@@ -63,6 +63,41 @@ def get_siliconflow_voices() -> list[str]:
     ]
 
 
+def get_localtts_base_url() -> str:
+    return config.app.get("localtts_base_url", "http://100.122.112.114:8765").rstrip("/")
+
+
+def get_localtts_model_name() -> str:
+    return config.app.get("localtts_model_name", "qwen3-tts-0.6b-custom")
+
+
+def get_localtts_voices() -> list[str]:
+    fallback_voices = [
+        "aiden",
+        "dylan",
+        "eric",
+        "ono_anna",
+        "ryan",
+        "serena",
+        "sohee",
+        "uncle_fu",
+        "vivian",
+    ]
+    model = get_localtts_model_name()
+    try:
+        response = requests.get(f"{get_localtts_base_url()}/v1/voices", timeout=5)
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        voices = [item.get("id") or item.get("name") for item in data]
+        voices = [voice for voice in voices if voice]
+        if voices:
+            return [f"localtts:{model}:{voice}-Local" for voice in voices]
+    except Exception as exc:
+        logger.warning(f"failed to fetch LocalTTS voices, using fallback list: {str(exc)}")
+
+    return [f"localtts:{model}:{voice}-Local" for voice in fallback_voices]
+
+
 def get_gemini_voices() -> list[str]:
     """
     获取Gemini TTS的声音列表
@@ -1131,6 +1166,11 @@ def is_siliconflow_voice(voice_name: str):
     return voice_name.startswith("siliconflow:")
 
 
+def is_localtts_voice(voice_name: str):
+    """检查是否是本地 LocalTTS 声音"""
+    return voice_name.startswith("localtts:")
+
+
 def is_gemini_voice(voice_name: str):
     """检查是否是Gemini TTS的声音"""
     return voice_name.startswith("gemini:")
@@ -1161,6 +1201,22 @@ def tts(
             )
         else:
             logger.error(f"Invalid siliconflow voice name format: {voice_name}")
+            return None
+    elif is_localtts_voice(voice_name):
+        parts = voice_name.split(":")
+        if len(parts) >= 3:
+            model = parts[1]
+            voice_with_suffix = parts[2]
+            local_voice = voice_with_suffix.split("-")[0]
+            return localtts_tts(
+                text=text,
+                model=model,
+                voice=local_voice,
+                voice_rate=voice_rate,
+                voice_file=voice_file,
+            )
+        else:
+            logger.error(f"Invalid LocalTTS voice name format: {voice_name}")
             return None
     elif is_gemini_voice(voice_name):
         # 从voice_name中提取声音名称
@@ -1638,6 +1694,57 @@ def siliconflow_tts(
             logger.error(f"siliconflow tts failed: {str(e)}")
 
     return None
+
+
+def localtts_tts(
+    text: str,
+    model: str,
+    voice: str,
+    voice_rate: float,
+    voice_file: str,
+) -> Union[SubMaker, None]:
+    text = text.strip()
+    if not text:
+        logger.error("LocalTTS input text is empty")
+        return None
+
+    url = f"{get_localtts_base_url()}/v1/audio/speech"
+    payload = {
+        "model": model or get_localtts_model_name(),
+        "input": text,
+        "voice": voice or config.app.get("localtts_voice_name", "ryan"),
+        "language": "English",
+        "instruct": config.app.get(
+            "localtts_instruct", "Speak clearly and warmly."
+        ),
+        "response_format": "wav",
+        "speed": voice_rate,
+        "max_new_tokens": 512,
+    }
+
+    try:
+        logger.info(
+            f"start LocalTTS, model: {payload['model']}, voice: {payload['voice']}"
+        )
+        response = requests.post(url, json=payload, timeout=300)
+        response.raise_for_status()
+
+        import io
+        from pydub import AudioSegment
+
+        audio_segment = AudioSegment.from_file(io.BytesIO(response.content), format="wav")
+        ensure_file_path_exists(voice_file)
+        audio_segment.export(voice_file, format="mp3")
+
+        logger.success(f"LocalTTS succeeded: {voice_file}")
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=ensure_legacy_submaker_fields(SubMaker()),
+            text=text,
+            audio_duration_seconds=len(audio_segment) / 1000.0,
+        )
+    except Exception as exc:
+        logger.error(f"LocalTTS failed: {str(exc)}")
+        return None
 
 
 def azure_tts_v2(text: str, voice_name: str, voice_file: str) -> Union[SubMaker, None]:

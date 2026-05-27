@@ -316,6 +316,11 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
+    # Full video generation needs a normalized concat mode before material lookup,
+    # because download_videos compares it against the enum values.
+    if type(params.video_concat_mode) is str:
+        params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
+
     # 5. Get video materials
     downloaded_videos = get_video_materials(
         task_id, params, video_terms, audio_duration
@@ -334,11 +339,6 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         return {"materials": downloaded_videos}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
-
-    # 仅完整视频生成流程才需要处理视频拼接模式；
-    # 这样可以避免 /subtitle 和 /audio 这类请求访问不存在的字段。
-    if type(params.video_concat_mode) is str:
-        params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
     final_video_paths, combined_video_paths = generate_final_videos(

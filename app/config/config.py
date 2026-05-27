@@ -8,6 +8,164 @@ from loguru import logger
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 config_file = f"{root_dir}/config.toml"
 
+_HIVE_ENV_FILES = ("~/.hivemindos/.env",)
+
+_APP_SECRET_DEFAULTS = {
+    "api_key": "",
+    "pexels_api_keys": [],
+    "pixabay_api_keys": [],
+    "openai_api_key": "",
+    "moonshot_api_key": "",
+    "oneapi_api_key": "",
+    "azure_api_key": "",
+    "gemini_api_key": "",
+    "qwen_api_key": "",
+    "cloudflare_api_key": "",
+    "cloudflare_account_id": "",
+    "minimax_api_key": "",
+    "deepseek_api_key": "",
+    "modelscope_api_key": "",
+    "ernie_api_key": "",
+    "ernie_secret_key": "",
+    "upload_post_api_key": "",
+    "upload_post_username": "",
+}
+_AZURE_SECRET_DEFAULTS = {"speech_key": "", "speech_region": ""}
+_SILICONFLOW_SECRET_DEFAULTS = {"api_key": ""}
+
+
+def _parse_env_file(env_file):
+    values = {}
+    path = os.path.expanduser(env_file)
+    if not os.path.isfile(path):
+        return values
+
+    with open(path, mode="r", encoding="utf-8") as fp:
+        for raw_line in fp:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if key and value:
+                values[key] = value
+    return values
+
+
+def _load_hive_env():
+    env = {}
+    env_files = os.getenv("HIVE_ENV_FILES")
+    paths = env_files.split(os.pathsep) if env_files else _HIVE_ENV_FILES
+    for env_file in paths:
+        env.update(_parse_env_file(env_file))
+    env.update({key: value for key, value in os.environ.items() if value})
+    return env
+
+
+def _env_value(env, *names):
+    for name in names:
+        value = env.get(name)
+        if value:
+            return value
+    return ""
+
+
+def _env_list(env, *names):
+    value = _env_value(env, *names)
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _apply_hive_env(_config):
+    env = _load_hive_env()
+    app_config = dict(_config.get("app", {}))
+    azure_config = dict(_config.get("azure", {}))
+    siliconflow_config = dict(_config.get("siliconflow", {}))
+
+    app_string_map = {
+        "api_key": ("MONEYPRINTERTURBO_API_KEY", "MPT_API_KEY"),
+        "openai_api_key": ("OPENAI_API_KEY",),
+        "openai_base_url": ("OPENAI_BASE_URL",),
+        "openai_model_name": ("OPENAI_MODEL",),
+        "localtts_base_url": ("LOCALTTS_BASE_URL",),
+        "localtts_model_name": ("LOCALTTS_MODEL",),
+        "localtts_voice_name": ("LOCALTTS_VOICE",),
+        "localtts_instruct": ("LOCALTTS_INSTRUCT",),
+        "moonshot_api_key": ("MOONSHOT_API_KEY",),
+        "oneapi_api_key": ("ONEAPI_API_KEY",),
+        "oneapi_base_url": ("ONEAPI_BASE_URL",),
+        "oneapi_model_name": ("ONEAPI_MODEL",),
+        "azure_api_key": ("AZURE_OPENAI_API_KEY", "AZURE_API_KEY"),
+        "azure_base_url": ("AZURE_OPENAI_ENDPOINT", "AZURE_BASE_URL"),
+        "azure_model_name": ("AZURE_OPENAI_DEPLOYMENT", "AZURE_MODEL"),
+        "gemini_api_key": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+        "qwen_api_key": ("DASHSCOPE_API_KEY", "QWEN_API_KEY"),
+        "cloudflare_api_key": ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY"),
+        "cloudflare_account_id": ("CLOUDFLARE_ACCOUNT_ID",),
+        "minimax_api_key": ("MINIMAX_API_KEY",),
+        "deepseek_api_key": ("DEEPSEEK_API_KEY",),
+        "modelscope_api_key": ("MODELSCOPE_API_KEY",),
+        "ernie_api_key": ("ERNIE_API_KEY",),
+        "ernie_secret_key": ("ERNIE_SECRET_KEY",),
+        "upload_post_api_key": ("UPLOAD_POST_API_KEY",),
+        "upload_post_username": ("UPLOAD_POST_USERNAME",),
+    }
+    for config_key, env_names in app_string_map.items():
+        value = _env_value(env, *env_names)
+        if value:
+            app_config[config_key] = value
+
+    for config_key, env_names in {
+        "pexels_api_keys": ("PEXELS_API_KEYS", "PEXELS_API_KEY"),
+        "pixabay_api_keys": ("PIXABAY_API_KEYS", "PIXABAY_API_KEY"),
+    }.items():
+        values = _env_list(env, *env_names)
+        if values:
+            app_config[config_key] = values
+
+    if not app_config.get("openai_api_key"):
+        bankr_key = _env_value(env, "BANKR_LLM_KEY", "BANKR_MANAGEMENT_KEY")
+        honey_gateway = _env_value(env, "HONEY_COMPUTE_GATEWAY_URL")
+        if bankr_key and honey_gateway:
+            app_config["llm_provider"] = "openai"
+            app_config["openai_api_key"] = bankr_key
+            app_config["openai_base_url"] = honey_gateway.rstrip("/") + "/v1"
+            app_config.setdefault("openai_model_name", "gpt-4o-mini")
+
+    for config_key, env_names in {
+        "speech_key": ("AZURE_SPEECH_KEY", "SPEECH_KEY"),
+        "speech_region": ("AZURE_SPEECH_REGION", "SPEECH_REGION"),
+    }.items():
+        value = _env_value(env, *env_names)
+        if value:
+            azure_config[config_key] = value
+
+    siliconflow_key = _env_value(env, "SILICONFLOW_API_KEY")
+    if siliconflow_key:
+        siliconflow_config["api_key"] = siliconflow_key
+
+    _config["app"] = app_config
+    _config["azure"] = azure_config
+    _config["siliconflow"] = siliconflow_config
+    return _config
+
+
+def _without_runtime_secrets(section, defaults):
+    clean_section = dict(section)
+    for key, default_value in defaults.items():
+        if key in clean_section:
+            clean_section[key] = default_value
+    return clean_section
+
 
 def load_config():
     # fix: IsADirectoryError: [Errno 21] Is a directory: '/MoneyPrinterTurbo/config.toml'
@@ -29,14 +187,16 @@ def load_config():
         with open(config_file, mode="r", encoding="utf-8-sig") as fp:
             _cfg_content = fp.read()
             _config_ = toml.loads(_cfg_content)
-    return _config_
+    return _apply_hive_env(_config_)
 
 
 def save_config():
     with open(config_file, "w", encoding="utf-8") as f:
-        _cfg["app"] = app
-        _cfg["azure"] = azure
-        _cfg["siliconflow"] = siliconflow
+        _cfg["app"] = _without_runtime_secrets(app, _APP_SECRET_DEFAULTS)
+        _cfg["azure"] = _without_runtime_secrets(azure, _AZURE_SECRET_DEFAULTS)
+        _cfg["siliconflow"] = _without_runtime_secrets(
+            siliconflow, _SILICONFLOW_SECRET_DEFAULTS
+        )
         _cfg["ui"] = ui
         f.write(toml.dumps(_cfg))
 

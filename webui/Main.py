@@ -674,7 +674,7 @@ with middle_panel:
         tts_servers = [
             ("azure-tts-v1", "Azure TTS V1"),
             ("azure-tts-v2", "Azure TTS V2"),
-            ("siliconflow", "SiliconFlow TTS"),
+            ("localtts", "LocalTTS"),
             ("gemini-tts", "Google Gemini TTS"),
         ]
 
@@ -699,9 +699,8 @@ with middle_panel:
         # 根据选择的TTS服务器获取声音列表
         filtered_voices = []
 
-        if selected_tts_server == "siliconflow":
-            # 获取硅基流动的声音列表
-            filtered_voices = voice.get_siliconflow_voices()
+        if selected_tts_server == "localtts":
+            filtered_voices = voice.get_localtts_voices()
         elif selected_tts_server == "gemini-tts":
             # 获取Gemini TTS的声音列表
             filtered_voices = voice.get_gemini_voices()
@@ -822,31 +821,16 @@ with middle_panel:
             config.azure["speech_region"] = azure_speech_region
             config.azure["speech_key"] = azure_speech_key
 
-        # 当选择硅基流动时，显示API key输入框和说明信息
-        if selected_tts_server == "siliconflow" or (
-            voice_name and voice.is_siliconflow_voice(voice_name)
+        if selected_tts_server == "localtts" or (
+            voice_name and voice.is_localtts_voice(voice_name)
         ):
-            saved_siliconflow_api_key = config.siliconflow.get("api_key", "")
-
-            siliconflow_api_key = st.text_input(
-                tr("SiliconFlow API Key"),
-                value=saved_siliconflow_api_key,
-                type="password",
-                key="siliconflow_api_key_input",
-            )
-
-            # 显示硅基流动的说明信息
             st.info(
-                tr("SiliconFlow TTS Settings")
+                "LocalTTS"
                 + ":\n"
-                + "- "
-                + tr("Speed: Range [0.25, 4.0], default is 1.0")
+                + f"- Endpoint: {voice.get_localtts_base_url()}"
                 + "\n"
-                + "- "
-                + tr("Volume: Uses Speech Volume setting, default 1.0 maps to gain 0")
+                + f"- Model: {voice.get_localtts_model_name()}"
             )
-
-            config.siliconflow["api_key"] = siliconflow_api_key
 
         params.voice_volume = st.selectbox(
             tr("Speech Volume"),
