@@ -5,10 +5,10 @@ import socket
 import toml
 from loguru import logger
 
+from hivemind_content_studio.shared_env import load_shared_hive_env
+
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 config_file = f"{root_dir}/config.toml"
-
-_HIVE_ENV_FILES = ("~/.hivemindos/.env",)
 
 _APP_SECRET_DEFAULTS = {
     "api_key": "",
@@ -27,47 +27,13 @@ _APP_SECRET_DEFAULTS = {
     "modelscope_api_key": "",
     "ernie_api_key": "",
     "ernie_secret_key": "",
-    "upload_post_api_key": "",
-    "upload_post_username": "",
 }
 _AZURE_SECRET_DEFAULTS = {"speech_key": "", "speech_region": ""}
 _SILICONFLOW_SECRET_DEFAULTS = {"api_key": ""}
 
 
-def _parse_env_file(env_file):
-    values = {}
-    path = os.path.expanduser(env_file)
-    if not os.path.isfile(path):
-        return values
-
-    with open(path, mode="r", encoding="utf-8") as fp:
-        for raw_line in fp:
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export ") :].strip()
-            if "=" not in line:
-                continue
-
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-                value = value[1:-1]
-            if key and value:
-                values[key] = value
-    return values
-
-
 def _load_hive_env():
-    env = {}
-    env_files = os.getenv("HIVE_ENV_FILES")
-    paths = env_files.split(os.pathsep) if env_files else _HIVE_ENV_FILES
-    for env_file in paths:
-        env.update(_parse_env_file(env_file))
-    env.update({key: value for key, value in os.environ.items() if value})
-    return env
+    return load_shared_hive_env()
 
 
 def _env_value(env, *names):
@@ -116,8 +82,6 @@ def _apply_hive_env(_config):
         "modelscope_api_key": ("MODELSCOPE_API_KEY",),
         "ernie_api_key": ("ERNIE_API_KEY",),
         "ernie_secret_key": ("ERNIE_SECRET_KEY",),
-        "upload_post_api_key": ("UPLOAD_POST_API_KEY",),
-        "upload_post_username": ("UPLOAD_POST_USERNAME",),
     }
     for config_key, env_names in app_string_map.items():
         value = _env_value(env, *env_names)

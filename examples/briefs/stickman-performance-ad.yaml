@@ -1,0 +1,31 @@
+id: stickman-performance-ad
+lane: stickman-performance-ad
+title: The cheapest-looking ad can hold attention
+audience: direct-to-consumer growth teams
+goal: test a simple visual argument without inventing a performance claim
+runtime_seconds: 12
+aspect_ratio: 9:16
+tone: dry, confident, concise
+voice:
+  provider: elevenlabs
+  voice_id: <set-per-run-voice-id>
+  model_id: eleven_v3
+  delivery: deadpan, confident, deliberate pacing
+scenes:
+  - title: Hook
+    beat: A stick figure watches an expensive glossy ad fall off a chart.
+    voice: Your most expensive-looking ad is not automatically your best ad.
+    overlay: Expensive does not mean clear
+    duration_seconds: 4
+  - title: Mechanism
+    beat: The stick figure removes everything except one product and one sentence.
+    voice: A plain character can make one idea impossible to miss.
+    overlay: One character. One idea.
+    duration_seconds: 4
+  - title: CTA
+    beat: Three simple variants appear beside the product.
+    voice: Test the simple version against the polished one.
+    overlay: Let retention decide
+    duration_seconds: 4
+publish:
+  platforms: [instagram, tiktok, youtube]

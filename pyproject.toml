@@ -6,12 +6,12 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "moneyprinterturbo"
-version = "1.2.7"
-description = "Generate short videos from prompts, local assets, subtitles, and TTS."
-readme = "README-en.md"
+name = "hivemind-content-studio"
+version = "0.1.0"
+description = "Local-first agent studio for faceless video, animation, clipping, media generation, QA, and approval-gated social publishing."
+readme = "README.md"
 requires-python = ">=3.11,<3.13"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-or-later" }
 dependencies = [
     "moviepy==2.1.2",
     "streamlit==1.45.0",
@@ -31,16 +31,35 @@ dependencies = [
     "socksio==1.0.0",
     "pydub==0.25.1",
     "litellm==1.60.0",
+    "yt-dlp>=2025.1.1",
+    "pillow-avif-plugin>=1.4.6",
+    "pillow-heif>=0.18.0",
 ]
 
 [project.optional-dependencies]
 g4f = [
     "g4f==0.5.2.2",
 ]
+mcp = [
+    "mcp>=1.9.0",
+]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+content-studio = "hivemind_content_studio.cli:main"
+content-studio-mcp = "hivemind_content_studio.mcp_server:main"
+content-studio-api = "hivemind_content_studio.control_api:main"
+auto-clipper = "auto_clipper.cli:main"
+auto-clipper-mcp = "auto_clipper.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["app"]
+packages = ["app", "src/hivemind_content_studio", "src/auto_clipper"]
 
 [tool.uv]
 # 当前项目以应用运行形态为主，不作为可发布的 Python 包安装。
-package = false
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["test"]

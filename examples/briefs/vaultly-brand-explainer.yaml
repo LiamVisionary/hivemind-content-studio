@@ -1,0 +1,27 @@
+type: brand_explainer
+client: Vaultly
+product: Document automation for law firms
+runtime_seconds: 75
+audience: partners at mid-size law firms, 35-55, skeptical of new software
+tone: confident, direct, slightly dry
+cta: See how much review time your firm can stop donating to formatting errors.
+style_guardrails:
+  - no buzzwords
+  - show one specific scenario before features
+  - mechanical proof over hype
+scenes:
+  - slug: contract-bottleneck
+    duration_seconds: 12
+    beat: Partner waits for a contract packet while associates reconcile versions manually.
+  - slug: upload-and-map
+    duration_seconds: 18
+    beat: Vaultly ingests firm templates and maps clauses to matters.
+  - slug: review-and-approve
+    duration_seconds: 20
+    beat: Attorney reviews exceptions instead of rewriting the whole document.
+  - slug: numbers-result
+    duration_seconds: 20
+    beat: Time saved, fewer formatting errors, lower write-off leakage.
+  - slug: dry-cta
+    duration_seconds: 5
+    beat: One-line CTA.

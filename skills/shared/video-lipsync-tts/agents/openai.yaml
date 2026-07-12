@@ -1,0 +1,4 @@
+interface:
+  display_name: "Video Lip Sync TTS"
+  short_description: "Preview exact TTS lines for lip sync."
+  default_prompt: "Use $video-lipsync-tts to generate line-level TTS previews, pick the best delivery, and prepare approved audio for video lip sync."

@@ -1,0 +1,12 @@
+{
+  "provider": "hermes",
+  "providerLabel": "Hermes",
+  "sourcePath": "/Users/liam/.hermes/skills/auto-clipper/SKILL.md",
+  "sourceChecksum": "aca2735e9070e1544d7f6ca286d5006bcc66e9ecd147094f63ec174637983498",
+  "sourceUpdatedAt": 1779724168096.3765,
+  "importedAt": "2026-06-01T19:52:29.312Z",
+  "autoSyncedAt": "2026-06-01T19:52:29.312Z",
+  "status": "missing-upstream",
+  "missingAt": "2026-06-07T12:34:24.997Z",
+  "deletionPolicy": "archive-only"
+}

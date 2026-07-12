@@ -1,0 +1,13 @@
+{
+  "provider": "hermes",
+  "providerLabel": "Hermes",
+  "sourcePath": "/root/.hermes/skills/creative/ai-animation-factory/SKILL.md",
+  "sourceMachine": "ubuntu-8gb-hel1-2",
+  "sourceChecksum": "42ba11835216ca33bbd469b0a9c8aacb47cbdae8313d749c025659e599a1fef2",
+  "sourceUpdatedAt": 1780976144189.4185,
+  "importedAt": "2026-06-09T05:24:38.552Z",
+  "autoSyncedAt": "2026-06-09T05:24:38.552Z",
+  "status": "missing-upstream",
+  "missingAt": "2026-06-12T05:58:52.651Z",
+  "deletionPolicy": "archive-only"
+}

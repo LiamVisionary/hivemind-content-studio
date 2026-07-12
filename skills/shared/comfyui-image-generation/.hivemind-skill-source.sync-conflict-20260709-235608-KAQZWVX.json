@@ -1,0 +1,7 @@
+{
+  "provider": "bundled",
+  "providerLabel": "HivemindOS bundled skills",
+  "sourcePath": "/Users/liam/hivemindos/skills/comfyui-image-generation",
+  "sourceUrl": "https://github.com/LiamVisionary/hivemindos/tree/main/skills/comfyui-image-generation",
+  "importedAt": "2026-07-10T03:55:45Z"
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "MUAPI Seedance Video"
+  short_description: "MUAPI Seedance clips with refs and audio."
+  default_prompt: "Use $muapi-seedance-video to generate a MUAPI Seedance video shot from this brief, using references/audio as needed, and return a QA-checked MP4."

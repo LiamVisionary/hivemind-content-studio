@@ -1,0 +1,779 @@
+diff --git a/backend/cli.py b/backend/cli.py
+index 995b31f..31662df 100644
+--- a/backend/cli.py
++++ b/backend/cli.py
+@@ -758,12 +758,15 @@ def cmd_process(args):
+                                 _raction = "earlier"
+                             elif any(w in fb for w in ["later", "forward"]):
+                                 _raction = "later"
+-                            elif any(w in fb for w in ["hormozi", "karaoke", "subtle", "branded"]):
++                            elif any(w in fb for w in ["hormozi", "karaoke", "subtle", "branded", "legacy"]):
+                                 _raction = "style"
+-                                for s in ["hormozi", "karaoke", "subtle", "branded"]:
+-                                    if s in fb:
+-                                        config["caption_style"] = s
+-                                        break
++                                if "legacy" in fb:
++                                    config["caption_style"] = "branded-legacy"
++                                else:
++                                    for s in ["hormozi", "karaoke", "subtle", "branded"]:
++                                        if s in fb:
++                                            config["caption_style"] = s
++                                            break
+                             elif any(w in fb for w in ["wrong person", "swap", "other speaker", "other face", "wrong face", "wrong speaker"]):
+                                 _raction = "swap"
+                             else:
+@@ -777,6 +780,7 @@ def cmd_process(args):
+                     if _raction == "style":
+                         _new_style = _rq.select("Style:", choices=[
+                             _rq.Choice("branded", value="branded"),
++                            _rq.Choice("branded-legacy", value="branded-legacy"),
+                             _rq.Choice("hormozi", value="hormozi"),
+                             _rq.Choice("karaoke", value="karaoke"),
+                             _rq.Choice("subtle", value="subtle"),
+@@ -1323,7 +1327,8 @@ def _post_render_loop(
+             if action == "style":
+                 new_style = questionary.select("Style:", choices=[
+                     questionary.Choice("hormozi — bold uppercase, yellow highlight", value="hormozi"),
+-                    questionary.Choice("branded — dark pill on active word + logo", value="branded"),
++                    questionary.Choice("branded — Remotion caption pages + active word pill", value="branded"),
++                    questionary.Choice("branded-legacy — old two-line active word pill", value="branded-legacy"),
+                     questionary.Choice("karaoke — sentence visible, words light up", value="karaoke"),
+                     questionary.Choice("subtle — clean small text at bottom", value="subtle"),
+                 ], style=qstyle).ask()
+@@ -2593,7 +2598,7 @@ def print_help():
+     print(f"    {green}-n{reset}, {green}--top{reset} {gray}<N>{reset}            Export top N clips {dim}(default: 5){reset}")
+     print(f"    {green}-o{reset}, {green}--output{reset} {gray}<dir>{reset}        Output directory {dim}(default: ./clips){reset}")
+     print(f"    {green}-p{reset}, {green}--preset{reset} {gray}<name>{reset}       Load a saved preset")
+-    print(f"    {green}--caption-style{reset} {gray}<style>{reset}  branded | hormozi | karaoke | subtle")
++    print(f"    {green}--caption-style{reset} {gray}<style>{reset}  branded | branded-legacy | hormozi | karaoke | subtle")
+     print(f"    {green}--crop{reset} {gray}<strategy>{reset}       speaker | speaker-hardcut | face | center")
+     print(f"    {green}--fast{reset}                 Draft mode: tiny Whisper, heuristic clips, low quality")
+     print(f"    {green}--logo{reset} {gray}<asset|path>{reset}     Overlay logo image")
+@@ -2645,7 +2650,7 @@ def main():
+     proc.add_argument("-o", "--output", help="Output directory (default: ./clips)")
+     proc.add_argument("-p", "--preset", help="Load a saved preset")
+     proc.add_argument("--fast", action="store_true", help="Draft mode: tiny Whisper, heuristic selection, center crop, low quality")
+-    proc.add_argument("--caption-style", choices=["branded", "hormozi", "karaoke", "subtle"])
++    proc.add_argument("--caption-style", choices=["branded", "branded-legacy", "hormozi", "karaoke", "subtle"])
+     proc.add_argument("--crop", choices=["center", "face", "speaker", "speaker-hardcut"])
+     proc.add_argument("--logo", help="Logo image (asset name or path)")
+     proc.add_argument("--outro", help="Outro video (asset name or path)")
+@@ -2669,7 +2674,7 @@ def main():
+     pre_save.add_argument("--video", help="Default video path")
+     pre_save.add_argument("--transcript", help="Default transcript path")
+     pre_save.add_argument("--output", help="Default output directory")
+-    pre_save.add_argument("--caption-style", choices=["branded", "hormozi", "karaoke", "subtle"])
++    pre_save.add_argument("--caption-style", choices=["branded", "branded-legacy", "hormozi", "karaoke", "subtle"])
+     pre_save.add_argument("--crop", choices=["center", "face", "speaker", "speaker-hardcut"])
+     pre_save.add_argument("--logo", help="Logo (asset name or path)")
+     pre_save.add_argument("--outro", help="Outro (asset name or path)")
+@@ -3203,7 +3208,8 @@ def _interactive_process():
+     caption_style = questionary.select(
+         "Caption style:",
+         choices=[
+-            questionary.Choice("branded — dark pill on active word + logo", value="branded"),
++            questionary.Choice("branded — Remotion caption pages + active word pill", value="branded"),
++            questionary.Choice("branded-legacy — old two-line active word pill", value="branded-legacy"),
+             questionary.Choice("hormozi — bold uppercase, yellow highlight", value="hormozi"),
+             questionary.Choice("karaoke — sentence visible, words light up", value="karaoke"),
+             questionary.Choice("subtle — clean small text at bottom", value="subtle"),
+@@ -3451,7 +3457,7 @@ def _interactive_presets():
+     # Caption style
+     caption_style = questionary.select(
+         "Caption style:",
+-        choices=["branded", "hormozi", "karaoke", "subtle"],
++        choices=["branded", "branded-legacy", "hormozi", "karaoke", "subtle"],
+         default=config.get("caption_style", "branded"),
+         style=qstyle,
+     ).ask()
+diff --git a/backend/config/caption_styles.py b/backend/config/caption_styles.py
+index e0ae80b..d010f6d 100644
+--- a/backend/config/caption_styles.py
++++ b/backend/config/caption_styles.py
+@@ -142,6 +142,12 @@ STYLES = {
+ }
+ 
+ 
++STYLES["branded-legacy"] = {
++    **STYLES["branded"],
++    "description": "Legacy branded renderer: two-line active-word dark pill with sentence-aware boundaries.",
++}
++
++
+ def get_style(name: str) -> dict:
+     """Get a caption style config by name."""
+     style = STYLES.get(name)
+diff --git a/backend/services/caption_renderer.py b/backend/services/caption_renderer.py
+index 940ed5a..f9d0b89 100644
+--- a/backend/services/caption_renderer.py
++++ b/backend/services/caption_renderer.py
+@@ -121,7 +121,7 @@ def render_captions(
+         content = _render_karaoke(words, style, time_offset)
+     elif caption_style == "subtle":
+         content = _render_subtle(words, style, time_offset)
+-    elif caption_style == "branded":
++    elif caption_style in {"branded", "branded-legacy"}:
+         content = _render_branded(words, style, time_offset)
+     else:
+         raise ValueError(f"Unknown style: {caption_style}")
+diff --git a/package.json b/package.json
+index 1ed29a5..3000442 100644
+--- a/package.json
++++ b/package.json
+@@ -39,6 +39,7 @@
+     "@fontsource/dm-sans": "^5.2.8",
+     "@modelcontextprotocol/sdk": "^1.12.1",
+     "@remotion/bundler": "^4.0.441",
++    "@remotion/captions": "4.0.441",
+     "@remotion/cli": "^4.0.441",
+     "@remotion/renderer": "^4.0.441",
+     "dotenv": "^16.4.7",
+diff --git a/remotion/src/CaptionedClip.tsx b/remotion/src/CaptionedClip.tsx
+index 72050b4..1794fb4 100644
+--- a/remotion/src/CaptionedClip.tsx
++++ b/remotion/src/CaptionedClip.tsx
+@@ -4,6 +4,7 @@ import { HormoziCaptions } from "./components/HormoziCaptions";
+ import { KaraokeCaptions } from "./components/KaraokeCaptions";
+ import { SubtleCaptions } from "./components/SubtleCaptions";
+ import { BrandedCaptions } from "./components/BrandedCaptions";
++import { LegacyBrandedCaptions } from "./components/LegacyBrandedCaptions";
+ import type { Word, CaptionStyle } from "./types";
+ 
+ export interface CaptionedClipProps {
+@@ -25,12 +26,15 @@ export const CaptionedClip: React.FC<CaptionedClipProps> = ({
+     karaoke: KaraokeCaptions,
+     subtle: SubtleCaptions,
+     branded: BrandedCaptions,
++    "branded-legacy": LegacyBrandedCaptions,
+   }[style.name];
+ 
+   return (
+     <AbsoluteFill style={{ backgroundColor: "transparent" }}>
+       {style.name === "branded" ? (
+         <BrandedCaptions words={words} style={style} logoSrc={logoSrc} faceY={faceY} />
++      ) : style.name === "branded-legacy" ? (
++        <LegacyBrandedCaptions words={words} style={style} logoSrc={logoSrc} faceY={faceY} />
+       ) : (
+         <CaptionComponent words={words} style={style} />
+       )}
+diff --git a/remotion/src/components/BrandedCaptions.tsx b/remotion/src/components/BrandedCaptions.tsx
+index beeb939..1376fc7 100644
+--- a/remotion/src/components/BrandedCaptions.tsx
++++ b/remotion/src/components/BrandedCaptions.tsx
+@@ -1,8 +1,11 @@
+-import React from "react";
++import { createTikTokStyleCaptions } from "@remotion/captions";
++import type { Caption, TikTokPage } from "@remotion/captions";
++import React, { useMemo } from "react";
+ import {
+   useCurrentFrame,
+   useVideoConfig,
+   spring,
++  interpolate,
+   Img,
+   staticFile,
+ } from "remotion";
+@@ -15,142 +18,139 @@ interface Props {
+   faceY?: number | null; // normalized 0-1 (0=top, 1=bottom)
+ }
+ 
+-interface Chunk {
+-  words: Word[];
+-  start: number;
+-  end: number;
+-}
+-
+-const MAX_CHARS_PER_CHUNK = 18;
+-
+-function buildChunks(words: Word[], perChunk: number): Chunk[] {
+-  const chunks: Chunk[] = [];
+-  let i = 0;
+-
+-  while (i < words.length) {
+-    let end = i;
+-    let charCount = 0;
++const HARD_PAUSE_SECONDS = 0.45;
++const COMBINE_TOKENS_WITHIN_MS = 900;
++const SENTENCE_END_RE = /[.!?。！？]["')\]]?$/;
+ 
+-    while (end < words.length && end - i < perChunk) {
+-      const nextWord = words[end].word.trim();
+-      const nextChars = charCount === 0 ? nextWord.length : charCount + 1 + nextWord.length;
++function endsSentence(word: string): boolean {
++  return SENTENCE_END_RE.test(word.trim());
++}
+ 
+-      if (end > i && nextChars > MAX_CHARS_PER_CHUNK) {
+-        break;
+-      }
++function shouldBreakBefore(previous: Word, next: Word): boolean {
++  if (endsSentence(previous.word)) {
++    return true;
++  }
++  return next.start - previous.end >= HARD_PAUSE_SECONDS;
++}
+ 
+-      charCount = nextChars;
+-      end += 1;
+-    }
++function splitIntoNaturalSegments(words: Word[]): Word[][] {
++  const segments: Word[][] = [];
++  let current: Word[] = [];
+ 
+-    if (end === i) {
+-      end = i + 1;
++  for (const word of words) {
++    const previous = current[current.length - 1];
++    if (previous && shouldBreakBefore(previous, word)) {
++      segments.push(current);
++      current = [];
+     }
+ 
+-    const remaining = words.length - end;
+-    if (remaining === 1 && end - i > 2) {
+-      end -= 1;
+-    }
++    current.push(word);
++  }
+ 
+-    const slice = words.slice(i, end);
+-    chunks.push({
+-      words: slice,
+-      start: slice[0].start,
+-      end: slice[slice.length - 1].end,
+-    });
+-    i = end;
++  if (current.length > 0) {
++    segments.push(current);
+   }
+ 
+-  return chunks;
++  return segments;
+ }
+ 
+-function splitIntoLines(words: Word[]): [Word[], Word[]] {
+-  if (words.length <= 2) {
+-    return [words, []];
+-  }
+-  if (words.length === 3) {
+-    return [words.slice(0, 2), words.slice(2)];
+-  }
+-  return [words.slice(0, 2), words.slice(2)];
++function toCaptions(words: Word[]): Caption[] {
++  return words.map((word, index) => {
++    const text = word.word.trim();
++    const startMs = Math.round(word.start * 1000);
++    const endMs = Math.round(word.end * 1000);
++
++    return {
++      text: `${index === 0 ? "" : " "}${text}`,
++      startMs,
++      endMs,
++      timestampMs: Math.round((startMs + endMs) / 2),
++      confidence: word.confidence ?? null,
++    };
++  });
+ }
+ 
+-/**
+- * Active pill rendered as an absolutely positioned background behind the word.
+- * The word itself is always rendered as plain inline text so layout doesn't shift.
+- */
+-const WordWithPill: React.FC<{
+-  word: Word;
+-  isActive: boolean;
+-  frame: number;
+-  fps: number;
+-}> = ({ word, isActive, frame, fps }) => {
+-  const wordEntryFrame = Math.round(word.start * fps);
+-
+-  const pillOpacity = isActive
+-    ? spring({
+-        frame: frame - wordEntryFrame,
+-        fps,
+-        config: { damping: 14, stiffness: 200, mass: 0.4 },
+-      })
+-    : 0;
++function buildPages(words: Word[]): TikTokPage[] {
++  return splitIntoNaturalSegments(words).flatMap((segment) => {
++    const { pages } = createTikTokStyleCaptions({
++      captions: toCaptions(segment),
++      combineTokensWithinMilliseconds: COMBINE_TOKENS_WITHIN_MS,
++    });
++    return pages;
++  });
++}
+ 
+-  return (
+-    <span style={{ position: "relative", display: "inline" }}>
+-      {/* Pill background — absolutely positioned, doesn't affect layout */}
+-      <span
+-        style={{
+-          position: "absolute",
+-          top: -4,
+-          left: -16,
+-          right: -16,
+-          bottom: -4,
+-          backgroundColor: "rgba(0, 0, 0, 0.85)",
+-          borderRadius: 18,
+-          boxShadow: "0 4px 20px rgba(0, 0, 0, 0.5)",
+-          opacity: pillOpacity,
+-          pointerEvents: "none",
+-        }}
+-      />
+-      {/* Word text — always inline, never shifts */}
+-      <span style={{ position: "relative", zIndex: 1 }}>{word.word}</span>
+-    </span>
+-  );
+-};
++function pageEndMs(page: TikTokPage): number {
++  const finalToken = page.tokens[page.tokens.length - 1];
++  return page.startMs + (page.durationMs ?? Math.max(0, (finalToken?.toMs ?? page.startMs) - page.startMs));
++}
+ 
+-const CaptionLine: React.FC<{
+-  words: Word[];
+-  currentTime: number;
++const CaptionPage: React.FC<{
++  page: TikTokPage;
++  currentTimeMs: number;
+   frame: number;
+   fps: number;
+   style: CaptionStyle;
+-}> = ({ words, currentTime, frame, fps, style }) => {
++}> = ({ page, currentTimeMs, frame, fps, style }) => {
++  const pageStartFrame = Math.round((page.startMs / 1000) * fps);
++  const enter = spring({
++    frame: frame - pageStartFrame,
++    fps,
++    config: { damping: 16, stiffness: 220, mass: 0.45 },
++    durationInFrames: 8,
++  });
++  const opacity = interpolate(enter, [0, 1], [0, 1]);
++  const translateY = interpolate(enter, [0, 1], [28, 0]);
++  const fontSize = Math.min(style.fontSize, page.text.length > 16 ? 82 : 90);
++
+   return (
+     <div
+       style={{
++        display: "flex",
++        flexWrap: "wrap",
++        justifyContent: "center",
++        alignItems: "center",
++        gap: "10px 14px",
++        maxWidth: 900,
++        padding: "10px 26px 14px",
+         textAlign: "center",
+         fontFamily: style.fontFamily,
+-        fontSize: style.fontSize,
+-        fontWeight: 400,
+-        color: style.color,
+-        textShadow: "0 0 40px rgba(0, 0, 0, 0.15), 0 0 80px rgba(0, 0, 0, 0.1), 0 0 150px rgba(0, 0, 0, 0.08)",
+-        lineHeight: 1.25,
+-        whiteSpace: "nowrap",
++        fontSize,
++        fontWeight: 800,
++        lineHeight: 1.04,
++        opacity,
++        transform: `translateY(${translateY}px)`,
+       }}
+     >
+-      {words.map((word, i) => {
+-        const isActive = currentTime >= word.start && currentTime < word.end;
+-        const prefix = i > 0 ? " " : "";
++      {page.tokens.map((token, i) => {
++        const isActive = currentTimeMs >= token.fromMs && currentTimeMs < token.toMs;
++        const scale = isActive
++          ? spring({
++              frame: frame - Math.round((token.fromMs / 1000) * fps),
++              fps,
++              config: { damping: 13, stiffness: 230, mass: 0.42 },
++            })
++          : 1;
+ 
+         return (
+-          <React.Fragment key={i}>
+-            {prefix}
+-            <WordWithPill
+-              word={word}
+-              isActive={isActive}
+-              frame={frame}
+-              fps={fps}
+-            />
+-          </React.Fragment>
++          <span
++            key={`${token.fromMs}-${i}`}
++            style={{
++              display: "inline-block",
++              padding: isActive ? "7px 18px 9px" : "7px 2px 9px",
++              borderRadius: 16,
++              color: "#FFFFFF",
++              backgroundColor: isActive ? "rgba(0, 0, 0, 0.86)" : "transparent",
++              boxShadow: isActive ? "0 8px 28px rgba(0, 0, 0, 0.44)" : "none",
++              textShadow: isActive
++                ? "none"
++                : "0 4px 20px rgba(0, 0, 0, 0.72), 0 0 2px rgba(0, 0, 0, 0.8)",
++              transform: `scale(${isActive ? Math.min(1.08, scale) : 1})`,
++              whiteSpace: "pre",
++            }}
++          >
++            {token.text.trim()}
++          </span>
+         );
+       })}
+     </div>
+@@ -165,11 +165,11 @@ export const BrandedCaptions: React.FC<Props> = ({
+ }) => {
+   const frame = useCurrentFrame();
+   const { fps, height } = useVideoConfig();
+-  const currentTime = frame / fps;
++  const currentTimeMs = (frame / fps) * 1000;
+ 
+-  const chunks = buildChunks(words, style.wordsPerChunk);
+-  const activeChunk = chunks.find(
+-    (c) => currentTime >= c.start && currentTime < c.end
++  const pages = useMemo(() => buildPages(words), [words]);
++  const activePage = pages.find(
++    (page) => currentTimeMs >= page.startMs && currentTimeMs < pageEndMs(page)
+   );
+ 
+   // Dynamic margin: if face is in the lower portion, push captions further down
+@@ -200,41 +200,27 @@ export const BrandedCaptions: React.FC<Props> = ({
+         />
+       )}
+ 
+-      {activeChunk && (() => {
+-        const [line1, line2] = splitIntoLines(activeChunk.words);
+-
+-        return (
+-          <div
+-            style={{
+-              position: "absolute",
+-              bottom: dynamicMargin,
+-              left: 60,
+-              right: 60,
+-              display: "flex",
+-              flexDirection: "column",
+-              alignItems: "center",
+-              gap: 8,
+-            }}
+-          >
+-            <CaptionLine
+-              words={line1}
+-              currentTime={currentTime}
+-              frame={frame}
+-              fps={fps}
+-              style={style}
+-            />
+-            {line2.length > 0 && (
+-              <CaptionLine
+-                words={line2}
+-                currentTime={currentTime}
+-                frame={frame}
+-                fps={fps}
+-                style={style}
+-              />
+-            )}
+-          </div>
+-        );
+-      })()}
++      {activePage && (
++        <div
++          style={{
++            position: "absolute",
++            bottom: dynamicMargin,
++            left: 60,
++            right: 60,
++            display: "flex",
++            justifyContent: "center",
++            alignItems: "center",
++          }}
++        >
++          <CaptionPage
++            page={activePage}
++            currentTimeMs={currentTimeMs}
++            frame={frame}
++            fps={fps}
++            style={style}
++          />
++        </div>
++      )}
+     </>
+   );
+ };
+diff --git a/remotion/src/components/LegacyBrandedCaptions.tsx b/remotion/src/components/LegacyBrandedCaptions.tsx
+new file mode 100644
+index 0000000..255c7fb
+--- /dev/null
++++ b/remotion/src/components/LegacyBrandedCaptions.tsx
+@@ -0,0 +1,240 @@
++import React from "react";
++import {
++  useCurrentFrame,
++  useVideoConfig,
++  spring,
++  Img,
++  staticFile,
++} from "remotion";
++import type { Word, CaptionStyle } from "../types";
++
++interface Props {
++  words: Word[];
++  style: CaptionStyle;
++  logoSrc?: string;
++  faceY?: number | null;
++}
++
++interface Chunk {
++  words: Word[];
++  start: number;
++  end: number;
++}
++
++const MAX_CHARS_PER_CHUNK = 18;
++const HARD_PAUSE_SECONDS = 0.45;
++const SENTENCE_END_RE = /[.!?。！？]["')\]]?$/;
++
++function endsSentence(word: string): boolean {
++  return SENTENCE_END_RE.test(word.trim());
++}
++
++function shouldBreakBefore(previous: Word, next: Word): boolean {
++  if (endsSentence(previous.word)) {
++    return true;
++  }
++  return next.start - previous.end >= HARD_PAUSE_SECONDS;
++}
++
++function buildChunks(words: Word[], perChunk: number): Chunk[] {
++  const chunks: Chunk[] = [];
++  let i = 0;
++
++  while (i < words.length) {
++    let end = i;
++    let charCount = 0;
++
++    while (end < words.length && end - i < perChunk) {
++      if (end > i && shouldBreakBefore(words[end - 1], words[end])) {
++        break;
++      }
++
++      const nextWord = words[end].word.trim();
++      const nextChars = charCount === 0 ? nextWord.length : charCount + 1 + nextWord.length;
++
++      if (end > i && nextChars > MAX_CHARS_PER_CHUNK) {
++        break;
++      }
++
++      charCount = nextChars;
++      end += 1;
++    }
++
++    if (end === i) {
++      end = i + 1;
++    }
++
++    const remaining = words.length - end;
++    if (remaining === 1 && end - i > 2) {
++      end -= 1;
++    }
++
++    const slice = words.slice(i, end);
++    chunks.push({
++      words: slice,
++      start: slice[0].start,
++      end: slice[slice.length - 1].end,
++    });
++    i = end;
++  }
++
++  return chunks;
++}
++
++function splitIntoLines(words: Word[]): [Word[], Word[]] {
++  if (words.length <= 2) {
++    return [words, []];
++  }
++  return [words.slice(0, 2), words.slice(2)];
++}
++
++const WordWithPill: React.FC<{
++  word: Word;
++  isActive: boolean;
++  frame: number;
++  fps: number;
++}> = ({ word, isActive, frame, fps }) => {
++  const wordEntryFrame = Math.round(word.start * fps);
++  const pillOpacity = isActive
++    ? spring({
++        frame: frame - wordEntryFrame,
++        fps,
++        config: { damping: 14, stiffness: 200, mass: 0.4 },
++      })
++    : 0;
++
++  return (
++    <span style={{ position: "relative", display: "inline" }}>
++      <span
++        style={{
++          position: "absolute",
++          top: -4,
++          left: -16,
++          right: -16,
++          bottom: -4,
++          backgroundColor: "rgba(0, 0, 0, 0.85)",
++          borderRadius: 18,
++          boxShadow: "0 4px 20px rgba(0, 0, 0, 0.5)",
++          opacity: pillOpacity,
++          pointerEvents: "none",
++        }}
++      />
++      <span style={{ position: "relative", zIndex: 1 }}>{word.word}</span>
++    </span>
++  );
++};
++
++const CaptionLine: React.FC<{
++  words: Word[];
++  currentTime: number;
++  frame: number;
++  fps: number;
++  style: CaptionStyle;
++}> = ({ words, currentTime, frame, fps, style }) => {
++  return (
++    <div
++      style={{
++        textAlign: "center",
++        fontFamily: style.fontFamily,
++        fontSize: style.fontSize,
++        fontWeight: 400,
++        color: style.color,
++        textShadow:
++          "0 0 40px rgba(0, 0, 0, 0.15), 0 0 80px rgba(0, 0, 0, 0.1), 0 0 150px rgba(0, 0, 0, 0.08)",
++        lineHeight: 1.25,
++        whiteSpace: "nowrap",
++      }}
++    >
++      {words.map((word, i) => {
++        const isActive = currentTime >= word.start && currentTime < word.end;
++        const prefix = i > 0 ? " " : "";
++
++        return (
++          <React.Fragment key={i}>
++            {prefix}
++            <WordWithPill word={word} isActive={isActive} frame={frame} fps={fps} />
++          </React.Fragment>
++        );
++      })}
++    </div>
++  );
++};
++
++export const LegacyBrandedCaptions: React.FC<Props> = ({
++  words,
++  style,
++  logoSrc,
++  faceY,
++}) => {
++  const frame = useCurrentFrame();
++  const { fps, height } = useVideoConfig();
++  const currentTime = frame / fps;
++  const chunks = buildChunks(words, style.wordsPerChunk);
++  const activeChunk = chunks.find(
++    (c) => currentTime >= c.start && currentTime < c.end
++  );
++
++  let dynamicMargin = style.marginBottom;
++  if (faceY != null && faceY > 0.55) {
++    dynamicMargin = Math.max(
++      80,
++      style.marginBottom - Math.round((faceY - 0.55) * height * 0.6)
++    );
++  } else if (faceY != null && faceY < 0.35) {
++    dynamicMargin = style.marginBottom + 60;
++  }
++
++  return (
++    <>
++      {logoSrc && (
++        <Img
++          src={logoSrc.startsWith("http") ? logoSrc : staticFile(logoSrc)}
++          style={{
++            position: "absolute",
++            top: 180,
++            left: 108,
++            width: 255,
++            height: 126,
++            objectFit: "contain",
++          }}
++        />
++      )}
++
++      {activeChunk && (() => {
++        const [line1, line2] = splitIntoLines(activeChunk.words);
++
++        return (
++          <div
++            style={{
++              position: "absolute",
++              bottom: dynamicMargin,
++              left: 60,
++              right: 60,
++              display: "flex",
++              flexDirection: "column",
++              alignItems: "center",
++              gap: 8,
++            }}
++          >
++            <CaptionLine
++              words={line1}
++              currentTime={currentTime}
++              frame={frame}
++              fps={fps}
++              style={style}
++            />
++            {line2.length > 0 && (
++              <CaptionLine
++                words={line2}
++                currentTime={currentTime}
++                frame={frame}
++                fps={fps}
++                style={style}
++              />
++            )}
++          </div>
++        );
++      })()}
++    </>
++  );
++};
+diff --git a/remotion/src/types.ts b/remotion/src/types.ts
+index 07fae7c..edae1ea 100644
+--- a/remotion/src/types.ts
++++ b/remotion/src/types.ts
+@@ -7,7 +7,7 @@ export interface Word {
+ }
+ 
+ export interface CaptionStyle {
+-  name: "hormozi" | "karaoke" | "subtle" | "branded";
++  name: "hormozi" | "karaoke" | "subtle" | "branded" | "branded-legacy";
+   fontSize: number;
+   fontFamily: string;
+   color: string;
+@@ -75,4 +75,15 @@ export const STYLES: Record<string, CaptionStyle> = {
+     position: "lower-third",
+     marginBottom: 420,
+   },
++  "branded-legacy": {
++    name: "branded-legacy",
++    fontSize: 100,
++    fontFamily: FONT,
++    color: "#FFFFFF",
++    activeColor: "#FFFFFF",
++    uppercase: false,
++    wordsPerChunk: 3,
++    position: "lower-third",
++    marginBottom: 420,
++  },
+ };

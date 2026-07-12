@@ -1,0 +1,4 @@
+interface:
+  display_name: "MUAPI Generative Media"
+  short_description: "Generate and edit media through MUAPI."
+  default_prompt: "Use $muapi-generative-media to generate, edit, upload, poll, download, and QA media through MUAPI with shared HivemindOS env credentials."

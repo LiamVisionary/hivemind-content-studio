@@ -1,0 +1,9 @@
+diff --git a/backend/services/captions_burn.py b/backend/services/captions_burn.py
+index 424f844..b323207 100644
+--- a/backend/services/captions_burn.py
++++ b/backend/services/captions_burn.py
+@@ -107,3 +107,3 @@ def burn_captions(
+     # Burn ASS subtitles
+-    filter_parts.append(f"[{current_label}]ass='{safe_ass}'[out]")
++    filter_parts.append(f"[{current_label}]ass={safe_ass}[out]")
+     filter_complex = ";".join(filter_parts)

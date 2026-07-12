@@ -1,0 +1,28 @@
+type: animated_story_series
+series: Drift Protocol
+episode: 2
+title: The Collapse That Wasn't
+runtime_minutes: 8
+main_character: Mara, 19, courier, can replay 30 seconds of any moment she has touched
+logline: Mara replays the moment before a building collapse and realizes it was not an accident. Someone is erasing events.
+tone: tense, cinematic, unresolved threat
+style_guardrails:
+  - original characters only
+  - cinematic western animation, muted earth tones, cyan accents
+  - no named living artists or studio-copy prompts in production
+scenes:
+  - slug: highway-after-rain
+    duration_seconds: 40
+    beat: Establish Mara arriving at a rain-soaked elevated highway after a collapse warning.
+  - slug: wall-touch-replay
+    duration_seconds: 45
+    beat: Mara touches cracked concrete and replays the 30 seconds before failure.
+  - slug: impossible-gap
+    duration_seconds: 40
+    beat: The replay shows a missing instant, like frames cut out of reality.
+  - slug: witness-silenced
+    duration_seconds: 45
+    beat: A witness starts explaining, then forgets the collapse ever happened.
+  - slug: erased-message
+    duration_seconds: 40
+    beat: Mara finds a warning addressed to her, then watches it erase itself.

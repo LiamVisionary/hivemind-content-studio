@@ -1,404 +1,211 @@
-<div align="center">
-<h1 align="center">MoneyPrinterTurbo 💸</h1>
+# Hivemind Content Studio
 
-<p align="center">
-  <a href="https://github.com/harry0703/MoneyPrinterTurbo/stargazers"><img src="https://img.shields.io/github/stars/harry0703/MoneyPrinterTurbo.svg?style=for-the-badge" alt="Stargazers"></a>
-  <a href="https://github.com/harry0703/MoneyPrinterTurbo/issues"><img src="https://img.shields.io/github/issues/harry0703/MoneyPrinterTurbo.svg?style=for-the-badge" alt="Issues"></a>
-  <a href="https://github.com/harry0703/MoneyPrinterTurbo/network/members"><img src="https://img.shields.io/github/forks/harry0703/MoneyPrinterTurbo.svg?style=for-the-badge" alt="Forks"></a>
-  <a href="https://github.com/harry0703/MoneyPrinterTurbo/blob/main/LICENSE"><img src="https://img.shields.io/github/license/harry0703/MoneyPrinterTurbo.svg?style=for-the-badge" alt="License"></a>
-</p>
-<br>
-<h3>简体中文 | <a href="README-en.md">English</a></h3>
-<div align="center">
-  <a href="https://trendshift.io/repositories/8731" target="_blank"><img src="https://trendshift.io/api/badge/repositories/8731" alt="harry0703%2FMoneyPrinterTurbo | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</div>
-<br>
-只需提供一个视频 <b>主题</b> 或 <b>关键词</b> ，就可以全自动生成视频文案、视频素材、视频字幕、视频背景音乐，然后合成一个高清的短视频。
-<br>
+One agent-facing repository for the full social-content lifecycle:
 
-<h4>Web界面</h4>
-
-![](docs/webui.jpg)
-
-<h4>API界面</h4>
-
-![](docs/api.jpg)
-
-</div>
-
-## 功能特性 🎯
-
-- [x] 完整的 **MVC架构**，代码 **结构清晰**，易于维护，支持 `API` 和 `Web界面`
-- [x] 支持视频文案 **AI自动生成**，也可以**自定义文案**
-- [x] 支持多种 **高清视频** 尺寸
-    - [x] 竖屏 9:16，`1080x1920`
-    - [x] 横屏 16:9，`1920x1080`
-- [x] 支持 **批量视频生成**，可以一次生成多个视频，然后选择一个最满意的
-- [x] 支持 **视频片段时长** 设置，方便调节素材切换频率
-- [x] 支持 **中文** 和 **英文** 视频文案
-- [x] 支持 **多种语音** 合成，可 **实时试听** 效果
-- [x] 支持 **字幕生成**，可以调整 `字体`、`位置`、`颜色`、`大小`，同时支持`字幕描边`设置
-- [x] 支持 **背景音乐**，随机或者指定音乐文件，可设置`背景音乐音量`
-- [x] 视频素材来源 **高清**，而且 **无版权**，也可以使用自己的 **本地素材**
-- [x] 支持 **OpenAI**、**Moonshot**、**Azure**、**gpt4free**、**one-api**、**通义千问**、**Google Gemini**、**Ollama**、**DeepSeek**、**MiniMax**、 **文心一言**, **Pollinations**、**ModelScope** 等多种模型接入
-    - 中国用户建议使用 **DeepSeek** 或 **Moonshot** 作为大模型提供商（国内可直接访问，不需要VPN。注册就送额度，基本够用）
-
-## 视频演示 📺
-
-### 竖屏 9:16
-
-<table>
-<thead>
-<tr>
-<th align="center"><g-emoji class="g-emoji" alias="arrow_forward">▶️</g-emoji> 《如何增加生活的乐趣》</th>
-<th align="center"><g-emoji class="g-emoji" alias="arrow_forward">▶️</g-emoji> 《金钱的作用》<br>更真实的合成声音</th>
-<th align="center"><g-emoji class="g-emoji" alias="arrow_forward">▶️</g-emoji> 《生命的意义是什么》</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="center"><video src="https://github.com/harry0703/MoneyPrinterTurbo/assets/4928832/a84d33d5-27a2-4aba-8fd0-9fb2bd91c6a6"></video></td>
-<td align="center"><video src="https://github.com/harry0703/MoneyPrinterTurbo/assets/4928832/af2f3b0b-002e-49fe-b161-18ba91c055e8"></video></td>
-<td align="center"><video src="https://github.com/harry0703/MoneyPrinterTurbo/assets/4928832/112c9564-d52b-4472-99ad-970b75f66476"></video></td>
-</tr>
-</tbody>
-</table>
-
-### 横屏 16:9
-
-<table>
-<thead>
-<tr>
-<th align="center"><g-emoji class="g-emoji" alias="arrow_forward">▶️</g-emoji>《生命的意义是什么》</th>
-<th align="center"><g-emoji class="g-emoji" alias="arrow_forward">▶️</g-emoji>《为什么要运动》</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td align="center"><video src="https://github.com/harry0703/MoneyPrinterTurbo/assets/4928832/346ebb15-c55f-47a9-a653-114f08bb8073"></video></td>
-<td align="center"><video src="https://github.com/harry0703/MoneyPrinterTurbo/assets/4928832/271f2fae-8283-44a0-8aa0-0ed8f9a6fa87"></video></td>
-</tr>
-</tbody>
-</table>
-
-## 配置要求 📦
-
-- 建议系统：Windows 10 或 MacOS 11.0 以上，或主流 Linux 发行版
-- GPU 不是必需项，但如果你希望本地转录、更快的视频处理或更顺畅的批量生成体验，建议使用带显存的独立显卡
-
-| 项目 | 最低配置 | 推荐配置 | 理想配置 |
-| --- | --- | --- | --- |
-| CPU | 4 核 | 6 到 8 核 | 8 核及以上 |
-| RAM | 4 GB | 8 GB | 16 GB 及以上 |
-| GPU | 非必须 | 4 GB 显存及以上 | 8 GB 显存及以上 |
-
-- 如果你主要依赖云端 LLM、云端 TTS 和在线素材源，CPU 与内存比 GPU 更重要
-- 如果你启用 `faster-whisper`、批量生成或更重的本地处理链路，GPU 会明显提升速度
-
-
-## 快速开始 🚀
-
-### 推荐使用方式
-
-- Windows 用户：优先使用一键启动包，适合快速体验
-- MacOS / Linux 用户：优先使用 `uv sync --frozen` 进行本地部署
-- 想要隔离运行环境：优先使用 Docker 部署
-
-### 在 Google Colab 中运行
-免去本地环境配置，点击直接在 Google Colab 中快速体验 MoneyPrinterTurbo
-
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harry0703/MoneyPrinterTurbo/blob/main/docs/MoneyPrinterTurbo.ipynb)
-
-
-### Windows一键启动包
-
-下载一键启动包，解压直接使用（路径不要有 **中文**、**特殊字符**、**空格**）
-当前提供的安装包仍是 `v1.2.6` 的旧打包版本，建议下载后先执行 `update.bat` 更新到最新代码。
-
-- 百度网盘（v1.2.6）: https://pan.baidu.com/s/1wg0UaIyXpO3SqIpaq790SQ?pwd=sbqx 提取码: sbqx
-- Google Drive (v1.2.6): https://drive.google.com/file/d/1HsbzfT7XunkrCrHw5ncUjFX8XX4zAuUh/view?usp=sharing
-
-下载后，建议先**双击执行** `update.bat` 更新到**最新代码**，然后双击 `start.bat` 启动
-
-启动后，会自动打开浏览器（如果打开是空白，建议换成 **Chrome** 或者 **Edge** 打开）
-
-## 安装部署 📥
-
-### 前提条件
-
-- 尽量不要使用 **中文路径**，避免出现一些无法预料的问题
-- 请确保你的 **网络** 是正常的，VPN需要打开`全局流量`模式
-
-#### ① 克隆代码
-
-```shell
-git clone https://github.com/harry0703/MoneyPrinterTurbo.git
+```text
+brief/source
+  -> script + scene plan
+  -> local/cloud media generation
+  -> faceless render or animation assembly
+  -> long-form clipping
+  -> render QA + rights approval
+  -> Postiz or Upload-Post publish
+  -> performance + monetization loop
 ```
 
-#### ② 修改配置文件（可选，建议启动后也可以在 WebUI 里面配置）
+It consolidates three owned systems without making three parallel pipelines:
 
-- 将 `config.example.toml` 文件复制一份，命名为 `config.toml`
-- 按照 `config.toml` 文件中的说明，配置好 `pexels_api_keys` 和 `llm_provider`，并根据 llm_provider 对应的服务商，配置相关的
-  API Key
+- **MoneyPrinterTurbo** is the faceless rendering engine: scripts, stock/local media, LocalTTS, subtitles, and FFmpeg/MoviePy assembly.
+- **Auto Clipper** is the long-form ingestion and clipping engine: transcripts, clip candidates, rights gates, approvals, Postiz planning, and monetization matching.
+- **AI Animation Factory** is the animation planning contract: briefs, scenes, image/motion prompts, voice lines, music briefs, and reproducible run artifacts.
+- **Hivemind Content Studio** is the only orchestration, provider, manifest, approval, and publishing layer.
 
-### Docker部署 🐳
+The current Upload-Post and Postiz API shapes are implemented once in `hivemind_content_studio.publishing`. MoneyPrinterTurbo never auto-publishes at the end of a render.
 
-#### ① 启动Docker
+## Unified studio
 
-如果未安装 Docker，请先安装 https://www.docker.com/products/docker-desktop/
+The durable run engine is the product surface. The browser studio, CLI, and MCP are adapters over the same SQLite state machine and versioned manifest:
 
-如果是Windows系统，请参考微软的文档：
-
-1. https://learn.microsoft.com/zh-cn/windows/wsl/install
-2. https://learn.microsoft.com/zh-cn/windows/wsl/tutorials/wsl-containers
-
-```shell
-cd MoneyPrinterTurbo
-docker-compose up
+```text
+execute run -> inspect next_actions -> route intent -> request/consume approval
+            -> execute provider -> attach provenance -> evaluate -> publish -> ingest outcomes
 ```
 
-> 注意：最新版的docker安装时会自动以插件的形式安装docker compose，启动命令调整为docker compose up
+Every run exposes status, current step, bounded retries, budget/spend, immutable artifact metadata, provider/job evidence, and precise next actions. Agents ask for capabilities such as `generate_keyframes` or `animate_scenes`; the router selects a ready provider under the run's privacy, allowlist, and budget policy. Paid work uses an HMAC-signed, exact-scope, one-time operator receipt. Run-associated generation attempts also emit local privacy-safe telemetry: success/failure, provider/model, media kind, duration, artifact count, and charged amount. Prompts, media, credentials, provider payloads, and raw error messages are excluded. Arbitrary shell commands and operator approval decisions are not exposed over MCP.
 
-#### ② 访问Web界面
+The browser studio opens in **Simple** mode: one HivemindOS-style composer accepts a production prompt and up to 30 ordered reference images, then a detected LLM brain expands the direction and selects the production lane, scene plan, and providers. Image and video routes default to Automatic but can be pinned to a provider/model. Prompt Helper is on by default; Walk-through makes the brain ask questions and wait for confirmation before creating the run. The browser receives only safe model/capability metadata—HivemindOS keeps API keys and OAuth tokens server-side.
 
-打开浏览器，访问 http://0.0.0.0:8501
+The original brief-first workspace remains available under **Advanced**. It exposes all seven lanes, scene direction, provider overrides, voice and captions, distribution, faceless-video controls, privacy, budget, and protected operator actions with progressive disclosure. Both modes create the same canonical manifest and SQLite-backed durable run.
 
-#### ③ 访问API文档
+## Production lanes
 
-打开浏览器，访问 http://0.0.0.0:8080/docs 或者 http://0.0.0.0:8080/redoc
+| Lane | Input | Primary local path | Cloud/BYOK alternatives |
+|---|---|---|---|
+| Animation | YAML scene brief | ComfyUI + Media Studio MCP + Universal TTS + ACE-Step | HivemindOS hosted credits, MUAPI, and other configured providers |
+| First-frame animation ad | Script/scene brief | General agent runtime + ComfyUI + Media Studio MCP + FFmpeg | GPT Image, xAI Imagine image/video, HivemindOS hosted credits, MUAPI, Higgsfield Cloud, Higgsfield consumer/Kling |
+| Stickman performance ad | Script/scene brief | Deterministic black-line renderer + Universal TTS + FFmpeg | ElevenLabs, Higgsfield product/UGC cut-ins, MUAPI |
+| Static text ad | One headline/subtext per scene | Deterministic 4:5/9:16/1:1 renderer | Generated product or UGC cut-ins when explicitly requested |
+| Faceless short | Topic/script/search terms | Embedded MoneyPrinterTurbo + stock/local media + Universal TTS | Pexels, Pixabay, configured LLMs |
+| Clipping | Long video URL/file | Embedded Auto Clipper + Podcli/FFmpeg | MUAPI AI clipping |
+| Social post | Approved final media | Self-hosted Postiz | Upload-Post |
 
-### 手动部署 📦
+The optional `clueso-mcp` provider adds 90 agent-discoverable workflows for
+motion graphics, demos, training, editing, localization, repurposing, and
+video-derived documentation. The workflows are namespaced behind the canonical
+studio router: Clueso is never silently preferred over local or hosted paths,
+and connecting its MCP or uploading media remains an explicit remote action.
 
-> 视频教程
+HivemindOS **Media Studio** is the image-to-video MCP already used by HivemindOS chat. The studio discovers its `mcpVideo` descriptor dynamically from `~/.hivemindos/app-preferences.json` (or portable environment overrides), stages input images through the configured upload base, calls `media_generate_video`, polls `media_get_job`, downloads the result, and runs technical QA. It never bakes a Tailnet hostname, token, or transient app ID into the repo.
 
-- 完整的使用演示：https://v.douyin.com/iFhnwsKY/
-- 如何在Windows上部署：https://v.douyin.com/iFyjoW3M
+HivemindOS **hosted media** is the zero-provider-key cloud path. The studio calls the authenticated local `/api/hivemindos/media` route, obtains the live quote, verifies the official 25% markup and the run's maximum debit, then lets the HivemindOS-controlled gateway reserve shared hosted credits and own the provider job. Company freeze, budget, and approval policy remain authoritative in HivemindOS. The studio never reads or receives the hosted MUAPI key. Configure only `HIVEMINDOS_URL`, `HIVEMINDOS_DASHBOARD_DEVICE_TOKEN`, and the company agent identity `HIVEMINDOS_CONTENT_STUDIO_AGENT_ID` through the shared environment.
 
-#### ① 创建虚拟环境
+Palmier Pro remains a separate optional local timeline/editor MCP. It is not the Media Studio generation backend.
 
-推荐使用 [uv](https://docs.astral.sh/uv/) 管理 Python 环境和依赖，默认使用 Python `3.11`
+## Production templates
 
-```shell
-git clone https://github.com/harry0703/MoneyPrinterTurbo.git
-cd MoneyPrinterTurbo
-uv python install 3.11
-uv sync --frozen
+The typed template catalog in `src/hivemind_content_studio/template_catalog.py` loads frontmatter-markdown templates from `src/hivemind_content_studio/templates/catalog/<category>/`. Each template is a composer-ready production prompt with `[SLOT]` placeholders plus safe metadata (lane hint, aspect ratio, duration, tags, provenance). Three categories ship today:
+
+- **ugc** — the hyper-real AI UGC system: a character reference photo prompt (named imperfections, lived-in environment, phone-camera language, the load-bearing negative) and the 8-beat 15-second product ad with character/outfit/environment/product/voice locks.
+- **formats** — eight proven viral ad formats (shocked reaction + demo, product-as-gameplay, notification punchline, mascot engine, "what worked for me" note, spot-the-AI split screen, accidental discovery, trend-template volume), each as a runnable beat plan.
+- **animation** — the brand-explainer arc built on the existing animation scaffolds.
+
+Templates surface in three places: the Simple composer's **Templates** menu (inserts the prompt for the brain to expand), `GET /api/templates` (and the `templates` key of `/api/simple/catalog`), and `content-studio templates [template-id]`. Adding a template is dropping a new `.md` file with valid frontmatter into the catalog directory — the loader validates lane ids, unique ids, and that every declared slot appears in the prompt body.
+
+## Quick start
+
+The studio automatically fills missing server-side variables from `~/.hivemindos/.env`; explicit process or project values take precedence. Provider secrets never enter the browser or the provider catalog response. `hive-env-run` remains useful for consistency with other HivemindOS tools, but is no longer required just to make the studio discover shared provider credentials.
+
+```bash
+uv sync --extra dev --extra mcp
+hive-env-run -- uv run content-studio doctor
+hive-env-run -- uv run content-studio providers
 ```
 
-如果你暂时不使用 `uv`，也可以继续使用 `venv + pip`
+Open the local studio:
 
-```shell
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+```bash
+hive-env-run -- uv run content-studio-api
 ```
 
-说明：
-- `pyproject.toml` 是主依赖定义文件
-- `uv.lock` 是锁文件，建议默认执行 `uv sync --frozen`
-- `requirements.txt` 仅保留给旧的 `pip` 安装方式兼容使用
+Then visit `http://127.0.0.1:8765`. Create opens in Simple mode; switch to Advanced for the complete production workspace. The Create, Runs, and Providers views all use the same-origin control API and canonical run engine. The original MoneyPrinter Streamlit entrypoint remains a temporary compatibility surface; new productions should begin in the unified studio.
 
-#### ② 安装好 ImageMagick
+Start a durable run. It advances deterministic work and stops with structured `next_actions` when an agent, provider, evaluator, or operator is needed:
 
-- Windows:
-    - 下载 https://imagemagick.org/script/download.php 选择Windows版本，切记一定要选择 **静态库** 版本，比如
-      ImageMagick-7.1.1-32-Q16-x64-**static**.exe
-    - 安装下载好的 ImageMagick，**注意不要修改安装路径**
-    - 修改 `配置文件 config.toml` 中的 `imagemagick_path` 为你的 **实际安装路径**
-
-- MacOS:
-  ```shell
-  brew install imagemagick
-  ````
-- Ubuntu
-  ```shell
-  sudo apt-get install imagemagick
-  ```
-- CentOS
-  ```shell
-  sudo yum install ImageMagick
-  ```
-
-#### ③ 启动Web界面 🌐
-
-注意需要到 MoneyPrinterTurbo 项目 `根目录` 下执行以下命令
-
-###### Windows
-
-```shell
-uv run streamlit run ./webui/Main.py --browser.gatherUsageStats=False
+```bash
+hive-env-run -- uv run content-studio run execute examples/briefs/first-frame-animation-ad.yaml --privacy local-first --max-cost-usd 10
+hive-env-run -- uv run content-studio run list
+hive-env-run -- uv run content-studio run get <run-id>
 ```
 
-如果你已经手动激活了虚拟环境，也可以直接执行：
+SQLite is authoritative for run/step/event/budget state. The versioned manifest is authoritative for the brief, provider selections, artifacts, provenance, approval, publish drafts, and receipts.
 
-```bat
-webui.bat
+Scripts are agent-runtime neutral. Any command that consumes the run request JSON on stdin and writes Markdown on stdout can be used, or an already-running HivemindOS agent can attach its finished script through CLI/MCP:
+
+```bash
+uv run content-studio script run <manifest.json> --runtime <operator-registered-runtime-id> --confirm AGENT_GENERATE
+uv run content-studio script attach <manifest.json> <script.md> --runtime hermes
 ```
 
-###### MacOS or Linux
+Route intents before execution. The result explains the selected implementation, fallbacks, readiness evidence, and every rejected provider:
 
-```shell
-uv run streamlit run ./webui/Main.py --browser.gatherUsageStats=False
+```bash
+uv run content-studio intent route <run-id> generate_keyframes --estimated-cost-usd 1.25
+uv run content-studio intent execute <run-id> generate_keyframes --estimated-cost-usd 1.25
+uv run content-studio telemetry generations
 ```
 
-如果你已经手动激活了虚拟环境，也可以直接执行：
+Direct paid-provider execution returns `awaiting_approval`. An operator decides that exact request through the authenticated control API or `content-studio approval decide`; the agent retries with the returned one-time `--approval-token`. Spend is debited atomically only after the registered executor succeeds. MUAPI requires an explicit live-discovered endpoint and payload template under `provider_options.muapi`; model-specific schemas are never guessed.
 
-```shell
-sh webui.sh
+For `hivemindos-hosted-media`, first discover the hosted catalog/schema and put the explicit model/payload template under `provider_options.hivemindos-hosted-media.<keyframe|motion>`. Pass the quoted retail amount as `--estimated-cost-usd`. This provider delegates authorization to the HivemindOS company policy instead of creating a second studio approval: an autonomous company inside its budget proceeds, while a frozen company, exhausted budget, low hosted balance, or HivemindOS approval threshold stops before provider spend.
+
+Higgsfield Cloud and the consumer CLI are separate providers. The studio never silently switches between their independent credentials or sessions.
+
+OpenAI GPT Image has two explicit providers. `openai-gpt-image` uses `OPENAI_API_KEY` with the official Image API. `openai-gpt-image-oauth` reuses the HivemindOS ChatGPT/Codex sign-in through the beta Codex Responses `image_generation` surface; it never presents that OAuth token to the public Image API. xAI Imagine similarly supports separate `XAI_API_KEY` and HivemindOS-brokered OAuth routes for image and video generation. The studio's OAuth controls start and inspect the existing HivemindOS sessions; access and refresh tokens never enter this process or the browser.
+
+Stickman ads can remain entirely local until product cut-ins or premium generation are requested:
+
+```bash
+uv run content-studio render-stickman <manifest.json>
+uv run content-studio intent execute <run-id> generate_voice --provider elevenlabs --estimated-cost-usd <estimate> --approval-token <one-time-token>
+uv run content-studio assemble <manifest.json>
+uv run content-studio capcut-handoff <manifest.json>
 ```
 
-启动后，会自动打开浏览器（如果打开是空白，建议换成 **Chrome** 或者 **Edge** 打开）
+FFmpeg assembly is the zero-human default. The CapCut command emits a portable asset/timing CSV and instructions rather than writing CapCut's unstable private project database.
 
-#### ④ 启动API服务 🚀
+Palmier discovery is read-only:
 
-```shell
-uv run python main.py
+```bash
+uv run content-studio mcp-tools
 ```
 
-如果你已经手动激活了虚拟环境，也可以直接执行：
+Media Studio discovery is also read-only:
 
-```shell
-python main.py
+```bash
+hive-env-run -- uv run content-studio media-studio status
+hive-env-run -- uv run content-studio media-studio tools
 ```
 
-## 特别感谢 🙏
+Media Studio is also available through the `animate_scenes` intent. Its local/fleet generation never implies approval to publish the result.
 
-由于该项目的 **部署** 和 **使用**，对于一些小白用户来说，还是 **有一定的门槛**，在此特别感谢
-**录咖（AI智能 多媒体服务平台）** 网站基于该项目，提供的免费`AI视频生成器`服务，可以不用部署，直接在线使用，非常方便。
+An actual Palmier project/tool mutation requires explicit confirmation:
 
-- 中文版：https://reccloud.cn
-- 英文版：https://reccloud.com
-
-![](docs/reccloud.cn.jpg)
-
-## 感谢赞助 🙏
-
-感谢佐糖 https://picwish.cn 对该项目的支持和赞助，使得该项目能够持续的更新和维护。
-
-佐糖专注于**图像处理领域**，提供丰富的**图像处理工具**，将复杂操作极致简化，真正实现让图像处理更简单。
-
-![picwish.jpg](docs/picwish.jpg)
-
-启动后，可以查看 `API文档` http://127.0.0.1:8080/docs 或者 http://127.0.0.1:8080/redoc 直接在线调试接口，快速体验。
-
-## 语音合成 🗣
-
-所有支持的声音列表，可以查看：[声音列表](./docs/voice-list.txt)
-
-2024-04-16 v1.1.2 新增了9种Azure的语音合成声音，需要配置API KEY，该声音合成的更加真实。
-
-## 字幕生成 📜
-
-当前支持2种字幕生成方式：
-
-- **edge**: 生成`速度快`，性能更好，对电脑配置没有要求，但是质量可能不稳定
-- **whisper**: 生成`速度慢`，性能较差，对电脑配置有一定要求，但是`质量更可靠`。
-
-可以修改 `config.toml` 配置文件中的 `subtitle_provider` 进行切换
-
-建议使用 `edge` 模式，如果生成的字幕质量不好，再切换到 `whisper` 模式
-
-> 注意：
-
-1. whisper 模式下需要到 HuggingFace 下载一个模型文件，大约 3GB 左右，请确保网络通畅
-2. 如果留空，表示不生成字幕。
-
-> 由于国内无法访问 HuggingFace，可以使用以下方法下载 `whisper-large-v3` 的模型文件
-
-下载地址：
-
-- 百度网盘: https://pan.baidu.com/s/11h3Q6tsDtjQKTjUu3sc5cA?pwd=xjs9
-- 夸克网盘：https://pan.quark.cn/s/3ee3d991d64b
-
-模型下载后解压，整个目录放到 `.\MoneyPrinterTurbo\models` 里面，
-最终的文件路径应该是这样: `.\MoneyPrinterTurbo\models\whisper-large-v3`
-
-```
-MoneyPrinterTurbo  
-  ├─models
-  │   └─whisper-large-v3
-  │          config.json
-  │          model.bin
-  │          preprocessor_config.json
-  │          tokenizer.json
-  │          vocabulary.json
+```bash
+uv run content-studio mcp-call <tool> --arguments '{"project_id":"..."}' --confirm MCP_WRITE
 ```
 
-## 背景音乐 🎵
+## Publishing gate
 
-用于视频的背景音乐，位于项目的 `resource/songs` 目录下。
-> 当前项目里面放了一些默认的音乐，来自于 YouTube 视频，如有侵权，请删除。
+Rendering and publishing are separate. Setup never enables auto-upload.
 
-## 字幕字体 🅰
+```bash
+uv run content-studio publish prepare <manifest.json> \
+  --video <final.mp4> \
+  --title "..." \
+  --caption "..." \
+  --platforms youtube,tiktok,instagram \
+  --provider upload-post
 
-用于视频字幕的渲染，位于项目的 `resource/fonts` 目录下，你也可以放进去自己的字体。
-
-## 常见问题 🤔
-
-### ❓RuntimeError: No ffmpeg exe could be found
-
-通常情况下，ffmpeg 会被自动下载，并且会被自动检测到。
-但是如果你的环境有问题，无法自动下载，可能会遇到如下错误：
-
-```
-RuntimeError: No ffmpeg exe could be found.
-Install ffmpeg on your system, or set the IMAGEIO_FFMPEG_EXE environment variable.
+uv run content-studio publish dry-run <manifest.json>
+uv run content-studio approval request-run <manifest.json>
+uv run content-studio approval decide <approval-id> --decision approve --decided-by <name>
+uv run content-studio approve <manifest.json> --reviewer <name> --rights-note "Owned/approved media and claims reviewed." --approval-token <one-time-token>
 ```
 
-此时你可以从 https://www.gyan.dev/ffmpeg/builds/ 下载ffmpeg，解压后，设置 `ffmpeg_path` 为你的实际安装路径即可。
+Live publishing additionally requires both `CONTENT_STUDIO_ENABLE_LIVE_PUBLISH=true` and `--confirm LIVE_PUBLISH`. Use `hive-env-run --` so credentials remain in the shared HivemindOS environment.
 
-```toml
-[app]
-# 请根据你的实际路径设置，注意 Windows 路径分隔符为 \\
-ffmpeg_path = "C:\\Users\\harry\\Downloads\\ffmpeg.exe"
+After distribution, attach platform outcomes to the same run:
+
+```bash
+uv run content-studio metrics record <manifest.json> --platform youtube --views 1000 --completed-views 620 --clicks 35 --conversions 4 --revenue 80
+uv run content-studio metrics summary <manifest.json>
 ```
 
-### ❓ImageMagick的安全策略阻止了与临时文件@/tmp/tmpur5hyyto.txt相关的操作
+## Agent access
 
-可以在ImageMagick的配置文件policy.xml中找到这些策略。
-这个文件通常位于 /etc/ImageMagick-`X`/ 或 ImageMagick 安装目录的类似位置。
-修改包含`pattern="@"`的条目，将`rights="none"`更改为`rights="read|write"`以允许对文件的读写操作。
+Two MCP servers are included. `content-studio-mcp` is the primary agent contract and exposes high-level run, intent, asset, evaluation, experiment, metric, and publishing tools plus these discoverable resources:
 
-### ❓OSError: [Errno 24] Too many open files
+- `studio://capabilities`
+- `studio://providers`
+- `studio://telemetry/generations`
+- `studio://runs/{run_id}`
+- `studio://runs/{run_id}/artifacts`
+- `studio://runs/{run_id}/next-actions`
 
-这个问题是由于系统打开文件数限制导致的，可以通过修改系统的文件打开数限制来解决。
+- `content-studio-mcp`: unified durable workflows; it can request approval but cannot approve or deny its own request.
+- `auto-clipper-mcp`: focused compatibility surface for existing clipping agents.
 
-查看当前限制
+The optional operator console is secondary and starts locally with `hive-env-run -- uv run content-studio-api`. It reads the same state store; authenticated mutations require `CONTENT_STUDIO_CONTROL_TOKEN`.
 
-```shell
-ulimit -n
-```
+The repository also snapshots the relevant Shared Brain skills under `skills/shared/` and vendors the audited Clueso workflow shelf under `skills/vendor/clueso-ai/`. `skills/hivemind-content-studio/SKILL.md` is linked into `.agents/skills/` as the canonical entry skill; provider adapters are operational references, not duplicate implementations.
 
-如果过低，可以调高一些，比如
+## Safety and licensing
 
-```shell
-ulimit -n 10240
-```
+- No credential values belong in this repository. `.env.example` contains key names only.
+- Remote media is untrusted input and is validated before rendering/publishing.
+- Remote URL ingestion and generated-media downloads enforce public HTTPS/SSRF, byte-size, MIME, and decode checks. Private generation URLs are disabled by default.
+- Agent runtimes are registered by operator-owned environment keys; agents submit a runtime id, not an argv array.
+- Paid generation and run approval use one-time exact-scope receipts. Editor mutation and public publishing retain separate gates.
+- Auto Clipper is declared AGPL-3.0-or-later. The combined work is therefore configured as AGPL-3.0-or-later; see `THIRD_PARTY_NOTICES.md` before distribution.
 
-### ❓Whisper 模型下载失败，出现如下错误
-
-LocalEntryNotfoundEror: Cannot find an appropriate cached snapshotfolderfor the specified revision on the local disk and
-outgoing trafic has been disabled.
-To enablerepo look-ups and downloads online, pass 'local files only=False' as input.
-
-或者
-
-An error occurred while synchronizing the model Systran/faster-whisper-large-v3 from the Hugging Face Hub:
-An error happened while trying to locate the files on the Hub and we cannot find the appropriate snapshot folder for the
-specified revision on the local disk. Please check your internet connection and try again.
-Trying to load the model directly from the local cache, if it exists.
-
-解决方法：[点击查看如何从网盘手动下载模型](#%E5%AD%97%E5%B9%95%E7%94%9F%E6%88%90-)
-
-## 反馈建议 📢
-
-- 可以提交 [issue](https://github.com/harry0703/MoneyPrinterTurbo/issues)
-  或者 [pull request](https://github.com/harry0703/MoneyPrinterTurbo/pulls)。
-
-## 许可证 📝
-
-点击查看 [`LICENSE`](LICENSE) 文件
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=harry0703/MoneyPrinterTurbo&type=Date)](https://star-history.com/#harry0703/MoneyPrinterTurbo&Date)
+See [Architecture](docs/ARCHITECTURE.md), [Operations](docs/OPERATIONS.md), [Migration Map](docs/MIGRATION_MAP.md), and [Monetization](docs/MONETIZATION.md).

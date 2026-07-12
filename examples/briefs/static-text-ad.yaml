@@ -1,0 +1,17 @@
+id: static-text-performance-ad
+lane: static-text-ad
+title: One idea, impossible to miss
+audience: direct-to-consumer founders
+goal: test a low-production text-led creative against generated video
+aspect_ratio: 4:5
+palette:
+  background: "#F7F5F2"
+  foreground: "#171717"
+  accent: "#D9FF63"
+voice:
+  enabled: false
+scenes:
+  - overlay: Your ad does not need to look expensive.
+    subtext: It needs one idea people remember.
+publish:
+  platforms: [instagram, facebook]

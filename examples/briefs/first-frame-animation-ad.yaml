@@ -1,0 +1,36 @@
+id: first-frame-studio-ad
+lane: first-frame-animation-ad
+title: From idea to finished campaign
+audience: founder-led software companies
+goal: show a complete content workflow in under 15 seconds
+runtime_seconds: 14
+aspect_ratio: 9:16
+tone: direct, visual, specific
+style_guardrails:
+  - keep the same founder, product interface, palette, and lighting across keyframes
+  - no unverified performance or revenue claims
+continuity:
+  visual: clean editorial 3D with warm directional light
+  character: one founder in a charcoal shirt
+  product: one purple content dashboard
+voice:
+  provider: universal-tts
+  delivery: calm, quick, confident
+scenes:
+  - title: Hook
+    beat: The founder faces ten unfinished content tabs.
+    voice: Ten tools should not be the price of one finished campaign.
+    overlay: Ten tools. Zero finished ads.
+    duration_seconds: 3
+  - title: First frames
+    beat: Every scene appears as a consistent storyboard on the dashboard.
+    voice: Plan the script, first frames, voice, and motion in one run.
+    overlay: One production contract
+    duration_seconds: 5
+  - title: Assembly
+    beat: Finished vertical ads flow into approval and scheduling.
+    voice: Assemble, approve, publish, and learn from the result.
+    overlay: Create. Approve. Distribute.
+    duration_seconds: 6
+publish:
+  platforms: [instagram, tiktok, youtube]

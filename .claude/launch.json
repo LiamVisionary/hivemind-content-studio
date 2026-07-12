@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "content-studio",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "uvicorn", "--factory", "hivemind_content_studio.control_api:build_control_app", "--host", "127.0.0.1", "--port", "8768"],
+      "port": 8768
+    }
+  ]
+}

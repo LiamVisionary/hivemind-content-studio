@@ -1,0 +1,63 @@
+{
+  "created_at": "2026-07-11T07:02:17.628178+00:00",
+  "request": "Create a unified DRY social content generation, clipping, and auto-posting repository from ai-animation-factory, MoneyPrinterTurbo-private, and auto-clipper, then create a Zero Human Company for it",
+  "custom_code_assessment": "balanced",
+  "entries": [
+    {
+      "source_repo": "LiamVisionary/MoneyPrinterTurbo-private@404f3ec",
+      "source_path": "app",
+      "target_path": "app",
+      "reuse_type": "adapted_code",
+      "note": "retained faceless engine and removed render-time publishing"
+    },
+    {
+      "source_repo": "LiamVisionary/auto-clipper@ed746b2",
+      "source_path": "src/auto_clipper",
+      "target_path": "src/auto_clipper",
+      "reuse_type": "adapted_code",
+      "note": "embedded clipping rights approval and monetization engine from current working-tree snapshot"
+    },
+    {
+      "source_repo": "LiamVisionary/auto-clipper@ed746b2",
+      "source_path": "tests",
+      "target_path": "test/auto_clipper",
+      "reuse_type": "test_adapted",
+      "note": "embedded donor contract tests"
+    },
+    {
+      "source_repo": "LiamVisionary/ai-animation-factory@80a0df7",
+      "source_path": "scripts/factory.py",
+      "target_path": "src/hivemind_content_studio/planner.py",
+      "reuse_type": "adapted_code",
+      "note": "provider-neutral canonical planning"
+    },
+    {
+      "source_repo": "LiamVisionary/ai-animation-factory@80a0df7",
+      "source_path": "scripts/publish_video.py",
+      "target_path": "src/hivemind_content_studio/publishing.py",
+      "reuse_type": "adapted_code",
+      "note": "unified current Postiz and Upload-Post gate"
+    },
+    {
+      "source_repo": "LiamVisionary/ai-animation-factory@80a0df7",
+      "source_path": "briefs",
+      "target_path": "examples/briefs",
+      "reuse_type": "asset_copied",
+      "note": "sample production briefs"
+    },
+    {
+      "source_repo": "LiamVisionary/hivemindos@0218fef",
+      "source_path": "src/lib/services/fleet/app-preferences.ts",
+      "target_path": "src/hivemind_content_studio/media_studio.py",
+      "reuse_type": "adapted_code",
+      "note": "dynamic mcpVideo descriptor discovery"
+    },
+    {
+      "source_repo": "LiamVisionary/hivemindos@0218fef+working-tree",
+      "source_path": "src/lib/services/chat/video-generation.ts",
+      "target_path": "src/hivemind_content_studio/media_studio.py",
+      "reuse_type": "adapted_code",
+      "note": "Media Studio upload generation polling download and QA bridge"
+    }
+  ]
+}
