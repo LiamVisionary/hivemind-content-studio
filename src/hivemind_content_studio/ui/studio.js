@@ -12,6 +12,7 @@ const state = {
   simpleHistory: [],
   simplePlan: null,
   createMode: 'simple',
+  studioMode: 'create',
   prompts: [],
   telemetry: null,
   historyFilter: '',
@@ -63,6 +64,56 @@ function switchCreateMode(mode) {
   $('#simple-studio').classList.toggle('is-hidden', state.createMode !== 'simple');
   $('#advanced-studio').classList.toggle('is-hidden', state.createMode !== 'advanced');
   $$('[data-create-mode]').forEach((button) => button.classList.toggle('is-active', button.dataset.createMode === state.createMode));
+}
+
+const STUDIO_MODES = {
+  create: {
+    heading: 'What do you want to make?',
+    copy: 'Create images, video, and complete media from one prompt, one model router, and one durable run.',
+    placeholder: 'Create a 20-second product launch ad with a hard pattern interrupt, three cinematic scenes, and a direct CTA…',
+    submit: 'Plan creation',
+    attachment: 'Images',
+  },
+  edit: {
+    heading: 'What should change?',
+    copy: 'Add one or more ordered references, describe the transformation, and keep every result in the same asset history.',
+    placeholder: 'Replace the background with a warm editorial studio while preserving the product, framing, and lighting direction…',
+    submit: 'Plan edit',
+    attachment: 'References',
+  },
+  animate: {
+    heading: 'What should move?',
+    copy: 'Animate an idea or attached frame with the same video models, run history, provenance, and approvals.',
+    placeholder: 'Animate this frame with a slow push-in, subtle fabric movement, natural parallax, and a clean final hold…',
+    submit: 'Plan animation',
+    attachment: 'Start frame',
+  },
+  workflow: {
+    heading: 'Build the complete workflow',
+    copy: 'Control scenes, providers, voice, assembly, publishing, budget, and policy in one production form.',
+    placeholder: '',
+    submit: 'Create production',
+    attachment: 'Images',
+  },
+};
+
+function selectNativeStudioMode(mode) {
+  const selected = Object.hasOwn(STUDIO_MODES, mode) ? mode : 'create';
+  state.studioMode = selected;
+  const config = STUDIO_MODES[selected];
+  const createView = $('[data-view="create"]');
+  createView.dataset.studioMode = selected;
+  $$('[data-studio-mode]').forEach((button) => {
+    const active = button.dataset.studioMode === selected;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  $('#simple-heading').textContent = config.heading;
+  $('#simple-hero-copy').textContent = config.copy;
+  $('#simple-prompt').placeholder = config.placeholder;
+  $('#simple-attach b').textContent = config.attachment;
+  $('#simple-submit span').textContent = config.submit;
+  switchCreateMode(selected === 'workflow' ? 'advanced' : 'simple');
 }
 
 function modelOptionLabel(model) {
@@ -571,7 +622,7 @@ function setSimpleBusy(busy, label = 'Planning') {
   const button = $('#simple-submit');
   button.disabled = busy;
   button.setAttribute('aria-busy', String(busy));
-  button.innerHTML = busy ? `<span>${esc(label)}</span><i class="spinner" aria-hidden="true"></i>` : '<span>Plan production</span><i aria-hidden="true">↑</i>';
+  button.innerHTML = busy ? `<span>${esc(label)}</span><i class="spinner" aria-hidden="true"></i>` : `<span>${esc(STUDIO_MODES[state.studioMode].submit)}</span><i aria-hidden="true">↑</i>`;
 }
 
 async function createSimpleRun(plan) {
@@ -605,6 +656,7 @@ async function submitSimplePrompt(event) {
   event.preventDefault();
   const prompt = $('#simple-prompt').value.trim();
   if (!prompt) { toast('Describe what you want to create.', 'error'); return; }
+  if (state.studioMode === 'edit' && !state.simpleAttachments.length) { toast('Add at least one reference image before planning an edit.', 'error'); return; }
   const brain = selectedRoute($('#simple-brain'));
   if (!brain.provider || brain.provider === 'automatic') { toast('Connect or select an LLM brain first.', 'error'); return; }
   appendSimpleMessage('user', `<p>${esc(prompt)}</p>`);
@@ -617,6 +669,7 @@ async function submitSimplePrompt(event) {
       method: 'POST',
       body: JSON.stringify({
         prompt,
+        studioMode: state.studioMode,
         ...brain,
         promptHelper: $('#simple-prompt-helper').checked,
         walkthrough: $('#simple-walkthrough').checked,
@@ -658,7 +711,7 @@ function navigate(view) {
   $$('.view').forEach((item) => item.classList.toggle('is-active', item.dataset.view === selected));
   $$('.nav-item').forEach((item) => item.classList.toggle('is-active', item.dataset.viewTarget === selected));
   const copy = {
-    create: ['New production', 'Create'],
+    create: ['Unified creation', 'Studio'],
     runs: ['Durable workflow', 'Runs'],
     history: ['Prompt library', 'History'],
     telemetry: ['Generation operations', 'Telemetry'],
@@ -849,6 +902,7 @@ function loadRunIntoSimpleComposer(runId, { notify = true, focus = true, navigat
   state.simpleHistory = [];
   state.simplePlan = null;
   switchCreateMode('simple');
+  selectNativeStudioMode(composer.studioMode || 'create');
   if (navigateToCreate) navigate('create');
   if (focus) {
     $('#simple-prompt').focus();
@@ -1143,6 +1197,7 @@ function duplicateRun(runId) {
     if (selector) selector.value = provider;
   });
   renderScenes();
+  selectNativeStudioMode('workflow');
   navigate('create');
   $('#title').focus();
   toast('Loaded as a new editable variant. The original run stays immutable.');
@@ -1238,7 +1293,7 @@ async function startOAuth(provider, button) {
 
 function bindEvents() {
   $$('.nav-item').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.viewTarget)));
-  $('#create-mode').addEventListener('click', (event) => { const button = event.target.closest('[data-create-mode]'); if (button) switchCreateMode(button.dataset.createMode); });
+  $('#native-studio-modes').addEventListener('click', (event) => { const button = event.target.closest('[data-studio-mode]'); if (button) selectNativeStudioMode(button.dataset.studioMode); });
   $('#simple-composer').addEventListener('submit', submitSimplePrompt);
   $('#simple-attach').addEventListener('click', () => $('#simple-image-input').click());
   $('#simple-image-input').addEventListener('change', (event) => { addSimpleImages(event.target.files); event.target.value = ''; });
@@ -1395,7 +1450,7 @@ async function boot() {
     renderMediaSelector('video');
     renderTemplates();
     updateCapabilityNote();
-    switchCreateMode('simple');
+    selectNativeStudioMode('create');
     state.selectedLane = state.catalog.lanes[0].id;
     selectLane(state.selectedLane);
     renderScenes();

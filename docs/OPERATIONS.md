@@ -14,6 +14,14 @@ The studio server reads `~/.hivemindos/.env` as its only default shared fallback
 
 ## Local services
 
+The browser is one native Studio and does not mount local-service UIs.
+`GET /api/runtime` is a read-only operator diagnostic for its internal engines
+and source provenance; it does not start processes or accept command arrays.
+Default loopback endpoints are `COMFYUI_URL=http://127.0.0.1:8188`,
+`SWIFT_FLUX2_SERVER_URL=http://127.0.0.1:8791`, and
+`MEDIA_STUDIO_BACKEND_URL=http://127.0.0.1:8787`. These names configure
+execution adapters, not user-visible workspaces.
+
 - Media Studio MCP: dynamically discovered from HivemindOS app preferences; never copy its Tailnet URL or token into project files.
 - Palmier Pro MCP: optional local timeline editor at `http://127.0.0.1:19789/mcp`, available only when installed and open.
 - Universal TTS: default `http://127.0.0.1:8799`; discovery uses `/health`, `/v1/models`, and `/v1/voices`.

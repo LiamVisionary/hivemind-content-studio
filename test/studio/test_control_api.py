@@ -64,6 +64,27 @@ def test_generation_telemetry_endpoint_is_read_only_and_agent_safe(tmp_path: Pat
     assert response.json()["recent_attempts"][0]["run_id"] == run["run_id"]
 
 
+def test_unified_runtime_endpoint_is_read_only_and_uses_the_canonical_snapshot(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.unified_runtime_snapshot",
+        lambda: {
+            "ok": True,
+            "canonical_app": "hivemind-content-studio",
+            "summary": {"online": 1, "offline": 0, "managed": 0, "misconfigured": 0, "total": 1},
+            "surface": {"id": "studio", "status": "online"},
+            "engines": [],
+            "repositories": [],
+        },
+    )
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    response = client.get("/api/runtime")
+
+    assert response.status_code == 200
+    assert response.json()["canonical_app"] == "hivemind-content-studio"
+    assert response.json()["surface"]["status"] == "online"
+
+
 def test_operator_can_decide_approvals_but_receipt_is_returned_only_after_auth(tmp_path: Path, monkeypatch) -> None:
     client, _, approvals = _client(tmp_path, monkeypatch)
     request = approvals.request(run_id="run-1", kind="paid-generation", provider="muapi", amount_usd=1, target="run-1:keyframe", reason="test")
@@ -177,6 +198,7 @@ def test_simple_brain_plan_is_proxied_without_browser_credentials(tmp_path: Path
     assert plan["mode"] == "confirmation"
     assert plan["selections"]["image"]["model"] == "gpt-image-2"
     assert plan["composer"] == {
+        "studioMode": "create",
         "brain": {"provider": "openai-codex", "model": "gpt-5.4", "auth": "oauth"},
         "imageSelection": {"provider": "openai-gpt-image-oauth", "model": "gpt-image-2"},
         "videoSelection": {"provider": "automatic", "model": "automatic"},
@@ -184,6 +206,36 @@ def test_simple_brain_plan_is_proxied_without_browser_credentials(tmp_path: Path
         "walkthrough": True,
     }
     assert "token" not in response.text.lower()
+
+
+def test_simple_plan_preserves_the_native_studio_mode_and_rejects_unknown_modes(tmp_path: Path, monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_plan(payload: dict) -> dict:
+        seen.update(payload)
+        return {"mode": "questions", "message": "Describe the edit", "questions": ["What should change?"]}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.plan_with_brain", fake_plan)
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/simple/plan",
+        json={
+            "prompt": "Replace the background with a studio set",
+            "provider": "openai-codex",
+            "model": "gpt-5.4",
+            "studioMode": "edit",
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["studioMode"] == "edit"
+    assert response.json()["plan"]["composer"]["studioMode"] == "edit"
+    invalid = client.post(
+        "/api/simple/plan",
+        json={"prompt": "test", "provider": "openai-codex", "model": "gpt-5.4", "studioMode": "separate-app"},
+    )
+    assert invalid.status_code == 422
 
 
 def test_simple_run_retains_ordered_reference_images_in_the_canonical_manifest(tmp_path: Path, monkeypatch) -> None:
@@ -533,6 +585,7 @@ def test_simple_run_records_the_post_edit_prompt_with_user_wording(tmp_path: Pat
         "mode": "brief",
         "user_prompt": "make a fun ad",
         "composer": {
+            "studioMode": "create",
             "brain": {"provider": "openai-codex", "model": "gpt-5.4", "auth": "oauth"},
             "imageSelection": {"provider": "openai-gpt-image-oauth", "model": "gpt-image-2"},
             "videoSelection": {"provider": "muapi", "model": "seedance-v2.0-t2v"},

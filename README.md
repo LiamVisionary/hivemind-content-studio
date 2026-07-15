@@ -33,9 +33,35 @@ execute run -> inspect next_actions -> route intent -> request/consume approval
 
 Every run exposes status, current step, bounded retries, budget/spend, immutable artifact metadata, provider/job evidence, and precise next actions. Agents ask for capabilities such as `generate_keyframes` or `animate_scenes`; the router selects a ready provider under the run's privacy, allowlist, and budget policy. Paid work uses an HMAC-signed, exact-scope, one-time operator receipt. Run-associated generation attempts also emit local privacy-safe telemetry: success/failure, provider/model, media kind, duration, artifact count, and charged amount. Prompts, media, credentials, provider payloads, and raw error messages are excluded. Arbitrary shell commands and operator approval decisions are not exposed over MCP.
 
-The browser studio opens in **Simple** mode: one HivemindOS-style composer accepts a production prompt and up to 30 ordered reference images, then a detected LLM brain expands the direction and selects the production lane, scene plan, and providers. Image and video routes default to Automatic but can be pinned to a provider/model. Prompt Helper is on by default; Walk-through makes the brain ask questions and wait for confirmation before creating the run. The browser receives only safe model/capability metadata—HivemindOS keeps API keys and OAuth tokens server-side.
+The browser opens as one native **Studio** with Create, Edit, Animate, and Workflow modes. Create, Edit, and Animate share one HivemindOS-style composer, up to 30 ordered reference images, the same model router, prompt history, and durable runs. Workflow reveals the detailed brief-first production form without opening another app. Image and video routes default to Automatic but can be pinned to a provider/model. Prompt Helper is on by default; Walk-through makes the brain ask questions and wait for confirmation before creating the run. The browser receives only safe model/capability metadata—HivemindOS keeps API keys and OAuth tokens server-side.
 
-The original brief-first workspace remains available under **Advanced**. It exposes all seven lanes, scene direction, provider overrides, voice and captions, distribution, faceless-video controls, privacy, budget, and protected operator actions with progressive disclosure. Both modes create the same canonical manifest and SQLite-backed durable run.
+The Workflow mode exposes all seven lanes, scene direction, provider overrides, voice and captions, distribution, faceless-video controls, privacy, budget, and protected operator actions with progressive disclosure. Every mode creates the same canonical manifest and SQLite-backed durable run.
+
+### Native all-in-one application
+
+The browser does not expose repositories as apps, workspace cards, or iframes.
+Useful behavior is assimilated into the first-party Studio surface while this
+package remains the only run, asset, provenance, approval, publishing, and
+metrics owner:
+
+- `hive-image-stack` supplies the local Media Studio gateway, generation API,
+  model manager, ComfyUI proxy, and Media Studio MCP behind provider-neutral
+  routes.
+- `comfyui-mobile-frontend` contributes workflow-editor, queue, model-manager,
+  and output-browser interaction patterns to native Studio features.
+- `Open-Generative-AI` contributes image, video, edit, workflow, model-catalog,
+  and local-inference implementations to native Studio features.
+- `flux-2-swift-mlx` and `Z-Image.swift` remain native Apple Silicon engines
+  behind the local gateway; users select capabilities and models, not sidecars.
+- `unified-image-studio-template` contributes portable service-catalog,
+  bootstrap, and launcher patterns without contributing a second dashboard.
+
+`GET /api/runtime` is an internal, secret-free diagnostic: one native Studio
+surface, bounded engine health, and donor/upstream provenance. It is not used to
+construct separate product areas. On 2026-07-15, Open Generative AI upstream
+`7c8df61` was confirmed to be the fork's merge-base; the Liam fork `0ab564b` is
+2 commits ahead and 0 behind, so there were no upstream commits to merge before
+assimilation continued.
 
 ## Production lanes
 
@@ -87,7 +113,7 @@ Open the local studio:
 hive-env-run -- uv run content-studio-api
 ```
 
-Then visit `http://127.0.0.1:8765`. Create opens in Simple mode; switch to Advanced for the complete production workspace. The Create, Runs, and Providers views all use the same-origin control API and canonical run engine. The original MoneyPrinter Streamlit entrypoint remains a temporary compatibility surface; new productions should begin in the unified studio.
+Then visit `http://127.0.0.1:8765`. Studio opens in Create mode; switch among Edit, Animate, and Workflow without leaving the native application. Studio, Runs, History, Telemetry, and Providers all use the same-origin control API and canonical run engine. The original MoneyPrinter Streamlit entrypoint remains a temporary compatibility surface; new productions should begin in Hivemind Studio.
 
 Start a durable run. It advances deterministic work and stops with structured `next_actions` when an agent, provider, evaluator, or operator is needed:
 

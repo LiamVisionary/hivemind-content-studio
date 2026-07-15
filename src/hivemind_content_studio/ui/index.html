@@ -17,7 +17,7 @@
 
         <nav class="primary-nav" aria-label="Studio navigation">
           <button class="nav-item is-active" type="button" data-view-target="create">
-            <span class="nav-icon" aria-hidden="true">＋</span><span>Create</span>
+            <span class="nav-icon" aria-hidden="true">◇</span><span>Studio</span>
           </button>
           <button class="nav-item" type="button" data-view-target="runs">
             <span class="nav-icon" aria-hidden="true">◫</span><span>Runs</span><span class="nav-count" id="run-count">…</span>
@@ -42,8 +42,8 @@
       <main class="workspace">
         <header class="topbar">
           <div>
-            <p class="context-label" id="view-eyebrow">New production</p>
-            <h1 id="view-title">Create</h1>
+            <p class="context-label" id="view-eyebrow">Unified creation</p>
+            <h1 id="view-title">Studio</h1>
           </div>
           <div class="topbar-actions">
             <span class="api-status" id="api-status"><i></i>Connecting</span>
@@ -52,15 +52,11 @@
         </header>
 
         <section class="view is-active" data-view="create">
-          <div class="create-mode-bar">
-            <div>
-              <p class="section-kicker">Creation mode</p>
-              <p>Describe the outcome, or open the full production workspace.</p>
-            </div>
-            <div class="segmented-control" id="create-mode" aria-label="Creation mode">
-              <button class="is-active" type="button" data-create-mode="simple">Simple</button>
-              <button type="button" data-create-mode="advanced">Advanced</button>
-            </div>
+          <div class="native-mode-rail" id="native-studio-modes" role="tablist" aria-label="Studio tool">
+            <button class="native-mode-button is-active" type="button" role="tab" aria-selected="true" data-studio-mode="create"><span>＋</span><b>Create</b><small>Images, video, and complete media</small></button>
+            <button class="native-mode-button" type="button" role="tab" aria-selected="false" data-studio-mode="edit"><span>↗</span><b>Edit</b><small>Transform ordered references</small></button>
+            <button class="native-mode-button" type="button" role="tab" aria-selected="false" data-studio-mode="animate"><span>▶</span><b>Animate</b><small>Turn an idea or frame into motion</small></button>
+            <button class="native-mode-button" type="button" role="tab" aria-selected="false" data-studio-mode="workflow"><span>⌘</span><b>Workflow</b><small>Build the complete production</small></button>
           </div>
 
           <section class="simple-studio" id="simple-studio" aria-labelledby="simple-heading">
@@ -69,7 +65,7 @@
                 <span class="simple-orbit" aria-hidden="true"><i></i><i></i><i></i></span>
                 <p class="section-kicker">Agent-directed production</p>
                 <h2 id="simple-heading">What do you want to make?</h2>
-                <p>Your selected brain expands the brief, chooses the right pieces, and creates a durable production run.</p>
+                <p id="simple-hero-copy">Your selected brain expands the brief, chooses the right pieces, and creates a durable production run.</p>
               </header>
 
               <div class="simple-thread" id="simple-thread" aria-live="polite"></div>

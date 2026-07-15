@@ -138,6 +138,28 @@ def test_generation_telemetry_has_a_compact_agent_first_view() -> None:
     assert ".telemetry-summary" in css
 
 
+def test_native_unified_studio_has_first_party_modes_without_app_boundaries() -> None:
+    html = (UI_ROOT / "index.html").read_text(encoding="utf-8")
+    javascript = (UI_ROOT / "studio.js").read_text(encoding="utf-8")
+    css = (UI_ROOT / "studio.css").read_text(encoding="utf-8")
+
+    assert '<span>Studio</span>' in html
+    assert 'id="native-studio-modes"' in html
+    assert 'data-studio-mode="create"' in html
+    assert 'data-studio-mode="edit"' in html
+    assert 'data-studio-mode="animate"' in html
+    assert 'data-studio-mode="workflow"' in html
+    assert "selectNativeStudioMode" in javascript
+    assert "studioMode: state.studioMode" in javascript
+    assert "composer.studioMode" in javascript
+    assert ".native-mode-rail" in css
+    assert "<iframe" not in html
+    assert "workspace-board" not in html
+    assert "data-open-workspace" not in javascript
+    assert "api('/api/runtime')" not in javascript
+    assert "Composite application" not in html
+
+
 def test_manual_refresh_rechecks_provider_readiness() -> None:
     javascript = (UI_ROOT / "studio.js").read_text(encoding="utf-8")
 

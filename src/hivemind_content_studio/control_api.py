@@ -8,7 +8,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -33,6 +33,7 @@ from .providers import provider_report
 from .shared_env import apply_shared_hive_env
 from .studio_drafts import StudioRunDraft
 from .template_catalog import template_report
+from .unified_runtime import unified_runtime_snapshot
 
 
 class CancelBody(BaseModel):
@@ -63,6 +64,7 @@ class SimplePlanBody(BaseModel):
     attachments: list[dict[str, Any]] = []
     imageSelection: dict[str, str] = {}
     videoSelection: dict[str, str] = {}
+    studioMode: Literal["create", "edit", "animate", "workflow"] = "create"
 
 
 def _route_snapshot(value: object) -> dict[str, str]:
@@ -78,6 +80,7 @@ def _composer_snapshot(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return {
+        "studioMode": str(value.get("studioMode") or "create"),
         "brain": _route_snapshot(value.get("brain")),
         "imageSelection": _route_snapshot(value.get("imageSelection")),
         "videoSelection": _route_snapshot(value.get("videoSelection")),
@@ -202,6 +205,7 @@ def build_control_app(
             "video": body.videoSelection or {"provider": "automatic", "model": "automatic"},
         }
         plan["composer"] = {
+            "studioMode": body.studioMode,
             "brain": _route_snapshot({"provider": body.provider, "model": body.model, "auth": body.auth}),
             "imageSelection": _route_snapshot(body.imageSelection),
             "videoSelection": _route_snapshot(body.videoSelection),
@@ -318,6 +322,10 @@ def build_control_app(
     @app.get("/api/telemetry/generations")
     def generation_telemetry(limit: int = 100) -> dict:
         return generation_telemetry_snapshot(runs.store, limit=limit)
+
+    @app.get("/api/runtime")
+    def runtime() -> dict:
+        return unified_runtime_snapshot()
 
     @app.post("/api/runs", status_code=201)
     def create_run(body: StudioRunDraft) -> dict:

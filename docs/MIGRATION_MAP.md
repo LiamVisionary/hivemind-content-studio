@@ -13,6 +13,11 @@
 | HivemindOS | Palmier Pro catalog and endpoint | `hivemind_content_studio.mcp_http` | Optional editor/timeline MCP adapter |
 | Shared Brain | generation, clipping, TTS, assembly, QA, publishing playbooks | `skills/shared/` | Versioned snapshots with a sync tool |
 | Shared Brain | MUAPI, Higgsfield, API quirks, AI UGC, and exact-line ElevenLabs workflows | `skills/shared/` plus canonical adapters | Skills choose payloads/models; executable gates and manifest receipts stay single-sourced in the studio package |
+| Unified Media Studio Template | service catalog, repository bootstrap, cross-platform launchers | `hivemind_content_studio.unified_runtime` plus future operator lifecycle CLI | Catalog pattern assimilated; parallel dashboard rejected |
+| Hive Image Stack | local Media Studio gateway, model manager, ComfyUI proxy, MCP, native engine routing | internal provider adapters plus `hivemind_content_studio.media_studio` | Kept as an invisible managed engine; does not own content runs |
+| Open Generative AI fork | image/video/edit/workflow UI, model catalog, Liam local inference additions | native Studio modes and provider executors | Donor behavior assimilated; separate UI/runtime rejected. Fork `0ab564b` confirmed 2 ahead / 0 behind upstream `7c8df61` on 2026-07-15 |
+| ComfyUI Mobile Frontend fork | workflow editing, queue, output browser, native workflow refinements | native Workflow, Runs, Models, and artifact-library components | Donor behavior assimilated; separate frontend rejected |
+| Flux 2 Swift MLX and Z-Image Swift forks | Apple Silicon native generation | managed sidecars behind Hive Image Stack | Engines retained out of process; artifacts enter canonical manifests through the gateway |
 
 ## Removed overlap
 
@@ -23,6 +28,7 @@
 - A single publish receipt format is used for Postiz and Upload-Post.
 - Script generation uses a general agent-runtime contract rather than a vendor-specific integration.
 - MUAPI, Higgsfield Cloud, Higgsfield consumer, and ElevenLabs use one paid-generation gate and one manifest artifact shape.
+- Repository names, workspace URLs, and iframes do not define product navigation; users operate native capabilities and canonical assets.
 
 ## Compatibility surfaces retained
 
