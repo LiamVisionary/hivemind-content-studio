@@ -1,0 +1,57 @@
+{
+  "name": "Media Studio",
+  "version": 1,
+  "manager": "Media Studio supervisor",
+  "workspace": "../..",
+  "entrypoints": {
+    "local": "http://127.0.0.1:8765",
+    "backend": "http://127.0.0.1:8787",
+    "mcp": "http://127.0.0.1:8796/mcp",
+    "tailnetMcp": "configured by the local supervisor",
+    "comfy": "http://127.0.0.1:8188",
+    "mobile": "http://127.0.0.1:8788/mobile/"
+  },
+  "components": [
+    {
+      "id": "gateway",
+      "name": "Studio Gateway",
+      "role": "Next.js shell, ComfyUI proxy, model manager, mobile route wrapper",
+      "healthUrl": "http://127.0.0.1:8788",
+      "port": 8788
+    },
+    {
+      "id": "backend",
+      "name": "Private Image API",
+      "role": "generation API, history, encrypted output serving, workflow recovery",
+      "healthUrl": "http://127.0.0.1:8787/healthz",
+      "port": 8787
+    },
+    {
+      "id": "mcp",
+      "name": "Media Studio MCP",
+      "role": "HTTP MCP endpoint for image/video generation tools",
+      "healthUrl": "http://127.0.0.1:8796/mcp",
+      "port": 8796
+    },
+    {
+      "id": "comfyui",
+      "name": "ComfyUI Runtime",
+      "role": "workflow graph execution and custom-node host",
+      "healthUrl": "http://127.0.0.1:8188/system_stats",
+      "port": 8188
+    },
+    {
+      "id": "mobile",
+      "name": "ComfyUI Mobile Workbench",
+      "role": "workflow editor, queue, output browser, and media viewer",
+      "healthUrl": "http://127.0.0.1:8788/mobile/",
+      "port": 8788
+    },
+    {
+      "id": "native",
+      "name": "Native MLX Sidecars",
+      "role": "Apple Silicon fast paths managed by the Media Studio supervisor when enabled",
+      "port": 8791
+    }
+  ]
+}

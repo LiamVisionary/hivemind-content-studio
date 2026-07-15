@@ -1,0 +1,21 @@
+# dependencies / build
+node_modules/
+.next/
+__pycache__/
+.pytest_cache/
+
+# secrets - auth tokens live on disk, encryption key lives in macOS Keychain
+token.txt
+*token*.txt*
+*.pem
+*.key
+*.crt
+.env*
+
+# runtime state (private generation history, job state, logs)
+history.jsonl*
+download_jobs.json
+equipped_models.json
+selected_loras.json
+last_mobile_prompt_loras.json
+*.log

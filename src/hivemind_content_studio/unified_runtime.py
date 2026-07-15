@@ -23,6 +23,7 @@ class SourceRepository:
     upstream_url: str | None
     layer: str
     integration: str
+    destination: str
     capabilities: tuple[str, ...]
 
 
@@ -34,6 +35,7 @@ SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
         None,
         "product",
         "native",
+        ".",
         ("durable-runs", "provider-routing", "approvals", "publishing", "metrics"),
     ),
     SourceRepository(
@@ -41,8 +43,9 @@ SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
         "Unified Media Studio Template",
         "https://github.com/LiamVisionary/unified-image-studio-template",
         None,
-        "donor",
-        "assimilated",
+        "package",
+        "embedded",
+        "packages/unified-studio-launcher",
         ("service-catalog", "repository-bootstrap", "desktop-launchers"),
     ),
     SourceRepository(
@@ -50,8 +53,9 @@ SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
         "Open Generative AI",
         "https://github.com/LiamVisionary/Open-Generative-AI",
         "https://github.com/Anil-matcha/Open-Generative-AI",
-        "donor",
-        "assimilated",
+        "package",
+        "embedded",
+        "packages/open-generative-ai",
         ("image-studio", "video-studio", "model-exploration", "local-inference"),
     ),
     SourceRepository(
@@ -59,8 +63,9 @@ SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
         "ComfyUI Mobile Frontend",
         "https://github.com/LiamVisionary/comfyui-mobile-frontend",
         "https://github.com/cosmicbuffalo/comfyui-mobile-frontend",
-        "donor",
-        "assimilated",
+        "package",
+        "embedded",
+        "packages/comfyui-mobile",
         ("workflow-editor", "queue", "output-browser", "model-manager"),
     ),
     SourceRepository(
@@ -69,7 +74,8 @@ SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
         "https://github.com/LiamVisionary/hive-image-stack",
         None,
         "engine",
-        "engine",
+        "embedded-engine",
+        "packages/media-gateway",
         ("comfyui-proxy", "generation-api", "media-studio-mcp", "model-manager"),
     ),
     SourceRepository(
@@ -78,7 +84,8 @@ SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
         "https://github.com/LiamVisionary/flux-2-swift-mlx",
         "https://github.com/VincentGourbin/flux-2-swift-mlx",
         "engine",
-        "engine",
+        "embedded-engine",
+        "engines/flux-2-swift-mlx",
         ("apple-silicon", "image-editing", "multi-reference", "lora"),
     ),
     SourceRepository(
@@ -87,7 +94,8 @@ SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
         "https://github.com/LiamVisionary/Z-Image.swift",
         "https://github.com/zhutao100/Z-Image.swift",
         "engine",
-        "engine",
+        "embedded-engine",
+        "engines/z-image-swift",
         ("apple-silicon", "text-to-image", "controlnet", "staging-daemon"),
     ),
 )
@@ -118,7 +126,7 @@ def unified_runtime_snapshot(
         "id": "studio",
         "label": "Hivemind Studio",
         "status": "online",
-        "modes": ["create", "edit", "animate", "workflow"],
+        "modes": ["create", "edit", "animate", "workflow", "explore", "canvas", "models"],
     }
     engines = [
         _remote_component(

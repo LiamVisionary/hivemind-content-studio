@@ -1,0 +1,46 @@
+diff --git a/execution.py b/execution.py
+index c4531759..9e7efa9e 100644
+--- a/execution.py
++++ b/execution.py
+@@ -2,6 +2,7 @@ import copy
+ import heapq
+ import inspect
+ import logging
++import os
+ import psutil
+ import sys
+ import threading
+@@ -1271,6 +1272,22 @@ class PromptQueue:
+         completed: bool
+         messages: List[str]
+ 
++    @staticmethod
++    def _private_history_prompts_enabled():
++        return os.environ.get("COMFY_PRIVATE_HISTORY_PROMPTS", "0").lower() in {"1", "true", "yes", "on"}
++
++    @classmethod
++    def _redact_history_prompt(cls, prompt):
++        if not cls._private_history_prompts_enabled():
++            return prompt
++
++        redacted = list(prompt)
++        if len(redacted) > 2:
++            redacted[2] = {}
++        if len(redacted) > 3:
++            redacted[3] = {}
++        return tuple(redacted)
++
+     def task_done(self, item_id, history_result,
+                   status: Optional['PromptQueue.ExecutionStatus'], process_item=None):
+         with self.mutex:
+@@ -1285,8 +1302,9 @@ class PromptQueue:
+             if process_item is not None:
+                 prompt = process_item(prompt)
+ 
++            history_prompt = self._redact_history_prompt(prompt)
+             self.history[prompt[1]] = {
+-                "prompt": prompt,
++                "prompt": history_prompt,
+                 "outputs": {},
+                 'status': status_dict,
+             }

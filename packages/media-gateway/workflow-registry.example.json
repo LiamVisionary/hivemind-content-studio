@@ -1,0 +1,77 @@
+{
+  "workflows": [
+    {
+      "id": "wan-example-i2v",
+      "media_type": "video",
+      "title": "Wan Example Image-to-Video",
+      "description": "Example registry entry for a future ComfyUI API-format video workflow.",
+      "family": "wan",
+      "builder": "comfy-api",
+      "api_workflow": "/absolute/path/to/wan-image-to-video-api.json",
+      "mobile_workflow": "/absolute/path/to/wan-image-to-video-editor.json",
+      "default": false,
+      "requires": {
+        "prompt": true,
+        "image": true
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "width",
+        "height",
+        "frames",
+        "frame_rate",
+        "seed",
+        "steps",
+        "cfg"
+      ],
+      "defaults": {
+        "width": 720,
+        "height": 1280,
+        "frames": 81,
+        "frame_rate": 24,
+        "steps": 30,
+        "cfg": 5,
+        "seed": 42
+      },
+      "slots": {
+        "prompt": {
+          "node": "6",
+          "input": "text"
+        },
+        "image_path": {
+          "node": "4",
+          "input": "image"
+        },
+        "width": {
+          "node": "10",
+          "input": "width"
+        },
+        "height": {
+          "node": "10",
+          "input": "height"
+        },
+        "frames": {
+          "node": "10",
+          "input": "length"
+        },
+        "frame_rate": {
+          "node": "20",
+          "input": "frame_rate"
+        },
+        "seed": {
+          "node": "12",
+          "input": "seed"
+        },
+        "steps": {
+          "node": "12",
+          "input": "steps"
+        },
+        "cfg": {
+          "node": "12",
+          "input": "cfg"
+        }
+      }
+    }
+  ]
+}

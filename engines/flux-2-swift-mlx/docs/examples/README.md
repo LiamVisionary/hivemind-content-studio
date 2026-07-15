@@ -1,0 +1,195 @@
+# Flux.2 Swift MLX - Examples Gallery
+
+This directory contains example images and documentation for the Flux.2 Swift MLX framework.
+
+## Available Models
+
+| Model | Parameters | Speed | License | Documentation |
+|-------|------------|-------|---------|---------------|
+| **[Flux.2 Dev](flux2-dev/README.md)** | 32B | ~35 min/image | Non-commercial | High quality, detailed generation |
+| **[Flux.2 Klein 4B](flux2-klein-4b/README.md)** | 4B | ~26s/image | Apache 2.0 | Fast, commercial-friendly |
+| **[Flux.2 Klein 9B](flux2-klein-9b/README.md)** | 9B | ~56s/image | Non-commercial | Balance of quality and speed |
+
+## Quick Comparison
+
+| Feature | Flux.2 Dev | Klein 4B | Klein 9B |
+|---------|------------|----------|----------|
+| Parameters | 32B | 4B | 9B |
+| Text Encoder | Mistral Small 3.2 | Qwen3-4B | Qwen3-8B |
+| Default Steps | 28 | 4 (distilled) | 4 (distilled) |
+| Transformer (qint8) | ~33GB | ~4GB | ~9GB |
+| 1024x1024 Time | ~35 min | ~26s | ~56s |
+| License | Non-commercial | **Apache 2.0** | Non-commercial |
+| **Speedup** | 1x | **~80x** | **~38x** |
+
+For detailed comparison, see [**Model Comparison**](comparison.md).
+
+---
+
+## Documentation Index
+
+### Model-Specific Examples
+
+- **[Flux.2 Dev Examples](flux2-dev/README.md)**
+  - Text-to-Image (standard and with prompt upsampling)
+  - Image-to-Image (artistic variation)
+  - Multi-reference I2I (cat + hat + jacket)
+  - Image interpretation (map to Paris photo)
+
+- **[Flux.2 Klein 4B Examples](flux2-klein-4b/README.md)**
+  - Fast T2I generation (4 steps)
+  - Multiple resolutions (1024x1024, 1536x1024, 2048x2048)
+  - Quantization comparison (bf16 vs qint8)
+  - Prompt upsampling progression
+
+- **[Flux.2 Klein 9B Examples](flux2-klein-9b/README.md)**
+  - Better quality T2I generation (4 steps)
+  - Multiple resolutions (1024x1024, 1536x1024, 2048x2048)
+  - Prompt upsampling progression
+  - Performance comparison with Klein 4B
+
+### Chains (`Flux2Chains` library)
+
+End-to-end recipes that compose `Flux2Pipeline` with extra stages
+(masking, canvas extension, I2I conditioning, …). Every chain conforms to
+the `Flux2Chain` protocol and exposes a single `run() async throws`
+entry point.
+
+- **[Masked Inpainting](inpainting/README.md)** — `Flux2MaskedInpaintingChain`
+  - RePaint-style per-step latent blending; no Fill checkpoint required
+  - Hard vs soft mask comparison
+- **[Outpainting](outpainting/README.md)** — `Flux2OutpaintingChain`
+  - BFL-style API: image + per-side paddings + prompt
+  - Horizontal panoramic + vertical/square examples
+  - Full diagnostic trail of the recipe (4 failing variants → 1 working)
+
+A third chain, `Flux2Sharp3DRepairChain` (single-image 3D novel-view
+repair via Apple SHARP + a FLUX.2 LoRA), lives in the sibling repo
+[`rephoto-swift-coreml`](https://github.com/VincentGourbin/rephoto-swift-coreml)
+because it pulls in AMLR-licensed CoreML weights and MetalSplatter.
+
+### Comparisons
+
+- **[Model Comparison](comparison.md)**
+  - Performance benchmarks
+  - Quality comparison
+  - When to use each model
+  - Recommended workflows
+
+- **[Small Decoder VAE](small-decoder/README.md)**
+  - Distilled VAE decoder (~13% faster decode, Apache 2.0)
+  - Visual comparison vs standard VAE
+  - Usage and when to use
+
+---
+
+## Sample Outputs
+
+### Flux.2 Dev (32B) - High Quality
+
+| Text-to-Image | Image-to-Image |
+|---------------|----------------|
+| ![Cat Beach](flux2-dev/cat_beach_upsampled/final.png) | ![Watercolor](flux2-dev/i2i_artistic_variation/final.png) |
+
+*~30 min generation time, ~33GB transformer (qint8)*
+
+### Flux.2 Klein 4B - Fast Generation
+
+| 1024x1024 | 2048x2048 |
+|-----------|-----------|
+| ![Beaver](flux2-klein-4b/klein_4b/beaver_1024.png) | ![City](flux2-klein-4b/klein_4b/city_2048.png) |
+
+*~26s generation time, ~5-8GB VRAM*
+
+### Flux.2 Klein 9B - Quality/Speed Balance
+
+| 1024x1024 | 2048x2048 |
+|-----------|-----------|
+| ![Beaver](flux2-klein-9b/klein_9b/beaver_1024.png) | ![City](flux2-klein-9b/klein_9b/city_2048.png) |
+
+*~56s generation time (1024x1024), ~20GB VRAM*
+
+Klein 9B offers better quality than Klein 4B while remaining much faster than Dev.
+
+---
+
+## VLM-Guided Checkpoint Selection
+
+During training, automatically score validation images using the Qwen3.5-4B VLM to detect learning trends and save the best checkpoint.
+
+| Step 25 (14/100) | Step 50 (51/100) | Step 75 (61/100 - Best) | Step 100 (42/100 - Degrading) |
+|:---:|:---:|:---:|:---:|
+| ![Step 25](vlm-scoring/step025_prompt0.png) | ![Step 50](vlm-scoring/step050_prompt0.png) | ![Step 75](vlm-scoring/step075_prompt0.png) | ![Step 100](vlm-scoring/step100_prompt0.png) |
+
+```yaml
+validation:
+  vlm_scoring:
+    enabled: true
+    save_best_checkpoint: true
+```
+
+The VLM detected the best checkpoint at step 75 (61/100) and automatically saved it, even though the loss at step 75 was higher than step 100. See **[VLM-Guided Checkpoint Selection](vlm-scoring/README.md)** for full documentation and results.
+
+---
+
+## LoRA Evaluation Pipeline
+
+Before training a LoRA, evaluate the gap between your reference image and the base model output to get recommended training parameters automatically.
+
+| Reference | Baseline (no LoRA) | Score |
+|:---------:|:------------------:|:-----:|
+| ![Reference](evaluate-lora/reference.png) | ![Baseline](evaluate-lora/baseline.png) | Scene: 0/10, Style: 9/10 |
+
+```bash
+flux2 evaluate-lora --image reference.png --model klein-4b --trigger-word "xyz_cat"
+```
+
+Outputs: reference copy, baseline image, VLM prompt, comparison report, and ready-to-use YAML training config. See **[LoRA Evaluation Pipeline](evaluate-lora/README.md)** for full documentation.
+
+> **Help Wanted**: The recommendation weights are initial heuristics — we need user feedback from real training runs to refine them. Please share your evaluation results!
+
+---
+
+## LoRA Adapters
+
+LoRA (Low-Rank Adaptation) allows fine-tuning models for specific tasks without modifying the base weights.
+
+| LoRA | Model | Example |
+|------|-------|---------|
+| **[Object Removal](https://huggingface.co/fal/flux-2-klein-4B-object-remove-lora)** | Klein 4B | ![Object Removal](lora_object_removal/output.png) |
+| **[Spritesheet](https://huggingface.co/fal/flux-2-klein-4b-spritesheet-lora)** | Klein 4B | ![Spritesheet](lora_spritesheet/output.png) |
+| **[h4rd8are](https://huggingface.co/siraxe/h4rd8are_klein9b)** | Klein 9B | ![h4rd8are](lora_h4rd8are/output.png) |
+| **[Multi-Angles](https://huggingface.co/lovis93/Flux-2-Multi-Angles-LoRA-v2)** | Dev | ![Multi-Angles](lora_multi_angles/output.png) |
+| **[Turbo 8-Step](https://huggingface.co/fal/FLUX.2-dev-Turbo)** | Dev | ![Turbo](lora_turbo/output.png) |
+
+For complete LoRA documentation, usage examples, and troubleshooting, see **[LoRA.md](../LoRA.md)**.
+
+---
+
+## Hardware Used
+
+All examples generated on:
+- **Machine:** MacBook Pro 14" (Nov 2023)
+- **Chip:** Apple M3 Max
+- **RAM:** 96 GB Unified Memory
+- **macOS:** Tahoe 26.2
+
+---
+
+## Quick Start
+
+```bash
+# Klein 4B - Fastest generation (commercial OK)
+flux2 t2i "a beaver building a dam" --model klein-4b
+
+# Klein 9B - Better quality, still fast (non-commercial)
+flux2 t2i "a beaver building a dam" --model klein-9b
+
+# Dev - Maximum quality (requires 64GB+ RAM)
+flux2 t2i "a cat wearing sunglasses" --model dev --steps 28
+
+# See all options
+flux2 --help
+```
+
+For complete CLI documentation, see [CLI.md](../CLI.md).

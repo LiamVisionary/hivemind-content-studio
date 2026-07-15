@@ -19,6 +19,7 @@ const state = {
   routePickerOpen: '',
   routePickerQuery: { brain: '', image: '', video: '' },
   routePickerExpanded: { brain: {}, image: {}, video: {} },
+  surfaces: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -138,7 +139,7 @@ function mediaAuthSection(providerId) {
 
 function routePickerProviders(kind) {
   if (kind === 'brain') {
-    return (state.simpleCatalog?.brains || []).flatMap((provider) => ['api', 'oauth'].map((authSection) => ({
+    return (state.simpleCatalog?.brains || []).flatMap((provider) => Object.keys(ROUTE_AUTH_SECTIONS).map((authSection) => ({
       id: provider.slug,
       label: provider.name,
       authSection,
@@ -707,11 +708,14 @@ function lane() {
 }
 
 function navigate(view) {
-  const selected = ['create', 'runs', 'history', 'telemetry', 'providers'].includes(view) ? view : 'create';
+  const selected = ['create', 'explore', 'canvas', 'models', 'runs', 'history', 'telemetry', 'providers'].includes(view) ? view : 'create';
   $$('.view').forEach((item) => item.classList.toggle('is-active', item.dataset.view === selected));
   $$('.nav-item').forEach((item) => item.classList.toggle('is-active', item.dataset.viewTarget === selected));
   const copy = {
     create: ['Unified creation', 'Studio'],
+    explore: ['Generative catalog', 'Explore'],
+    canvas: ['ComfyUI production', 'Canvas'],
+    models: ['Local inference', 'Models'],
     runs: ['Durable workflow', 'Runs'],
     history: ['Prompt library', 'History'],
     telemetry: ['Generation operations', 'Telemetry'],
@@ -720,10 +724,54 @@ function navigate(view) {
   $('#view-eyebrow').textContent = copy[0];
   $('#view-title').textContent = copy[1];
   location.hash = selected;
+  if (['explore', 'canvas', 'models'].includes(selected)) loadToolSurface(selected);
   if (selected === 'runs') renderRuns();
   if (selected === 'history') void loadPrompts({ quiet: true });
   if (selected === 'telemetry') void loadGenerationTelemetry({ quiet: true });
   if (selected === 'providers') renderProviders();
+}
+
+function gatewayUrl(path) {
+  if (location.port === '8789') return `${location.origin}${path}`;
+  return `${location.protocol}//${location.hostname}:8788${path}`;
+}
+
+function loadToolSurface(name) {
+  const frame = $(`[data-tool-surface="${name}"]`);
+  if (!frame || frame.dataset.loaded === 'true') return;
+  const surface = state.surfaces?.surfaces?.[name];
+  if (!surface) return;
+  let url = surface.path || gatewayUrl(surface.gateway_path || '/');
+  if (name === 'explore' && window.localAI?.isElectron) {
+    url += `${url.includes('?') ? '&' : '?'}hivemindBridge=1`;
+  }
+  frame.src = url;
+  frame.dataset.loaded = 'true';
+}
+
+function localAiMethod(path) {
+  return path.split('.').reduce((value, key) => value?.[key], window.localAI);
+}
+
+function bindLocalAiBridge() {
+  window.addEventListener('message', async (event) => {
+    const request = event.data;
+    if (request?.type !== 'hivemind-local-ai-request' || !window.localAI?.isElectron) return;
+    const frame = $('#explore-frame');
+    if (!frame || frame.contentWindow !== event.source) return;
+    const targetOrigin = event.origin === 'null' ? '*' : event.origin;
+    try {
+      const method = localAiMethod(request.method);
+      if (typeof method !== 'function') throw new Error(`Unsupported local AI method: ${request.method}`);
+      const result = await method(...(Array.isArray(request.args) ? request.args : []));
+      event.source.postMessage({ type: 'hivemind-local-ai-response', id: request.id, result }, targetOrigin);
+    } catch (error) {
+      event.source.postMessage({ type: 'hivemind-local-ai-response', id: request.id, error: error?.message || String(error) }, targetOrigin);
+    }
+  });
+  const forward = (eventName, data) => $('#explore-frame')?.contentWindow?.postMessage({ type: 'hivemind-local-ai-event', event: eventName, data }, '*');
+  window.localAI?.onProgress?.((data) => forward('progress', data));
+  window.localAI?.onDownloadProgress?.((data) => forward('download-progress', data));
 }
 
 async function loadPrompts({ quiet = false } = {}) {
@@ -1439,8 +1487,9 @@ async function refreshAll({ quiet = false } = {}) {
 
 async function boot() {
   bindEvents();
+  bindLocalAiBridge();
   try {
-    [state.catalog, state.simpleCatalog] = await Promise.all([api('/api/catalog'), api('/api/simple/catalog')]);
+    [state.catalog, state.simpleCatalog, state.surfaces] = await Promise.all([api('/api/catalog'), api('/api/simple/catalog'), api('/api/surfaces')]);
     await loadOAuth();
     $('#aspect-ratio').innerHTML = state.catalog.aspect_ratios.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join('');
     $('#privacy').innerHTML = state.catalog.privacy_modes.map((value) => `<option value="${esc(value)}">${esc(titleCase(value))}</option>`).join('');

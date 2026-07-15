@@ -1,0 +1,304 @@
+import Logging
+import MLX
+import XCTest
+
+@testable import ZImage
+
+/// Integration tests for ZImagePipeline using real model inference.
+/// These tests require downloading the 8-bit quantized model (~7.5GB).
+/// Run with: ZIMAGE_RUN_INTEGRATION_TESTS=1 swift test --filter PipelineIntegrationTests
+final class PipelineIntegrationTests: XCTestCase {
+  /// Shared pipeline instance to avoid reloading model for each test
+  private nonisolated(unsafe) static var sharedPipeline: ZImagePipeline?
+
+  private static let outputDir = integrationTestOutputDirectory("PipelineIntegrationTests")
+
+  /// Initialize shared pipeline once for all tests
+  override class func setUp() {
+    super.setUp()
+    if integrationTestsEnabled(), ProcessInfo.processInfo.environment["CI"] == nil {
+      sharedPipeline = ZImagePipeline()
+    }
+  }
+
+  override class func tearDown() {
+    // Clean up shared pipeline
+    sharedPipeline = nil
+    // Clean up generated outputs after all tests
+    try? FileManager.default.removeItem(at: outputDir)
+    super.tearDown()
+  }
+
+  override func setUpWithError() throws {
+    try super.setUpWithError()
+    try requireIntegrationTestsEnabled()
+    try ensureMLXMetalLibraryColocated(for: type(of: self))
+  }
+
+  /// Get the shared pipeline or skip test if not available
+  private func getPipeline() throws -> ZImagePipeline {
+    guard let pipeline = Self.sharedPipeline else {
+      throw XCTSkip("Pipeline not available. Enable integration tests and run outside CI.")
+    }
+    return pipeline
+  }
+
+  // MARK: - Basic Generation Tests
+
+  func testBasicGeneration() async throws {
+    try skipIfNoGPU()
+    let pipeline = try getPipeline()
+
+    let tempOutput = Self.outputDir.appendingPathComponent("test_basic.png")
+
+    let request = ZImageGenerationRequest(
+      prompt: "a red apple on a white background",
+      width: 512,
+      height: 512,
+      steps: 9,
+      outputPath: tempOutput,
+      model: "mzbac/z-image-turbo-8bit"
+    )
+
+    let outputURL = try await pipeline.generate(request)
+
+    // Verify output exists
+    XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+
+    // Verify it's a valid image
+    let imageData = try Data(contentsOf: outputURL)
+    XCTAssertGreaterThan(imageData.count, 1000)  // Should be a reasonable image size
+  }
+
+  func testDeterministicSeed() async throws {
+    try skipIfNoGPU()
+    let pipeline = try getPipeline()
+
+    let tempOutput1 = Self.outputDir.appendingPathComponent("test_seed1.png")
+    let tempOutput2 = Self.outputDir.appendingPathComponent("test_seed2.png")
+
+    let seed: UInt64 = 42
+
+    // Generate first image
+    let request1 = ZImageGenerationRequest(
+      prompt: "a blue cube",
+      width: 256,
+      height: 256,
+      steps: 9,
+      seed: seed,
+      outputPath: tempOutput1,
+      model: "mzbac/z-image-turbo-8bit"
+    )
+    _ = try await pipeline.generate(request1)
+
+    // Generate second image with same seed
+    let request2 = ZImageGenerationRequest(
+      prompt: "a blue cube",
+      width: 256,
+      height: 256,
+      steps: 9,
+      seed: seed,
+      outputPath: tempOutput2,
+      model: "mzbac/z-image-turbo-8bit"
+    )
+    _ = try await pipeline.generate(request2)
+
+    // Both images should exist
+    XCTAssertTrue(FileManager.default.fileExists(atPath: tempOutput1.path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: tempOutput2.path))
+
+    // With same seed, images should be identical
+    let data1 = try Data(contentsOf: tempOutput1)
+    let data2 = try Data(contentsOf: tempOutput2)
+    XCTAssertEqual(data1, data2, "Same seed should produce identical images")
+  }
+
+  func testVariableDimensions() async throws {
+    try skipIfNoGPU()
+    let pipeline = try getPipeline()
+
+    let dimensions: [(Int, Int)] = [(512, 512), (768, 768), (512, 768)]
+
+    for (width, height) in dimensions {
+      let tempOutput = Self.outputDir.appendingPathComponent("test_dim_\(width)x\(height).png")
+
+      let request = ZImageGenerationRequest(
+        prompt: "abstract art",
+        width: width,
+        height: height,
+        steps: 9,
+        outputPath: tempOutput,
+        model: "mzbac/z-image-turbo-8bit"
+      )
+
+      let outputURL = try await pipeline.generate(request)
+      XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path), "Failed for \(width)x\(height)")
+    }
+  }
+
+  func testLongPrompt() async throws {
+    try skipIfNoGPU()
+    let pipeline = try getPipeline()
+
+    let tempOutput = Self.outputDir.appendingPathComponent("test_long.png")
+
+    // Create a long detailed prompt
+    let longPrompt = """
+      A highly detailed digital painting of a majestic castle perched on a cliff overlooking a vast ocean,
+      with dramatic storm clouds gathering in the sky, lightning striking in the distance, waves crashing
+      against the rocky shore below, medieval architecture with tall spires and flying buttresses,
+      surrounded by lush green forests and winding paths, birds flying in formation, a full moon
+      partially visible through the clouds, atmospheric perspective creating depth, cinematic lighting,
+      4k resolution, trending on artstation, masterpiece quality
+      """
+
+    let request = ZImageGenerationRequest(
+      prompt: longPrompt,
+      width: 512,
+      height: 512,
+      steps: 9,
+      outputPath: tempOutput,
+      model: "mzbac/z-image-turbo-8bit",
+      maxSequenceLength: 256
+    )
+
+    let outputURL = try await pipeline.generate(request)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+  }
+
+  // MARK: - Output Validation
+
+  func testOutputFileFormat() async throws {
+    try skipIfNoGPU()
+    let pipeline = try getPipeline()
+
+    let tempOutput = Self.outputDir.appendingPathComponent("test_format.png")
+
+    let request = ZImageGenerationRequest(
+      prompt: "test image",
+      width: 256,
+      height: 256,
+      steps: 9,
+      outputPath: tempOutput,
+      model: "mzbac/z-image-turbo-8bit"
+    )
+
+    let outputURL = try await pipeline.generate(request)
+
+    // Verify PNG signature
+    let data = try Data(contentsOf: outputURL)
+    let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    let fileSignature = [UInt8](data.prefix(8))
+    XCTAssertEqual(fileSignature, pngSignature, "Output should be a valid PNG file")
+  }
+
+  func testBaseModelSmokeGeneration() async throws {
+    try skipIfNoGPU()
+    let modelSpec = try baseSmokeModelSpec()
+    let pipeline = try getPipeline()
+
+    let tempOutput = Self.outputDir.appendingPathComponent("test_base_smoke.png")
+    let request = ZImageGenerationRequest(
+      prompt: "a black tiger in a bamboo forest",
+      width: 256,
+      height: 256,
+      steps: 4,
+      guidanceScale: 4.0,
+      outputPath: tempOutput,
+      model: modelSpec,
+      maxSequenceLength: 256
+    )
+
+    let outputURL = try await pipeline.generate(request)
+
+    XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+
+    let data = try Data(contentsOf: outputURL)
+    let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    let fileSignature = [UInt8](data.prefix(8))
+    XCTAssertEqual(fileSignature, pngSignature, "Base smoke output should be a valid PNG file")
+  }
+
+  // MARK: - Prompt Enhancement Tests
+
+  func testPromptEnhancement() async throws {
+    try skipIfNoGPU()
+
+    // Load text encoder and tokenizer for direct enhancement testing
+    let snapshot = try await loadSnapshot()
+    let modelConfigs = try ZImageModelConfigs.load(from: snapshot)
+    let logger = Logger(label: "test.prompt-enhancement")
+    let weightsMapper = ZImageWeightsMapper(snapshot: snapshot, logger: logger)
+    let quantManifest = weightsMapper.loadQuantizationManifest()
+
+    let tokenizer = try QwenTokenizer.load(from: snapshot.appending(path: "tokenizer"))
+    let textEncoder = QwenTextEncoder(
+      configuration: .init(
+        vocabSize: modelConfigs.textEncoder.vocabSize,
+        hiddenSize: modelConfigs.textEncoder.hiddenSize,
+        numHiddenLayers: modelConfigs.textEncoder.numHiddenLayers,
+        numAttentionHeads: modelConfigs.textEncoder.numAttentionHeads,
+        numKeyValueHeads: modelConfigs.textEncoder.numKeyValueHeads,
+        intermediateSize: modelConfigs.textEncoder.intermediateSize,
+        ropeTheta: modelConfigs.textEncoder.ropeTheta,
+        maxPositionEmbeddings: modelConfigs.textEncoder.maxPositionEmbeddings,
+        rmsNormEps: modelConfigs.textEncoder.rmsNormEps,
+        headDim: modelConfigs.textEncoder.headDim
+      )
+    )
+    let textEncoderWeights = try weightsMapper.loadTextEncoder()
+    ZImageWeightsMapping.applyTextEncoder(
+      weights: textEncoderWeights, to: textEncoder, manifest: quantManifest, logger: logger)
+
+    let originalPrompt = "a cat"
+    let config = PromptEnhanceConfig(
+      maxNewTokens: 512,
+      temperature: 0.7,
+      topP: 0.9,
+      repetitionPenalty: 1.05
+    )
+
+    let enhancedPrompt = try textEncoder.enhancePrompt(originalPrompt, tokenizer: tokenizer, config: config)
+
+    // Verify enhancement produced a non-empty result
+    XCTAssertFalse(enhancedPrompt.isEmpty, "Enhanced prompt should not be empty")
+
+    // Verify enhanced prompt is longer and more detailed than original
+    XCTAssertGreaterThan(enhancedPrompt.count, originalPrompt.count, "Enhanced prompt should be longer than original")
+
+    // Verify enhanced prompt doesn't contain thinking tags (they should be stripped)
+    XCTAssertFalse(enhancedPrompt.contains("<think>"), "Enhanced prompt should not contain <think> tag")
+    XCTAssertFalse(enhancedPrompt.contains("</think>"), "Enhanced prompt should not contain </think> tag")
+  }
+
+  /// Helper to load model snapshot for testing
+  private func loadSnapshot() async throws -> URL {
+    let filePatterns = ["*.json", "*.safetensors", "tokenizer/*"]
+    return try await ModelResolution.resolve(modelSpec: "mzbac/z-image-turbo-8bit", filePatterns: filePatterns)
+  }
+
+  // MARK: - Helper Functions
+
+  private func baseSmokeModelSpec() throws -> String {
+    let env = ProcessInfo.processInfo.environment
+    let enabled = env["ZIMAGE_RUN_BASE_SMOKE"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard enabled == "1" || enabled == "true" || enabled == "yes" else {
+      throw XCTSkip("Set ZIMAGE_RUN_BASE_SMOKE=1 to enable the opt-in Base smoke test.")
+    }
+
+    if let override = env["ZIMAGE_BASE_SMOKE_MODEL"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !override.isEmpty
+    {
+      return override
+    }
+
+    return ZImageKnownModel.zImage.id
+  }
+
+  private func skipIfNoGPU() throws {
+    // Check if running in CI without GPU
+    if ProcessInfo.processInfo.environment["CI"] != nil {
+      throw XCTSkip("Skipping GPU-intensive test in CI environment")
+    }
+  }
+}

@@ -16,9 +16,11 @@ def test_repository_catalog_preserves_forks_upstreams_and_component_boundaries()
         "Z-Image.swift",
     ]
     assert next(item for item in repositories if item["id"] == "hivemind-content-studio")["integration"] == "native"
-    assert next(item for item in repositories if item["id"] == "unified-image-studio-template")["integration"] == "assimilated"
-    assert next(item for item in repositories if item["id"] == "Open-Generative-AI")["integration"] == "assimilated"
-    assert next(item for item in repositories if item["id"] == "comfyui-mobile-frontend")["integration"] == "assimilated"
+    assert next(item for item in repositories if item["id"] == "unified-image-studio-template")["integration"] == "embedded"
+    assert next(item for item in repositories if item["id"] == "Open-Generative-AI")["destination"] == "packages/open-generative-ai"
+    assert next(item for item in repositories if item["id"] == "comfyui-mobile-frontend")["destination"] == "packages/comfyui-mobile"
+    assert next(item for item in repositories if item["id"] == "hive-image-stack")["destination"] == "packages/media-gateway"
+    assert next(item for item in repositories if item["id"] == "flux-2-swift-mlx")["integration"] == "embedded-engine"
     assert next(item for item in repositories if item["id"] == "Open-Generative-AI")["upstream_url"] == "https://github.com/Anil-matcha/Open-Generative-AI"
     assert next(item for item in repositories if item["id"] == "comfyui-mobile-frontend")["upstream_url"] == "https://github.com/cosmicbuffalo/comfyui-mobile-frontend"
     assert next(item for item in repositories if item["id"] == "flux-2-swift-mlx")["upstream_url"] == "https://github.com/VincentGourbin/flux-2-swift-mlx"
@@ -40,7 +42,7 @@ def test_runtime_snapshot_is_safe_and_reports_one_native_surface_with_internal_e
         "id": "studio",
         "label": "Hivemind Studio",
         "status": "online",
-        "modes": ["create", "edit", "animate", "workflow"],
+        "modes": ["create", "edit", "animate", "workflow", "explore", "canvas", "models"],
     }
     assert next(item for item in snapshot["engines"] if item["id"] == "comfyui")["status"] == "online"
     assert next(item for item in snapshot["engines"] if item["id"] == "flux-2-swift-mlx")["status"] == "offline"

@@ -1,0 +1,1021 @@
+import { useMemo, useState } from 'react';
+import { useWorkflowStore } from '@/hooks/useWorkflow';
+import { getScopedWorkflowView } from '@/utils/canonicalWorkflowOps';
+import { useConnectionSectionFoldsStore } from '@/hooks/useConnectionSectionFolds';
+import {
+  findCompatibleSourceNodes,
+  findCompatibleNodeTypesForInput,
+  findCompatibleNodeTypesForOutput,
+  findCompatibleTargetNodesForOutput,
+  isWildcardOnlyMatch
+} from '@/utils/connectionUtils';
+import { CheckIcon, PlusIcon } from '@/components/icons';
+import {
+  fuzzyMatch,
+  getFieldScore,
+  isSubsequence,
+  normalizeSearchText,
+  prettyPackName
+} from '@/utils/search';
+import { resolveNodeTypeDisplayName, searchAndSortNodeTypes } from '@/utils/nodeTypeSearch';
+import {
+  findWorkflowNodeInScope,
+  resolveWorkflowNodeDisplayName
+} from '@/utils/subgraphPlaceholderLabels';
+import { ConnectionSearchResult } from './ConnectionModal/SearchResult';
+import { SearchActionModal } from './SearchActionModal';
+import { NodeTypeSearchResult } from './NodeTypeSearchResult';
+import { SearchEmptyState } from './SearchEmptyState';
+import { Dialog } from './Dialog';
+import { FullscreenModalActions } from './FullscreenModalActions';
+
+interface ConnectionModalBaseProps {
+  isOpen: boolean;
+  onClose: () => void;
+  nodeId: number;
+  // True when the originating connection button already had a connection (i.e.
+  // the user is editing an existing link). When false, the button was empty and
+  // this modal is creating a brand-new connection — in that case we skip the
+  // scroll-to-node on submit so creating a connection doesn't jump the view.
+  originHadConnection: boolean;
+}
+
+interface InputConnectionModalProps extends ConnectionModalBaseProps {
+  mode: 'input';
+  inputIndex: number;
+  inputType: string;
+  inputName: string;
+  currentlyConnectedNodeId: number | null;
+}
+
+interface OutputConnectionModalProps extends ConnectionModalBaseProps {
+  mode: 'output';
+  outputIndex: number;
+  outputType: string;
+  outputName: string;
+}
+
+type ConnectionModalProps = InputConnectionModalProps | OutputConnectionModalProps;
+
+interface OutputCandidate {
+  nodeId: number;
+  inputIndex: number;
+  displayName: string;
+  pack: string;
+  inputName: string;
+  inputType: string;
+  currentlyConnectedFromThisOutput: boolean;
+  hasExistingLink: boolean;
+  existingSourceLabel: string | null;
+  score: number;
+}
+
+interface OutputNodeCandidate {
+  nodeId: number;
+  displayName: string;
+  pack: string;
+  score: number;
+  inputs: OutputCandidate[];
+}
+
+function makeOutputSelectionKey(nodeId: number, inputIndex: number): string {
+  return `${nodeId}:${inputIndex}`;
+}
+
+function areKeySetsEqual(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const key of a) {
+    if (!b.has(key)) return false;
+  }
+  return true;
+}
+
+export function ConnectionModal(props: ConnectionModalProps) {
+  const { isOpen, onClose, nodeId, mode } = props;
+  const workflow = useWorkflowStore((s) => s.workflow);
+  const scopeStack = useWorkflowStore((s) => s.scopeStack);
+  const nodeTypes = useWorkflowStore((s) => s.nodeTypes);
+  const connectNodes = useWorkflowStore((s) => s.connectNodes);
+  const disconnectInput = useWorkflowStore((s) => s.disconnectInput);
+  const addNode = useWorkflowStore((s) => s.addNode);
+  const addNodeAndConnect = useWorkflowStore((s) => s.addNodeAndConnect);
+  const scrollToNode = useWorkflowStore((s) => s.scrollToNode);
+  const expandConnectionsSection = useConnectionSectionFoldsStore((s) => s.expand);
+  const topScopeFrame = scopeStack[scopeStack.length - 1];
+  const currentSubgraphId = topScopeFrame?.type === 'subgraph' ? topScopeFrame.id : null;
+  const scopedWorkflow = useMemo(
+    () => (workflow ? getScopedWorkflowView(workflow, currentSubgraphId) : null),
+    [currentSubgraphId, workflow],
+  );
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [currentAction, setCurrentAction] = useState<'pick' | 'addNew'>('pick');
+  const [selectedOutputTargetKeys, setSelectedOutputTargetKeys] = useState<Set<string>>(() => {
+    if (mode !== 'output' || !scopedWorkflow) return new Set<string>();
+    const selected = new Set<string>();
+    // Scoped links: inside a subgraph the root link list would yield wrong
+    // (or false-positive same-id) pre-selected targets.
+    for (const link of scopedWorkflow.links) {
+      const [, srcNodeId, srcSlot, tgtNodeId, tgtSlot] = link;
+      if (srcNodeId === nodeId && srcSlot === props.outputIndex) {
+        selected.add(makeOutputSelectionKey(tgtNodeId, tgtSlot));
+      }
+    }
+    return selected;
+  });
+  const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false);
+  const [multiInputPickerNodeId, setMultiInputPickerNodeId] = useState<number | null>(null);
+  const [multiInputPickerSelection, setMultiInputPickerSelection] = useState<Set<string>>(new Set());
+
+  // The source this input is actually wired to right now (origin node + slot),
+  // resolved from the scoped link list. Used both to pre-select the form and to
+  // tell when the staged selection has changed.
+  const initialInputSource = useMemo<{ nodeId: number; outputIndex: number } | null>(() => {
+    if (mode !== 'input' || !scopedWorkflow) return null;
+    const inputIndex = (props as InputConnectionModalProps).inputIndex;
+    const node = scopedWorkflow.nodes.find((n) => n.id === nodeId);
+    const linkId = node?.inputs?.[inputIndex]?.link;
+    if (linkId == null) return null;
+    const link = scopedWorkflow.links.find((l) => l[0] === linkId);
+    if (!link) return null;
+    return { nodeId: link[1], outputIndex: link[2] };
+  }, [mode, scopedWorkflow, nodeId, props]);
+  // Staged single-selection for the input picker: tapping a candidate selects
+  // it (tapping the connected one clears it), and Apply commits — mirroring the
+  // output picker so editing a wired input updates the form in place instead of
+  // connecting + closing + scrolling on every tap.
+  const [selectedInputSource, setSelectedInputSource] = useState(initialInputSource);
+
+  const currentNodeHierarchicalKey = useMemo(() => {
+    const node = findWorkflowNodeInScope(workflow, nodeId, currentSubgraphId);
+    return node?.itemKey ?? null;
+  }, [currentSubgraphId, nodeId, workflow]);
+
+  const getHierarchicalKeyForNodeId = (targetNodeId: number): string | null => {
+    const node = findWorkflowNodeInScope(
+      useWorkflowStore.getState().workflow,
+      targetNodeId,
+      currentSubgraphId,
+    );
+    return node?.itemKey ?? null;
+  };
+
+  const compatibleNodes = useMemo(() => {
+    if (mode !== 'input' || !scopedWorkflow || !nodeTypes) return [];
+    return findCompatibleSourceNodes(scopedWorkflow, nodeId, props.inputIndex);
+  }, [mode, scopedWorkflow, nodeTypes, nodeId, props]);
+
+  const filteredNodes = useMemo(() => {
+    if (mode !== 'input') return [];
+    const query = searchQuery.trim();
+    const scored = compatibleNodes
+      .map((entry) => {
+        const { node } = entry;
+        const typeDef = nodeTypes?.[node.type];
+        const displayName = resolveWorkflowNodeDisplayName(workflow, node, nodeTypes);
+        const text = `${displayName} ${typeDef?.display_name ?? ''} ${node.type} ${String(node.id)}`;
+        const matches = !query
+          || fuzzyMatch(query, text)
+          || isSubsequence(normalizeSearchText(query), normalizeSearchText(text));
+        if (!matches) return null;
+        const score =
+          getFieldScore(query, displayName) * 4 +
+          getFieldScore(query, typeDef?.display_name ?? '') * 3 +
+          getFieldScore(query, node.type) * 2 +
+          getFieldScore(query, String(node.id));
+        return { ...entry, score };
+      })
+      .filter(Boolean) as Array<(typeof compatibleNodes)[number] & { score: number }>;
+    scored.sort((a, b) => b.score - a.score || a.node.id - b.node.id);
+    return scored;
+  }, [mode, compatibleNodes, searchQuery, nodeTypes, workflow]);
+
+  const compatibleTypes = useMemo(() => {
+    if (mode !== 'input' || !nodeTypes) return [];
+    return findCompatibleNodeTypesForInput(nodeTypes, props.inputType).map((item, index) => ({ ...item, index }));
+  }, [mode, nodeTypes, props]);
+
+  const compatibleOutputTypes = useMemo(() => {
+    if (mode !== 'output' || !nodeTypes) return [];
+    return findCompatibleNodeTypesForOutput(nodeTypes, props.outputType).map((item, index) => ({ ...item, index }));
+  }, [mode, nodeTypes, props]);
+
+  const filteredTypes = useMemo(() => {
+    if (mode !== 'input') return [];
+    return searchAndSortNodeTypes(
+      compatibleTypes,
+      searchQuery,
+      (item) => {
+        const displayName = resolveNodeTypeDisplayName(item.def, item.typeName);
+        const typeName = resolveNodeTypeDisplayName(
+          { display_name: item.def.name, name: item.typeName },
+          item.typeName
+        );
+        const pack = prettyPackName(item.def.python_module || (item.def.category?.split('/')[0] || 'Core'));
+        return {
+          displayName,
+          typeName,
+          category: String(item.def.category ?? ''),
+          pack
+        };
+      },
+      (item) => item.index
+    );
+  }, [mode, compatibleTypes, searchQuery]);
+
+  const filteredOutputTypes = useMemo(() => {
+    if (mode !== 'output') return [];
+    return searchAndSortNodeTypes(
+      compatibleOutputTypes,
+      searchQuery,
+      (item) => {
+        const displayName = resolveNodeTypeDisplayName(item.def, item.typeName);
+        const typeName = resolveNodeTypeDisplayName(
+          { display_name: item.def.name, name: item.typeName },
+          item.typeName
+        );
+        const pack = prettyPackName(item.def.python_module || (item.def.category?.split('/')[0] || 'Core'));
+        return {
+          displayName,
+          typeName,
+          category: String(item.def.category ?? ''),
+          pack
+        };
+      },
+      (item) => item.index
+    );
+  }, [mode, compatibleOutputTypes, searchQuery]);
+
+  const outputCandidates = useMemo<OutputCandidate[]>(() => {
+    if (mode !== 'output' || !scopedWorkflow || !nodeTypes) return [];
+    const compatibleTargets = findCompatibleTargetNodesForOutput(scopedWorkflow, nodeId, props.outputIndex);
+    const connectedKeys = new Set<string>();
+    for (const link of scopedWorkflow.links) {
+      const [, srcNodeId, srcSlot, tgtNodeId, tgtSlot] = link;
+      if (srcNodeId === nodeId && srcSlot === props.outputIndex) {
+        connectedKeys.add(makeOutputSelectionKey(tgtNodeId, tgtSlot));
+      }
+    }
+    const query = searchQuery.trim();
+
+    const candidates = compatibleTargets
+      .map(({ node, inputIndex }) => {
+        const typeDef = nodeTypes[node.type];
+        const displayName = resolveWorkflowNodeDisplayName(workflow, node, nodeTypes);
+        const pack = prettyPackName(String(typeDef?.python_module ?? typeDef?.category?.split('/')[0] ?? 'Core'));
+        const inputSlot = node.inputs?.[inputIndex];
+        if (!inputSlot) return null;
+        const inputName = inputSlot.localized_name || inputSlot.name || `Input ${inputIndex + 1}`;
+        const inputType = String(inputSlot.type);
+        const selectionKey = makeOutputSelectionKey(node.id, inputIndex);
+        const currentlyConnectedFromThisOutput = connectedKeys.has(selectionKey);
+        let hasExistingLink = false;
+        let existingSourceLabel: string | null = null;
+        const existingLinkId = inputSlot.link;
+        if (existingLinkId != null && !currentlyConnectedFromThisOutput) {
+          const existingLink = scopedWorkflow.links.find((link) => link[0] === existingLinkId);
+          if (existingLink) {
+            hasExistingLink = true;
+            const [, existingSrcNodeId] = existingLink;
+            const existingSrcNode = findWorkflowNodeInScope(
+              workflow,
+              existingSrcNodeId,
+              currentSubgraphId,
+            );
+            if (existingSrcNode) {
+              existingSourceLabel = `${resolveWorkflowNodeDisplayName(workflow, existingSrcNode, nodeTypes)} #${existingSrcNode.id}`;
+            }
+          }
+        }
+        const text = `${displayName} ${typeDef?.display_name ?? ''} ${node.type} ${String(node.id)} ${inputName}`;
+        const matches = !query
+          || fuzzyMatch(query, text)
+          || isSubsequence(normalizeSearchText(query), normalizeSearchText(text));
+        if (!matches) return null;
+        const score =
+          getFieldScore(query, displayName) * 4 +
+          getFieldScore(query, inputName) * 3 +
+          getFieldScore(query, typeDef?.display_name ?? '') * 2 +
+          getFieldScore(query, node.type) * 2 +
+          getFieldScore(query, String(node.id));
+
+        return {
+          nodeId: node.id,
+          inputIndex,
+          displayName,
+          pack,
+          inputName,
+          inputType,
+          currentlyConnectedFromThisOutput,
+          hasExistingLink,
+          existingSourceLabel,
+          score
+        };
+      });
+    const filtered = candidates.filter((candidate): candidate is OutputCandidate => candidate !== null);
+    filtered.sort((a, b) => b.score - a.score || a.nodeId - b.nodeId);
+    return filtered;
+  }, [mode, scopedWorkflow, workflow, nodeTypes, nodeId, props, searchQuery, currentSubgraphId]);
+
+  const initialOutputSelection = useMemo(() => {
+    if (mode !== 'output') return new Set<string>();
+    return new Set(
+      outputCandidates
+        .filter((candidate) => candidate.currentlyConnectedFromThisOutput)
+        .map((candidate) => makeOutputSelectionKey(candidate.nodeId, candidate.inputIndex))
+    );
+  }, [mode, outputCandidates]);
+
+  const outputCandidatesByKey = useMemo(() => {
+    const map = new Map<string, OutputCandidate>();
+    for (const candidate of outputCandidates) {
+      map.set(makeOutputSelectionKey(candidate.nodeId, candidate.inputIndex), candidate);
+    }
+    return map;
+  }, [outputCandidates]);
+
+  const outputNodeCandidates = useMemo<OutputNodeCandidate[]>(() => {
+    if (mode !== 'output') return [];
+    const byNode = new Map<number, OutputNodeCandidate>();
+    for (const candidate of outputCandidates) {
+      const existing = byNode.get(candidate.nodeId);
+      if (existing) {
+        existing.inputs.push(candidate);
+        if (candidate.score > existing.score) existing.score = candidate.score;
+        continue;
+      }
+      byNode.set(candidate.nodeId, {
+        nodeId: candidate.nodeId,
+        displayName: candidate.displayName,
+        pack: candidate.pack,
+        score: candidate.score,
+        inputs: [candidate]
+      });
+    }
+    return Array.from(byNode.values()).sort((a, b) => b.score - a.score || a.nodeId - b.nodeId);
+  }, [mode, outputCandidates]);
+
+  const outputSelectionHasChanges = useMemo(() => {
+    if (mode !== 'output') return false;
+    return !areKeySetsEqual(selectedOutputTargetKeys, initialOutputSelection);
+  }, [mode, selectedOutputTargetKeys, initialOutputSelection]);
+
+  const inputSelectionHasChanges = useMemo(() => {
+    if (mode !== 'input') return false;
+    const a = selectedInputSource;
+    const b = initialInputSource;
+    if (!a && !b) return false;
+    if (!a || !b) return true;
+    return a.nodeId !== b.nodeId || a.outputIndex !== b.outputIndex;
+  }, [mode, selectedInputSource, initialInputSource]);
+
+  const outputOverwriteCandidates = useMemo(() => {
+    if (mode !== 'output') return [];
+    const candidates: OutputCandidate[] = [];
+    for (const key of selectedOutputTargetKeys) {
+      if (initialOutputSelection.has(key)) continue;
+      const candidate = outputCandidatesByKey.get(key);
+      if (candidate?.hasExistingLink) candidates.push(candidate);
+    }
+    return candidates;
+  }, [mode, selectedOutputTargetKeys, initialOutputSelection, outputCandidatesByKey]);
+
+  const toggleInputSelection = (srcNodeId: number, srcOutputIndex: number) => {
+    if (mode !== 'input') return;
+    setSelectedInputSource((prev) =>
+      prev && prev.nodeId === srcNodeId && prev.outputIndex === srcOutputIndex
+        ? null
+        : { nodeId: srcNodeId, outputIndex: srcOutputIndex },
+    );
+  };
+
+  // Clears the staged selection; the actual disconnect happens on Apply.
+  const handleDisconnect = () => {
+    if (mode !== 'input') return;
+    setSelectedInputSource(null);
+  };
+
+  const applyInputSelection = () => {
+    if (mode !== 'input') return;
+    if (!currentNodeHierarchicalKey) return;
+    if (!selectedInputSource) {
+      if (initialInputSource) disconnectInput(currentNodeHierarchicalKey, props.inputIndex);
+      onClose();
+      return;
+    }
+    const srcHierarchicalKey = getHierarchicalKeyForNodeId(selectedInputSource.nodeId);
+    if (!srcHierarchicalKey) return;
+    connectNodes(
+      srcHierarchicalKey,
+      selectedInputSource.outputIndex,
+      currentNodeHierarchicalKey,
+      props.inputIndex,
+      props.inputType,
+    );
+    onClose();
+  };
+
+  const handleAddNewNode = (typeName: string) => {
+    if (mode !== 'input') return;
+    if (!currentNodeHierarchicalKey) return;
+    const newNodeId = addNodeAndConnect(typeName, currentNodeHierarchicalKey, props.inputIndex);
+    onClose();
+    setSearchQuery('');
+    if (newNodeId !== null) {
+      const newHierarchicalKey = getHierarchicalKeyForNodeId(newNodeId);
+      if (newHierarchicalKey) {
+        // New node opens with its connections section expanded.
+        expandConnectionsSection(newHierarchicalKey);
+        if (props.originHadConnection) scrollToNode(newHierarchicalKey);
+      }
+    }
+  };
+
+  const handleAddNewNodeFromOutput = (
+    typeName: string,
+    suggestedInputIndex: number,
+    suggestedInputType: string
+  ) => {
+    if (mode !== 'output') return;
+    if (!currentNodeHierarchicalKey) return;
+
+    const newNodeId = addNode(typeName, {
+      nearNodeHierarchicalKey: currentNodeHierarchicalKey,
+      inSubgraphId: currentSubgraphId ?? undefined,
+    });
+    if (newNodeId === null) return;
+
+    const newHierarchicalKey = getHierarchicalKeyForNodeId(newNodeId);
+    if (!newHierarchicalKey) return;
+
+    const latestWorkflow = useWorkflowStore.getState().workflow;
+    const newNode = latestWorkflow
+      ? findWorkflowNodeInScope(latestWorkflow, newNodeId, currentSubgraphId)
+      : null;
+    if (!newNode || !currentNodeHierarchicalKey) return;
+
+    const compatibleInputIndex = newNode.inputs.findIndex((input) => input.type.toUpperCase() === suggestedInputType.toUpperCase());
+    const inputIndex = compatibleInputIndex >= 0 ? compatibleInputIndex : suggestedInputIndex;
+    const inputType = newNode.inputs[inputIndex]?.type;
+    if (inputType == null) return;
+
+    connectNodes(currentNodeHierarchicalKey, props.outputIndex, newHierarchicalKey, inputIndex, inputType);
+    onClose();
+    setSearchQuery('');
+    // New node opens with its connections section expanded.
+    expandConnectionsSection(newHierarchicalKey);
+    if (props.originHadConnection) scrollToNode(newHierarchicalKey);
+  };
+
+  const toggleOutputTargetSelection = (nodeIdToToggle: number, inputIndexToToggle: number) => {
+    const key = makeOutputSelectionKey(nodeIdToToggle, inputIndexToToggle);
+    setSelectedOutputTargetKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const openMultiInputPicker = (nodeCandidate: OutputNodeCandidate) => {
+    const initialSelection = new Set<string>();
+    for (const candidate of nodeCandidate.inputs) {
+      const key = makeOutputSelectionKey(candidate.nodeId, candidate.inputIndex);
+      if (selectedOutputTargetKeys.has(key)) {
+        initialSelection.add(key);
+      }
+    }
+    setMultiInputPickerNodeId(nodeCandidate.nodeId);
+    setMultiInputPickerSelection(initialSelection);
+  };
+
+  const closeMultiInputPicker = () => {
+    setMultiInputPickerNodeId(null);
+    setMultiInputPickerSelection(new Set());
+  };
+
+  const toggleMultiInputPickerSelection = (selectionKey: string) => {
+    setMultiInputPickerSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(selectionKey)) {
+        next.delete(selectionKey);
+      } else {
+        next.add(selectionKey);
+      }
+      return next;
+    });
+  };
+
+  const applyMultiInputPickerSelection = () => {
+    if (multiInputPickerNodeId == null) return;
+    const nodeCandidate = outputNodeCandidates.find((candidate) => candidate.nodeId === multiInputPickerNodeId);
+    if (!nodeCandidate) {
+      closeMultiInputPicker();
+      return;
+    }
+    const nodeKeys = nodeCandidate.inputs.map((input) => makeOutputSelectionKey(input.nodeId, input.inputIndex));
+    setSelectedOutputTargetKeys((prev) => {
+      const next = new Set(prev);
+      for (const key of nodeKeys) {
+        next.delete(key);
+      }
+      for (const key of multiInputPickerSelection) {
+        next.add(key);
+      }
+      return next;
+    });
+    closeMultiInputPicker();
+  };
+
+  const handleOutputNodeClick = (nodeCandidate: OutputNodeCandidate) => {
+    if (nodeCandidate.inputs.length > 1) {
+      openMultiInputPicker(nodeCandidate);
+      return;
+    }
+    const onlyInput = nodeCandidate.inputs[0];
+    if (!onlyInput) return;
+    toggleOutputTargetSelection(onlyInput.nodeId, onlyInput.inputIndex);
+  };
+
+  const applyOutputSelection = () => {
+    if (mode !== 'output') return;
+    for (const key of initialOutputSelection) {
+      if (selectedOutputTargetKeys.has(key)) continue;
+      const candidate = outputCandidatesByKey.get(key);
+      if (!candidate) continue;
+      const targetHierarchicalKey = getHierarchicalKeyForNodeId(candidate.nodeId);
+      if (!targetHierarchicalKey) continue;
+      disconnectInput(targetHierarchicalKey, candidate.inputIndex);
+    }
+    for (const key of selectedOutputTargetKeys) {
+      if (initialOutputSelection.has(key)) continue;
+      const candidate = outputCandidatesByKey.get(key);
+      if (!candidate) continue;
+      const targetHierarchicalKey = getHierarchicalKeyForNodeId(candidate.nodeId);
+      if (!targetHierarchicalKey || !currentNodeHierarchicalKey) continue;
+      connectNodes(currentNodeHierarchicalKey, props.outputIndex, targetHierarchicalKey, candidate.inputIndex, candidate.inputType);
+    }
+    onClose();
+  };
+
+  const handleSubmitOutput = () => {
+    if (mode !== 'output') return;
+    if (outputOverwriteCandidates.length > 0) {
+      setShowOverwriteConfirm(true);
+      return;
+    }
+    applyOutputSelection();
+  };
+
+  const modalTitle = mode === 'input'
+    ? (currentAction === 'pick' ? `Connect ${props.inputName}` : 'Add new node')
+    : (currentAction === 'pick' ? `Connect ${props.outputName}` : 'Add new node');
+  const searchPlaceholder = mode === 'input'
+    ? (currentAction === 'pick' ? 'Search existing nodes...' : 'Search node types...')
+    : (currentAction === 'pick' ? 'Search target nodes...' : 'Search node types...');
+
+  const renderInputPickContent = () => {
+    if (mode !== 'input') return null;
+    const inputProps = props;
+
+    const concreteNodes: typeof filteredNodes = [];
+    const wildcardNodes: typeof filteredNodes = [];
+    for (const entry of filteredNodes) {
+      const outputSlot = entry.node.outputs?.[entry.outputIndex];
+      const outputType = outputSlot?.type;
+      if (isWildcardOnlyMatch(outputType, inputProps.inputType)) {
+        wildcardNodes.push(entry);
+      } else {
+        concreteNodes.push(entry);
+      }
+    }
+
+    const renderNodeEntry = (entry: (typeof filteredNodes)[number]) => {
+      const { node, outputIndex } = entry;
+      const typeDef = nodeTypes?.[node.type];
+      const displayName = resolveWorkflowNodeDisplayName(workflow, node, nodeTypes);
+      const pack = prettyPackName(String(typeDef?.python_module ?? typeDef?.category?.split('/')[0] ?? 'Core'));
+      const outputSlot = node.outputs?.[outputIndex];
+      const outputName = outputSlot?.localized_name || outputSlot?.name || `Output ${outputIndex + 1}`;
+      const outputType = String(outputSlot?.type ?? inputProps.inputType);
+      const selected = Boolean(
+        selectedInputSource &&
+        selectedInputSource.nodeId === node.id &&
+        selectedInputSource.outputIndex === outputIndex,
+      );
+      const currentlyConnected = Boolean(
+        initialInputSource &&
+        initialInputSource.nodeId === node.id &&
+        initialInputSource.outputIndex === outputIndex,
+      );
+      return (
+        <ConnectionSearchResult
+          key={node.id}
+          nodeId={node.id}
+          displayName={displayName}
+          pack={pack}
+          outputName={outputName}
+          outputType={outputType}
+          inputName={inputProps.inputName}
+          selected={selected}
+          currentlyConnected={currentlyConnected}
+          onSelect={() => toggleInputSelection(node.id, outputIndex)}
+        />
+      );
+    };
+
+    return (
+      <div className="px-3 pt-3 pb-20 flex flex-col gap-2">
+        {concreteNodes.map(renderNodeEntry)}
+
+        {wildcardNodes.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 pt-1 pb-0.5">
+              <div className="flex-1 border-t border-white/10" />
+              <span className="text-xs font-medium text-slate-400 whitespace-nowrap">Wildcard *</span>
+              <div className="flex-1 border-t border-white/10" />
+            </div>
+            {wildcardNodes.map(renderNodeEntry)}
+          </>
+        )}
+
+        {filteredNodes.length === 0 && (
+          <SearchEmptyState query={searchQuery} message="No matching nodes found" />
+        )}
+
+        <button
+          type="button"
+          className="w-full text-left rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 flex items-center gap-3 hover:bg-cyan-500/15 active:scale-[0.998] transition shadow-sm"
+          onClick={() => { setCurrentAction('addNew'); setSearchQuery(''); }}
+        >
+          <div className="w-8 h-8 rounded-full bg-cyan-500 flex items-center justify-center flex-shrink-0">
+            <PlusIcon className="w-4 h-4 text-slate-950" />
+          </div>
+          <span className="text-sm font-semibold text-slate-100">Add new node...</span>
+        </button>
+
+        {inputProps.currentlyConnectedNodeId !== null && (
+          <button
+            type="button"
+            className="w-full text-left rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-300 hover:bg-red-500/20 active:scale-[0.998] transition"
+            onClick={handleDisconnect}
+          >
+            Disconnect
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  const renderInputAddNewContent = () => {
+    if (mode !== 'input') return null;
+    const inputProps = props;
+
+    const concreteTypes: typeof filteredTypes = [];
+    const wildcardTypes: typeof filteredTypes = [];
+    for (const entry of filteredTypes) {
+      const outputType = entry.def.output?.[entry.outputIndex];
+      if (isWildcardOnlyMatch(outputType, inputProps.inputType)) {
+        wildcardTypes.push(entry);
+      } else {
+        concreteTypes.push(entry);
+      }
+    }
+
+    const renderTypeEntry = (entry: (typeof filteredTypes)[number]) => {
+      const { typeName, def, outputIndex } = entry;
+      const pack = prettyPackName(String(def.python_module ?? def.category?.split('/')[0] ?? 'Core'));
+      const outputType = String(def.output?.[outputIndex] ?? inputProps.inputType);
+      const outputName = def.output_name?.[outputIndex] ?? def.output?.[outputIndex] ?? 'Output';
+      return (
+        <NodeTypeSearchResult
+          key={typeName}
+          title={resolveNodeTypeDisplayName(def, typeName)}
+          subtitle={pack || 'Core'}
+          outputType={outputType}
+          outputName={String(outputName)}
+          inputName={inputProps.inputName}
+          titleClassName="text-sm font-medium text-slate-100 truncate"
+          onSelect={() => handleAddNewNode(typeName)}
+        />
+      );
+    };
+
+    return (
+      <div className="px-3 pt-3 pb-20 flex flex-col gap-2">
+        {filteredTypes.length === 0 && (
+          <SearchEmptyState query={searchQuery} message="No matching node types found" />
+        )}
+        {concreteTypes.map(renderTypeEntry)}
+        {wildcardTypes.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 pt-1 pb-0.5">
+              <div className="flex-1 border-t border-white/10" />
+              <span className="text-xs font-medium text-slate-400 whitespace-nowrap">Wildcard *</span>
+              <div className="flex-1 border-t border-white/10" />
+            </div>
+            {wildcardTypes.map(renderTypeEntry)}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const renderOutputSelectionContent = () => {
+    if (mode !== 'output') return null;
+    const outputProps = props;
+
+    const concreteOutputNodes: typeof outputNodeCandidates = [];
+    const wildcardOutputNodes: typeof outputNodeCandidates = [];
+    for (const nodeCandidate of outputNodeCandidates) {
+      const allWildcard = nodeCandidate.inputs.every((candidate) =>
+        isWildcardOnlyMatch(outputProps.outputType, candidate.inputType)
+      );
+      if (allWildcard) {
+        wildcardOutputNodes.push(nodeCandidate);
+      } else {
+        concreteOutputNodes.push(nodeCandidate);
+      }
+    }
+
+    const renderOutputNodeEntry = (nodeCandidate: OutputNodeCandidate) => {
+      const selectedCount = nodeCandidate.inputs.filter((candidate) =>
+        selectedOutputTargetKeys.has(makeOutputSelectionKey(candidate.nodeId, candidate.inputIndex))
+      ).length;
+      const isSelected = selectedCount > 0;
+      const hasExistingLink = nodeCandidate.inputs.some((candidate) => candidate.hasExistingLink);
+      const hasConnectedFromThisOutput = nodeCandidate.inputs.some((candidate) => candidate.currentlyConnectedFromThisOutput);
+      const subtitle = nodeCandidate.inputs.length > 1
+        ? `${nodeCandidate.inputs.length} compatible inputs`
+        : `${outputProps.outputName} -> ${nodeCandidate.inputs[0]?.inputName ?? 'Input'}`;
+      return (
+        <button
+          key={`output-node-${nodeCandidate.nodeId}`}
+          type="button"
+          className={`w-full text-left rounded-xl border px-4 py-3 shadow-sm transition ${
+            isSelected
+              ? 'border-cyan-400/50 bg-cyan-500/10'
+              : 'border-white/10 bg-slate-900/95 hover:bg-slate-800/95 active:scale-[0.998]'
+          }`}
+          onClick={() => handleOutputNodeClick(nodeCandidate)}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-slate-100 flex items-center gap-2 min-w-0">
+                <span className="truncate">
+                  {nodeCandidate.displayName} <span className="text-slate-500">#{nodeCandidate.nodeId}</span>
+                </span>
+                {hasConnectedFromThisOutput && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 text-[10px] font-medium shrink-0">
+                    <CheckIcon className="w-3 h-3" />
+                    Connected
+                  </span>
+                )}
+                {hasExistingLink && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 text-[10px] font-medium shrink-0">
+                    Already linked
+                  </span>
+                )}
+              </div>
+              <div className="text-xs text-slate-400 truncate mt-0.5">{nodeCandidate.pack || 'Core'}</div>
+              <div className="text-xs text-slate-300 mt-1 truncate">{subtitle}</div>
+            </div>
+            <div className={`w-5 h-5 rounded border flex items-center justify-center ${isSelected ? 'bg-cyan-500 border-cyan-500 text-slate-950' : 'bg-slate-950 border-white/20'}`}>
+              {isSelected && <CheckIcon className="w-3 h-3" />}
+            </div>
+          </div>
+        </button>
+      );
+    };
+
+    return (
+      <div className="px-3 pt-3 pb-20 flex flex-col gap-2">
+        {concreteOutputNodes.map(renderOutputNodeEntry)}
+
+        {wildcardOutputNodes.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 pt-1 pb-0.5">
+              <div className="flex-1 border-t border-white/10" />
+              <span className="text-xs font-medium text-slate-400 whitespace-nowrap">Wildcard *</span>
+              <div className="flex-1 border-t border-white/10" />
+            </div>
+            {wildcardOutputNodes.map(renderOutputNodeEntry)}
+          </>
+        )}
+
+        {outputNodeCandidates.length === 0 && (
+          <SearchEmptyState query={searchQuery} message="No matching target nodes found" />
+        )}
+
+        <button
+          type="button"
+          className="w-full text-left rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 flex items-center gap-3 hover:bg-cyan-500/15 active:scale-[0.998] transition shadow-sm"
+          onClick={() => { setCurrentAction('addNew'); setSearchQuery(''); }}
+        >
+          <div className="w-8 h-8 rounded-full bg-cyan-500 flex items-center justify-center flex-shrink-0">
+            <PlusIcon className="w-4 h-4 text-slate-950" />
+          </div>
+          <span className="text-sm font-semibold text-slate-100">Add new node...</span>
+        </button>
+      </div>
+    );
+  };
+
+  const renderOutputAddNewContent = () => {
+    if (mode !== 'output') return null;
+    const outputProps = props;
+
+    const concreteOutputTypes: typeof filteredOutputTypes = [];
+    const wildcardOutputTypes: typeof filteredOutputTypes = [];
+    for (const entry of filteredOutputTypes) {
+      if (isWildcardOnlyMatch(outputProps.outputType, entry.inputType)) {
+        wildcardOutputTypes.push(entry);
+      } else {
+        concreteOutputTypes.push(entry);
+      }
+    }
+
+    const renderOutputTypeEntry = (entry: (typeof filteredOutputTypes)[number]) => {
+      const { typeName, def, inputIndex, inputType, inputName } = entry;
+      const pack = prettyPackName(String(def.python_module ?? def.category?.split('/')[0] ?? 'Core'));
+      return (
+        <NodeTypeSearchResult
+          key={typeName}
+          title={resolveNodeTypeDisplayName(def, typeName)}
+          subtitle={pack || 'Core'}
+          outputType={outputProps.outputType}
+          outputName={outputProps.outputName}
+          inputName={String(inputName)}
+          titleClassName="text-sm font-medium text-slate-100 truncate"
+          onSelect={() => handleAddNewNodeFromOutput(typeName, inputIndex, inputType)}
+        />
+      );
+    };
+
+    return (
+      <div className="px-3 pt-3 pb-20 flex flex-col gap-2">
+        {filteredOutputTypes.length === 0 && (
+          <SearchEmptyState query={searchQuery} message="No matching node types found" />
+        )}
+        {concreteOutputTypes.map(renderOutputTypeEntry)}
+        {wildcardOutputTypes.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 pt-1 pb-0.5">
+              <div className="flex-1 border-t border-white/10" />
+              <span className="text-xs font-medium text-slate-400 whitespace-nowrap">Wildcard *</span>
+              <div className="flex-1 border-t border-white/10" />
+            </div>
+            {wildcardOutputTypes.map(renderOutputTypeEntry)}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <SearchActionModal
+      isOpen={isOpen}
+      onClose={onClose}
+      title={modalTitle}
+      searchQuery={searchQuery}
+      onSearchQueryChange={setSearchQuery}
+      searchPlaceholder={searchPlaceholder}
+      onBack={currentAction === 'addNew' ? () => { setCurrentAction('pick'); setSearchQuery(''); } : undefined}
+      footer={(
+        <FullscreenModalActions
+          zIndex={2201}
+          actions={[
+            {
+              key: 'cancel',
+              label: 'Cancel',
+              onClick: onClose,
+              variant: 'secondary'
+            },
+            ...(mode === 'output'
+              && currentAction === 'pick'
+              ? [{
+                  key: 'apply',
+                  label: 'Apply',
+                  onClick: handleSubmitOutput,
+                  variant: 'primary' as const,
+                  disabled: !outputSelectionHasChanges
+                }]
+              : []),
+            ...(mode === 'input'
+              && currentAction === 'pick'
+              ? [{
+                  key: 'apply',
+                  label: 'Apply',
+                  onClick: applyInputSelection,
+                  variant: 'primary' as const,
+                  disabled: !inputSelectionHasChanges
+                }]
+              : [])
+          ]}
+        />
+      )}
+    >
+      <div className="flex-1 overflow-auto bg-slate-950/88">
+        {mode === 'input' ? (
+          currentAction === 'pick' ? (
+            renderInputPickContent()
+          ) : (
+            renderInputAddNewContent()
+          )
+        ) : currentAction === 'pick' ? (
+          renderOutputSelectionContent()
+        ) : (
+          renderOutputAddNewContent()
+        )}
+      </div>
+
+      {mode === 'output' && multiInputPickerNodeId != null && (
+        <div
+          className="fixed inset-0 z-[2250] bg-black/40 flex items-center justify-center p-4"
+          onClick={closeMultiInputPicker}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-sm bg-slate-900 border border-white/10 text-slate-100 rounded-xl shadow-lg overflow-hidden"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-4 py-3 text-sm font-semibold text-slate-100 border-b border-white/10">
+              Select compatible inputs
+            </div>
+            <div className="max-h-[45vh] overflow-y-auto">
+              {outputNodeCandidates
+                .find((candidate) => candidate.nodeId === multiInputPickerNodeId)
+                ?.inputs.map((candidate) => {
+                  const key = makeOutputSelectionKey(candidate.nodeId, candidate.inputIndex);
+                  const selected = multiInputPickerSelection.has(key);
+                  return (
+                    <button
+                      key={`input-picker-${key}`}
+                      type="button"
+                      className={`w-full flex items-center justify-between gap-3 text-left px-4 py-3 text-sm ${
+                        selected ? 'bg-cyan-500/10' : 'hover:bg-white/10'
+                      }`}
+                      onClick={() => toggleMultiInputPickerSelection(key)}
+                    >
+                      <span className="min-w-0">
+                        <span className="block text-slate-100 truncate">{candidate.inputName}</span>
+                        <span className="block text-xs text-slate-400 truncate">{candidate.inputType}</span>
+                      </span>
+                      <span className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 ${
+                        selected ? 'bg-cyan-500 border-cyan-500 text-slate-950' : 'bg-slate-950 border-white/20'
+                      }`}>
+                        {selected ? <CheckIcon className="w-3 h-3" /> : null}
+                      </span>
+                    </button>
+                  );
+                })}
+            </div>
+            <div className="px-3 py-3 border-t border-white/10 flex justify-end gap-2">
+              <button
+                type="button"
+                className="px-3 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-white/10"
+                onClick={closeMultiInputPicker}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="px-3 py-2 rounded-lg text-sm font-semibold text-slate-950 bg-cyan-500 hover:bg-cyan-400"
+                onClick={applyMultiInputPickerSelection}
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mode === 'output' && showOverwriteConfirm && (
+        <Dialog
+          onClose={() => setShowOverwriteConfirm(false)}
+          title="Overwrite existing connections?"
+          description="Some selected inputs are already connected. Continuing will disconnect their current source and reconnect to this output."
+          actions={[
+            {
+              label: 'Cancel',
+              onClick: () => setShowOverwriteConfirm(false),
+              variant: 'secondary'
+            },
+            {
+              label: 'Overwrite',
+              onClick: () => {
+                setShowOverwriteConfirm(false);
+                applyOutputSelection();
+              },
+              variant: 'danger'
+            }
+          ]}
+        />
+      )}
+    </SearchActionModal>
+  );
+}

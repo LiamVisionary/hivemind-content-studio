@@ -1,0 +1,16 @@
+# Build files
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+
+# Local temp & caches
+.DS_Store
+.artifacts/
+temp/
+*.cache
+*.profraw
+
+# Local config overrides
+config/external-projects.local.yaml

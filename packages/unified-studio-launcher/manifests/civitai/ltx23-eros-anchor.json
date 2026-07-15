@@ -1,0 +1,194 @@
+{
+  "id": "ltx23-eros-anchor",
+  "name": "ComfyUI LTX2.3 Eros Anchor Video Generation",
+  "kind": "workflow-archive",
+  "sourceUrl": "https://civitai.red/models/2667355/comfyui-ltx23-eros-anchor-video-generationnsfw?modelVersionId=2995139",
+  "modelId": 2667355,
+  "modelVersionId": 2995139,
+  "fileId": 2874732,
+  "baseModel": "LTXV 2.3",
+  "download": {
+    "endpointPath": "/api/civitai/download",
+    "expectedPath": "models/Workflows/comfyuiLTX23ErosAnchor_v10.zip",
+    "fileName": "comfyuiLTX23ErosAnchor_v10.zip",
+    "sha256": "C07ABFD8E5A63ECB591DE8611B47EFF924CAF189AB62C7C578FC93FC3725EB11"
+  },
+  "workflow": {
+    "format": "comfyui-editor",
+    "extractTo": "workflows/civitai/ltx23-eros-anchor",
+    "outputName": "ltx23-eros-anchor.editor.json"
+  },
+  "nodeDependencies": [
+    {
+      "class": "LTXLatentAnchorAware",
+      "package": "10S-Comfy-nodes",
+      "repo": "https://github.com/TenStrip/10S-Comfy-nodes.git",
+      "directory": "10S-Comfy-nodes",
+      "required": true
+    },
+    {
+      "class": "LTXTextAttentionAmplifier",
+      "package": "10S-Comfy-nodes",
+      "repo": "https://github.com/TenStrip/10S-Comfy-nodes.git",
+      "directory": "10S-Comfy-nodes",
+      "required": true
+    },
+    {
+      "class": "LTXVLatentUpsamplerTiled",
+      "package": "10S-Comfy-nodes",
+      "repo": "https://github.com/TenStrip/10S-Comfy-nodes.git",
+      "directory": "10S-Comfy-nodes",
+      "required": true
+    },
+    {
+      "class": "STGGuiderAdvanced",
+      "package": "ComfyUI-LTXVideo",
+      "repo": "https://github.com/Lightricks/ComfyUI-LTXVideo.git",
+      "directory": "ComfyUI-LTXVideo",
+      "required": true
+    },
+    {
+      "class": "VHS_VideoCombine",
+      "package": "ComfyUI-VideoHelperSuite",
+      "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git",
+      "directory": "ComfyUI-VideoHelperSuite",
+      "required": true
+    },
+    {
+      "class": "JWStringToFloat",
+      "package": "comfyui-various",
+      "repo": "https://github.com/jamesWalker55/comfyui-various.git",
+      "directory": "comfyui-various",
+      "required": true
+    },
+    {
+      "class": "PainterAudioLength",
+      "package": "Comfyui-PainterAudioLength",
+      "repo": "https://github.com/princepainter/Comfyui-PainterAudioLength.git",
+      "directory": "Comfyui-PainterAudioLength",
+      "required": true
+    },
+    {
+      "class": "AudioCrop",
+      "package": "audio-separation-nodes-comfyui",
+      "repo": "https://github.com/christian-byrne/audio-separation-nodes-comfyui.git",
+      "directory": "audio-separation-nodes-comfyui",
+      "required": true
+    },
+    {
+      "class": "RTXVideoSuperResolution",
+      "package": "Nvidia_RTX_Nodes_ComfyUI",
+      "repo": "https://github.com/Comfy-Org/Nvidia_RTX_Nodes_ComfyUI.git",
+      "directory": "Nvidia_RTX_Nodes_ComfyUI",
+      "required": false,
+      "platforms": ["win32"]
+    },
+    {
+      "class": "GetNode",
+      "package": "comfyui-kjnodes",
+      "directory": "comfyui-kjnodes",
+      "frontendOnly": true
+    },
+    {
+      "class": "SetNode",
+      "package": "comfyui-kjnodes",
+      "directory": "comfyui-kjnodes",
+      "frontendOnly": true
+    },
+    {
+      "class": "Fast Groups Bypasser (rgthree)",
+      "package": "rgthree-comfy",
+      "directory": "rgthree-comfy",
+      "frontendOnly": true
+    },
+    {
+      "class": "Label (rgthree)",
+      "package": "rgthree-comfy",
+      "directory": "rgthree-comfy",
+      "frontendOnly": true
+    },
+    {
+      "class": "Note",
+      "package": "ComfyUI frontend",
+      "frontendOnly": true
+    }
+  ],
+  "patches": [
+    {
+      "directory": "comfyui-kjnodes",
+      "file": "patches/comfyui-kjnodes/ltx2-lora-bypass-mps.patch",
+      "description": "Use ComfyUI bypass LoRA injections for LTX2 LoRAs on Apple Silicon MPS instead of repeatedly repatching model weights.",
+      "unidiffZero": true,
+      "platforms": ["darwin"]
+    }
+  ],
+  "modelDependencies": [
+    {
+      "folder": "checkpoints",
+      "relativePath": "ltx/10Eros_v1-fp8mixed_learned.safetensors",
+      "name": "10Eros_v1-fp8mixed_learned.safetensors",
+      "url": "https://huggingface.co/TenStrip/LTX2.3-10Eros/resolve/main/10Eros_v1-fp8mixed_learned.safetensors",
+      "required": true,
+      "approxBytes": 29161842950
+    },
+    {
+      "folder": "text_encoders",
+      "relativePath": "gemma_3_12B_it_fp8_scaled.safetensors",
+      "name": "gemma_3_12B_it_fp8_scaled.safetensors",
+      "url": "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors",
+      "required": true
+    },
+    {
+      "folder": "vae",
+      "relativePath": "taeltx2_3.safetensors",
+      "name": "taeltx2_3.safetensors",
+      "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/taeltx2_3.safetensors",
+      "required": true,
+      "approxBytes": 23531296
+    },
+    {
+      "folder": "latent_upscale_models",
+      "relativePath": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+      "name": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+      "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+      "required": true
+    },
+    {
+      "folder": "loras",
+      "relativePath": "ltx/2.3/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
+      "name": "ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
+      "url": "https://huggingface.co/TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments/resolve/main/ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors",
+      "required": true
+    },
+    {
+      "folder": "loras",
+      "relativePath": "ltx/2.3/LTX-2.3-OmniNFT-RL-Lora_bf16.safetensors",
+      "name": "LTX-2.3-OmniNFT-RL-Lora_bf16.safetensors",
+      "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/loras/LTX-2.3-OmniNFT-RL-Lora_bf16.safetensors",
+      "required": true,
+      "approxBytes": 616948520
+    },
+    {
+      "folder": "vae",
+      "relativePath": "LTX23_audio_vae_bf16.safetensors",
+      "name": "LTX23_audio_vae_bf16.safetensors",
+      "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors",
+      "required": false,
+      "approxBytes": 364855188
+    },
+    {
+      "folder": "vae",
+      "relativePath": "LTX23_video_vae_bf16.safetensors",
+      "name": "LTX23_video_vae_bf16.safetensors",
+      "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors",
+      "required": false,
+      "approxBytes": 1452258578
+    }
+  ],
+  "notes": [
+    "The workflow archive is public Civitai metadata for model 2667355/version 2995139 and is installed through the existing local downloader endpoint.",
+    "The RTXVideoSuperResolution node is optional and Windows/NVIDIA-oriented; Apple Silicon setups should keep that workflow group disabled or remove it.",
+    "On Apple Silicon, the installer applies a KJNodes LTX2 LoRA bypass patch so the workflow follows the existing ComfyUI MPS weight-adapter fast path.",
+    "Large model files are declared but not downloaded unless the installer is run with --download-models."
+  ]
+}

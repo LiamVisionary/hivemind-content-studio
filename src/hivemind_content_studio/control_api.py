@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hmac
 import json
 import os
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -21,7 +24,7 @@ from .approval_config import load_approval_ledger
 from .agent_runtime import attach_script
 from .approval_ledger import ApprovalLedger
 from .asset_store import AssetStore
-from .hivemindos_brain import brain_catalog, plan_with_brain
+from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brain, plan_with_local_brain
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
 from .lanes import LANE_MATRIX
 from .manifest import load_manifest, write_manifest
@@ -29,7 +32,7 @@ from .media_catalog import media_catalog
 from .hivemindos_oauth import oauth_provider_status, start_oauth_login
 from .orchestrator import ContentOrchestrator
 from .prompt_history import PromptHistoryStore
-from .providers import provider_report
+from .providers import provider_report, providers_for
 from .shared_env import apply_shared_hive_env
 from .studio_drafts import StudioRunDraft
 from .template_catalog import template_report
@@ -106,7 +109,10 @@ def build_control_app(
 
     app = FastAPI(title="Hivemind Content Studio", version="0.2.0")
     ui_root = Path(__file__).resolve().parent / "ui"
+    repository_root = Path(__file__).resolve().parents[2]
+    open_gen_dist = repository_root / "packages/open-generative-ai/dist"
     app.mount("/assets", StaticFiles(directory=ui_root), name="studio-assets")
+    app.mount("/open-gen", StaticFiles(directory=open_gen_dist, html=True, check_dir=False), name="open-generative-ai")
 
     def record_prompt(
         draft: StudioRunDraft,
@@ -171,6 +177,52 @@ def build_control_app(
             "privacy_modes": ["local-only", "local-first", "cloud-allowed"],
         }
 
+    @app.get("/api/surfaces")
+    def surfaces() -> dict:
+        return {
+            "ok": True,
+            "surfaces": {
+                "explore": {"path": "/open-gen/", "available": (open_gen_dist / "index.html").is_file()},
+                "canvas": {"gateway_path": "/mobile/", "available": True},
+                "models": {"gateway_path": "/models", "available": True},
+                "gateway": {"gateway_path": "/", "available": True},
+            },
+        }
+
+    @app.api_route("/open-gen-api/{path:path}", methods=["GET", "POST"])
+    async def open_gen_api(path: str, request: Request) -> Response:
+        allowed = {
+            "health",
+            "healthz",
+            "local-ai/binary-status",
+            "local-ai/models",
+            "local-ai/generate",
+        }
+        if path not in allowed and not (path.startswith("local-ai/job/") and path.removeprefix("local-ai/job/").replace("-", "").replace("_", "").isalnum()):
+            raise HTTPException(status_code=404, detail="OpenGen bridge route not found")
+        body = await request.body()
+
+        def forward() -> tuple[bytes, int, str]:
+            proxy_request = urllib.request.Request(
+                f"http://127.0.0.1:8794/{path}",
+                data=body or None,
+                method=request.method,
+                headers={"Content-Type": request.headers.get("content-type", "application/json")},
+            )
+            try:
+                with urllib.request.urlopen(proxy_request, timeout=190) as upstream:
+                    return upstream.read(), upstream.status, upstream.headers.get("content-type", "application/json")
+            except urllib.error.HTTPError as exc:
+                return exc.read(), exc.code, exc.headers.get("content-type", "application/json")
+            except (OSError, urllib.error.URLError) as exc:
+                raise RuntimeError("OpenGen local inference bridge is unavailable") from exc
+
+        try:
+            content, status, content_type = await asyncio.to_thread(forward)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        return Response(content=content, status_code=status, media_type=content_type.split(";", 1)[0])
+
     @app.get("/api/simple/catalog")
     def simple_catalog() -> dict:
         brains: list[dict] = []
@@ -180,6 +232,7 @@ def build_control_app(
             brains = value.get("providers") if isinstance(value.get("providers"), list) else []
         except RuntimeError as exc:
             brain_error = str(exc)
+            brains = local_brain_catalog()["providers"]
         return {
             "ok": True,
             "brains": brains,
@@ -196,10 +249,26 @@ def build_control_app(
 
     @app.post("/api/simple/plan")
     def simple_plan(body: SimplePlanBody) -> dict:
-        try:
-            plan = plan_with_brain(body.model_dump())
-        except RuntimeError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from None
+        if body.provider == "local-planner":
+            plan = plan_with_local_brain(body.model_dump())
+        else:
+            try:
+                plan = plan_with_brain(body.model_dump())
+            except RuntimeError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from None
+        draft = plan.get("draft")
+        if isinstance(draft, dict):
+            selections = (("keyframe", body.imageSelection), ("motion", body.videoSelection))
+            for role, selection in selections:
+                if not isinstance(selection, dict):
+                    continue
+                provider = str(selection.get("provider") or "automatic")
+                model = str(selection.get("model") or "automatic")
+                if provider == "automatic" or provider not in {item.id for item in providers_for(role)}:
+                    continue
+                draft.setdefault("providers", {})[role] = provider
+                if model != "automatic":
+                    draft.setdefault("provider_options", {}).setdefault(provider, {})[role] = {"model": model}
         plan["selections"] = {
             "image": body.imageSelection or {"provider": "automatic", "model": "automatic"},
             "video": body.videoSelection or {"provider": "automatic", "model": "automatic"},

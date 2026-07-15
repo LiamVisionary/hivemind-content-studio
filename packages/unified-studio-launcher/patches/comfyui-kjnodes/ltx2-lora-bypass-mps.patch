@@ -1,0 +1,54 @@
+diff --git a/nodes/ltxv_nodes.py b/nodes/ltxv_nodes.py
+--- a/nodes/ltxv_nodes.py
++++ b/nodes/ltxv_nodes.py
+@@ -2121,1 +2121,49 @@
+-            k = new_modelpatcher.add_patches(loaded, strength_model)
++            use_bypass_lora = False
++            try:
++                import os
++                import comfy.model_management
++
++                bypass_env = os.environ.get("LTX2_LORA_BYPASS_MPS", "1").lower()
++                use_bypass_lora = (
++                    bypass_env not in ("0", "false", "off")
++                    and comfy.model_management.get_torch_device().type == "mps"
++                )
++            except Exception:
++                use_bypass_lora = False
++
++            if use_bypass_lora:
++                import comfy.weight_adapter
++
++                bypass_patches = {}
++                regular_patches = {}
++                for key, patch_data in loaded.items():
++                    if isinstance(patch_data, (comfy.weight_adapter.WeightAdapterBase, comfy.weight_adapter.WeightAdapterTrainBase)):
++                        bypass_patches[key] = patch_data
++                    else:
++                        regular_patches[key] = patch_data
++
++                k = set()
++                if regular_patches:
++                    k.update(new_modelpatcher.add_patches(regular_patches, strength_model))
++
++                if bypass_patches:
++                    manager = comfy.weight_adapter.BypassInjectionManager()
++                    model_sd_keys = set(new_modelpatcher.model.state_dict().keys())
++                    for key, adapter in bypass_patches.items():
++                        if key in model_sd_keys:
++                            manager.add_adapter(key, adapter, strength=strength_model)
++                            k.add(key)
++                        else:
++                            print(f"LTX2 LoRA bypass skipped missing key: {key}")
++
++                    injections = manager.create_injections(new_modelpatcher.model)
++                    hook_count = manager.get_hook_count()
++                    if hook_count > 0:
++                        existing = new_modelpatcher.get_injections("bypass_lora") or []
++                        new_modelpatcher.set_injections("bypass_lora", existing + injections)
++                    print(
++                        f"LTX2 LoRA bypass on MPS: hooks={hook_count} "
++                        f"adapters={len(bypass_patches)} regular={len(regular_patches)}"
++                    )
++            else:
++                k = new_modelpatcher.add_patches(loaded, strength_model)

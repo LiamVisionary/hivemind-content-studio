@@ -1,0 +1,24 @@
+{
+  "name": "unified-media-studio-template",
+  "version": "0.1.0",
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "start": "node src/cli.mjs serve --start --open",
+    "serve": "node src/cli.mjs serve",
+    "status": "node src/cli.mjs status",
+    "repos": "node src/cli.mjs repos",
+    "bootstrap": "node src/cli.mjs bootstrap",
+    "doctor": "node src/cli.mjs doctor",
+    "setup:ltx23-eros": "node scripts/install-civitai-workflow.mjs --manifest manifests/civitai/ltx23-eros-anchor.json",
+    "install:launcher": "node src/cli.mjs install-launcher",
+    "install:macos": "node src/cli.mjs install-macos-app",
+    "install:linux": "node src/cli.mjs install-linux-launcher",
+    "install:windows": "node src/cli.mjs install-windows-launcher",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

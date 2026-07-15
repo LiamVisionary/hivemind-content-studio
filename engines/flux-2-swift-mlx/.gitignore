@@ -1,0 +1,55 @@
+# Xcode
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.xcuserstate
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Test outputs
+test_checkpoints/
+result_checkpoints/
+output/
+*.png
+
+# But keep documentation images and example datasets
+!docs/examples/**/*.png
+!docs/screenshots/**/*.png
+!examples/tarot-style/**/*.png
+
+# Profiling
+*.profraw
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# Package resolution
+Package.resolved
+datasets/
+.build-xcode/
+groot_training_ostris/
+flux2
+loras/
+
+# Serena MCP
+.serena/
+
+# Local dev files (user-specific configs and scripts)
+groot_training*.yaml
+scripts/train_all_models.sh
+scripts/*.py
+!scripts/convert_mxfp8_bigloves.py
+!scripts/convert_mxfp8_to_mlx_native.py
+!scripts/convert_mxfp8_to_swift_mapped_mlx.py
+*.safetensors
+
+# Obsolete plans directory
+docs/plans/

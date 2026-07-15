@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "imported_at": "2026-07-15",
+  "components": [
+    {
+      "id": "unified-image-studio-template",
+      "source_commit": "80f801f8e57348bc188ed8af540b064ccfa77921",
+      "destination": "packages/unified-studio-launcher",
+      "license": "project-owned"
+    },
+    {
+      "id": "Open-Generative-AI",
+      "source_commit": "0ab564ba0e59a050a6db1adc61a3345e0dc35708",
+      "destination": "packages/open-generative-ai",
+      "license": "MIT"
+    },
+    {
+      "id": "comfyui-mobile-frontend",
+      "source_commit": "dbc5cf322487580ec59785fbd35f58c1153e26e5",
+      "destination": "packages/comfyui-mobile",
+      "license": "MIT"
+    },
+    {
+      "id": "hive-image-stack",
+      "source_commit": "7b6b9dc8f069d88d37ae1ace03fa68c2c2e15ceb",
+      "destination": "packages/media-gateway",
+      "license": "owner-review-required"
+    },
+    {
+      "id": "flux-2-swift-mlx",
+      "source_commit": "c75e2a07d36206f2f9f667e05cad22dc46ba7654",
+      "destination": "engines/flux-2-swift-mlx",
+      "license": "MIT"
+    },
+    {
+      "id": "Z-Image.swift",
+      "source_commit": "9b8ba663d154d90e293513f546d130d330914267",
+      "destination": "engines/z-image-swift",
+      "license": "owner-review-required"
+    }
+  ]
+}

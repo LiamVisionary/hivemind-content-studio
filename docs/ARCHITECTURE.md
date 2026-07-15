@@ -59,25 +59,29 @@ Manifest schema v2 assigns every artifact a stable id, SHA-256, byte size, MIME 
 | `auto_clipper` | long-form ingestion, clipping, clip-specific rights data, monetization matches | global publisher implementation |
 | `skills/shared` | Shared Brain agent playbooks and provider operating knowledge | executable business logic |
 | `skills/vendor/clueso-ai` | pinned upstream Clueso workflows, audit provenance, and namespaced policy adapters | provider selection, approvals, credentials, or publishing authority |
-| `hive-image-stack` | local media gateway, ComfyUI proxy, model manager, Media Studio MCP, native-sidecar routing | canonical content runs, approvals, publishing, or metrics |
-| `Open-Generative-AI` | donor image/video/edit/model-catalog and local-inference implementations | a separately mounted UI or canonical run state |
-| `comfyui-mobile-frontend` | donor workflow editor, queue, output-browser, and model-manager interactions | a separately mounted UI, canonical run state, or direct publishing |
-| `flux-2-swift-mlx` and `Z-Image.swift` | native Apple Silicon generation engines | browser shell, orchestration, approval, or distribution |
-| `unified-image-studio-template` | portable repository/service manifest and launcher patterns | a second production dashboard or runtime state machine |
+| `packages/media-gateway` | local media gateway, ComfyUI proxy, model manager, Media Studio MCP, native-sidecar routing | canonical content runs, approvals, publishing, or metrics |
+| `packages/open-generative-ai` | embedded Explore UI, model catalog, local inference, desktop IPC bridge | canonical run state, approvals, or publishing |
+| `packages/comfyui-mobile` | embedded Canvas workflow editor, queue, output browser, and model manager | canonical run state or direct publishing |
+| `engines/flux-2-swift-mlx` and `engines/z-image-swift` | native Apple Silicon generation engines | browser shell, orchestration, approval, or distribution |
+| `packages/unified-studio-launcher` | portable service manifest, workflow installers, tests, and launcher patterns | a second production dashboard or runtime state machine |
 
-## Native all-in-one Studio
+## Unified all-in-one Studio
 
-The browser exposes one first-party Studio with Create, Edit, Animate, and
-Workflow modes. These modes share the composer, model router, reference-image
-intake, durable run, artifact library, prompt history, approval gates, and
-telemetry. Donor repository names never define navigation or user-visible state.
+The browser exposes one shell with Create, Edit, Animate, Workflow, Explore,
+Canvas, Models, Runs, History, Telemetry, and Providers. Creation modes share
+the composer, model router, reference-image intake, durable run, artifact
+library, prompt history, approval gates, and telemetry. Explore and Canvas are
+full-height embedded package surfaces; they do not own a second canonical run
+store. The desktop shell forwards only the allowlisted OpenGen local-inference
+IPC methods to the Explore frame. Browser mode reaches the same local engine
+through the loopback OpenGen bridge without exposing the gateway token.
 
 `GET /api/runtime` remains a bounded operator diagnostic. It reports the one
 native surface, internal engines/gateways, and Liam-fork/upstream provenance.
 HTTP probes run concurrently with short timeouts and return generic status
-only. The browser Studio does not use the endpoint to mount or link another app.
-Any donor behavior enters through native provider/asset contracts and every
-result is recorded in the versioned manifest before downstream use.
+only. Package source provenance is recorded in `components.json`. Results that
+enter a durable production are recorded in the versioned manifest before
+downstream use.
 
 ## Provider routing
 

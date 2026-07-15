@@ -1,0 +1,742 @@
+#!/usr/bin/env bash
+set -u
+umask 077
+
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+SCRIPT_PATH="$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+STUDIO_ROOT="${HIVEMIND_STUDIO_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
+MEDIA_STATE_ROOT="${HIVEMIND_MEDIA_STATE_DIR:-$HOME/.hivemindos/media-studio}"
+
+LABEL="com.liam.zimage-stack"
+OLD_CF_LABEL="com.liam.zimage-cloudflared"
+OLD_OPEN_GEN_LABEL="com.liam.open-generative-ai-hosted"
+DOMAIN="gui/$(id -u)"
+PRIV="${COMFY_PRIVATE_ROOT:-$HOME/.comfy-private.noindex}"
+COMFY="${COMFY_DIR:-$HOME/comfy/ComfyUI}"
+APP="$STUDIO_ROOT/packages/media-gateway"
+MOBILE="$STUDIO_ROOT/packages/comfyui-mobile"
+OPEN_GEN="$STUDIO_ROOT/packages/open-generative-ai"
+CONTENT_STUDIO="$STUDIO_ROOT"
+CLOUDFLARED="$HOME/.local/bin/cloudflared"
+TAILSCALE_CLI="/Applications/Tailscale.app/Contents/MacOS/tailscale"
+TAILSCALE_PROXY="$HOME/.local/bin/zimage-tailscale-proxy"
+TAILSCALE_HTTPS_PROXY="$APP/tailscale-https-proxy.js"
+TAILSCALE_HTTPS_PORT="8789"
+MEDIA_STUDIO_MCP_PORT="${MEDIA_STUDIO_MCP_PORT:-8796}"
+FLUX2_SERVER_DIR="$STUDIO_ROOT/engines/flux-2-swift-mlx"
+FLUX2_SERVER_BIN="$FLUX2_SERVER_DIR/.build/arm64-apple-macosx/release/Flux2Server"
+FLUX2_SERVER_PORT="8791"
+COMFY_DEFAULT_PORT="8188"
+COMFY_ANIMA_PORT="8198"
+COMFY_LTX_PORT="8199"
+CONTENT_STUDIO_PORT="8765"
+OPEN_GEN_PORT="8794"
+ZIMG_TOKEN_FILE="${ZIMG_TOKEN_FILE:-$MEDIA_STATE_ROOT/secure/zimg-token}"
+
+load_hardware_profile() {
+  if [ -f "$APP/hardware_profile.py" ]; then
+    eval "$(python3 "$APP/hardware_profile.py" --shell 2>/dev/null)" || true
+  fi
+  ZIMG_ACCELERATOR_PROFILE="${ZIMG_ACCELERATOR_PROFILE:-cpu}"
+  ZIMG_IS_APPLE_SILICON="${ZIMG_IS_APPLE_SILICON:-0}"
+  ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS="${ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS:-0}"
+  ZIMG_DEFAULT_ENABLE_FLUX2_SERVER="${ZIMG_DEFAULT_ENABLE_FLUX2_SERVER:-0}"
+  ZIMG_DEFAULT_ASFP8_INT8_EXT="${ZIMG_DEFAULT_ASFP8_INT8_EXT:-0}"
+  ZIMG_DEFAULT_ASFP8_FP8_EXT="${ZIMG_DEFAULT_ASFP8_FP8_EXT:-0}"
+  ZIMG_DEFAULT_ASFP8_TRACE_OPS="${ZIMG_DEFAULT_ASFP8_TRACE_OPS:-0}"
+  ZIMG_DEFAULT_ASFP8_PROFILE="${ZIMG_DEFAULT_ASFP8_PROFILE:-0}"
+  ZIMG_DEFAULT_COMFY_ATTENTION="${ZIMG_DEFAULT_COMFY_ATTENTION:-}"
+}
+
+load_hardware_profile
+ZIMG_ENABLE_FLUX2_SERVER="${ZIMG_ENABLE_FLUX2_SERVER:-$ZIMG_DEFAULT_ENABLE_FLUX2_SERVER}"
+COMFY_DEFAULT_ATTENTION="${COMFY_DEFAULT_ATTENTION:-$ZIMG_DEFAULT_COMFY_ATTENTION}"
+COMFY_ANIMA_ATTENTION="${COMFY_ANIMA_ATTENTION:-$ZIMG_DEFAULT_COMFY_ATTENTION}"
+COMFY_LTX_ATTENTION="${COMFY_LTX_ATTENTION:-$ZIMG_DEFAULT_COMFY_ATTENTION}"
+COMFY_ENABLE_LTX_LANE="${COMFY_ENABLE_LTX_LANE:-$ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS}"
+ZIMG_LTX_PRIORITY_MODE="${ZIMG_LTX_PRIORITY_MODE:-$COMFY_ENABLE_LTX_LANE}"
+if [ "${ZIMG_LTX_PRIORITY_MODE:-0}" = "1" ] && [ "${ZIMG_FORCE_FLUX2_SERVER:-0}" != "1" ]; then
+  # LTXAV keeps a very large MPS working set. Leaving the unrelated Flux2 MLX
+  # server resident costs measurable LTX throughput, so the dedicated LTX lane
+  # gets priority unless Flux2 is explicitly forced on.
+  ZIMG_ENABLE_FLUX2_SERVER=0
+fi
+COMFY_DEFAULT_ASFP8_INT8_EXT="${COMFY_DEFAULT_ASFP8_INT8_EXT:-$ZIMG_DEFAULT_ASFP8_INT8_EXT}"
+COMFY_DEFAULT_ASFP8_FP8_EXT="${COMFY_DEFAULT_ASFP8_FP8_EXT:-$ZIMG_DEFAULT_ASFP8_FP8_EXT}"
+COMFY_DEFAULT_ASFP8_TRACE_OPS="${COMFY_DEFAULT_ASFP8_TRACE_OPS:-$ZIMG_DEFAULT_ASFP8_TRACE_OPS}"
+COMFY_DEFAULT_ASFP8_PROFILE="${COMFY_DEFAULT_ASFP8_PROFILE:-$ZIMG_DEFAULT_ASFP8_PROFILE}"
+TLS_DIR="$PRIV/tls"
+TLS_CERT="$TLS_DIR/zimage-tailscale.crt"
+TLS_KEY="$TLS_DIR/zimage-tailscale.key"
+LOG_DIR="$HOME/Library/Logs"
+SUP_LOG="$LOG_DIR/zimage-stack-supervisor.log"
+URL_FILE="$PRIV/z-image-remote-url.txt"
+LOCK_DIR="$PRIV/zimage-stack-supervise.lock"
+
+mkdir -p "$PRIV/output" "$PRIV/z_image_outputs" "$PRIV/debug_outputs" "$PRIV/input" "$PRIV/temp" "$PRIV/temp-anima" "$PRIV/temp-ltx" "$LOG_DIR" "$TLS_DIR" "$MEDIA_STATE_ROOT/state/media-gateway" "$MEDIA_STATE_ROOT/secure"
+touch "$PRIV/.metadata_never_index" "$PRIV/output/.metadata_never_index" "$PRIV/z_image_outputs/.metadata_never_index" "$PRIV/debug_outputs/.metadata_never_index"
+chmod -R go-rwx "$PRIV" 2>/dev/null || true
+chflags hidden "$PRIV" 2>/dev/null || true
+
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$SUP_LOG"; }
+
+kill_port() {
+  local port="$1"
+  local pids
+  pids=$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+  if [ -n "$pids" ]; then
+    log "stopping listener(s) on :$port: $pids"
+    kill $pids 2>/dev/null || true
+  fi
+}
+
+wait_http() {
+  local url="$1" timeout="${2:-120}" elapsed=0
+  until curl -fsS --max-time 5 "$url" >/dev/null 2>&1; do
+    elapsed=$((elapsed + 2))
+    [ "$elapsed" -ge "$timeout" ] && return 1
+    sleep 2
+  done
+  return 0
+}
+
+write_tunnel_url_once() {
+  local cf_log="$PRIV/z-image-cloudflared.log"
+  local url
+  url=$(grep -Eo 'https://[-a-zA-Z0-9.]+\.trycloudflare\.com' "$cf_log" 2>/dev/null | tail -1 || true)
+  if [ -n "$url" ]; then
+    printf '%s\n' "$url" > "$URL_FILE"
+  fi
+}
+
+tailscale_ip() {
+  local ip=""
+  if [ -x "$TAILSCALE_CLI" ]; then
+    ip="$($TAILSCALE_CLI ip -4 2>/dev/null | head -1 || true)"
+    # The Tailscale CLI can report the account/device IP even when the backend is
+    # stopped and the address is not actually bound locally. Only use it if the
+    # interface is present; otherwise binding proxies to it fails with EADDRNOTAVAIL.
+    if [ -n "$ip" ] && ifconfig 2>/dev/null | grep -q "inet $ip "; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  fi
+  ifconfig 2>/dev/null | awk '/inet 100\./ {print $2; exit}'
+}
+
+tailscale_dns() {
+  if [ -x "$TAILSCALE_CLI" ]; then
+    "$TAILSCALE_CLI" status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("Self") or {}).get("DNSName","").rstrip("."))' 2>/dev/null || true
+  fi
+}
+
+ensure_tls_cert() {
+  local ts_ip="$1"
+  local ts_dns
+  [ -n "$ts_ip" ] || return 1
+  ts_dns="$(tailscale_dns || true)"
+  if [ -s "$TLS_CERT" ] && [ -s "$TLS_KEY" ] && openssl x509 -checkend 604800 -noout -in "$TLS_CERT" >/dev/null 2>&1; then
+    if [ -z "$ts_dns" ] || openssl x509 -noout -subject -in "$TLS_CERT" 2>/dev/null | grep -q "$ts_dns" || openssl x509 -noout -text -in "$TLS_CERT" 2>/dev/null | grep -q "DNS:$ts_dns"; then
+      return 0
+    fi
+  fi
+  if [ -n "$ts_dns" ] && "$TAILSCALE_CLI" cert --cert-file "$TLS_CERT" --key-file "$TLS_KEY" "$ts_dns" >/dev/null 2>&1; then
+    chmod 600 "$TLS_KEY" "$TLS_CERT"
+    return 0
+  fi
+  cat > "$TLS_DIR/openssl-tailscale.cnf" <<EOF
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+x509_extensions = v3_req
+
+[dn]
+CN = $ts_ip
+
+[v3_req]
+subjectAltName = @alt_names
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+[alt_names]
+IP.1 = $ts_ip
+DNS.1 = localhost
+IP.2 = 127.0.0.1
+EOF
+  openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+    -keyout "$TLS_KEY" \
+    -out "$TLS_CERT" \
+    -config "$TLS_DIR/openssl-tailscale.cnf" >/dev/null 2>&1
+  chmod 600 "$TLS_KEY" "$TLS_CERT"
+}
+
+children=()
+start_children() {
+  children=()
+  log "starting Hivemind Content Studio as one managed app"
+  log "hardware profile=$ZIMG_ACCELERATOR_PROFILE apple_silicon=$ZIMG_IS_APPLE_SILICON flux2_server=$ZIMG_ENABLE_FLUX2_SERVER asfp8_int8=$COMFY_DEFAULT_ASFP8_INT8_EXT asfp8_fp8=$COMFY_DEFAULT_ASFP8_FP8_EXT"
+	  : > "$PRIV/comfy.log"
+	  : > "$PRIV/comfy-ltx.log"
+	  : > "$PRIV/z-image-api.log"
+  : > "$PRIV/z-image-frontend.log"
+  : > "$PRIV/hivemind-content-studio.log"
+  : > "$PRIV/media-studio-mcp.log"
+  : > "$PRIV/z-image-cloudflared.log"
+  : > "$PRIV/z-image-tailscale-proxy.log"
+  : > "$PRIV/z-image-tailscale-https-proxy.log"
+  rm -f "$URL_FILE"
+  if [ -L "$COMFY/custom_nodes/comfyui-mobile-frontend" ] || [ ! -e "$COMFY/custom_nodes/comfyui-mobile-frontend" ]; then
+    ln -sfn "$MOBILE" "$COMFY/custom_nodes/comfyui-mobile-frontend"
+  else
+    log "cannot install embedded ComfyUI Mobile: custom node path is not a symlink"
+    return 1
+  fi
+  COMFY_PRIVATE_VIEW_TOKEN="$("$COMFY/.venv/bin/python" - <<'PY'
+import secrets
+print(secrets.token_urlsafe(32))
+PY
+  )"
+
+	  kill_port "$COMFY_DEFAULT_PORT"
+	  kill_port "$COMFY_LTX_PORT"
+	  kill_port "$COMFY_ANIMA_PORT"
+  kill_port 8787
+  kill_port 8788
+  kill_port "$MEDIA_STUDIO_MCP_PORT"
+  kill_port "$FLUX2_SERVER_PORT"
+  kill_port "$TAILSCALE_HTTPS_PORT"
+  kill_port "$CONTENT_STUDIO_PORT"
+  sleep 2
+
+  if [ "${ZIMG_ENABLE_FLUX2_SERVER:-0}" = "1" ]; then
+    cd "$FLUX2_SERVER_DIR" || return 1
+      FLUX2_MODEL="${FLUX2_MODEL:-klein9B}" \
+    FLUX2_TRANSFORMER_PATH="${FLUX2_TRANSFORMER_PATH:-$COMFY/models/diffusion_models/BigLoveKlein3_mxfp8_swift_mapped_mlx.safetensors}" \
+    FLUX2_TRANSFORMER_QUANT="${FLUX2_TRANSFORMER_QUANT:-bf16}" \
+	    FLUX2_SERVER_PORT="$FLUX2_SERVER_PORT" MLX_METAL_PATH="$HOME/comfy/Flux2CLI-v2.1.0/mlx.metallib" "$FLUX2_SERVER_BIN" \
+	      >> "$PRIV/z-image-flux2-server.log" 2>&1 &
+	    local pid="$!"
+	    log "Flux2 persistent server child pid=$pid"
+	    if [ "${ZIMG_SUPERVISE_FLUX2_SERVER:-0}" = "1" ]; then
+	      children+=("$pid")
+	    else
+	      log "Flux2 persistent server is optional; not restarting whole stack if it exits"
+	    fi
+    if ! wait_http "http://127.0.0.1:$FLUX2_SERVER_PORT/health" 45; then
+      log "Flux2 persistent server did not become healthy in time"
+      return 1
+    fi
+    local warm_input="$PRIV/input/mlx_test_selfie.jpg"
+    if [ "${ZIMG_ENABLE_FLUX2_WARMUP:-1}" = "1" ] && [ -f "$warm_input" ]; then
+      log "warming Flux2 persistent server in background"
+      (
+      /usr/bin/python3 - <<PY >> "$PRIV/z-image-flux2-server.log" 2>&1 || log "Flux2 warmup failed; continuing with cold first request"
+import json, urllib.request, time
+payload = {
+  "prompt": "Replace the hat with a simple red Santa hat. Preserve the face, pose, lighting, and background.",
+  "imagePath": "$warm_input",
+  "outputPath": "$PRIV/z_image_outputs/.flux2_warmup.png",
+  "width": 448,
+  "height": 672,
+  "steps": 1,
+  "guidance": 1.0,
+  "seed": 12345,
+}
+t0=time.time()
+req=urllib.request.Request("http://127.0.0.1:$FLUX2_SERVER_PORT/generate", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json"}, method="POST")
+print(urllib.request.urlopen(req, timeout=180).read().decode())
+print("warmup_wall", round(time.time()-t0, 2))
+PY
+      ) &
+    elif [ "${ZIMG_ENABLE_FLUX2_WARMUP:-1}" = "1" ]; then
+      log "Flux2 warmup skipped; no $warm_input"
+    else
+      log "Flux2 warmup disabled; persistent server stays ready without startup generation"
+    fi
+  fi
+
+	  local comfy_default_attention_args=()
+	  local comfy_anima_attention_args=()
+	  local comfy_ltx_attention_args=()
+	  local comfy_lanes="default=http://127.0.0.1:$COMFY_DEFAULT_PORT,anima=http://127.0.0.1:$COMFY_ANIMA_PORT"
+	  local comfy_lane_rules="anima=anima,qwen35,qwen3.5"
+	  if [ -n "$COMFY_DEFAULT_ATTENTION" ]; then
+	    comfy_default_attention_args+=("$COMFY_DEFAULT_ATTENTION")
+	  fi
+	  if [ -n "$COMFY_ANIMA_ATTENTION" ]; then
+	    comfy_anima_attention_args+=("$COMFY_ANIMA_ATTENTION")
+	  fi
+	  if [ -n "$COMFY_LTX_ATTENTION" ]; then
+	    comfy_ltx_attention_args+=("$COMFY_LTX_ATTENTION")
+	  fi
+	  if [ "${COMFY_ENABLE_LTX_LANE:-0}" = "1" ]; then
+	    comfy_lanes="$comfy_lanes,ltx=http://127.0.0.1:$COMFY_LTX_PORT"
+	    comfy_lane_rules="ltx=ltx,ltxv,ltxav,ltx23,eros,10eros;$comfy_lane_rules"
+	  fi
+
+  cd "$COMFY" || return 1
+  ZIMG_ACCELERATOR_PROFILE="$ZIMG_ACCELERATOR_PROFILE" \
+  HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
+  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+  ZIMG_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  SWIFT_FLUX2_BIN="$FLUX2_SERVER_DIR/.build/arm64-apple-macosx/release/Flux2CLI" \
+  ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS="$ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS" \
+  ASFP8_INT8_EXT="$COMFY_DEFAULT_ASFP8_INT8_EXT" \
+  ASFP8_FP8_EXT="$COMFY_DEFAULT_ASFP8_FP8_EXT" \
+  ASFP8_TRACE_OPS="$COMFY_DEFAULT_ASFP8_TRACE_OPS" \
+  ASFP8_PROFILE="$COMFY_DEFAULT_ASFP8_PROFILE" \
+  COMFY_PRIVATE_HISTORY_PROMPTS="${COMFY_PRIVATE_HISTORY_PROMPTS:-1}" \
+  COMFYUI_PRIVATE_HISTORY_PROMPTS="${COMFYUI_PRIVATE_HISTORY_PROMPTS:-1}" \
+  COMFY_PRIVATE_VIEW_TOKEN="$COMFY_PRIVATE_VIEW_TOKEN" \
+  "$COMFY/.venv/bin/python" main.py \
+    --listen 127.0.0.1 \
+    --port "$COMFY_DEFAULT_PORT" \
+    ${COMFY_DEFAULT_ATTENTION:+$COMFY_DEFAULT_ATTENTION} \
+    --output-directory "$PRIV/output" \
+    --input-directory "$PRIV/input" \
+    --temp-directory "$PRIV/temp" \
+    --disable-metadata \
+    >> "$PRIV/comfy.log" 2>&1 &
+  local pid="$!"
+  children+=("$pid")
+  log "ComfyUI default lane child pid=$pid port=$COMFY_DEFAULT_PORT"
+
+  if ! wait_http "http://127.0.0.1:$COMFY_DEFAULT_PORT/system_stats" 150; then
+    log "ComfyUI default lane did not become healthy in time"
+    return 1
+  fi
+
+  local comfy_warm_input="$PRIV/input/mlx_test_selfie.jpg"
+  if [ "${ZIMG_ENABLE_COMFY_WARMUP:-0}" = "1" ] && [ -f "$comfy_warm_input" ]; then
+    log "warming Comfy BigLoveKlein3 BF16 fast edit route in background"
+    (
+    /usr/bin/python3 - <<PY >> "$PRIV/comfy.log" 2>&1 || log "Comfy BigLoveKlein3 warmup failed; continuing cold"
+import json, time, urllib.request
+prompt = {
+  '1': {'class_type':'UNETLoader','inputs':{'unet_name':'BigLoveKlein3_bf16.safetensors','weight_dtype':'default'}},
+  '2': {'class_type':'CLIPLoader','inputs':{'clip_name':'qwen_3_8b_fp8mixed.safetensors','type':'flux2','device':'default'}},
+  '3': {'class_type':'VAELoader','inputs':{'vae_name':'flux2-vae.safetensors'}},
+  '4': {'class_type':'LoadImage','inputs':{'image':'mlx_test_selfie.jpg'}},
+  '4b': {'class_type':'ImageScale','inputs':{'image':['4',0],'upscale_method':'lanczos','width':384,'height':576,'crop':'disabled'}},
+  '5': {'class_type':'CLIPTextEncode','inputs':{'clip':['2',0],'text':'warmup portrait edit'}},
+  '6': {'class_type':'CLIPTextEncode','inputs':{'clip':['2',0],'text':'low quality, distorted'}},
+  '7': {'class_type':'VAEEncode','inputs':{'pixels':['4b',0], 'vae':['3',0]}},
+  '8': {'class_type':'KSampler','inputs':{'model':['1',0],'positive':['5',0],'negative':['6',0],'latent_image':['7',0],'seed':12345,'steps':1,'cfg':1.0,'sampler_name':'euler','scheduler':'beta','denoise':0.45}},
+  '9': {'class_type':'VAEDecode','inputs':{'samples':['8',0], 'vae':['3',0]}},
+  '10': {'class_type':'SaveImage','inputs':{'images':['9',0], 'filename_prefix':'.biglove_bf16_warmup'}},
+}
+t0=time.time()
+req=urllib.request.Request('http://127.0.0.1:$COMFY_DEFAULT_PORT/prompt', data=json.dumps({'prompt':prompt,'client_id':'zimage-startup-warmup'}).encode(), headers={'Content-Type':'application/json'})
+pid=json.loads(urllib.request.urlopen(req, timeout=30).read().decode())['prompt_id']
+while time.time()-t0 < 180:
+    time.sleep(0.5)
+    hist=json.loads(urllib.request.urlopen('http://127.0.0.1:$COMFY_DEFAULT_PORT/history/'+pid, timeout=10).read().decode() or '{}')
+    if pid in hist:
+        print('comfy_biglove_bf16_warmup_wall', round(time.time()-t0, 2), hist[pid].get('status'))
+        break
+PY
+    ) &
+	  elif [ "${ZIMG_ENABLE_COMFY_WARMUP:-0}" = "1" ]; then
+	    log "Comfy BigLoveKlein3 warmup skipped; no $comfy_warm_input"
+	  else
+	    log "Comfy BigLoveKlein3 warmup disabled; keeping startup queue free"
+	  fi
+	
+	  if [ "${COMFY_ENABLE_LTX_LANE:-0}" = "1" ]; then
+	    ZIMG_ACCELERATOR_PROFILE="$ZIMG_ACCELERATOR_PROFILE" \
+	    ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS="$ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS" \
+	    ASFP8_INT8_EXT="$COMFY_DEFAULT_ASFP8_INT8_EXT" \
+	    ASFP8_FP8_EXT="$COMFY_DEFAULT_ASFP8_FP8_EXT" \
+	    ASFP8_TRACE_OPS="$COMFY_DEFAULT_ASFP8_TRACE_OPS" \
+	    ASFP8_PROFILE="$COMFY_DEFAULT_ASFP8_PROFILE" \
+	    COMFY_PRIVATE_HISTORY_PROMPTS="${COMFY_PRIVATE_HISTORY_PROMPTS:-1}" \
+	    COMFYUI_PRIVATE_HISTORY_PROMPTS="${COMFYUI_PRIVATE_HISTORY_PROMPTS:-1}" \
+	    COMFY_PRIVATE_VIEW_TOKEN="$COMFY_PRIVATE_VIEW_TOKEN" \
+	    "$COMFY/.venv/bin/python" main.py \
+	      --listen 127.0.0.1 \
+	      --port "$COMFY_LTX_PORT" \
+	      ${COMFY_LTX_ATTENTION:+$COMFY_LTX_ATTENTION} \
+	      --gpu-only \
+	      ${COMFY_LTX_EXTRA_ARGS:-} \
+	      --output-directory "$PRIV/output" \
+	      --input-directory "$PRIV/input" \
+	      --temp-directory "$PRIV/temp-ltx" \
+	      --database-url "sqlite:///$PRIV/comfy-ltx.db" \
+	      --disable-metadata \
+	      >> "$PRIV/comfy-ltx.log" 2>&1 &
+	    pid="$!"
+	    children+=("$pid")
+	    log "ComfyUI LTX lane child pid=$pid port=$COMFY_LTX_PORT gpu_only=1 lora_bypass_mps=1"
+	
+	    if ! wait_http "http://127.0.0.1:$COMFY_LTX_PORT/system_stats" 150; then
+	      log "ComfyUI LTX lane did not become healthy in time"
+	      return 1
+	    fi
+	  else
+	    log "ComfyUI LTX lane disabled; non-Apple-Silicon path uses default Comfy lane"
+	  fi
+	
+	  ZIMG_ACCELERATOR_PROFILE="$ZIMG_ACCELERATOR_PROFILE" \
+  ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS="$ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS" \
+  ASFP8_INT8_EXT="$COMFY_DEFAULT_ASFP8_INT8_EXT" \
+  ASFP8_FP8_EXT="$COMFY_DEFAULT_ASFP8_FP8_EXT" \
+  ASFP8_TRACE_OPS="$COMFY_DEFAULT_ASFP8_TRACE_OPS" \
+  ASFP8_PROFILE="$COMFY_DEFAULT_ASFP8_PROFILE" \
+  COMFY_PRIVATE_HISTORY_PROMPTS="${COMFY_PRIVATE_HISTORY_PROMPTS:-1}" \
+  COMFYUI_PRIVATE_HISTORY_PROMPTS="${COMFYUI_PRIVATE_HISTORY_PROMPTS:-1}" \
+  COMFY_PRIVATE_VIEW_TOKEN="$COMFY_PRIVATE_VIEW_TOKEN" \
+  "$COMFY/.venv/bin/python" main.py \
+    --listen 127.0.0.1 \
+    --port "$COMFY_ANIMA_PORT" \
+    ${COMFY_ANIMA_ATTENTION:+$COMFY_ANIMA_ATTENTION} \
+    --output-directory "$PRIV/output" \
+    --input-directory "$PRIV/input" \
+    --temp-directory "$PRIV/temp-anima" \
+    --database-url "sqlite:///$PRIV/comfy-anima.db" \
+    --disable-metadata \
+    >> "$PRIV/comfy-anima.log" 2>&1 &
+  pid="$!"
+  children+=("$pid")
+  log "ComfyUI Anima lane child pid=$pid port=$COMFY_ANIMA_PORT"
+
+  if ! wait_http "http://127.0.0.1:$COMFY_ANIMA_PORT/system_stats" 150; then
+    log "ComfyUI Anima lane did not become healthy in time"
+    return 1
+  fi
+
+  cd "$APP" || return 1
+  ZIMG_ACCELERATOR_PROFILE="$ZIMG_ACCELERATOR_PROFILE" \
+  HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
+  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+  ZIMG_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  SWIFT_FLUX2_BIN="$FLUX2_SERVER_DIR/.build/arm64-apple-macosx/release/Flux2CLI" \
+  ZIMG_OUTPUT_DIR="$PRIV/z_image_outputs" \
+  ZIMG_DEBUG_OUTPUT_DIR="$PRIV/debug_outputs" \
+  ZIMG_OUTPUT_ENCRYPTION="${ZIMG_OUTPUT_ENCRYPTION:-1}" \
+  ZIMG_USE_FLUX2_SERVER="${ZIMG_ENABLE_FLUX2_SERVER:-0}" \
+  ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT="${ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT:-$ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS}" \
+  ZIMG_ALLOW_MXFP8_COMFY_FALLBACK="${ZIMG_ALLOW_MXFP8_COMFY_FALLBACK:-0}" \
+  SWIFT_FLUX2_SERVER_URL="http://127.0.0.1:$FLUX2_SERVER_PORT" \
+	  COMFY_LANES="$comfy_lanes" \
+	  COMFY_LANE_RULES="$comfy_lane_rules" \
+  COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
+  COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
+  hive-env-run -- python3 app.py \
+    >> "$PRIV/z-image-api.log" 2>&1 &
+  pid="$!"
+  children+=("$pid")
+  log "Z-Image API child pid=$pid"
+
+  if ! wait_http http://127.0.0.1:8787/health 45; then
+    log "Z-Image API did not become healthy in time"
+    return 1
+  fi
+
+	  cd "$APP" || return 1
+	  COMFY_PRIVATE_VIEW_TOKEN="$COMFY_PRIVATE_VIEW_TOKEN" \
+	  HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
+	  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+	  ZIMG_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+	  COMFY_MOBILE_DIST="$MOBILE/dist" \
+	  COMFY_LANES="$comfy_lanes" \
+  COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
+  COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
+  hive-env-run -- npm run start >> "$PRIV/z-image-frontend.log" 2>&1 &
+  pid="$!"
+  children+=("$pid")
+  log "Z-Image browser frontend child pid=$pid"
+
+  if ! wait_http http://127.0.0.1:8788/ 45; then
+    log "Z-Image frontend did not become healthy in time"
+    return 1
+  fi
+
+  cd "$OPEN_GEN" || return 1
+  OGA_HOST="127.0.0.1" \
+  OGA_PORT="$OPEN_GEN_PORT" \
+  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+  ZIMAGE_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  hive-env-run -- node hosted-server.js >> "$PRIV/open-generative-ai.log" 2>&1 &
+  pid="$!"
+  children+=("$pid")
+  log "OpenGen local inference bridge child pid=$pid url=http://127.0.0.1:$OPEN_GEN_PORT"
+
+  if ! wait_http "http://127.0.0.1:$OPEN_GEN_PORT/health" 30; then
+    log "OpenGen local inference bridge did not become healthy in time"
+    return 1
+  fi
+
+  cd "$CONTENT_STUDIO" || return 1
+  HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
+  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+  hive-env-run -- uv run content-studio-api \
+    >> "$PRIV/hivemind-content-studio.log" 2>&1 &
+  pid="$!"
+  children+=("$pid")
+  log "Hivemind Content Studio child pid=$pid url=http://127.0.0.1:$CONTENT_STUDIO_PORT"
+
+  if ! wait_http "http://127.0.0.1:$CONTENT_STUDIO_PORT/api/runtime" 60; then
+    log "Hivemind Content Studio did not become healthy in time"
+    return 1
+  fi
+
+  local ts_ip
+  local ts_dns
+  local media_studio_public_url
+  ts_ip="$(tailscale_ip || true)"
+  if [ -n "$ts_ip" ]; then
+    ts_dns="$(tailscale_dns || true)"
+    if [ -n "$ts_dns" ]; then
+      media_studio_public_url="https://$ts_dns:$TAILSCALE_HTTPS_PORT"
+    else
+      media_studio_public_url="https://$ts_ip:$TAILSCALE_HTTPS_PORT"
+    fi
+  fi
+
+  cd "$APP" || return 1
+  MEDIA_STUDIO_MCP_HOST="127.0.0.1" \
+  MEDIA_STUDIO_MCP_PORT="$MEDIA_STUDIO_MCP_PORT" \
+  MEDIA_STUDIO_MCP_BACKEND_URL="http://127.0.0.1:8787" \
+  MEDIA_STUDIO_MCP_STUDIO_URL="http://127.0.0.1:8788" \
+  MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL="${media_studio_public_url:-http://127.0.0.1:8788}" \
+  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+  MEDIA_STUDIO_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  hive-env-run -- node "$APP/bin/media-studio-mcp.mjs" --http >> "$PRIV/media-studio-mcp.log" 2>&1 &
+  pid="$!"
+  children+=("$pid")
+  log "Media Studio MCP HTTP child pid=$pid url=http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT/mcp"
+
+  local mcp_ready=0
+  for _ in $(seq 1 30); do
+    # Streamable HTTP MCP intentionally returns 405 to GET /mcp, so accept any
+    # reachable HTTP response as the readiness signal here.
+    if curl -sS --max-time 2 -o /dev/null "http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT/mcp"; then
+      mcp_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$mcp_ready" != "1" ]; then
+    log "Media Studio MCP HTTP did not become reachable in time"
+    return 1
+  fi
+
+  if [ -n "$ts_ip" ] && [ -x "$TAILSCALE_PROXY" ]; then
+    "$TAILSCALE_PROXY" --listen-host "$ts_ip" --listen-port 8788 --target-host 127.0.0.1 --target-port 8788 \
+      >> "$PRIV/z-image-tailscale-proxy.log" 2>&1 &
+    pid="$!"
+    children+=("$pid")
+    log "Tailscale proxy child pid=$pid url=http://$ts_ip:8788"
+
+    if [ -f "$TAILSCALE_HTTPS_PROXY" ] && ensure_tls_cert "$ts_ip"; then
+      cd "$APP" || return 1
+      TAILSCALE_IP="$ts_ip" TAILSCALE_HTTPS_PORT="$TAILSCALE_HTTPS_PORT" ZIMAGE_TLS_CERT="$TLS_CERT" ZIMAGE_TLS_KEY="$TLS_KEY" ZIMAGE_TARGET="http://127.0.0.1:8788" HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" MEDIA_STUDIO_MCP_TARGET="http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT" \
+        node "$TAILSCALE_HTTPS_PROXY" >> "$PRIV/z-image-tailscale-https-proxy.log" 2>&1 &
+      pid="$!"
+      children+=("$pid")
+      log "Tailscale HTTPS proxy child pid=$pid url=https://$ts_ip:$TAILSCALE_HTTPS_PORT"
+    else
+      log "Tailscale HTTPS proxy/cert unavailable; secure mobile URL disabled"
+    fi
+  else
+    log "Tailscale IP/proxy not available; tailnet URL disabled"
+  fi
+
+  if [ "${ZIMAGE_ENABLE_CLOUDFLARED:-0}" = "1" ] && [ -x "$CLOUDFLARED" ]; then
+    "$CLOUDFLARED" tunnel --no-autoupdate --loglevel info --logfile "$PRIV/z-image-cloudflared.log" --url http://127.0.0.1:8788 &
+    pid="$!"
+    children+=("$pid")
+    log "Cloudflare tunnel child pid=$pid"
+    for _ in $(seq 1 45); do
+      write_tunnel_url_once
+      [ -s "$URL_FILE" ] && break
+      sleep 1
+    done
+    [ -s "$URL_FILE" ] && log "remote URL: $(cat "$URL_FILE")" || log "remote URL not assigned yet"
+  else
+    log "cloudflared disabled; use Tailscale instead"
+  fi
+}
+
+stop_children() {
+  log "stopping Z-Image stack children"
+  for pid in "${children[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 2
+  for pid in "${children[@]:-}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  children=()
+	  kill_port "$COMFY_DEFAULT_PORT"
+	  kill_port "$COMFY_LTX_PORT"
+	  kill_port "$COMFY_ANIMA_PORT"
+  kill_port 8787
+  kill_port 8788
+  kill_port "$MEDIA_STUDIO_MCP_PORT"
+  kill_port "$FLUX2_SERVER_PORT"
+  kill_port "$TAILSCALE_HTTPS_PORT"
+  kill_port "$CONTENT_STUDIO_PORT"
+  kill_port "$OPEN_GEN_PORT"
+}
+
+healthy() {
+  # Do not use ComfyUI's HTTP endpoint as a watchdog during long Apple Silicon
+  # generations. Heavy text encoders/samplers can legitimately make the prompt
+  # server miss a short /system_stats deadline; the child-pid check above still
+  # catches a real ComfyUI crash without killing active renders.
+  curl -fsS --max-time 5 http://127.0.0.1:8787/health >/dev/null || return 1
+  curl -fsS --max-time 5 "http://127.0.0.1:$CONTENT_STUDIO_PORT/api/runtime" >/dev/null || return 1
+  curl -fsS --max-time 5 "http://127.0.0.1:$OPEN_GEN_PORT/health" >/dev/null || return 1
+  if curl -fsS --max-time 10 http://127.0.0.1:8788/ >/dev/null; then
+    ZIMG_FRONTEND_HEALTH_SOFT_FAILS=0
+  else
+    ZIMG_FRONTEND_HEALTH_SOFT_FAILS=$(( ${ZIMG_FRONTEND_HEALTH_SOFT_FAILS:-0} + 1 ))
+    log "frontend health soft-failed ($ZIMG_FRONTEND_HEALTH_SOFT_FAILS/6); keeping Comfy lanes alive"
+    [ "$ZIMG_FRONTEND_HEALTH_SOFT_FAILS" -lt 6 ] || return 1
+  fi
+  return 0
+}
+
+supervise() {
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    local old_pid=""
+    [ -f "$LOCK_DIR/pid" ] && old_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+      log "another supervisor is already running pid=$old_pid; exiting"
+      exit 0
+    fi
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || { log "could not acquire supervisor lock; exiting"; exit 0; }
+  fi
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+  trap 'stop_children; rm -rf "$LOCK_DIR"; exit 0' TERM INT HUP EXIT
+  /usr/bin/caffeinate -i -m -w $$ >> "$SUP_LOG" 2>&1 &
+  children+=("$!")
+  while true; do
+    stop_children
+    if ! start_children; then
+      log "startup failed; retrying in 10s"
+      stop_children
+      sleep 10
+      continue
+    fi
+    while true; do
+      sleep 20
+      write_tunnel_url_once
+      for pid in "${children[@]:-}"; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+          log "child pid $pid exited; restarting whole stack"
+          break 2
+        fi
+      done
+      if ! healthy; then
+        log "health check failed; restarting whole stack"
+        break
+      fi
+    done
+  done
+}
+
+launch_start() {
+  launchctl bootout "$DOMAIN/$OLD_CF_LABEL" 2>/dev/null || true
+  launchctl bootout "$DOMAIN/$OLD_OPEN_GEN_LABEL" 2>/dev/null || true
+  launchctl disable "$DOMAIN/$OLD_OPEN_GEN_LABEL" 2>/dev/null || true
+  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  launchctl setenv ZIMG_ACCELERATOR_PROFILE "$ZIMG_ACCELERATOR_PROFILE" 2>/dev/null || true
+	  if [ "${ZIMG_ENABLE_FLUX2_SERVER:-0}" = "1" ]; then
+	    launchctl setenv ZIMG_ENABLE_FLUX2_SERVER 1 2>/dev/null || true
+	  else
+	    launchctl unsetenv ZIMG_ENABLE_FLUX2_SERVER 2>/dev/null || true
+	  fi
+	  if [ "${COMFY_ENABLE_LTX_LANE:-0}" = "1" ]; then
+	    launchctl setenv COMFY_ENABLE_LTX_LANE 1 2>/dev/null || true
+	  else
+	    launchctl unsetenv COMFY_ENABLE_LTX_LANE 2>/dev/null || true
+	  fi
+  local loaded=0
+  for _ in 1 2 3 4 5; do
+    if launchctl bootstrap "$DOMAIN" "$HOME/Library/LaunchAgents/$LABEL.plist"; then
+      loaded=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$loaded" -ne 1 ]; then
+    echo "Failed to load $LABEL" >&2
+    exit 1
+  fi
+  launchctl kickstart -k "$DOMAIN/$LABEL" 2>/dev/null || true
+  echo "Hivemind Content Studio starting as one managed app."
+  echo "Local URL: http://127.0.0.1:$CONTENT_STUDIO_PORT"
+  ts_ip="$(tailscale_ip || true)"
+  [ -n "$ts_ip" ] && { ts_dns="$(tailscale_dns || true)"; [ -n "$ts_dns" ] && echo "App URL: https://$ts_dns:$TAILSCALE_HTTPS_PORT" || echo "App URL: https://$ts_ip:$TAILSCALE_HTTPS_PORT"; }
+}
+
+launch_stop() {
+  launchctl bootout "$DOMAIN/$OLD_CF_LABEL" 2>/dev/null || true
+  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+	  kill_port "$COMFY_DEFAULT_PORT"
+	  kill_port "$COMFY_LTX_PORT"
+	  kill_port "$COMFY_ANIMA_PORT"
+  kill_port 8787
+  kill_port 8788
+  kill_port "$MEDIA_STUDIO_MCP_PORT"
+  kill_port "$FLUX2_SERVER_PORT"
+  kill_port "$TAILSCALE_HTTPS_PORT"
+  kill_port "$CONTENT_STUDIO_PORT"
+  kill_port "$OPEN_GEN_PORT"
+  echo "Hivemind Content Studio stopped."
+}
+
+status() {
+  echo "LaunchAgent:"
+  launchctl print "$DOMAIN/$LABEL" 2>/dev/null | sed -n '1,20p' || echo "  not loaded"
+  echo
+  echo "Hardware profile: $ZIMG_ACCELERATOR_PROFILE (Apple Silicon optimizations: $ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS)"
+	  echo "Default lane ASFP8: INT8=$COMFY_DEFAULT_ASFP8_INT8_EXT FP8=$COMFY_DEFAULT_ASFP8_FP8_EXT"
+	  echo "Comfy attention flag: ${COMFY_DEFAULT_ATTENTION:-none}"
+	  echo "Dedicated LTX lane: $COMFY_ENABLE_LTX_LANE (port $COMFY_LTX_PORT, Apple Silicon gpu-only + MPS LoRA bypass)"
+	  echo "LTX priority mode: $ZIMG_LTX_PRIORITY_MODE (Flux2 forced: ${ZIMG_FORCE_FLUX2_SERVER:-0})"
+	  echo "Flux2 Swift/MLX server default: $ZIMG_ENABLE_FLUX2_SERVER"
+  echo
+  echo "Listeners:"
+	  for port in "$CONTENT_STUDIO_PORT" "$OPEN_GEN_PORT" "$COMFY_DEFAULT_PORT" "$COMFY_LTX_PORT" "$COMFY_ANIMA_PORT" 8787 8788 "$MEDIA_STUDIO_MCP_PORT" "$FLUX2_SERVER_PORT" "$TAILSCALE_HTTPS_PORT"; do
+    pids=$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$pids" ]; then echo "  :$port pid(s): $pids"; else echo "  :$port not listening"; fi
+  done
+  echo
+  if [ -s "$URL_FILE" ]; then
+    echo "Cloudflare URL: $(cat "$URL_FILE")"
+  else
+    echo "Cloudflare URL: disabled"
+  fi
+  local ts_ip
+  ts_ip="$(tailscale_ip || true)"
+  if [ -n "$ts_ip" ]; then
+    local ts_dns
+    ts_dns="$(tailscale_dns || true)"
+    [ -n "$ts_dns" ] && echo "App URL: https://$ts_dns:$TAILSCALE_HTTPS_PORT" || echo "App URL: https://$ts_ip:$TAILSCALE_HTTPS_PORT"
+    echo "Plain HTTP fallback: http://$ts_ip:8788"
+  else
+    echo "App URL: Tailscale IP not found"
+  fi
+}
+
+case "${1:-status}" in
+  supervise) supervise ;;
+  start) launch_start ;;
+  stop) launch_stop ;;
+  restart) launch_stop; sleep 2; launch_start ;;
+  status) status ;;
+  url)
+    ts_ip="$(tailscale_ip || true)"
+    ts_dns="$(tailscale_dns || true)"
+    if [ -n "$ts_dns" ]; then echo "https://$ts_dns:$TAILSCALE_HTTPS_PORT"; elif [ -n "$ts_ip" ]; then echo "https://$ts_ip:$TAILSCALE_HTTPS_PORT"; else echo "http://127.0.0.1:$CONTENT_STUDIO_PORT"; fi
+    ;;
+  *) echo "Usage: zimage-stack {start|stop|restart|status|url|supervise}" >&2; exit 2 ;;
+esac

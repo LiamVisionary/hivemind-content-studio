@@ -1,0 +1,29 @@
+{
+  "name": "media-studio-next",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p 8788",
+    "build": "next build",
+    "start": "NODE_ENV=production HOST=127.0.0.1 PORT=8788 node server.js",
+    "test": "python3 -m unittest test_app.py && npm run build",
+    "studio": "node bin/image-gen-studio.mjs open --start",
+    "studio:open": "node bin/image-gen-studio.mjs open",
+    "studio:status": "node bin/image-gen-studio.mjs status",
+    "studio:install-app": "node bin/image-gen-studio.mjs install-macos-app",
+    "studio:doctor": "node bin/image-gen-studio.mjs doctor",
+    "mcp:stdio": "node bin/media-studio-mcp.mjs --stdio",
+    "mcp:http": "node bin/media-studio-mcp.mjs --http",
+    "mcp:tools": "node bin/media-studio-mcp.mjs --print-tools"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "http-proxy": "^1.18.1",
+    "lucide-react": "latest",
+    "next": "^16.2.10",
+    "react": "latest",
+    "react-dom": "latest",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
+  }
+}

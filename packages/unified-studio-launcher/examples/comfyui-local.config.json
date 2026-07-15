@@ -1,0 +1,36 @@
+{
+  "name": "ComfyUI Studio",
+  "host": "127.0.0.1",
+  "port": 4888,
+  "openUrl": "http://127.0.0.1:4888",
+  "dataDir": "../.studio",
+  "actions": {},
+  "repositories": [
+    {
+      "id": "comfyui",
+      "url": "https://github.com/comfyanonymous/ComfyUI.git",
+      "ref": "master",
+      "path": "../vendor/ComfyUI",
+      "install": {
+        "darwin": [["python3", "-m", "pip", "install", "-r", "requirements.txt"]],
+        "linux": [["python3", "-m", "pip", "install", "-r", "requirements.txt"]],
+        "win32": [["python", "-m", "pip", "install", "-r", "requirements.txt"]]
+      }
+    }
+  ],
+  "services": [
+    {
+      "id": "comfyui",
+      "name": "ComfyUI Runtime",
+      "role": "Workflow graph execution and custom-node host",
+      "healthUrl": "http://127.0.0.1:8188/system_stats",
+      "url": "http://127.0.0.1:8188",
+      "cwd": "../vendor/ComfyUI",
+      "start": {
+        "darwin": ["python3", "main.py", "--listen", "127.0.0.1", "--port", "8188"],
+        "linux": ["python3", "main.py", "--listen", "127.0.0.1", "--port", "8188"],
+        "win32": ["python", "main.py", "--listen", "127.0.0.1", "--port", "8188"]
+      }
+    }
+  ]
+}

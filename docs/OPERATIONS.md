@@ -14,7 +14,9 @@ The studio server reads `~/.hivemindos/.env` as its only default shared fallback
 
 ## Local services
 
-The browser is one native Studio and does not mount local-service UIs.
+The browser is one Hivemind Content Studio shell. Explore, Canvas, and Models
+mount embedded package UIs while durable runs continue to use the canonical
+Content Studio API and state store.
 `GET /api/runtime` is a read-only operator diagnostic for its internal engines
 and source provenance; it does not start processes or accept command arrays.
 Default loopback endpoints are `COMFYUI_URL=http://127.0.0.1:8188`,
@@ -81,13 +83,44 @@ Do not replace a remote/Tailnet service URL with client-local `127.0.0.1`. The l
 
 Run the stdio MCP server with `hive-env-run -- uv run content-studio-mcp`. Agents should begin with `studio://capabilities` and `studio://providers`, create a run with `execute_content_run`, and inspect `studio://runs/<id>/next-actions` after every external step.
 
-Start the local creation and operations studio with:
+Build embedded web packages once after dependency or frontend changes:
 
 ```bash
-hive-env-run -- uv run content-studio-api
+npm --prefix packages/open-generative-ai ci
+npm --prefix packages/comfyui-mobile ci
+npm --prefix packages/media-gateway ci
+npm run build:embedded
 ```
 
-Open `http://127.0.0.1:8765`. The default flow creates a production from a title, creative direction, lane, and optional scenes. Advanced panels expose provider routing, voice/captions, distribution, MoneyPrinter faceless controls, privacy, budget, and operator credentials only when needed. Creating a run is a safe local draft operation; resume, retry, cancellation, and approval decisions require `Authorization: Bearer <CONTENT_STUDIO_CONTROL_TOKEN>`. The approval signing secret and operator token remain server-side.
+Start the complete managed app:
+
+```bash
+uv run content-studio stack start
+```
+
+Open `http://127.0.0.1:8765`. Use `content-studio stack status`, `restart`, `stop`, or `url` for lifecycle control. The supervisor owns ports 8765, 8787, 8788, 8794, 8796, the configured ComfyUI lanes, and optional native MLX/Tailscale listeners. Creating a run is a safe local draft operation; resume, retry, cancellation, and approval decisions require `Authorization: Bearer <CONTENT_STUDIO_CONTROL_TOKEN>`. The approval signing secret and operator token remain server-side.
+
+The stable LaunchAgent still invokes `~/.local/bin/zimage-stack`. Install the reversible link only after verification:
+
+```bash
+python3 scripts/bootstrap_unified_studio.py --install-links
+```
+
+The installer archives the prior launcher under `~/.hivemindos/media-studio/archive/launchers/` and reports the exact restore path. It refuses to overwrite a real ComfyUI custom-node directory.
+Starting the unified LaunchAgent also boots out and disables the obsolete `com.liam.open-generative-ai-hosted` label so it cannot compete for port 8794. Its plist is left intact for rollback.
+
+## Donor checkout retirement gate
+
+Do not delete an old checkout until all of these are true:
+
+1. `uv run pytest test/studio` and `npm run test:embedded` pass.
+2. `npm run build:embedded` passes from the unified repo.
+3. A cold start from `scripts/hivemind-studio-stack supervise` reaches every required health endpoint.
+4. Browser checks pass for Studio, Explore, Canvas, Models, Runs, History, Telemetry, and Providers on desktop and mobile widths.
+5. `scripts/migrate_media_state.py` has written a migration receipt and the canonical state files are present.
+6. The two owner forks without detected license files have an explicit redistribution decision before the embedded source is pushed publicly.
+
+Deleting donor checkouts must never include the external ComfyUI checkout, model directories, `~/.comfy-private.noindex`, or `~/.hivemindos/media-studio`. Keep a final archive until at least one real generation has completed through the unified stack.
 
 ## Recovery and rollback
 

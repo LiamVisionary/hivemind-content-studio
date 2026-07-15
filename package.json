@@ -1,0 +1,21 @@
+{
+  "name": "hivemind-content-studio-monorepo",
+  "private": true,
+  "version": "0.2.0",
+  "scripts": {
+    "build:open-gen": "npm --prefix packages/open-generative-ai run vite:build",
+    "build:mobile": "npm --prefix packages/comfyui-mobile run build",
+    "build:gateway": "npm --prefix packages/media-gateway run build",
+    "build:embedded": "npm run build:open-gen && npm run build:mobile && npm run build:gateway",
+    "test:open-gen": "npm --prefix packages/open-generative-ai test --if-present",
+    "test:mobile": "npm --prefix packages/comfyui-mobile test",
+    "test:gateway": "npm --prefix packages/media-gateway test",
+    "test:embedded": "npm run test:open-gen && npm run test:mobile && npm run test:gateway",
+    "stack:start": "./scripts/hivemind-studio-stack start",
+    "stack:stop": "./scripts/hivemind-studio-stack stop",
+    "stack:restart": "./scripts/hivemind-studio-stack restart",
+    "stack:status": "./scripts/hivemind-studio-stack status",
+    "desktop": "HIVEMIND_STUDIO_URL=http://127.0.0.1:8765 npm --prefix packages/open-generative-ai run electron:dev",
+    "bootstrap:check": "python3 scripts/bootstrap_unified_studio.py"
+  }
+}

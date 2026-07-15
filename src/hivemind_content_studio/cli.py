@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,6 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
     templates = sub.add_parser("templates", help="List production templates or show one template's prompt")
     templates.add_argument("template_id", nargs="?", default="", help="Template id to show in full; omit to list the catalog")
     templates.set_defaults(func=cmd_templates)
+
+    stack = sub.add_parser("stack", help="Start, stop, inspect, or restart the complete local media stack")
+    stack.add_argument("action", choices=["start", "stop", "restart", "status", "url", "supervise"], nargs="?", default="status")
+    stack.set_defaults(func=cmd_stack)
 
     telemetry = sub.add_parser("telemetry", help="Inspect privacy-safe generation performance and reliability")
     telemetry_sub = telemetry.add_subparsers(dest="telemetry_command", required=True)
@@ -308,6 +313,13 @@ def cmd_templates(args: argparse.Namespace) -> int:
     ]
     print(json.dumps(listing, indent=2, sort_keys=True))
     return 0
+
+
+def cmd_stack(args: argparse.Namespace) -> int:
+    script = Path(__file__).resolve().parents[2] / "scripts" / "hivemind-studio-stack"
+    if not script.is_file():
+        raise RuntimeError(f"Unified stack supervisor is missing: {script}")
+    return subprocess.run([str(script), args.action], check=False).returncode
 
 
 def cmd_plan(args: argparse.Namespace) -> int:

@@ -36,4 +36,7 @@ debug_*.py
 test_*.py
 !test/services/test_*.py
 !test/**/*.py
+!packages/**/test_*.py
+!packages/**/tests/**/*.py
+!engines/**/Tests/**
 streamlit.log

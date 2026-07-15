@@ -158,6 +158,59 @@ def test_simple_catalog_combines_safe_hivemind_brains_and_media_capabilities(tmp
     assert any(template["id"] == "ugc-product-ad-15s" for template in catalog["templates"])
 
 
+def test_unified_tool_surfaces_are_discoverable_without_checkout_paths(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    response = client.get("/api/surfaces")
+
+    assert response.status_code == 200
+    surfaces = response.json()["surfaces"]
+    assert surfaces["explore"]["path"] == "/open-gen/"
+    assert surfaces["canvas"]["gateway_path"] == "/mobile/"
+    assert surfaces["models"]["gateway_path"] == "/models"
+    assert isinstance(surfaces["explore"]["available"], bool)
+    assert "/Users/" not in response.text
+
+
+def test_simple_catalog_falls_back_to_the_builtin_local_planner(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.brain_catalog",
+        lambda: (_ for _ in ()).throw(RuntimeError("HivemindOS unavailable")),
+    )
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    catalog = client.get("/api/simple/catalog").json()
+
+    assert catalog["brains"][0]["slug"] == "local-planner"
+    assert catalog["brains"][0]["models"][0]["auth"] == "local"
+    assert catalog["brain_error"] == "HivemindOS unavailable"
+
+
+def test_builtin_local_planner_creates_a_confirmable_draft_and_keeps_media_routes(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/simple/plan",
+        json={
+            "prompt": "Animate a product reveal with a slow push-in",
+            "provider": "local-planner",
+            "model": "deterministic-v1",
+            "auth": "local",
+            "studioMode": "animate",
+            "imageSelection": {"provider": "comfyui", "model": "automatic"},
+            "videoSelection": {"provider": "xai-imagine-api", "model": "grok-imagine-video"},
+        },
+    )
+
+    assert response.status_code == 200
+    plan = response.json()["plan"]
+    assert plan["mode"] == "confirmation"
+    assert plan["planner"] == "local-planner:deterministic-v1"
+    assert plan["draft"]["lane"] == "animation"
+    assert plan["draft"]["providers"] == {"keyframe": "comfyui", "motion": "xai-imagine-api"}
+    assert plan["draft"]["provider_options"]["xai-imagine-api"]["motion"]["model"] == "grok-imagine-video"
+
+
 def test_template_catalog_endpoint_serves_composer_ready_templates(tmp_path: Path, monkeypatch) -> None:
     client, _, _ = _client(tmp_path, monkeypatch)
 

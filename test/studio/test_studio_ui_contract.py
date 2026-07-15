@@ -138,7 +138,7 @@ def test_generation_telemetry_has_a_compact_agent_first_view() -> None:
     assert ".telemetry-summary" in css
 
 
-def test_native_unified_studio_has_first_party_modes_without_app_boundaries() -> None:
+def test_unified_studio_has_native_modes_and_embedded_tool_surfaces() -> None:
     html = (UI_ROOT / "index.html").read_text(encoding="utf-8")
     javascript = (UI_ROOT / "studio.js").read_text(encoding="utf-8")
     css = (UI_ROOT / "studio.css").read_text(encoding="utf-8")
@@ -153,7 +153,16 @@ def test_native_unified_studio_has_first_party_modes_without_app_boundaries() ->
     assert "studioMode: state.studioMode" in javascript
     assert "composer.studioMode" in javascript
     assert ".native-mode-rail" in css
-    assert "<iframe" not in html
+    assert '<span>Explore</span>' in html
+    assert '<span>Canvas</span>' in html
+    assert '<span>Models</span>' in html
+    assert 'data-tool-surface="explore"' in html
+    assert 'data-tool-surface="canvas"' in html
+    assert 'data-tool-surface="models"' in html
+    assert "loadToolSurface" in javascript
+    assert "bindLocalAiBridge" in javascript
+    assert "api('/api/surfaces')" in javascript
+    assert ".tool-view iframe" in css
     assert "workspace-board" not in html
     assert "data-open-workspace" not in javascript
     assert "api('/api/runtime')" not in javascript

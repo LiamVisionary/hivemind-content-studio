@@ -1,0 +1,797 @@
+{
+  "id": "dc3eb2e2-3e34-498b-9236-7ac065cd3e87",
+  "revision": 0,
+  "last_node_id": 69,
+  "last_link_id": 102,
+  "nodes": [
+    {
+      "id": 29,
+      "type": "SaveImage",
+      "pos": [
+        1485.4907635493869,
+        228.98554477583767
+      ],
+      "size": [
+        521.9400468165495,
+        856.5997176634778
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 81
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "Krea2_RedMix"
+      ]
+    },
+    {
+      "id": 49,
+      "type": "ResolutionSelector",
+      "pos": [
+        -57.472671457476736,
+        229.60771020646268
+      ],
+      "size": [
+        274.01021553152884,
+        126
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "links": []
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "ResolutionSelector"
+      },
+      "widgets_values": [
+        "1:1 (Square)",
+        1,
+        8
+      ]
+    },
+    {
+      "id": 51,
+      "type": "CLIPTextEncode",
+      "pos": [
+        732.3348728704531,
+        230.8459697570243
+      ],
+      "size": [
+        384.8934678286189,
+        465.61235434663604
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 97
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            75,
+            77
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "{\n  \"subject\": {\n    \"description\": \"A cute young East Asian woman in her early 20s with fair skin and short black bob, lying down in bright sunlight, playfully winking at the camera.\",\n    \"mirror_rules\": \"Extreme close-up POV, very intimate framing with hands in foreground\",\n    \"age\": \"early 20s\",\n    \"expression\": {\n      \"eyes\": { \"look\": \"right eye wide open looking at camera, left eye winking/closed\", \"energy\": \"playful, teasing, cute and cheeky\", \"direction\": \"right eye directly toward viewer\" },\n      \"mouth\": { \"position\": \"soft gentle smile with slightly upturned corners\", \"energy\": \"sweet and mischievous\" },\n      \"overall\": \"playful wink + soft smile, charming and lighthearted\"\n    },\n    \"face\": { \"preserve_original\": \"soft features, full cheeks, natural double eyelids\", \"makeup\": \"light natural makeup, glossy coral-orange lips, subtle glow\" }\n  },\n  \"hair\": { \"color\": \"jet black\", \"style\": \"short bob with straight bangs\", \"effect\": \"shiny with strong sunlight highlights on strands\" },\n  \"body\": {\n    \"frame\": \"petite slim build\",\n    \"waist\": \"slender\",\n    \"chest\": \"upper chest visible\",\n    \"legs\": \"not visible\",\n    \"skin\": {\n      \"visible_areas\": \"face, neck, shoulders, upper chest\",\n      \"tone\": \"fair porcelain with warm undertones\",\n      \"texture\": \"smooth with visible natural texture and pores under harsh light\",\n      \"lighting_effect\": \"harsh directional sunlight creating distinct parallel striped shadows across face, neck and chest, bright highlights on skin\"\n    }\n  },\n  \"pose\": { \"position\": \"lying down / reclining, head resting on light-colored surface, looking up at camera\", \"base\": \"lying on back or side\", \"overall\": \"relaxed playful pose with head slightly tilted\" },\n  \"clothing\": {\n    \"top\": { \"type\": \"white thin-strap camisole\", \"color\": \"off-white\", \"details\": \"delicate spaghetti strap visible on left shoulder, soft fabric\", \"effect\": \"casual and light, skin visible around strap\" },\n    \"bottom\": { \"type\": \"not visible\", \"color\": \"\", \"details\": \"\" }\n  },\n  \"accessories\": { \"headwear\": \"none\", \"jewelry\": \"small earrings\", \"device\": \"smartphone implied\", \"prop\": \"hands in foreground framing the composition (large hand at top, blurred hand at bottom)\" },\n  \"photography\": {\n    \"camera_style\": \"casual extreme close-up POV smartphone photo, very intimate\",\n    \"angle\": \"high angle / overhead close-up, looking down at her face\",\n    \"shot_type\": \"extreme close-up on face and upper chest\",\n    \"aspect_ratio\": \"portrait, vertical\",\n    \"texture\": \"high detail on skin texture, hair strands, fabric\",\n    \"lighting\": \"strong directional sunlight with clear parallel striped shadows (window blinds effect), high contrast, bright highlights and deep shadows\",\n    \"depth_of_field\": \"shallow depth of field, sharp on the open eye and facial features, foreground hands slightly soft\"\n  },\n  \"background\": {\n    \"setting\": \"bright sunlit indoor space, light-colored chair or cushion\",\n    \"wall_color\": \"bright overexposed light tones\",\n    \"elements\": [\"light-colored woven or grid-textured surface under her head\", \"strong sunlight creating striped shadow patterns\"],\n    \"atmosphere\": \"bright, hot, sunny, intimate\",\n    \"lighting\": \"harsh golden sunlight from above/side, strong striped shadows\"\n  },\n  \"the_vibe\": {\n    \"energy\": \"playful, cheeky, sunny and intimate\",\n    \"mood\": \"fun, lighthearted, slightly teasing\",\n    \"aesthetic\": \"bright natural light photography, high contrast sunlight, casual intimate snapshot\",\n    \"authenticity\": \"real candid moment with visible strong shadow patterns\",\n    \"intimacy\": \"very high — extreme close-up, direct gaze from open eye, hands framing the shot\",\n    \"story\": \"a girl lying in strong sunlight, playfully winking at the camera while someone takes an extremely close photo\",\n    \"caption_energy\": \"playful sunny daily share, cute and cheeky\"\n  },\n  \"constraints\": {\n    \"must_keep\": [\n      \"short black bob with straight bangs\",\n      \"playful wink (left eye closed, right eye open looking at camera)\",\n      \"soft coral glossy lips and gentle smile\",\n      \"strong directional sunlight with distinct striped/blind shadows across face, neck and chest\",\n      \"hands visible in foreground framing top and bottom of frame\",\n      \"white thin camisole strap visible\",\n      \"extreme close-up overhead POV angle, lying down pose\",\n      \"bright overexposed sunny background with light-colored textured surface\"\n    ],\n    \"avoid\": [\n      \"both eyes open\",\n      \"soft diffused lighting\",\n      \"no hands in frame\",\n      \"studio or even lighting\",\n      \"full body or medium shot\",\n      \"dark or moody atmosphere\",\n      \"overly perfect skin without texture\"\n    ]\n  },\n  \"negative_prompt\": [\n    \"blurry\", \"low quality\", \"deformed\", \"bad anatomy\", \"extra limbs\", \"watermark\", \"text\", \"overexposed face\", \"flat lighting\", \"no shadows\", \"both eyes open\", \"serious expression\", \"cartoon\"\n  ]\n}"
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 52,
+      "type": "UNETLoader",
+      "pos": [
+        244.06701423188045,
+        228.66492314522569
+      ],
+      "size": [
+        450,
+        140
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            95
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "krea2_turbo_fp8_scaled.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "Krea2RedMix-10Steps-bf16-dequant-ComfyUI.safetensors",
+        "default"
+      ]
+    },
+    {
+      "id": 53,
+      "type": "CLIPLoader",
+      "pos": [
+        244.06701423188045,
+        430.9866667544874
+      ],
+      "size": [
+        450,
+        170
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            97
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "CLIPLoader",
+        "models": [
+          {
+            "name": "qwen3vl_4b_fp8_scaled.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+            "directory": "text_encoders"
+          }
+        ]
+      },
+      "widgets_values": [
+        "qwen3vl_4b_fp8_scaled.safetensors",
+        "krea2",
+        "default"
+      ]
+    },
+    {
+      "id": 54,
+      "type": "KSampler",
+      "pos": [
+        1139.4303434922222,
+        234.52998818376815
+      ],
+      "size": [
+        320,
+        590
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 95
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 75
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 76
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 79
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            78
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        794015397137290,
+        "randomize",
+        10,
+        1,
+        "er_sde",
+        "simple",
+        1
+      ]
+    },
+    {
+      "id": 55,
+      "type": "ConditioningZeroOut",
+      "pos": [
+        1004.720914508608,
+        768.5735882480118
+      ],
+      "size": [
+        225,
+        26
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 77
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            76
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "ConditioningZeroOut"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 56,
+      "type": "VAEDecode",
+      "pos": [
+        742.2781363133461,
+        733.9227996884545
+      ],
+      "size": [
+        233.33701732775376,
+        46
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 78
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 98
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            81,
+            102
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 57,
+      "type": "EmptyLatentImage",
+      "pos": [
+        -51.96264290354667,
+        413.91335007494627
+      ],
+      "size": [
+        266.00681428589235,
+        124.5321194060939
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            79
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "EmptyLatentImage"
+      },
+      "widgets_values": [
+        960,
+        1440,
+        1
+      ]
+    },
+    {
+      "id": 58,
+      "type": "VAELoader",
+      "pos": [
+        244.06701423188045,
+        664.4453607346028
+      ],
+      "size": [
+        450,
+        120
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            98
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "qwen_image_vae.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "qwen_image_vae.safetensors"
+      ]
+    },
+    {
+      "id": 66,
+      "type": "SeedVR2LoadDiTModel",
+      "pos": [
+        1125.9396954729502,
+        917.707562121137
+      ],
+      "size": [
+        317.55208333333337,
+        253.85416666666669
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "torch_compile_args",
+          "shape": 7,
+          "type": "TORCH_COMPILE_ARGS",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SEEDVR2_DIT",
+          "type": "SEEDVR2_DIT",
+          "links": [
+            99
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "seedvr2_videoupscaler",
+        "ver": "4490bd1f482e026674543386bb2a4d176da245b9",
+        "Node name for S&R": "SeedVR2LoadDiTModel",
+        "aux_id": "numz/ComfyUI-SeedVR2_VideoUpscaler"
+      },
+      "widgets_values": [
+        "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors",
+        "mps",
+        0,
+        false,
+        "cpu",
+        true,
+        "sdpa"
+      ]
+    },
+    {
+      "id": 67,
+      "type": "SeedVR2LoadVAEModel",
+      "pos": [
+        1126.3458892863357,
+        1223.5126351703361
+      ],
+      "size": [
+        321.796875,
+        357.1875
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "torch_compile_args",
+          "shape": 7,
+          "type": "TORCH_COMPILE_ARGS",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SEEDVR2_VAE",
+          "type": "SEEDVR2_VAE",
+          "links": [
+            100
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "seedvr2_videoupscaler",
+        "ver": "4490bd1f482e026674543386bb2a4d176da245b9",
+        "Node name for S&R": "SeedVR2LoadVAEModel",
+        "aux_id": "numz/ComfyUI-SeedVR2_VideoUpscaler"
+      },
+      "widgets_values": [
+        "ema_vae_fp16.safetensors",
+        "mps",
+        true,
+        1024,
+        128,
+        true,
+        1024,
+        128,
+        "false",
+        "cpu",
+        true
+      ]
+    },
+    {
+      "id": 68,
+      "type": "SeedVR2VideoUpscaler",
+      "pos": [
+        758.1395796475817,
+        924.2258342536993
+      ],
+      "size": [
+        329.9479166666667,
+        422.7604166666667
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 102
+        },
+        {
+          "name": "dit",
+          "type": "SEEDVR2_DIT",
+          "link": 99
+        },
+        {
+          "name": "vae",
+          "type": "SEEDVR2_VAE",
+          "link": 100
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            101
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "seedvr2_videoupscaler",
+        "ver": "4490bd1f482e026674543386bb2a4d176da245b9",
+        "Node name for S&R": "SeedVR2VideoUpscaler",
+        "aux_id": "numz/ComfyUI-SeedVR2_VideoUpscaler"
+      },
+      "widgets_values": [
+        3041761909,
+        "randomize",
+        1920,
+        0,
+        1,
+        false,
+        "lab",
+        0,
+        0,
+        0.0,
+        0.0,
+        "none",
+        false
+      ]
+    },
+    {
+      "id": 69,
+      "type": "SaveImage",
+      "pos": [
+        2040.5024421443186,
+        229.3763796133437
+      ],
+      "size": [
+        809.4747359457847,
+        1338.9343545805689
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 101
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.22.0",
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "Krea2SeedVR2"
+      ]
+    }
+  ],
+  "links": [
+    [
+      75,
+      51,
+      0,
+      54,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      76,
+      55,
+      0,
+      54,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      77,
+      51,
+      0,
+      55,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      78,
+      54,
+      0,
+      56,
+      0,
+      "LATENT"
+    ],
+    [
+      79,
+      57,
+      0,
+      54,
+      3,
+      "LATENT"
+    ],
+    [
+      81,
+      56,
+      0,
+      29,
+      0,
+      "IMAGE"
+    ],
+    [
+      95,
+      52,
+      0,
+      54,
+      0,
+      "MODEL"
+    ],
+    [
+      97,
+      53,
+      0,
+      51,
+      0,
+      "CLIP"
+    ],
+    [
+      98,
+      58,
+      0,
+      56,
+      1,
+      "VAE"
+    ],
+    [
+      99,
+      66,
+      0,
+      68,
+      1,
+      "SEEDVR2_DIT"
+    ],
+    [
+      100,
+      67,
+      0,
+      68,
+      2,
+      "SEEDVR2_VAE"
+    ],
+    [
+      101,
+      68,
+      0,
+      69,
+      0,
+      "IMAGE"
+    ],
+    [
+      102,
+      56,
+      0,
+      68,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "SeedVR2",
+      "bounding": [
+        748.1395796475813,
+        847.707562121137,
+        710.0031846387553,
+        742.9925730491973
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.45.19",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true,
+    "ue_links": [],
+    "ds": {
+      "scale": 0.7037928547457123,
+      "offset": [
+        -334.62142856593675,
+        -75.20500912634759
+      ]
+    },
+    "name": "Krea2 Red Mix SeedVR2 Apple Silicon",
+    "comfyMobile": {
+      "title": "Krea2 Red Mix SeedVR2 Apple Silicon",
+      "note": "Native Krea2 Red Mix FP8/scaled Apple Silicon workflow with Qwen3VL text encoder, Qwen image VAE, and SeedVR2 7B MPS upscaling branch.",
+      "recommendedSettings": {
+        "kreaModel": "Krea2RedMix-10Steps-bf16-dequant-ComfyUI.safetensors via UNETLoader; dequantized from the Red Mix FP8 file for MPS compatibility.",
+        "clip": "qwen3vl_4b_fp8_scaled.safetensors via CLIPLoader type krea2",
+        "vae": "qwen_image_vae.safetensors",
+        "baseSize": "960x1440",
+        "sampler": "er_sde / simple, 10 steps, cfg 1",
+        "seedVR2": "Disabled by default for lighter base Krea2 generations. Re-enable nodes 66, 67, 68, and 69 to run the SeedVR2 upscaling branch.",
+        "outputs": "Krea2_RedMix saves the base image; Krea2SeedVR2 saves the SeedVR2 upscaled image."
+      },
+      "dependencies": {
+        "customNodes": [
+          "ComfyUI-SeedVR2_VideoUpscaler"
+        ],
+        "models": [
+          "diffusion_models/Krea2RedMix-10Steps-fp8-scaled-ComfyUI.safetensors",
+          "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+          "vae/qwen_image_vae.safetensors",
+          "SEEDVR2/seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors",
+          "SEEDVR2/ema_vae_fp16.safetensors"
+        ]
+      },
+      "seedVR2Default": "disabled",
+      "appleSiliconModelPath": "diffusion_models/Krea2RedMix-10Steps-bf16-dequant-ComfyUI.safetensors"
+    }
+  },
+  "version": 0.4,
+  "seed_widgets": {
+    "54": 0,
+    "68": 0
+  }
+}

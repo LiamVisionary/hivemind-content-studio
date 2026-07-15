@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unified Media Studio</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div>
+        <p class="eyebrow">Local media stack</p>
+        <h1>Unified Media Studio</h1>
+      </div>
+      <div class="actions">
+        <button id="refresh">Refresh</button>
+        <button id="start">Start</button>
+        <button id="restart">Restart</button>
+        <button id="stop" class="danger">Stop</button>
+      </div>
+    </header>
+    <section class="summary" id="summary">
+      <article><span>Status</span><strong>Checking</strong></article>
+      <article><span>Services</span><strong>...</strong></article>
+      <article><span>Config</span><strong>Loading</strong></article>
+    </section>
+    <section class="grid" id="services"></section>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Repositories</h2>
+        <button id="bootstrap">Bootstrap</button>
+      </div>
+      <div class="repo-grid" id="repositories"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Action Log</h2>
+        <button id="doctor">Doctor</button>
+      </div>
+      <pre id="log">Ready.</pre>
+    </section>
+  </main>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+{
+  "name": "Unified Media Studio",
+  "host": "127.0.0.1",
+  "port": 4888,
+  "openUrl": "http://127.0.0.1:4888",
+  "dataDir": ".studio",
+  "actions": {
+    "start": ["echo", "Replace actions.start with your supervisor command"],
+    "stop": ["echo", "Replace actions.stop with your supervisor command"],
+    "restart": ["echo", "Replace actions.restart with your supervisor command"]
+  },
+  "repositories": [],
+  "services": [
+    {
+      "id": "gateway",
+      "name": "Studio Gateway",
+      "role": "Browser shell and API gateway",
+      "healthUrl": "http://127.0.0.1:8788",
+      "url": "http://127.0.0.1:8788"
+    },
+    {
+      "id": "backend",
+      "name": "Private Media API",
+      "role": "Image/video generation API, history, output serving, workflow recovery",
+      "healthUrl": "http://127.0.0.1:8787/healthz",
+      "url": "http://127.0.0.1:8787"
+    },
+    {
+      "id": "comfyui",
+      "name": "ComfyUI Runtime",
+      "role": "Workflow graph execution and custom-node host",
+      "healthUrl": "http://127.0.0.1:8188/system_stats",
+      "url": "http://127.0.0.1:8188"
+    },
+    {
+      "id": "mobile",
+      "name": "Mobile Workflow UI",
+      "role": "Workflow editor, queue, outputs, media viewer",
+      "healthUrl": "http://127.0.0.1:8788/mobile/",
+      "url": "http://127.0.0.1:8788/mobile/"
+    },
+    {
+      "id": "native",
+      "name": "Native Engine Sidecar",
+      "role": "Optional Swift/MLX, CUDA, or other accelerated engine",
+      "healthUrl": "",
+      "url": ""
+    }
+  ]
+}

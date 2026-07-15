@@ -1,0 +1,249 @@
+@import "tailwindcss";
+
+/* Base styles */
+:root {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: #000000;
+  touch-action: pan-y;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.bg-white { background-color: #151a23; }
+
+input,
+select,
+textarea {
+  background-color: #0b1320;
+  border-color: #1b2432;
+  color: #e5e7eb;
+}
+.rs__control {
+  min-height: 0;
+  height: 48px;
+  /* Match .comfy-input / bg-slate-950/80 controls. */
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 0.5rem;
+  background-color: rgb(2 6 23 / 0.8);
+  box-shadow: none;
+  cursor: pointer;
+}
+.rs__control--is-focused {
+  border-color: #22d3ee;
+  box-shadow: 0 0 0 1px #22d3ee;
+}
+.rs__control--is-disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.rs__value-container {
+  padding: 0 0.75rem;
+}
+.rs__input-container {
+  margin: 0;
+  padding: 0;
+}
+.rs__input {
+  margin: 0;
+  padding: 0;
+  line-height: 1.5;
+}
+.rs__single-value {
+  color: #e5e7eb;
+  margin: 0;
+  line-height: 1.5;
+}
+.rs__placeholder {
+  color: #9ca3af;
+  margin: 0;
+}
+.rs__menu {
+  z-index: 200;
+  margin-top: 0.25rem;
+  border-radius: 0.5rem;
+  background-color: #0b1320;
+  box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5), 0 4px 6px -4px rgba(0,0,0,0.4);
+}
+.rs-scroll-target {
+  scroll-margin-top: calc(var(--top-bar-offset, 0px) + 12px);
+}
+.rs__menu-list {
+  padding: 0.25rem 0;
+}
+.rs__option {
+  font-size: 1rem;
+  padding: 0.5rem 0.75rem;
+}
+.rs__option--is-focused {
+  background-color: #111827;
+}
+.rs__option--is-selected {
+  background-color: #1f2937;
+  color: #e5e7eb;
+}
+.rs-error .rs__control {
+  border-color: #7f1d1d;
+  box-shadow: 0 0 0 1px #7f1d1d;
+}
+.rs-promoted .rs__control {
+  border-color: #ec4899;
+  box-shadow: 0 0 0 1px #ec4899;
+}
+.rs-missing .rs__single-value {
+  color: #fca5a5;
+}
+.rs-has-pin .rs__value-container {
+  padding-right: 3.5rem;
+}
+.rs-no-pin .rs__value-container {
+  padding-right: 2.25rem;
+}
+.note-display {
+  background-color: #0b1320;
+  border-color: #1b2432;
+  color: #e5e7eb;
+}
+select.bg-white {
+  background-color: #0b1320;
+}
+option {
+  background-color: #0b1320;
+  color: #e5e7eb;
+}
+.shadow-lg { box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5), 0 4px 6px -4px rgba(0,0,0,0.4); }
+.shadow-md { box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5), 0 2px 4px -2px rgba(0,0,0,0.4); }
+.shadow-sm { box-shadow: 0 1px 2px 0 rgba(0,0,0,0.4); }
+.bg-purple-100\/50 { background-color: rgba(88, 28, 135, 0.35); }
+.bg-purple-200 { background-color: rgba(74, 26, 106, 0.6); }
+.border-purple-300 { border-color: rgba(91, 42, 134, 0.6); }
+
+/* Error states */
+.bg-red-500 { background-color: #7f1d1d; }
+.text-red-200 { color: #fecaca; }
+
+/* Safe area handling for iOS */
+.safe-area-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Touch optimization */
+button, .touchable {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Suppress the mobile browser's default (often orange) tap-highlight on inputs. */
+input, textarea, select {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@keyframes node-card-wiggle {
+  0% {
+    transform: rotate(-0.6deg);
+  }
+  100% {
+    transform: rotate(0.6deg);
+  }
+}
+
+/* Node highlight animation */
+@keyframes highlight-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(59, 130, 246, 0.55);
+  }
+}
+
+.highlight-pulse {
+  animation: highlight-pulse 0.6s ease-in-out 2;
+}
+
+/* Connection-button highlight: flashes a ring around the specific reciprocal
+   connection on the destination node after navigating from a connection. A
+   tighter, brighter ring than the node pulse since the target is much smaller.
+   The `.node-connections` wrapper carries extra horizontal padding so this ring
+   clears the surrounding `overflow-hidden` clip boundary instead of being cut
+   on the outer edge (which read as off-center). */
+@keyframes connection-highlight-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.85);
+  }
+}
+
+.connection-highlight-pulse {
+  animation: connection-highlight-pulse 0.6s ease-in-out 2;
+}
+
+.scroll-container {
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+.node-scroll-anchor {
+  scroll-margin-top: var(--top-bar-offset, 0px);
+}
+
+/* Type colors for connection buttons */
+.type-IMAGE { background-color: #a855f7; color: white; }
+.type-LATENT { background-color: #ec4899; color: white; }
+.type-MODEL { background-color: #f97316; color: white; }
+.type-CLIP { background-color: #eab308; color: black; }
+.type-VAE { background-color: #ef4444; color: white; }
+.type-CONDITIONING { background-color: #22c55e; color: white; }
+.type-INT { background-color: #3b82f6; color: white; }
+.type-FLOAT { background-color: #06b6d4; color: white; }
+.type-STRING { background-color: #8b5cf6; color: white; }
+.type-BOOLEAN { background-color: #6366f1; color: white; }
+.type-MASK { background-color: #64748b; color: white; }
+.type-default { background-color: #9ca3af; color: white; }
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 2px;
+}
+
+/* Shared Input Styling */
+.comfy-input {
+  /* Match the slate-950/80 + white/10 styling used by the number-control
+     +/- buttons so all node inputs share one background. */
+  background-color: rgb(2 6 23 / 0.8);
+  border-color: rgb(255 255 255 / 0.1);
+  color: #e5e7eb;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 0.5rem;
+}

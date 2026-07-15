@@ -1,0 +1,27 @@
+=== LoRA Evaluation Report ===
+Date: 2026-03-25T06:47:45Z
+LoRA: "Tabby Cat" — A specific tabby-and-white domestic cat with brown and black stripes, sitting on a red couch
+Model: Flux.2 Klein 4B
+Trigger word: sks
+DOP: not needed
+
+Reference Image Description:
+A single, alert tabby-and-white domestic cat sits upright on a plush red sofa, facing directly toward the camera with an attentive gaze. The feline has a distinctive coat pattern featuring bold brown and black stripes on its back, head, and legs, contrasted by a clean white chest, muzzle, and paws. Its ears are perked high and forward, suggesting curiosity or readiness, while its green eyes reflect the ambient light. The cat’s posture is poised and slightly tense, with front paws planted firmly on the fabric of the couch. Behind it, a large red cushion fills the background, creating a vivid color contrast with the cat’s warm fur tones. A small black object—possibly a button or bead—is visible on the seat cushion to the left of the cat. The scene is shot indoors during daylight, with soft natural lighting that casts gentle shadows and highlights the texture of both the cat’s fur and the velvety red upholstery. The photo is taken at eye level with the animal, using a shallow depth of field that keeps the cat sharply in focus while softly blurring the background wall and furniture. The overall color palette is warm and saturated, dominated by the deep crimson of the couch and the earthy browns and creams of the cat’s fur. The image has a realistic, high-resolution photographic quality with fine detail in whiskers and fur texture, capturing the subtle sheen of the cat’s coat and the slight wrinkling of the sofa fabric
+
+Comparison Scores:
+  Scene: 9/10 — The generated image accurately captures the core subject: a tabby-and-white cat sitting on a red couch. The pose, color palette (red sofa, brown/black/white fur), and the small black object on the cushion are all correctly reproduced. The LoRA needs to learn this specific subject matter and spatial arrangement.
+  Style: 8/10 — The rendering style is very close, with similar lighting and texture on the couch. However, there are minor discrepancies in the cat's facial features (eye shape and nose) compared to the reference, which are critical for a high-fidelity LoRA.
+
+Recommended Training Parameters:
+  Steps: 150
+  Rank: 8
+  Alpha: 8.0
+  Learning Rate: 0.0001
+  Warmup Steps: 15
+  Timestep Sampling: balanced
+  Loss Weighting: bell_shaped
+  Target Layers: all
+  DOP: false 
+  Gradient Checkpointing: false
+
+Summary: Scene gap: LOW (9/10), Style gap: LOW (8/10) → 150 steps, rank 8, balanced sampling

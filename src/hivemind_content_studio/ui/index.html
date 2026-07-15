@@ -19,6 +19,15 @@
           <button class="nav-item is-active" type="button" data-view-target="create">
             <span class="nav-icon" aria-hidden="true">◇</span><span>Studio</span>
           </button>
+          <button class="nav-item" type="button" data-view-target="explore">
+            <span class="nav-icon" aria-hidden="true">✦</span><span>Explore</span>
+          </button>
+          <button class="nav-item" type="button" data-view-target="canvas">
+            <span class="nav-icon" aria-hidden="true">⌘</span><span>Canvas</span>
+          </button>
+          <button class="nav-item" type="button" data-view-target="models">
+            <span class="nav-icon" aria-hidden="true">▦</span><span>Models</span>
+          </button>
           <button class="nav-item" type="button" data-view-target="runs">
             <span class="nav-icon" aria-hidden="true">◫</span><span>Runs</span><span class="nav-count" id="run-count">…</span>
           </button>
@@ -257,6 +266,18 @@
             </aside>
           </form>
           </div>
+        </section>
+
+        <section class="view tool-view" data-view="explore">
+          <iframe id="explore-frame" title="Generative media studios" data-tool-surface="explore" allow="clipboard-read; clipboard-write; fullscreen; microphone; camera"></iframe>
+        </section>
+
+        <section class="view tool-view" data-view="canvas">
+          <iframe id="canvas-frame" title="ComfyUI workflow canvas" data-tool-surface="canvas" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+        </section>
+
+        <section class="view tool-view" data-view="models">
+          <iframe id="models-frame" title="Local model manager" data-tool-surface="models" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
         </section>
 
         <section class="view" data-view="runs">
