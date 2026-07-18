@@ -156,6 +156,16 @@ const translations = {
         'video.download': '↓ Download',
         'video.extend': '↗ Extend',
         'video.new': '+ New',
+        'video.backToSetup': 'Back to setup',
+        'video.progressTitle': 'Creating your video',
+        'video.progress.preparing': 'Preparing generation',
+        'video.progress.loading': 'Loading model',
+        'video.progress.queued': 'Queued with provider',
+        'video.progress.rendering': 'Rendering frames',
+        'video.progress.finishing': 'Preparing playback',
+        'video.progress.inProgress': 'In progress',
+        'video.progress.elapsed': 'Elapsed',
+        'video.pingWhenComplete': 'Ping when complete',
         'video.videoTools': 'Video Tools',
 
         // Lip Sync Studio
@@ -357,6 +367,16 @@ const translations = {
         'video.download': '↓ 下载',
         'video.extend': '↗ 延伸',
         'video.new': '+ 新建',
+        'video.backToSetup': '返回设置',
+        'video.progressTitle': '正在创建视频',
+        'video.progress.preparing': '正在准备生成',
+        'video.progress.loading': '正在加载模型',
+        'video.progress.queued': '已加入提供商队列',
+        'video.progress.rendering': '正在渲染画面',
+        'video.progress.finishing': '正在准备播放',
+        'video.progress.inProgress': '进行中',
+        'video.progress.elapsed': '已用时间',
+        'video.pingWhenComplete': '完成时提示音',
         'video.videoTools': '视频工具',
 
         // Lip Sync Studio

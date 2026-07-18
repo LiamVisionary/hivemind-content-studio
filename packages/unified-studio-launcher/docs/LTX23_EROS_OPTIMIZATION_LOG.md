@@ -2,6 +2,8 @@
 
 Date started: 2026-07-08
 
+Operator guide: [LTX 2.3 Workflows and MCP](./LTX23_WORKFLOWS_AND_MCP.md)
+
 Purpose: keep a durable lab notebook for the Civitai Eros LTX 2.3 workflow so future attempts do not repeat already tested regressions. The hard goal from the user is to cut the full 9.7s generation below half of the current best time without quality loss.
 
 ## Current Control State
@@ -1557,3 +1559,481 @@ Do not repeat:
 - Do not repeat q8 post-fusion.
 - Do not repeat exact-v1 bf16 merge-before-q8 unless there is a new way to reduce full stage 2 by at least `7s` without touching quality.
 - If pursuing exact-v1 further, focus specifically on full-resolution stage 2 DiT throughput and decoder scheduling, not conversion correctness.
+
+## 2026-07-16 MCP Multi-Anchor / MLX Fast Path
+
+Confirmed from local source and live run:
+
+- `/Users/liam/comfy/ltx-2-mlx-opt/packages/ltx-pipelines-mlx/src/ltx_pipelines_mlx/cli.py` already supports repeated `--image PATH FRAME_IDX STRENGTH` arguments.
+- The distilled MLX pipeline consumes multi-anchor `images` and applies `combined_image_conditionings`; this is the correct Apple Silicon fast path for start/middle/end or arbitrary keyframes.
+- Local Comfy has editor-only FLF templates:
+  - `/Users/liam/comfy/ComfyUI/.venv/lib/python3.11/site-packages/comfyui_workflow_templates_media_video/templates/video_ltx2_3_flf2v.json`
+  - `/Users/liam/comfy/ComfyUI/blueprints/First-Last-Frame to Video (LTX-2.3).json`
+- No exported runnable API-prompt FLF workflow is currently installed. The registry now supports `middle_image_*`, `end_image_*`, and `keyframes[]` slots for any future Comfy API workflow that declares them, but the confirmed live multi-anchor route is native MLX.
+
+Implemented:
+
+- MCP `media_generate_video` accepts:
+  - `image_path` / `image_base64` / `image_url` as the start frame.
+  - `middle_image_path` / `middle_image_base64` / `middle_image_url`.
+  - `end_image_path` / `end_image_base64` / `end_image_url`.
+  - `keyframes[]` with `image_path` / `image_base64` / `image_url`, `frame` or `time_seconds`, `role`, and `strength`.
+- `extra.nativeMlxLtx.keyframes` is written into the workflow metadata.
+- Gateway native LTX detection normalizes anchors and `run_native_mlx_ltx_video` emits repeated MLX CLI `--image` arguments.
+- Windows/non-Apple Comfy fallback remains the existing graph unless a FLF/keyframe API workflow is registered with matching slots.
+
+Live smoke:
+
+- Route: stdio MCP `media_generate_video`, workflow `ltx23-regular-fp8`.
+- Input: `/Users/liam/Downloads/wP44i.jpg` as start and end anchors.
+- Settings: `512x512`, `9` frames, `24fps`, seed `1234`.
+- Job: `061fe1a8a813`.
+- Backend: `mlx-ltx-regular-regular-q8-distilled`.
+- Keyframes: frame `0` and frame `8`, both strength `1.0`.
+- Backend elapsed: `14.33s`.
+- Output:
+
+```text
+/Users/liam/.comfy-private.noindex/output/LTX23/mlx_ltx23_regular_q8_distilled_mobile_061fe1a8a813_9f.mp4
+```
+
+Follow-up verification:
+
+- Managed Streamable HTTP MCP was verified with the official JS SDK client against `http://127.0.0.1:8796/mcp`.
+- `media_status` reported the public Studio base as `https://liams-macbook-pro-1.tail629894.ts.net:8789`, so returned `include_urls` media links are tailnet-reachable instead of `127.0.0.1`.
+- The managed MCP process no longer runs under `hive-env-run`; it uses the explicit token file and avoids inheriting unrelated shared hive credentials.
+
+Remote image path finding:
+
+- `image_base64` is the correct remote-client path. It writes a real private file under Comfy input and works with native MLX keyframes.
+- Managed LaunchAgent reads of `/Users/liam/Downloads/wP44i.jpg` are not reliable as a remote contract. A byte-copy from `Downloads` timed out under the managed MCP process.
+- Symlink staging is a dead end for native MLX: `_resolve_native_ltx_image_path` resolves the symlink target before enforcing private-storage roots, so a symlink to `Downloads` is rejected as outside private Comfy storage.
+- Current staging policy: try a hardlink for same-volume server-local absolute paths, then fall back to async bounded copy. Do not re-add symlink staging for native LTX.
+
+Managed HTTP MCP smoke:
+
+- Route: Streamable HTTP MCP `media_generate_video`, workflow `ltx23-regular-fp8`.
+- Input: `/Users/liam/Downloads/wP44i.jpg` sent as `image_base64` and `end_image_base64`.
+- Settings: `512x512`, `9` frames, `24fps`, seed `1243`.
+- Job: `e3bc84dda986`.
+- Route/backend: `native-mlx-apple-silicon`, `mlx-ltx-regular-regular-q8-distilled`.
+- Backend elapsed: `14.28s`; caller wall time: `15.21s`.
+- Logical output:
+
+```text
+/Users/liam/.comfy-private.noindex/output/LTX23/mlx_ltx23_regular_q8_distilled_mobile_e3bc84dda986_9f.mp4
+```
+
+- Stored encrypted file:
+
+```text
+/Users/liam/.comfy-private.noindex/output/LTX23/mlx_ltx23_regular_q8_distilled_mobile_e3bc84dda986_9f.mp4.zenc
+```
+
+Eros fast parity smoke:
+
+- Route: Streamable HTTP MCP `media_generate_video`, workflow `ltx23-eros-fast`.
+- Input: same base64 start/end anchors.
+- Settings: `512x512`, `9` frames, `24fps`, seed `1244`.
+- Job: `293b4008e608`.
+- Route/backend: `native-mlx-apple-silicon`, `mlx-ltx-eros-fast-q8-v12`.
+- Backend elapsed: `13.15s`; caller wall time: `13.67s`.
+
+## 2026-07-16 Better Motion Civitai Downloader Finding
+
+Confirmed local behavior:
+
+- The unified studio gateway downloader at `/api/civitai/download` works for non-login-required Civitai assets. Example verified version `3075498` downloaded `nicegirls_krea2.safetensors`.
+- The Better Motion LTX 2.3 asset `versionId=3087364`, `fileId=2966847` is login-required at Civitai. Direct Civitai requests and gateway requests without a Civitai key return `401` with `The creator of this asset requires you to be logged in to download it`.
+- ComfyUI Model Linker is a second downloader path at `/model_linker/download`. It accepts a body field named `civitai_key`, but the inspected UI clients were not passing that field. Without it, the lane logs show the same `401`.
+- The gateway now accepts per-request `civitai_key`, `civitai_token`, `civitaiToken`, or `civitaiApiKey` in the `/api/civitai/download` JSON body. The token is used only for that download and is not persisted into the public job record.
+- If no configured token or request token is present, the gateway error now explicitly says to configure `CIVITAI_TOKEN`, write `/Users/liam/.hivemindos/media-studio/secure/civitai-token`, or pass `civitai_key`/`civitai_token`.
+
+Avoid repeating:
+
+- Do not retry Better Motion `3087364` without either a configured Civitai token or a per-request key; it is expected to fail.
+- Do not treat a successful public Civitai model download as proof this specific login-required asset will download unauthenticated.
+
+Follow-up after shared env key injection:
+
+- `CIVITAI_API_KEY` was present through `hive-env-run`; `CIVITAI_TOKEN` remained absent, so gateway alias support for `CIVITAI_API_KEY` is required.
+- Better Motion download succeeded through `/api/civitai/download` with a per-request token from hive env.
+- Download job: `4d4d5ab7f55b`.
+- Installed file:
+
+```text
+/Users/liam/comfy/ComfyUI/models/loras/mvmt_lora_v2_600.safetensors
+```
+
+- Size: `674249616` bytes (`643M` on disk).
+- Managed stack was restarted after install so future gateway downloads inherit the hive env key.
+
+Better Motion native MLX smoke:
+
+- Route: Streamable HTTP MCP `media_generate_video`, workflow alias `motion` -> `ltx23-better-motion-lora`.
+- Input: `/Users/liam/Downloads/wP44i.jpg`.
+- Settings: `512x512`, `9` frames, `24fps`, seed `2244`.
+- Job: `24ee5ed06a80`.
+- Route/backend: `native-mlx-apple-silicon`, `mlx-ltx-regular-regular-q8-distilled`.
+- Confirmed runner stderr included LoRA fusion:
+
+```text
+Fusing LoRA: /Users/liam/comfy/ComfyUI/models/loras/mvmt_lora_v2_600.safetensors (strength=0.30)
+```
+
+- Backend elapsed: `13.91s`; caller wall time: `15.20s`.
+- Stored encrypted output:
+
+```text
+/Users/liam/.comfy-private.noindex/output/LTX23/mlx_ltx23_regular_q8_distilled_mobile_24ee5ed06a80_9f.mp4.zenc
+```
+
+## 2026-07-16 LTX 2.3 IC Dual Character LoRA Integration
+
+Confirmed model metadata:
+
+- Civitai model: `2500098` (`LTX2.3-IC-LORA-Dual-Character`).
+- Version: `2810376` (`v0.1`).
+- File: `2696156`, `LTX2.3-IC-LORA-Dual-Character.safetensors`.
+- Base model: `LTXV 2.3`.
+
+Install:
+
+- Download route: unified studio gateway `/api/civitai/download` with shared hive env `CIVITAI_API_KEY`.
+- Download job: `083f2130a676`.
+- Installed file:
+
+```text
+/Users/liam/comfy/ComfyUI/models/loras/LTX2.3-IC-LORA-Dual-Character.safetensors
+```
+
+- Size: `327287347` bytes (`312M` on disk).
+- SHA-256: `b6c3199e2c95eb0aad0cea4f3e8dfa33e8f6966d85bc79e3994faf5a57406103`.
+
+Implemented:
+
+- Added registered workflow `ltx23-ic-dual-character-lora`.
+- Added MCP aliases: `ic`, `ic-lora`, `dual`, `dual-character`, `ic-dual-character`, `ltx23-ic`, `ltx23-dual-character`, `ltx23-ic-dual-character`, `ltx23-ic-dual-character-lora`.
+- Added Apple Silicon native MLX LoRA metadata at strength `0.8`.
+- Added ComfyUI fallback API workflow:
+
+```text
+/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-ic-dual-character-lora/ltx23-ic-dual-character-lora.user-image-api.json
+```
+
+- Added ComfyUI Mobile workflow:
+
+```text
+/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 IC Dual Character LoRA Mobile.json
+```
+
+Verification:
+
+- JSON validation passed for registry, API workflow, and mobile workflow.
+- `node --check packages/media-gateway/bin/media-studio-mcp.mjs` passed.
+- Managed stack restarted successfully.
+- MCP discovery for query `dual` returned `ltx23-ic-dual-character-lora`.
+- Smoke route: Streamable HTTP MCP `media_generate_video`, workflow alias `dual-character`.
+- Input: `/Users/liam/Downloads/wP44i.jpg`.
+- Settings: `512x512`, `9` frames, `24fps`, seed `2256`.
+- Job: `816c0a4f4376`.
+- Route/backend: `native-mlx-apple-silicon`, `mlx-ltx-regular-regular-q8-distilled`.
+- Confirmed LoRA fusion in native runner:
+
+```text
+Fusing LoRA: /Users/liam/comfy/ComfyUI/models/loras/LTX2.3-IC-LORA-Dual-Character.safetensors (strength=0.80)
+```
+
+- Backend elapsed: `55.94s`; caller wall time: `56.27s`.
+- Logical output:
+
+```text
+/Users/liam/.comfy-private.noindex/output/LTX23/mlx_ltx23_regular_q8_distilled_mobile_816c0a4f4376_9f.mp4
+```
+
+- Preview copy:
+
+```text
+/Users/liam/.comfy-private.noindex/preview-cache/ltx23_ic_dual_character_smoke_816c0a4f4376.mp4
+```
+
+### Five-second dual-character anchored test
+
+- Entry path: authenticated Streamable HTTP MCP `media_generate_video`.
+- Workflow alias: `dual-character` -> `ltx23-ic-dual-character-lora`.
+- Start and end anchors were generated with the built-in GPT Image path. The end anchor was an identity-preserving edit of the start anchor rather than an independent generation.
+- Settings: `512x512`, `121` frames, `24fps`, seed `2261`, CFG `1.0`.
+- Anchors: start at frame `0`, end at frame `120`, both strength `1.0`.
+- Job: `9a35498aed3c`.
+- Route/backend: `native-mlx-apple-silicon`, `mlx-ltx-regular-regular-q8-distilled`.
+- Confirmed LoRA fusion in native runner:
+
+```text
+Fusing LoRA: /Users/liam/comfy/ComfyUI/models/loras/LTX2.3-IC-LORA-Dual-Character.safetensors (strength=0.80)
+```
+
+- Backend elapsed: `50.25s`; complete MCP wall time: `51.40s`.
+- Output: H.264/AAC MP4, `512x512`, `121` frames, `5.041667s`.
+- Contact-sheet inspection confirmed that both character identities, wardrobes, and greenhouse geometry remained distinct and stable while the mechanical flower opened.
+- Exposure check: first-second average luma `74.52`, last-second average luma `75.89`, delta `+1.37`; no progressive overexposure was detected.
+- Reproducible test artifacts:
+
+```text
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-5s-test/start.png
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-5s-test/end.png
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-5s-test/result.mp4
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-5s-test/contact-sheet.jpg
+```
+
+### Intended IC Dual Character behavior and controlled A/B test
+
+Creator guidance confirmed from the Civitai description and attached sample:
+
+- The LoRA is intended for multi-shot two-person dialogue, not merely keeping two people visible in one continuous composition.
+- Prompts should explicitly describe the scene, both character identities, shot timing, and camera language.
+- No trigger word is required.
+- Recommended operating point: 16:9, at least 10 seconds, 24fps, LoRA strength `0.6-1.0` when used alone.
+- The creator's attached sample is `1280x704`, `369` frames at `24fps`, duration `15.375s`. Automated scene detection found hard composition changes at approximately `4.208s` and `8.417s`: two-shot -> over-the-shoulder close-up on the woman -> reverse close-up on the man.
+
+The earlier five-second flower-opening test was valid as a pipeline and exposure smoke test, but it did not isolate the LoRA's advertised multi-shot benefit because it used one nearly static composition plus start/end anchors.
+
+Controlled test design:
+
+- One GPT Image-generated 16:9 reference containing two visually distinct adults.
+- One 10-second prompt specifying three shots: wide two-shot, over-the-shoulder close-up on Character A, reverse over-the-shoulder close-up on Character B.
+- Only a frame-0 image anchor; no middle or end anchors that could manufacture identity retention.
+- Identical prompt, negative prompt, seed `43177`, CFG `1.0`, 24fps, dimensions, and native MLX `regular-q8-distilled` base for both runs.
+
+Rejected attempt:
+
+- Requested `768x432`, but the distilled two-stage MLX runner snapped the output to `768x384` because dimensions must be multiples of 64. Job `663ade5331d3`; backend elapsed `120.50s`; MCP wall time `120.75s`.
+- Do not use `768x432` for exact 16:9 comparisons on this lane. Use `1024x576`, whose width and height are both multiples of 64.
+
+Valid base control:
+
+- Workflow: `ltx23-regular-fp8`.
+- Job: `32664b2c07b9`.
+- Output: `1024x576`, `241` frames, `10.041667s`.
+- Backend elapsed: `318.86s`; MCP wall time: `319.72s`.
+- Detected shot changes: approximately `2.625s` and `6.917s`.
+
+Valid IC-LoRA run:
+
+- Workflow: `ltx23-ic-dual-character-lora`, alias `dual-character`.
+- Job: `c532fa3b33d8`.
+- Output: `1024x576`, `241` frames, `10.041667s`.
+- Confirmed native fusion at strength `0.80`.
+- Backend elapsed: `345.91s`; MCP wall time: `347.05s`.
+- Detected shot changes: approximately `2.292s` and `6.583s`.
+
+Visual finding for this seed:
+
+- Both base and IC-LoRA runs produced the requested wide -> Character A close-up -> Character B reverse close-up grammar and retained the principal facial, hair, glasses, earring, and wardrobe cues.
+- The IC-LoRA did not show a dramatic qualitative advantage over the base control on this single seed. This is a valid negative/neutral result, not evidence that the LoRA never helps; multiple seeds and harder scenes would be required for a statistical claim.
+- Exposure remained stable: base first-to-last-second luma delta `-1.31`; IC delta `-2.46`.
+
+Integration corrections made from the creator guidance:
+
+- Removed `single character` from the IC workflow's default negative prompt because it conflicts with single-character close-up coverage.
+- Replaced the generic one-shot default prompt with an explicit three-shot dialogue storyboard.
+- Changed defaults to exact `1024x576`, `10s`, `24fps` and installed a two-character default reference image.
+- Updated the API workflow, ComfyUI Mobile workflow, registry description/defaults, and MCP-discovered metadata.
+
+Artifacts:
+
+```text
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-ab-test/reference.png
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-ab-test/base.mp4
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-ab-test/ic.mp4
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-ab-test/comparison.mp4
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-ab-test/base-contact-sheet.jpg
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-ab-test/ic-contact-sheet.jpg
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ic-dual-character-ab-test/creator-example.mp4
+```
+
+Audio assembly correction:
+
+- Both generated A/B sources contain native LTX 2.3 AAC stereo audio (`base.mp4` and `ic.mp4`, 48 kHz, approximately 10.01 seconds).
+- The first side-by-side assembly mistakenly passed `-an`, which explicitly removed audio from `comparison.mp4`.
+- The corrected `comparison.mp4` preserves all 241 original video frames without re-encoding. It maps the base take to the left audio channel and the IC-LoRA take to the right audio channel so the sound position matches the side-by-side image.
+- Verification: decoded video frame hash is unchanged (`f8c6f71238314df13252816a557a5fd29e0cd0940a3a88ac5d4ce8932aa08b52`); output has H.264 video plus 48 kHz stereo AAC audio and a `10.041667s` container duration.
+- The prior silent artifact is retained as `comparison-silent.mp4` for rollback.
+
+### Shared MLX and Comfy/CUDA anchor compiler
+
+- Baseline through authenticated HTTP MCP with start, middle, and end images confirmed that the fallback graph still contained `num_images: "1"` in both `LTXVImgToVideoInplaceKJ` nodes and only one frame-zero `LTXVAddGuide`.
+- Rejected approach: adding per-workflow middle/end registry slots would duplicate anchor semantics and still omit arbitrary keyframes.
+- Implemented one normalized keyframe list as the backend-independent contract. The Apple MLX translator consumes it as repeated native image conditions; the Comfy compiler now materializes the same list into shared image preprocessing, both latent insertion passes, and chained `LTXVAddGuide` nodes.
+- The compiler applies to both built-in Eros workflows and every registered LTX `comfy-api` workflow without per-model anchor branches.
+- Shared limit: 20 unique image anchors, matching the installed Comfy LTX node capacity.
+- Real MCP regression tests cover regular and Eros builders with frames `0`, `30`, `60`, and `120`, including strength `0.65` on the arbitrary frame-30 anchor.
+- Verification: `test_media_studio_mcp_contract.py` passed `3/3`; Media Gateway unit tests passed `36/36`.
+
+## 2026-07-17 Windows/CUDA source-video and audio extension
+
+Goal:
+
+- Keep the Apple Silicon native MLX extension route.
+- Give Windows/Linux CUDA ComfyUI the same MCP fields and true appended video plus appended audio, without a video-only or silent-audio fallback.
+
+Implemented Comfy topology:
+
+1. Load and VAE-encode the source video.
+2. Run the official overlap-aware `LTXVExtendSampler` with 16 source frames of temporal overlap.
+3. Load the source audio from `VHS_LoadVideo`; add a same-duration silence fallback so silent source clips remain valid; audio-VAE encode it.
+4. Append an empty audio latent for the requested extension duration and concatenate it with the source audio latent.
+5. Join the completed video and audio latents, freeze all video and source-audio tokens, and mask only the appended audio interval.
+6. Generate that interval with the selected workflow's own refinement model, CFG guider, LCM sampler, and low-sigma schedule. Decode and mux the extended streams.
+
+Portability defects found and patched in `ComfyUI-LTXVideo`:
+
+- `LTXVAddLatents` wrote `noise_mask: None`; downstream AV mask nodes expect either a tensor or no key. The shared installer patch now omits the key when no mask exists.
+- `LinearOverlapLatentTransition` blended CPU-offloaded and GPU latents without aligning devices. The shared installer patch moves the second latent onto the first latent's execution device.
+- The same node explicitly emitted `batch_index` as `float32`, but Comfy uses it as an integer range/index in `prepare_noise`. The patch now emits `torch.int64`.
+- Both patches are platform-neutral in `ltx23-eros-anchor.json`; only the separate MPS LoRA bypass remains Darwin-specific.
+
+Rejected attempts and evidence:
+
+- A single masked joint AV denoising pass looked simpler but produced non-finite video and audio on the local Apple MPS Comfy fallback. It was rejected.
+- Reusing the full first-stage STG schedule for a second audio pass also produced non-finite output on MPS. It was replaced with the workflow-authored refinement model/CFG/LCM branch.
+- The initial overlap run failed on a CPU/MPS device mismatch, and the next run failed because a float batch index reached Comfy's integer noise-index loop. Both were upstream node defects, not MCP transport failures.
+- The local MPS Comfy render is not evidence for or against CUDA correctness: Lightricks documents the Comfy LTX 2.3 target as CUDA with at least 32 GB VRAM, while this Studio routes Apple Silicon through MLX. The online Windows peer was reachable over Tailscale but exposed neither SSH nor a discovered Comfy app proxy, so a real CUDA render could not be executed from this Mac in this run.
+
+Verification completed here:
+
+- The authenticated HTTP MCP path stages inline MP4 bytes and compiles a Windows/CUDA graph with source video loading, overlap video extension, source-audio VAE encoding, appended audio latents, audio-only time masking, the workflow's refinement sampler, AV separation, decode, and one MP4 output.
+- Contract assertions confirm the refinement audio pass uses the workflow's existing CFG model, LCM sampler, and low-sigma schedule rather than the first-stage STG branch.
+- Installer assertions confirm both continuation patches apply to `win32` and CUDA because they have no platform filter.
+- `git apply --reverse --check` passes for both patches against the installed official node checkout.
+
+## 2026-07-17 LTX 2.3 Ingredients IC-LoRA integration
+
+Confirmed from the official Lightricks model card and shipped Comfy workflow:
+
+- Ingredients is an IC-LoRA, not a normal style or motion LoRA. Fusing it without a reference-latent path is incorrect.
+- The input is one composite reference sheet with separate panels for characters, props, wardrobe, and locations.
+- The required prompt contract has a reference-sheet description followed by a target-video description.
+- The model metadata declares its reference downscale; the official Comfy path reads that value rather than hard-coding it.
+- Recommended Ingredients strength is `1.4`; reference conditioning strength is `1.0`.
+- The validated training bucket is `768x448`, 121 frames, 24 fps. The official single-stage distilled example uses the nine-value sigma list ending at zero.
+
+Implemented paths:
+
+- Comfy/CUDA: FP8 dev checkpoint -> official distilled LoRA at `0.5` -> `LTXICLoRALoaderModelOnly` -> repeated-sheet `LTXAddVideoICLoRAGuide` -> joint AV sample -> guide crop -> tiled video decode and audio decode.
+- Apple MLX: `ltx-2-mlx ic-lora` with the regular q8 distilled model, Ingredients at `1.4`, full-resolution `--single-stage`, and a temporary lossless FFV1 video containing the repeated reference sheet. This reaches the same `VideoConditionByReferenceLatent` mechanism rather than using a frame-zero I2V anchor.
+- MCP: `reference_description` is assembled with `prompt` into the official two-part contract. A caller may instead provide an already assembled prompt containing both headings.
+
+Rejected or avoided approaches:
+
+- Generic `generate --lora` on MLX was rejected because it would omit IC reference tokens.
+- Passing the sheet as `--image` was rejected because that turns the sheet into a visible frame-zero anchor; the official workflow bypasses ordinary I2V conditioning.
+- Reusing the Dual Character workflow was rejected because it is a conventional fused LoRA and does not implement Ingredients reference-sheet semantics.
+- A lossy H.264 temporary reference was avoided. FFV1 preserves the sheet exactly before MLX VAE encoding.
+
+Download state at implementation time:
+
+- The public official distilled LoRA from `Lightricks/LTX-2.3` was installed and verified at `7,605,507,256` bytes with SHA-256 `f5d4953f3386197a4b4f5abdb17616ff256171e8075c111d6e7d2dfa6e823b3a`.
+- The Ingredients file is gated. The first three conventional token names were absent, but the established shared-Hive alias `HUGGINGFACE_READ_WRITE_KEY` was present. Installer support was expanded to recognize it so authenticated downloads can run through `hive-env-run` without copying or persisting the credential. The credential authenticated successfully against Hugging Face (`whoami` returned `200`), while the gated file returned `403`; the account still needs access to the Ingredients repository before an end-to-end render can run.
+
+## 2026-07-18 Fast/Regular source-video extension parity
+
+### Reproduced failure
+
+- Job `7f1b20ec9476` requested a four-second continuation at 24 fps through `ltx23-eros-fast`.
+- The public request correctly normalized to 96 appended output frames. The MLX CLI correctly represented those as 12 latent frames because the video VAE has 8:1 temporal compression.
+- The route was nevertheless wrong: Fast silently switched from `/Users/liam/comfy/mlx-models/ltx-2.3-10eros-v1.2-mlx-q8-distilled-subset` to the Eros v1 q8 dev model and ran 30 guided steps.
+- It reached real denoise step `20/30` after about `20m28s` at `62.69s/step`, then was terminated after `20m59s` wall time. The gateway's synthetic wrapper progress remained at 5%, which led the caller to report a stall at workflow step 5. It was slow, not stalled.
+- At the measured step rate, the dev denoise alone projected to about `31m20s`, before final decode and mux.
+
+### Implementation
+
+- Ported the official distilled retake behavior into `ltx-2-mlx`: positive-only conditioning, `DISTILLED_SIGMAS`, `denoise_loop`, and the fixed eight-step schedule. The dev/CFG path remains available when `--distilled` is absent.
+- Added `--distilled` to both `retake` and `extend` CLI commands.
+- Fast, Exact, and Regular extension now retain their own distilled transformer instead of switching to a shared dev checkpoint.
+- Gateway metadata now reports `extension_output_frames` and `extension_latent_frames` separately. Output filenames use the output-frame count.
+- Replaced `subprocess.run`'s frozen progress with streamed tqdm parsing. Jobs now report real denoise steps and decoder phases.
+- Corrected source normalization from truncation to forward padding. The 24-frame reproduction source was previously cut to 17 frames; it is now padded to 25 by repeating the final frame, preserving all original motion.
+- Silence-pad source audio over the compatibility frame when necessary, and pass the source frame rate through the shared decoder/mux helper.
+- Windows/CUDA remains on the shared Comfy compiler and receives all 96 output frames in `LTXVExtendSampler.num_new_frames`; it does not receive the MLX-only latent count.
+
+Official references used:
+
+- [Lightricks RetakePipeline source](https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-pipelines/src/ltx_pipelines/retake.py): distilled mode uses the fixed distilled sigma schedule and simple denoiser.
+- [Lightricks pipeline guide](https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-pipelines/README.md): retake supports distilled and full/dev modes.
+- [ComfyUI-LTXVideo extension sampler](https://github.com/Lightricks/ComfyUI-LTXVideo/blob/master/easy_samplers.py): `num_new_frames` is an output-frame count.
+- [ltx-2-mlx README](https://github.com/dgrauet/ltx-2-mlx): `--extend-frames` is a latent-frame count and each added latent frame contributes eight output frames.
+
+### Attempts and final benchmark
+
+- Job `503ee57f969c`: stopped after discovering that source normalization would truncate the 24-frame clip to 17 frames. Rejected before accepting an artifact.
+- Job `751fea96cc89`: completed all eight distilled denoise steps in `148s`, then exposed an existing mux bug because retake/extend omitted `frame_rate`. No output accepted.
+- Job `71e036641855`: successful authenticated HTTP MCP run through `media_generate_video`.
+  - Workflow/backend: `ltx23-eros-fast` / `mlx-ltx-eros-fast-q8-v12`.
+  - Model: MLXBits 10Eros v1.2 q8 distilled, identical to ordinary Fast generation.
+  - Source: 24 frames at 24 fps, normalized forward to 25 VAE-compatible frames.
+  - Extension: 96 output frames / 12 latent frames / four requested seconds.
+  - Result: 121 H.264 frames, `576x1024`, 24 fps, `5.041667s`; AAC 48 kHz stereo audio, `5.010s`.
+  - Backend elapsed: `172.69s`; CLI reported `172.5s`.
+  - Source-segment preservation: SSIM `0.989469`, average PSNR `45.035338 dB` over the first 24 frames.
+  - Visual inspection: stable identity and exposure; no incoherent jump at frames 24/25; motion begins continuously in the generated interval.
+  - Artifact: `/Users/liam/.comfy-private.noindex/output/Eros/mlx_10eros_q8_distilled_mobile_71e036641855_extend-96f.mp4`.
+- The successful route is at least `7.29x` faster than the prior job's already-elapsed 20m59s and approximately `10.9x` faster than its projected dev completion, while keeping the selected Fast model and official distilled schedule.
+
+### Regular Fast routing and quality acceptance
+
+- Added explicit MCP aliases `fastregular`, `fast-regular`, `regular-fast`, and `regular`; all resolve to `ltx23-regular-fp8`. The existing bare `fast` alias intentionally remains `ltx23-eros-fast`.
+- The Regular workflow maps Apple generation and extension to `/Users/liam/comfy/mlx-models/ltx-2.3-mlx-q8-distilled-subset`. Its accepted backend label is `mlx-ltx-regular-regular-q8-distilled`; neither path contains Eros weights. Windows/CUDA continues through the official regular FP8 Comfy graph.
+- Job `14f9d2b8d856`: routing resolved correctly to the Regular backend and model, then failed before generation because the private input sweeper had already removed the staged source video. This was an input-lifetime failure, not a model or routing failure.
+- Job `c18999c6fb6d`: completed a true-Regular four-second append in `226.41s`, but the take was rejected because average luma fell from approximately `108` to `42` near the end and visual inspection confirmed progressive underexposure.
+- Job `c53b7c93cbab`: completed in `197.23s` with phrases such as `no fade`, `no dimming`, and `no darkening` placed in the positive prompt. The take was rejected because the fade became worse. The native distilled extension lane is positive-only, so negative concepts in positive text can reinforce the very behavior they are intended to prohibit.
+- Job `51851237fd9e`: passed the visual gate using only affirmative source-continuity and constant-illumination language, then was retroactively rejected when listening exposed glitchy audio.
+  - Workflow/backend: alias `fastregular` -> `ltx23-regular-fp8` / `mlx-ltx-regular-regular-q8-distilled`.
+  - Model: regular q8 distilled subset at `/Users/liam/comfy/mlx-models/ltx-2.3-mlx-q8-distilled-subset`.
+  - Source: 24 H.264 frames at `576x1024`, 24 fps, one second, with no audio stream.
+  - Extension: 96 output frames / 12 latent frames / four requested seconds.
+  - Result: 121 H.264 frames, `576x1024`, 24 fps, `5.041667s`; AAC 48 kHz stereo audio.
+  - Backend elapsed: `200.60s`.
+  - Source-segment preservation: SSIM `0.993316` over the original 24 frames.
+  - Visual inspection: stable illumination through the generated interval. The final luma decrease is explained by the actor and hand approaching the lens, not an exposure fade.
+  - Artifact: `/Users/liam/.comfy-private.noindex/output/LTX23/mlx_ltx23_regular_q8_distilled_mobile_51851237fd9e_extend-96f.mp4`.
+- Published the positive-only behavior as `prompt_contract` in the workflow registry so `media_list_workflows` exposes it to agents before submission.
+
+### Mute-source audio conditioning correction
+
+- Reproduced the complaint on job `51851237fd9e`. The AAC container was structurally valid, but the decoded waveform contained deterministic periodic noise at approximately `-37.44 dB RMS` with a repeated peak near `-16.90 dB`. Stream presence, sample rate, and mux duration were therefore insufficient audio acceptance checks.
+- Root cause: `_encode_source_video` represented a mute source with an all-zero audio latent and froze that interval. Zero is not the audio VAE's encoded silence point; decoding it produces periodic low-level noise.
+- Isolated round-trip: 1.0417 seconds of real zero-valued PCM was encoded through the audio VAE and decoded through the installed vocoder. The result measured `-89.69 dB RMS`, versus `-37.44 dB RMS` for the broken output.
+- Job `d973c4a894c8`: diagnostic rerun after replacing the raw zero latent with audio-VAE-encoded PCM silence.
+  - Backend elapsed: `168.93s`.
+  - First-second audio: `-90.37 dB RMS`; generated interval: `-116.36 dB RMS`.
+  - The pulse was eliminated, but the take was rejected because preserving silence for a mute input also deprived the complete shot of a useful generated soundtrack.
+- Corrected semantics on both routes:
+  - Source has audio: encode and preserve it, then generate only the appended audio interval; MCP reports `audio_mode: "extend"`.
+  - Source is mute: use encoded silence only to establish the required latent shape, denoise the full audio timeline, and report `audio_mode: "generate"`.
+  - Windows/CUDA probes the staged source with ffprobe and sets `LTXVSetAudioVideoMaskByTime.start_time` to `0` for mute input or source duration when audio exists. Apple MLX probes inside the retake/extension pipeline and applies the same mask semantics.
+- Job `34edf72ac475`: accepted true-Regular full-timeline audio generation using the same source, seed, four-second append, 24 fps, and eight-step distilled lane.
+  - Backend elapsed: `140.77s`.
+  - Result: 121 H.264 frames, `576x1024`, `5.041667s`; AAC stereo 48 kHz, `5.010s`.
+  - Audio: full track `-47.80 dB RMS`, first second `-49.16 dB RMS`, appended interval `-47.52 dB RMS`, peak `-23.01 dB`; no clipping or silence gap at the one-second boundary.
+  - Source-segment preservation: SSIM `0.993297` over the original 24 frames.
+  - Visual inspection: stable illumination; later luma reduction is caused by the actor moving toward the lens.
+  - Artifact: `/Users/liam/.comfy-private.noindex/output/LTX23/mlx_ltx23_regular_q8_distilled_mobile_34edf72ac475_extend-96f.mp4`.
+
+Do not repeat these mistakes:
+
+- Do not judge output duration from the latent-frame count.
+- Do not switch a Fast workflow to dev weights for extension.
+- Do not round a source clip down to `8n + 1`; pad forward.
+- Do not claim a stall from wrapper percentage without inspecting real denoise progress.
+- Do not accept denoise completion as end-to-end success until decode, mux, frame count, duration, and audio streams are verified.
+- Do not put unwanted visual concepts into a distilled extension's positive prompt. State the desired persistent condition affirmatively.
+- Do not call bare `fast` when Regular Fast is required; use `ltx23-regular-fp8` or an explicit Regular alias.
+- Do not treat an all-zero latent as silence. Encode a silent waveform through the audio VAE, and generate the full soundtrack when the source has no audio stream.
+- Do not accept audio from codec/sample-rate/duration metadata alone; inspect or listen to the decoded waveform.
+
+Verification:
+
+- MLX distilled-retake unit tests: `8 passed`.
+- Full MLX suite with the declared `trainer` extra: `602 passed`, `22 skipped`.
+- Media Gateway unit tests: `47 passed`.
+- MCP contract tests excluding the pre-existing machine-private URL-redaction test: `9 passed`, `1 deselected`.

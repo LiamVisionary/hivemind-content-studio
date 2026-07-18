@@ -10,17 +10,17 @@
   <body>
     <div id="studio-shell" class="studio-shell">
       <aside class="sidebar">
-        <a class="brand" href="#create" aria-label="Hivemind Content Studio home">
+        <a class="brand" href="#explore" aria-label="Hivemind Content Studio home">
           <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
           <span><b>Hivemind</b><small>Content Studio</small></span>
         </a>
 
         <nav class="primary-nav" aria-label="Studio navigation">
-          <button class="nav-item is-active" type="button" data-view-target="create">
+          <button class="nav-item is-active" type="button" data-view-target="explore">
             <span class="nav-icon" aria-hidden="true">◇</span><span>Studio</span>
           </button>
-          <button class="nav-item" type="button" data-view-target="explore">
-            <span class="nav-icon" aria-hidden="true">✦</span><span>Explore</span>
+          <button class="nav-item" type="button" data-view-target="create">
+            <span class="nav-icon" aria-hidden="true">✦</span><span>Planner</span>
           </button>
           <button class="nav-item" type="button" data-view-target="canvas">
             <span class="nav-icon" aria-hidden="true">⌘</span><span>Canvas</span>
@@ -51,16 +51,17 @@
       <main class="workspace">
         <header class="topbar">
           <div>
-            <p class="context-label" id="view-eyebrow">Unified creation</p>
+            <p class="context-label" id="view-eyebrow">Unified Studio</p>
             <h1 id="view-title">Studio</h1>
           </div>
           <div class="topbar-actions">
             <span class="api-status" id="api-status"><i></i>Connecting</span>
             <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh studio data">↻</button>
+            <button class="lock-button" id="lock-button" type="button">Lock</button>
           </div>
         </header>
 
-        <section class="view is-active" data-view="create">
+        <section class="view" data-view="create">
           <div class="native-mode-rail" id="native-studio-modes" role="tablist" aria-label="Studio tool">
             <button class="native-mode-button is-active" type="button" role="tab" aria-selected="true" data-studio-mode="create"><span>＋</span><b>Create</b><small>Images, video, and complete media</small></button>
             <button class="native-mode-button" type="button" role="tab" aria-selected="false" data-studio-mode="edit"><span>↗</span><b>Edit</b><small>Transform ordered references</small></button>
@@ -81,6 +82,7 @@
 
               <form class="simple-composer" id="simple-composer">
                 <div class="simple-attachments" id="simple-attachments"></div>
+                <section class="loaded-canvas-setup is-hidden" id="loaded-canvas-setup" aria-label="Loaded Canvas generation setup"></section>
                 <label class="simple-prompt-label" for="simple-prompt">Production prompt</label>
                 <textarea id="simple-prompt" rows="3" maxlength="20000" placeholder="Create a 20-second product launch ad with a hard pattern interrupt, three cinematic scenes, and a direct CTA…"></textarea>
                 <div class="simple-composer-footer">
@@ -130,6 +132,8 @@
                       <div class="composer-options-menu">
                         <label class="option-toggle"><span><b>Prompt helper</b><small>Expand and improve my direction</small></span><input id="simple-prompt-helper" type="checkbox" checked /><i></i></label>
                         <label class="option-toggle"><span><b>Walk-through</b><small>Ask first, then wait for confirmation</small></span><input id="simple-walkthrough" type="checkbox" /><i></i></label>
+                        <label class="seed-option"><span><b>Seed mode</b><small>Choose how the next generation advances</small></span><select id="simple-seed-mode"><option value="randomize">Randomize</option><option value="fixed">Fixed</option><option value="increment">Increment</option><option value="decrement">Decrement</option></select></label>
+                        <label class="seed-option"><span><b>Seed</b><small>The exact numeric seed, including the last random seed</small></span><input id="simple-seed" type="number" min="-3" max="9007199254740991" step="1" value="-1" /></label>
                       </div>
                     </details>
                   </div>
@@ -268,8 +272,8 @@
           </div>
         </section>
 
-        <section class="view tool-view" data-view="explore">
-          <iframe id="explore-frame" title="Generative media studios" data-tool-surface="explore" allow="clipboard-read; clipboard-write; fullscreen; microphone; camera"></iframe>
+        <section class="view tool-view is-active" data-view="explore">
+          <iframe id="explore-frame" title="Generative media studios" data-tool-surface="explore" allow="autoplay; clipboard-read; clipboard-write; fullscreen; microphone; camera"></iframe>
         </section>
 
         <section class="view tool-view" data-view="canvas">
@@ -293,10 +297,16 @@
 
         <section class="view" data-view="history">
           <div class="view-toolbar">
-            <div><p class="section-kicker">Prompt library</p><h2>History</h2></div>
-            <div class="segmented-control" id="history-filters" aria-label="Filter prompts"><button class="is-active" data-history-filter="">All</button><button data-history-filter="favorites">Favorites</button></div>
+            <div><p class="section-kicker">Private archive</p><h2>History</h2></div>
+            <div class="history-toolbar-controls">
+              <div class="segmented-control" id="history-filters" aria-label="Filter history"><button class="is-active" data-history-filter="">All</button><button data-history-filter="prompts">Prompts</button><button data-history-filter="canvas">Canvas</button><button data-history-filter="favorites">Favorites</button></div>
+              <div class="canvas-history-filters" id="canvas-history-filters">
+                <label><span>Format</span><select id="canvas-format-filter"><option value="">All formats</option></select></label>
+                <label><span>Model</span><select id="canvas-model-filter"><option value="">All models</option></select></label>
+              </div>
+            </div>
           </div>
-          <p class="fine-print history-note">Every production records the prompt that ultimately drove generation — the brain-expanded brief when the prompt helper ran, or your exact words when it didn't. Favorite the ones worth reusing and drop them into the composer from the Ingredients menu.</p>
+          <p class="fine-print history-note">Owner-only prompts and Canvas outputs live here. Canvas records are imported without prompt graphs, tokens, filesystem paths, or media copies; encrypted source files remain in their original private storage.</p>
           <div class="prompt-history-list" id="prompt-history-list"><div class="skeleton skeleton-run"></div><div class="skeleton skeleton-run"></div></div>
         </section>
 
@@ -332,6 +342,13 @@
       </main>
     </div>
 
+    <dialog class="history-delete-dialog" id="history-delete-dialog">
+      <form method="dialog">
+        <header><span aria-hidden="true">!</span><div><p class="section-kicker">Permanent deletion</p><h3 id="history-delete-title">Delete this output?</h3></div></header>
+        <p id="history-delete-copy">This removes every local trace of this generated output and cannot be undone.</p>
+        <div><button type="button" data-cancel-history-delete>Cancel</button><button class="danger" type="button" data-confirm-history-delete>Delete permanently</button></div>
+      </form>
+    </dialog>
     <div class="toast-region" id="toast-region" aria-live="polite"></div>
     <script type="module" src="/assets/studio.js"></script>
   </body>

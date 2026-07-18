@@ -1,5 +1,8 @@
 import importlib.util
+import io
 import json
+import os
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +21,294 @@ def load_app():
 
 
 class ZImageAppTests(unittest.TestCase):
+    def test_active_output_is_not_encryptable_until_native_writer_finishes(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output_dir = Path(td) / 'output'
+            output_dir.mkdir()
+            output = output_dir / 'render.mp4'
+            output.write_bytes(b'x' * 1000)
+
+            with patch.object(app, 'OUT_DIR', output_dir), patch.object(app, 'COMFY_OUTPUT_DIR', Path(td) / 'comfy'):
+                app.mark_output_active(output)
+                self.assertTrue(app.output_path_is_active(output))
+                self.assertFalse(app.is_encryptable_output(output))
+
+                app.mark_output_inactive(output)
+                self.assertFalse(app.output_path_is_active(output))
+                self.assertTrue(app.is_encryptable_output(output))
+
+    def test_generate_api_accepts_prompt_over_previous_character_limit(self):
+        app = load_app()
+        long_prompt = 'detailed image prompt ' * 200
+        completed = app.threading.Event()
+        captured = {}
+
+        def fake_run_generation(job_id, prompt, loras, options):
+            captured.update(job_id=job_id, prompt=prompt, loras=loras, options=options)
+            completed.set()
+
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        with patch.object(app, 'TOKEN', 'test-token'), \
+             patch.object(app, 'jobs', {}), \
+             patch.object(app, 'load_selected_loras', return_value=[]), \
+             patch.object(app, 'run_generation', side_effect=fake_run_generation):
+            server_thread.start()
+            try:
+                request = app.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/generate',
+                    data=json.dumps({'prompt': long_prompt}).encode('utf-8'),
+                    headers={
+                        'Authorization': 'Bearer test-token',
+                        'Content-Type': 'application/json',
+                    },
+                    method='POST',
+                )
+                with app.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode('utf-8'))
+                    self.assertEqual(response.status, 202)
+                self.assertTrue(completed.wait(1))
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+        self.assertGreater(len(long_prompt), 1200)
+        self.assertEqual(captured['prompt'], long_prompt.strip())
+        self.assertEqual(captured['job_id'], payload['id'])
+
+    def test_private_media_is_encrypted_before_serve_and_never_cacheable(self):
+        app = load_app()
+
+        class Handler:
+            def __init__(self):
+                self.headers = {}
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status): self.status = status
+            def cors_headers(self): pass
+            def send_header(self, key, value): self.headers[key] = value
+            def end_headers(self): pass
+
+        handler = Handler()
+        logical_path = Path('/private/output.mp4')
+        with patch.object(app, 'encrypt_output_file', return_value=logical_path) as encrypt, \
+             patch.object(app, 'decrypt_output_bytes', return_value=(b'private-video', 'video/mp4')):
+            app.send_output_file(handler, logical_path)
+
+        encrypt.assert_called_once_with(logical_path)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.headers['Cache-Control'], 'private, no-store, max-age=0')
+        self.assertEqual(handler.headers['Pragma'], 'no-cache')
+        self.assertEqual(handler.wfile.getvalue(), b'private-video')
+
+    def test_output_encryption_failure_deletes_plaintext_and_fails_closed(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output = Path(td) / 'private.png'
+            output.write_bytes(b'private-image')
+            with patch.object(app, 'OUT_DIR', Path(td)), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', Path(td)), \
+                 patch.object(app, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app, 'encrypt_output_file', side_effect=RuntimeError('cipher unavailable')):
+                    with self.assertRaises(RuntimeError):
+                        app.encrypt_outputs([output])
+            self.assertFalse(output.exists())
+
+    def test_access_log_redacts_query_credentials(self):
+        app = load_app()
+        handler = object.__new__(app.Handler)
+        handler.client_address = ('127.0.0.1', 1234)
+        handler.log_date_time_string = lambda: 'now'
+        stderr = io.StringIO()
+
+        with patch.object(app.sys, 'stderr', stderr):
+            handler.log_message('"%s"', 'GET /image/a.png?token=super-secret&name=ok HTTP/1.1')
+
+        rendered = stderr.getvalue()
+        self.assertNotIn('super-secret', rendered)
+        self.assertIn('token=%5Bredacted%5D', rendered)
+
+    def test_private_input_deletion_is_confined_to_comfy_input(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_root = Path(td) / 'input'
+            input_root.mkdir()
+            staged = input_root / 'media-studio-input-private.png'
+            staged.write_bytes(b'private-reference')
+            outside = Path(td) / 'outside.png'
+            outside.write_bytes(b'keep')
+
+            with patch.object(app, 'COMFY_INPUT_DIR', input_root):
+                self.assertTrue(app.delete_private_input(staged.name))
+                with self.assertRaises(ValueError):
+                    app.delete_private_input('../outside.png')
+
+            self.assertFalse(staged.exists())
+            self.assertTrue(outside.exists())
+
+    def test_private_media_defaults_do_not_allow_plaintext_grace_or_token_printing(self):
+        source = (BASE / 'app.py').read_text(encoding='utf-8')
+        comfy_proxy = (BASE / 'app/comfy/[[...path]]/route.js').read_text(encoding='utf-8')
+
+        self.assertIn('ZIMG_OUTPUT_PLAINTEXT_GRACE", "0"', source)
+        self.assertNotIn('print(f"Token: {TOKEN}"', source)
+        self.assertNotIn('max-age=10800', comfy_proxy)
+        self.assertIn("cache-control', 'private, no-store, max-age=0'", comfy_proxy)
+
+    def test_tailscale_https_proxy_routes_next_assets_to_gateway(self):
+        proxy_source = (BASE / 'tailscale-https-proxy.js').read_text(encoding='utf-8')
+        self.assertIn("pathname === '/_next'", proxy_source)
+        self.assertIn("pathname.startsWith('/_next/')", proxy_source)
+        self.assertIn("'/api/models'", proxy_source)
+        self.assertIn("'/api/civitai'", proxy_source)
+        self.assertIn("'/image'", proxy_source)
+
+    def test_output_encryption_covers_images_and_videos(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output_root = Path(td)
+            image = output_root / 'image.png'
+            video = output_root / 'video.mp4'
+            model = output_root / 'model.safetensors'
+            with patch.object(app, 'OUT_DIR', output_root), patch.object(app, 'OUTPUT_ENCRYPTION_ENABLED', True):
+                self.assertTrue(app.is_encryptable_output(image))
+                self.assertTrue(app.is_encryptable_output(video))
+                self.assertFalse(app.is_encryptable_output(model))
+
+    def test_exact_output_lookup_is_confined_to_private_media_roots(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output_root = Path(td) / 'output'
+            output_root.mkdir()
+            logical = output_root / 'nested-video.mp4'
+            logical.with_name(logical.name + '.zenc').write_bytes(b'opaque-encrypted-payload')
+            outside = Path(td) / 'outside.mp4'
+            outside.write_bytes(b'outside')
+            with patch.object(app, 'OUT_DIR', output_root), patch.object(app, 'COMFY_OUTPUT_DIR', output_root):
+                self.assertEqual(app.find_exact_output_logical_path(logical), logical.resolve())
+                self.assertIsNone(app.find_exact_output_logical_path(outside))
+                self.assertIsNone(app.find_exact_output_logical_path(output_root / 'model.safetensors'))
+
+    def test_output_encryption_preserves_original_mtime(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            output_root = Path(td)
+            source = output_root / 'preserve-time.mp4'
+            source.write_bytes(b'plaintext-video')
+            original_ns = 1_700_000_000_123_456_789
+            os.utime(source, ns=(original_ns, original_ns))
+
+            def fake_openssl(command, **_kwargs):
+                target = Path(command[command.index('-out') + 1])
+                target.write_bytes(b'opaque-encrypted-payload' * 2)
+                return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+
+            with patch.object(app, 'OUT_DIR', output_root), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', output_root), \
+                 patch.object(app, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app, 'output_encryption_password', return_value='test-secret'), \
+                 patch.object(app.subprocess, 'run', side_effect=fake_openssl):
+                app.encrypt_output_file(source)
+
+            encrypted = source.with_name(source.name + '.zenc')
+            self.assertFalse(source.exists())
+            self.assertEqual(encrypted.stat().st_mtime_ns, original_ns)
+
+    def test_delete_output_everywhere_purges_copies_history_workflow_index_and_preview_cache(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            comfy_output = root / 'comfy-output'
+            native_output = root / 'native-output'
+            preview_cache = root / 'preview-cache'
+            comfy_output.mkdir()
+            native_output.mkdir()
+            preview_cache.mkdir()
+            (comfy_output / 'purge-me.png.zenc').write_bytes(b'ciphertext-a')
+            (native_output / 'purge-me.png.zenc').write_bytes(b'ciphertext-b')
+            (native_output / 'keep-me.png.zenc').write_bytes(b'ciphertext-c')
+            (preview_cache / 'cached-preview.jpg').write_bytes(b'preview')
+            history_file = root / 'history.jsonl'
+            history_file.write_text(
+                json.dumps({'id': 'job-1', 'outputs': [str(native_output / 'purge-me.png'), str(native_output / 'keep-me.png')], 'prompt': '[private]'}) + '\n',
+                encoding='utf-8',
+            )
+            workflow_index = root / 'output-workflow-index.jsonl'
+            workflow_index.write_text(
+                json.dumps({'prompt_id': 'prompt-1', 'filenames': ['purge-me.png'], 'workflow': {'encrypted': True, 'format': 'comfyui-mobile-encrypted-workflow'}}) + '\n',
+                encoding='utf-8',
+            )
+            app._workflow_index = {'purge-me.png': {'encrypted': True}}
+            app._workflow_index_records = {'purge-me.png': {'prompt_id': 'prompt-1', 'lane': 'default'}}
+            app._workflow_index_prompts = {'prompt-1'}
+
+            with patch.object(app, 'OUT_DIR', native_output), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', comfy_output), \
+                 patch.object(app, 'HISTORY_FILE', history_file), \
+                 patch.object(app, 'WORKFLOW_INDEX_FILE', workflow_index), \
+                 patch.object(app, 'PREVIEW_CACHE_ROOTS', [preview_cache]), \
+                 patch.object(app, '_delete_prompt_ids_from_comfy', return_value=[]):
+                result = app.delete_output_everywhere('purge-me.png')
+
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['deleted_files'], 2)
+            self.assertFalse((comfy_output / 'purge-me.png.zenc').exists())
+            self.assertFalse((native_output / 'purge-me.png.zenc').exists())
+            self.assertTrue((native_output / 'keep-me.png.zenc').exists())
+            remaining_history = json.loads(history_file.read_text(encoding='utf-8'))
+            self.assertEqual([Path(value).name for value in remaining_history['outputs']], ['keep-me.png'])
+            self.assertEqual(workflow_index.read_text(encoding='utf-8'), '')
+            self.assertFalse(any(preview_cache.iterdir()))
+            self.assertNotIn('purge-me.png', app._workflow_index)
+
+    def test_delete_output_everywhere_cleans_shared_prompt_trace_without_deleting_sibling_output(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            output_root = root / 'output'
+            output_root.mkdir()
+            (output_root / 'purge-me.png.zenc').write_bytes(b'ciphertext-a')
+            (output_root / 'keep-me.png.zenc').write_bytes(b'ciphertext-b')
+            workflow_index = root / 'output-workflow-index.jsonl'
+            workflow_index.write_text(
+                json.dumps({
+                    'prompt_id': 'shared-prompt',
+                    'filenames': ['purge-me.png', 'keep-me.png'],
+                    'workflow': {'encrypted': True, 'format': 'comfyui-mobile-encrypted-workflow'},
+                }) + '\n',
+                encoding='utf-8',
+            )
+            app._workflow_index = {
+                'purge-me.png': {'encrypted': True},
+                'keep-me.png': {'encrypted': True},
+            }
+            app._workflow_index_records = {
+                'purge-me.png': {'prompt_id': 'shared-prompt', 'lane': 'default'},
+                'keep-me.png': {'prompt_id': 'shared-prompt', 'lane': 'default'},
+            }
+            app._workflow_index_prompts = {'shared-prompt'}
+
+            with patch.object(app, 'OUT_DIR', output_root), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', output_root), \
+                 patch.object(app, 'HISTORY_FILE', root / 'missing-history.jsonl'), \
+                 patch.object(app, 'WORKFLOW_INDEX_FILE', workflow_index), \
+                 patch.object(app, 'PREVIEW_CACHE_ROOTS', []), \
+                 patch.object(app, '_delete_prompt_ids_from_comfy', return_value=[]) as delete_from_comfy:
+                result = app.delete_output_everywhere('purge-me.png')
+
+            self.assertTrue(result['ok'])
+            delete_from_comfy.assert_called_once_with({'shared-prompt'})
+            self.assertFalse((output_root / 'purge-me.png.zenc').exists())
+            self.assertTrue((output_root / 'keep-me.png.zenc').exists())
+            record = json.loads(workflow_index.read_text(encoding='utf-8'))
+            self.assertEqual(record['filenames'], ['keep-me.png'])
+            self.assertNotIn('purge-me.png', app._workflow_index)
+            self.assertIn('keep-me.png', app._workflow_index)
+            self.assertIn('shared-prompt', app._workflow_index_prompts)
+
     def test_hardware_profile_cuda_disables_apple_specific_routes(self):
         app = load_app()
         with patch.dict('os.environ', CUDA_ENV, clear=False):
@@ -36,19 +327,32 @@ class ZImageAppTests(unittest.TestCase):
             self.assertTrue(app.supports_native_mlx_ltx_route())
             self.assertTrue(app.use_swift_flux2_server())
 
-    def test_civitai_token_uses_env_or_canonical_file_and_ignores_legacy_save(self):
+    def test_civitai_token_uses_env_alias_or_canonical_file_and_ignores_legacy_save(self):
         app = load_app()
         with TemporaryDirectory() as td:
             tmp_path = Path(td)
             token_file = tmp_path / 'civitai-token'
-            with patch.object(app, 'CIVITAI_TOKEN_FILE', token_file), patch.dict('os.environ', {'CIVITAI_TOKEN': ''}, clear=False):
+            with patch.object(app, 'CIVITAI_TOKEN_FILE', token_file), patch.dict('os.environ', {
+                'CIVITAI_TOKEN': '',
+                'CIVITAI_API_TOKEN': '',
+                'CIVITAI_API_KEY': '',
+                'CIVITAI_KEY': '',
+                'CIVITAI_ACCESS_TOKEN': '',
+                'CIVITAI_BEARER_TOKEN': '',
+                'CIVITAI_PAT': '',
+            }, clear=False):
                 token_file.write_text('canonical-token\n')
                 (tmp_path / 'civitai_token.txt.save').write_text('saved-token\n')
                 self.assertEqual(app.civitai_token(), 'canonical-token')
+                self.assertTrue(app.civitai_token_status()['configured'])
                 token_file.unlink()
                 self.assertEqual(app.civitai_token(), '')
             with patch.dict('os.environ', {'CIVITAI_TOKEN': 'env-token'}, clear=False):
                 self.assertEqual(app.civitai_token(), 'env-token')
+            with patch.dict('os.environ', {'CIVITAI_TOKEN': '', 'CIVITAI_API_KEY': 'api-key-token'}, clear=False):
+                self.assertEqual(app.civitai_token(), 'api-key-token')
+            with patch.dict('os.environ', {'CIVITAI_TOKEN': '', 'CIVITAI_API_KEY': '', 'CIVITAI_PAT': 'pat-token'}, clear=False):
+                self.assertEqual(app.civitai_token(), 'pat-token')
 
     def test_download_progress_callback_receives_bytes_and_total(self):
         app = load_app()
@@ -93,6 +397,10 @@ class ZImageAppTests(unittest.TestCase):
             with patch.object(app, 'CIVITAI_TOKEN_FILE', tmp_path / 'civitai_token.txt'), patch.object(app, 'BASE', tmp_path), patch.dict('os.environ', {'CIVITAI_TOKEN': 'test-token'}, clear=False):
                 url = app.civitai_download_url('https://civitai.com/api/download/models/2960556')
                 self.assertIn('token=test-token', url)
+                self.assertEqual(app.civitai_token(' request-token '), 'request-token')
+                override_url = app.civitai_download_url('https://civitai.com/api/download/models/2960556', token_override='body-token')
+                self.assertIn('token=body-token', override_url)
+                self.assertNotIn('token=test-token', override_url)
                 self.assertEqual(app.civitai_download_headers(), {'User-Agent': 'Hermes-ZImage-ComfyUI/1.0'})
                 self.assertNotIn('Authorization', app.civitai_download_headers())
 
@@ -160,6 +468,485 @@ class ZImageAppTests(unittest.TestCase):
         self.assertEqual(native['options']['frames'], 233)
         self.assertEqual(native['options']['frame_rate'], 24)
         self.assertEqual(native['options']['seed'], 42)
+        self.assertEqual(native['images'], [{'image_path': 'source.png', 'frame': 0, 'strength': 1.0, 'role': 'start'}])
+
+    def test_native_mlx_ltx_fast_extension_keeps_distilled_model_and_labels_frame_units(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            model_dir = Path(td) / 'fast-distilled'
+            model_dir.mkdir()
+            variants = {key: dict(value) for key, value in app.LTX2_MLX_VARIANTS.items()}
+            variants['fast-q8-v12'].update({
+                'model': str(model_dir),
+                'video_model': str(model_dir),
+                'video_distilled': True,
+            })
+            body = json.dumps({
+                'prompt': {
+                    '597': {'class_type': 'VHS_VideoCombine', 'inputs': {'filename_prefix': 'Eros/native_mlx_ltx__fast-q8-v12'}},
+                    '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                    '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'continue the same shot'}},
+                },
+                'extra_data': {
+                    'extra_pnginfo': {
+                        'workflow': {
+                            'extra': {
+                                'nativeMlxLtx': {
+                                    'enabled': True,
+                                    'variant': 'fast-q8-v12',
+                                    'defaults': {'frame_rate': 24, 'duration_seconds': 4},
+                                    'video': {'path': 'source.mp4', 'mode': 'extend'},
+                                },
+                            },
+                        },
+                    },
+                },
+            }).encode('utf-8')
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                 patch.object(app, 'LTX2_MLX_VARIANTS', variants):
+                native = app.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['operation'], 'extend')
+        self.assertEqual(native['options']['model'], str(model_dir))
+        self.assertEqual(native['options']['extension_output_frames'], 96)
+        self.assertEqual(native['options']['extension_latent_frames'], 12)
+        self.assertTrue(native['options']['distilled'])
+
+    def test_native_mlx_ltx_regular_variant_uses_metadata_frames(self):
+        app = load_app()
+        body = json.dumps({
+            'prompt': {
+                '542': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                '597': {
+                    'class_type': 'VHS_VideoCombine',
+                    'inputs': {
+                        'filename_prefix': 'LTX23/native_mlx_ltx__regular-q8-distilled',
+                        'frame_rate': ['542', 0],
+                        'save_output': True,
+                    },
+                },
+                '773': {'class_type': 'LoadImage', 'inputs': {'image': 'source.png'}},
+                '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 480}},
+                '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 832}},
+                '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private regular ltx prompt'}},
+                '534': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': 233}},
+            },
+            'extra_data': {
+                'extra_pnginfo': {
+                    'workflow': {
+                        'extra': {
+                            'nativeMlxLtx': {
+                                'enabled': True,
+                                'variant': 'regular-q8-distilled',
+                                'defaults': {'frames': 25},
+                            },
+                        },
+                    },
+                },
+            },
+        }).encode('utf-8')
+
+        with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+            native = app.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['variant'], 'regular-q8-distilled')
+        self.assertEqual(native['prompt'], 'private regular ltx prompt')
+        self.assertEqual(native['options']['frames'], 25)
+        self.assertEqual(native['options']['title'], 'LTX 2.3 regular q8 distilled')
+
+    def test_native_mlx_ltx_metadata_keyframes_are_normalized(self):
+        app = load_app()
+        body = json.dumps({
+            'prompt': {
+                '542': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                '597': {
+                    'class_type': 'VHS_VideoCombine',
+                    'inputs': {
+                        'filename_prefix': 'LTX23/native_mlx_ltx__regular-q8-distilled',
+                        'frame_rate': ['542', 0],
+                        'save_output': True,
+                    },
+                },
+                '773': {'class_type': 'LoadImage', 'inputs': {'image': 'start.png'}},
+                '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 480}},
+                '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 832}},
+                '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private keyed ltx prompt'}},
+                '534': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': 25}},
+            },
+            'extra_data': {
+                'extra_pnginfo': {
+                    'workflow': {
+                        'extra': {
+                            'nativeMlxLtx': {
+                                'enabled': True,
+                                'variant': 'regular-q8-distilled',
+                                'defaults': {'frames': 25},
+                                'keyframes': [
+                                    {'image': 'middle.png', 'role': 'middle', 'strength': 0.75},
+                                    {'image': 'end.png', 'role': 'end'},
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        }).encode('utf-8')
+
+        with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+            native = app.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['images'], [
+            {'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'},
+            {'image_path': 'middle.png', 'frame': 12, 'strength': 0.75, 'role': 'middle'},
+            {'image_path': 'end.png', 'frame': 24, 'strength': 1.0, 'role': 'end'},
+        ])
+
+    def test_native_mlx_ltx_metadata_loras_and_cfg_are_normalized(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            lora = root / 'models' / 'loras' / 'ltx' / '2.3' / 'ltx2.3-transition.safetensors'
+            lora.parent.mkdir(parents=True)
+            lora.write_bytes(b'lora')
+            body = json.dumps({
+                'prompt': {
+                    '542': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                    '583': {'class_type': 'CFGGuider', 'inputs': {'cfg': 4.0}},
+                    '597': {
+                        'class_type': 'VHS_VideoCombine',
+                        'inputs': {
+                            'filename_prefix': 'LTX23/native_mlx_ltx__regular-q8-distilled',
+                            'frame_rate': ['542', 0],
+                            'save_output': True,
+                        },
+                    },
+                    '773': {'class_type': 'LoadImage', 'inputs': {'image': 'start.png'}},
+                    '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 480}},
+                    '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 832}},
+                    '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                    '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private transition prompt zhuanchang'}},
+                    '534': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': 25}},
+                },
+                'extra_data': {
+                    'extra_pnginfo': {
+                        'workflow': {
+                            'extra': {
+                                'nativeMlxLtx': {
+                                    'enabled': True,
+                                    'variant': 'regular-q8-distilled',
+                                    'defaults': {'frames': 25},
+                                    'loras': [
+                                        {'name': 'ltx/2.3/ltx2.3-transition.safetensors', 'strength': 1.0},
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                },
+            }).encode('utf-8')
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), \
+                 patch.object(app, 'COMFY', root):
+                native = app.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['options']['cfg_scale'], 4.0)
+        self.assertEqual(native['options']['loras'], [{
+            'name': 'ltx2.3-transition.safetensors',
+            'source': 'ltx/2.3/ltx2.3-transition.safetensors',
+            'scale': 1.0,
+            'filePath': str(lora.resolve()),
+        }])
+
+    def test_native_mlx_ltx_ingredients_metadata_uses_ic_reference_path(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            lora = root / 'models' / 'loras' / 'ltx' / '2.3' / 'ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors'
+            lora.parent.mkdir(parents=True)
+            lora.write_bytes(b'ingredients-lora')
+            body = json.dumps({
+                'prompt': {
+                    '2004': {'class_type': 'LoadImage', 'inputs': {'image': 'reference-sheet.png'}},
+                    '2483': {'class_type': 'CLIPTextEncode', 'inputs': {'text': '### Reference Sheet Description\na cartoon character panel\n### Target Description\nshot'}},
+                    '3059': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': ['5072', 0]}},
+                    '4832': {'class_type': 'RandomNoise', 'inputs': {'noise_seed': 7}},
+                    '5011': {'class_type': 'LTXICLoRALoaderModelOnly', 'inputs': {'lora_name': 'ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors', 'strength_model': 1.4}},
+                    '5012': {'class_type': 'LTXAddVideoICLoRAGuide', 'inputs': {'image': ['2004', 0], 'strength': 1.0}},
+                    '5072': {'class_type': 'PrimitiveInt', 'inputs': {'value': 121}},
+                    '5098': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                    '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 768}},
+                    '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 448}},
+                },
+                'extra_data': {
+                    'extra_pnginfo': {
+                        'workflow': {
+                            'extra': {
+                                'nativeMlxLtx': {
+                                    'enabled': True,
+                                    'variant': 'regular-q8-distilled',
+                                    'pipeline': 'ic-lora',
+                                    'defaults': {'image': 'reference-sheet.png', 'width': 768, 'height': 448, 'frames': 121, 'frame_rate': 24, 'seed': 7},
+                                    'icLora': {'single_stage': True, 'conditioning_strength': 1.0, 'reference_strength': 1.0},
+                                    'loras': [{'name': 'ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors', 'strength': 1.4}],
+                                },
+                            },
+                        },
+                    },
+                },
+            }).encode('utf-8')
+
+            with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False), patch.object(app, 'COMFY', root):
+                native = app.detect_native_mlx_ltx_prompt(body)
+                fallback_data = json.loads(body.decode('utf-8'))
+                fallback_data.pop('extra_data')
+                fallback_native = app.detect_native_mlx_ltx_prompt(json.dumps(fallback_data).encode('utf-8'))
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['operation'], 'ic-lora')
+        self.assertEqual(native['reference_image_path'], 'reference-sheet.png')
+        self.assertEqual(native['images'], [])
+        self.assertEqual(native['options']['width'], 768)
+        self.assertEqual(native['options']['height'], 448)
+        self.assertEqual(native['options']['frames'], 121)
+        self.assertTrue(native['options']['single_stage'])
+        self.assertEqual(native['options']['loras'][0]['scale'], 1.4)
+        self.assertEqual(fallback_native['operation'], 'ic-lora')
+        self.assertEqual(fallback_native['reference_image_path'], 'reference-sheet.png')
+        self.assertEqual(fallback_native['options']['loras'][0]['scale'], 1.4)
+
+    def test_native_mlx_ltx_runner_uses_ic_lora_with_lossless_reference_video(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            input_dir = root / 'input'
+            output_dir = root / 'output'
+            ltx_dir = root / 'ltx-2-mlx'
+            model_dir = root / 'model'
+            lora = root / 'models' / 'loras' / 'ltx' / '2.3' / 'ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors'
+            input_dir.mkdir()
+            output_dir.mkdir()
+            ltx_dir.mkdir()
+            model_dir.mkdir()
+            lora.parent.mkdir(parents=True)
+            lora.write_bytes(b'ingredients-lora')
+            (input_dir / 'reference-sheet.png').write_bytes(b'reference-sheet')
+            captured = {}
+
+            def fake_reference_video(_image, output, _frames, _fps):
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b'lossless-reference-video')
+                return output
+
+            def fake_run(_job_id, _rec, command, **_kwargs):
+                captured['command'] = command
+                out = Path(command[command.index('-o') + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b'video' * 600)
+                return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
+
+            variants = {key: dict(value) for key, value in app.LTX2_MLX_VARIANTS.items()}
+            variants['regular-q8-distilled']['model'] = str(model_dir)
+            with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
+                 patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app, 'COMFY', root), \
+                 patch.object(app, 'OUT_DIR', output_dir), \
+                 patch.object(app, 'LTX2_MLX_DIR', ltx_dir), \
+                 patch.object(app, 'LTX2_MLX_VARIANTS', variants), \
+                 patch.object(app, '_create_native_ltx_static_reference_video', side_effect=fake_reference_video), \
+                 patch.object(app, '_run_native_ltx_subprocess', side_effect=fake_run), \
+                 patch.object(app, 'append_history'), \
+                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path: path):
+                app.run_native_mlx_ltx_video('job-ingredients', {
+                    'variant': 'regular-q8-distilled',
+                    'operation': 'ic-lora',
+                    'prompt': '### Reference Sheet Description\na cartoon character panel\n### Target Description\nshot',
+                    'reference_image_path': 'reference-sheet.png',
+                    'images': [],
+                    'options': {
+                        'width': 768,
+                        'height': 448,
+                        'frames': 121,
+                        'frame_rate': 24,
+                        'seed': 7,
+                        'single_stage': True,
+                        'conditioning_strength': 1.0,
+                        'reference_strength': 1.0,
+                        'loras': [{'name': 'ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors', 'strength': 1.4}],
+                    },
+                })
+
+            command = captured['command']
+            self.assertEqual(command[:4], ['uv', 'run', 'ltx-2-mlx', 'ic-lora'])
+            self.assertEqual(command[command.index('--lora') + 1:command.index('--lora') + 3], [str(lora.resolve()), '1.4'])
+            reference_arg = Path(command[command.index('--video-conditioning') + 1])
+            self.assertEqual(command[command.index('--video-conditioning') + 2], '1.0')
+            self.assertIn('--single-stage', command)
+            self.assertNotIn('--image', command)
+            self.assertFalse(reference_arg.exists())
+            self.assertEqual(app.jobs['job-ingredients']['status'], 'success')
+
+    def test_native_mlx_ltx_runner_passes_repeated_image_anchors(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            input_dir = root / 'input'
+            output_dir = root / 'output'
+            ltx_dir = root / 'ltx-2-mlx'
+            model_path = root / 'model.safetensors'
+            lora = root / 'models' / 'loras' / 'ltx' / '2.3' / 'ltx2.3-transition.safetensors'
+            input_dir.mkdir()
+            output_dir.mkdir()
+            ltx_dir.mkdir()
+            lora.parent.mkdir(parents=True)
+            model_path.write_bytes(b'model')
+            lora.write_bytes(b'lora')
+            (input_dir / 'start.png').write_bytes(b'start-image')
+            (input_dir / 'end.png').write_bytes(b'end-image')
+            captured = {}
+
+            def fake_run(_job_id, _rec, command, **_kwargs):
+                captured['command'] = command
+                out = Path(command[command.index('-o') + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b'video' * 600)
+                return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
+
+            variants = {key: dict(value) for key, value in app.LTX2_MLX_VARIANTS.items()}
+            variants['regular-q8-distilled']['model'] = str(model_path)
+
+            with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
+                 patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app, 'COMFY', root), \
+                 patch.object(app, 'OUT_DIR', output_dir), \
+                 patch.object(app, 'LTX2_MLX_DIR', ltx_dir), \
+                 patch.object(app, 'LTX2_MLX_VARIANTS', variants), \
+                 patch.object(app, '_run_native_ltx_subprocess', side_effect=fake_run), \
+                 patch.object(app, 'append_history'), \
+                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path: path):
+                app.run_native_mlx_ltx_video('job-keyed', {
+                    'variant': 'regular-q8-distilled',
+                    'prompt': 'private keyed ltx prompt',
+                    'image_path': 'start.png',
+                    'images': [
+                        {'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'},
+                        {'image_path': 'end.png', 'frame': 24, 'strength': 0.8, 'role': 'end'},
+                    ],
+                    'options': {
+                        'width': 480,
+                        'height': 832,
+                        'frames': 25,
+                        'frame_rate': 24,
+                        'seed': 7,
+                        'cfg_scale': 4.0,
+                        'loras': [{'name': 'ltx/2.3/ltx2.3-transition.safetensors', 'strength': 1.0}],
+                    },
+                })
+
+            command = captured['command']
+            first = command.index('--image')
+            second = command.index('--image', first + 1)
+            lora_arg = command.index('--lora')
+            cfg_arg = command.index('--cfg-scale')
+            self.assertEqual(command[first + 1:first + 4], [str((input_dir / 'start.png').resolve()), '0', '1.0'])
+            self.assertEqual(command[second + 1:second + 4], [str((input_dir / 'end.png').resolve()), '24', '0.8'])
+            self.assertEqual(command[lora_arg + 1:lora_arg + 3], [str(lora.resolve()), '1.0'])
+            self.assertEqual(command[cfg_arg + 1], '4.0')
+            self.assertEqual(app.jobs['job-keyed']['status'], 'success')
+
+    def test_native_mlx_ltx_runner_uses_extend_command_for_source_video(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            input_dir = root / 'input'
+            output_dir = root / 'output'
+            ltx_dir = root / 'ltx-2-mlx'
+            model_dir = root / 'ltx-distilled-model'
+            input_dir.mkdir()
+            output_dir.mkdir()
+            ltx_dir.mkdir()
+            model_dir.mkdir()
+            source = input_dir / 'source.mp4'
+            source.write_bytes(b'source-video')
+            captured = {}
+
+            def fake_run(_job_id, _rec, command, **_kwargs):
+                captured['command'] = command
+                out = Path(command[command.index('-o') + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b'video' * 600)
+                return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
+
+            variants = {key: dict(value) for key, value in app.LTX2_MLX_VARIANTS.items()}
+            variants['fast-q8-v12']['video_model'] = str(model_dir)
+
+            with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
+                 patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app, 'COMFY', root), \
+                 patch.object(app, 'OUT_DIR', output_dir), \
+                 patch.object(app, 'LTX2_MLX_DIR', ltx_dir), \
+                 patch.object(app, 'LTX2_MLX_VARIANTS', variants), \
+                 patch.object(app, '_run_native_ltx_subprocess', side_effect=fake_run), \
+                 patch.object(app, 'append_history'), \
+                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path: path):
+                app.run_native_mlx_ltx_video('job-extend', {
+                    'variant': 'fast-q8-v12',
+                    'operation': 'extend',
+                    'prompt': 'continue the same cinematic shot',
+                    'video_path': 'source.mp4',
+                    'images': [],
+                    'options': {
+                        'model': str(model_dir),
+                        'duration_seconds': 2,
+                        'extension_output_frames': 48,
+                        'extension_latent_frames': 6,
+                        'extend_latent_frames': 6,
+                        'distilled': True,
+                        'frame_rate': 24,
+                        'seed': 7,
+                        'steps': 30,
+                        'cfg_scale': 3.0,
+                        'stg_scale': 1.0,
+                    },
+                })
+
+            command = captured['command']
+            self.assertEqual(command[:4], ['uv', 'run', 'ltx-2-mlx', 'extend'])
+            self.assertEqual(command[command.index('--video') + 1], str(source.resolve()))
+            self.assertEqual(command[command.index('--extend-frames') + 1], '6')
+            self.assertIn('--distilled', command)
+            self.assertNotIn('--steps', command)
+            self.assertNotIn('--cfg-scale', command)
+            self.assertNotIn('--stg-scale', command)
+            self.assertNotIn('--image', command)
+            self.assertEqual(app.jobs['job-extend']['status'], 'success')
+            self.assertEqual(app.jobs['job-extend']['options']['extension_output_frames'], 48)
+            self.assertEqual(app.jobs['job-extend']['options']['extension_latent_frames'], 6)
+            self.assertEqual(app.jobs['job-extend']['options']['extension_pipeline'], 'distilled')
+
+    def test_native_mlx_ltx_progress_tracks_real_denoise_steps(self):
+        app = load_app()
+        rec = {'id': 'job-progress', 'status': 'running'}
+
+        app._update_native_ltx_process_progress(
+            'job-progress',
+            rec,
+            '\rDenoising:  50%|#####     | 4/8 [00:12<00:12, 3.00s/it]',
+        )
+
+        self.assertEqual(rec['current_step'], 4)
+        self.assertEqual(rec['total_steps'], 8)
+        self.assertEqual(rec['progress'], 50)
+        self.assertEqual(rec['progress_phase'], 'denoising')
 
     def test_native_mlx_ltx_prompt_marker_is_ignored_on_cuda(self):
         app = load_app()

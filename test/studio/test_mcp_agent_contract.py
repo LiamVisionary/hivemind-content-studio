@@ -43,3 +43,6 @@ def test_mcp_does_not_expose_operator_approval_decisions() -> None:
 
     assert "approve_content_approval" not in tools
     assert "deny_content_approval" not in tools
+    assert "plan_content" not in tools
+    assert "run_agent_script_generation" not in tools
+    assert "attach_agent_script" not in tools

@@ -364,8 +364,20 @@ function modelPath(comfyDir, dep) {
 
 async function downloadFile(url, dest) {
   mkdirSync(dirname(dest), { recursive: true });
-  const response = await fetch(url, { cache: 'no-store' });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  const parsed = new URL(url);
+  const isHuggingFace = parsed.hostname === 'huggingface.co' || parsed.hostname.endsWith('.huggingface.co');
+  const hfToken = process.env.HF_TOKEN
+    || process.env.HUGGING_FACE_HUB_TOKEN
+    || process.env.HUGGINGFACE_TOKEN
+    || process.env.HUGGINGFACE_READ_WRITE_KEY;
+  const headers = isHuggingFace && hfToken ? { Authorization: `Bearer ${hfToken.trim()}` } : {};
+  const response = await fetch(url, { headers, cache: 'no-store' });
+  if (!response.ok) {
+    if (isHuggingFace && (response.status === 401 || response.status === 403)) {
+      throw new Error(`${response.status} Hugging Face access denied; accept the model gate and expose a supported Hugging Face token at runtime`);
+    }
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
   if (!response.body) throw new Error('download response had no body');
   const tmp = `${dest}.part`;
   await pipeline(Readable.fromWeb(response.body), createWriteStream(tmp));

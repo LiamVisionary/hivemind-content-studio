@@ -2,6 +2,7 @@ import './style.css';
 import './lib/browserLocalAI.js';
 import { Header } from './components/Header.js';
 import { ImageStudio } from './components/ImageStudio.js';
+import { installHivemindExploreDock } from './lib/hivemindStudio.js';
 
 const app = document.querySelector('#app');
 let contentArea;
@@ -48,6 +49,7 @@ contentArea = document.createElement('main');
 contentArea.id = 'content-area';
 contentArea.className = 'flex-1 relative w-full overflow-hidden flex flex-col bg-app-bg';
 app.appendChild(contentArea);
+installHivemindExploreDock();
 
 // Initial Route
 navigate('image');

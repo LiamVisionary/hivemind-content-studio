@@ -11,6 +11,7 @@ import { AuthModal } from './AuthModal.js';
 import { t } from '../lib/i18n.js';
 import { createUploadPicker } from './UploadPicker.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
+import { loadStudioGenerationHistory, saveStudioGenerationHistory } from '../lib/hivemindStudio.js';
 
 function createInlineInstructions(type) {
     const el = document.createElement('div');
@@ -1074,8 +1075,7 @@ export function ImageStudio() {
     const addToHistory = (entry) => {
         generationHistory.unshift(entry);
 
-        // Save to localStorage
-        localStorage.setItem('muapi_history', JSON.stringify(generationHistory.slice(0, 50)));
+        saveStudioGenerationHistory('muapi_history', generationHistory, 50);
 
         // Show sidebar
         historySidebar.classList.remove('translate-x-full', 'opacity-0');
@@ -1137,16 +1137,13 @@ export function ImageStudio() {
         }
     };
 
-    // --- Load history from localStorage ---
-    try {
-        const saved = JSON.parse(localStorage.getItem('muapi_history') || '[]');
-        if (saved.length > 0) {
-            saved.forEach(e => generationHistory.push(e));
-            historySidebar.classList.remove('translate-x-full', 'opacity-0');
-            historySidebar.classList.add('translate-x-0', 'opacity-100');
-            renderHistory();
-        }
-    } catch (e) { /* ignore */ }
+    const savedHistory = loadStudioGenerationHistory('muapi_history');
+    if (savedHistory.length > 0) {
+        savedHistory.forEach(e => generationHistory.push(e));
+        historySidebar.classList.remove('translate-x-full', 'opacity-0');
+        historySidebar.classList.add('translate-x-0', 'opacity-100');
+        renderHistory();
+    }
 
     // --- Resume any pending image generations from a previous session ---
     (async () => {
@@ -1356,8 +1353,6 @@ export function ImageStudio() {
                 res = await muapi.generateImage(genParams);
             }
 
-            console.log('[ImageStudio] Full response:', res);
-
             if (res && res.url) {
                 if (capturedRequestId) removePendingJob(capturedRequestId);
                 addToHistory({
@@ -1370,7 +1365,6 @@ export function ImageStudio() {
                 });
                 showImageInCanvas(res.url);
             } else {
-                console.error('[ImageStudio] No image URL in response:', res);
                 throw new Error('No image URL returned by API');
             }
         } catch (e) {

@@ -95,10 +95,44 @@ function sendLanding(req, res) {
 const targetUrl = new URL(target);
 const studioTargetUrl = new URL(studioTarget);
 const mcpTargetUrl = new URL(mcpTarget);
+const GATEWAY_API_PREFIXES = [
+  '/api/civitai',
+  '/api/download',
+  '/api/generate',
+  '/api/history',
+  '/api/job',
+  '/api/library',
+  '/api/loras',
+  '/api/models',
+  '/api/object_info',
+  '/api/prompt',
+  '/api/queue',
+  '/api/view',
+];
+const GATEWAY_REFERER_PREFIXES = ['/app', '/gateway', '/mobile', '/comfy', '/models'];
 // Keep-alive upstream pool: remote clients on high-RTT tailnet paths must not
 // pay a fresh upstream TCP handshake per request.
 const upstreamAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 256 });
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade', 'te', 'trailer']);
+
+function startsWithRoute(pathname, prefix) {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
+function hasGatewayReferer(req) {
+  try {
+    const referer = new URL(req.headers.referer || req.headers.referrer || '');
+    return GATEWAY_REFERER_PREFIXES.some((prefix) => startsWithRoute(referer.pathname, prefix));
+  } catch {
+    return false;
+  }
+}
+
+function isGatewayApiRoute(pathname, req) {
+  if (GATEWAY_API_PREFIXES.some((prefix) => startsWithRoute(pathname, prefix))) return true;
+  if ((pathname === '/api/runtime' || pathname === '/healthz') && hasGatewayReferer(req)) return true;
+  return false;
+}
 
 // HTTP/2 with HTTP/1.1 ALPN fallback. The old https/1.1 server serialized the
 // gallery into (6 connections x RTT) waves; over a DERP-relayed tailnet path
@@ -123,7 +157,10 @@ const server = http2.createSecureServer({
     || pathname === '/gateway' || pathname.startsWith('/gateway/')
     || pathname === '/mobile' || pathname.startsWith('/mobile/')
     || pathname === '/comfy' || pathname.startsWith('/comfy/')
-    || pathname === '/models' || pathname.startsWith('/models/');
+    || pathname === '/models' || pathname.startsWith('/models/')
+    || pathname === '/_next' || pathname.startsWith('/_next/')
+    || pathname === '/image' || pathname.startsWith('/image/')
+    || isGatewayApiRoute(pathname, req);
   if (pathname === '/app' || pathname.startsWith('/app/')) {
     url = url.replace(/^\/app(?=\/|$)/, '') || '/';
   }

@@ -3,7 +3,7 @@ const ENCRYPTION_VERSION = 1;
 const PBKDF2_ITERATIONS = 250_000;
 const STATUS_EVENT = 'comfyui-mobile-workflow-unlock-status';
 const PERSISTED_UNLOCK_STORAGE_KEY = 'comfyui-mobile-workflow-unlock-v1';
-const DEFAULT_UNLOCK_TTL_MS = 4 * 60 * 60 * 1000;
+const DEFAULT_UNLOCK_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface EncryptedWorkflowEnvelope {
   encrypted: true;
@@ -48,30 +48,39 @@ function emitStatusChanged(): void {
 
 function storageAvailable(): boolean {
   try {
-    return typeof window !== 'undefined' && Boolean(window.localStorage);
+    return typeof window !== 'undefined' && Boolean(window.sessionStorage);
   } catch {
     return false;
   }
 }
 
+function clearLegacyPersistentUnlockRecord(): void {
+  try {
+    window.localStorage?.removeItem(PERSISTED_UNLOCK_STORAGE_KEY);
+  } catch {
+    // Old builds persisted this secret; cleanup must never block unlock.
+  }
+}
+
 function readPersistedUnlockRecord(): PersistedUnlockRecord | null {
+  clearLegacyPersistentUnlockRecord();
   if (!storageAvailable()) return null;
   try {
-    const raw = window.localStorage.getItem(PERSISTED_UNLOCK_STORAGE_KEY);
+    const raw = window.sessionStorage.getItem(PERSISTED_UNLOCK_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<PersistedUnlockRecord>;
     if (typeof parsed.secret !== 'string' || typeof parsed.expiresAt !== 'number') {
-      window.localStorage.removeItem(PERSISTED_UNLOCK_STORAGE_KEY);
+      window.sessionStorage.removeItem(PERSISTED_UNLOCK_STORAGE_KEY);
       return null;
     }
     if (parsed.expiresAt <= Date.now()) {
-      window.localStorage.removeItem(PERSISTED_UNLOCK_STORAGE_KEY);
+      window.sessionStorage.removeItem(PERSISTED_UNLOCK_STORAGE_KEY);
       return null;
     }
     return { secret: parsed.secret, expiresAt: parsed.expiresAt };
   } catch {
     try {
-      window.localStorage.removeItem(PERSISTED_UNLOCK_STORAGE_KEY);
+      window.sessionStorage.removeItem(PERSISTED_UNLOCK_STORAGE_KEY);
     } catch {
       // Ignore storage cleanup failures.
     }
@@ -83,7 +92,8 @@ function persistUnlockRecord(secret: string, ttlMs = DEFAULT_UNLOCK_TTL_MS): num
   if (!storageAvailable()) return null;
   const expiresAt = Date.now() + Math.max(ttlMs, DEFAULT_UNLOCK_TTL_MS);
   try {
-    window.localStorage.setItem(PERSISTED_UNLOCK_STORAGE_KEY, JSON.stringify({ secret, expiresAt }));
+    window.sessionStorage.setItem(PERSISTED_UNLOCK_STORAGE_KEY, JSON.stringify({ secret, expiresAt }));
+    clearLegacyPersistentUnlockRecord();
     return expiresAt;
   } catch {
     return null;
@@ -91,9 +101,10 @@ function persistUnlockRecord(secret: string, ttlMs = DEFAULT_UNLOCK_TTL_MS): num
 }
 
 function clearPersistedUnlockRecord(): void {
+  clearLegacyPersistentUnlockRecord();
   if (!storageAvailable()) return;
   try {
-    window.localStorage.removeItem(PERSISTED_UNLOCK_STORAGE_KEY);
+    window.sessionStorage.removeItem(PERSISTED_UNLOCK_STORAGE_KEY);
   } catch {
     // Ignore storage cleanup failures.
   }

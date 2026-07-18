@@ -7,9 +7,10 @@ import {
   setWorkflowEncryptionKey,
   subscribeWorkflowEncryptionStatus,
 } from '@/utils/workflowEncryption';
+import { isTrustedOwnerParentEvent } from '@/utils/trustedOwnerParent';
 
 function formatUnlockExpiry(expiresAt: number | null): string {
-  if (!expiresAt) return 'for at least 4 hours';
+  if (!expiresAt) return 'for up to 24 hours';
   const remainingMs = Math.max(0, expiresAt - Date.now());
   const remainingMinutes = Math.max(1, Math.ceil(remainingMs / 60_000));
   if (remainingMinutes >= 60) {
@@ -30,6 +31,32 @@ export function WorkflowUnlockGate() {
     setUnlocked(isWorkflowEncryptionUnlocked());
     setExpiresAt(getWorkflowEncryptionUnlockExpiresAt());
   }), []);
+
+  useEffect(() => {
+    const onOwnerAccess = (event: MessageEvent) => {
+      if (!isTrustedOwnerParentEvent(event)) return;
+      if (event.data?.type === 'hivemind-owner-lock') {
+        clearWorkflowEncryptionKey();
+        setUnlocked(false);
+        setExpiresAt(null);
+        return;
+      }
+      if (event.data?.type !== 'hivemind-owner-unlock' || typeof event.data.passphrase !== 'string') return;
+      try {
+        setWorkflowEncryptionKey(event.data.passphrase);
+        setUnlocked(true);
+        setExpiresAt(getWorkflowEncryptionUnlockExpiresAt());
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to unlock private workflows');
+      }
+    };
+    window.addEventListener('message', onOwnerAccess);
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: 'hivemind-owner-unlock-ready' }, '*');
+    }
+    return () => window.removeEventListener('message', onOwnerAccess);
+  }, []);
 
   useEffect(() => {
     if (!unlocked) return undefined;
@@ -82,7 +109,7 @@ export function WorkflowUnlockGate() {
           </div>
           <h1 className="text-2xl font-bold text-white">Unlock private workflows</h1>
           <p className="mt-3 text-sm leading-6 text-slate-300">
-            Enter the same passphrase you use in Z-Image Studio. ComfyUI Mobile will remember this browser unlock for 4 hours, then forget it automatically. The passphrase is still never sent to the backend or derived from the URL token.
+            Enter the same passphrase you use in Hivemind Content Studio. Canvas will remember this browser unlock for 24 hours, then forget it automatically. The passphrase is still never sent to the backend or derived from the URL token.
           </p>
         </div>
 
@@ -111,11 +138,11 @@ export function WorkflowUnlockGate() {
           className="mt-5 w-full rounded-2xl bg-cyan-300 px-4 py-3 text-base font-bold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={!passphrase.trim()}
         >
-          Unlock ComfyUI Mobile for 4 hours
+          Unlock Canvas for 24 hours
         </button>
 
         <p className="mt-4 text-xs leading-5 text-slate-400">
-          Reloading the page keeps the unlock until the 4-hour TTL expires. Tapping the unlocked badge forgets it immediately.
+          Reloading the page keeps the unlock until the 24-hour TTL expires. Tapping the unlocked badge forgets it immediately.
         </p>
       </form>
     </div>

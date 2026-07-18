@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 from pathlib import Path
 
-from hivemind_content_studio.media_studio import discover_media_studio
+from hivemind_content_studio.media_studio import (
+    MediaStudioDescriptor,
+    _private_video_url,
+    _reachable,
+    _token,
+    discover_media_studio,
+    generate_video,
+)
 from hivemind_content_studio.planner import DEFAULT_PROVIDERS
 
 
@@ -39,3 +47,263 @@ def test_media_studio_is_discovered_from_hivemind_preferences(tmp_path: Path, mo
     assert descriptor.tool == "media_generate_video"
     assert descriptor.job_tool == "media_get_job"
     assert DEFAULT_PROVIDERS["motion"] == "media-studio-mcp"
+
+
+def test_media_studio_falls_back_to_the_managed_local_mcp_descriptor(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HIVEMINDOS_APP_PREFERENCES", str(tmp_path / "missing-preferences.json"))
+    monkeypatch.setenv("MEDIA_STUDIO_MCP_PORT", "9876")
+    monkeypatch.setenv("MEDIA_STUDIO_UPLOAD_BASE", "http://127.0.0.1:8788")
+
+    descriptor = discover_media_studio()
+
+    assert descriptor is not None
+    assert descriptor.app_id == "managed:media-studio-mcp"
+    assert descriptor.mcp_url == "http://127.0.0.1:9876/mcp"
+    assert descriptor.upload_base == "http://127.0.0.1:8788"
+    assert descriptor.auth_env_key == "ZIMG_TOKEN"
+    assert descriptor.tool == "media_generate_video"
+
+
+def test_managed_media_studio_uses_canonical_token_file_over_stale_media_env(tmp_path: Path, monkeypatch) -> None:
+    state = tmp_path / "media-state"
+    token_file = state / "secure" / "zimg-token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text("canonical-local-token\n", encoding="utf-8")
+    monkeypatch.setenv("HIVEMINDOS_APP_PREFERENCES", str(tmp_path / "missing-preferences.json"))
+    monkeypatch.setenv("HIVEMIND_MEDIA_STATE_DIR", str(state))
+    monkeypatch.setenv("MEDIA_STUDIO_TOKEN", "stale-shared-env-token")
+    monkeypatch.delenv("ZIMG_TOKEN", raising=False)
+
+    descriptor = discover_media_studio()
+
+    assert descriptor is not None
+    assert descriptor.app_id == "managed:media-studio-mcp"
+    assert _token(descriptor) == "canonical-local-token"
+
+
+def test_media_studio_reachability_rejects_bad_mcp_auth(monkeypatch) -> None:
+    def fail_auth(request, timeout=0):
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio.urllib.request.urlopen", fail_auth)
+
+    assert _reachable("http://example.test/mcp", "wrong-token") is False
+
+
+def test_private_output_lookup_uses_server_auth_without_returning_it_through_mcp(monkeypatch) -> None:
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key="TEST_MEDIA_STUDIO_TOKEN",
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="ltx23-eros-fast",
+    )
+    monkeypatch.setenv("TEST_MEDIA_STUDIO_TOKEN", "server-private-token")
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps({
+                "id": "job-private",
+                "status": "success",
+                "image_urls": ["/image/private-video.mp4?token=server-private-token"],
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio.urllib.request.urlopen", fake_urlopen)
+
+    result = _private_video_url(descriptor, "job-private")
+
+    assert result == "http://127.0.0.1:8788/image/private-video.mp4?token=server-private-token"
+    assert requests[0].get_header("Authorization") == "Bearer server-private-token"
+
+
+def test_private_output_lookup_supports_comfy_video_history(monkeypatch) -> None:
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="ltx23-regular-fp8",
+    )
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout=0):
+        if request.full_url.endswith("/api/job/comfy-job"):
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+        return Response({
+            "comfy-job": {
+                "outputs": {
+                    "video": {
+                        "gifs": [{"filename": "private result.mp4", "subfolder": "ltx", "type": "output"}],
+                    },
+                },
+            },
+        })
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio.urllib.request.urlopen", fake_urlopen)
+
+    result = _private_video_url(descriptor, "comfy-job")
+
+    assert result == "http://127.0.0.1:8788/comfy/view?filename=private+result.mp4&subfolder=ltx&type=output"
+
+
+def test_video_generation_removes_uploaded_reference_and_qa_frame(tmp_path: Path, monkeypatch) -> None:
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="ltx23-eros-fast",
+    )
+    image = tmp_path / "reference.png"
+    image.write_bytes(b"reference")
+    deleted_inputs: list[str] = []
+    private_output_lookups: list[str] = []
+
+    class Client:
+        def call_tool(self, name, arguments):
+            if name == descriptor.tool:
+                assert arguments["image_path"] == "media-studio-input-private.png"
+                payload = {"job": {"id": "job-private", "status": "queued", "media_redacted": True}}
+            else:
+                assert name == descriptor.job_tool
+                assert arguments["id"] == "job-private"
+                payload = {"job": {"id": "job-private", "status": "success", "media_redacted": True}}
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps(payload),
+                }],
+            }
+
+    def fake_private_video_url(_descriptor, job_id):
+        private_output_lookups.append(job_id)
+        return "http://127.0.0.1:8788/private.mp4"
+
+    def fake_download(_url, destination, *, token=""):
+        assert token == ""
+        destination.write_bytes(b"private-video")
+
+    def fake_qa(video, *, output_dir, require_audio):
+        frame = Path(output_dir) / "private-middle.jpg"
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_bytes(b"private-frame")
+        return {"ok": True, "video": str(video), "representative_frame": str(frame), "failures": []}
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._upload_image", lambda *_args: "media-studio-input-private.png")
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+    monkeypatch.setattr("hivemind_content_studio.media_studio._private_video_url", fake_private_video_url)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._download", fake_download)
+    monkeypatch.setattr("hivemind_content_studio.media_studio.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("hivemind_content_studio.media_studio.qa_video", fake_qa)
+    monkeypatch.setattr(
+        "hivemind_content_studio.media_studio._delete_uploaded_image",
+        lambda _descriptor, name: deleted_inputs.append(name),
+    )
+    monkeypatch.setattr("hivemind_content_studio.media_studio._video_dimensions", lambda _path: (768, 768))
+
+    result = generate_video(image_path=image, prompt="private prompt", output_dir=tmp_path / "outputs")
+
+    assert deleted_inputs == ["media-studio-input-private.png"]
+    assert private_output_lookups == ["job-private"]
+    assert result["qa"]["representative_frame"] is None
+    assert not (tmp_path / "outputs" / "qa" / "private-middle.jpg").exists()
+
+
+def test_video_generation_routes_source_video_to_ltx_extension(tmp_path: Path, monkeypatch) -> None:
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="ltx23-eros-fast",
+    )
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source-video")
+    captured: dict = {}
+    deleted_inputs: list[str] = []
+
+    class Client:
+        def call_tool(self, name, arguments):
+            captured.update(arguments)
+            assert name == descriptor.tool
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "job": {
+                            "id": "job-extend",
+                            "status": "success",
+                            "media_urls": ["http://127.0.0.1:8788/image/extended.mp4"],
+                        },
+                    }),
+                }],
+            }
+
+    def fake_download(_url, destination, *, token=""):
+        destination.write_bytes(b"extended-video")
+
+    def fake_qa(video, *, output_dir, require_audio):
+        return {"ok": True, "video": str(video), "representative_frame": None, "failures": []}
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._upload_video", lambda *_args: "media-studio-input-source.mp4")
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+    monkeypatch.setattr("hivemind_content_studio.media_studio._download", fake_download)
+    monkeypatch.setattr("hivemind_content_studio.media_studio.qa_video", fake_qa)
+    monkeypatch.setattr(
+        "hivemind_content_studio.media_studio._delete_uploaded_image",
+        lambda _descriptor, name: deleted_inputs.append(name),
+    )
+
+    result = generate_video(
+        video_path=source,
+        video_mode="extend",
+        prompt="continue the same shot",
+        duration_seconds=2,
+        output_dir=tmp_path / "outputs",
+    )
+
+    assert captured["video_path"] == "media-studio-input-source.mp4"
+    assert captured["video_mode"] == "extend"
+    assert captured["duration_seconds"] == 2
+    assert captured["frame_rate"] == 24
+    assert "image_path" not in captured
+    assert "width" not in captured
+    assert deleted_inputs == ["media-studio-input-source.mp4"]
+    assert Path(result["output"]).read_bytes() == b"extended-video"

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import base64
+import io
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
 
 from hivemind_content_studio.approval_ledger import ApprovalLedger
-from hivemind_content_studio.control_api import build_control_app
+from hivemind_content_studio.control_api import _write_inline_video, build_control_app
 from hivemind_content_studio.orchestrator import ContentOrchestrator
+from hivemind_content_studio.private_access import OwnerAccess, PrivateFieldCipher
 from hivemind_content_studio.run_store import RunStore
 
 
@@ -15,11 +18,33 @@ def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, ContentOrchestrato
     monkeypatch.setenv("CONTENT_STUDIO_RUNS_DIR", str(tmp_path / "runs"))
     orchestrator = ContentOrchestrator(RunStore(tmp_path / "state.sqlite3"))
     approvals = ApprovalLedger(tmp_path / "approvals.sqlite3", signing_secret="s" * 64, operator_token="operator-secret")
-    app = build_control_app(orchestrator=orchestrator, approvals=approvals, control_token="control-secret", operator_token="operator-secret")
-    return TestClient(app), orchestrator, approvals
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    owner_access = OwnerAccess.for_testing(password="test-owner-password", cipher=cipher)
+    app = build_control_app(
+        orchestrator=orchestrator,
+        approvals=approvals,
+        control_token="control-secret",
+        operator_token="operator-secret",
+        owner_access=owner_access,
+        private_cipher=cipher,
+    )
+    client = TestClient(app)
+    response = client.post("/api/owner/unlock", json={"password": "test-owner-password"})
+    assert response.status_code == 200
+    return client, orchestrator, approvals
 
 
-def test_control_api_is_a_thin_run_viewer_with_authenticated_mutations(tmp_path: Path, monkeypatch) -> None:
+def test_inline_video_data_url_is_staged_with_video_suffix(tmp_path: Path) -> None:
+    source = b"\x00\x00\x00\x18ftypisomvideo-data"
+    encoded = base64.b64encode(source).decode("ascii")
+
+    staged = _write_inline_video(f"data:video/mp4;base64,{encoded}", tmp_path)
+
+    assert staged.suffix == ".mp4"
+    assert staged.read_bytes() == source
+
+
+def test_control_api_is_a_thin_run_viewer_with_owner_or_operator_mutations(tmp_path: Path, monkeypatch) -> None:
     client, orchestrator, _ = _client(tmp_path, monkeypatch)
     brief = tmp_path / "brief.yaml"
     brief.write_text("id: api\nlane: static-text-ad\nscenes:\n  - overlay: Test\n", encoding="utf-8")
@@ -29,9 +54,17 @@ def test_control_api_is_a_thin_run_viewer_with_authenticated_mutations(tmp_path:
     response = client.get("/api/runs")
     assert response.status_code == 200
     assert response.json()["runs"][0]["run_id"] == run["run_id"]
+    assert client.post("/api/owner/lock").status_code == 200
     assert client.post(f"/api/runs/{run['run_id']}/cancel", json={"reason": "stop"}).status_code == 401
+    assert client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
+    owner_cancelled = client.post(f"/api/runs/{run['run_id']}/cancel", json={"reason": "stop"})
+    assert owner_cancelled.status_code == 200
+    assert owner_cancelled.json()["status"] == "cancelled"
+
+    operator_run = orchestrator.execute_content_run(brief)
+    assert client.post("/api/owner/lock").status_code == 200
     cancelled = client.post(
-        f"/api/runs/{run['run_id']}/cancel",
+        f"/api/runs/{operator_run['run_id']}/cancel",
         json={"reason": "stop"},
         headers={"Authorization": "Bearer control-secret"},
     )
@@ -153,6 +186,9 @@ def test_simple_catalog_combines_safe_hivemind_brains_and_media_capabilities(tmp
     assert catalog["attachment_intake_limit"] == 30
     gpt_image = next(item for item in catalog["media"]["image"] if item["id"] == "openai-gpt-image")
     assert next(model for model in gpt_image["models"] if model["id"] == "gpt-image-1.5")["max_reference_images"] == 16
+    media_studio = next(item for item in catalog["media"]["video"] if item["id"] == "media-studio-mcp")
+    assert {model["id"] for model in media_studio["models"]} >= {"ltx23-eros-fast", "ltx23-eros-exact"}
+    assert next(model for model in media_studio["models"] if model["id"] == "ltx23-eros-fast")["label"] == "LTX 2.3 Eros Fast"
     seedance = next(item for item in catalog["media"]["video"] if item["id"] == "muapi")
     assert next(model for model in seedance["models"] if model["id"] == "seedance-v2.0-t2v")["max_reference_images"] is None
     assert any(template["id"] == "ugc-product-ad-15s" for template in catalog["templates"])
@@ -170,6 +206,112 @@ def test_unified_tool_surfaces_are_discoverable_without_checkout_paths(tmp_path:
     assert surfaces["models"]["gateway_path"] == "/models"
     assert isinstance(surfaces["explore"]["available"], bool)
     assert "/Users/" not in response.text
+
+
+def test_media_studio_video_is_owner_visible_but_machine_callers_receive_only_a_receipt(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+    output_path = tmp_path / "generated" / "media-studio" / "mock-ltx.mp4"
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        image_path = Path(kwargs["image_path"])
+        assert image_path.is_file()
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"mock-video")
+        qa_frame = output_dir / "qa" / "mock.jpg"
+        qa_frame.parent.mkdir(parents=True, exist_ok=True)
+        qa_frame.write_bytes(b"private-qa-frame")
+        return {
+            "job_id": "job-123",
+            "provider": "Media Studio",
+            "output": str(output_path),
+            "prompt": "secret prompt echo",
+            "qa": {"ok": True, "video": str(output_path), "representative_frame": str(qa_frame)},
+        }
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video", fake_generate)
+    client, _, _ = _client(tmp_path, monkeypatch)
+    image = Image.new("RGB", (16, 16), "white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    request_body = {
+        "prompt": "slow push in",
+        "workflow_id": "ltx23-regular-fp8",
+        "image_base64": f"data:image/png;base64,{encoded}",
+        "duration_seconds": 2,
+    }
+
+    response = client.post(
+        "/api/media-studio/video",
+        json=request_body,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["url"] == "/api/media-studio/generated/mock-ltx.mp4"
+    assert payload["output"] == "mock-ltx.mp4"
+    assert payload["encrypted_at_rest"] is True
+    assert "video" not in payload["qa"]
+    assert "representative_frame" not in payload["qa"]
+    assert "prompt" not in payload
+    assert "slow push in" not in response.text
+    assert "secret prompt echo" not in response.text
+    assert str(output_path) not in response.text
+    assert captured["workflow_id"] == "ltx23-regular-fp8"
+    assert captured["duration_seconds"] == 2
+    assert not Path(captured["image_path"]).exists()
+    assert not (output_path.parent / "qa" / "mock.jpg").exists()
+    assert not output_path.exists()
+    assert output_path.with_name("mock-ltx.mp4.zenc").is_file()
+    assert b"mock-video" not in output_path.with_name("mock-ltx.mp4.zenc").read_bytes()
+    media = client.get(payload["url"])
+    assert media.status_code == 200
+    assert media.content == b"mock-video"
+    assert media.headers["cache-control"] == "private, no-store"
+    partial = client.get(payload["url"], headers={"Range": "bytes=0-3"})
+    assert partial.status_code == 206
+    assert partial.content == b"mock"
+
+    assert client.post("/api/owner/lock").status_code == 200
+    machine = client.post(
+        "/api/media-studio/video",
+        json=request_body,
+        headers={"Authorization": "Bearer control-secret"},
+    )
+
+    assert machine.status_code == 200
+    machine_payload = machine.json()
+    assert machine_payload["job_id"] == "job-123"
+    assert machine_payload["privacy"] == "machine-redacted"
+    assert machine_payload["prompts_redacted"] is True
+    assert machine_payload["media_redacted"] is True
+    for forbidden in ("url", "media_url", "output", "qa", "encrypted_at_rest", "slow push in", "secret prompt echo", "mock-ltx.mp4"):
+        assert forbidden not in machine.text
+
+    failed_input: dict = {}
+
+    def fail_generate(**kwargs):
+        failed_input.update(kwargs)
+        raise RuntimeError(f"private prompt failed near {output_path}")
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video", fail_generate)
+    failed = client.post(
+        "/api/media-studio/video",
+        json=request_body,
+        headers={"Authorization": "Bearer control-secret"},
+    )
+    assert failed.status_code == 503
+    assert failed.json()["detail"] == "Media generation failed"
+    assert "private prompt" not in failed.text
+    assert str(output_path) not in failed.text
+    assert not Path(failed_input["image_path"]).exists()
+
+    guessed_url = "/api/media-studio/generated/mock-ltx.mp4"
+    assert client.get(guessed_url, headers={"Authorization": "Bearer control-secret"}).status_code == 401
+    assert client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
+    assert client.get(guessed_url).content == b"mock-video"
 
 
 def test_simple_catalog_falls_back_to_the_builtin_local_planner(tmp_path: Path, monkeypatch) -> None:
@@ -289,6 +431,38 @@ def test_simple_plan_preserves_the_native_studio_mode_and_rejects_unknown_modes(
         json={"prompt": "test", "provider": "openai-codex", "model": "gpt-5.4", "studioMode": "separate-app"},
     )
     assert invalid.status_code == 422
+
+
+def test_simple_plan_preserves_seed_value_and_mode_in_composer_and_provider_options(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.plan_with_brain",
+        lambda payload: {
+            "mode": "confirmation",
+            "message": "Review",
+            "draft": {"lane": "static-text-ad", "title": payload["prompt"]},
+        },
+    )
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/simple/plan",
+        json={
+            "prompt": "Recreate this setup",
+            "provider": "openai-codex",
+            "model": "gpt-5.4",
+            "seed": 8675309,
+            "seedMode": "randomize",
+        },
+    )
+
+    assert response.status_code == 200
+    plan = response.json()["plan"]
+    assert plan["composer"]["seed"] == 8675309
+    assert plan["composer"]["seedMode"] == "randomize"
+    assert plan["draft"]["provider_options"]["_studio_generation"] == {
+        "seed": 8675309,
+        "seed_mode": "randomize",
+    }
 
 
 def test_simple_run_retains_ordered_reference_images_in_the_canonical_manifest(tmp_path: Path, monkeypatch) -> None:
@@ -576,6 +750,13 @@ def test_run_artifact_endpoint_serves_only_manifest_artifacts(tmp_path: Path, mo
     assert download.status_code == 200
     assert b"Artifact preview" in download.content
     assert client.get(f"/api/runs/{run['run_id']}/artifacts/not-real").status_code == 404
+
+    assert client.post("/api/owner/lock").status_code == 200
+    protected = client.get(
+        f"/api/runs/{run['run_id']}/artifacts/{artifact['id']}",
+        headers={"Authorization": "Bearer control-secret"},
+    )
+    assert protected.status_code == 401
 
 
 def test_oauth_routes_proxy_safe_hivemindos_status_and_start(tmp_path: Path, monkeypatch) -> None:

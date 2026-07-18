@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .private_access import ENCRYPTED_PREFIX, PrivateFieldCipher
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -22,10 +24,13 @@ class PromptHistoryStore:
     either can be reused from the composer.
     """
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, cipher: PrivateFieldCipher | None = None):
         self.path = Path(path).expanduser().resolve()
+        self.cipher = cipher
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+        if self.cipher:
+            self._migrate_private_fields()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -47,6 +52,7 @@ class PromptHistoryStore:
                     source TEXT NOT NULL DEFAULT 'simple',
                     run_id TEXT NOT NULL DEFAULT '',
                     composer_json TEXT NOT NULL DEFAULT '{}',
+                    prompt_digest TEXT NOT NULL DEFAULT '',
                     favorite INTEGER NOT NULL DEFAULT 0,
                     use_count INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
@@ -58,6 +64,41 @@ class PromptHistoryStore:
             columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(prompts)").fetchall()}
             if "composer_json" not in columns:
                 connection.execute("ALTER TABLE prompts ADD COLUMN composer_json TEXT NOT NULL DEFAULT '{}'")
+            if "prompt_digest" not in columns:
+                connection.execute("ALTER TABLE prompts ADD COLUMN prompt_digest TEXT NOT NULL DEFAULT ''")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_prompts_digest ON prompts(prompt_digest)")
+
+    def _migrate_private_fields(self) -> None:
+        assert self.cipher is not None
+        changed = False
+        with self._connect() as connection:
+            rows = connection.execute("SELECT prompt_id, prompt, user_prompt, title, prompt_digest FROM prompts").fetchall()
+            for row in rows:
+                prompt = self.cipher.decrypt(str(row["prompt"]))
+                user_prompt = self.cipher.decrypt(str(row["user_prompt"]))
+                title = self.cipher.decrypt(str(row["title"]))
+                digest = self.cipher.digest(prompt)
+                if (
+                    not str(row["prompt"]).startswith(ENCRYPTED_PREFIX)
+                    or (str(row["user_prompt"]) and not str(row["user_prompt"]).startswith(ENCRYPTED_PREFIX))
+                    or (str(row["title"]) and not str(row["title"]).startswith(ENCRYPTED_PREFIX))
+                    or row["prompt_digest"] != digest
+                ):
+                    connection.execute(
+                        "UPDATE prompts SET prompt=?, user_prompt=?, title=?, prompt_digest=? WHERE prompt_id=?",
+                        (
+                            self.cipher.encrypt(prompt),
+                            self.cipher.encrypt(user_prompt),
+                            self.cipher.encrypt(title),
+                            digest,
+                            row["prompt_id"],
+                        ),
+                    )
+                    changed = True
+        if changed:
+            with self._connect() as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                connection.execute("VACUUM")
 
     def record(
         self,
@@ -75,10 +116,13 @@ class PromptHistoryStore:
             raise ValueError("A history entry requires a prompt")
         now = _now()
         composer_json = json.dumps(composer or {}, separators=(",", ":"), sort_keys=True)
+        prompt_digest = self.cipher.digest(text) if self.cipher else ""
         with self._connect() as connection:
-            existing = connection.execute(
-                "SELECT prompt_id FROM prompts WHERE prompt = ? LIMIT 1", (text,)
-            ).fetchone()
+            existing = (
+                connection.execute("SELECT prompt_id FROM prompts WHERE prompt_digest = ? LIMIT 1", (prompt_digest,)).fetchone()
+                if self.cipher
+                else connection.execute("SELECT prompt_id FROM prompts WHERE prompt = ? LIMIT 1", (text,)).fetchone()
+            )
             if existing:
                 connection.execute(
                     "UPDATE prompts SET use_count = use_count + 1, updated_at = ?, run_id = ?, composer_json = ? WHERE prompt_id = ?",
@@ -87,17 +131,18 @@ class PromptHistoryStore:
                 return self.get(existing["prompt_id"])
             prompt_id = f"ph_{uuid.uuid4().hex[:12]}"
             connection.execute(
-                "INSERT INTO prompts (prompt_id, prompt, user_prompt, title, lane, source, run_id, composer_json, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO prompts (prompt_id, prompt, user_prompt, title, lane, source, run_id, composer_json, prompt_digest, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     prompt_id,
-                    text,
-                    user_prompt.strip()[:20_000],
-                    title.strip()[:180],
+                    self.cipher.encrypt(text) if self.cipher else text,
+                    self.cipher.encrypt(user_prompt.strip()[:20_000]) if self.cipher else user_prompt.strip()[:20_000],
+                    self.cipher.encrypt(title.strip()[:180]) if self.cipher else title.strip()[:180],
                     lane.strip()[:80],
                     source.strip()[:40] or "simple",
                     run_id,
                     composer_json,
+                    prompt_digest,
                     now,
                     now,
                 ),
@@ -136,17 +181,16 @@ class PromptHistoryStore:
             if deleted.rowcount == 0:
                 raise KeyError(f"Unknown prompt {prompt_id!r}")
 
-    @staticmethod
-    def _entry(row: sqlite3.Row) -> dict[str, Any]:
+    def _entry(self, row: sqlite3.Row) -> dict[str, Any]:
         try:
             composer = json.loads(row["composer_json"])
         except (json.JSONDecodeError, TypeError):
             composer = {}
         return {
             "prompt_id": row["prompt_id"],
-            "prompt": row["prompt"],
-            "user_prompt": row["user_prompt"],
-            "title": row["title"],
+            "prompt": self.cipher.decrypt(row["prompt"]) if self.cipher else row["prompt"],
+            "user_prompt": self.cipher.decrypt(row["user_prompt"]) if self.cipher else row["user_prompt"],
+            "title": self.cipher.decrypt(row["title"]) if self.cipher else row["title"],
             "lane": row["lane"],
             "source": row["source"],
             "run_id": row["run_id"],

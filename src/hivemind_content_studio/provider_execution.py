@@ -109,8 +109,9 @@ class ProviderExecutors:
         prompt = str(request.get("prompt") or "").strip()
         aspect_ratio = str(request.get("aspect_ratio") or manifest["brief"].get("aspect_ratio") or "9:16")
         options = _provider_options(manifest, provider)
+        generation_options = _studio_generation_options(manifest)
         if provider == "higgsfield-consumer":
-            model = str(options.get(f"{kind}_model") or ("gpt_image_2" if kind == "keyframe" else "seedance_2_0"))
+            model = _selected_model(options, kind, "gpt_image_2" if kind == "keyframe" else "seedance_2_0")
             source = self._source_path(manifest, scene) if kind == "motion" else None
             return self.higgsfield_consumer(
                 kind=kind,
@@ -125,7 +126,7 @@ class ProviderExecutors:
         if provider in {"openai-gpt-image", "openai-gpt-image-oauth"}:
             if kind != "keyframe":
                 raise ValueError("OpenAI GPT Image does not provide scene motion")
-            model = str(options.get("model") or options.get("keyframe_model") or "gpt-image-2")
+            model = _selected_model(options, kind, "gpt-image-2")
             generator = self.openai_oauth_image if provider.endswith("oauth") else self.openai_image
             return generator(
                 prompt=prompt,
@@ -136,10 +137,7 @@ class ProviderExecutors:
                 confirm=PAID_GENERATION_CONFIRMATION,
             )
         if provider in {"xai-imagine-api", "xai-imagine-oauth"}:
-            model = str(
-                options.get(f"{kind}_model")
-                or ("grok-imagine-image-quality" if kind == "keyframe" else "grok-imagine-video")
-            )
+            model = _selected_model(options, kind, "grok-imagine-image-quality" if kind == "keyframe" else "grok-imagine-video")
             return self.xai_imagine(
                 kind=kind,
                 auth_mode="oauth" if provider.endswith("oauth") else "api-key",
@@ -153,7 +151,7 @@ class ProviderExecutors:
                 confirm=PAID_GENERATION_CONFIRMATION,
             )
         if provider == "higgsfield-cloud":
-            model = str(options.get(f"{kind}_model") or ("higgsfield-ai/soul/standard" if kind == "keyframe" else "higgsfield-ai/dop/standard"))
+            model = _selected_model(options, kind, "higgsfield-ai/soul/standard" if kind == "keyframe" else "higgsfield-ai/dop/standard")
             payload: dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
             if kind == "motion":
                 source_url = self._source_url(manifest, scene)
@@ -175,6 +173,8 @@ class ProviderExecutors:
                 "aspect_ratio": aspect_ratio,
                 "duration_seconds": request.get("duration_seconds") or 4,
                 "source_url": self._source_url(manifest, scene) or "",
+                "seed": generation_options.get("seed"),
+                "seed_mode": generation_options.get("seed_mode", "randomize"),
             }
             payload = _format_template(template, values)
             payload_path = output.with_suffix(".payload.json")
@@ -195,6 +195,8 @@ class ProviderExecutors:
                 "aspect_ratio": aspect_ratio,
                 "duration_seconds": request.get("duration_seconds") or 4,
                 "source_url": self._source_url(manifest, scene) or "",
+                "seed": generation_options.get("seed"),
+                "seed_mode": generation_options.get("seed_mode", "randomize"),
             }
             payload = _format_template(template, values)
             agent_id = str(
@@ -213,11 +215,18 @@ class ProviderExecutors:
                 idempotency_key=f"{run_id}:{kind}:{scene}:{model}",
             )
         if provider == "media-studio-mcp" and kind == "motion":
+            workflow_id = str(
+                _role_options(options, kind).get("workflow_id")
+                or options.get("workflow_id")
+                or _role_options(options, kind).get("model")
+                or options.get("model")
+                or ""
+            ).strip()
             return self.media_studio(
                 image_path=self._source_path(manifest, scene),
                 prompt=prompt,
                 duration_seconds=float(request.get("duration_seconds") or 4),
-                workflow_id=str(options.get("workflow_id") or "") or None,
+                workflow_id=workflow_id or None,
                 output_dir=output_dir,
             )
         raise ValueError(f"No manifest executor exists for {provider!r} and {kind!r}")
@@ -249,9 +258,34 @@ def _provider_options(manifest: dict[str, Any], provider: str) -> dict[str, Any]
     return value if isinstance(value, dict) else {}
 
 
+def _studio_generation_options(manifest: dict[str, Any]) -> dict[str, Any]:
+    all_options = manifest.get("brief", {}).get("provider_options")
+    if not isinstance(all_options, dict):
+        return {}
+    value = all_options.get("_studio_generation")
+    return value if isinstance(value, dict) else {}
+
+
+def _role_options(options: dict[str, Any], kind: str) -> dict[str, Any]:
+    value = options.get(kind)
+    return value if isinstance(value, dict) else {}
+
+
+def _selected_model(options: dict[str, Any], kind: str, fallback: str) -> str:
+    role_options = _role_options(options, kind)
+    for value in (
+        role_options.get("model"),
+        options.get(f"{kind}_model"),
+        options.get("model"),
+    ):
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            return str(value).strip()
+    return fallback
+
+
 def _format_template(value: Any, variables: dict[str, Any]) -> Any:
     if isinstance(value, str):
-        if value in {"{prompt}", "{aspect_ratio}", "{duration_seconds}", "{source_url}"}:
+        if value in {"{prompt}", "{aspect_ratio}", "{duration_seconds}", "{source_url}", "{seed}", "{seed_mode}"}:
             return variables[value[1:-1]]
         return value.format_map({key: str(item) for key, item in variables.items()})
     if isinstance(value, list):

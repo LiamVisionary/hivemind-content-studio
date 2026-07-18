@@ -115,6 +115,16 @@
   ],
   "patches": [
     {
+      "directory": "ComfyUI-LTXVideo",
+      "file": "patches/comfyui-ltxvideo/omit-null-noise-mask.patch",
+      "description": "Keep absent latent noise masks absent so joint audio-video continuation can construct its mask without crashing on null values."
+    },
+    {
+      "directory": "ComfyUI-LTXVideo",
+      "file": "patches/comfyui-ltxvideo/align-overlap-latent-device.patch",
+      "description": "Align overlap latents across CPU/GPU offload boundaries and keep Comfy batch indices integer-valued for continuation sampling on MPS and CUDA."
+    },
+    {
       "directory": "comfyui-kjnodes",
       "file": "patches/comfyui-kjnodes/ltx2-lora-bypass-mps.patch",
       "description": "Use ComfyUI bypass LoRA injections for LTX2 LoRAs on Apple Silicon MPS instead of repeatedly repatching model weights.",
@@ -183,12 +193,31 @@
       "url": "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors",
       "required": false,
       "approxBytes": 1452258578
+    },
+    {
+      "folder": "loras",
+      "relativePath": "ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "name": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "required": false,
+      "approxBytes": 7605507256,
+      "sha256": "f5d4953f3386197a4b4f5abdb17616ff256171e8075c111d6e7d2dfa6e823b3a"
+    },
+    {
+      "folder": "loras",
+      "relativePath": "ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+      "name": "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+      "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients/resolve/main/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+      "required": false,
+      "gated": true,
+      "authEnv": ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_READ_WRITE_KEY"]
     }
   ],
   "notes": [
     "The workflow archive is public Civitai metadata for model 2667355/version 2995139 and is installed through the existing local downloader endpoint.",
     "The RTXVideoSuperResolution node is optional and Windows/NVIDIA-oriented; Apple Silicon setups should keep that workflow group disabled or remove it.",
     "On Apple Silicon, the installer applies a KJNodes LTX2 LoRA bypass patch so the workflow follows the existing ComfyUI MPS weight-adapter fast path.",
-    "Large model files are declared but not downloaded unless the installer is run with --download-models."
+    "Large model files are declared but not downloaded unless the installer is run with --download-models.",
+    "Ingredients IC-LoRA dependencies are optional for the base Eros workflow; include --download-optional-models after accepting the Hugging Face gate and exposing a supported Hugging Face token at runtime."
   ]
 }

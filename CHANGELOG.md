@@ -1,5 +1,116 @@
 # Changelog
 
+## 2026-07-16 16:55:34 -0400 — Video progress clears the composer and completion ping unlocks reliably
+
+- Status: Uncommitted
+- User-facing result: Starting a video generation now removes the Studio hero and composer from the active layout, places the animated progress card near the top of the viewport above setup controls, and restores setup only on Back or an error. Enabling Ping when complete immediately plays a preview tone; successful generations play the same louder two-note tone when the result becomes viewable.
+- Root cause and audio handling: The composer retained a fill-mode entrance animation at `z-40`, which could override an opacity utility while the progress layer sat at `z-30`. The progress layer now uses structural hiding and `z-50`. The embedded Explore frame explicitly allows autoplay, and Generate primes Web Audio with a silent source during its user gesture so delayed completion playback remains authorized.
+- Verification: OpenGen regressions pass 27/27; Studio UI contract passes 21/21; complete Studio suite passes 185/185; JavaScript syntax, production build, live served-bundle/CSS inspection, and `git diff --check` pass. Real speaker playback and screenshot QA were unavailable in this runtime.
+- Intended commit message: `fix: keep video progress above composer and unlock ping`
+
+## 2026-07-16 16:51:04 -0400 — Video model and duration survive reloads
+
+- Status: Uncommitted
+- User-facing result: Video Studio now restores the last selected video model and duration after a reload, including local Hivemind workflows such as LTX 2.3 Eros Fast once asynchronous workflow discovery completes.
+- Privacy boundary: The persistent browser preference contains only the model ID and numeric duration. Prompts, reference images/videos, filenames, generation context, and outputs remain excluded.
+- Verification: OpenGen regressions pass 27/27 (baseline 26/26); Studio UI contract passes 21/21; complete Studio suite passes 185/185; JavaScript syntax, production build, live served-bundle inspection, catalog ID-collision audit, and `git diff --check` pass. Browser interaction QA was unavailable in this runtime.
+- Intended commit message: `fix: persist video model and duration`
+
+## 2026-07-16 16:40:05 -0400 — Regenerate skips the hidden editor
+
+- Status: Uncommitted
+- User-facing result: Regenerate now restores the prior prompt, reference media, model, and parameters off-screen, pauses the previous result, and transitions directly into the generation progress card. The chat input appears only when Back to setup is chosen or regeneration fails and needs editing.
+- Verification: OpenGen regressions pass 26/26; Studio UI contract passes 21/21; JavaScript syntax, production build, live served-bundle check, and `git diff --check` pass.
+- Intended commit message: `fix: keep editor hidden during video regeneration`
+
+## 2026-07-16 16:38:26 -0400 — Raised video progress card and completion ping
+
+- Status: Uncommitted
+- User-facing result: The animated video generation card now sits higher in the Studio viewport instead of rendering below the composer. A new Ping when complete toggle beside Generate plays a short two-note chime when a newly generated video becomes ready.
+- Behavior and privacy: The toggle defaults off and is remembered only in tab-scoped `sessionStorage`. Audio is primed from the user’s toggle or generation click so asynchronous completion can play reliably. The completion guard fires once per generation and does not ping when opening an existing history video.
+- Verification: OpenGen regressions pass 26/26; Studio UI contract passes 21/21; complete Studio suite passes 185/185; JavaScript syntax, production build, served-bundle checks, and `git diff --check` pass. The live OpenGen service serves the raised-card CSS and completion-audio code with all managed listeners online. A real render/audio playback and screenshot QA were not run because browser execution was unavailable in this runtime.
+- Intended commit message: `fix: raise video progress and add completion ping`
+
+## 2026-07-16 16:32:08 -0400 — Video generation progress and reversible result editing
+
+- Status: Uncommitted
+- User-facing result: Video generation now replaces the faded composer with an animated generation card showing the selected model, start-frame preview, requested format, elapsed time, a moving progress bar, and safe generation stages. Wan2GP telemetry drives a real percentage; Hivemind and remote providers remain honestly indeterminate when their API exposes no percentage.
+- Result workflow: The completed-video view now has a Back to setup action that restores the same prompt, model, start/end frames, uploaded video, and generation options. Regenerate restores that in-memory submission before resubmitting, so it no longer fails with a hidden “prompt required” validation error. New still clears the setup intentionally.
+- Privacy boundary: The submission snapshot and start-frame object URL remain memory-only and are never added to persistent Hivemind browser history. Raw provider progress messages are not rendered; the card maps telemetry to bounded status labels so local paths or operational output cannot leak into the UI.
+- Verification: OpenGen JavaScript syntax and all 26 OpenGen regressions pass (baseline 23/23); the Studio UI contract passes 21/21 (baseline 20/20); the complete Studio suite passes 185/185; the production OpenGen bundle builds; `git diff --check` passes. The managed stack was restarted and all required listeners are online; the live OpenGen server serves the new Video Studio chunk and progress animation CSS. Screenshot QA was skipped because the in-app browser execution tool was unavailable in this runtime.
+- Intended commit message: `fix: add video progress and preserve generation setup`
+
+## 2026-07-16 16:00:20 -0400 — Creative reads require the unlocked owner session
+
+- Status: Uncommitted
+- User-facing result: Prompt history, Canvas workflows/media, generated Media Studio videos, OpenGen outputs, simple-plan results, and run artifacts are now explicitly owner-session-only. A control-token caller may still start or manage an allowed run, but receives a machine-redacted receipt with no prompt, QA payload, output filename, media URL, or private failure detail.
+- MCP boundary: Machine-private Media Studio MCP calls now ignore `include_urls=true`, remove every media/output URL field, and return generic errors. The trusted Content Studio server resolves completed native or Comfy outputs through its private gateway credential, downloads them internally, and then uses the existing encrypted-at-rest owner playback flow.
+- Verification: complete Studio suite passes 183/183; Media Gateway suite passes 41/41; JavaScript syntax, Python compileall, and `git diff --check` pass. The settled managed-stack restart has all required listeners online. Live probes confirm control-token media reads return `401`, an owner session decrypts the same temporary encrypted probe with `Cache-Control: private, no-store`, the probe is removed, live MCP history/job calls return no creative or credential fields even with `include_urls=true`, and all seven local video workflows remain discoverable.
+- Intended commit message: `fix: make creative content owner-session-only`
+
+## 2026-07-16 15:02:00 -0400 — Creative inputs and outputs stay behind the owner unlock
+
+- Status: Uncommitted
+- User-facing result: In the embedded Studio, image/video prompts and generated media history are now memory-only; pending remote jobs are tab-session-only; locking the Studio clears current and legacy creative browser state. Canvas workflow keys are stored in `sessionStorage` instead of persistent `localStorage`, while prompt-helper reference images remain AES-GCM ciphertext in IndexedDB.
+- Media handling: Private image/video playback now encrypts a completed plaintext output before serving it, uses `Cache-Control: private, no-store, max-age=0` through both gateway layers, fails closed and removes the plaintext result when output encryption fails, and no longer prints bearer tokens or token-bearing request URLs in logs. Temporary Media Studio start frames and QA frame extracts are deleted after terminal generation, with a bounded stale-input sweeper as recovery.
+- Security boundary: Owner cookies authorize creative reads; control tokens authorize only bounded machine operations with redacted receipts. Local model/runtime processes necessarily receive prompt and media plaintext transiently while generating. Output and workflow encryption protects durable state; this is not zero-knowledge execution against the local runtime itself. An explicit `ZIMG_OUTPUT_ENCRYPTION=0` deployment override disables the output-at-rest guarantee.
+- Verification: complete Studio suite passes 180/180; Media Gateway suite passes 41/41; ComfyUI Mobile passes 937/937; OpenGen regressions pass 23/23; ComfyUI Mobile and OpenGen production bundles build successfully.
+- Intended commit message: `fix: harden studio creative privacy`
+
+## 2026-07-16 14:24:13 -0400 — Direct Media Studio renders encrypt at rest
+
+- Status: Uncommitted
+- User-facing result: Local video generations launched from the embedded OpenGen Studio now keep the uploaded start frame temporary and remove it after the Media Studio MCP call. The returned MP4 is immediately converted into an authenticated `.zenc` sidecar, the plaintext MP4 is removed, playback still works through `/api/media-studio/generated/{filename}` with range support, and local workflow prompts are not persisted in the embedded browser history.
+- Areas changed: Content Studio private byte encryption helper; direct `/api/media-studio/video` output handling; authenticated generated-media playback; OpenGen local-workflow history prompt redaction; API/UI regression coverage; rebuilt served OpenGen dist bundle.
+- Security boundary: the browser receives the same owner/control-gated private media URL, a safe output filename, sanitized QA metadata, and an `encrypted_at_rest` flag. It no longer receives local output paths from the MCP result, QA paths, prompt echoes, or persistent plaintext reference-image files. Hivemind/Media Studio prompt text is sent only for generation and then redacted from OpenGen `video_history`; existing local workflow history entries are scrubbed on load.
+- Verification: focused encrypted Media Studio endpoint and local-workflow selector/history regressions pass; broader Studio API/UI contract suite passes 47/47; `python3 -m py_compile src/hivemind_content_studio/control_api.py src/hivemind_content_studio/private_access.py` and `node --check packages/open-generative-ai/src/components/VideoStudio.js` pass; `npm run vite:build` rebuilt the served OpenGen bundle; managed stack restarted and live health reports `{"ok":true}` on `127.0.0.1:8765`; live catalog still reports the Media Studio MCP LTX workflow list; LTX queue is empty after restart.
+- Intended commit message: `fix: encrypt direct media studio outputs`
+
+## 2026-07-16 14:08:07 -0400 — Local LTX workflows in OpenGen Video Studio selector
+
+- Status: Uncommitted
+- User-facing result: The embedded Studio video model selector now shows local Hivemind/Media Studio workflows such as `LTX 2.3 Eros Fast`, `LTX 2.3 Eros Exact`, and the registered LTX 2.3 LoRA workflows directly in the normal Video Studio model dropdown instead of hiding them behind image mode or the Hivemind side dock. Selecting one switches the generation path to the same-origin Media Studio MCP route.
+- Areas changed: OpenGen Video Studio model list composition and Hivemind workflow selection behavior; UI contract coverage; rebuilt served OpenGen dist bundle.
+- Security boundary: local workflows still use same-origin Content Studio owner/control auth and the existing `/api/media-studio/video` bridge. No provider keys, MCP tokens, private workflow JSON, or local filesystem paths are exposed to the browser.
+- Verification: live catalog probe with shared env confirms `media-studio-mcp` is available and returns `workflow-default`, `ltx23-eros-fast`, `ltx23-eros-exact`, `ltx23-regular-fp8`, `ltx23-transition-lora`, `ltx23-better-motion-lora`, and `ltx23-ic-dual-character-lora`; focused OpenGen/Studio UI contract passes; complete `test/studio/test_studio_ui_contract.py` passes 18/18; `node --check` passes for the touched OpenGen modules; `npm run vite:build` rebuilt the served OpenGen bundle; dist grep confirms the served bundle includes the Hivemind local workflow marker; `git diff --check` passes.
+- Intended commit message: `fix: show local ltx workflows in video studio`
+
+## 2026-07-16 — Regular-LTX renders survive frontend stalls and receive negative conditioning
+
+- Status: Uncommitted
+- User-facing result: Long regular-LTX renders are no longer terminated when accelerator saturation temporarily stalls the Studio frontend, and `media_generate_video` now passes a caller-provided negative prompt into registered video workflows.
+- Areas changed: managed-stack frontend watchdog policy; Media Studio MCP video input contract; focused source-contract regressions.
+- Safety boundary: exited child processes remain fatal, only the already-designated soft frontend HTTP check is non-fatal, bearer authentication is unchanged, and prompts remain excluded from stored history.
+- Verification: reproduced the six-timeout supervisor restart during an active LTX job; the corrected stack completed subsequent regular-LTX renders without restart; local Studio suite passes 149/149; live M5 MCP syntax, negative-prompt schema, listener, and final regular-LTX generation checks pass.
+- Intended commit message: `fix: preserve and condition regular ltx renders`
+
+## 2026-07-15 18:22:19 -0400 — Explore becomes the core Studio surface
+
+- Status: Uncommitted
+- User-facing result: The primary Studio nav and no-hash shell route now open the Explore/OpenGen generation UX. The former native composer remains available as Planner for agent-directed production, history restore, templates, ingredients, prompt-helper/walk-through options, route pickers, and durable run workflows.
+- Areas changed: Content Studio shell routing and Explore iframe boot params; parent-to-Explore prompt/template/ingredient bridge; OpenGen Hivemind dock; dynamic discovery of `media-studio-mcp` video workflows; OpenGen Video Studio Hivemind image-to-video model routing; same-origin Media Studio video endpoint accepting inline start images and returning private MP4 URLs; focused API/UI contracts.
+- Security boundary: local workflow generation stays owner-session protected and same-origin. The browser sends an inline start image to `/api/media-studio/video`; the server writes it to private temp storage, calls the existing Media Studio MCP adapter, downloads output under the private generated-media root, and serves only a checked filename URL. Wan2GP/Electron local-AI routing remains separate and unchanged.
+- Verification: focused contracts pass: `.venv/bin/pytest test/studio/test_studio_ui_contract.py test/studio/test_control_api.py`; Media Studio/provider contracts pass: `.venv/bin/pytest test/studio/test_media_studio.py test/studio/test_provider_execution.py`; JavaScript syntax checks pass via `node --check`; Python compile checks pass via `python3 -m py_compile src/hivemind_content_studio/control_api.py src/hivemind_content_studio/media_studio.py`; OpenGen production bundle builds with `npm run vite:build`; TestClient smoke confirms `/` and `/open-gen/` serve 200 after owner unlock.
+- Intended commit message: `feat: make explore the core studio surface`
+
+## 2026-07-15 17:29:19 -0400 — Owner run controls in Runs view
+
+- Status: Uncommitted
+- User-facing result: The Runs view no longer blocks Resume, Retry step, or Cancel behind the Advanced operator-token field when the browser already has an unlocked owner session. Operator bearer tokens still work for machine/non-owner clients, and locked browsers without a token remain rejected.
+- Areas changed: Content Studio run-control API authorization; Runs view run-action frontend guard; focused API/UI regression coverage.
+- Security boundary: approval decisions remain operator-token gated. This change only lets the existing owner session cookie authorize local run lifecycle controls that were already visible in the owner UI.
+- Verification: focused regression checks pass: `uv run pytest test/studio/test_control_api.py::test_control_api_is_a_thin_run_viewer_with_owner_or_operator_mutations test/studio/test_studio_ui_contract.py::test_ui_is_same_origin_and_uses_session_storage_only_for_tab_scoped_owner_handoff`; broader API/UI contracts pass: `uv run pytest test/studio/test_control_api.py test/studio/test_studio_ui_contract.py`; `python3 -m py_compile src/hivemind_content_studio/control_api.py`, `node --check src/hivemind_content_studio/ui/studio.js`, and `git diff --check` pass.
+- Intended commit message: `fix: allow owner sessions to use run controls`
+
+## 2026-07-15 21:08:00 -0400 — LTX 2.3 Eros video workflow discovery
+
+- Status: Uncommitted
+- User-facing result: The Video model picker can now discover the managed Media Studio MCP route even when no HivemindOS `mcpVideo` app preference is present, and it exposes the built-in LTX 2.3 Eros workflow choices (`ltx23-eros-fast`, `ltx23-eros-exact`) instead of only a generic workflow-default option. Selecting `ltx23-eros-fast` preserves that choice into the run and dispatches it as the Media Studio `workflow_id`, which uses the optimized LTX Eros route.
+- Areas changed: managed Media Studio MCP fallback discovery and token-file auth; workflow listing from Media Studio MCP; Simple composer media catalog entries for LTX Eros workflows; executor routing from nested `motion.model` to Media Studio `workflow_id`; run restore reads nested media model selections; focused discovery/catalog/execution tests.
+- Security boundary: no secrets are printed or sent to the browser. Token-file reading is process-local and only used to authenticate the managed MCP. The browser receives safe workflow ids, labels, readiness, and reference-image limits only; generation still goes through the existing MCP, run manifest, and provider intent boundaries.
+- Verification: reproduced the baseline catalog status showing `media-studio-mcp` unavailable with only `workflow-default`; with the shared env loaded, live post-change status reports managed MCP reachable and `media_list_workflows` returns `ltx23-eros-fast` as default plus `ltx23-eros-exact`. The composer catalog lists `workflow-default`, `ltx23-eros-fast`, and `ltx23-eros-exact`. Focused tests pass: `uv run pytest test/studio/test_media_studio.py test/studio/test_control_api.py::test_simple_catalog_combines_safe_hivemind_brains_and_media_capabilities test/studio/test_provider_execution.py::test_media_studio_motion_uses_the_selected_workflow_model`. Python compile and `node --check src/hivemind_content_studio/ui/studio.js` pass.
+- Intended commit message: `fix: discover LTX Eros video workflows in composer`
+
 ## 2026-07-12 02:22:15 +0800 — Run history restores reference images
 
 - Status: Uncommitted

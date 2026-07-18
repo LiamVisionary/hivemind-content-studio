@@ -50,6 +50,20 @@ function safeStorageRemove(key) {
     if (typeof window !== 'undefined' && window.localStorage) window.localStorage.removeItem(key);
   } catch {}
 }
+function normalizedLocalHostname(hostname) {
+  const normalized = String(hostname || '').toLowerCase();
+  return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(normalized) ? 'loopback' : normalized;
+}
+function isTrustedOwnerParent(event) {
+  if (event.source !== window.parent) return false;
+  try {
+    const parent = new URL(event.origin);
+    return normalizedLocalHostname(parent.hostname) === normalizedLocalHostname(location.hostname)
+      && ['8765', '8789', location.port].includes(parent.port);
+  } catch {
+    return false;
+  }
+}
 const unlockScreenStyle = {
   minHeight: '100vh',
   display: 'grid',
@@ -292,6 +306,29 @@ function AuthGate({ children }) {
     if (expires > Date.now()) setUnlocked(true);
     else safeStorageRemove(FRONTEND_UNLOCK_STORAGE);
     setChecking(false);
+  }, []);
+
+  useEffect(() => {
+    const onOwnerAccess = async (event) => {
+      if (!isTrustedOwnerParent(event)) return;
+      if (event.data?.type === 'hivemind-owner-lock') {
+        safeStorageRemove(FRONTEND_UNLOCK_STORAGE);
+        setUnlocked(false);
+        return;
+      }
+      if (event.data?.type !== 'hivemind-owner-unlock') return;
+      if (event.data?.ownerSession !== true) {
+        if (typeof event.data.passphrase !== 'string') return;
+        if (await sha256Hex(event.data.passphrase) !== FRONTEND_PASSWORD_HASH) return;
+      }
+      safeStorageSet(FRONTEND_UNLOCK_STORAGE, String(Date.now() + FRONTEND_UNLOCK_MS));
+      setUnlocked(true);
+    };
+    window.addEventListener('message', onOwnerAccess);
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: 'hivemind-owner-unlock-ready' }, '*');
+    }
+    return () => window.removeEventListener('message', onOwnerAccess);
   }, []);
 
   async function unlock(event) {

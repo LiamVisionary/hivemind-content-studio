@@ -1,0 +1,26 @@
+diff --git a/easy_samplers.py b/easy_samplers.py
+index d44e77c..af887d5 100644
+--- a/easy_samplers.py
++++ b/easy_samplers.py
+@@ -871,6 +871,8 @@ class LinearOverlapLatentTransition:
+     def process(self, samples1, samples2, overlap, axis=0):
+         samples1 = self.get_subbatch(samples1)
+         samples2 = self.get_subbatch(samples2)
++        if samples2.device != samples1.device:
++            samples2 = samples2.to(samples1.device)
+ 
+         # Create transition coefficients
+         alpha = torch.linspace(1, 0, overlap + 2)[1:-1].to(samples1.device)
+@@ -900,9 +902,9 @@ class LinearOverlapLatentTransition:
+         ]
+ 
+         combined_samples = torch.cat(parts, dim=axis)
+-        combined_batch_index = torch.arange(0, combined_samples.shape[0]).to(
+-            dtype=torch.float32
+-        )
++        combined_batch_index = torch.arange(
++            0, combined_samples.shape[0], dtype=torch.int64
++        )
+ 
+         return (
+             {

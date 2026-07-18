@@ -26,6 +26,7 @@ dependencies = [
     "azure-cognitiveservices-speech==1.41.1",
     "redis==5.2.0",
     "python-multipart==0.0.19",
+    "cryptography==46.0.6",
     "pyyaml==6.0.3",
     "requests==2.33.1",
     "socksio==1.0.0",

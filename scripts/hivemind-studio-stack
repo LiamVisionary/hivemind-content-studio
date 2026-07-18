@@ -597,7 +597,9 @@ healthy() {
   else
     ZIMG_FRONTEND_HEALTH_SOFT_FAILS=$(( ${ZIMG_FRONTEND_HEALTH_SOFT_FAILS:-0} + 1 ))
     log "frontend health soft-failed ($ZIMG_FRONTEND_HEALTH_SOFT_FAILS/6); keeping Comfy lanes alive"
-    [ "$ZIMG_FRONTEND_HEALTH_SOFT_FAILS" -lt 6 ] || return 1
+    if [ "$ZIMG_FRONTEND_HEALTH_SOFT_FAILS" -eq 6 ]; then
+      log "frontend remained unresponsive during a possible accelerator-heavy render; child-pid supervision stays active and the generation stack will not be restarted"
+    fi
   fi
   return 0
 }

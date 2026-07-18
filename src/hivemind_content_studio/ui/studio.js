@@ -14,6 +14,19 @@ const state = {
   createMode: 'simple',
   studioMode: 'create',
   prompts: [],
+  canvasHistory: [],
+  canvasPage: 0,
+  canvasPageSize: 48,
+  canvasHasMore: true,
+  canvasLoading: false,
+  canvasTotal: 0,
+  canvasFormat: '',
+  canvasModel: '',
+  canvasFormats: [],
+  canvasModels: [],
+  canvasSetups: {},
+  canvasWorkflowPayloads: {},
+  loadedCanvasSetup: null,
   telemetry: null,
   historyFilter: '',
   routePickerOpen: '',
@@ -21,6 +34,42 @@ const state = {
   routePickerExpanded: { brain: {}, image: {}, video: {} },
   surfaces: null,
 };
+
+let historyMediaObserver = null;
+let historyPageObserver = null;
+let historySetupObserver = null;
+let canvasBridgeReady = false;
+let canvasBridgeWaiters = [];
+const canvasBridgeRequests = new Map();
+const canvasSetupPromises = new Map();
+const canvasSetupQueue = [];
+let canvasSetupActive = 0;
+let historyDeleteTarget = null;
+
+const OWNER_PASSPHRASE_STORAGE_KEY = 'hivemind.ownerPassphrase.once';
+
+function readOwnerPassphrase() {
+  try {
+    const raw = sessionStorage.getItem(OWNER_PASSPHRASE_STORAGE_KEY) || '';
+    if (!raw) return '';
+    try {
+      const parsed = JSON.parse(raw);
+      const password = typeof parsed?.password === 'string' ? parsed.password : '';
+      const expiresAt = Number(parsed?.expiresAt || 0);
+      if (expiresAt && expiresAt <= Date.now()) {
+        sessionStorage.removeItem(OWNER_PASSPHRASE_STORAGE_KEY);
+        return '';
+      }
+      return password;
+    } catch {
+      return raw;
+    }
+  } catch {
+    return '';
+  }
+}
+
+let ownerPassphrase = readOwnerPassphrase();
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -666,6 +715,7 @@ async function submitSimplePrompt(event) {
   try {
     const imageSelection = selectedRoute($('#simple-image-route'));
     const videoSelection = selectedRoute($('#simple-video-route'));
+    const seed = Number($('#simple-seed').value);
     const payload = await api('/api/simple/plan', {
       method: 'POST',
       body: JSON.stringify({
@@ -679,6 +729,8 @@ async function submitSimplePrompt(event) {
         attachments: await simpleAttachmentsPayload(),
         imageSelection,
         videoSelection,
+        seed: Number.isSafeInteger(seed) ? seed : null,
+        seedMode: $('#simple-seed-mode').value,
       }),
     });
     const plan = payload.plan;
@@ -708,12 +760,12 @@ function lane() {
 }
 
 function navigate(view) {
-  const selected = ['create', 'explore', 'canvas', 'models', 'runs', 'history', 'telemetry', 'providers'].includes(view) ? view : 'create';
+  const selected = ['create', 'explore', 'canvas', 'models', 'runs', 'history', 'telemetry', 'providers'].includes(view) ? view : 'explore';
   $$('.view').forEach((item) => item.classList.toggle('is-active', item.dataset.view === selected));
   $$('.nav-item').forEach((item) => item.classList.toggle('is-active', item.dataset.viewTarget === selected));
   const copy = {
-    create: ['Unified creation', 'Studio'],
-    explore: ['Generative catalog', 'Explore'],
+    create: ['Agent-directed production', 'Planner'],
+    explore: ['Unified Studio', 'Studio'],
     canvas: ['ComfyUI production', 'Canvas'],
     models: ['Local inference', 'Models'],
     runs: ['Durable workflow', 'Runs'],
@@ -742,11 +794,77 @@ function loadToolSurface(name) {
   const surface = state.surfaces?.surfaces?.[name];
   if (!surface) return;
   let url = surface.path || gatewayUrl(surface.gateway_path || '/');
-  if (name === 'explore' && window.localAI?.isElectron) {
-    url += `${url.includes('?') ? '&' : '?'}hivemindBridge=1`;
+  if (name === 'explore') {
+    const params = ['hivemindStudio=1'];
+    if (window.localAI?.isElectron) params.push('hivemindBridge=1');
+    url += `${url.includes('?') ? '&' : '?'}${params.join('&')}`;
   }
   frame.src = url;
+  if (['canvas', 'models'].includes(name)) {
+    frame.addEventListener('load', () => { void postOwnerAccess(frame, 'hivemind-owner-unlock'); }, { once: true });
+  }
   frame.dataset.loaded = 'true';
+}
+
+function toolSurfaceOrigin(frame) {
+  try { return new URL(frame.src, location.href).origin; } catch { return ''; }
+}
+
+function postExploreMessage(message) {
+  const frame = $('#explore-frame');
+  if (!frame) return;
+  loadToolSurface('explore');
+  const send = () => frame.contentWindow?.postMessage(message, toolSurfaceOrigin(frame) || location.origin);
+  if (frame.dataset.exploreReady === 'true') {
+    send();
+  } else {
+    frame.addEventListener('load', () => window.setTimeout(send, 0), { once: true });
+    window.setTimeout(send, 500);
+  }
+}
+
+function ownerAccessFrameForEvent(event) {
+  if (event.data?.type !== 'hivemind-owner-unlock-ready') return null;
+  return $$('[data-tool-surface]').find((frame) => (
+    ['canvas', 'models'].includes(frame.dataset.toolSurface)
+    && frame.contentWindow === event.source
+    && event.origin === toolSurfaceOrigin(frame)
+  )) || null;
+}
+
+async function postOwnerAccess(frame, type) {
+  if (!frame?.contentWindow) return;
+  let ownerSession = false;
+  if (type === 'hivemind-owner-unlock' && !ownerPassphrase) {
+    try {
+      ownerSession = Boolean((await api('/api/owner/session')).unlocked);
+    } catch {
+      return;
+    }
+    if (!ownerSession) return;
+  }
+  try {
+    frame.contentWindow.postMessage({
+      type,
+      ...(ownerPassphrase ? { passphrase: ownerPassphrase } : {}),
+      ...(ownerSession ? { ownerSession: true } : {}),
+    }, toolSurfaceOrigin(frame));
+  } catch {}
+}
+
+function bindOwnerAccessBridge() {
+  window.addEventListener('message', (event) => {
+    const frame = ownerAccessFrameForEvent(event);
+    if (frame) void postOwnerAccess(frame, 'hivemind-owner-unlock');
+  });
+}
+
+async function lockStudio() {
+  $$('[data-tool-surface]').forEach((frame) => { void postOwnerAccess(frame, 'hivemind-owner-lock'); });
+  ownerPassphrase = '';
+  try { sessionStorage.removeItem(OWNER_PASSPHRASE_STORAGE_KEY); } catch {}
+  await api('/api/owner/lock', { method: 'POST' });
+  location.reload();
 }
 
 function localAiMethod(path) {
@@ -756,9 +874,14 @@ function localAiMethod(path) {
 function bindLocalAiBridge() {
   window.addEventListener('message', async (event) => {
     const request = event.data;
-    if (request?.type !== 'hivemind-local-ai-request' || !window.localAI?.isElectron) return;
     const frame = $('#explore-frame');
     if (!frame || frame.contentWindow !== event.source) return;
+    if (request?.type === 'hivemind-explore-ready') {
+      frame.dataset.exploreReady = 'true';
+      postExploreMessage({ type: 'hivemind-explore-refresh' });
+      return;
+    }
+    if (request?.type !== 'hivemind-local-ai-request' || !window.localAI?.isElectron) return;
     const targetOrigin = event.origin === 'null' ? '*' : event.origin;
     try {
       const method = localAiMethod(request.method);
@@ -776,13 +899,72 @@ function bindLocalAiBridge() {
 
 async function loadPrompts({ quiet = false } = {}) {
   try {
-    const payload = await api('/api/simple/prompts');
-    state.prompts = payload.prompts || [];
+    state.canvasPage = 0;
+    state.canvasHasMore = true;
+    state.canvasLoading = true;
+    const query = new URLSearchParams({
+      page: '1',
+      page_size: String(state.canvasPageSize),
+      ...(state.canvasFormat ? { format: state.canvasFormat } : {}),
+      ...(state.canvasModel ? { model: state.canvasModel } : {}),
+    });
+    const [promptPayload, canvasPayload] = await Promise.all([
+      api('/api/simple/prompts'),
+      api(`/api/canvas/history?${query.toString()}`),
+    ]);
+    state.prompts = promptPayload.prompts || [];
+    state.canvasHistory = canvasPayload.history || [];
+    state.canvasPage = canvasPayload.pagination?.page || 1;
+    state.canvasHasMore = Boolean(canvasPayload.pagination?.has_more);
+    state.canvasTotal = Number(canvasPayload.pagination?.total || state.canvasHistory.length);
+    state.canvasFormats = canvasPayload.filters?.formats || [];
+    state.canvasModels = canvasPayload.filters?.models || [];
   } catch (error) {
     if (!quiet) toast(error.message, 'error');
+  } finally {
+    state.canvasLoading = false;
   }
+  renderCanvasHistoryFilters();
   renderPromptHistory();
   renderIngredients();
+  postExploreMessage({ type: 'hivemind-explore-refresh' });
+}
+
+async function loadMoreCanvasHistory() {
+  if (state.canvasLoading || !state.canvasHasMore) return;
+  state.canvasLoading = true;
+  const query = new URLSearchParams({
+    page: String(state.canvasPage + 1),
+    page_size: String(state.canvasPageSize),
+    ...(state.canvasFormat ? { format: state.canvasFormat } : {}),
+    ...(state.canvasModel ? { model: state.canvasModel } : {}),
+  });
+  try {
+    const payload = await api(`/api/canvas/history?${query.toString()}`);
+    const known = new Set(state.canvasHistory.map((entry) => entry.history_id));
+    state.canvasHistory.push(...(payload.history || []).filter((entry) => !known.has(entry.history_id)));
+    state.canvasPage = payload.pagination?.page || state.canvasPage + 1;
+    state.canvasHasMore = Boolean(payload.pagination?.has_more);
+    state.canvasTotal = Number(payload.pagination?.total || state.canvasTotal);
+    state.canvasFormats = [...new Set([...state.canvasFormats, ...(payload.filters?.formats || [])])].sort();
+    state.canvasModels = [...new Set([...state.canvasModels, ...(payload.filters?.models || [])])].sort((left, right) => left.localeCompare(right));
+    renderCanvasHistoryFilters();
+    renderPromptHistory();
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    state.canvasLoading = false;
+  }
+}
+
+function renderCanvasHistoryFilters() {
+  const format = $('#canvas-format-filter');
+  const model = $('#canvas-model-filter');
+  if (!format || !model) return;
+  format.innerHTML = `<option value="">All formats</option>${state.canvasFormats.map((value) => `<option value="${esc(value)}">${esc(value.toUpperCase())}</option>`).join('')}`;
+  model.innerHTML = `<option value="">All models</option>${state.canvasModels.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join('')}`;
+  format.value = state.canvasFormat;
+  model.value = state.canvasModel;
 }
 
 function formatTelemetryDuration(milliseconds) {
@@ -839,24 +1021,349 @@ function promptHistoryEntryCard(entry) {
     ? `<details class="prompt-original"><summary>Your original wording</summary><p>${esc(entry.user_prompt)}</p></details>` : '';
   return `<article class="prompt-card${entry.favorite ? ' is-favorite' : ''}" data-prompt-id="${esc(entry.prompt_id)}">
     <button class="prompt-star" type="button" data-favorite-prompt="${esc(entry.prompt_id)}" data-favorite-next="${entry.favorite ? 'false' : 'true'}" aria-label="${entry.favorite ? 'Remove from favorites' : 'Add to favorites'}" aria-pressed="${entry.favorite}">${entry.favorite ? '★' : '☆'}</button>
+    <div class="history-card-actions">
+      <button class="history-more-button" type="button" data-history-menu-button aria-label="Prompt actions" title="Prompt actions" aria-expanded="false">•••</button>
+      <div class="history-action-menu is-hidden" role="menu">
+        <button type="button" role="menuitem" data-use-prompt="${esc(entry.prompt_id)}">Load in Studio</button>
+        <button type="button" role="menuitem" data-copy-prompt="${esc(entry.prompt_id)}">Copy prompt</button>
+        <button class="danger" type="button" role="menuitem" data-delete-prompt="${esc(entry.prompt_id)}">Delete</button>
+      </div>
+    </div>
     <div class="prompt-card-body">
       <p class="prompt-text">${esc(entry.prompt)}</p>
       ${original}
       <div class="prompt-meta">${meta}</div>
     </div>
-    <div class="prompt-card-actions">
-      <button type="button" data-use-prompt="${esc(entry.prompt_id)}">Use in composer</button>
-      <button class="danger" type="button" data-delete-prompt="${esc(entry.prompt_id)}" aria-label="Delete prompt from history">×</button>
-    </div>
   </article>`;
+}
+
+function canvasHistoryEntryCard(entry) {
+  const media = entry.media_type?.startsWith('video/')
+    ? `<button class="canvas-video-loader" type="button" data-load-canvas-video data-media-url="${esc(entry.media_url)}" aria-label="Load encrypted video preview"><span aria-hidden="true">▶</span><b>Load video</b></button>`
+    : `<img data-media-src="${esc(entry.media_url)}" alt="Private Canvas output" />`;
+  const timestamp = entry.time_label || (entry.created_at ? new Date(entry.created_at).toLocaleString() : 'Imported from Canvas');
+  const model = entry.models?.length ? entry.models.join(', ') : 'Reading exact setup…';
+  return `<article class="canvas-history-card" data-canvas-history-id="${esc(entry.history_id)}">
+    <div class="history-card-actions">
+      <button class="history-more-button" type="button" data-history-menu-button aria-label="Output actions" title="Output actions" aria-expanded="false">•••</button>
+      <div class="history-action-menu is-hidden" role="menu">
+        <button type="button" role="menuitem" data-load-canvas-studio="${esc(entry.history_id)}">Load in Studio</button>
+        <button type="button" role="menuitem" data-load-canvas-workflow="${esc(entry.history_id)}">Load in Canvas</button>
+        <button type="button" role="menuitem" data-copy-canvas-prompt="${esc(entry.history_id)}">Copy prompt</button>
+        <button class="danger" type="button" role="menuitem" data-delete-canvas-output="${esc(entry.history_id)}">Delete</button>
+      </div>
+    </div>
+    <div class="canvas-history-media">${media}</div>
+    <div class="canvas-history-details"><b>Canvas output</b><small>${esc(timestamp)}</small><small data-canvas-models>${esc(model)}</small></div>
+    <span class="canvas-format-chip">${esc((entry.file_format || '').toUpperCase())}</span>
+    <span class="private-state${entry.encrypted_at_rest ? ' is-encrypted' : ''}">${entry.encrypted_at_rest ? 'Encrypted at rest' : 'Private output'}</span>
+  </article>`;
+}
+
+function loadCanvasVideo(button) {
+  const container = button.closest('.canvas-history-media');
+  if (!container || !button.dataset.mediaUrl) return;
+  const video = document.createElement('video');
+  video.controls = true;
+  video.preload = 'metadata';
+  video.addEventListener('error', () => {
+    container.innerHTML = '<div class="canvas-video-error"><b>Preview unavailable</b><small>Try loading it again.</small></div>';
+  }, { once: true });
+  container.replaceChildren(video);
+  video.src = button.dataset.mediaUrl;
+  video.load();
 }
 
 function renderPromptHistory() {
   const list = $('#prompt-history-list');
   if (!list) return;
-  const entries = state.historyFilter === 'favorites' ? state.prompts.filter((entry) => entry.favorite) : state.prompts;
-  list.innerHTML = entries.length ? entries.map(promptHistoryEntryCard).join('')
-    : `<div class="empty-detail"><span>☆</span><b>${state.historyFilter === 'favorites' ? 'No favorites yet' : 'No prompts yet'}</b><small>${state.historyFilter === 'favorites' ? 'Star a prompt to keep it as a reusable ingredient.' : 'Create a production and its final generation prompt will be recorded here.'}</small></div>`;
+  const showCanvas = ['', 'canvas'].includes(state.historyFilter);
+  const showPrompts = ['', 'prompts', 'favorites'].includes(state.historyFilter);
+  const prompts = state.historyFilter === 'favorites' ? state.prompts.filter((entry) => entry.favorite) : state.prompts;
+  const canvas = showCanvas && state.canvasHistory.length
+    ? `<section class="history-group"><div class="history-group-heading"><div><p class="section-kicker">Canvas</p><h3>Encrypted outputs</h3></div><small>${esc(state.canvasHistory.length)} of ${esc(state.canvasTotal)}</small></div><div class="canvas-history-grid">${state.canvasHistory.map(canvasHistoryEntryCard).join('')}</div>${state.canvasHasMore ? '<div class="history-load-more" data-history-load-more role="status">Loading more outputs…</div>' : ''}</section>`
+    : showCanvas ? '<div class="empty-history"><b>No Canvas outputs indexed yet</b><small>The source folders remain untouched. Refresh after a Canvas generation finishes.</small></div>' : '';
+  const promptCards = showPrompts && prompts.length
+    ? `<section class="history-group"><div class="history-group-heading"><p class="section-kicker">Prompt library</p><h3>${state.historyFilter === 'favorites' ? 'Favorites' : 'Generation prompts'}</h3></div><div class="prompt-history-items">${prompts.map(promptHistoryEntryCard).join('')}</div></section>`
+    : showPrompts ? `<div class="empty-history"><b>${state.historyFilter === 'favorites' ? 'No favorites yet' : 'No prompts yet'}</b><small>${state.historyFilter === 'favorites' ? 'Star a prompt to keep it as a reusable ingredient.' : 'Create a production and its final generation prompt will be recorded here.'}</small></div>` : '';
+  list.innerHTML = `${canvas}${promptCards}`;
+  observeRenderedHistory();
+}
+
+function observeRenderedHistory() {
+  historyMediaObserver?.disconnect();
+  historyPageObserver?.disconnect();
+  historySetupObserver?.disconnect();
+  historyMediaObserver = new IntersectionObserver((entries, observer) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      const image = entry.target;
+      if (image.dataset.mediaSrc && !image.src) image.src = image.dataset.mediaSrc;
+      observer.unobserve(image);
+    });
+  }, { rootMargin: '600px 0px' });
+  $$('[data-media-src]', $('#prompt-history-list')).forEach((image) => historyMediaObserver.observe(image));
+
+  historySetupObserver = new IntersectionObserver((entries, observer) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      observer.unobserve(entry.target);
+      void inspectCanvasHistoryEntry(entry.target.dataset.canvasHistoryId);
+    });
+  }, { rootMargin: '320px 0px' });
+  $$('[data-canvas-history-id]', $('#prompt-history-list')).forEach((card) => historySetupObserver.observe(card));
+
+  const sentinel = $('[data-history-load-more]', $('#prompt-history-list'));
+  if (sentinel) {
+    historyPageObserver = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void loadMoreCanvasHistory();
+    }, { rootMargin: '900px 0px' });
+    historyPageObserver.observe(sentinel);
+  }
+}
+
+function canvasFrameOrigin() {
+  const frame = $('#canvas-frame');
+  if (!frame?.src) return '';
+  try { return new URL(frame.src, location.href).origin; } catch { return ''; }
+}
+
+function drainCanvasSetupQueue() {
+  while (canvasSetupActive < 2 && canvasSetupQueue.length) {
+    const job = canvasSetupQueue.shift();
+    canvasSetupActive += 1;
+    Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+      canvasSetupActive -= 1;
+      drainCanvasSetupQueue();
+    });
+  }
+}
+
+function scheduleCanvasSetup(task) {
+  return new Promise((resolve, reject) => {
+    canvasSetupQueue.push({ task, resolve, reject });
+    drainCanvasSetupQueue();
+  });
+}
+
+function waitForCanvasBridge() {
+  loadToolSurface('canvas');
+  if (canvasBridgeReady) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      canvasBridgeWaiters = canvasBridgeWaiters.filter((waiter) => waiter.resolve !== resolve);
+      reject(new Error('Canvas is still starting. Try the action again in a moment.'));
+    }, 15000);
+    canvasBridgeWaiters.push({ resolve, reject, timeout });
+  });
+}
+
+function bindCanvasHistoryBridge() {
+  window.addEventListener('message', (event) => {
+    const frame = $('#canvas-frame');
+    if (!frame?.contentWindow || event.source !== frame.contentWindow || event.origin !== canvasFrameOrigin()) return;
+    if (event.data?.type === 'hivemind-owner-history-bridge-ready') {
+      canvasBridgeReady = true;
+      canvasBridgeWaiters.splice(0).forEach((waiter) => {
+        clearTimeout(waiter.timeout);
+        waiter.resolve();
+      });
+      return;
+    }
+    if (event.data?.type !== 'hivemind-owner-history-response') return;
+    const pending = canvasBridgeRequests.get(event.data.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    canvasBridgeRequests.delete(event.data.requestId);
+    if (event.data.ok) pending.resolve(event.data.setup || {});
+    else pending.reject(new Error(event.data.error || 'Unable to read the exact workflow'));
+  });
+}
+
+async function canvasWorkflowPayload(entry) {
+  if (!state.canvasWorkflowPayloads[entry.history_id]) {
+    state.canvasWorkflowPayloads[entry.history_id] = await api(`/api/canvas/history/${encodeURIComponent(entry.history_id)}/workflow`);
+  }
+  return state.canvasWorkflowPayloads[entry.history_id];
+}
+
+async function requestCanvasBridge(entry, action = 'inspect') {
+  await waitForCanvasBridge();
+  const payload = await canvasWorkflowPayload(entry);
+  const requestId = globalThis.crypto?.randomUUID?.() || `history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const frame = $('#canvas-frame');
+  const targetOrigin = canvasFrameOrigin();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      canvasBridgeRequests.delete(requestId);
+      reject(new Error('Canvas did not finish reading this workflow.'));
+    }, 30000);
+    canvasBridgeRequests.set(requestId, { resolve, reject, timeout });
+    frame.contentWindow.postMessage({
+      type: 'hivemind-owner-history-request',
+      requestId,
+      action,
+      historyId: entry.history_id,
+      workflow: payload.workflow,
+      mediaUrl: entry.media_url,
+      mediaType: entry.media_type,
+    }, targetOrigin);
+  });
+}
+
+async function inspectCanvasHistoryEntry(historyId) {
+  const entry = state.canvasHistory.find((item) => item.history_id === historyId);
+  if (!entry || state.canvasSetups[historyId]?.unavailable) return null;
+  if (state.canvasSetups[historyId]?.primaryPrompt !== undefined) return state.canvasSetups[historyId];
+  if (canvasSetupPromises.has(historyId)) return canvasSetupPromises.get(historyId);
+  const pending = scheduleCanvasSetup(() => requestCanvasBridge(entry, 'inspect'))
+    .then(async (setup) => {
+      state.canvasSetups[historyId] = setup;
+      entry.models = setup.models || [];
+      entry.seeds = setup.seeds || [];
+      state.canvasModels = [...new Set([...state.canvasModels, ...entry.models])].sort((left, right) => left.localeCompare(right));
+      renderCanvasHistoryFilters();
+      const modelLabel = $(`[data-canvas-history-id="${historyId}"] [data-canvas-models]`);
+      if (modelLabel) modelLabel.textContent = entry.models.length ? entry.models.join(', ') : 'Exact workflow available';
+      await api(`/api/canvas/history/${encodeURIComponent(historyId)}/provenance`, {
+        method: 'POST',
+        body: JSON.stringify({ models: entry.models, seeds: entry.seeds }),
+      }).catch(() => {});
+      return setup;
+    })
+    .catch((error) => {
+      const unavailable = /exact canvas workflow is unavailable|no loadable exact workflow/i.test(error.message);
+      state.canvasSetups[historyId] = { unavailable, error: error.message };
+      const modelLabel = $(`[data-canvas-history-id="${historyId}"] [data-canvas-models]`);
+      if (modelLabel) modelLabel.textContent = unavailable ? 'Exact setup unavailable' : 'Setup not loaded · use an action to retry';
+      return null;
+    })
+    .finally(() => canvasSetupPromises.delete(historyId));
+  canvasSetupPromises.set(historyId, pending);
+  return pending;
+}
+
+function selectMatchingCanvasModel(entry, setup) {
+  const kind = entry.media_type?.startsWith('video/') ? 'video' : 'image';
+  const wanted = new Set((setup.models || []).flatMap((value) => [String(value).toLowerCase(), String(value).split(/[\\/]/).pop().toLowerCase()]));
+  for (const provider of state.simpleCatalog?.media?.[kind] || []) {
+    const model = provider.models.find((candidate) => wanted.has(String(candidate.id).toLowerCase()) || wanted.has(String(candidate.id).split(/[\\/]/).pop().toLowerCase()));
+    if (!model) continue;
+    setRoutePickerValue(kind, routeValue(provider.id, model.id));
+    return;
+  }
+}
+
+function renderLoadedCanvasSetup(entry, setup) {
+  const panel = $('#loaded-canvas-setup');
+  const isVideo = entry.media_type?.startsWith('video/');
+  const media = isVideo
+    ? `<video controls preload="metadata" src="${esc(entry.media_url)}"></video>`
+    : `<img src="${esc(entry.media_url)}" alt="Loaded Canvas output" />`;
+  const seedRows = (setup.seeds || []).map((seed) => `<span><b>${esc(seed.label)}</b>${esc(seed.value)} · ${esc(titleCase(seed.mode))}</span>`).join('');
+  const settingRows = (setup.settings || []).slice(0, 12).map((setting) => `<span><b>${esc(setting.name)}</b>${esc(setting.value)}</span>`).join('');
+  panel.innerHTML = `<div class="loaded-canvas-media">${media}</div><div class="loaded-canvas-copy"><header><div><p class="section-kicker">Exact Canvas setup</p><h3>Loaded generation</h3></div><button type="button" data-clear-loaded-canvas aria-label="Remove loaded Canvas setup" title="Remove loaded setup">×</button></header><div class="loaded-canvas-models"><b>Model</b><span>${esc((setup.models || []).join(', ') || 'Recorded in workflow')}</span></div><div class="loaded-canvas-values">${seedRows}${settingRows}</div></div>`;
+  panel.classList.remove('is-hidden');
+}
+
+async function loadCanvasOutputInStudio(historyId) {
+  const entry = state.canvasHistory.find((item) => item.history_id === historyId);
+  if (!entry) return;
+  try {
+    const setup = await inspectCanvasHistoryEntry(historyId);
+    if (!setup) throw new Error(state.canvasSetups[historyId]?.error || 'Exact setup unavailable');
+    state.loadedCanvasSetup = { historyId, setup };
+    $('#simple-prompt').value = setup.primaryPrompt || '';
+    $('#simple-prompt-helper').checked = false;
+    const primarySeed = setup.seeds?.[0];
+    if (primarySeed) {
+      $('#simple-seed').value = String(primarySeed.value);
+      $('#simple-seed-mode').value = primarySeed.mode;
+    }
+    selectMatchingCanvasModel(entry, setup);
+    selectNativeStudioMode(entry.media_type?.startsWith('video/') ? 'animate' : 'create');
+    renderLoadedCanvasSetup(entry, setup);
+    navigate('create');
+    $('#simple-prompt').focus();
+    toast('Loaded the exact prompt, output, model, seed mode, seed, and recorded node settings.');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function loadCanvasOutputInCanvas(historyId) {
+  const entry = state.canvasHistory.find((item) => item.history_id === historyId);
+  if (!entry) return;
+  navigate('canvas');
+  try {
+    const setup = await requestCanvasBridge(entry, 'load-canvas');
+    state.canvasSetups[historyId] = setup;
+    toast('Loaded the exact encrypted workflow and generated output in Canvas.');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function copyText(value) {
+  await navigator.clipboard.writeText(value);
+  toast('Copied prompt.');
+}
+
+async function copyCanvasPrompt(historyId) {
+  try {
+    const setup = await inspectCanvasHistoryEntry(historyId);
+    if (!setup?.primaryPrompt) throw new Error('This output has no recoverable prompt.');
+    await copyText(setup.primaryPrompt);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+function openCanvasDeleteDialog(historyId) {
+  historyDeleteTarget = historyId;
+  const dialog = $('#history-delete-dialog');
+  $('#history-delete-title').textContent = 'Delete this generated output?';
+  $('#history-delete-copy').textContent = 'This permanently removes every same-name media copy, encrypted sidecar, history reference, workflow-index entry, and regenerable preview cache. This cannot be undone.';
+  dialog.showModal();
+}
+
+async function confirmCanvasDelete() {
+  if (!historyDeleteTarget) return;
+  const historyId = historyDeleteTarget;
+  const button = $('[data-confirm-history-delete]');
+  button.disabled = true;
+  try {
+    await api(`/api/canvas/history/${encodeURIComponent(historyId)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ confirm: true }),
+    });
+    state.canvasHistory = state.canvasHistory.filter((entry) => entry.history_id !== historyId);
+    state.canvasTotal = Math.max(0, state.canvasTotal - 1);
+    delete state.canvasSetups[historyId];
+    delete state.canvasWorkflowPayloads[historyId];
+    if (state.loadedCanvasSetup?.historyId === historyId) {
+      state.loadedCanvasSetup = null;
+      $('#loaded-canvas-setup').classList.add('is-hidden');
+    }
+    $('#history-delete-dialog').close();
+    historyDeleteTarget = null;
+    renderPromptHistory();
+    toast('Output and its local traces were permanently deleted.');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function toggleHistoryMenu(button) {
+  const menu = button.parentElement?.querySelector('.history-action-menu');
+  if (!menu) return;
+  const opening = menu.classList.contains('is-hidden');
+  $$('.history-action-menu').forEach((item) => item.classList.add('is-hidden'));
+  $$('[data-history-menu-button]').forEach((item) => item.setAttribute('aria-expanded', 'false'));
+  menu.classList.toggle('is-hidden', !opening);
+  button.setAttribute('aria-expanded', String(opening));
 }
 
 function renderIngredients() {
@@ -885,15 +1392,16 @@ function renderTemplates() {
       <button class="ingredient-item template-item" type="button" data-insert-template="${esc(entry.id)}" title="${esc(entry.description)}">
         <b>▤</b><span><strong>${esc(entry.title)}</strong><small>${esc(entry.description)}</small></span>
       </button>`).join('')}`).join('');
+  postExploreMessage({ type: 'hivemind-explore-refresh' });
 }
 
 function insertPromptIntoComposer(text) {
-  navigate('create');
-  switchCreateMode('simple');
   const box = $('#simple-prompt');
-  box.value = box.value.trim() ? `${box.value.replace(/\s+$/, '')}\n${text}` : text;
-  box.focus();
-  box.setSelectionRange(box.value.length, box.value.length);
+  if (box) {
+    box.value = box.value.trim() ? `${box.value.replace(/\s+$/, '')}\n${text}` : text;
+  }
+  navigate('explore');
+  postExploreMessage({ type: 'hivemind-explore-insert-prompt', text });
 }
 
 function promptEntryForRun(runId) {
@@ -905,7 +1413,8 @@ function mediaRouteFromRun(run, kind) {
   const provider = run.brief?.providers?.[role] || run.providers?.[role] || '';
   if (!provider) return null;
   const options = run.brief?.provider_options?.[provider];
-  return { provider, model: options?.model || 'automatic' };
+  const nested = options?.[role];
+  return { provider, model: nested?.model || options?.[`${role}_model`] || options?.model || 'automatic' };
 }
 
 function restoreRunAttachments(run) {
@@ -946,6 +1455,8 @@ function loadRunIntoSimpleComposer(runId, { notify = true, focus = true, navigat
   });
   if (typeof composer.promptHelper === 'boolean') $('#simple-prompt-helper').checked = composer.promptHelper;
   if (typeof composer.walkthrough === 'boolean') $('#simple-walkthrough').checked = composer.walkthrough;
+  if (typeof composer.seed === 'number') $('#simple-seed').value = String(composer.seed);
+  if (['fixed', 'randomize', 'increment', 'decrement'].includes(composer.seedMode)) $('#simple-seed-mode').value = composer.seedMode;
   restoreRunAttachments(run);
   state.simpleHistory = [];
   state.simplePlan = null;
@@ -1257,12 +1768,6 @@ function authHeaders() {
 }
 
 async function runAction(action, runId, stepId) {
-  if (!$('#operator-token').value) {
-    $('#operator-details').open = true;
-    $('#operator-token').focus();
-    toast('Enter the operator token under Advanced to use protected run controls.', 'error');
-    return;
-  }
   try {
     const path = action === 'retry' ? `/api/runs/${encodeURIComponent(runId)}/retry` : `/api/runs/${encodeURIComponent(runId)}/${action}`;
     const body = action === 'retry' ? { step_id: stepId } : action === 'cancel' ? { reason: 'Cancelled from Content Studio' } : undefined;
@@ -1340,6 +1845,8 @@ async function startOAuth(provider, button) {
 }
 
 function bindEvents() {
+  bindOwnerAccessBridge();
+  bindCanvasHistoryBridge();
   $$('.nav-item').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.viewTarget)));
   $('#native-studio-modes').addEventListener('click', (event) => { const button = event.target.closest('[data-studio-mode]'); if (button) selectNativeStudioMode(button.dataset.studioMode); });
   $('#simple-composer').addEventListener('submit', submitSimplePrompt);
@@ -1376,9 +1883,30 @@ function bindEvents() {
     if (!button) return;
     $$('[data-history-filter]').forEach((item) => item.classList.toggle('is-active', item === button));
     state.historyFilter = button.dataset.historyFilter;
+    $('#canvas-history-filters').classList.toggle('is-hidden', !['', 'canvas'].includes(state.historyFilter));
     renderPromptHistory();
   });
+  $('#canvas-format-filter').addEventListener('change', (event) => {
+    state.canvasFormat = event.target.value;
+    void loadPrompts();
+  });
+  $('#canvas-model-filter').addEventListener('change', (event) => {
+    state.canvasModel = event.target.value;
+    void loadPrompts();
+  });
   $('#prompt-history-list').addEventListener('click', (event) => {
+    const menuButton = event.target.closest('[data-history-menu-button]');
+    if (menuButton) { toggleHistoryMenu(menuButton); return; }
+    const canvasVideo = event.target.closest('[data-load-canvas-video]');
+    if (canvasVideo) { loadCanvasVideo(canvasVideo); return; }
+    const loadStudio = event.target.closest('[data-load-canvas-studio]');
+    if (loadStudio) { void loadCanvasOutputInStudio(loadStudio.dataset.loadCanvasStudio); return; }
+    const loadCanvas = event.target.closest('[data-load-canvas-workflow]');
+    if (loadCanvas) { void loadCanvasOutputInCanvas(loadCanvas.dataset.loadCanvasWorkflow); return; }
+    const copyCanvas = event.target.closest('[data-copy-canvas-prompt]');
+    if (copyCanvas) { void copyCanvasPrompt(copyCanvas.dataset.copyCanvasPrompt); return; }
+    const deleteCanvas = event.target.closest('[data-delete-canvas-output]');
+    if (deleteCanvas) { openCanvasDeleteDialog(deleteCanvas.dataset.deleteCanvasOutput); return; }
     const favorite = event.target.closest('[data-favorite-prompt]');
     if (favorite) { void setPromptFavorite(favorite.dataset.favoritePrompt, favorite.dataset.favoriteNext === 'true'); return; }
     const use = event.target.closest('[data-use-prompt]');
@@ -1388,8 +1916,25 @@ function bindEvents() {
       if (entry) insertPromptIntoComposer(entry.user_prompt || entry.prompt);
       return;
     }
+    const copyPrompt = event.target.closest('[data-copy-prompt]');
+    if (copyPrompt) {
+      const entry = state.prompts.find((item) => item.prompt_id === copyPrompt.dataset.copyPrompt);
+      if (entry) void copyText(entry.prompt);
+      return;
+    }
     const remove = event.target.closest('[data-delete-prompt]');
     if (remove) void deletePrompt(remove.dataset.deletePrompt);
+  });
+  $('[data-cancel-history-delete]').addEventListener('click', () => {
+    historyDeleteTarget = null;
+    $('#history-delete-dialog').close();
+  });
+  $('[data-confirm-history-delete]').addEventListener('click', () => { void confirmCanvasDelete(); });
+  $('#loaded-canvas-setup').addEventListener('click', (event) => {
+    if (!event.target.closest('[data-clear-loaded-canvas]')) return;
+    state.loadedCanvasSetup = null;
+    $('#loaded-canvas-setup').classList.add('is-hidden');
+    $('#loaded-canvas-setup').replaceChildren();
   });
   $('#simple-attachments').addEventListener('click', (event) => { const button = event.target.closest('[data-remove-simple-image]'); if (button) removeSimpleImage(Number(button.dataset.removeSimpleImage)); });
   $('#simple-composer').addEventListener('click', (event) => {
@@ -1423,7 +1968,13 @@ function bindEvents() {
       }
     });
   });
-  document.addEventListener('click', (event) => { if (state.routePickerOpen && !event.target.closest('.route-picker')) closeRoutePickers(); });
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('.history-card-actions')) {
+      $$('.history-action-menu').forEach((item) => item.classList.add('is-hidden'));
+      $$('[data-history-menu-button]').forEach((item) => item.setAttribute('aria-expanded', 'false'));
+    }
+    if (state.routePickerOpen && !event.target.closest('.route-picker')) closeRoutePickers();
+  });
   document.addEventListener('click', (event) => {
     const close = event.target.closest('[data-close-generation-preview]');
     if (close || event.target.classList?.contains('application-generation-preview')) event.target.closest('.application-generation-preview')?.remove();
@@ -1443,6 +1994,7 @@ function bindEvents() {
     if (open) { state.selectedRunId = open.dataset.openSimpleRun; navigate('runs'); }
   });
   $('#refresh-button').addEventListener('click', refreshAll);
+  $('#lock-button').addEventListener('click', () => void lockStudio());
   $('#create-run-form').addEventListener('submit', createRun);
   $('#add-scene-button').addEventListener('click', () => { state.scenes.push({ title: `Scene ${state.scenes.length + 1}`, beat: '', overlay: '', voice: '', duration_seconds: 4, image_prompt: '', motion_prompt: '' }); renderScenes(); });
   $('#lane-grid').addEventListener('click', (event) => { const button = event.target.closest('[data-lane]'); if (button) selectLane(button.dataset.lane); });
@@ -1506,7 +2058,7 @@ async function boot() {
     await refreshAll({ quiet: true });
     await loadPrompts({ quiet: true });
     restoreLatestRunInComposer();
-    navigate(location.hash.slice(1) || 'create');
+    navigate(location.hash.slice(1) || 'explore');
   } catch (error) {
     $('#api-status').className = 'api-status is-offline';
     $('#api-status').innerHTML = '<i></i>API unavailable';

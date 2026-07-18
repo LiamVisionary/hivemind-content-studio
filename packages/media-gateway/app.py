@@ -4,6 +4,7 @@ import base64
 import hashlib
 import html
 import json
+import math
 import mimetypes
 import os
 import re
@@ -52,14 +53,28 @@ LTX2_MLX_VARIANTS = {
     "fast-q8-v12": {
         "title": "MLXBits 10Eros v1.2 q8 distilled",
         "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-distilled-subset"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-distilled-subset"),
+        "video_distilled": True,
         "output_prefix": "mlx_10eros_q8_distilled_mobile",
         "benchmark_seconds": 193.11,
     },
     "exact-v1-merged-q8": {
         "title": "Exact-v1 bf16 LoRA merged q8 distilled",
         "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-bf16-lora-merged-q8-distilled"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-bf16-lora-merged-q8-distilled"),
+        "video_distilled": True,
         "output_prefix": "mlx_10eros_v1_bf16_lora_merged_q8_distilled_mobile",
         "benchmark_seconds": 247.44,
+    },
+    "regular-q8-distilled": {
+        "title": "LTX 2.3 regular q8 distilled",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-mlx-q8-distilled-subset"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-mlx-q8-distilled-subset"),
+        "video_distilled": True,
+        "output_prefix": "mlx_ltx23_regular_q8_distilled_mobile",
+        "benchmark_seconds": None,
+        "backend_prefix": "mlx-ltx-regular",
+        "output_subdir": "LTX23",
     },
 }
 LTX2_MLX_VARIANT_ALIASES = {
@@ -74,8 +89,18 @@ LTX2_MLX_VARIANT_ALIASES = {
     "merged": "exact-v1-merged-q8",
     "merged-q8": "exact-v1-merged-q8",
     "exact_v1_merged_q8": "exact-v1-merged-q8",
+    "regular": "regular-q8-distilled",
+    "regular-q8": "regular-q8-distilled",
+    "regular-fast": "regular-q8-distilled",
+    "ltx23-regular": "regular-q8-distilled",
+    "ltx-2.3-regular": "regular-q8-distilled",
 }
 HISTORY_FILE = GATEWAY_STATE_DIR / "history.jsonl"
+PREVIEW_CACHE_ROOTS = [
+    Path.home() / ".comfy-private.noindex/preview-cache",
+    Path(os.environ.get("COMFY_TEMP_DIR", str(Path.home() / ".comfy-private.noindex/temp"))) / "mobile_video_thumbs",
+]
+QUEUE_METADATA_FILES = [STUDIO_ROOT / "packages/comfyui-mobile/.cache/queue_metadata_cache.json"]
 TOKEN_FILE = Path(
     os.environ.get("ZIMG_TOKEN_FILE", str(MEDIA_STATE_ROOT / "secure/zimg-token"))
 ).expanduser().resolve()
@@ -176,6 +201,15 @@ SELECTED_LORAS_FILE = GATEWAY_STATE_DIR / "selected_loras.json"
 CIVITAI_TOKEN_FILE = Path(
     os.environ.get("CIVITAI_TOKEN_FILE", str(MEDIA_STATE_ROOT / "secure/civitai-token"))
 ).expanduser().resolve()
+CIVITAI_TOKEN_ENV_KEYS = (
+    'CIVITAI_TOKEN',
+    'CIVITAI_API_TOKEN',
+    'CIVITAI_API_KEY',
+    'CIVITAI_KEY',
+    'CIVITAI_ACCESS_TOKEN',
+    'CIVITAI_BEARER_TOKEN',
+    'CIVITAI_PAT',
+)
 CIVITAI_API = "https://civitai.com/api/v1"
 DOWNLOAD_JOBS_FILE = GATEWAY_STATE_DIR / "download_jobs.json"
 LAST_MOBILE_PROMPT_LORAS_FILE = GATEWAY_STATE_DIR / "last_mobile_prompt_loras.json"
@@ -192,26 +226,23 @@ CIVITAI_FALLBACK_BASE_MODELS = [
     'Hunyuan Video', 'LTXV', 'Mochi', 'CogVideoX', 'SVD', 'AnimateDiff', 'Allegro',
     'OpenSora', 'SkyReels', 'Qwen-Image', 'Qwen-Image-Edit', 'Hidream-I1',
 ]
-MAX_PROMPT_CHARS = 1200
 LORA_STRENGTH_MIN = -100000.0
 LORA_STRENGTH_MAX = 100000.0
-OUTPUT_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+OUTPUT_MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v", ".mkv"}
 OUTPUT_ENCRYPTION_ENABLED = os.environ.get("ZIMG_OUTPUT_ENCRYPTION", "1") != "0"
 OUTPUT_ENCRYPTION_SERVICE = os.environ.get("ZIMG_OUTPUT_KEYCHAIN_SERVICE", "zimage-output-encryption")
 OUTPUT_ENCRYPTION_ITER = int(os.environ.get("ZIMG_OUTPUT_ENCRYPTION_ITER", "50000"))
-# How long fresh plaintext outputs may live before the sweeper encrypts them.
-# This must comfortably cover the completion moment in the UI: the queue card
-# fetches its preview via /comfy/view right after the `executed` event, and
-# Comfy itself can only serve the plaintext. A 5s window made that a race the
-# client often lost (preview 404 -> retry/fallback -> image appearing 10-20s
-# late). Encryption-at-rest still holds; the window only delays it slightly.
-OUTPUT_PLAINTEXT_GRACE_SECONDS = int(os.environ.get("ZIMG_OUTPUT_PLAINTEXT_GRACE", "90"))
+OUTPUT_PLAINTEXT_GRACE_SECONDS = int(os.environ.get("ZIMG_OUTPUT_PLAINTEXT_GRACE", "0"))
 OUTPUT_ENCRYPTION_SUFFIX = ".zenc"
+PRIVATE_INPUT_PREFIXES = ("media-studio-input-", "mcp_inline_", "mcp_ltx_", "mcp_video_")
+PRIVATE_INPUT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_MAX_AGE", "7200"))
 jobs = {}
 jobs_lock = threading.Lock()
 download_jobs = {}
 download_jobs_lock = threading.Lock()
 encryption_lock = threading.Lock()
+active_output_paths = set()
+active_output_paths_lock = threading.Lock()
 _output_encryption_password = None
 
 
@@ -221,6 +252,55 @@ def now_iso():
 
 def safe_name(name):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+
+
+def redact_access_log_message(value):
+    return re.sub(
+        r"(?i)([?&](?:token|access_token|api_key|key)=)[^&\s\"]*",
+        lambda match: match.group(1) + "%5Bredacted%5D",
+        str(value),
+    )
+
+
+def delete_private_input(name):
+    raw = str(name or "").strip()
+    if not raw or Path(raw).name != raw or not raw.startswith(PRIVATE_INPUT_PREFIXES):
+        raise ValueError("invalid private input filename")
+    root = COMFY_INPUT_DIR.expanduser().resolve()
+    candidate = (root / raw).resolve()
+    if not _is_under(candidate, root):
+        raise ValueError("private input path escaped the input directory")
+    if not candidate.exists():
+        return False
+    if not candidate.is_file():
+        raise ValueError("private input is not a file")
+    candidate.unlink()
+    return True
+
+
+def cleanup_staged_private_inputs_once(max_age_seconds=PRIVATE_INPUT_MAX_AGE_SECONDS):
+    root = COMFY_INPUT_DIR.expanduser().resolve()
+    if not root.exists():
+        return 0
+    now = time.time()
+    deleted = 0
+    for candidate in root.iterdir():
+        if not candidate.name.startswith(PRIVATE_INPUT_PREFIXES) or not candidate.is_file():
+            continue
+        try:
+            if now - candidate.stat().st_mtime < max_age_seconds:
+                continue
+            candidate.unlink()
+            deleted += 1
+        except OSError:
+            continue
+    return deleted
+
+
+def private_input_sweeper():
+    while True:
+        cleanup_staged_private_inputs_once()
+        time.sleep(300)
 
 
 def _is_under(path, root):
@@ -283,13 +363,30 @@ def logical_path_for_encrypted(path):
     return path
 
 
+def mark_output_active(path):
+    with active_output_paths_lock:
+        active_output_paths.add(str(Path(path).resolve()))
+
+
+def mark_output_inactive(path):
+    with active_output_paths_lock:
+        active_output_paths.discard(str(Path(path).resolve()))
+
+
+def output_path_is_active(path):
+    with active_output_paths_lock:
+        return str(Path(path).resolve()) in active_output_paths
+
+
 def is_encryptable_output(path):
     path = Path(path)
     if not OUTPUT_ENCRYPTION_ENABLED:
         return False
+    if output_path_is_active(path):
+        return False
     if path.name.endswith(OUTPUT_ENCRYPTION_SUFFIX):
         return False
-    if path.suffix.lower() not in OUTPUT_IMAGE_EXTS:
+    if path.suffix.lower() not in OUTPUT_MEDIA_EXTS:
         return False
     if _is_under(path, DEBUG_OUTPUT_DIR):
         return False
@@ -297,7 +394,7 @@ def is_encryptable_output(path):
 
 
 def encrypt_output_file(path):
-    """Encrypt an output image in place as <name>.zenc and remove plaintext.
+    """Encrypt output media in place as <name>.zenc and remove plaintext.
 
     Returns the logical original path (the filename the UI should keep using).
     """
@@ -314,6 +411,7 @@ def encrypt_output_file(path):
     with encryption_lock:
         if enc.exists() and not path.exists():
             return path
+        source_stat = path.stat()
         proc = subprocess.run(
             [
                 "/usr/bin/openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-iter", str(OUTPUT_ENCRYPTION_ITER),
@@ -329,8 +427,9 @@ def encrypt_output_file(path):
                 tmp.unlink(missing_ok=True)
             except Exception:
                 pass
-            raise RuntimeError(f"failed to encrypt output image {path.name}")
+            raise RuntimeError(f"failed to encrypt output media {path.name}")
         os.replace(tmp, enc)
+        os.utime(enc, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
         try:
             path.unlink()
         except FileNotFoundError:
@@ -367,11 +466,16 @@ def decrypt_output_bytes(path):
 def encrypt_outputs(paths):
     out = []
     for p in paths or []:
+        path = Path(p).expanduser().resolve()
         try:
-            out.append(str(encrypt_output_file(p).resolve()))
+            out.append(str(encrypt_output_file(path).resolve()))
         except Exception as e:
-            print(f"[output-encryption] failed to encrypt {Path(str(p)).name}: {e}", file=sys.stderr)
-            out.append(str(Path(p).resolve()))
+            if is_encryptable_output(path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise RuntimeError(f"output encryption failed for {path.name}") from e
     return out
 
 
@@ -402,12 +506,28 @@ def find_output_logical_path(name):
     return None
 
 
+def find_exact_output_logical_path(value):
+    try:
+        logical = logical_path_for_encrypted(Path(value).expanduser()).resolve()
+    except Exception:
+        return None
+    if logical.suffix.lower() not in OUTPUT_MEDIA_EXTS:
+        return None
+    if not any(_is_under(logical, root) for root in [OUT_DIR, COMFY_OUTPUT_DIR]):
+        return None
+    if logical.is_file() or encrypted_path_for(logical).is_file():
+        return logical
+    return None
+
+
 def send_output_file(handler, path):
+    path = encrypt_output_file(path)
     data, ctype = decrypt_output_bytes(path)
     handler.send_response(200)
     handler.cors_headers()
     handler.send_header("Content-Type", ctype)
-    handler.send_header("Cache-Control", "private, max-age=10800")
+    handler.send_header("Cache-Control", "private, no-store, max-age=0")
+    handler.send_header("Pragma", "no-cache")
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
@@ -578,6 +698,199 @@ def workflow_index_record_for_filename(name):
     with workflow_index_lock:
         rec = _workflow_index_records.get(name)
         return dict(rec) if isinstance(rec, dict) else None
+
+
+def _atomic_write_jsonl(path, records):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def _record_without_output(record, name):
+    if not isinstance(record, dict):
+        return record, False
+    changed = False
+    result = dict(record)
+    for key in ("outputs", "image_urls", "video_urls", "files"):
+        values = result.get(key)
+        if not isinstance(values, list):
+            continue
+        kept = [value for value in values if Path(urlparse(str(value)).path).name.removesuffix(OUTPUT_ENCRYPTION_SUFFIX) != name]
+        if len(kept) != len(values):
+            result[key] = kept
+            changed = True
+    return result, changed
+
+
+def _rewrite_gateway_history_without_output(name):
+    if not HISTORY_FILE.exists():
+        return 0
+    records = []
+    changed = 0
+    try:
+        with HISTORY_FILE.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                cleaned, record_changed = _record_without_output(record, name)
+                changed += int(record_changed)
+                if isinstance(cleaned, dict):
+                    records.append(cleaned)
+        if changed:
+            _atomic_write_jsonl(HISTORY_FILE, records)
+    except OSError as exc:
+        raise RuntimeError("failed to purge durable generation history") from exc
+    return changed
+
+
+def _rewrite_workflow_index_without_output(name):
+    removed_prompt_ids = set()
+    touched_prompt_ids = set()
+    records = []
+    changed = 0
+    with workflow_index_lock:
+        if WORKFLOW_INDEX_FILE.exists():
+            try:
+                with WORKFLOW_INDEX_FILE.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        filenames = record.get("filenames") if isinstance(record.get("filenames"), list) else []
+                        kept = [value for value in filenames if Path(str(value)).name != name]
+                        if len(kept) != len(filenames):
+                            changed += 1
+                            if record.get("prompt_id"):
+                                touched_prompt_ids.add(str(record["prompt_id"]))
+                            if not kept and record.get("prompt_id"):
+                                removed_prompt_ids.add(str(record["prompt_id"]))
+                        if kept:
+                            records.append({**record, "filenames": kept})
+                if changed:
+                    _atomic_write_jsonl(WORKFLOW_INDEX_FILE, records)
+            except OSError as exc:
+                raise RuntimeError("failed to purge encrypted workflow history") from exc
+        _workflow_index.pop(name, None)
+        index_record = _workflow_index_records.pop(name, None)
+        if isinstance(index_record, dict) and index_record.get("prompt_id"):
+            prompt_id = str(index_record["prompt_id"])
+            if not any(str(value.get("prompt_id") or "") == prompt_id for value in _workflow_index_records.values()):
+                removed_prompt_ids.add(prompt_id)
+        for prompt_id in removed_prompt_ids:
+            _workflow_index_prompts.discard(prompt_id)
+    return changed, touched_prompt_ids
+
+
+def _purge_queue_metadata(prompt_ids):
+    changed = 0
+    for cache_file in QUEUE_METADATA_FILES:
+        if not cache_file.exists():
+            continue
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            prompts = data.get("prompts") if isinstance(data, dict) else None
+            if not isinstance(prompts, dict):
+                continue
+            for prompt_id in prompt_ids:
+                if prompts.pop(prompt_id, None) is not None:
+                    changed += 1
+            if changed:
+                temporary = cache_file.with_name(f".{cache_file.name}.{os.getpid()}.tmp")
+                temporary.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+                os.replace(temporary, cache_file)
+        except (OSError, json.JSONDecodeError):
+            continue
+    return changed
+
+
+def _delete_prompt_ids_from_comfy(prompt_ids):
+    failures = []
+    if not prompt_ids:
+        return failures
+    body = json.dumps({"delete": sorted(prompt_ids)}).encode("utf-8")
+    for lane, base in COMFY_LANES.items():
+        try:
+            request = Request(
+                f"{base}/history",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=10):
+                pass
+        except Exception:
+            failures.append(lane)
+    return failures
+
+
+def delete_output_everywhere(value):
+    name = safe_name(value)
+    if not name or Path(name).suffix.lower() not in OUTPUT_MEDIA_EXTS:
+        raise ValueError("valid media filename required")
+
+    history_records = _rewrite_gateway_history_without_output(name)
+    workflow_records, prompt_ids = _rewrite_workflow_index_without_output(name)
+    queue_metadata = _purge_queue_metadata(prompt_ids)
+
+    with jobs_lock:
+        live_records = 0
+        for job_id, record in list(jobs.items()):
+            cleaned, changed = _record_without_output(record, name)
+            if changed:
+                jobs[job_id] = cleaned
+                live_records += 1
+
+    deleted_files = 0
+    for root in (OUT_DIR, COMFY_OUTPUT_DIR):
+        try:
+            if not root.exists():
+                continue
+            for candidate in list(root.rglob("*")):
+                if not candidate.is_file():
+                    continue
+                logical = logical_path_for_encrypted(candidate)
+                if logical.name != name:
+                    continue
+                candidate.unlink(missing_ok=True)
+                deleted_files += 1
+        except OSError as exc:
+            raise RuntimeError("failed to remove every private media copy") from exc
+
+    preview_files = 0
+    for cache_root in PREVIEW_CACHE_ROOTS:
+        try:
+            if not cache_root.exists():
+                continue
+            for candidate in list(cache_root.rglob("*")):
+                if candidate.is_file():
+                    candidate.unlink(missing_ok=True)
+                    preview_files += 1
+            for candidate in sorted(cache_root.rglob("*"), reverse=True):
+                if candidate.is_dir():
+                    candidate.rmdir()
+        except OSError:
+            continue
+
+    lane_failures = _delete_prompt_ids_from_comfy(prompt_ids)
+    return {
+        "ok": True,
+        "deleted_files": deleted_files,
+        "history_records": history_records,
+        "workflow_records": workflow_records,
+        "live_records": live_records,
+        "queue_metadata": queue_metadata,
+        "preview_files": preview_files,
+        "lane_cleanup_deferred": len(lane_failures),
+    }
 
 
 def mirror_output_to_comfy_output(path):
@@ -1245,7 +1558,7 @@ def output_file_records(limit=200):
                     logical = logical_path_for_encrypted(p)
                     if logical.name.startswith("."):
                         continue
-                    if logical.suffix.lower() in OUTPUT_IMAGE_EXTS:
+                    if logical.suffix.lower() in OUTPUT_MEDIA_EXTS:
                         paths.append(logical)
         except Exception:
             continue
@@ -1881,6 +2194,16 @@ def _normalize_ltx_mlx_variant(value):
     return LTX2_MLX_VARIANT_ALIASES.get(raw)
 
 
+def _ltx_mlx_backend_name(spec, variant):
+    prefix = str((spec or {}).get('backend_prefix') or 'mlx-ltx-eros').strip().rstrip('-')
+    return f"{prefix}-{variant}"
+
+
+def _ltx_mlx_output_subdir(spec):
+    subdir = str((spec or {}).get('output_subdir') or 'Eros').strip().strip('/')
+    return subdir or 'Eros'
+
+
 def _ltx_mlx_variant_from_text(value):
     text = str(value or '')
     for pattern in (
@@ -1908,7 +2231,12 @@ def _native_mlx_ltx_metadata_from_workflow(workflow):
         return None
     return {
         'variant': variant,
+        'pipeline': str(native.get('pipeline') or 'generate').strip().lower(),
         'defaults': native.get('defaults') if isinstance(native.get('defaults'), dict) else {},
+        'keyframes': native.get('keyframes') if isinstance(native.get('keyframes'), list) else [],
+        'loras': native.get('loras') if isinstance(native.get('loras'), list) else [],
+        'video': native.get('video') if isinstance(native.get('video'), dict) else None,
+        'ic_lora': (native.get('icLora') or native.get('ic_lora')) if isinstance(native.get('icLora') or native.get('ic_lora'), dict) else None,
     }
 
 
@@ -1917,28 +2245,59 @@ def _native_mlx_ltx_metadata_from_body(data, nodes):
     if isinstance(data, dict):
         extra_data = data.get('extra_data') if isinstance(data.get('extra_data'), dict) else {}
         extra_pnginfo = extra_data.get('extra_pnginfo') if isinstance(extra_data.get('extra_pnginfo'), dict) else {}
-        workflow = extra_pnginfo.get('workflow') if isinstance(extra_pnginfo.get('workflow'), dict) else None
+        direct_native = extra_pnginfo.get('nativeMlxLtx') or extra_pnginfo.get('native_mlx_ltx')
+        if isinstance(direct_native, dict):
+            workflow = {'extra': {'nativeMlxLtx': direct_native}}
+        else:
+            workflow = extra_pnginfo.get('workflow') if isinstance(extra_pnginfo.get('workflow'), dict) else None
     meta = _native_mlx_ltx_metadata_from_workflow(workflow)
     if meta:
         return meta
+    ic_loader = next((node for node in nodes if str(node.get('class_type') or '') == 'LTXICLoRALoaderModelOnly'), None)
+    ic_guide = next((node for node in nodes if str(node.get('class_type') or '') == 'LTXAddVideoICLoRAGuide'), None)
+    if ic_loader and ic_guide:
+        loader_inputs = _node_inputs(ic_loader)
+        guide_inputs = _node_inputs(ic_guide)
+        lora_name = _prompt_string(loader_inputs.get('lora_name'))
+        try:
+            lora_strength = float(loader_inputs.get('strength_model', 1.0))
+        except Exception:
+            lora_strength = 1.0
+        try:
+            reference_strength = float(guide_inputs.get('strength', 1.0))
+        except Exception:
+            reference_strength = 1.0
+        return {
+            'variant': 'regular-q8-distilled',
+            'pipeline': 'ic-lora',
+            'defaults': {},
+            'keyframes': [],
+            'loras': ([{'name': lora_name, 'strength': lora_strength}] if lora_name else []),
+            'video': None,
+            'ic_lora': {
+                'single_stage': True,
+                'conditioning_strength': 1.0,
+                'reference_strength': reference_strength,
+            },
+        }
     for node in nodes:
         inputs = _node_inputs(node)
         for value in inputs.values():
             if isinstance(value, str):
                 variant = _ltx_mlx_variant_from_text(value)
                 if variant:
-                    return {'variant': variant, 'defaults': {'frames': 233}}
+                    return {'variant': variant, 'defaults': {'frames': 233}, 'keyframes': [], 'loras': [], 'video': None}
         node_meta = node.get('_meta') if isinstance(node.get('_meta'), dict) else {}
         for value in node_meta.values():
             if isinstance(value, str):
                 variant = _ltx_mlx_variant_from_text(value)
                 if variant:
-                    return {'variant': variant, 'defaults': {'frames': 233}}
+                    return {'variant': variant, 'defaults': {'frames': 233}, 'keyframes': [], 'loras': [], 'video': None}
     return None
 
 
 def _first_ltx_prompt_text(nodes_by_id, nodes):
-    preferred_ids = ('824', '536')
+    preferred_ids = ('824', '536', '2483')
     for key in preferred_ids:
         node = nodes_by_id.get(key)
         if not isinstance(node, dict):
@@ -1978,6 +2337,142 @@ def _first_ltx_image_name(nodes):
     return None
 
 
+def _native_ltx_keyframe_image_name(item):
+    if not isinstance(item, dict):
+        return None
+    for key in ('image', 'image_path', 'path', 'filename', 'file'):
+        image_name = _prompt_string(item.get(key))
+        if image_name:
+            return image_name
+    return None
+
+
+def _native_ltx_role_frame(role, frames):
+    text = str(role or '').strip().lower()
+    if text in {'start', 'first', 'first_frame', 'beginning'}:
+        return 0
+    if text in {'middle', 'mid', 'center', 'centre'}:
+        return max(0, (frames - 1) // 2)
+    if text in {'end', 'last', 'last_frame', 'final'}:
+        return max(0, frames - 1)
+    return None
+
+
+def _native_ltx_keyframe_frame(item, frames, frame_rate):
+    if not isinstance(item, dict):
+        return 0
+    for key in ('frame', 'frame_idx', 'frame_index'):
+        if item.get(key) is not None:
+            try:
+                return max(0, min(frames - 1, int(round(float(item.get(key))))))
+            except Exception:
+                break
+    for key in ('time_seconds', 'time', 'seconds'):
+        if item.get(key) is not None:
+            try:
+                return max(0, min(frames - 1, int(round(float(item.get(key)) * float(frame_rate or 24.0)))))
+            except Exception:
+                break
+    role_frame = _native_ltx_role_frame(item.get('role'), frames)
+    return 0 if role_frame is None else role_frame
+
+
+def _native_ltx_keyframe_strength(item):
+    if not isinstance(item, dict):
+        return 1.0
+    try:
+        strength = float(item.get('strength', 1.0))
+    except Exception:
+        strength = 1.0
+    if not math.isfinite(strength):
+        strength = 1.0
+    return max(0.0, min(1.0, strength))
+
+
+def _native_ltx_lora_name(item):
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return None
+    for key in ('filePath', 'file_path', 'path', 'name', 'lora_name', 'lora', 'id'):
+        value = _prompt_string(item.get(key))
+        if value:
+            return value
+    return None
+
+
+def _native_ltx_lora_strength(item):
+    if isinstance(item, dict):
+        for key in ('scale', 'strength', 'strength_model', 'model_strength'):
+            if item.get(key) is not None:
+                try:
+                    value = float(item.get(key))
+                    if math.isfinite(value):
+                        return value
+                except Exception:
+                    return 1.0
+    return 1.0
+
+
+def _native_ltx_lora_enabled(item):
+    if not isinstance(item, dict):
+        return True
+    value = item.get('enabled', item.get('on', item.get('active', True)))
+    return value is not False and str(value).strip().lower() not in {'0', 'false', 'off', 'no', 'none', 'disabled'}
+
+
+def _native_ltx_loras(raw_loras):
+    out = []
+    seen = set()
+    if not isinstance(raw_loras, list):
+        return out
+    for item in raw_loras:
+        if not _native_ltx_lora_enabled(item):
+            continue
+        name = _native_ltx_lora_name(item)
+        if not name:
+            continue
+        path = _resolve_lora_path(name)
+        strength = _native_ltx_lora_strength(item)
+        key = (str(path or name), round(strength, 6))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            'name': Path(str(name)).name,
+            'source': name,
+            'scale': strength,
+            **({'filePath': path} if path else {}),
+        })
+    return out
+
+
+def _native_ltx_keyframes(raw_keyframes, frames, frame_rate, fallback_image=None):
+    out = []
+    if isinstance(raw_keyframes, list):
+        for item in raw_keyframes:
+            if not isinstance(item, dict):
+                continue
+            image_name = _native_ltx_keyframe_image_name(item)
+            if not image_name:
+                continue
+            out.append({
+                'image_path': image_name,
+                'frame': _native_ltx_keyframe_frame(item, frames, frame_rate),
+                'strength': _native_ltx_keyframe_strength(item),
+                'role': str(item.get('role') or '').strip() or None,
+            })
+    if fallback_image and not any(int(k.get('frame', 0)) == 0 for k in out):
+        out.insert(0, {'image_path': fallback_image, 'frame': 0, 'strength': 1.0, 'role': 'start'})
+    if not out and fallback_image:
+        out.append({'image_path': fallback_image, 'frame': 0, 'strength': 1.0, 'role': 'start'})
+    deduped = {}
+    for item in out:
+        frame = int(item.get('frame') or 0)
+        deduped[frame] = item
+    return [deduped[key] for key in sorted(deduped)]
+
+
 def _ltx_valid_frame_count(value, default=233):
     try:
         frames = int(round(float(value)))
@@ -1985,6 +2480,23 @@ def _ltx_valid_frame_count(value, default=233):
         frames = default
     frames = max(9, min(721, frames))
     return max(9, int(round((frames - 1) / 8)) * 8 + 1)
+
+
+def _ltx_extension_output_frames(duration_seconds, frame_rate=24.0):
+    try:
+        duration = float(duration_seconds)
+        fps = float(frame_rate)
+    except Exception:
+        duration, fps = 4.0, 24.0
+    if not math.isfinite(duration) or duration <= 0:
+        duration = 4.0
+    if not math.isfinite(fps) or fps <= 0:
+        fps = 24.0
+    return max(8, min(720, int(math.ceil(duration * fps / 8.0)) * 8))
+
+
+def _ltx_extension_latent_frames(duration_seconds, frame_rate=24.0):
+    return _ltx_extension_output_frames(duration_seconds, frame_rate) // 8
 
 
 def _call_comfy_free_before_ltx():
@@ -2020,12 +2532,96 @@ def detect_native_mlx_ltx_prompt(body):
     if not spec:
         return None
 
-    prompt_text = _first_ltx_prompt_text(nodes_by_id, nodes)
-    image_name = _first_ltx_image_name(nodes)
-    if not prompt_text or not image_name:
-        return None
-
     defaults = meta.get('defaults') or {}
+    prompt_text = _first_ltx_prompt_text(nodes_by_id, nodes)
+    if not prompt_text:
+        return None
+    pipeline = str(meta.get('pipeline') or 'generate').strip().lower()
+    if pipeline == 'ic-lora':
+        ic_lora = meta.get('ic_lora') if isinstance(meta.get('ic_lora'), dict) else {}
+        image_name = _prompt_string(ic_lora.get('reference_image') or defaults.get('image')) or _first_ltx_image_name(nodes)
+        if not image_name:
+            return None
+        width = int_quality_option({'width': _resolve_prompt_number(nodes_by_id, ['809', 0], defaults.get('width', 768))}, 'width', 768)
+        height = int_quality_option({'height': _resolve_prompt_number(nodes_by_id, ['811', 0], defaults.get('height', 448))}, 'height', 448)
+        frame_rate = float_quality_option({'frame_rate': _resolve_prompt_number(nodes_by_id, ['5098', 0], defaults.get('frame_rate', 24))}, 'frame_rate', 24.0)
+        latent = next((n for n in nodes if str(n.get('class_type') or '') == 'EmptyLTXVLatentVideo'), None)
+        latent_inputs = _node_inputs(latent)
+        raw_frames = defaults.get('frames') if defaults.get('frames') is not None else _resolve_prompt_number(nodes_by_id, latent_inputs.get('length'), 121)
+        frames = _ltx_valid_frame_count(raw_frames, int(defaults.get('frames', 121) or 121))
+        seed_value = _resolve_prompt_number(nodes_by_id, ['4832', 0], defaults.get('seed', 42))
+        seed = int(seed_value) if seed_value is not None else 42
+        loras = _native_ltx_loras(meta.get('loras') or [])
+        try:
+            conditioning_strength = max(0.0, min(1.0, float(ic_lora.get('conditioning_strength', 1.0))))
+        except Exception:
+            conditioning_strength = 1.0
+        try:
+            reference_strength = max(0.0, min(1.0, float(ic_lora.get('reference_strength', 1.0))))
+        except Exception:
+            reference_strength = 1.0
+        single_stage_value = ic_lora.get('single_stage', True)
+        low_ram_value = ic_lora.get('low_ram', False)
+        return {
+            'variant': variant,
+            'operation': 'ic-lora',
+            'prompt': prompt_text,
+            'reference_image_path': image_name,
+            'images': [],
+            'options': {
+                'width': width,
+                'height': height,
+                'frames': frames,
+                'frame_rate': frame_rate,
+                'seed': seed,
+                'model': spec['model'],
+                'title': spec['title'],
+                'benchmark_seconds': spec.get('benchmark_seconds'),
+                'conditioning_strength': conditioning_strength,
+                'reference_strength': reference_strength,
+                'single_stage': single_stage_value is not False and str(single_stage_value).strip().lower() not in {'0', 'false', 'off', 'no'},
+                'low_ram': low_ram_value is not False and str(low_ram_value).strip().lower() not in {'0', 'false', 'off', 'no'},
+                **({'loras': loras} if loras else {}),
+            },
+        }
+    video = meta.get('video') if isinstance(meta.get('video'), dict) else None
+    video_name = _prompt_string(video.get('path') or video.get('video_path') or video.get('filename')) if video else None
+    if video_name:
+        mode = str(video.get('mode') or 'extend').strip().lower()
+        if mode != 'extend':
+            return None
+        video_model = str(spec.get('video_model') or '').strip()
+        if not video_model or not Path(video_model).expanduser().exists():
+            return None
+        frame_rate = float_quality_option({'frame_rate': video.get('frame_rate', defaults.get('frame_rate', 24))}, 'frame_rate', 24.0)
+        duration_seconds = float_quality_option({'duration_seconds': video.get('duration_seconds', defaults.get('duration_seconds', 4))}, 'duration_seconds', 4.0)
+        extension_output_frames = _ltx_extension_output_frames(duration_seconds, frame_rate)
+        extension_latent_frames = extension_output_frames // 8
+        seed_value = _resolve_prompt_number(nodes_by_id, ['812', 0], defaults.get('seed', 42))
+        seed = int(seed_value) if seed_value is not None else 42
+        return {
+            'variant': variant,
+            'operation': 'extend',
+            'prompt': prompt_text,
+            'video_path': video_name,
+            'images': [],
+            'options': {
+                'duration_seconds': duration_seconds,
+                'extension_output_frames': extension_output_frames,
+                'extension_latent_frames': extension_latent_frames,
+                'extend_latent_frames': extension_latent_frames,
+                'frame_rate': frame_rate,
+                'seed': seed,
+                'model': video_model,
+                'title': spec['title'],
+                'benchmark_seconds': spec.get('benchmark_seconds'),
+                'distilled': bool(spec.get('video_distilled')),
+                'cfg_scale': float(video.get('cfg_scale', 3.0)),
+                'stg_scale': float(video.get('stg_scale', 1.0)),
+                'steps': int(video.get('steps', 30)),
+            },
+        }
+    image_name = _first_ltx_image_name(nodes)
     width = int_quality_option({'width': _resolve_prompt_number(nodes_by_id, ['809', 0], defaults.get('width', 480))}, 'width', 480)
     height = int_quality_option({'height': _resolve_prompt_number(nodes_by_id, ['811', 0], defaults.get('height', 832))}, 'height', 832)
     frame_rate = float_quality_option({'frame_rate': _resolve_prompt_number(nodes_by_id, ['542', 0], defaults.get('frame_rate', 24))}, 'frame_rate', 24.0)
@@ -2035,11 +2631,20 @@ def detect_native_mlx_ltx_prompt(body):
     frames = _ltx_valid_frame_count(raw_frames, int(defaults.get('frames', 233) or 233))
     seed_value = _resolve_prompt_number(nodes_by_id, ['812', 0], defaults.get('seed', 42))
     seed = int(seed_value) if seed_value is not None else 42
+    keyframes = _native_ltx_keyframes(meta.get('keyframes') or [], frames, frame_rate, image_name)
+    cfg_node_inputs = _node_inputs(nodes_by_id.get('583'))
+    cfg_scale = _resolve_prompt_number(nodes_by_id, cfg_node_inputs.get('cfg'), defaults.get('cfg'))
+    loras = _native_ltx_loras(meta.get('loras') or [])
+    if not image_name and keyframes:
+        image_name = keyframes[0].get('image_path')
+    if not image_name:
+        return None
 
     return {
         'variant': variant,
         'prompt': prompt_text,
         'image_path': image_name,
+        'images': keyframes,
         'options': {
             'width': width,
             'height': height,
@@ -2049,6 +2654,8 @@ def detect_native_mlx_ltx_prompt(body):
             'model': spec['model'],
             'title': spec['title'],
             'benchmark_seconds': spec.get('benchmark_seconds'),
+            **({'cfg_scale': float(cfg_scale)} if cfg_scale is not None else {}),
+            **({'loras': loras} if loras else {}),
         },
     }
 
@@ -2484,8 +3091,8 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
         jobs[job_id] = rec
 
 
-def _comfy_history_prompt_tuple_for_native_ltx(job_id, workflow=None):
-    extra = {'backend': 'mlx-ltx-eros-video'}
+def _comfy_history_prompt_tuple_for_native_ltx(job_id, workflow=None, backend='mlx-ltx-eros-video'):
+    extra = {'backend': backend}
     if workflow:
         extra['extra_pnginfo'] = {'workflow': workflow}
     return [0, job_id, {}, extra, []]
@@ -2499,14 +3106,18 @@ def queue_native_mlx_ltx_job(native, workflow=None):
     if not spec:
         raise RuntimeError(f"unknown native MLX LTX variant: {variant}")
     options = dict(native.get('options') or {})
+    operation = str(native.get('operation') or 'generate')
+    native_keyframes = native.get('images') if isinstance(native.get('images'), list) else []
+    native_loras = _native_ltx_loras(options.get('loras') or [])
     job_id = uuid.uuid4().hex[:12]
+    backend = _ltx_mlx_backend_name(spec, variant)
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id,
             "prompt": PRIVATE_PROMPT_LABEL,
-            "comfy_prompt": _comfy_history_prompt_tuple_for_native_ltx(job_id, workflow),
+            "comfy_prompt": _comfy_history_prompt_tuple_for_native_ltx(job_id, workflow, backend),
             "status": "queued",
-            "backend": f"mlx-ltx-eros-{variant}",
+            "backend": backend,
             "created_at": now_iso(),
             "outputs": [],
             "options": {
@@ -2517,6 +3128,26 @@ def queue_native_mlx_ltx_job(native, workflow=None):
                 "frames": options.get('frames'),
                 "frame_rate": options.get('frame_rate'),
                 "seed": options.get('seed'),
+                "operation": operation,
+                **({"source_video": Path(str(native.get('video_path') or '')).name,
+                    "duration_seconds": options.get('duration_seconds'),
+                    "extension_output_frames": options.get('extension_output_frames'),
+                    "extension_latent_frames": options.get('extension_latent_frames', options.get('extend_latent_frames')),
+                    "extension_pipeline": "distilled" if options.get('distilled', spec.get('video_distilled', False)) else "dev"} if operation == 'extend' else {}),
+                **({'lora_count': len(native_loras), 'loras': [
+                    {'name': item.get('name') or Path(str(item.get('source') or '')).name, 'strength': item.get('scale', 1.0)}
+                    for item in native_loras
+                ]} if native_loras else {}),
+                "keyframes": [
+                    {
+                        "image": Path(str(item.get('image_path') or item.get('image') or '')).name,
+                        "frame": item.get('frame'),
+                        "strength": item.get('strength'),
+                        **({"role": item.get("role")} if item.get("role") else {}),
+                    }
+                    for item in native_keyframes
+                    if isinstance(item, dict)
+                ],
                 "benchmark_seconds": spec.get('benchmark_seconds'),
             },
             "source": "comfy-prompt-intercept",
@@ -2526,11 +3157,143 @@ def queue_native_mlx_ltx_job(native, workflow=None):
     return job_id
 
 
+def _resolve_native_ltx_image_path(value):
+    image_path = Path(str(value or ''))
+    if not image_path.is_absolute():
+        image_path = COMFY_INPUT_DIR / str(image_path)
+    return image_path.resolve()
+
+
+def _resolve_native_ltx_video_path(value):
+    return _resolve_native_ltx_image_path(value)
+
+
+def _create_native_ltx_static_reference_video(image_path, output_path, frames, frame_rate):
+    """Encode a lossless repeated reference sheet for MLX IC-LoRA conditioning."""
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise RuntimeError('ffmpeg is required for native MLX IC-LoRA reference conditioning')
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    frame_rate_arg = str(int(frame_rate)) if float(frame_rate).is_integer() else str(frame_rate)
+    cmd = [
+        ffmpeg, '-y', '-loglevel', 'error',
+        '-loop', '1', '-framerate', frame_rate_arg,
+        '-i', str(image_path),
+        '-frames:v', str(frames),
+        '-c:v', 'ffv1', '-level', '3', '-pix_fmt', 'rgb24',
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, text=True, capture_output=True, timeout=180)
+    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1000:
+        detail = (result.stderr or result.stdout or 'unknown ffmpeg error').strip()
+        raise RuntimeError(f'failed to prepare lossless IC-LoRA reference video: {detail[-1200:]}')
+    return output_path
+
+
+def _native_ltx_runtime_keyframes(native, frames):
+    specs = native.get('images') if isinstance(native.get('images'), list) else []
+    if not specs:
+        specs = [{'image_path': native.get('image_path'), 'frame': 0, 'strength': 1.0, 'role': 'start'}]
+    out = []
+    for item in specs:
+        if not isinstance(item, dict):
+            continue
+        image_name = _native_ltx_keyframe_image_name(item) or _prompt_string(item.get('image_path'))
+        if not image_name:
+            continue
+        try:
+            frame = max(0, min(frames - 1, int(round(float(item.get('frame', 0))))))
+        except Exception:
+            frame = 0
+        out.append({
+            'path': _resolve_native_ltx_image_path(image_name),
+            'frame': frame,
+            'strength': _native_ltx_keyframe_strength(item),
+            'role': str(item.get('role') or '').strip() or None,
+        })
+    if not out and native.get('image_path'):
+        out.append({
+            'path': _resolve_native_ltx_image_path(native.get('image_path')),
+            'frame': 0,
+            'strength': 1.0,
+            'role': 'start',
+        })
+    return sorted(out, key=lambda item: item['frame'])
+
+
+def _update_native_ltx_process_progress(job_id, rec, text):
+    matches = list(re.finditer(r"Denoising(?: \(guided\))?:[^\r\n]*?\|\s*(\d+)/(\d+)\s*\[", text))
+    if matches:
+        current, total = (int(value) for value in matches[-1].groups())
+        rec.update({
+            "current_step": current,
+            "total_steps": total,
+            "progress": min(90, 10 + round(80 * current / max(1, total))),
+            "step_progress": round(100 * current / max(1, total)),
+            "progress_phase": "denoising",
+        })
+    elif "Decoding video + audio" in text:
+        rec.update({"progress": 94, "progress_phase": "decoding"})
+    elif "Loading decoders" in text:
+        rec.update({"progress": 91, "progress_phase": "loading-decoders"})
+    else:
+        return
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
+def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
+    """Run ltx-2-mlx while publishing tqdm progress from both output streams."""
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+    streams = [stream for stream in (proc.stdout, proc.stderr) if stream is not None]
+    output = {proc.stdout: bytearray(), proc.stderr: bytearray()}
+    progress_tail = ""
+    started = time.monotonic()
+    try:
+        while streams:
+            if time.monotonic() - started > timeout:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            ready, _, _ = select.select(streams, [], [], 0.25)
+            for stream in ready:
+                chunk = os.read(stream.fileno(), 8192)
+                if not chunk:
+                    streams.remove(stream)
+                    continue
+                output[stream].extend(chunk)
+                if len(output[stream]) > 500_000:
+                    del output[stream][:-500_000]
+                progress_tail = (progress_tail + chunk.decode('utf-8', errors='replace'))[-8192:]
+                _update_native_ltx_process_progress(job_id, rec, progress_tail)
+        returncode = proc.wait()
+    except Exception:
+        if proc.poll() is None:
+            proc.terminate()
+        raise
+    stdout = bytes(output.get(proc.stdout, b'')).decode('utf-8', errors='replace')
+    stderr = bytes(output.get(proc.stderr, b'')).decode('utf-8', errors='replace')
+    return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
+
+
 def run_native_mlx_ltx_video(job_id, native, workflow=None):
     started = now_iso()
     variant = native.get('variant')
     spec = LTX2_MLX_VARIANTS.get(variant) or {}
+    backend = _ltx_mlx_backend_name(spec, variant)
     options = dict(native.get('options') or {})
+    operation = str(native.get('operation') or 'generate').strip().lower()
     prompt = str(native.get('prompt') or '').strip()
     width = int_quality_option(options, 'width', 480)
     height = int_quality_option(options, 'height', 832)
@@ -2538,20 +3301,24 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
     frame_rate = float_quality_option(options, 'frame_rate', 24.0)
     frame_rate_arg = str(int(frame_rate)) if float(frame_rate).is_integer() else str(frame_rate)
     seed = int_option(options, 'seed', 42, 0, 1_000_000_000)
-    image_path = Path(str(native.get('image_path') or ''))
-    if not image_path.is_absolute():
-        image_path = COMFY_INPUT_DIR / str(image_path)
-    image_path = image_path.resolve()
-    model_path = Path(str(spec.get('model') or options.get('model') or '')).resolve()
-    out_dir = COMFY_OUTPUT_DIR / "Eros"
+    keyframes = _native_ltx_runtime_keyframes(native, frames)
+    native_loras = _native_ltx_loras(options.get('loras') or [])
+    cfg_scale = float_quality_option(options, 'cfg_scale', float_quality_option(options, 'cfg', 0.0))
+    model_path = Path(str(options.get('model') or spec.get('model') or '')).resolve()
+    out_dir = COMFY_OUTPUT_DIR / _ltx_mlx_output_subdir(spec)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{spec.get('output_prefix', 'mlx_ltx_eros_mobile')}_{job_id}_{frames}f.mp4"
+    extension_output_frames = int(options.get('extension_output_frames') or (int(options.get('extend_latent_frames') or 0) * 8))
+    extension_latent_frames = int(options.get('extension_latent_frames') or options.get('extend_latent_frames') or 0)
+    distilled_extension = operation == 'extend' and bool(options.get('distilled', spec.get('video_distilled', False)))
+    output_frame_label = f"extend-{extension_output_frames}f" if operation == 'extend' else f"{frames}f"
+    out = out_dir / f"{spec.get('output_prefix', 'mlx_ltx_eros_mobile')}_{job_id}_{output_frame_label}.mp4"
+    reference_video_path = None
     rec = {
         "id": job_id,
         "prompt": PRIVATE_PROMPT_LABEL,
-        "comfy_prompt": _comfy_history_prompt_tuple_for_native_ltx(job_id, workflow),
+        "comfy_prompt": _comfy_history_prompt_tuple_for_native_ltx(job_id, workflow, backend),
         "status": "running",
-        "backend": f"mlx-ltx-eros-{variant}",
+        "backend": backend,
         "created_at": started,
         "outputs": [],
         "options": {
@@ -2563,10 +3330,34 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             "frames": frames,
             "frame_rate": frame_rate,
             "seed": seed,
+            "operation": operation,
+            **({"reference_image": Path(str(native.get('reference_image_path') or '')).name,
+                "conditioning_strength": options.get('conditioning_strength', 1.0),
+                "reference_strength": options.get('reference_strength', 1.0),
+                "single_stage": bool(options.get('single_stage', True))} if operation == 'ic-lora' else {}),
+            **({"source_video": Path(str(native.get('video_path') or '')).name,
+                "duration_seconds": options.get('duration_seconds'),
+                "extension_output_frames": extension_output_frames,
+                "extension_latent_frames": extension_latent_frames,
+                "extension_pipeline": "distilled" if distilled_extension else "dev"} if operation == 'extend' else {}),
+            **({'cfg_scale': cfg_scale} if cfg_scale else {}),
+            **({'lora_count': len(native_loras), 'loras': [
+                {'name': item.get('name') or Path(str(item.get('source') or '')).name, 'strength': item.get('scale', 1.0)}
+                for item in native_loras
+            ]} if native_loras else {}),
+            "keyframes": [
+                {
+                    "image": item['path'].name,
+                    "frame": item['frame'],
+                    "strength": item['strength'],
+                    **({"role": item["role"]} if item.get("role") else {}),
+                }
+                for item in keyframes
+            ],
             "benchmark_seconds": spec.get('benchmark_seconds'),
         },
         "current_step": 0,
-        "total_steps": 2,
+        "total_steps": 8 if distilled_extension else (int(options.get('steps') or 30) if operation == 'extend' else 2),
         "progress": 0,
         "step_progress": 0,
         "progress_phase": "queued",
@@ -2583,27 +3374,106 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
         if not prompt:
             raise RuntimeError("prompt is required for native MLX LTX generation")
         allowed = [COMFY_INPUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), OUT_DIR.resolve()]
-        if not image_path.exists() or not any(_is_under(image_path, root) for root in allowed):
-            raise RuntimeError("input image is outside private Comfy storage or does not exist")
+        source_video = None
+        reference_image = None
+        if operation == 'extend':
+            source_video = _resolve_native_ltx_video_path(native.get('video_path'))
+            if not source_video.exists() or not any(_is_under(source_video, root) for root in allowed):
+                raise RuntimeError("input video is outside private Comfy storage or does not exist")
+        elif operation == 'ic-lora':
+            reference_image = _resolve_native_ltx_image_path(native.get('reference_image_path'))
+            if not reference_image.exists() or not any(_is_under(reference_image, root) for root in allowed):
+                raise RuntimeError("IC-LoRA reference image is outside private Comfy storage or does not exist")
+            if not native_loras:
+                raise RuntimeError("native MLX IC-LoRA generation requires at least one IC-LoRA model")
+        else:
+            if not keyframes:
+                raise RuntimeError("at least one input image is required for native MLX LTX generation")
+            for item in keyframes:
+                image_path = item['path']
+                if not image_path.exists() or not any(_is_under(image_path, root) for root in allowed):
+                    raise RuntimeError("input image is outside private Comfy storage or does not exist")
+        lora_root = (COMFY / 'models' / 'loras').resolve()
+        for item in native_loras:
+            lora_path = Path(str(item.get('filePath') or '')).resolve() if item.get('filePath') else None
+            if not lora_path or not lora_path.exists() or not _is_under(lora_path, lora_root):
+                raise RuntimeError(f"native MLX LTX LoRA not found: {item.get('source') or item.get('name') or 'unnamed LoRA'}")
+            item['filePath'] = str(lora_path)
         if _env_enabled("ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN", "1"):
             rec["progress_phase"] = "free-comfy"
             with jobs_lock:
                 jobs[job_id] = rec
             _call_comfy_free_before_ltx()
-        cmd = [
-            "uv", "run", "ltx-2-mlx", "generate",
-            "--distilled",
-            "--model", str(model_path),
-            "--gemma", LTX2_MLX_GEMMA,
-            "--prompt", prompt,
-            "--image", str(image_path),
-            "-H", str(height),
-            "-W", str(width),
-            "-f", str(frames),
-            "--frame-rate", frame_rate_arg,
-            "--seed", str(seed),
-            "-o", str(out),
-        ]
+        if operation == 'extend':
+            extend_latent_frames = int_option(options, 'extension_latent_frames', int_option(options, 'extend_latent_frames', 12, 1, 90), 1, 90)
+            steps = int_option(options, 'steps', 30, 1, 100)
+            stg_scale = float_quality_option(options, 'stg_scale', 1.0)
+            cmd = [
+                "uv", "run", "ltx-2-mlx", "extend",
+                *(["--distilled"] if distilled_extension else []),
+                "--model", str(model_path),
+                "--gemma", LTX2_MLX_GEMMA,
+                "--prompt", prompt,
+                "--video", str(source_video),
+                "--extend-frames", str(extend_latent_frames),
+                "--direction", "after",
+            ]
+            if not distilled_extension:
+                cmd.extend([
+                    "--steps", str(steps),
+                    "--cfg-scale", str(cfg_scale or 3.0),
+                    "--stg-scale", str(stg_scale),
+                ])
+            cmd.extend(["--seed", str(seed), "-o", str(out)])
+        elif operation == 'ic-lora':
+            reference_video_path = OUT_DIR / '.ltx-reference' / f'{job_id}.mkv'
+            _create_native_ltx_static_reference_video(reference_image, reference_video_path, frames, frame_rate)
+            cmd = [
+                "uv", "run", "ltx-2-mlx", "ic-lora",
+                "--model", str(model_path),
+                "--gemma", LTX2_MLX_GEMMA,
+                "--prompt", prompt,
+            ]
+            for item in native_loras:
+                cmd.extend(["--lora", str(item['filePath']), str(item.get('scale', 1.0))])
+            cmd.extend([
+                "--video-conditioning", str(reference_video_path), str(options.get('reference_strength', 1.0)),
+                "--conditioning-strength", str(options.get('conditioning_strength', 1.0)),
+            ])
+            if options.get('single_stage', True):
+                cmd.append("--single-stage")
+            if options.get('low_ram', False):
+                cmd.append("--low-ram")
+            cmd.extend([
+                "-H", str(height),
+                "-W", str(width),
+                "-f", str(frames),
+                "--frame-rate", frame_rate_arg,
+                "--seed", str(seed),
+                "-o", str(out),
+            ])
+        else:
+            cmd = [
+                "uv", "run", "ltx-2-mlx", "generate",
+                "--distilled",
+                "--model", str(model_path),
+                "--gemma", LTX2_MLX_GEMMA,
+                "--prompt", prompt,
+            ]
+            for item in keyframes:
+                cmd.extend(["--image", str(item['path']), str(item['frame']), str(item['strength'])])
+            for item in native_loras:
+                cmd.extend(["--lora", str(item['filePath']), str(item.get('scale', 1.0))])
+            if cfg_scale:
+                cmd.extend(["--cfg-scale", str(cfg_scale)])
+            cmd.extend([
+                "-H", str(height),
+                "-W", str(width),
+                "-f", str(frames),
+                "--frame-rate", frame_rate_arg,
+                "--seed", str(seed),
+                "-o", str(out),
+            ])
         env = os.environ.copy()
         env.setdefault("LTX2_DIT_EVAL_EVERY", "8")
         rec["progress_phase"] = "ltx-2-mlx"
@@ -2611,15 +3481,26 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
         with jobs_lock:
             jobs[job_id] = rec
         t0 = time.monotonic()
-        proc = subprocess.run(cmd, cwd=str(LTX2_MLX_DIR), text=True, capture_output=True, timeout=2400, env=env)
-        elapsed = round(time.monotonic() - t0, 2)
-        stdout = proc.stdout.strip()
-        stderr = proc.stderr.strip()
-        if proc.returncode != 0:
-            raise RuntimeError(f"ltx-2-mlx exited {proc.returncode}\nSTDOUT:\n{stdout[-2000:]}\nSTDERR:\n{stderr[-2000:]}")
-        if not out.exists() or out.stat().st_size < 1000:
-            raise RuntimeError("ltx-2-mlx finished without a valid output video")
-        visible_out = mirror_output_to_comfy_output(out)
+        mark_output_active(out)
+        try:
+            proc = _run_native_ltx_subprocess(
+                job_id,
+                rec,
+                cmd,
+                cwd=str(LTX2_MLX_DIR),
+                env=env,
+                timeout=2400,
+            )
+            elapsed = round(time.monotonic() - t0, 2)
+            stdout = proc.stdout.strip()
+            stderr = proc.stderr.strip()
+            if proc.returncode != 0:
+                raise RuntimeError(f"ltx-2-mlx exited {proc.returncode}\nSTDOUT:\n{stdout[-2000:]}\nSTDERR:\n{stderr[-2000:]}")
+            if not out.exists() or out.stat().st_size < 1000:
+                raise RuntimeError("ltx-2-mlx finished without a valid output video")
+            visible_out = mirror_output_to_comfy_output(out)
+        finally:
+            mark_output_inactive(out)
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
@@ -2627,14 +3508,20 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             "elapsed_seconds": elapsed,
             "runner_stdout": json_safe_text(stdout),
             "runner_stderr": json_safe_text(stderr),
-            "current_step": 2,
-            "total_steps": 2,
+            "current_step": rec.get("total_steps", 2),
+            "total_steps": rec.get("total_steps", 2),
             "progress": 100,
             "step_progress": 100,
             "progress_phase": "done",
         })
     except Exception as e:
         rec.update({"status": "error", "finished_at": now_iso(), "error": str(e), "progress_phase": "error"})
+    finally:
+        if reference_video_path:
+            try:
+                reference_video_path.unlink(missing_ok=True)
+            except Exception:
+                pass
     append_history(rec)
     with jobs_lock:
         jobs[job_id] = rec
@@ -2702,7 +3589,7 @@ def render_home():
       <h2>Describe it. Generate it. Keep the best shots.</h2>
       <p class="sub">Use natural language prompts. The image will render on your Mac, then appear in the live preview and history below.</p>
       <form id="genForm" method="post" action="/generate?token={TOKEN}">
-        <div class="field"><textarea id="prompt" name="prompt" maxlength="{MAX_PROMPT_CHARS}" placeholder="Example: a cinematic portrait of a crystal fox in a neon rainforest, shallow depth of field, dramatic rim light"></textarea><span class="counter"><span id="count">0</span>/{MAX_PROMPT_CHARS}</span></div>
+        <div class="field"><textarea id="prompt" name="prompt" placeholder="Example: a cinematic portrait of a crystal fox in a neon rainforest, shallow depth of field, dramatic rim light"></textarea><span class="counter"><span id="count">0</span> characters</span></div>
         <div class="jobmeta" style="margin-top:12px;padding:12px;border:1px solid rgba(255,255,255,.12);border-radius:18px;background:rgba(255,255,255,.045)">
           <strong>Fast native Apple edit</strong><br>
           Attach an image to use <code>BigLoveKlein3_mxfp8</code> through MLX instead of the slower ComfyUI/PyTorch MPS path.
@@ -2888,10 +3775,13 @@ def comfy_json(path, method='GET', data=None):
 
 
 
-def civitai_token():
-    env = os.environ.get('CIVITAI_TOKEN')
-    if env:
-        return env.strip()
+def civitai_token(token_override=None):
+    if token_override:
+        return str(token_override).strip()
+    for key in CIVITAI_TOKEN_ENV_KEYS:
+        env = os.environ.get(key)
+        if env:
+            return env.strip()
     for p in [CIVITAI_TOKEN_FILE]:
         if p.exists():
             tok = p.read_text().strip()
@@ -2900,9 +3790,18 @@ def civitai_token():
     return ''
 
 
-def civitai_headers():
+def civitai_token_status():
+    sources = []
+    for key in CIVITAI_TOKEN_ENV_KEYS:
+        if os.environ.get(key):
+            sources.append({'type': 'env', 'name': key, 'set': True})
+    sources.append({'type': 'file', 'path': str(CIVITAI_TOKEN_FILE), 'set': CIVITAI_TOKEN_FILE.exists() and bool(CIVITAI_TOKEN_FILE.read_text().strip())})
+    return {'configured': bool(civitai_token()), 'sources': sources}
+
+
+def civitai_headers(token_override=None):
     headers = {'User-Agent': 'Hermes-ZImage-ComfyUI/1.0'}
-    tok = civitai_token()
+    tok = civitai_token(token_override)
     if tok:
         headers['Authorization'] = f'Bearer {tok}'
     return headers
@@ -2917,8 +3816,8 @@ def civitai_download_headers():
     return {'User-Agent': 'Hermes-ZImage-ComfyUI/1.0'}
 
 
-def civitai_download_url(url):
-    tok = civitai_token()
+def civitai_download_url(url, token_override=None):
+    tok = civitai_token(token_override)
     if not tok:
         return url
     parsed = urlparse(str(url))
@@ -2934,10 +3833,10 @@ def civitai_download_url(url):
     return parsed._replace(query=query).geturl()
 
 
-def civitai_json(path, params=None):
+def civitai_json(path, params=None, token_override=None):
     query = urlencode({k: v for k, v in (params or {}).items() if v not in (None, '', [])}, doseq=True)
     url = CIVITAI_API + path + (('?' + query) if query else '')
-    req = Request(url, headers=civitai_headers())
+    req = Request(url, headers=civitai_headers(token_override))
     with urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode('utf-8'))
 
@@ -3229,8 +4128,8 @@ def summarize_civitai_item(item):
     return {'id': item.get('id'), 'name': item.get('name'), 'type': item.get('type'), 'nsfw': item.get('nsfw'), 'creator': (item.get('creator') or {}).get('username'), 'stats': item.get('stats') or {}, 'modelVersions': versions}
 
 
-def download_civitai_version(version_id, file_id=None, progress_cb=None):
-    version = civitai_json(f'/model-versions/{int(version_id)}')
+def download_civitai_version(version_id, file_id=None, progress_cb=None, token_override=None):
+    version = civitai_json(f'/model-versions/{int(version_id)}', token_override=token_override)
     model_type = (version.get('model') or {}).get('type') or 'Model'
     files = version.get('files') or []
     chosen = None
@@ -3247,8 +4146,28 @@ def download_civitai_version(version_id, file_id=None, progress_cb=None):
     if not str(dest).startswith(str((COMFY / 'models').resolve())):
         raise RuntimeError('Refusing to write outside ComfyUI models directory')
     url = chosen.get('downloadUrl') or version.get('downloadUrl') or f'https://civitai.com/api/download/models/{version_id}'
-    req = Request(civitai_download_url(url), headers=civitai_download_headers())
-    with urlopen(req, timeout=60) as r:
+    req = Request(civitai_download_url(url, token_override=token_override), headers=civitai_download_headers())
+    try:
+        r = urlopen(req, timeout=60)
+    except HTTPError as e:
+        body = ''
+        try:
+            body = e.read().decode('utf-8', errors='replace')
+        except Exception:
+            body = ''
+        if e.code == 401:
+            message = ''
+            try:
+                parsed = json.loads(body) if body else {}
+                message = parsed.get('message') or parsed.get('error') or ''
+            except Exception:
+                message = body.strip()
+            if message:
+                message = message.rstrip('. ') + '.'
+            token_hint = f" Configure CIVITAI_TOKEN or write it to {CIVITAI_TOKEN_FILE}, or pass civitai_key/civitai_token in the request body." if not civitai_token(token_override) else ""
+            raise RuntimeError(f"Civitai download requires authenticated Civitai access for version {version_id}. {message}{token_hint}".strip()) from e
+        raise
+    with r:
         total = int(r.headers.get('Content-Length') or chosen.get('sizeKB') or 0)
         if total and total < 1024 * 1024 and chosen.get('sizeKB'):
             total = int(float(chosen.get('sizeKB')) * 1024)
@@ -3283,7 +4202,7 @@ def public_download_job(job):
     return out
 
 
-def start_civitai_download_job(version_id, file_id=None):
+def start_civitai_download_job(version_id, file_id=None, token_override=None):
     job_id = uuid.uuid4().hex[:12]
     rec = {'id': job_id, 'status': 'queued', 'created_at': now_iso(), 'versionId': str(version_id), 'fileId': str(file_id or ''), 'downloaded_bytes': 0, 'total_bytes': 0}
     with download_jobs_lock:
@@ -3296,7 +4215,7 @@ def start_civitai_download_job(version_id, file_id=None):
     def worker():
         update_download_job(job_id, status='running', started_at=now_iso())
         try:
-            result = download_civitai_version(version_id, file_id, progress_cb=progress)
+            result = download_civitai_version(version_id, file_id, progress_cb=progress, token_override=token_override)
             with download_jobs_lock:
                 downloaded = download_jobs[job_id].get('total_bytes') or download_jobs[job_id].get('downloaded_bytes', 0)
             update_download_job(job_id, status='success', finished_at=now_iso(), result=result, downloaded_bytes=downloaded)
@@ -3882,7 +4801,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ZImageEndpoint/1.1"
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
+        rendered = redact_access_log_message(fmt % args)
+        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), rendered))
 
     def auth_cookie_header(self):
         # Query-token auth is awkward for embedded apps because Vite/React emits
@@ -4010,7 +4930,7 @@ class Handler(BaseHTTPRequestHandler):
                         "node_errors": {},
                         "native_mlx": True,
                         "native_video": True,
-                        "backend": f"mlx-ltx-eros-{native_ltx.get('variant')}",
+                        "backend": _ltx_mlx_backend_name(LTX2_MLX_VARIANTS.get(native_ltx.get('variant')) or {}, native_ltx.get('variant')),
                         "status": "queued",
                     }, 200)
                 except Exception as e:
@@ -4156,7 +5076,14 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
         if parsed.path in ["/healthz", "/health"]:
-            return self.send_json({"ok": True, "comfy": str(COMFY), "runner": RUNNER.exists(), "ui": "v2"})
+            return self.send_json({
+                "ok": True,
+                "comfy": str(COMFY),
+                "runner": RUNNER.exists(),
+                "ui": "v2",
+                "accelerator_profile": accelerator_profile(),
+                "native_mlx_ltx": supports_native_mlx_ltx_route(),
+            })
         if not self.authed(qs):
             return self.send_text("Unauthorized. Add ?token=... or Authorization: Bearer ***", 401, "text/plain")
         if parsed.path == "/workflow-key":
@@ -4229,6 +5156,16 @@ class Handler(BaseHTTPRequestHandler):
                     print(f"[output-encryption] failed to serve {name}: {e}", file=sys.stderr)
                     return self.send_text("not found\n", 404, "text/plain")
             # If this is not one of our native/private outputs, let ComfyUI answer normally.
+        if parsed.path == "/output":
+            p = find_exact_output_logical_path(qs.get('path', [''])[0])
+            if not p:
+                return self.send_text("not found\n", 404, "text/plain")
+            try:
+                send_output_file(self, p)
+            except Exception as e:
+                print(f"[output-encryption] failed to serve exact output: {e}", file=sys.stderr)
+                return self.send_text("not found\n", 404, "text/plain")
+            return
         if parsed.path in ["/mobile", "/mobile/"] or parsed.path.startswith(("/mobile/", "/assets/", "/comfy/")):
             return self.proxy_to_comfy(parsed, "GET")
         if parsed.path == "/api/history":
@@ -4261,6 +5198,23 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         if not self.authed(qs):
             return self.send_json({"error": "unauthorized"}, 401)
+        if parsed.path == "/api/delete-output":
+            try:
+                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+                if data.get("confirm") is not True:
+                    return self.send_json({"error": "permanent deletion requires confirm=true"}, 400)
+                result = delete_output_everywhere(str(data.get("filename") or ""))
+                return self.send_json(result)
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 400)
+            except RuntimeError as exc:
+                return self.send_json({"error": str(exc)}, 500)
+        if parsed.path == "/api/delete-input":
+            try:
+                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+                return self.send_json({"ok": True, "deleted": delete_private_input(data.get("filename"))})
+            except (json.JSONDecodeError, ValueError) as exc:
+                return self.send_json({"error": str(exc)}, 400)
         if parsed.path in ["/api/models/equip", "/api/models/unequip"]:
             try:
                 data = json.loads((self.read_body() or b"{}").decode("utf-8"))
@@ -4282,12 +5236,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/civitai/download":
             try:
                 data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+                civitai_key = data.get('civitai_key') or data.get('civitai_token') or data.get('civitaiToken') or data.get('civitaiApiKey')
                 if data.get('url'):
                     resolved = resolve_civitai_url(data.get('url'))
-                    job = start_civitai_download_job(resolved.get('versionId'), data.get('fileId') or resolved.get('fileId'))
+                    job = start_civitai_download_job(resolved.get('versionId'), data.get('fileId') or resolved.get('fileId'), token_override=civitai_key)
                     job['resolved'] = {'versionId': resolved.get('versionId'), 'fileId': data.get('fileId') or resolved.get('fileId')}
                     return self.send_json(job, 202)
-                job = start_civitai_download_job(data.get('versionId') or data.get('modelVersionId'), data.get('fileId'))
+                job = start_civitai_download_job(data.get('versionId') or data.get('modelVersionId'), data.get('fileId'), token_override=civitai_key)
                 return self.send_json(job, 202)
             except Exception as e:
                 return self.send_json({"error": str(e)}, 502)
@@ -4337,8 +5292,6 @@ class Handler(BaseHTTPRequestHandler):
                     prompt = str(data.get("prompt", [""])[0]).strip()
             if not prompt:
                 return self.send_json({"error": "prompt required"}, 400)
-            if len(prompt) > MAX_PROMPT_CHARS:
-                return self.send_json({"error": f"prompt too long; max {MAX_PROMPT_CHARS}"}, 400)
             options = {}
             if isinstance(data, dict):
                 for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'negative_prompt', 'mlx_cache_limit_gb']:
@@ -4395,6 +5348,7 @@ def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     DEBUG_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
     if OUTPUT_ENCRYPTION_ENABLED:
         output_encryption_password(create=True)
         migrated = encrypt_existing_outputs_once(max_age_seconds=0)
@@ -4402,6 +5356,8 @@ def main():
             print(f"[output-encryption] encrypted {migrated} existing output image(s)", flush=True)
         threading.Thread(target=output_encryption_sweeper, daemon=True).start()
     threading.Thread(target=workflow_index_sweeper, daemon=True).start()
+    cleanup_staged_private_inputs_once()
+    threading.Thread(target=private_input_sweeper, daemon=True).start()
     with download_jobs_lock:
         download_jobs.update(load_download_jobs())
         # Jobs that were mid-flight during a backend restart cannot be resumed safely.
@@ -4416,7 +5372,6 @@ def main():
         if changed:
             save_download_jobs_unlocked()
     print(f"Media Studio endpoint listening on http://{HOST}:{PORT}", flush=True)
-    print(f"Token: {TOKEN}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

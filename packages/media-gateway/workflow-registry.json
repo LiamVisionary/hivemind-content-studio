@@ -1,0 +1,628 @@
+{
+  "workflows": [
+    {
+      "id": "ltx23-regular-fp8",
+      "media_type": "video",
+      "title": "LTX 2.3 Regular FP8",
+      "description": "Regular LTX 2.3 image-to-video and source-video extension workflow. Apple Silicon uses the regular q8 distilled MLX model; Windows/CUDA uses the official Lightricks FP8 ComfyUI graph. This workflow never selects an Eros checkpoint.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-regular-anchor/ltx23-regular-anchor.user-image-api.json",
+      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Regular FP8 Mobile.json",
+      "default": false,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-distilled",
+        "title": "LTX 2.3 regular q8 distilled",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "output_subdir": "LTX23"
+      },
+      "requires": {
+        "prompt": false,
+        "image": false
+      },
+      "prompt_contract": {
+        "native_mlx_distilled_extension": "positive-only",
+        "negative_prompt_behavior": "The native MLX distilled extension path does not consume negative conditioning. Windows/CUDA Comfy generation still maps negative_prompt through the registered slot.",
+        "guidance": "For native Regular Fast extension, describe the desired continuous state affirmatively. Do not place unwanted concepts such as fade, darkness, dimming, or exposure ramp in the positive prompt, even inside a phrase beginning with no."
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "video_path",
+        "video_base64",
+        "video_url",
+        "video_mode",
+        "middle_image_path",
+        "middle_image_base64",
+        "middle_image_url",
+        "end_image_path",
+        "end_image_base64",
+        "end_image_url",
+        "keyframes",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg",
+        "transition_lora",
+        "transition_lora_strength",
+        "transition_trigger",
+        "append_transition_trigger"
+      ],
+      "defaults": {
+        "image": "e39e3b884e724eb8bb19e6176a408f42.png",
+        "prompt": "cinematic photorealistic image-to-video shot of an adult subject, natural facial expression, subtle head movement, natural blinking, realistic skin texture, soft sunlight, handheld phone camera, smooth natural motion, high quality, realistic lighting\n\n",
+        "negative_prompt": "child, teen, underage, minor, cartoon, anime, illustration, doll, plastic skin, deformed face, warped eyes, bad teeth, low quality, blur, text, watermark, captions, subtitles, logo, wordmark, nudity, explicit sexual content, censoring, bleep, VR, game, static, noise",
+        "width": 480,
+        "height": 832,
+        "frame_rate": 24,
+        "seed": 42
+      },
+      "slots": {
+        "prompt": {
+          "node": "824",
+          "input": "value"
+        },
+        "negative_prompt": {
+          "node": "825",
+          "input": "value"
+        },
+        "image_path": {
+          "node": "773",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "542",
+          "input": "value"
+        },
+        "duration_seconds": {
+          "node": "852",
+          "input": "end_time"
+        },
+        "seed": {
+          "node": "812",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "583",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        }
+      ]
+    },
+    {
+      "id": "ltx23-transition-lora",
+      "media_type": "video",
+      "title": "LTX 2.3 Transition LoRA",
+      "description": "First-frame/last-frame LTX 2.3 transition workflow using joyfox's Apache-2.0 Transition LoRA, with the same Apple Silicon MLX fast lane as regular LTX 2.3.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-transition-lora/ltx23-transition-lora.user-image-api.json",
+      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Transition LoRA Mobile.json",
+      "default": false,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-distilled",
+        "title": "LTX 2.3 regular q8 distilled + Transition LoRA",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "output_subdir": "LTX23"
+      },
+      "transition_lora": {
+        "enabled": true,
+        "name": "ltx/2.3/ltx2.3-transition.safetensors",
+        "repo": "joyfox/LTX-2.3-Transition-LORA",
+        "url": "https://huggingface.co/joyfox/LTX-2.3-Transition-LORA/resolve/main/ltx2.3-transition.safetensors",
+        "license": "Apache-2.0",
+        "baseModel": "Lightricks/LTX-2.3",
+        "trigger": "zhuanchang",
+        "strength": 1.0,
+        "cfg": 4.0,
+        "guidance": 1.0,
+        "append_trigger": true
+      },
+      "requires": {
+        "prompt": false,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "video_path",
+        "video_base64",
+        "video_url",
+        "video_mode",
+        "middle_image_path",
+        "middle_image_base64",
+        "middle_image_url",
+        "end_image_path",
+        "end_image_base64",
+        "end_image_url",
+        "keyframes",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg",
+        "transition_lora",
+        "transition_lora_strength",
+        "transition_trigger",
+        "append_transition_trigger"
+      ],
+      "defaults": {
+        "image": "e39e3b884e724eb8bb19e6176a408f42.png",
+        "prompt": "cinematic photorealistic first-frame to last-frame transition video, preserve subject identity and composition while smoothly transforming from the starting image into the final image, natural continuous motion, realistic lighting, detailed skin and fabric texture, high quality, zhuanchang\n\n",
+        "negative_prompt": "child, teen, underage, minor, cartoon, anime, illustration, doll, plastic skin, deformed face, warped eyes, bad teeth, low quality, blur, text, watermark, captions, subtitles, VR, game, static, noise",
+        "width": 480,
+        "height": 832,
+        "frame_rate": 24,
+        "seed": 42,
+        "cfg": 4.0,
+        "guidance": 1.0,
+        "transition_lora": true,
+        "transition_lora_strength": 1.0,
+        "transition_trigger": "zhuanchang",
+        "append_transition_trigger": true
+      },
+      "slots": {
+        "prompt": {
+          "node": "824",
+          "input": "value"
+        },
+        "negative_prompt": {
+          "node": "825",
+          "input": "value"
+        },
+        "image_path": {
+          "node": "773",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "542",
+          "input": "value"
+        },
+        "duration_seconds": {
+          "node": "852",
+          "input": "end_time"
+        },
+        "seed": {
+          "node": "812",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "583",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx2.3-transition.safetensors",
+          "url": "https://huggingface.co/joyfox/LTX-2.3-Transition-LORA/resolve/main/ltx2.3-transition.safetensors",
+          "required": true,
+          "bytes": 390229424,
+          "sha256": "ba420d6fefafced8e317e2d6ff951b312b52f534377d016b491877a00b830d33"
+        }
+      ]
+    },
+    {
+      "id": "ltx23-better-motion-lora",
+      "media_type": "video",
+      "title": "LTX 2.3 Better Motion LoRA",
+      "description": "Regular LTX 2.3 image-to-video workflow with Better Motion LTX 2.3 T2V/I2V LoRA at the recommended 0.3 strength, using the same Apple Silicon MLX fast lane as regular LTX 2.3 while preserving the normal ComfyUI path for Windows and non-native users.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-better-motion-lora/ltx23-better-motion-lora.user-image-api.json",
+      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Better Motion LoRA Mobile.json",
+      "default": false,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-distilled",
+        "title": "LTX 2.3 regular q8 distilled + Better Motion LoRA",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "output_subdir": "LTX23",
+        "loras": [
+          {
+            "name": "mvmt_lora_v2_600.safetensors",
+            "strength": 0.3,
+            "repo": "civitai:2734359@3087364"
+          }
+        ]
+      },
+      "requires": {
+        "prompt": false,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "video_path",
+        "video_base64",
+        "video_url",
+        "video_mode",
+        "middle_image_path",
+        "middle_image_base64",
+        "middle_image_url",
+        "end_image_path",
+        "end_image_base64",
+        "end_image_url",
+        "keyframes",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg"
+      ],
+      "defaults": {
+        "image": "e39e3b884e724eb8bb19e6176a408f42.png",
+        "prompt": "cinematic photorealistic image-to-video shot, natural subject motion, clear camera movement, smooth body movement, realistic lighting, high quality\n\n",
+        "negative_prompt": "child, teen, underage, minor, cartoon, anime, illustration, doll, plastic skin, deformed face, warped eyes, bad teeth, low quality, blur, text, watermark, captions, subtitles, logo, wordmark, nudity, explicit sexual content, censoring, bleep, VR, game, static, noise",
+        "width": 480,
+        "height": 832,
+        "frame_rate": 24,
+        "seed": 42
+      },
+      "slots": {
+        "prompt": {
+          "node": "824",
+          "input": "value"
+        },
+        "negative_prompt": {
+          "node": "825",
+          "input": "value"
+        },
+        "image_path": {
+          "node": "773",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "542",
+          "input": "value"
+        },
+        "duration_seconds": {
+          "node": "852",
+          "input": "end_time"
+        },
+        "seed": {
+          "node": "812",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "583",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "mvmt_lora_v2_600.safetensors",
+          "url": "https://civitai.com/api/download/models/3087364?type=Model&format=SafeTensor",
+          "required": true,
+          "bytes": 674249616,
+          "sha256": "3cd5aeeff4e079510527650af4c45c1ec8a51495996de34c8d155fe35b6ed6a5",
+          "modelVersionId": 3087364,
+          "fileId": 2966847
+        }
+      ]
+    },
+    {
+      "id": "ltx23-ic-dual-character-lora",
+      "media_type": "video",
+      "title": "LTX 2.3 IC Dual Character LoRA",
+      "description": "Regular LTX 2.3 image-to-video workflow with MaqueAI's IC dual-character multi-shot dialogue LoRA at 0.8 strength. It is tuned for storyboarded two-shots, over-the-shoulder coverage, and identity retention across angle changes. Apple Silicon uses the native MLX fast lane; Windows and non-native users stay on the normal ComfyUI path.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-ic-dual-character-lora/ltx23-ic-dual-character-lora.user-image-api.json",
+      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 IC Dual Character LoRA Mobile.json",
+      "default": false,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-distilled",
+        "title": "LTX 2.3 regular q8 distilled + IC Dual Character LoRA",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "output_subdir": "LTX23",
+        "loras": [
+          {
+            "name": "LTX2.3-IC-LORA-Dual-Character.safetensors",
+            "strength": 0.8,
+            "repo": "civitai:2500098@2810376"
+          }
+        ]
+      },
+      "requires": {
+        "prompt": false,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "video_path",
+        "video_base64",
+        "video_url",
+        "video_mode",
+        "middle_image_path",
+        "middle_image_base64",
+        "middle_image_url",
+        "end_image_path",
+        "end_image_base64",
+        "end_image_url",
+        "keyframes",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg"
+      ],
+      "defaults": {
+        "image": "ltx23_ic_dual_character_storyboard_reference.png",
+        "prompt": "[Scene] Cinematic two-person dialogue in a stable location with consistent lighting. [Characters] Character A and Character B retain the exact faces, hair, accessories, and wardrobe established by the reference image. [Shot 1, wide two-shot, 0-3.3s] Both characters face each other with subtle natural dialogue motion. [Shot 2, hard cut to over-the-shoulder close-up on Character A, 3.3-6.6s] Character B's shoulder is soft foreground while Character A speaks; preserve Character A's identity exactly. [Shot 3, hard cut to reverse over-the-shoulder close-up on Character B, 6.6-10.0s] Character A's shoulder is soft foreground while Character B responds; preserve Character B's identity exactly. True editorial hard cuts, coherent eyelines, stable wardrobe and environment, natural blinking and lip movement, constant exposure, high quality.\n\n",
+        "negative_prompt": "extra person, third person, merged faces, fused bodies, duplicated limbs, identity swap, character drift, inconsistent faces, changed ethnicity, changed hairstyle, missing accessories, changed wardrobe, face morphing, continuous morph between shot angles, dissolve, incoherent eyeline, flicker, exposure ramp, blown highlights, child, teen, underage, minor, cartoon, anime, illustration, doll, plastic skin, deformed face, warped eyes, bad teeth, low quality, blur, text, watermark, captions, subtitles, logo, wordmark, nudity, explicit sexual content, censoring, bleep, VR, game, static, noise",
+        "width": 1024,
+        "height": 576,
+        "duration_seconds": 10,
+        "frame_rate": 24,
+        "seed": 42,
+        "cfg": 1.0
+      },
+      "slots": {
+        "prompt": {
+          "node": "824",
+          "input": "value"
+        },
+        "negative_prompt": {
+          "node": "825",
+          "input": "value"
+        },
+        "image_path": {
+          "node": "773",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "542",
+          "input": "value"
+        },
+        "duration_seconds": {
+          "node": "852",
+          "input": "end_time"
+        },
+        "seed": {
+          "node": "812",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "583",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "LTX2.3-IC-LORA-Dual-Character.safetensors",
+          "url": "https://civitai.com/api/download/models/2810376?type=Model&format=SafeTensor",
+          "required": true,
+          "bytes": 327287347,
+          "sha256": "b6c3199e2c95eb0aad0cea4f3e8dfa33e8f6966d85bc79e3994faf5a57406103",
+          "modelVersionId": 2810376,
+          "fileId": 2696156
+        }
+      ]
+    },
+    {
+      "id": "ltx23-ic-ingredients-lora",
+      "media_type": "video",
+      "title": "LTX 2.3 IC-LoRA Ingredients",
+      "description": "Lightricks' official Ingredients IC-LoRA for generating a coherent shot from a labeled reference sheet containing characters, props, wardrobe, and locations. Apple Silicon uses the native MLX IC-LoRA reference-latent lane; Windows and CUDA use the equivalent ComfyUI IC guide graph.",
+      "family": "ltx-2.3",
+      "builder": "comfy-api",
+      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/huggingface/ltx23-ic-ingredients-lora/ltx23-ic-ingredients-lora.user-reference-api.json",
+      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 IC LoRA Ingredients Mobile.json",
+      "default": false,
+      "native_mlx": {
+        "enabled": true,
+        "variant": "regular-q8-distilled",
+        "pipeline": "ic-lora",
+        "title": "LTX 2.3 regular q8 distilled + Ingredients IC-LoRA",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "output_subdir": "LTX23",
+        "ic_lora": {
+          "single_stage": true,
+          "conditioning_strength": 1.0,
+          "reference_strength": 1.0
+        },
+        "loras": [
+          {
+            "name": "ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+            "strength": 1.4,
+            "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients"
+          }
+        ]
+      },
+      "prompt_contract": {
+        "type": "ltx23-ingredients",
+        "reference_heading": "### Reference Sheet Description",
+        "target_heading": "### Target Description",
+        "reference_description_param": "reference_description"
+      },
+      "requires": {
+        "prompt": true,
+        "image": true
+      },
+      "accepts": [
+        "prompt",
+        "reference_description",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "cfg"
+      ],
+      "defaults": {
+        "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted, identity drift, changed wardrobe, missing prop, duplicate character, text, watermark",
+        "width": 768,
+        "height": 448,
+        "duration_seconds": 5,
+        "frames": 121,
+        "frame_rate": 24,
+        "seed": 42,
+        "cfg": 1.0,
+        "ingredients_lora_strength": 1.4,
+        "reference_strength": 1.0
+      },
+      "slots": {
+        "prompt": {
+          "node": "2483",
+          "input": "text"
+        },
+        "negative_prompt": {
+          "node": "2612",
+          "input": "text"
+        },
+        "image_path": {
+          "node": "2004",
+          "input": "image"
+        },
+        "width": {
+          "node": "809",
+          "input": "value"
+        },
+        "height": {
+          "node": "811",
+          "input": "value"
+        },
+        "frames": {
+          "node": "5072",
+          "input": "value"
+        },
+        "frame_rate": {
+          "node": "5098",
+          "input": "value"
+        },
+        "seed": {
+          "node": "4832",
+          "input": "noise_seed"
+        },
+        "cfg": {
+          "node": "4828",
+          "input": "cfg"
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx-2.3-22b-dev-fp8.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-fp8/resolve/main/ltx-2.3-22b-dev-fp8.safetensors",
+          "required": true,
+          "bytes": 29145431166,
+          "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "required": true,
+          "bytes": 7605507256,
+          "sha256": "f5d4953f3386197a4b4f5abdb17616ff256171e8075c111d6e7d2dfa6e823b3a"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients/resolve/main/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+          "required": true,
+          "gated": true,
+          "auth_env": ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_READ_WRITE_KEY"]
+        }
+      ]
+    }
+  ]
+}

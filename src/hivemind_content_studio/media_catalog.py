@@ -18,6 +18,7 @@ class MediaModel:
     reference_roles: tuple[str, ...] = ()
     max_reference_images: int | None = 0
     limit_source: str = "provider contract"
+    accepts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,14 @@ class MediaProviderModels:
     label: str
     kind: MediaKind
     models: tuple[MediaModel, ...]
+
+
+BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS: tuple[MediaModel, ...] = (
+    MediaModel("workflow-default", "Workflow default", ("start", "reference"), None, "selected MCP workflow schema", ("image_base64", "video_base64", "video_mode")),
+    MediaModel("ltx23-eros-fast", "LTX 2.3 Eros Fast", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode")),
+    MediaModel("ltx23-eros-exact", "LTX 2.3 Eros Exact", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode")),
+    MediaModel("ltx23-regular-fp8", "LTX 2.3 Regular FP8", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode")),
+)
 
 
 MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
@@ -77,9 +86,7 @@ MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
     MediaProviderModels("xai-imagine-oauth", "xAI · Imagine OAuth", "video", (
         MediaModel("grok-imagine-video", "Grok Imagine Video", ("start",), 1),
     )),
-    MediaProviderModels("media-studio-mcp", "HivemindOS · Media Studio MCP", "video", (
-        MediaModel("workflow-default", "Workflow default", ("start", "reference"), None, "selected MCP workflow schema"),
-    )),
+    MediaProviderModels("media-studio-mcp", "HivemindOS · Media Studio MCP", "video", BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS),
     MediaProviderModels("comfyui", "ComfyUI", "video", (
         MediaModel("workflow-default", "Workflow default", ("start", "end", "reference"), None, "selected workflow schema"),
     )),
@@ -109,17 +116,44 @@ MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
 )
 
 
+def _media_studio_video_models(status: dict | None = None) -> tuple[MediaModel, ...]:
+    models = {model.id: model for model in BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS}
+    if status is not None and not status.get("available"):
+        return tuple(models.values())
+    try:
+        from .media_studio import list_media_studio_workflows
+
+        workflows = list_media_studio_workflows("video")
+    except Exception:
+        return tuple(models.values())
+    for workflow in workflows:
+        workflow_id = str(workflow.get("id") or "").strip()
+        if not workflow_id:
+            continue
+        label = str(workflow.get("title") or workflow_id).strip()
+        models[workflow_id] = MediaModel(
+            workflow_id,
+            label,
+            ("start", "reference"),
+            None,
+            "live Media Studio MCP workflow registry",
+            tuple(str(value) for value in workflow.get("accepts", []) if str(value).strip()),
+        )
+    return tuple(models.values())
+
+
 def media_catalog() -> dict[str, list[dict]]:
     readiness = {row["id"]: row for row in provider_report()}
     result: dict[str, list[dict]] = {"image": [], "video": []}
     for provider in MEDIA_MODEL_MATRIX:
         status = readiness.get(provider.id, {})
+        models = _media_studio_video_models(status) if provider.id == "media-studio-mcp" and provider.kind == "video" else provider.models
         result[provider.kind].append({
             "id": provider.id,
             "label": provider.label,
             "available": bool(status.get("available")),
             "detail": str(status.get("detail") or ""),
-            "models": [{**asdict(model), "reference_roles": list(model.reference_roles)} for model in provider.models],
+            "models": [{**asdict(model), "reference_roles": list(model.reference_roles), "accepts": list(model.accepts)} for model in models],
         })
     return result
 
@@ -130,7 +164,8 @@ def reference_limit(provider_id: str, model_id: str) -> int | None:
     for provider in MEDIA_MODEL_MATRIX:
         if provider.id != provider_id:
             continue
-        model = next((item for item in provider.models if item.id == model_id), None)
+        models = _media_studio_video_models() if provider.id == "media-studio-mcp" and provider.kind == "video" else provider.models
+        model = next((item for item in models if item.id == model_id), None)
         if model:
             return model.max_reference_images
     raise ValueError("The selected media provider/model is not in the studio capability catalog")
