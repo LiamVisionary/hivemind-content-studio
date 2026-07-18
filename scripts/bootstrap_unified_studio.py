@@ -20,6 +20,8 @@ STACK_LINK = HOME / ".local/bin/zimage-stack"
 COMFY_ROOT = Path(os.environ.get("COMFY_DIR", HOME / "comfy/ComfyUI")).expanduser()
 MOBILE_LINK = COMFY_ROOT / "custom_nodes/comfyui-mobile-frontend"
 MOBILE_ROOT = ROOT / "packages/comfyui-mobile"
+KREA2_IDENTITY_LINK = COMFY_ROOT / "custom_nodes/hivemind-krea2-identity"
+KREA2_IDENTITY_ROOT = ROOT / "packages/comfyui-custom-nodes/hivemind-krea2-identity"
 
 
 def check() -> list[dict[str, object]]:
@@ -30,6 +32,7 @@ def check() -> list[dict[str, object]]:
         "OpenGen build": ROOT / "packages/open-generative-ai/dist/index.html",
         "mobile source": MOBILE_ROOT / "package.json",
         "mobile build": MOBILE_ROOT / "dist/index.html",
+        "Krea2 identity adapter": KREA2_IDENTITY_ROOT / "__init__.py",
         "gateway source": ROOT / "packages/media-gateway/app.py",
         "gateway build": ROOT / "packages/media-gateway/.next/BUILD_ID",
         "Flux engine": ROOT / "engines/flux-2-swift-mlx/Package.swift",
@@ -70,9 +73,14 @@ def install_links() -> dict[str, object]:
         raise RuntimeError(f"Refusing to replace non-symlink ComfyUI node directory: {MOBILE_LINK}")
     MOBILE_LINK.unlink(missing_ok=True)
     MOBILE_LINK.symlink_to(MOBILE_ROOT)
+    if KREA2_IDENTITY_LINK.exists() and not KREA2_IDENTITY_LINK.is_symlink():
+        raise RuntimeError(f"Refusing to replace non-symlink ComfyUI node directory: {KREA2_IDENTITY_LINK}")
+    KREA2_IDENTITY_LINK.unlink(missing_ok=True)
+    KREA2_IDENTITY_LINK.symlink_to(KREA2_IDENTITY_ROOT)
     return {
         "stack_link": str(STACK_LINK),
         "mobile_link": str(MOBILE_LINK),
+        "krea2_identity_link": str(KREA2_IDENTITY_LINK),
         "launcher_backup": str(backup) if backup else None,
         "rollback": f"Restore {backup} to {STACK_LINK}" if backup else "Remove the two links to return to an uninstalled state.",
     }

@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import base64
 import json
 import os
 import subprocess
@@ -1031,6 +1032,125 @@ class ZImageAppTests(unittest.TestCase):
         self.assertEqual(data['prompt']['7']['inputs']['sampler_name'], 'euler_ancestral')
         self.assertEqual(data['prompt']['7']['inputs']['scheduler'], 'beta')
         self.assertEqual(data['prompt']['4']['inputs']['prompt'], 'private prompt')
+
+    def test_krea2_identity_graph_uses_optional_reference_on_apple_turbo_path(self):
+        app = load_app()
+        options = {
+            'width': 1031,
+            'height': 777,
+            'steps': 10,
+            'cfg': 1,
+            'seed': 42,
+            'ref_boost': 4,
+            'identity_strength': 1,
+            'grounding_px': 768,
+        }
+
+        fallback_graph = app.build_krea2_turbo_identity_prompt(
+            'private prompt', options=options, profile='apple-silicon'
+        )
+        template_graph = app.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='None', options=options, profile='apple-silicon'
+        )
+        edit_graph = app.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='reference.png', options=options, profile='apple-silicon'
+        )
+
+        self.assertEqual(fallback_graph['1']['class_type'], 'MultiLoRAStackToPreLora')
+        self.assertEqual(fallback_graph['1']['inputs']['lora_stack'], '[]')
+        self.assertEqual(fallback_graph['2']['class_type'], 'OTUNetLoaderW8A8')
+        self.assertEqual(fallback_graph['4']['class_type'], 'TextEncodeKrea2')
+        self.assertNotIn('HivemindOptionalLoadImage', {item['class_type'] for item in fallback_graph.values()})
+        self.assertEqual(template_graph['1']['inputs']['image'], 'None')
+        self.assertEqual(edit_graph['1']['inputs']['image'], 'reference.png')
+        self.assertEqual(template_graph['2']['class_type'], 'Krea2IdentityOptionalPreLora')
+        self.assertEqual(template_graph['3']['class_type'], 'OTUNetLoaderW8A8')
+        self.assertEqual(template_graph['3']['inputs']['unet_name'], 'krea2_turbo_bf16.safetensors')
+        self.assertTrue(template_graph['3']['inputs']['on_the_fly_quantization'])
+        self.assertTrue(template_graph['3']['inputs']['enable_convrot'])
+        self.assertEqual(template_graph['5']['class_type'], 'Krea2IdentityOptionalEncode')
+        self.assertEqual(template_graph['9']['class_type'], 'Krea2IdentityOptionalModelPatch')
+        self.assertEqual(template_graph['7']['inputs']['width'], 1024)
+        self.assertEqual(template_graph['7']['inputs']['height'], 768)
+        self.assertEqual(edit_graph['2']['inputs']['lora_name'], 'krea2_identity_edit_v1_2.safetensors')
+        self.assertEqual(edit_graph['9']['inputs']['ref_boost'], 4.0)
+
+    def test_krea2_identity_graph_uses_regular_portable_turbo_without_an_image(self):
+        app = load_app()
+
+        text_graph = app.build_krea2_turbo_identity_prompt('private prompt', profile='cuda')
+        edit_graph = app.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='reference.png', profile='cuda'
+        )
+
+        self.assertEqual(text_graph['2']['class_type'], 'UNETLoader')
+        self.assertNotIn('LoraLoaderModelOnly', {item['class_type'] for item in text_graph.values()})
+        self.assertEqual(text_graph['7']['inputs']['model'], ['2', 0])
+        self.assertEqual(text_graph['4']['class_type'], 'TextEncodeKrea2')
+        template_graph = app.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='None', profile='cuda'
+        )
+        self.assertEqual(template_graph['3']['class_type'], 'Krea2IdentityOptionalLoraModel')
+        self.assertEqual(edit_graph['3']['class_type'], 'Krea2IdentityOptionalLoraModel')
+        self.assertEqual(edit_graph['3']['inputs']['model'], ['2', 0])
+        self.assertEqual(edit_graph['3']['inputs']['image'], ['1', 0])
+        self.assertEqual(edit_graph['9']['inputs']['model'], ['3', 0])
+
+    def test_generate_api_routes_optional_image_to_krea2_identity_backend(self):
+        app = load_app()
+        completed = app.threading.Event()
+        captured = {}
+
+        def fake_run(job_id, prompt, image_path, options):
+            captured.update(
+                job_id=job_id,
+                prompt=prompt,
+                image_path=image_path,
+                image_bytes=image_path.read_bytes(),
+                options=options,
+            )
+            completed.set()
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir()
+            server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+            server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+            with patch.object(app, 'TOKEN', 'test-token'), \
+                 patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app, 'jobs', {}), \
+                 patch.object(app, 'run_comfy_krea2_identity', side_effect=fake_run):
+                server_thread.start()
+                try:
+                    request = app.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'comfy-krea2-turbo-identity-edit',
+                            'prompt': 'preserve this identity in a studio portrait',
+                            'image_base64': 'data:image/png;base64,' + base64.b64encode(b'image').decode(),
+                            'ref_boost': 5,
+                        }).encode('utf-8'),
+                        headers={
+                            'Authorization': 'Bearer test-token',
+                            'Content-Type': 'application/json',
+                        },
+                        method='POST',
+                    )
+                    with app.urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                        self.assertEqual(response.status, 202)
+                    self.assertTrue(completed.wait(1))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+        self.assertEqual(payload['backend'], 'comfy-krea2-turbo-identity-edit')
+        self.assertEqual(payload['mode'], 'identity-edit')
+        self.assertEqual(captured['image_path'].parent, input_dir)
+        self.assertTrue(captured['image_path'].name.startswith('media-studio-inline-'))
+        self.assertEqual(captured['image_bytes'], b'image')
+        self.assertEqual(captured['options']['ref_boost'], 5)
 
     def test_native_loras_from_generation_request_resolves_selected_loras(self):
         app = load_app()

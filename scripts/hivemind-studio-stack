@@ -17,6 +17,7 @@ PRIV="${COMFY_PRIVATE_ROOT:-$HOME/.comfy-private.noindex}"
 COMFY="${COMFY_DIR:-$HOME/comfy/ComfyUI}"
 APP="$STUDIO_ROOT/packages/media-gateway"
 MOBILE="$STUDIO_ROOT/packages/comfyui-mobile"
+KREA2_IDENTITY_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-krea2-identity"
 OPEN_GEN="$STUDIO_ROOT/packages/open-generative-ai"
 CONTENT_STUDIO="$STUDIO_ROOT"
 CLOUDFLARED="$HOME/.local/bin/cloudflared"
@@ -193,6 +194,12 @@ start_children() {
     ln -sfn "$MOBILE" "$COMFY/custom_nodes/comfyui-mobile-frontend"
   else
     log "cannot install embedded ComfyUI Mobile: custom node path is not a symlink"
+    return 1
+  fi
+  if [ -L "$COMFY/custom_nodes/hivemind-krea2-identity" ] || [ ! -e "$COMFY/custom_nodes/hivemind-krea2-identity" ]; then
+    ln -sfn "$KREA2_IDENTITY_NODE" "$COMFY/custom_nodes/hivemind-krea2-identity"
+  else
+    log "cannot install Krea2 identity adapter: custom node path is not a symlink"
     return 1
   fi
   COMFY_PRIVATE_VIEW_TOKEN="$("$COMFY/.venv/bin/python" - <<'PY'

@@ -40,7 +40,17 @@ BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS: tuple[MediaModel, ...] = (
 MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
     MediaProviderModels("stickman-renderer", "Stickman renderer", "image", (MediaModel("automatic", "Automatic"),)),
     MediaProviderModels("static-text-renderer", "Static text renderer", "image", (MediaModel("automatic", "Automatic"),)),
-    MediaProviderModels("comfyui", "ComfyUI", "image", (MediaModel("workflow-default", "Workflow default", ("reference",), None, "selected workflow schema"),)),
+    MediaProviderModels("comfyui", "ComfyUI", "image", (
+        MediaModel("workflow-default", "Workflow default", ("reference",), None, "selected workflow schema"),
+        MediaModel(
+            "comfy-krea2-turbo-identity-edit",
+            "Krea 2 Turbo Identity Edit",
+            ("reference",),
+            1,
+            "Krea 2 identity-edit workflow contract",
+            ("image_base64", "image_url", "image_path"),
+        ),
+    )),
     MediaProviderModels("openai-gpt-image", "OpenAI · GPT Image API", "image", (
         MediaModel("gpt-image-2", "GPT Image 2", ("reference",), 16, "OpenAI image edits contract"),
         MediaModel("gpt-image-1.5", "GPT Image 1.5", ("reference",), 16, "OpenAI image edits contract"),

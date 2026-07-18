@@ -49,12 +49,18 @@ class McpHttpClient:
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self.initialize()
-        return self._rpc("tools/call", {"name": name, "arguments": arguments})
+        timeout = 30.0
+        if arguments.get("wait") and arguments.get("timeout_s") is not None:
+            try:
+                timeout = max(timeout, float(arguments["timeout_s"]) + 30.0)
+            except (TypeError, ValueError):
+                pass
+        return self._rpc("tools/call", {"name": name, "arguments": arguments}, timeout=timeout)
 
-    def _rpc(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _rpc(self, method: str, params: dict[str, Any], *, timeout: float = 30.0) -> dict[str, Any]:
         self.request_id += 1
         payload = {"jsonrpc": "2.0", "id": self.request_id, "method": method, "params": params}
-        response = self._post(payload)
+        response = self._post(payload, timeout=timeout)
         if "error" in response:
             error = response.get("error") or {}
             raise McpError(f"MCP {method} failed: {error.get('message', 'unknown protocol error')}")
@@ -66,7 +72,7 @@ class McpHttpClient:
     def _notify(self, method: str, params: dict[str, Any]) -> None:
         self._post({"jsonrpc": "2.0", "method": method, "params": params}, expect_body=False)
 
-    def _post(self, payload: dict[str, Any], *, expect_body: bool = True) -> dict[str, Any]:
+    def _post(self, payload: dict[str, Any], *, expect_body: bool = True, timeout: float = 30.0) -> dict[str, Any]:
         headers = {
             **self.headers,
             "Content-Type": "application/json",
@@ -77,7 +83,7 @@ class McpHttpClient:
             headers["Mcp-Session-Id"] = self.session_id
         request = urllib.request.Request(self.endpoint, data=json.dumps(payload).encode("utf-8"), method="POST", headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 session = response.headers.get("Mcp-Session-Id")
                 if session:
                     self.session_id = session

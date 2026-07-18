@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from hivemind_content_studio.mcp_http import McpHttpClient
@@ -50,3 +51,11 @@ def test_streamable_http_initialize_list_and_call() -> None:
         server.shutdown()
         thread.join(timeout=2)
 
+
+def test_waiting_tool_uses_declared_timeout_plus_transport_margin() -> None:
+    client = McpHttpClient("http://127.0.0.1:1/mcp")
+    client.initialized = True
+    with patch.object(client, "_rpc", return_value={}) as rpc:
+        client.call_tool("media_generate_image", {"wait": True, "timeout_s": 300})
+
+    assert rpc.call_args.kwargs["timeout"] == 330.0

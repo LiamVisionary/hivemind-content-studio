@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import cgi
 import base64
+import binascii
 import hashlib
 import html
 import json
@@ -110,9 +111,16 @@ FRONTEND_HTTP = os.environ.get("ZIMG_FRONTEND_HTTP", "http://127.0.0.1:8788")
 TOKEN = os.environ.get("ZIMG_TOKEN") or (TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else "")
 COMFY_HTTP_DEFAULT = os.environ.get("COMFY_HTTP_DEFAULT") or os.environ.get("COMFY_HTTP", "http://127.0.0.1:8188")
 COMFY_HTTP = COMFY_HTTP_DEFAULT
+MAX_JSON_BODY_BYTES = int(os.environ.get("MEDIA_GATEWAY_MAX_JSON_BODY_BYTES", str(25 * 1024 * 1024)))
 
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
+
+from krea2_identity_workflow import (
+    KREA2_IDENTITY_BACKENDS,
+    KREA2_TURBO_PRE_LORA_SOURCE_MODEL,
+    build_krea2_turbo_identity_prompt as compile_krea2_turbo_identity_prompt,
+)
 
 try:
     from hardware_profile import capabilities_for_profile, detect_profile
@@ -1419,7 +1427,6 @@ def exact_comfy_biglove_prompt_body(body):
 
 
 KREA2_TURBO_LEGACY_CONVROT_MODEL = "Krea2_Turbo_convrot_int8mixed.safetensors"
-KREA2_TURBO_PRE_LORA_SOURCE_MODEL = "krea2_turbo_bf16.safetensors"
 
 
 def _api_ref_node_id(value):
@@ -1539,6 +1546,17 @@ def exact_comfy_krea2_turbo_pre_lora_prompt_body(body):
     if not changed:
         return body
     return json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+
+
+def build_krea2_turbo_identity_prompt(prompt, image_name=None, options=None, profile=None, filename_prefix="krea2_identity"):
+    return compile_krea2_turbo_identity_prompt(
+        prompt,
+        image_name=image_name,
+        options=options,
+        profile=profile or accelerator_profile(),
+        filename_prefix=filename_prefix,
+    )
+
 
 def output_file_records(limit=200):
     """Fallback history from image files that exist on disk.
@@ -1694,6 +1712,36 @@ def float_option(options, key, default, lo, hi):
     return max(lo, min(hi, value))
 
 
+def stage_inline_image_base64(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    encoded = value.strip()
+    extension = ".png"
+    if encoded.startswith("data:"):
+        match = re.match(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.*)$", encoded, flags=re.DOTALL)
+        if not match:
+            raise ValueError("image_base64 must be raw base64 or an image data URL")
+        mime, encoded = match.groups()
+        extension = {
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/webp": ".webp",
+            "image/png": ".png",
+        }.get(mime.lower(), ".png")
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("image_base64 is not valid base64") from exc
+    if not payload:
+        raise ValueError("image_base64 decoded to an empty image")
+    if len(payload) > 20 * 1024 * 1024:
+        raise ValueError("decoded inline image exceeds 20MB")
+    COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    target = COMFY_INPUT_DIR / f"media-studio-inline-{uuid.uuid4().hex[:16]}{extension}"
+    target.write_bytes(payload)
+    return target
+
+
 def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
     started = now_iso()
     options = options or {}
@@ -1786,6 +1834,107 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
         })
     except Exception as e:
         rec.update({"status": "error", "finished_at": now_iso(), "error": str(e)})
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
+def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
+    started = now_iso()
+    options = options or {}
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "comfy-krea2-turbo-identity-edit",
+        "created_at": started,
+        "outputs": [],
+        "mode": "identity-edit" if image_path else "text-to-image",
+        "options": {
+            "width": int_option(options, "width", 1024, 64, 4096),
+            "height": int_option(options, "height", 1024, 64, 4096),
+            "steps": int_option(options, "steps", 10, 1, 50),
+            "cfg": float_option(options, "cfg", float_option(options, "guidance", 1.0, 0.0, 20.0), 0.0, 20.0),
+            "seed": int_option(options, "seed", int(time.time()) % 1_000_000_000, 0, 1_000_000_000),
+            "ref_boost": float_option(options, "ref_boost", 4.0, 0.0, 1000.0),
+            "identity_strength": float_option(options, "identity_strength", 1.0, -10.0, 10.0),
+            "grounding_px": int_option(options, "grounding_px", 768, 0, 4096),
+        },
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    try:
+        input_name = None
+        if image_path:
+            image_path = Path(image_path).expanduser().resolve()
+            allowed = [OUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), COMFY_INPUT_DIR.resolve()]
+            if not any(str(image_path).startswith(str(root)) for root in allowed) or not image_path.exists():
+                raise RuntimeError("input image is outside private image storage or does not exist")
+            COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+            input_name = safe_name(image_path.name)
+            comfy_input = (COMFY_INPUT_DIR / input_name).resolve()
+            if comfy_input != image_path:
+                comfy_input.write_bytes(image_path.read_bytes())
+
+        filename_prefix = f"krea2_identity_{job_id}"
+        api_prompt = build_krea2_turbo_identity_prompt(
+            prompt,
+            image_name=input_name,
+            options=rec["options"],
+            filename_prefix=filename_prefix,
+        )
+        body = json.dumps({"prompt": api_prompt, "client_id": f"media-krea2-{job_id}"}).encode("utf-8")
+        t0 = time.monotonic()
+        req = Request(f"{COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
+        try:
+            queued = json.loads(urlopen(req, timeout=30).read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"ComfyUI rejected Krea2 identity graph: {detail[:4000]}") from exc
+        prompt_id = queued.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI did not return prompt_id: {queued}")
+        rec["comfy_prompt_id"] = prompt_id
+        with jobs_lock:
+            jobs[job_id] = rec
+
+        history = None
+        for _ in range(450):
+            time.sleep(2)
+            try:
+                payload = urlopen(f"{COMFY_HTTP_DEFAULT}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                data = json.loads(payload or "{}")
+                if prompt_id in data:
+                    history = data[prompt_id]
+                    break
+            except Exception:
+                pass
+        if history is None:
+            raise RuntimeError(f"ComfyUI Krea2 identity generation timed out waiting for prompt {prompt_id}")
+        status = history.get("status") or {}
+        if status.get("status_str") != "success" or not status.get("completed"):
+            raise RuntimeError(f"ComfyUI Krea2 identity generation failed: {status}")
+
+        outputs = []
+        for node_out in (history.get("outputs") or {}).values():
+            for image in node_out.get("images") or []:
+                name = safe_name(image.get("filename") or "")
+                subfolder = image.get("subfolder") or ""
+                typ = image.get("type") or "output"
+                root = COMFY_OUTPUT_DIR if typ == "output" else COMFY_INPUT_DIR
+                path = (root / subfolder / name).resolve()
+                if path.exists():
+                    outputs.append(str(path))
+        if not outputs:
+            raise RuntimeError("ComfyUI Krea2 identity generation completed without output images")
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": encrypt_outputs(outputs),
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as exc:
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(exc)})
     append_history(rec)
     with jobs_lock:
         jobs[job_id] = rec
@@ -4866,7 +5015,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_body(self):
         n = int(self.headers.get("Content-Length", "0") or 0)
-        if n > 2_000_000:
+        if n > MAX_JSON_BODY_BYTES:
             raise ValueError("request body too large")
         return self.rfile.read(n) if n else b""
 
@@ -5265,7 +5414,7 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
                 prompt = str(form.getfirst("prompt", "")).strip()
-                for key in ['backend', 'width', 'height', 'steps', 'guidance', 'seed', 'mlx_cache_limit_gb']:
+                for key in ['backend', 'width', 'height', 'steps', 'cfg', 'guidance', 'seed', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px']:
                     if key in form:
                         data[key] = form.getfirst(key)
                 image_item = form['image'] if 'image' in form else None
@@ -5287,6 +5436,7 @@ class Handler(BaseHTTPRequestHandler):
                 if "application/json" in ctype:
                     data = json.loads(body.decode("utf-8") or "{}")
                     prompt = str(data.get("prompt", "")).strip()
+                    uploaded_image = stage_inline_image_base64(data.get("image_base64"))
                 else:
                     data = parse_qs(body.decode("utf-8"))
                     prompt = str(data.get("prompt", [""])[0]).strip()
@@ -5294,10 +5444,43 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "prompt required"}, 400)
             options = {}
             if isinstance(data, dict):
-                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'negative_prompt', 'mlx_cache_limit_gb']:
+                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'negative_prompt', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px']:
                     if key in data:
                         options[key] = data.get(key)
             backend = str(data.get('backend', '') if isinstance(data, dict) else '')
+            if backend in KREA2_IDENTITY_BACKENDS:
+                if uploaded_image is None:
+                    maybe_image = str(data.get('image_path', '') if isinstance(data, dict) else '')
+                    if maybe_image:
+                        uploaded_image = Path(maybe_image).expanduser()
+                        if not uploaded_image.is_absolute():
+                            uploaded_image = COMFY_INPUT_DIR / maybe_image
+                job_id = uuid.uuid4().hex[:12]
+                with jobs_lock:
+                    jobs[job_id] = {
+                        "id": job_id,
+                        "prompt": PRIVATE_PROMPT_LABEL,
+                        "status": "queued",
+                        "created_at": now_iso(),
+                        "backend": "comfy-krea2-turbo-identity-edit",
+                        "mode": "identity-edit" if uploaded_image else "text-to-image",
+                        "options": {k: v for k, v in options.items() if k != 'negative_prompt'},
+                    }
+                t = threading.Thread(
+                    target=run_comfy_krea2_identity,
+                    args=(job_id, prompt, uploaded_image, options),
+                    daemon=True,
+                )
+                t.start()
+                return self.send_json({
+                    "id": job_id,
+                    "status": "queued",
+                    "backend": "comfy-krea2-turbo-identity-edit",
+                    "mode": "identity-edit" if uploaded_image else "text-to-image",
+                    "job_url": f"/api/job/{job_id}",
+                    "page_url": f"/job/{job_id}",
+                    "history_url": "/api/history",
+                }, 202)
             if backend in {'mlx-bigloves-klein3-edit', 'mlx-mxfp8-bigloves-klein3-edit'} or uploaded_image is not None:
                 native_loras = _native_loras_from_generation_request(data)
                 if native_loras:
