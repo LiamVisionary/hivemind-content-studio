@@ -13,6 +13,7 @@ from .generation_telemetry import GenerationAttempt
 from .manifest import add_artifact, load_manifest, write_manifest
 from .lanes import LANE_STEPS
 from .planner import plan
+from .private_access import read_private_json, write_private_json
 from .run_store import RunStore
 from .stickman import render_stickman_frames
 
@@ -263,7 +264,7 @@ class ContentOrchestrator:
             "output_contract": {"passed": "boolean", "score": "0-100", "scene_failures": "list", "regeneration_instructions": "list"},
         }
         path = manifest_file.parent / "evaluation-request.json"
-        path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_private_json(path, request)
         add_artifact(manifest, role="evaluation-request", path=path, provider="agent-evaluator")
         write_manifest(manifest_file, manifest)
 
@@ -273,8 +274,8 @@ class ContentOrchestrator:
         if not item:
             return {}
         try:
-            value = json.loads(Path(item["path"]).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            value = read_private_json(Path(item["path"]))
+        except (OSError, ValueError, RuntimeError):
             return {}
         return value if isinstance(value, dict) else {}
 

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from hivemind_content_studio.agent_runtime import attach_script
 from hivemind_content_studio.orchestrator import ContentOrchestrator
+from hivemind_content_studio.private_access import private_media_exists
 from hivemind_content_studio.run_store import RunStore
 
 
@@ -39,7 +40,7 @@ def test_resume_runs_safe_local_steps_until_semantic_evaluation_is_needed(tmp_pa
     assert result["status"] == "awaiting_evaluation"
     assert result["current_step"] == "evaluation"
     assert result["next_actions"][0]["intent"] == "evaluate_content"
-    assert Path(result["artifacts"]["final_video"]).is_file()
+    assert private_media_exists(Path(result["artifacts"]["final_video"]))
     generation_events = [event for event in result["events"] if event["kind"].startswith("generation.")]
     assert [event["kind"] for event in generation_events] == ["generation.started", "generation.completed"]
     assert generation_events[-1]["payload"]["provider"] == "stickman-renderer"

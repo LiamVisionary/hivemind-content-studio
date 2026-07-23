@@ -1,3 +1,7 @@
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/space-grotesk';
+@import './variables.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -5,6 +9,29 @@
 @layer base {
     body {
         @apply bg-app-bg text-white font-sans antialiased h-screen overflow-hidden;
+        color: var(--text-primary);
+        font-feature-settings: 'cv11', 'ss01';
+    }
+
+    ::selection {
+        background: rgba(34, 211, 238, 0.28);
+        color: #fff;
+    }
+
+    /* Keyboard focus — visible ring, never removed */
+    :focus-visible {
+        outline: 2px solid rgba(34, 211, 238, 0.7);
+        outline-offset: 2px;
+        border-radius: 6px;
+    }
+
+    button, [role="button"], a, select, summary {
+        cursor: pointer;
+    }
+
+    button:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
     }
 
     /* Custom Scrollbar Refinement */
@@ -23,11 +50,11 @@
 
 @layer components {
     .glass {
-        @apply bg-black/80 backdrop-blur-2xl border border-white/10 shadow-3xl;
+        @apply bg-panel-bg/80 backdrop-blur-2xl border border-white/10 shadow-3xl;
     }
 
     .glass-panel {
-        @apply bg-black/60 backdrop-blur-xl border border-white/5;
+        @apply bg-panel-bg/60 backdrop-blur-xl border border-white/5;
     }
 
     .neon-border {
@@ -37,13 +64,58 @@
     .interactive-glow {
         @apply transition-all duration-300 hover:shadow-glow hover:scale-[1.02] active:scale-[0.98];
     }
+
+    /* Elevated card surface used across studios */
+    .surface-card {
+        @apply bg-card-bg border border-white/[0.07] rounded-2xl shadow-panel;
+    }
+
+    .custom-scrollbar {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+    }
+}
+
+/* Topbar API status pill — hubApp.js reports into #hub-api-status */
+.hub-api-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 11px;
+    height: 2.25rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.5rem;
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.04);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.hub-api-status i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #d9bc74;
+}
+
+.hub-api-status.is-online i { background: var(--color-primary); box-shadow: 0 0 8px rgba(34, 211, 238, 0.6); }
+.hub-api-status.is-offline i { background: var(--color-danger); }
+
+/* Ambient background wash — layered onto the app root, always behind content */
+.app-ambient-bg {
+    background:
+        radial-gradient(48rem 30rem at 18% -8%, rgba(34, 211, 238, 0.05), transparent 60%),
+        radial-gradient(44rem 30rem at 92% 4%, rgba(167, 139, 250, 0.045), transparent 60%),
+        radial-gradient(60rem 40rem at 50% 118%, rgba(34, 211, 238, 0.03), transparent 62%),
+        var(--bg-app);
 }
 
 /* Custom Animations */
 @keyframes fade-in-up {
     from {
         opacity: 0;
-        transform: translateY(20px);
+        transform: translateY(16px);
     }
 
     to {
@@ -53,7 +125,7 @@
 }
 
 .animate-fade-in-up {
-    animation: fade-in-up 0.6s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+    animation: fade-in-up 0.5s var(--ease-out-expo, cubic-bezier(0.23, 1, 0.32, 1)) forwards;
 }
 
 @keyframes video-generation-card-enter {
@@ -235,7 +307,7 @@
     left: 50%;
     transform: translateX(-50%) translateY(8px);
     border: 6px solid transparent;
-    border-top-color: #1a1a1a;
+    border-top-color: var(--bg-elevated, #1a1a24);
     opacity: 0;
     pointer-events: none;
     transition: all 0.2s ease;
@@ -250,7 +322,7 @@
     left: 50%;
     transform: translateX(-50%) translateY(12px);
     padding: 8px 14px;
-    background: #1a1a1a;
+    background: var(--bg-elevated, #1a1a24);
     border: 1px solid rgba(255,255,255,0.1);
     border-radius: 10px;
     font-size: 12px;
@@ -276,7 +348,7 @@
     bottom: auto;
     top: 100%;
     border-top-color: transparent;
-    border-bottom-color: #1a1a1a;
+    border-bottom-color: var(--bg-elevated, #1a1a24);
     transform: translateX(-50%) translateY(-8px);
 }
 

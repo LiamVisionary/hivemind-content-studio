@@ -4,7 +4,7 @@ import { t } from '../lib/i18n.js';
 
 export function SettingsModal(onClose) {
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);display:flex;align-items:center;justify-content:center;z-index:100;';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(5,5,10,0.7);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;z-index:100;';
 
     const modal = document.createElement('div');
     modal.style.cssText = 'background:var(--bg-card,#111);border-radius:1rem;border:1px solid rgba(255,255,255,0.08);width:min(90vw,36rem);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;';
@@ -112,6 +112,13 @@ export function SettingsModal(onClose) {
 
     header.querySelector('#settings-close-btn').onclick = close;
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    const onKeyDown = (e) => {
+        if (e.key === 'Escape') {
+            close();
+            document.removeEventListener('keydown', onKeyDown);
+        }
+    };
+    document.addEventListener('keydown', onKeyDown);
 
     overlay.appendChild(modal);
     return overlay;

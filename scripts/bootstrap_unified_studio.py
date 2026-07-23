@@ -24,6 +24,19 @@ KREA2_IDENTITY_LINK = COMFY_ROOT / "custom_nodes/hivemind-krea2-identity"
 KREA2_IDENTITY_ROOT = ROOT / "packages/comfyui-custom-nodes/hivemind-krea2-identity"
 
 
+def install_comfy_node(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        if target.is_symlink():
+            target.unlink()
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        return
+    if target.exists() and not target.is_symlink():
+        raise RuntimeError(f"Refusing to replace non-symlink ComfyUI node directory: {target}")
+    target.unlink(missing_ok=True)
+    target.symlink_to(source)
+
+
 def check() -> list[dict[str, object]]:
     paths = {
         "studio source": ROOT / "src/hivemind_content_studio/control_api.py",
@@ -73,10 +86,7 @@ def install_links() -> dict[str, object]:
         raise RuntimeError(f"Refusing to replace non-symlink ComfyUI node directory: {MOBILE_LINK}")
     MOBILE_LINK.unlink(missing_ok=True)
     MOBILE_LINK.symlink_to(MOBILE_ROOT)
-    if KREA2_IDENTITY_LINK.exists() and not KREA2_IDENTITY_LINK.is_symlink():
-        raise RuntimeError(f"Refusing to replace non-symlink ComfyUI node directory: {KREA2_IDENTITY_LINK}")
-    KREA2_IDENTITY_LINK.unlink(missing_ok=True)
-    KREA2_IDENTITY_LINK.symlink_to(KREA2_IDENTITY_ROOT)
+    install_comfy_node(KREA2_IDENTITY_ROOT, KREA2_IDENTITY_LINK)
     return {
         "stack_link": str(STACK_LINK),
         "mobile_link": str(MOBILE_LINK),

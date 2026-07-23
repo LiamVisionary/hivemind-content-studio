@@ -1,3 +1,5 @@
+import { resolveMediaSrc } from './e2eMedia';
+
 export async function downloadImage(
   src: string,
   filename?: string,
@@ -5,7 +7,8 @@ export async function downloadImage(
 ) {
   try {
     const targetFilename = filename?.trim() || filenameFromSrc(src);
-    const response = await fetch(src);
+    // Sealed outputs must save as decrypted media, never as the raw envelope.
+    const response = await fetch(await resolveMediaSrc(src));
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -54,7 +57,8 @@ interface ShareTarget {
 }
 
 async function fetchAsFile(target: ShareTarget): Promise<File> {
-  const response = await fetch(target.src);
+  // Sealed outputs must share/save as decrypted media, never as the envelope.
+  const response = await fetch(await resolveMediaSrc(target.src));
   if (!response.ok) {
     // Don't wrap an error body (404/500 HTML/JSON) into a "file" and hand it to
     // the share/download flow as if it succeeded.

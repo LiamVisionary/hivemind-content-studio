@@ -53,12 +53,33 @@
     }
   }
 
+  async function listLoras(modelId) {
+    const data = await jsonFetch(`/local-ai/loras/${encodeURIComponent(modelId)}`);
+    return {
+      ...data,
+      loras: (data.loras || []).map((lora) => ({
+        ...lora,
+        previewUrl: lora.previewPath ? `${apiBase}${lora.previewPath}` : '',
+      })),
+    };
+  }
+
   window.localAI = {
     isElectron: true,
     isHosted: true,
     getBinaryStatus: () => jsonFetch('/local-ai/binary-status'),
     downloadBinary: async () => ({ ok: true, source: 'hosted' }),
     listModels: () => jsonFetch('/local-ai/models'),
+    listLoras,
+    generatePrompt: (params) => jsonFetch('/local-ai/prompt-helper', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    }),
+    startCivitaiDownload: (url) => jsonFetch('/local-ai/civitai-download', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    }),
+    getCivitaiDownloadJob: (jobId) => jsonFetch(`/local-ai/civitai-download/${encodeURIComponent(jobId)}`),
     downloadModel: async (modelId) => ({ ok: true, id: modelId, source: 'hosted' }),
     downloadAuxiliary: async (auxKey) => ({ ok: true, id: auxKey, source: 'hosted' }),
     deleteModel: async () => ({ ok: false, error: 'Hosted mode keeps shared models managed by the Mac.' }),

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -10,6 +9,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 from .manifest import add_artifact, load_manifest, write_manifest
+from .private_access import encrypt_private_media, read_private_json
 
 
 FRAME_SIZES = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080), "4:5": (1080, 1350)}
@@ -31,7 +31,7 @@ def _scene_contract(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     artifact = next((item for item in manifest["artifacts"] if item["role"] == "stickman-scenes"), None)
     if not artifact:
         raise ValueError("Run has no stickman-scenes artifact")
-    scenes = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+    scenes = read_private_json(Path(artifact["path"]))
     if not isinstance(scenes, list):
         raise ValueError("stickman-scenes must be a JSON list")
     return [scene for scene in scenes if isinstance(scene, dict)]
@@ -83,5 +83,6 @@ def render_stickman_frames(manifest_path: str | Path) -> dict[str, Any]:
         image.save(path, format="PNG", optimize=True)
         frames.append(str(path))
         add_artifact(manifest, role="keyframe", path=path, provider="stickman-renderer")
+        encrypt_private_media(path)
     write_manifest(manifest_file, manifest)
     return {"frames": frames, "provider": "stickman-renderer", "aspect_ratio": aspect_ratio}

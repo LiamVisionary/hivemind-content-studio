@@ -9,6 +9,7 @@ import pytest
 from hivemind_content_studio.agent_runtime import attach_script, run_agent_script
 from hivemind_content_studio.manifest import load_manifest
 from hivemind_content_studio.planner import plan
+from hivemind_content_studio.private_access import ENCRYPTED_PREFIX, read_private_json, read_private_text
 
 
 def _planned_run(tmp_path: Path, monkeypatch) -> Path:
@@ -48,7 +49,9 @@ def test_any_stdin_stdout_agent_command_can_generate_the_canonical_script(tmp_pa
         confirm="AGENT_GENERATE",
     )
 
-    assert Path(output["script_path"]).read_text(encoding="utf-8") == "# Script\n\nGeneral runtime\n"
+    script_path = Path(output["script_path"])
+    assert read_private_text(script_path) == "# Script\n\nGeneral runtime\n"
+    assert script_path.read_text(encoding="utf-8").startswith(ENCRYPTED_PREFIX)
     manifest = load_manifest(manifest_path)
     assert any(item["role"] == "script" and item["provider"] == "agent-runtime" for item in manifest["artifacts"])
 
@@ -61,5 +64,5 @@ def test_external_agent_can_attach_a_script_without_a_vendor_specific_runtime(tm
     result = attach_script(manifest_path, script, runtime="hermes")
 
     assert Path(result["script_path"]).parent == manifest_path.parent
-    receipt = json.loads((manifest_path.parent / "script-receipt.json").read_text(encoding="utf-8"))
+    receipt = read_private_json(manifest_path.parent / "script-receipt.json")
     assert receipt["runtime"] == "hermes"

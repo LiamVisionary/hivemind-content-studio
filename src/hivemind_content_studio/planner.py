@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-import json
+import io
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,7 @@ import yaml
 
 from .config import load_config
 from .manifest import add_artifact, create_manifest, write_manifest
+from .private_access import read_private_text, write_private_json, write_private_text
 
 
 DEFAULT_PROVIDERS = {
@@ -28,7 +29,7 @@ DEFAULT_PROVIDERS = {
 
 def load_brief(path: str | Path) -> dict[str, Any]:
     brief_path = Path(path).expanduser().resolve()
-    brief = yaml.safe_load(brief_path.read_text(encoding="utf-8")) or {}
+    brief = yaml.safe_load(read_private_text(brief_path)) or {}
     if not isinstance(brief, dict):
         raise ValueError(f"Brief must be a YAML object: {brief_path}")
     return brief
@@ -56,7 +57,7 @@ def plan(brief_path: str | Path, *, lane: str | None = None) -> Path:
     run_dir = manifest_path.parent
 
     brief_snapshot = run_dir / "brief.yaml"
-    brief_snapshot.write_text(yaml.safe_dump(brief, sort_keys=False), encoding="utf-8")
+    write_private_text(brief_snapshot, yaml.safe_dump(brief, sort_keys=False))
     add_artifact(manifest, role="brief", path=brief_snapshot)
 
     if selected_lane == "animation":
@@ -90,20 +91,21 @@ def _scenes(brief: dict[str, Any]) -> list[dict[str, Any]]:
 def _plan_animation(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -> None:
     scenes = _scenes(brief)
     scene_csv = run_dir / "scene_manifest.csv"
-    with scene_csv.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["scene", "title", "duration_seconds", "beat", "voice", "image_prompt", "motion_prompt"])
-        writer.writeheader()
-        for index, scene in enumerate(scenes, start=1):
-            beat = str(scene.get("beat") or scene.get("description") or "")
-            writer.writerow({
-                "scene": index,
-                "title": scene.get("title") or f"Scene {index}",
-                "duration_seconds": scene.get("duration_seconds") or "",
-                "beat": beat,
-                "voice": scene.get("voice") or beat,
-                "image_prompt": scene.get("image_prompt") or beat,
-                "motion_prompt": scene.get("motion_prompt") or f"Animate the scene naturally: {beat}",
-            })
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["scene", "title", "duration_seconds", "beat", "voice", "image_prompt", "motion_prompt"])
+    writer.writeheader()
+    for index, scene in enumerate(scenes, start=1):
+        beat = str(scene.get("beat") or scene.get("description") or "")
+        writer.writerow({
+            "scene": index,
+            "title": scene.get("title") or f"Scene {index}",
+            "duration_seconds": scene.get("duration_seconds") or "",
+            "beat": beat,
+            "voice": scene.get("voice") or beat,
+            "image_prompt": scene.get("image_prompt") or beat,
+            "motion_prompt": scene.get("motion_prompt") or f"Animate the scene naturally: {beat}",
+        })
+    write_private_text(scene_csv, buffer.getvalue())
     add_artifact(manifest, role="scene-manifest", path=scene_csv)
 
     prompt_roles = {
@@ -117,12 +119,12 @@ def _plan_animation(run_dir: Path, brief: dict[str, Any], manifest: dict[str, An
         for index, scene in enumerate(scenes, start=1):
             value = scene.get(scene_key) or scene.get("beat") or ""
             blocks.append(f"## Scene {index}\n\n{value}")
-        output.write_text("\n\n".join(blocks).strip() + "\n", encoding="utf-8")
+        write_private_text(output, "\n\n".join(blocks).strip() + "\n")
         add_artifact(manifest, role=artifact_role, path=output, provider=manifest["providers"][provider_role])
 
     music = run_dir / "music-brief.md"
     music_data = brief.get("music") if isinstance(brief.get("music"), dict) else {}
-    music.write_text(str(music_data.get("mood") or brief.get("music_prompt") or "Instrumental score matching the story arc.") + "\n", encoding="utf-8")
+    write_private_text(music, str(music_data.get("mood") or brief.get("music_prompt") or "Instrumental score matching the story arc.") + "\n")
     add_artifact(manifest, role="music-brief", path=music, provider=manifest["providers"]["music"])
     _write_publish_metadata(run_dir, brief, manifest)
 
@@ -146,7 +148,7 @@ def _write_script_request(run_dir: Path, brief: dict[str, Any], manifest: dict[s
         },
     }
     output = run_dir / "script-request.json"
-    output.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, request)
     add_artifact(manifest, role="script-request", path=output, provider=manifest["providers"]["script"])
 
 
@@ -165,7 +167,7 @@ def _write_generation_requests(run_dir: Path, brief: dict[str, Any], manifest: d
             for index, scene in enumerate(scenes, start=1)
         ]
         output = run_dir / "keyframe-requests.json"
-        output.write_text(json.dumps(keyframe_requests, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_private_json(output, keyframe_requests)
         add_artifact(manifest, role="keyframe-requests", path=output, provider=manifest["providers"]["image"])
 
     motion_requests = [
@@ -179,7 +181,7 @@ def _write_generation_requests(run_dir: Path, brief: dict[str, Any], manifest: d
         for index, scene in enumerate(scenes, start=1)
     ]
     motion = run_dir / "motion-requests.json"
-    motion.write_text(json.dumps(motion_requests, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(motion, motion_requests)
     add_artifact(manifest, role="motion-requests", path=motion, provider=manifest["providers"]["motion"])
 
 
@@ -201,7 +203,7 @@ def _write_editor_handoff(run_dir: Path, brief: dict[str, Any], manifest: dict[s
         "note": "FFmpeg is the deterministic zero-human default; CapCut receives a portable asset/timeline handoff rather than an unstable private project format.",
     }
     output = run_dir / "editor-handoff.json"
-    output.write_text(json.dumps(handoff, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, handoff)
     add_artifact(manifest, role="editor-handoff", path=output, provider=manifest["providers"]["assembly"])
 
 
@@ -217,7 +219,7 @@ def _plan_stickman_performance_ad(run_dir: Path, brief: dict[str, Any], manifest
     _plan_animation(run_dir, brief, manifest)
     scenes = _scenes(brief)
     output = run_dir / "stickman-scenes.json"
-    output.write_text(json.dumps(scenes, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, scenes)
     add_artifact(manifest, role="stickman-scenes", path=output, provider="stickman-renderer")
     _write_generation_requests(run_dir, brief, manifest, keyframes=False)
     _write_editor_handoff(run_dir, brief, manifest)
@@ -227,7 +229,7 @@ def _plan_static_text_ad(run_dir: Path, brief: dict[str, Any], manifest: dict[st
     _write_script_request(run_dir, brief, manifest)
     scenes = _scenes(brief)
     output = run_dir / "static-text-scenes.json"
-    output.write_text(json.dumps(scenes, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, scenes)
     add_artifact(manifest, role="static-text-scenes", path=output, provider="static-text-renderer")
     _write_publish_metadata(run_dir, brief, manifest)
 
@@ -247,7 +249,7 @@ def _plan_faceless(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any
         "video_clip_duration": int(brief.get("clip_duration_seconds") or 5),
     }
     params = run_dir / "faceless-params.json"
-    params.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(params, payload)
     add_artifact(manifest, role="faceless-params", path=params, provider="moneyprinterturbo")
     _write_publish_metadata(run_dir, brief, manifest)
 
@@ -261,7 +263,7 @@ def _plan_clip(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -
         "rights_status": "research",
     }
     clip_plan = run_dir / "clip-plan.json"
-    clip_plan.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(clip_plan, payload)
     add_artifact(manifest, role="clip-plan", path=clip_plan, provider="auto-clipper")
     _write_publish_metadata(run_dir, brief, manifest)
 
@@ -280,5 +282,5 @@ def _write_publish_metadata(run_dir: Path, brief: dict[str, Any], manifest: dict
         "cta": publish.get("cta") or brief.get("cta") or "",
     }
     output = run_dir / "publish-metadata.json"
-    output.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(output, metadata)
     add_artifact(manifest, role="publish-metadata", path=output, provider=manifest["providers"]["publish"])

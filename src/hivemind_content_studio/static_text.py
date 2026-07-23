@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -10,6 +9,7 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from .manifest import add_artifact, load_manifest, write_manifest
+from .private_access import encrypt_private_media, read_private_json
 from .stickman import FRAME_SIZES, _font
 
 
@@ -35,7 +35,7 @@ def render_static_text_frames(manifest_path: str | Path) -> dict[str, Any]:
     artifact = next((item for item in manifest["artifacts"] if item["role"] == "static-text-scenes"), None)
     if not artifact:
         raise ValueError("Run has no static-text-scenes artifact")
-    scenes = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+    scenes = read_private_json(Path(artifact["path"]))
     aspect_ratio = str(manifest["brief"].get("aspect_ratio") or "4:5")
     width, height = FRAME_SIZES.get(aspect_ratio, FRAME_SIZES["4:5"])
     palette = manifest["brief"].get("palette") if isinstance(manifest["brief"].get("palette"), dict) else {}
@@ -61,5 +61,6 @@ def render_static_text_frames(manifest_path: str | Path) -> dict[str, Any]:
         image.save(path, format="PNG", optimize=True)
         frames.append(str(path))
         add_artifact(manifest, role="keyframe", path=path, provider="static-text-renderer", scene=index)
+        encrypt_private_media(path)
     write_manifest(manifest_file, manifest)
     return {"frames": frames, "provider": "static-text-renderer", "aspect_ratio": aspect_ratio}

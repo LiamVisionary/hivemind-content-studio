@@ -13,6 +13,7 @@ from typing import Any
 
 from .config import StudioConfig, load_config
 from .manifest import load_manifest, utc_now, write_manifest
+from .private_access import encrypt_private_media, private_media_exists, read_private_media, staged_private_media
 from .qa import qa_asset
 
 
@@ -149,7 +150,7 @@ def encode_multipart(fields: dict[str, str] | list[tuple[str, str]], files: list
         chunks.append(
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{path.name}\"\r\nContent-Type: {content_type}\r\n\r\n".encode()
         )
-        chunks.append(path.read_bytes())
+        chunks.append(read_private_media(path))
         chunks.append(b"\r\n")
     chunks.append(f"--{boundary}--\r\n".encode())
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
@@ -177,14 +178,25 @@ def prepare_publish(
     if not text_only and not media_paths:
         raise ValueError("At least one media file is required unless text_only is true")
     for media_path in media_paths:
-        if not media_path.is_file():
+        if not private_media_exists(media_path):
             raise FileNotFoundError(f"Publish media not found: {media_path}")
     normalized_platforms = sorted({platform.strip().lower() for platform in platforms if platform.strip()})
     if not normalized_platforms:
         raise ValueError("At least one platform is required")
     if provider not in {"postiz", "upload-post"}:
         raise ValueError("Provider must be postiz or upload-post")
-    qa_results = [qa_asset(path, output_dir=Path(manifest_path).expanduser().resolve().parent / "qa") for path in media_paths]
+    qa_dir = Path(manifest_path).expanduser().resolve().parent / "qa"
+    qa_results = []
+    for path in media_paths:
+        with staged_private_media(path) as staged:
+            qa = qa_asset(staged, output_dir=qa_dir)
+        for key in ("path", "video"):
+            if qa.get(key):
+                qa[key] = str(path)
+        if qa.get("representative_frame"):
+            frame = Path(str(qa["representative_frame"]))
+            encrypt_private_media(frame)
+        qa_results.append(qa)
     failures = [failure for qa in qa_results for failure in qa.get("failures", [])]
     if failures:
         raise PublishError("Media QA failed: " + "; ".join(failures))
@@ -223,7 +235,7 @@ def dry_run(manifest_path: str | Path) -> dict[str, Any]:
     for draft in drafts:
         if draft.get("media_kind") != "text":
             for media_path in draft.get("media", []):
-                if not Path(str(media_path)).is_file():
+                if not private_media_exists(Path(str(media_path))):
                     failures.append(f"missing media for draft {draft.get('id')}: {media_path}")
         if not draft.get("platforms"):
             failures.append(f"missing platforms for draft {draft.get('id')}")

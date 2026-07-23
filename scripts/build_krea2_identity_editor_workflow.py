@@ -51,18 +51,21 @@ def build(source: Path) -> dict:
     workflow["id"] = "hivemind-krea2-turbo-identity-optional-apple"
     workflow["revision"] = 1
     workflow["last_link_id"] = 18
-    workflow["nodes"] = [item for item in workflow["nodes"] if item["id"] not in {73, 90, 92, 102}]
+    workflow["nodes"] = [item for item in workflow["nodes"] if item["id"] not in {71, 73, 90, 92, 102}]
     workflow["groups"] = [group for group in workflow["groups"] if group["id"] != 3]
     nodes = workflow["nodes"]
 
     loader = node(nodes, 55)
     loader.update({
-        "type": "OTUNetLoaderW8A8",
-        "inputs": [input_slot("pre_lora", "PRE_LORA", 1, optional=True)],
+        "type": "Krea2IdentityOptionalAppleModelLoader",
+        "inputs": [input_slot("image", "IMAGE", 1, optional=True)],
         "outputs": [{"name": "MODEL", "type": "MODEL", "links": [2]}],
-        "widgets_values": ["krea2_turbo_bf16.safetensors", "default", "krea2", True, True, "None"],
+        "widgets_values": [
+            "Krea2_Turbo_convrot_int8mixed.safetensors",
+            "Krea2_Turbo_identity_v1_2_convrot_int8mixed.safetensors",
+        ],
     })
-    loader.setdefault("properties", {})["Node name for S&R"] = "OTUNetLoaderW8A8"
+    loader.setdefault("properties", {})["Node name for S&R"] = "Krea2IdentityOptionalAppleModelLoader"
 
     clip = node(nodes, 56)
     clip["outputs"] = [{"name": "CLIP", "type": "CLIP", "links": [4, 5]}]
@@ -71,20 +74,11 @@ def build(source: Path) -> dict:
     vae = node(nodes, 57)
     vae["outputs"] = [{"name": "VAE", "type": "VAE", "links": [6, 7]}]
 
-    pre_lora = node(nodes, 71)
-    pre_lora.update({
-        "type": "Krea2IdentityOptionalPreLora",
-        "inputs": [input_slot("image", "IMAGE", 8, optional=True)],
-        "outputs": [{"name": "PRE_LORA", "type": "PRE_LORA", "links": [1]}],
-        "widgets_values": ["krea2_identity_edit_v1_2.safetensors", 1.0],
-    })
-    pre_lora.setdefault("properties", {})["Node name for S&R"] = "Krea2IdentityOptionalPreLora"
-
     image = node(nodes, 72)
     image.update({
         "type": "HivemindOptionalLoadImage",
         "outputs": [
-            {"name": "IMAGE", "type": "IMAGE", "links": [8, 9, 10, 11]},
+            {"name": "IMAGE", "type": "IMAGE", "links": [1, 9, 10, 11]},
             {"name": "MASK", "type": "MASK", "links": None},
         ],
         "widgets_values": ["None", "image"],
@@ -100,7 +94,7 @@ def build(source: Path) -> dict:
             input_slot("image", "IMAGE", 9, optional=True),
         ],
         "outputs": [{"name": "MODEL", "type": "MODEL", "links": [3]}],
-        "widgets_values": [4.0, "fit"],
+        "widgets_values": [4.0, "fit", True],
     })
     patch.setdefault("properties", {})["Node name for S&R"] = "Krea2IdentityOptionalModelPatch"
 
@@ -150,14 +144,13 @@ def build(source: Path) -> dict:
     save["widgets_values"] = ["krea2_identity_optional"]
 
     workflow["links"] = [
-        [1, 71, 0, 55, 0, "PRE_LORA"],
+        [1, 72, 0, 55, 0, "IMAGE"],
         [2, 55, 0, 79, 0, "MODEL"],
         [3, 79, 0, 53, 0, "MODEL"],
         [4, 56, 0, 84, 0, "CLIP"],
         [5, 56, 0, 85, 0, "CLIP"],
         [6, 57, 0, 54, 1, "VAE"],
         [7, 57, 0, 79, 1, "VAE"],
-        [8, 72, 0, 71, 0, "IMAGE"],
         [9, 72, 0, 79, 2, "IMAGE"],
         [10, 72, 0, 84, 1, "IMAGE"],
         [11, 72, 0, 85, 1, "IMAGE"],
@@ -171,16 +164,16 @@ def build(source: Path) -> dict:
     ]
 
     node(nodes, 100)["widgets_values"] = [
-        "Pinned dependencies:\n- krea2_turbo_bf16.safetensors\n- qwen3vl_4b_bf16.safetensors\n- qwen_image_vae.safetensors\n- krea2_identity_edit_v1_2.safetensors\n- lbouaraba/comfyui-krea2edit"
+        "Pinned dependencies:\n- Krea2_Turbo_convrot_int8mixed.safetensors\n- Krea2_Turbo_identity_v1_2_convrot_int8mixed.safetensors\n- qwen3vl_4b_bf16.safetensors\n- qwen_image_vae.safetensors\n- lbouaraba/comfyui-krea2edit"
     ]
     node(nodes, 101)["widgets_values"] = [
-        "OPTIONAL REFERENCE IMAGE\n\nLeave this set to None for the unchanged regular Krea 2 Turbo route. Load one adult reference image to enable the identity LoRA, VAE source tokens, and grounded Qwen3-VL edit conditioning."
+        "OPTIONAL REFERENCE IMAGE\n\nLeave this set to None for the regular prebuilt Krea 2 Turbo ConvRot route. Load one adult reference image to select the prebuilt identity ConvRot model, VAE source tokens, grounded Qwen3-VL conditioning, and static source-token cache."
     ]
     node(nodes, 105)["widgets_values"] = [
         "Turbo defaults: 10 steps, CFG 1, euler_ancestral / beta.\n\n8 steps favors composition/instruction adherence; 12 steps can add face detail."
     ]
     node(nodes, 106)["widgets_values"] = [
-        "KREA 2 TURBO IDENTITY EDIT v1.2\n\nNo image: regular optimized Krea 2 Turbo.\nImage supplied: the same Turbo lane plus identity pre-LoRA, source-token patch, and grounded vision conditioning."
+        "KREA 2 TURBO IDENTITY EDIT v1.2\n\nNo image: regular optimized Krea 2 Turbo.\nImage supplied: the dedicated identity-baked ConvRot lane plus source-token patch, grounded vision conditioning, and exact pre-block caching."
     ]
     workflow.setdefault("extra", {})["workflow_name"] = "Krea2 Turbo Identity Optional Apple Silicon"
     validate(workflow)

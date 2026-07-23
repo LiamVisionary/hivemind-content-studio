@@ -29,17 +29,17 @@ const ASSET_URLS = {
     "f/11": "./assets/cinema/f_11.webp"
 };
 
-export function CameraControls(onChange) {
+export function CameraControls(onChange, initialState = {}) {
     const container = document.createElement('div');
     // Added padding-bottom to ensure scrollbar doesn't overlap content if visible
     // Changed justify-center to justify-start md:justify-center to allow left-aligned scrolling on mobile
     container.className = 'w-full flex justify-start md:justify-center gap-3 md:gap-6 py-4 md:py-8 overflow-x-auto no-scrollbar snap-x px-4 md:px-0';
 
     let state = {
-        camera: Object.keys(CAMERA_MAP)[0],
-        lens: Object.keys(LENS_MAP)[0],
-        focal: 35,
-        aperture: "f/1.4"
+        camera: initialState.camera || Object.keys(CAMERA_MAP)[0],
+        lens: initialState.lens || Object.keys(LENS_MAP)[0],
+        focal: Number(initialState.focal) || 35,
+        aperture: initialState.aperture || "f/1.4"
     };
 
     const updateState = (key, value) => {

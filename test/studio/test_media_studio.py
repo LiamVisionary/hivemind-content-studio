@@ -4,6 +4,8 @@ import json
 import urllib.error
 from pathlib import Path
 
+import pytest
+
 from hivemind_content_studio.media_studio import (
     MediaStudioDescriptor,
     _private_video_url,
@@ -11,8 +13,28 @@ from hivemind_content_studio.media_studio import (
     _token,
     discover_media_studio,
     generate_video,
+    video_dimensions_for_request,
 )
 from hivemind_content_studio.planner import DEFAULT_PROVIDERS
+
+
+def test_media_catalog_preserves_workflow_geometry_and_duration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hivemind_content_studio.media_studio.list_media_studio_workflows",
+        lambda _kind: [{
+            "id": "ltx23-ic-ingredients-lora",
+            "title": "LTX 2.3 IC-LoRA Ingredients",
+            "accepts": ["prompt", "ingredient_images", "image_base64"],
+            "aspect_ratios": ["16:9", "9:16", "4:3", "3:4", "1:1"],
+            "defaults": {"duration_seconds": 5},
+        }],
+    )
+    from hivemind_content_studio.media_catalog import _media_studio_video_models
+
+    model = next(item for item in _media_studio_video_models({"available": True}) if item.id == "ltx23-ic-ingredients-lora")
+
+    assert model.aspect_ratios == ("16:9", "9:16", "4:3", "3:4", "1:1")
+    assert model.default_duration_seconds == 5
 
 
 def test_media_studio_is_discovered_from_hivemind_preferences(tmp_path: Path, monkeypatch) -> None:
@@ -195,6 +217,7 @@ def test_video_generation_removes_uploaded_reference_and_qa_frame(tmp_path: Path
         def call_tool(self, name, arguments):
             if name == descriptor.tool:
                 assert arguments["image_path"] == "media-studio-input-private.png"
+                assert arguments["loras"] == [{"id": "ltx/style.safetensors", "strength": 0.65}]
                 payload = {"job": {"id": "job-private", "status": "queued", "media_redacted": True}}
             else:
                 assert name == descriptor.job_tool
@@ -234,12 +257,70 @@ def test_video_generation_removes_uploaded_reference_and_qa_frame(tmp_path: Path
     )
     monkeypatch.setattr("hivemind_content_studio.media_studio._video_dimensions", lambda _path: (768, 768))
 
-    result = generate_video(image_path=image, prompt="private prompt", output_dir=tmp_path / "outputs")
+    result = generate_video(
+        image_path=image,
+        prompt="private prompt",
+        loras=[{"id": "ltx/style.safetensors", "strength": 0.65}],
+        output_dir=tmp_path / "outputs",
+    )
 
     assert deleted_inputs == ["media-studio-input-private.png"]
     assert private_output_lookups == ["job-private"]
     assert result["qa"]["representative_frame"] is None
     assert not (tmp_path / "outputs" / "qa" / "private-middle.jpg").exists()
+
+
+def test_video_generation_surfaces_private_backend_error_and_removes_upload(tmp_path: Path, monkeypatch) -> None:
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="ltx23-ic-ingredients-lora",
+    )
+    image = tmp_path / "start.png"
+    image.write_bytes(b"start")
+    deleted_inputs: list[str] = []
+
+    class Client:
+        def call_tool(self, name, arguments):
+            assert name in {descriptor.tool, descriptor.job_tool}
+            payload = (
+                {"job": {"id": "job-failed", "status": "queued"}}
+                if name == descriptor.tool
+                else {"job": {"id": "job-failed", "status": "error", "media_redacted": True}}
+            )
+            return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._upload_image", lambda *_args: "uploaded-start.png")
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+    monkeypatch.setattr("hivemind_content_studio.media_studio._video_dimensions", lambda _path: (768, 448))
+    monkeypatch.setattr("hivemind_content_studio.media_studio.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "hivemind_content_studio.media_studio._private_json",
+        lambda *_args: {
+            "id": "job-failed",
+            "status": "error",
+            "error": "native MLX LTX LoRA not found: ingredients.safetensors",
+        },
+    )
+    monkeypatch.setattr(
+        "hivemind_content_studio.media_studio._delete_uploaded_image",
+        lambda _descriptor, name: deleted_inputs.append(name),
+    )
+
+    with pytest.raises(RuntimeError, match="native MLX LTX LoRA not found: ingredients.safetensors"):
+        generate_video(
+            image_path=image,
+            prompt="Keep the same character identity.",
+            output_dir=tmp_path / "outputs",
+        )
+
+    assert deleted_inputs == ["uploaded-start.png"]
 
 
 def test_video_generation_routes_source_video_to_ltx_extension(tmp_path: Path, monkeypatch) -> None:
@@ -307,3 +388,186 @@ def test_video_generation_routes_source_video_to_ltx_extension(tmp_path: Path, m
     assert "width" not in captured
     assert deleted_inputs == ["media-studio-input-source.mp4"]
     assert Path(result["output"]).read_bytes() == b"extended-video"
+
+
+def test_video_generation_forwards_ingredient_views_without_start_frame(tmp_path: Path, monkeypatch) -> None:
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="ltx23-ic-ingredients-lora",
+    )
+    front = tmp_path / "front.png"
+    profile = tmp_path / "profile.png"
+    front.write_bytes(b"front")
+    profile.write_bytes(b"profile")
+    captured: dict = {}
+    deleted_inputs: list[str] = []
+
+    class Client:
+        def call_tool(self, name, arguments):
+            captured.update(arguments)
+            assert name == descriptor.tool
+            return {"content": [{"type": "text", "text": json.dumps({
+                "job": {"id": "ingredients-job", "status": "success", "media_urls": ["http://127.0.0.1:8788/image/ingredients.mp4"]},
+            })}]}
+
+    def fake_upload(_descriptor, image):
+        return f"uploaded-{Path(image).stem}.png"
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._upload_image", fake_upload)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+    monkeypatch.setattr("hivemind_content_studio.media_studio._download", lambda _url, destination, **_kwargs: destination.write_bytes(b"video"))
+    monkeypatch.setattr("hivemind_content_studio.media_studio.qa_video", lambda *_args, **_kwargs: {"ok": True, "representative_frame": None, "failures": []})
+    monkeypatch.setattr(
+        "hivemind_content_studio.media_studio._delete_uploaded_image",
+        lambda _descriptor, name: deleted_inputs.append(name),
+    )
+
+    generate_video(
+        prompt="The same character turns toward camera.",
+        reference_description="Two views of the same character.",
+        ingredient_images=[
+            {"image_path": front, "description": "front view"},
+            {"image_path": profile, "description": "right profile"},
+        ],
+        output_dir=tmp_path / "outputs",
+    )
+
+    assert "image_path" not in captured
+    assert "video_path" not in captured
+    assert captured["ingredient_images"] == [
+        {"image_path": "uploaded-front.png", "description": "front view"},
+        {"image_path": "uploaded-profile.png", "description": "right profile"},
+    ]
+    assert captured["reference_description"] == "Two views of the same character."
+    assert "width" not in captured and "height" not in captured
+    assert deleted_inputs == ["uploaded-front.png", "uploaded-profile.png"]
+
+
+def test_video_dimensions_support_a_high_resolution_tier() -> None:
+    assert video_dimensions_for_request(aspect_ratio="16:9") == (768, 448)
+    assert video_dimensions_for_request(aspect_ratio="16:9", resolution="high") == (1216, 704)
+    assert video_dimensions_for_request(aspect_ratio="3:4", resolution="high") == (768, 1024)
+    assert video_dimensions_for_request(aspect_ratio="1:1", resolution="High") == (896, 896)
+    # Unknown tiers fall back to the standard buckets.
+    assert video_dimensions_for_request(aspect_ratio="9:16", resolution="ultra") == (448, 768)
+    # Every high bucket stays VAE-aligned and close to its nominal aspect.
+    for aspect, (width, height) in {
+        "16:9": (1216, 704), "9:16": (704, 1216), "4:3": (1024, 768),
+        "3:4": (768, 1024), "1:1": (896, 896),
+    }.items():
+        assert width % 32 == 0 and height % 32 == 0
+        nominal_w, nominal_h = (int(part) for part in aspect.split(":"))
+        assert abs((width / height) - (nominal_w / nominal_h)) / (nominal_w / nominal_h) <= 0.05
+
+
+def test_video_generation_forwards_high_resolution_dimensions(tmp_path: Path, monkeypatch) -> None:
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="ltx23-ic-ingredients-lora",
+    )
+    sheet = tmp_path / "sheet.png"
+    sheet.write_bytes(b"sheet")
+    captured: dict = {}
+
+    class Client:
+        def call_tool(self, name, arguments):
+            captured.update(arguments)
+            assert name == descriptor.tool
+            return {"content": [{"type": "text", "text": json.dumps({
+                "job": {"id": "high-res-job", "status": "success", "media_urls": ["http://127.0.0.1:8788/image/high.mp4"]},
+            })}]}
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._upload_image", lambda _descriptor, image: f"uploaded-{Path(image).stem}.png")
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+    monkeypatch.setattr("hivemind_content_studio.media_studio._download", lambda _url, destination, **_kwargs: destination.write_bytes(b"video"))
+    monkeypatch.setattr("hivemind_content_studio.media_studio.qa_video", lambda *_args, **_kwargs: {"ok": True, "representative_frame": None, "failures": []})
+    monkeypatch.setattr("hivemind_content_studio.media_studio._delete_uploaded_image", lambda _descriptor, name: None)
+
+    generate_video(
+        prompt="A closeup of the character.",
+        reference_description="The reference sheet of the character.",
+        ingredient_images=[{"image_path": sheet, "description": ""}],
+        aspect_ratio="3:4",
+        resolution="high",
+        output_dir=tmp_path / "outputs",
+    )
+
+    assert captured["width"] == 768
+    assert captured["height"] == 1024
+
+
+def test_video_generation_forwards_start_frame_with_ingredient_views(tmp_path: Path, monkeypatch) -> None:
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="ltx23-ic-ingredients-lora",
+    )
+    start = tmp_path / "start.png"
+    front = tmp_path / "front.png"
+    profile = tmp_path / "profile.png"
+    start.write_bytes(b"start")
+    front.write_bytes(b"front")
+    profile.write_bytes(b"profile")
+    captured: dict = {}
+    deleted_inputs: list[str] = []
+
+    class Client:
+        def call_tool(self, name, arguments):
+            captured.update(arguments)
+            assert name == descriptor.tool
+            return {"content": [{"type": "text", "text": json.dumps({
+                "job": {"id": "ingredients-start-job", "status": "success", "media_urls": ["http://127.0.0.1:8788/image/ingredients.mp4"]},
+            })}]}
+
+    def fake_upload(_descriptor, image):
+        return f"uploaded-{Path(image).stem}.png"
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._upload_image", fake_upload)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+    monkeypatch.setattr("hivemind_content_studio.media_studio._download", lambda _url, destination, **_kwargs: destination.write_bytes(b"video"))
+    monkeypatch.setattr("hivemind_content_studio.media_studio.qa_video", lambda *_args, **_kwargs: {"ok": True, "representative_frame": None, "failures": []})
+    monkeypatch.setattr(
+        "hivemind_content_studio.media_studio._delete_uploaded_image",
+        lambda _descriptor, name: deleted_inputs.append(name),
+    )
+
+    generate_video(
+        image_path=start,
+        prompt="The same character turns toward camera.",
+        reference_description="Two views of the same character.",
+        ingredient_images=[
+            {"image_path": front, "description": "front view"},
+            {"image_path": profile, "description": "right profile"},
+        ],
+        aspect_ratio="9:16",
+        output_dir=tmp_path / "outputs",
+    )
+
+    assert captured["image_path"] == "uploaded-start.png"
+    assert captured["ingredient_images"] == [
+        {"image_path": "uploaded-front.png", "description": "front view"},
+        {"image_path": "uploaded-profile.png", "description": "right profile"},
+    ]
+    assert captured["width"] == 448
+    assert captured["height"] == 768
+    assert deleted_inputs == ["uploaded-start.png", "uploaded-front.png", "uploaded-profile.png"]

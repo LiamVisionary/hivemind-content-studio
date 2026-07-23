@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import subprocess
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -22,6 +23,41 @@ def load_app():
 
 
 class ZImageAppTests(unittest.TestCase):
+    def test_ltx_mlx_runtime_prefers_persistent_checkout_over_temp(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            studio = root / 'comfy' / 'hivemind-content-studio'
+            persistent = root / 'comfy' / 'ltx-2-mlx-opt'
+            legacy_temp = root / 'tmp' / 'ltx-2-mlx-opt'
+            studio.mkdir(parents=True)
+            persistent.mkdir(parents=True)
+            legacy_temp.mkdir(parents=True)
+            (persistent / 'pyproject.toml').write_text('[project]\nname="ltx-pipelines-mlx"\n')
+            (legacy_temp / 'pyproject.toml').write_text('[project]\nname="ltx-pipelines-mlx"\n')
+
+            resolved = app.resolve_ltx2_mlx_dir(
+                env={},
+                studio_root=studio,
+                home=root / 'home',
+                temp_root=root / 'tmp',
+            )
+
+            self.assertEqual(resolved, persistent.resolve())
+
+    def test_ltx_mlx_runtime_honors_explicit_override(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            override = Path(td) / 'custom-ltx-runtime'
+            resolved = app.resolve_ltx2_mlx_dir(
+                env={'LTX2_MLX_DIR': str(override)},
+                studio_root=Path(td) / 'studio',
+                home=Path(td) / 'home',
+                temp_root=Path(td) / 'tmp',
+            )
+
+            self.assertEqual(resolved, override.resolve())
+
     def test_active_output_is_not_encryptable_until_native_writer_finishes(self):
         app = load_app()
         with TemporaryDirectory() as td:
@@ -149,6 +185,33 @@ class ZImageAppTests(unittest.TestCase):
 
             self.assertFalse(staged.exists())
             self.assertTrue(outside.exists())
+
+    def test_private_input_cleanup_covers_reference_and_ingredient_sheet_staging(self):
+        # The Ingredients lane stages private references as media-studio-reference-*
+        # and composes the conditioning sheet as mcp_ingredients_*; both are plaintext
+        # in ComfyUI's input dir, so delete-input and the sweeper must cover them.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_root = Path(td) / 'input'
+            input_root.mkdir()
+            reference = input_root / 'media-studio-reference-abc123.png'
+            sheet = input_root / 'mcp_ingredients_1721600000_deadbeef.png'
+            inline = input_root / 'media-studio-inline-0123456789abcdef.png'
+            unrelated = input_root / 'user-photo.png'
+            for path in (reference, sheet, inline, unrelated):
+                path.write_bytes(b'pixels')
+            old = time.time() - app.PRIVATE_INPUT_MAX_AGE_SECONDS - 60
+            for path in (reference, sheet, inline, unrelated):
+                os.utime(path, (old, old))
+
+            with patch.object(app, 'COMFY_INPUT_DIR', input_root):
+                self.assertTrue(app.delete_private_input(reference.name))
+                self.assertEqual(app.cleanup_staged_private_inputs_once(), 2)
+
+            self.assertFalse(reference.exists())
+            self.assertFalse(sheet.exists())
+            self.assertFalse(inline.exists())
+            self.assertTrue(unrelated.exists())
 
     def test_private_media_defaults_do_not_allow_plaintext_grace_or_token_printing(self):
         source = (BASE / 'app.py').read_text(encoding='utf-8')
@@ -391,6 +454,15 @@ class ZImageAppTests(unittest.TestCase):
             self.assertEqual(Path(result['path']).parent.resolve(), (tmp_path / 'models' / 'loras').resolve())
             self.assertEqual(progress[-1], (6, 6))
             self.assertGreaterEqual(len(progress), 3)
+
+    def test_civitai_expected_type_accepts_lora_families_and_rejects_checkpoints(self):
+        app = load_app()
+
+        app.validate_civitai_expected_type({'model': {'type': 'LORA'}}, 'LORA')
+        app.validate_civitai_expected_type({'model': {'type': 'LoCon'}}, 'LORA')
+        with self.assertRaisesRegex(RuntimeError, 'Expected a Civitai LoRA URL'):
+            app.validate_civitai_expected_type({'model': {'type': 'Checkpoint'}}, 'LORA')
+
     def test_civitai_download_url_uses_query_token_not_bearer_redirect_header(self):
         app = load_app()
         with TemporaryDirectory() as td:
@@ -691,10 +763,32 @@ class ZImageAppTests(unittest.TestCase):
                             'extra': {
                                 'nativeMlxLtx': {
                                     'enabled': True,
-                                    'variant': 'regular-q8-distilled',
+                                    'variant': 'regular-q8-dev-ic',
                                     'pipeline': 'ic-lora',
                                     'defaults': {'image': 'reference-sheet.png', 'width': 768, 'height': 448, 'frames': 121, 'frame_rate': 24, 'seed': 7},
-                                    'icLora': {'single_stage': True, 'conditioning_strength': 1.0, 'reference_strength': 1.0},
+                                    'keyframes': [{'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'}],
+                                    'ingredientSheet': {
+                                        'sourceCount': 4,
+                                        'columns': 2,
+                                        'rows': 2,
+                                        'conditioningOnly': True,
+                                    },
+                                    'icLora': {
+                                        'single_stage': True,
+                                        'reference_min_frames': 121,
+                                        'target_min_frames': 121,
+                                        'image_crf': 0,
+                                        'conditioning_strength': 1.0,
+                                        'reference_strength': 1.0,
+                                        'dev_transformer': 'transformer-dev.safetensors',
+                                        'distilled_lora': 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
+                                        'distilled_lora_strength': 0.5,
+                                        'guided_dev': False,
+                                        'stage1_steps': 8,
+                                        'cfg_scale': 1.0,
+                                        'stg_scale': 0.0,
+                                        'runtime_timeout_seconds': 2400,
+                                    },
                                     'loras': [{'name': 'ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors', 'strength': 1.4}],
                                 },
                             },
@@ -712,15 +806,44 @@ class ZImageAppTests(unittest.TestCase):
         self.assertIsNotNone(native)
         self.assertEqual(native['operation'], 'ic-lora')
         self.assertEqual(native['reference_image_path'], 'reference-sheet.png')
-        self.assertEqual(native['images'], [])
+        self.assertEqual(native['images'], [{'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'}])
         self.assertEqual(native['options']['width'], 768)
         self.assertEqual(native['options']['height'], 448)
         self.assertEqual(native['options']['frames'], 121)
         self.assertTrue(native['options']['single_stage'])
+        self.assertEqual(native['options']['reference_min_frames'], 121)
+        self.assertEqual(native['options']['target_min_frames'], 121)
+        self.assertEqual(native['options']['ingredient_source_count'], 4)
+        self.assertEqual(native['options']['ingredient_sheet_columns'], 2)
+        self.assertEqual(native['options']['ingredient_sheet_rows'], 2)
+        self.assertTrue(native['options']['ingredient_conditioning_only'])
+        self.assertEqual(native['options']['image_crf'], 0)
+        self.assertEqual(native['variant'], 'regular-q8-dev-ic')
+        self.assertEqual(native['options']['dev_transformer'], 'transformer-dev.safetensors')
+        self.assertFalse(native['options']['guided_dev'])
+        self.assertEqual(native['options']['stage1_steps'], 8)
+        self.assertEqual(native['options']['cfg_scale'], 1.0)
+        self.assertEqual(native['options']['stg_scale'], 0.0)
+        self.assertEqual(native['options']['runtime_timeout_seconds'], 2400)
+        self.assertEqual(native['options']['distilled_lora'], 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors')
+        self.assertEqual(native['options']['distilled_lora_strength'], 0.5)
         self.assertEqual(native['options']['loras'][0]['scale'], 1.4)
         self.assertEqual(fallback_native['operation'], 'ic-lora')
         self.assertEqual(fallback_native['reference_image_path'], 'reference-sheet.png')
         self.assertEqual(fallback_native['options']['loras'][0]['scale'], 1.4)
+
+    def test_native_mlx_ltx_eros_ingredients_variant_uses_eros_dev_model(self):
+        app = load_app()
+
+        spec = app.LTX2_MLX_VARIANTS['eros-q8-dev-ic']
+
+        self.assertEqual(
+            spec['model'],
+            str(app.MLX_MODELS_ROOT / 'ltx-2.3-10eros-v1-mlx-q8-dev'),
+        )
+        self.assertFalse(spec['video_distilled'])
+        self.assertEqual(spec['backend_prefix'], 'mlx-ltx-eros')
+        self.assertEqual(app._normalize_ltx_mlx_variant('eros-ingredients'), 'eros-q8-dev-ic')
 
     def test_native_mlx_ltx_runner_uses_ic_lora_with_lossless_reference_video(self):
         app = load_app()
@@ -735,25 +858,30 @@ class ZImageAppTests(unittest.TestCase):
             output_dir.mkdir()
             ltx_dir.mkdir()
             model_dir.mkdir()
+            (model_dir / 'transformer-dev.safetensors').write_bytes(b'dev-transformer')
+            (model_dir / 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors').write_bytes(b'distilled-lora')
             lora.parent.mkdir(parents=True)
             lora.write_bytes(b'ingredients-lora')
             (input_dir / 'reference-sheet.png').write_bytes(b'reference-sheet')
+            (input_dir / 'start.png').write_bytes(b'start-frame')
             captured = {}
 
-            def fake_reference_video(_image, output, _frames, _fps):
+            def fake_reference_video(_image, output, frames, _fps):
+                captured['reference_frames'] = frames
                 output.parent.mkdir(parents=True, exist_ok=True)
                 output.write_bytes(b'lossless-reference-video')
                 return output
 
             def fake_run(_job_id, _rec, command, **_kwargs):
                 captured['command'] = command
+                captured['env'] = _kwargs['env']
                 out = Path(command[command.index('-o') + 1])
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(b'video' * 600)
                 return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
 
             variants = {key: dict(value) for key, value in app.LTX2_MLX_VARIANTS.items()}
-            variants['regular-q8-distilled']['model'] = str(model_dir)
+            variants['regular-q8-dev-ic']['model'] = str(model_dir)
             with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
                  patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
                  patch.object(app, 'COMFY_OUTPUT_DIR', output_dir), \
@@ -762,35 +890,68 @@ class ZImageAppTests(unittest.TestCase):
                  patch.object(app, 'LTX2_MLX_DIR', ltx_dir), \
                  patch.object(app, 'LTX2_MLX_VARIANTS', variants), \
                  patch.object(app, '_create_native_ltx_static_reference_video', side_effect=fake_reference_video), \
+                 patch.object(
+                     app,
+                     '_prepare_native_ltx_anchor_canvas',
+                     side_effect=lambda source, *_args: (source, {'mode': 'passthrough', 'cached': False}),
+                 ), \
                  patch.object(app, '_run_native_ltx_subprocess', side_effect=fake_run), \
                  patch.object(app, 'append_history'), \
-                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path: path):
+                patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path: path):
                 app.run_native_mlx_ltx_video('job-ingredients', {
-                    'variant': 'regular-q8-distilled',
+                    'variant': 'regular-q8-dev-ic',
                     'operation': 'ic-lora',
                     'prompt': '### Reference Sheet Description\na cartoon character panel\n### Target Description\nshot',
                     'reference_image_path': 'reference-sheet.png',
-                    'images': [],
+                    'images': [{'image_path': 'start.png', 'frame': 0, 'strength': 1.0, 'role': 'start'}],
                     'options': {
                         'width': 768,
                         'height': 448,
-                        'frames': 121,
+                        'frames': 25,
                         'frame_rate': 24,
                         'seed': 7,
                         'single_stage': True,
                         'conditioning_strength': 1.0,
                         'reference_strength': 1.0,
+                        'reference_min_frames': 121,
+                        'target_min_frames': 121,
+                        'image_crf': 0,
+                        'dev_transformer': 'transformer-dev.safetensors',
+                        'distilled_lora': 'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
+                        'distilled_lora_strength': 0.5,
+                        'guided_dev': False,
+                        'stage1_steps': 8,
+                        'cfg_scale': 1.0,
+                        'stg_scale': 0.0,
+                        'runtime_timeout_seconds': 2400,
                         'loras': [{'name': 'ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors', 'strength': 1.4}],
                     },
                 })
 
             command = captured['command']
+            self.assertEqual(captured['reference_frames'], 121)
             self.assertEqual(command[:4], ['uv', 'run', 'ltx-2-mlx', 'ic-lora'])
             self.assertEqual(command[command.index('--lora') + 1:command.index('--lora') + 3], [str(lora.resolve()), '1.4'])
             reference_arg = Path(command[command.index('--video-conditioning') + 1])
             self.assertEqual(command[command.index('--video-conditioning') + 2], '1.0')
+            self.assertEqual(os.path.realpath(reference_arg.parent), os.path.realpath(input_dir / '.ltx-reference'))
             self.assertIn('--single-stage', command)
-            self.assertNotIn('--image', command)
+            self.assertEqual(command[command.index('--dev-transformer') + 1], 'transformer-dev.safetensors')
+            self.assertNotIn('--guided-dev', command)
+            self.assertNotIn('--stage1-steps', command)
+            self.assertNotIn('--cfg-scale', command)
+            self.assertNotIn('--stg-scale', command)
+            self.assertEqual(
+                command[command.index('--distilled-lora') + 1],
+                'ltx-2.3-22b-distilled-lora-384-1.1.safetensors',
+            )
+            self.assertEqual(command[command.index('--distilled-lora-strength') + 1], '0.5')
+            image_arg = command.index('--image')
+            self.assertEqual(
+                command[image_arg + 1:image_arg + 5],
+                [str((input_dir / 'start.png').resolve()), '0', '1.0', '0'],
+            )
+            self.assertEqual(command[command.index('-f') + 1], '121')
             self.assertFalse(reference_arg.exists())
             self.assertEqual(app.jobs['job-ingredients']['status'], 'success')
 
@@ -1046,34 +1207,48 @@ class ZImageAppTests(unittest.TestCase):
             'grounding_px': 768,
         }
 
-        fallback_graph = app.build_krea2_turbo_identity_prompt(
-            'private prompt', options=options, profile='apple-silicon'
-        )
-        template_graph = app.build_krea2_turbo_identity_prompt(
-            'private prompt', image_name='None', options=options, profile='apple-silicon'
-        )
-        edit_graph = app.build_krea2_turbo_identity_prompt(
-            'private prompt', image_name='reference.png', options=options, profile='apple-silicon'
-        )
+        with TemporaryDirectory() as td:
+            comfy = Path(td)
+            model_dir = comfy / 'models' / 'diffusion_models'
+            model_dir.mkdir(parents=True)
+            (model_dir / app.KREA2_IDENTITY_CONVROT_MODEL).write_bytes(b'checkpoint')
+            with patch.object(app, 'COMFY', comfy):
+                fallback_graph = app.build_krea2_turbo_identity_prompt(
+                    'private prompt', options=options, profile='apple-silicon'
+                )
+                template_graph = app.build_krea2_turbo_identity_prompt(
+                    'private prompt', image_name='None', options=options, profile='apple-silicon'
+                )
+                edit_graph = app.build_krea2_turbo_identity_prompt(
+                    'private prompt', image_name='reference.png', options=options, profile='apple-silicon'
+                )
+                custom_strength_graph = app.build_krea2_turbo_identity_prompt(
+                    'private prompt',
+                    image_name='reference.png',
+                    options={**options, 'identity_strength': 0.8},
+                    profile='apple-silicon',
+                )
 
         self.assertEqual(fallback_graph['1']['class_type'], 'MultiLoRAStackToPreLora')
         self.assertEqual(fallback_graph['1']['inputs']['lora_stack'], '[]')
         self.assertEqual(fallback_graph['2']['class_type'], 'OTUNetLoaderW8A8')
         self.assertEqual(fallback_graph['4']['class_type'], 'TextEncodeKrea2')
         self.assertNotIn('HivemindOptionalLoadImage', {item['class_type'] for item in fallback_graph.values()})
-        self.assertEqual(template_graph['1']['inputs']['image'], 'None')
+        self.assertNotIn('HivemindOptionalLoadImage', {item['class_type'] for item in template_graph.values()})
         self.assertEqual(edit_graph['1']['inputs']['image'], 'reference.png')
-        self.assertEqual(template_graph['2']['class_type'], 'Krea2IdentityOptionalPreLora')
-        self.assertEqual(template_graph['3']['class_type'], 'OTUNetLoaderW8A8')
-        self.assertEqual(template_graph['3']['inputs']['unet_name'], 'krea2_turbo_bf16.safetensors')
-        self.assertTrue(template_graph['3']['inputs']['on_the_fly_quantization'])
-        self.assertTrue(template_graph['3']['inputs']['enable_convrot'])
-        self.assertEqual(template_graph['5']['class_type'], 'Krea2IdentityOptionalEncode')
-        self.assertEqual(template_graph['9']['class_type'], 'Krea2IdentityOptionalModelPatch')
-        self.assertEqual(template_graph['7']['inputs']['width'], 1024)
-        self.assertEqual(template_graph['7']['inputs']['height'], 768)
-        self.assertEqual(edit_graph['2']['inputs']['lora_name'], 'krea2_identity_edit_v1_2.safetensors')
+        self.assertNotIn('2', edit_graph)
+        self.assertEqual(edit_graph['3']['class_type'], 'OTUNetLoaderW8A8')
+        self.assertEqual(edit_graph['3']['inputs']['unet_name'], app.KREA2_IDENTITY_CONVROT_MODEL)
+        self.assertFalse(edit_graph['3']['inputs']['on_the_fly_quantization'])
+        self.assertTrue(edit_graph['3']['inputs']['enable_convrot'])
+        self.assertEqual(edit_graph['5']['class_type'], 'Krea2IdentityOptionalEncode')
+        self.assertEqual(edit_graph['9']['class_type'], 'Krea2IdentityOptionalModelPatch')
+        self.assertTrue(edit_graph['9']['inputs']['cache_static_tokens'])
+        self.assertEqual(edit_graph['7']['inputs']['width'], 1024)
+        self.assertEqual(edit_graph['7']['inputs']['height'], 768)
         self.assertEqual(edit_graph['9']['inputs']['ref_boost'], 4.0)
+        self.assertEqual(custom_strength_graph['2']['inputs']['lora_name'], 'krea2_identity_edit_v1_2.safetensors')
+        self.assertTrue(custom_strength_graph['3']['inputs']['on_the_fly_quantization'])
 
     def test_krea2_identity_graph_uses_regular_portable_turbo_without_an_image(self):
         app = load_app()
@@ -1090,11 +1265,156 @@ class ZImageAppTests(unittest.TestCase):
         template_graph = app.build_krea2_turbo_identity_prompt(
             'private prompt', image_name='None', profile='cuda'
         )
-        self.assertEqual(template_graph['3']['class_type'], 'Krea2IdentityOptionalLoraModel')
+        self.assertNotIn('Krea2IdentityOptionalLoraModel', {item['class_type'] for item in template_graph.values()})
         self.assertEqual(edit_graph['3']['class_type'], 'Krea2IdentityOptionalLoraModel')
         self.assertEqual(edit_graph['3']['inputs']['model'], ['2', 0])
         self.assertEqual(edit_graph['3']['inputs']['image'], ['1', 0])
         self.assertEqual(edit_graph['9']['inputs']['model'], ['3', 0])
+
+    def test_krea2_seed_minus_one_randomizes_instead_of_clamping_to_zero(self):
+        app = load_app()
+        import krea2_identity_workflow as workflow
+
+        with patch.object(workflow.random, 'randint', return_value=123456789) as randint:
+            text_graph = app.build_krea2_turbo_identity_prompt(
+                'private prompt', options={'seed': -1}, profile='cuda'
+            )
+            edit_graph = app.build_krea2_turbo_identity_prompt(
+                'private prompt', image_name='reference.png', options={'seed': -1}, profile='cuda'
+            )
+        self.assertEqual(text_graph['7']['inputs']['seed'], 123456789)
+        self.assertEqual(edit_graph['10']['inputs']['seed'], 123456789)
+        randint.assert_called_with(0, workflow.SEED_MAX)
+
+        with patch.object(workflow.random, 'randint', return_value=555):
+            self.assertEqual(app.resolve_seed_option({'seed': -1}), 555)
+            self.assertEqual(app.resolve_seed_option({}), 555)
+            self.assertEqual(app.resolve_seed_option({'seed': 'garbage'}), 555)
+        self.assertEqual(app.resolve_seed_option({'seed': 0}), 0)
+        self.assertEqual(app.resolve_seed_option({'seed': 7}), 7)
+        self.assertEqual(app.resolve_seed_option({'seed': 2_147_483_647}), workflow.SEED_MAX)
+
+    def test_ltx_anchor_outpaint_preserves_source_aspect_and_has_apple_cuda_parity(self):
+        app = load_app()
+
+        apple = app.build_krea2_turbo_outpaint_prompt(
+            'locked scene',
+            'portrait.png',
+            source_width=720,
+            source_height=1024,
+            options={'width': 768, 'height': 448, 'seed': 42},
+            profile='apple-silicon',
+            identity_checkpoint_available=True,
+        )
+        cuda = app.build_krea2_turbo_outpaint_prompt(
+            'locked scene',
+            'portrait.png',
+            source_width=720,
+            source_height=1024,
+            options={'width': 768, 'height': 448, 'seed': 42},
+            profile='cuda',
+        )
+
+        self.assertEqual(apple['geometry']['scaled_width'], 315)
+        self.assertEqual(apple['geometry']['scaled_height'], 448)
+        self.assertEqual(apple['geometry']['left'], 226)
+        self.assertEqual(apple['geometry']['right'], 227)
+        self.assertEqual(apple['output'], ['18', 0])
+        self.assertEqual(apple['graph']['18']['class_type'], 'ImageCompositeMasked')
+        self.assertEqual(apple['graph']['14']['class_type'], 'ImagePadForOutpaint')
+        self.assertEqual(apple['graph']['15']['class_type'], 'InpaintModelConditioning')
+        self.assertEqual(apple['graph']['16']['class_type'], 'DifferentialDiffusion')
+        self.assertEqual(apple['graph']['20']['class_type'], 'ImageBlur')
+        self.assertEqual(apple['graph']['15']['inputs']['pixels'], ['21', 0])
+        self.assertEqual(apple['graph']['10']['inputs']['denoise'], 0.7)
+        self.assertEqual(apple['graph']['3']['class_type'], 'OTUNetLoaderW8A8')
+        self.assertEqual(cuda['geometry'], apple['geometry'])
+        self.assertEqual(cuda['graph']['2']['class_type'], 'UNETLoader')
+        self.assertEqual(cuda['graph']['3']['class_type'], 'Krea2IdentityOptionalLoraModel')
+        self.assertEqual(cuda['graph']['18']['inputs'], apple['graph']['18']['inputs'])
+
+    def test_ltx_anchor_context_excludes_reference_sheet_inventory(self):
+        app = load_app()
+        prompt = (
+            '### Reference Sheet Description\n'
+            'Character B and several optional props.\n'
+            '### Target Description\n'
+            'Character A remains alone beside the counter.'
+        )
+
+        self.assertEqual(
+            app._ltx_target_description(prompt),
+            'Character A remains alone beside the counter.',
+        )
+
+    def test_krea2_user_loras_use_pre_lora_on_apple_and_model_loaders_on_cuda(self):
+        app = load_app()
+        options = {'loras': [{'id': 'styles/look.safetensors', 'strength': 0.65}]}
+
+        apple_text = app.build_krea2_turbo_identity_prompt(
+            'private prompt', options=options, profile='apple-silicon'
+        )
+        apple_edit = app.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='reference.png', options=options, profile='apple-silicon'
+        )
+        cuda_text = app.build_krea2_turbo_identity_prompt(
+            'private prompt', options=options, profile='cuda'
+        )
+        cuda_edit = app.build_krea2_turbo_identity_prompt(
+            'private prompt', image_name='reference.png', options=options, profile='cuda'
+        )
+
+        self.assertEqual(
+            json.loads(apple_text['1']['inputs']['lora_stack']),
+            [{'on': True, 'lora': 'styles/look.safetensors', 'strength': 0.65}],
+        )
+        apple_edit_stack = json.loads(apple_edit['2']['inputs']['lora_stack'])
+        self.assertEqual(apple_edit_stack[0]['lora'], 'krea2_identity_edit_v1_2.safetensors')
+        self.assertEqual(apple_edit_stack[1]['lora'], 'styles/look.safetensors')
+        self.assertEqual(apple_edit['3']['inputs']['pre_lora'], ['2', 0])
+        self.assertEqual(cuda_text['20']['class_type'], 'LoraLoaderModelOnly')
+        self.assertEqual(cuda_text['20']['inputs']['model'], ['2', 0])
+        self.assertEqual(cuda_text['7']['inputs']['model'], ['20', 0])
+        self.assertEqual(cuda_edit['20']['inputs']['model'], ['3', 0])
+        self.assertEqual(cuda_edit['9']['inputs']['model'], ['20', 0])
+
+    def test_model_scoped_lora_catalog_and_selection_do_not_mutate_global_state(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            comfy = Path(td) / 'ComfyUI'
+            lora_root = comfy / 'models' / 'loras'
+            lora_root.mkdir(parents=True)
+            krea = lora_root / 'krea-look.safetensors'
+            zimage = lora_root / 'z-look.safetensors'
+            krea.write_bytes(b'not-a-real-safetensor')
+            zimage.write_bytes(b'not-a-real-safetensor')
+            Path(str(krea) + '.civitai.json').write_text(json.dumps({
+                'baseModel': 'Krea 2',
+                'name': 'Krea Look',
+                'trainedWords': ['krea-look'],
+            }))
+            Path(str(zimage) + '.civitai.json').write_text(json.dumps({
+                'baseModel': 'ZImageTurbo',
+                'name': 'Z Look',
+            }))
+            krea.with_suffix('.webp').write_bytes(b'preview')
+            selected_file = Path(td) / 'selected.json'
+
+            with patch.object(app, 'COMFY', comfy), patch.object(app, 'SELECTED_LORAS_FILE', selected_file):
+                catalog = app.local_lora_catalog(['Krea 2'])
+                selected = app.resolve_lora_selection(
+                    [
+                        {'id': 'krea-look.safetensors', 'strength': 0.75},
+                        {'id': 'z-look.safetensors', 'strength': 1.0},
+                    ],
+                    ['Krea 2'],
+                )
+
+            self.assertEqual([item['id'] for item in catalog], ['krea-look.safetensors'])
+            self.assertEqual(catalog[0]['displayName'], 'Krea Look')
+            self.assertTrue(catalog[0]['hasPreview'])
+            self.assertEqual([(item['id'], item['strength']) for item in selected], [('krea-look.safetensors', 0.75)])
+            self.assertFalse(selected_file.exists())
 
     def test_generate_api_routes_optional_image_to_krea2_identity_backend(self):
         app = load_app()
@@ -1114,9 +1434,15 @@ class ZImageAppTests(unittest.TestCase):
         with TemporaryDirectory() as td:
             input_dir = Path(td) / 'input'
             input_dir.mkdir()
+            comfy = Path(td) / 'ComfyUI'
+            lora = comfy / 'models' / 'loras' / 'krea-look.safetensors'
+            lora.parent.mkdir(parents=True)
+            lora.write_bytes(b'lora')
+            Path(str(lora) + '.civitai.json').write_text('{"baseModel":"Krea 2"}')
             server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
             server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
             with patch.object(app, 'TOKEN', 'test-token'), \
+                 patch.object(app, 'COMFY', comfy), \
                  patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
                  patch.object(app, 'jobs', {}), \
                  patch.object(app, 'run_comfy_krea2_identity', side_effect=fake_run):
@@ -1129,6 +1455,7 @@ class ZImageAppTests(unittest.TestCase):
                             'prompt': 'preserve this identity in a studio portrait',
                             'image_base64': 'data:image/png;base64,' + base64.b64encode(b'image').decode(),
                             'ref_boost': 5,
+                            'loras': [{'id': 'krea-look.safetensors', 'strength': 0.7}],
                         }).encode('utf-8'),
                         headers={
                             'Authorization': 'Bearer test-token',
@@ -1151,6 +1478,7 @@ class ZImageAppTests(unittest.TestCase):
         self.assertTrue(captured['image_path'].name.startswith('media-studio-inline-'))
         self.assertEqual(captured['image_bytes'], b'image')
         self.assertEqual(captured['options']['ref_boost'], 5)
+        self.assertEqual(captured['options']['loras'], [{'id': 'krea-look.safetensors', 'strength': 0.7}])
 
     def test_native_loras_from_generation_request_resolves_selected_loras(self):
         app = load_app()
@@ -1387,6 +1715,54 @@ class ZImageAppTests(unittest.TestCase):
         self.assertIsNotNone(native)
         self.assertEqual(native['options']['loras'], [{'filePath': str(lora.resolve()), 'scale': 0.8}])
 
+    def test_comfy_biglove_fallback_chains_selected_loras_before_sampling(self):
+        app = load_app()
+        captured = {}
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            comfy = root / 'ComfyUI'
+            input_dir = comfy / 'input'
+            output_dir = comfy / 'output'
+            lora = comfy / 'models' / 'loras' / 'looks' / 'style.safetensors'
+            input_dir.mkdir(parents=True)
+            output_dir.mkdir(parents=True)
+            lora.parent.mkdir(parents=True)
+            source = input_dir / 'source.png'
+            source.write_bytes(b'image')
+            lora.write_bytes(b'lora')
+
+            def fake_urlopen(request, timeout=0):
+                if isinstance(request, app.Request):
+                    captured.update(json.loads(request.data.decode('utf-8')))
+                    return io.BytesIO(b'{"prompt_id":"prompt-1"}')
+                return io.BytesIO(json.dumps({
+                    'prompt-1': {
+                        'status': {'status_str': 'error', 'completed': False},
+                        'outputs': {},
+                    },
+                }).encode('utf-8'))
+
+            with patch.object(app, 'COMFY', comfy), \
+                 patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', output_dir), \
+                 patch.object(app, 'OUT_DIR', output_dir), \
+                 patch.object(app, 'urlopen', side_effect=fake_urlopen), \
+                 patch.object(app, 'append_history'), \
+                 patch.object(app, 'jobs', {}):
+                app.run_comfy_klein3_edit(
+                    'job-1',
+                    'private prompt',
+                    source,
+                    {'loras': [{'filePath': str(lora), 'scale': 0.6}]},
+                )
+
+        graph = captured['prompt']
+        self.assertEqual(graph['11']['class_type'], 'LoraLoaderModelOnly')
+        self.assertEqual(graph['11']['inputs']['model'], ['1', 0])
+        self.assertEqual(graph['11']['inputs']['lora_name'], str(Path('looks') / 'style.safetensors'))
+        self.assertEqual(graph['11']['inputs']['strength_model'], 0.6)
+        self.assertEqual(graph['8']['inputs']['model'], ['11', 0])
+
     def test_mxfp8_biglove_multi_lora_stack_string_uses_native_route_with_lora_payload(self):
         app = load_app()
         with TemporaryDirectory() as td:
@@ -1556,6 +1932,138 @@ class ZImageAppTests(unittest.TestCase):
 
         data = json.loads(rewritten.decode('utf-8'))
         self.assertEqual(data['prompt']['1']['inputs']['unet_name'], 'BigLoveKlein3_mxfp8.safetensors')
+
+
+class CoupleModeTests(unittest.TestCase):
+    """Regional (couple) auto-workflows: single-subject by default, explicit regions when enabled."""
+
+    @staticmethod
+    def _regional_graph():
+        return {
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "waiANIMA_v10Base10.safetensors"}},
+            "2": {"class_type": "LoadQwen35AnimaCLIP", "inputs": {"clip_name": "qwen35_4b.safetensors"}},
+            "11": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": "turbo.safetensors"}},
+            "4": {"class_type": "ForgeCoupleRegionalPrompt", "inputs": {
+                "model": ["11", 0], "clip": ["2", 0],
+                "positive_text": "a\nb", "width": 1024, "height": 1344,
+                "mode": "Basic", "background": "None", "background_weight": 0.2,
+                "advanced_mapping": "[[0.0, 0.5, 0.0, 1.0, 1.0], [0.5, 1.0, 0.0, 1.0, 1.0]]",
+            }},
+            "6": {"class_type": "EmptyQwenImageLayeredLatentImage", "inputs": {"width": 1024, "height": 1344}},
+            "7": {"class_type": "KSampler", "inputs": {
+                "model": ["4", 0], "positive": ["4", 1], "negative": ["4", 1],
+                "latent_image": ["6", 0], "seed": 1, "steps": 8, "cfg": 1.0,
+            }},
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0]}},
+        }
+
+    def test_couple_off_splices_regional_node_for_full_canvas(self):
+        app = load_app()
+        graph = self._regional_graph()
+        self.assertTrue(app._auto_bypass_regional_prompt_node(graph, "4", "a person by a bonfire", "lowres"))
+        self.assertNotIn("4", graph)
+        sampler = graph["7"]["inputs"]
+        self.assertEqual(sampler["model"], ["11", 0])
+        pos_id, neg_id = sampler["positive"][0], sampler["negative"][0]
+        self.assertNotEqual(pos_id, neg_id)
+        self.assertEqual(graph[pos_id]["class_type"], "CLIPTextEncode")
+        self.assertEqual(graph[pos_id]["inputs"], {"clip": ["2", 0], "text": "a person by a bonfire"})
+        self.assertEqual(graph[neg_id]["inputs"], {"clip": ["2", 0], "text": "lowres"})
+
+    def test_couple_on_builds_advanced_mapping_with_split_and_anchor(self):
+        app = load_app()
+        node = self._regional_graph()["4"]
+        app._auto_apply_couple_regions(node, "positive_text", "sakura\nblack hair", {"couple_split": 0.7, "couple_direction": "horizontal"})
+        self.assertEqual(node["inputs"]["mode"], "Advanced")
+        self.assertEqual(node["inputs"]["background"], "None")
+        rows = json.loads(node["inputs"]["advanced_mapping"])
+        self.assertEqual(rows, [[0.0, 0.7, 0.0, 1.0, 1.0], [0.7, 1.0, 0.0, 1.0, 1.0]])
+        # Composition anchor per line — without it regions blend into ONE subject.
+        self.assertEqual(node["inputs"]["positive_text"], "2girls, sakura\n2girls, black hair")
+
+    def test_couple_pair_anchor_replaces_conflicting_solo_tags(self):
+        app = load_app()
+        node = self._regional_graph()["4"]
+        app._auto_apply_couple_regions(
+            node, "positive_text", "1girl, sakura\nSOLO, 1boy, dark knight",
+            {"couple_pair": "mixed"},
+        )
+        self.assertEqual(node["inputs"]["positive_text"], "1boy, 1girl, sakura\n1boy, 1girl, dark knight")
+
+    def test_couple_shared_scene_adds_full_canvas_row_and_vertical_split(self):
+        app = load_app()
+        node = self._regional_graph()["4"]
+        app._auto_apply_couple_regions(
+            node, "positive_text", "bonfire night\nsakura\nblack hair",
+            {"couple_shared": True, "couple_split": 0.5, "couple_direction": "vertical"},
+        )
+        rows = json.loads(node["inputs"]["advanced_mapping"])
+        self.assertEqual(rows[0], [0.0, 1.0, 0.0, 1.0, 0.2])  # shared scene at the node's background weight
+        self.assertEqual(rows[1], [0.0, 1.0, 0.0, 0.5, 1.0])
+        self.assertEqual(rows[2], [0.0, 1.0, 0.5, 1.0, 1.0])
+        # Shared scene line stays un-anchored; character lines get the pair anchor.
+        self.assertEqual(node["inputs"]["positive_text"], "bonfire night\n2girls, sakura\n2girls, black hair")
+
+    def test_couple_single_line_duplicates_character(self):
+        app = load_app()
+        node = self._regional_graph()["4"]
+        app._auto_apply_couple_regions(node, "positive_text", "one line", {})
+        self.assertEqual(node["inputs"]["positive_text"], "2girls, one line\n2girls, one line")
+
+    def test_couple_on_gets_real_negative_conditioning(self):
+        app = load_app()
+        graph = self._regional_graph()
+        sampler = graph["7"]["inputs"]
+        self.assertEqual(sampler["negative"], ["4", 1])  # template: neg == pos, cfg is a no-op
+        self.assertTrue(app._auto_split_regional_negative(graph, sampler, "4", "blurry, lowres"))
+        self.assertIn("4", graph)  # regional node stays for couple mode
+        self.assertEqual(sampler["positive"], ["4", 1])
+        neg_id = sampler["negative"][0]
+        self.assertNotEqual(neg_id, "4")
+        self.assertEqual(graph[neg_id]["class_type"], "CLIPTextEncode")
+        self.assertEqual(graph[neg_id]["inputs"], {"clip": ["2", 0], "text": "blurry, lowres"})
+
+    def test_regional_negative_rewire_skips_distinct_negative_nodes(self):
+        app = load_app()
+        graph = self._regional_graph()
+        graph["12"] = {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": "already separate"}}
+        sampler = graph["7"]["inputs"]
+        sampler["negative"] = ["12", 0]
+        self.assertFalse(app._auto_split_regional_negative(graph, sampler, "4", "blurry"))
+        self.assertEqual(sampler["negative"], ["12", 0])
+
+    def test_user_loras_chain_above_the_model_loader(self):
+        app = load_app()
+        graph = self._regional_graph()
+        sampler = graph["7"]["inputs"]
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            lora_dir = root / "models" / "loras"
+            lora_dir.mkdir(parents=True)
+            (lora_dir / "sakura_anima.safetensors").write_bytes(b"")
+            with patch.object(app, "COMFY", root):
+                applied = app._auto_apply_model_loras(graph, sampler, [
+                    {"id": "sakura_anima.safetensors", "path": str(lora_dir / "sakura_anima.safetensors"), "strength": 0.8},
+                ])
+        self.assertEqual(applied, 1)
+        new_id = graph["11"]["inputs"]["model"][0]
+        self.assertNotEqual(new_id, "1")  # turbo lora now feeds from the user lora...
+        self.assertEqual(graph[new_id]["class_type"], "LoraLoaderModelOnly")
+        self.assertEqual(graph[new_id]["inputs"]["lora_name"], "sakura_anima.safetensors")
+        self.assertEqual(graph[new_id]["inputs"]["strength_model"], 0.8)
+        self.assertEqual(graph[new_id]["inputs"]["model"], ["1", 0])  # ...which feeds from the loader
+        self.assertEqual(sampler["model"], ["4", 0])  # sampler wiring untouched
+
+    def test_normalize_couple_options_coerces_types(self):
+        app = load_app()
+        options = {"couple_mode": "true", "couple_shared": 0, "couple_split": "2.5", "couple_direction": "Diagonal", "couple_pair": "Robots"}
+        app._normalize_couple_options(options)
+        self.assertIs(options["couple_mode"], True)
+        self.assertIs(options["couple_shared"], False)
+        self.assertEqual(options["couple_split"], 0.9)
+        self.assertEqual(options["couple_direction"], "horizontal")
+        self.assertEqual(options["couple_pair"], "girls")
 
 
 if __name__ == '__main__':

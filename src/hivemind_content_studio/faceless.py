@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from app.models.schema import VideoParams
 from app.services import task
 
 from .manifest import add_artifact, load_manifest, write_manifest
+from .private_access import encrypt_private_media, read_private_json
 
 
 def render_faceless(manifest_path: str | Path) -> dict:
@@ -17,12 +17,15 @@ def render_faceless(manifest_path: str | Path) -> dict:
     if manifest.get("lane") != "faceless":
         raise ValueError("Manifest lane must be faceless")
     params_path = _artifact_path(manifest, "faceless-params")
-    params = VideoParams(**json.loads(params_path.read_text(encoding="utf-8")))
+    params = VideoParams(**read_private_json(params_path))
     result = task.start(manifest["run_id"], params, stop_at="video")
     if not isinstance(result, dict) or not result.get("videos"):
         raise RuntimeError("MoneyPrinterTurbo did not return final video paths")
     for video in result["videos"]:
-        add_artifact(manifest, role="final-video", path=Path(video), provider="moneyprinterturbo")
+        video_path = Path(video).expanduser().resolve()
+        add_artifact(manifest, role="final-video", path=video_path, provider="moneyprinterturbo")
+        if video_path.is_relative_to(path.parent):
+            encrypt_private_media(video_path)
     manifest["status"] = "rendered"
     write_manifest(path, manifest)
     return result

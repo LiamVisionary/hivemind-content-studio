@@ -8,6 +8,7 @@ from hivemind_content_studio.approval_ledger import ApprovalLedger
 from hivemind_content_studio.capability_router import CapabilityRouter
 from hivemind_content_studio.intent_service import ContentIntentService
 from hivemind_content_studio.orchestrator import ContentOrchestrator
+from hivemind_content_studio.private_access import private_media_exists
 from hivemind_content_studio.run_store import RunStore
 
 
@@ -72,7 +73,7 @@ def test_execute_intent_runs_deterministic_provider_and_records_assets(tmp_path:
     assert result["status"] == "completed"
     assert result["provider"] == "static-text-renderer"
     assert len(result["artifacts"]) == 1
-    assert Path(result["artifacts"][0]).is_file()
+    assert private_media_exists(Path(result["artifacts"][0]))
 
 
 def test_local_intent_does_not_require_approval_infrastructure(tmp_path: Path, monkeypatch) -> None:

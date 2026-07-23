@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
 
 from .manifest import add_artifact, load_manifest, utc_now, write_manifest
+from .private_access import write_private_json
 
 
 CLAIM_RISK = re.compile(r"\b(?:guaranteed?|cure[sd]?|risk[- ]free|make\s+you\s+rich|overnight|100%|no\s+risk)\b", re.IGNORECASE)
@@ -67,7 +67,7 @@ def record_semantic_evaluation(
         "evaluated_at": utc_now(),
     }
     path = manifest_file.parent / "semantic-evaluation.json"
-    path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_private_json(path, result)
     manifest["artifacts"] = [item for item in manifest["artifacts"] if item["role"] != "semantic-evaluation"]
     add_artifact(manifest, role="semantic-evaluation", path=path, provider="agent-evaluator")
     manifest.setdefault("quality", {})["semantic"] = {"passed": result["passed"], "score": result["score"], "evaluated_at": result["evaluated_at"]}

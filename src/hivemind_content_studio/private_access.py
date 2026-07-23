@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterator
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -19,6 +25,9 @@ OWNER_COOKIE = "hivemind_content_studio_owner"
 OWNER_SESSION_SECONDS = 24 * 60 * 60
 ENCRYPTED_PREFIX = "enc:v1:"
 ENCRYPTED_BYTES_PREFIX = b"enc-bytes:v1:"
+PRIVATE_SECRET_ENV = "CONTENT_STUDIO_PRIVATE_SECRET"
+PRIVATE_MEDIA_SUFFIX = ".zenc"
+RUN_MEDIA_SCOPE = "run-media"
 
 
 class PrivateFieldCipher:
@@ -92,6 +101,157 @@ class PrivateFieldCipher:
 
     def derive(self, label: str) -> bytes:
         return hmac.new(self._key, label.encode("utf-8"), hashlib.sha256).digest()
+
+
+_configured_cipher: PrivateFieldCipher | None = None
+_cipher_cache: dict[tuple[str, str], PrivateFieldCipher] = {}
+
+
+def configure_private_cipher(cipher: PrivateFieldCipher | None) -> None:
+    """Pin the process-wide cipher (tests and embedding apps)."""
+    global _configured_cipher
+    _configured_cipher = cipher
+
+
+def private_state_enabled() -> bool:
+    return os.environ.get("ZIMG_OUTPUT_ENCRYPTION", "1") != "0"
+
+
+def _resolve_private_cipher() -> PrivateFieldCipher:
+    if _configured_cipher is not None:
+        return _configured_cipher
+    secret = os.environ.get(PRIVATE_SECRET_ENV, "").strip()
+    service = os.environ.get("ZIMG_OUTPUT_KEYCHAIN_SERVICE", "zimage-output-encryption")
+    key = (secret, service)
+    cipher = _cipher_cache.get(key)
+    if cipher is None:
+        cipher = PrivateFieldCipher.from_secret(secret) if secret else PrivateFieldCipher.from_keychain(service=service)
+        _cipher_cache[key] = cipher
+    return cipher
+
+
+def runtime_private_cipher() -> PrivateFieldCipher | None:
+    """Cipher used for new private writes; None only when encryption is disabled."""
+    if not private_state_enabled():
+        return None
+    return _resolve_private_cipher()
+
+
+def is_private_text_file(path: str | Path) -> bool:
+    try:
+        with Path(path).expanduser().open("r", encoding="utf-8") as handle:
+            return handle.read(len(ENCRYPTED_PREFIX)) == ENCRYPTED_PREFIX
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def write_private_text(path: str | Path, text: str) -> Path:
+    target = Path(path).expanduser()
+    cipher = runtime_private_cipher()
+    target.write_text(cipher.encrypt(text) + "\n" if cipher else text, encoding="utf-8")
+    return target
+
+
+def read_private_text(path: str | Path) -> str:
+    target = Path(path).expanduser()
+    body = target.read_text(encoding="utf-8")
+    if not body.startswith(ENCRYPTED_PREFIX):
+        return body
+    # Reads decrypt even when new-write encryption is disabled.
+    return _resolve_private_cipher().decrypt(body.strip())
+
+
+def write_private_json(path: str | Path, payload: Any) -> Path:
+    return write_private_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def read_private_json(path: str | Path) -> Any:
+    return json.loads(read_private_text(path))
+
+
+def private_media_context(path: str | Path, *, scope: str = RUN_MEDIA_SCOPE) -> str:
+    return f"{scope}:{Path(path).name}"
+
+
+def private_media_sidecar(path: str | Path) -> Path:
+    target = Path(path)
+    return target.with_name(target.name + PRIVATE_MEDIA_SUFFIX)
+
+
+def private_media_exists(path: str | Path) -> bool:
+    target = Path(path)
+    return target.is_file() or private_media_sidecar(target).is_file()
+
+
+def encrypt_private_media(
+    path: str | Path,
+    *,
+    scope: str = RUN_MEDIA_SCOPE,
+    cipher: PrivateFieldCipher | None = None,
+) -> bool:
+    """Replace a plaintext media file with its encrypted `.zenc` sidecar."""
+    if not private_state_enabled():
+        return False
+    selected = cipher if cipher is not None else _resolve_private_cipher()
+    target = Path(path).expanduser().resolve()
+    sidecar = private_media_sidecar(target)
+    if sidecar.is_file() and not target.exists():
+        return True
+    if not target.is_file():
+        return False
+    original_stat = target.stat()
+    tmp = sidecar.with_name(f"{sidecar.name}.{os.getpid()}.tmp")
+    encrypted = selected.encrypt_bytes(target.read_bytes(), context=private_media_context(target, scope=scope))
+    try:
+        tmp.write_bytes(encrypted)
+        os.replace(tmp, sidecar)
+        os.utime(sidecar, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        target.unlink()
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+    return True
+
+
+def read_private_media(
+    path: str | Path,
+    *,
+    scope: str = RUN_MEDIA_SCOPE,
+    cipher: PrivateFieldCipher | None = None,
+) -> bytes:
+    target = Path(path).expanduser()
+    if target.is_file():
+        return target.read_bytes()
+    sidecar = private_media_sidecar(target)
+    if not sidecar.is_file():
+        raise FileNotFoundError(str(target))
+    selected = cipher if cipher is not None else _resolve_private_cipher()
+    return selected.decrypt_bytes(sidecar.read_bytes(), context=private_media_context(target, scope=scope))
+
+
+@contextmanager
+def staged_private_media(
+    path: str | Path,
+    *,
+    scope: str = RUN_MEDIA_SCOPE,
+    directory: str | Path | None = None,
+) -> Iterator[Path]:
+    """Yield a plaintext path for external tools; staged copies are removed."""
+    target = Path(path).expanduser()
+    if target.is_file():
+        yield target
+        return
+    body = read_private_media(target, scope=scope)
+    staging_dir = Path(directory).expanduser() if directory is not None else target.parent
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=f".staged-{target.stem}-", suffix=target.suffix, dir=staging_dir)
+    staged = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+        yield staged
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)

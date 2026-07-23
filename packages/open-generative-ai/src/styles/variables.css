@@ -1,49 +1,52 @@
 :root {
-  /* Brand Colors */
-  --color-primary: #22d3ee;
-  /* Electric Cyan */
-  --color-primary-hover: #06b6d4;
-  --color-accent: #a855f7;
-  /* Creative Purple */
-  --color-accent-hover: #9333ea;
-  --color-danger: #ef4444;
+  /* Brand */
+  --color-primary: #22d3ee;        /* Electric cyan */
+  --color-primary-hover: #67e8f9;
+  --color-accent: #a78bfa;         /* Soft violet */
+  --color-accent-hover: #c4b5fd;
+  --color-danger: #f87171;
+  --color-success: #34d399;
 
-  /* Backgrounds - Strict Dark Mode */
-  --bg-app: #050505;
-  /* Deepest Black */
-  --bg-panel: #0a0a0a;
-  /* Panel Background */
-  --bg-card: #141414;
-  /* Card/Input Background */
-  --bg-glass: rgba(10, 10, 10, 0.8);
+  /* Surfaces — layered near-black, slightly cool. Never pure #000. */
+  --bg-app: #0a0a0f;
+  --bg-panel: #101016;
+  --bg-card: #15151d;
+  --bg-elevated: #1a1a24;
+  --bg-glass: rgba(16, 16, 22, 0.82);
 
   /* Text */
-  --text-primary: #ffffff;
-  --text-secondary: #a1a1aa;
-  --text-muted: #52525b;
+  --text-primary: #f4f4f6;
+  --text-secondary: #a7a7b8;
+  --text-muted: #70707f;
 
-  /* UI Elements */
-  --border-color: #27272a;
-  --border-light: rgba(255, 255, 255, 0.1);
+  /* Lines */
+  --border-color: #23232e;
+  --border-light: rgba(255, 255, 255, 0.08);
 
-  --border-radius-sm: 6px;
-  --border-radius-md: 10px;
+  --border-radius-sm: 8px;
+  --border-radius-md: 12px;
   --border-radius-lg: 16px;
   --border-radius-xl: 24px;
   --border-radius-full: 9999px;
 
   /* Effects */
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
-  --shadow-glow: 0 0 20px rgba(176, 251, 93, 0.4);
-  --shadow-glow-accent: 0 0 20px rgba(168, 85, 247, 0.4);
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+  --shadow-md: 0 6px 16px -6px rgb(0 0 0 / 0.5);
+  --shadow-lg: 0 16px 40px -16px rgb(0 0 0 / 0.65);
+  --shadow-glow: 0 0 24px rgba(34, 211, 238, 0.25);
+  --shadow-glow-accent: 0 0 24px rgba(167, 139, 250, 0.3);
   --backdrop-blur: blur(20px);
 
-  /* Transitions */
+  /* Motion — expo-out for entrances, ease-in for exits */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-normal: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 300ms cubic-bezier(0.16, 1, 0.3, 1);
 
   /* Typography */
-  --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-family: 'Inter Variable', 'Inter', system-ui, -apple-system, sans-serif;
+  --font-display: 'Space Grotesk Variable', 'Space Grotesk', 'Inter Variable', system-ui, sans-serif;
+
+  /* Shell metrics */
+  --rail-width: 76px;
+  --topbar-height: 56px;
 }

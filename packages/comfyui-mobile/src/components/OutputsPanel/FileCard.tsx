@@ -6,6 +6,7 @@ import {
 } from '@/components/icons';
 import { ContextMenuButton } from '@/components/buttons/ContextMenuButton';
 import { formatBytes } from '@/utils/formatBytes';
+import { E2EImage } from '@/components/E2EMedia';
 
 interface SelectionClickOptions {
   range?: boolean;
@@ -106,7 +107,7 @@ function FileCardComponent({
           {isFolder ? (
             <FolderIcon className={`w-6 h-6 ${folderIconClass}`} />
           ) : file.previewUrl && !previewError ? (
-            <img
+            <E2EImage
               src={file.previewUrl}
               className="w-full h-full object-cover"
               loading="lazy"
@@ -183,7 +184,7 @@ function FileCardComponent({
             ) : null}
           </div>
         ) : file.previewUrl && !previewError ? (
-          <img
+          <E2EImage
             src={file.previewUrl}
             className="w-full h-full object-cover"
             loading="lazy"

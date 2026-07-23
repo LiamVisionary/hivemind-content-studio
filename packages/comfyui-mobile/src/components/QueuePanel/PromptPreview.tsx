@@ -4,6 +4,7 @@ import { useQueueStore } from '@/hooks/useQueue';
 import { Collapsible } from '@/components/Collapsible';
 import { FoldIcon } from '@/components/FoldIcon';
 import { CloudDownloadIcon } from '@/components/icons';
+import { E2EImage } from '@/components/E2EMedia';
 import {
   computeQueueWorkflowDiff,
   type DiffSegment,
@@ -215,7 +216,7 @@ export function PromptPreview({
               <div className="grid grid-cols-2 gap-1">
                 {inputImages.map((img) => (
                   <div key={img.key} className="relative">
-                    <img
+                    <E2EImage
                       src={img.displaySrc}
                       alt="Generation input"
                       className="aspect-square w-full rounded object-cover"

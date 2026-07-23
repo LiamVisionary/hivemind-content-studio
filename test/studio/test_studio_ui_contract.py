@@ -244,6 +244,8 @@ def test_unified_studio_has_native_modes_and_embedded_tool_surfaces() -> None:
     assert ".native-mode-rail" in css
     assert "navigate(location.hash.slice(1) || 'explore')" in javascript
     assert "hivemindStudio=1" in javascript
+    assert "explorePage" in javascript
+    assert "page=${encodeURIComponent(requestedPage)}" in javascript
     assert "hivemind-explore-insert-prompt" in javascript
     assert '<span>Canvas</span>' in html
     assert '<span>Models</span>' in html
@@ -264,6 +266,9 @@ def test_manual_refresh_rechecks_provider_readiness() -> None:
     javascript = (UI_ROOT / "studio.js").read_text(encoding="utf-8")
 
     assert "if (!state.catalog || !quiet) state.catalog = await api('/api/catalog')" in javascript
+    assert "state.surfaces = await api('/api/surfaces')" in javascript
+    assert "currentExplorePath !== previousExplorePath" in javascript
+    assert "reloadToolSurface('explore')" in javascript
 
 
 def test_provider_view_exposes_safe_oauth_connection_controls() -> None:
@@ -314,7 +319,7 @@ def test_explore_core_embeds_hivemind_workflows_and_preserves_local_generation_p
     assert "localStorage.setItem(OPTIONS_KEY" not in bridge
     assert "isHivemindVideoModelId" in video
     assert "generateHivemindVideo" in video
-    assert "const generationModels = imageMode ? allI2V : [...hivemindI2V, ...allT2V]" in video
+    assert "const generationModels = (imageMode ? allI2V : [...hivemindI2V, ...allT2V])" in video
     assert "allI2V = [...hivemindI2V, ...i2vModels, ...localI2V]" in video
     assert "selectHivemindWorkflowModel(m.id)" in video
     assert "uploadFileToHivemindStudio" in video
@@ -330,11 +335,14 @@ def test_video_generation_has_progress_and_reversible_result_navigation() -> Non
     assert 'generationProgressView.id = \'video-generation-progress\'' in video
     assert 'data-progress-mode="indeterminate"' in video
     assert "showGenerationProgress(lastSubmittedContext)" in video
-    assert "const generationContexts = new Map()" in video
+    assert "createGenerationContextStore" in video
+    assert "contextStore.remember" in video
+    assert "contextStore.view" in video
     assert "imageUrl: uploadedImageUrl" in video
     assert "endImageUrl: uploadedEndImageUrl" in video
     assert "backToSetupBtn.onclick" in video
-    assert "restoreGenerationContext(viewedGenerationContext)" in video
+    assert "const viewed = contextStore.getViewed()" in video
+    assert "if (viewed) restoreGenerationContext(viewed)" in video
     assert "regenerateBtn.onclick = () => generateBtn.click();" not in video
     assert "video-generation-progress-slide" in css
     assert 'data-progress-mode="determinate"' in css
@@ -355,7 +363,9 @@ def test_video_generation_has_progress_and_reversible_result_navigation() -> Non
     assert "resetToPromptBar();\n        generateBtn.click();" not in video
     assert "VIDEO_PREFERENCES_KEY" in video
     assert "normalizeVideoPreferences" in video
-    assert "modelId: selectedModel,\n            duration: selectedDuration" in video
+    assert "modelId: selectedModel" in video
+    assert "localMode: videoLocalMode" in video
+    assert "duration: selectedDuration" in video
     assert "localStorage.setItem(VIDEO_PREFERENCES_KEY" in video
     assert "const restoredPreference = restorePersistedVideoPreferences();" in video
     assert "if (!restoredPreference)" in video

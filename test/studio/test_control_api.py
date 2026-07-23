@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import io
+import json
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -10,7 +12,7 @@ from PIL import Image
 from hivemind_content_studio.approval_ledger import ApprovalLedger
 from hivemind_content_studio.control_api import _write_inline_video, build_control_app
 from hivemind_content_studio.orchestrator import ContentOrchestrator
-from hivemind_content_studio.private_access import OwnerAccess, PrivateFieldCipher
+from hivemind_content_studio.private_access import ENCRYPTED_PREFIX, OwnerAccess, PrivateFieldCipher, read_private_text
 from hivemind_content_studio.run_store import RunStore
 
 
@@ -201,7 +203,7 @@ def test_unified_tool_surfaces_are_discoverable_without_checkout_paths(tmp_path:
 
     assert response.status_code == 200
     surfaces = response.json()["surfaces"]
-    assert surfaces["explore"]["path"] == "/open-gen/"
+    assert surfaces["explore"]["path"].startswith("/open-gen/?build=")
     assert surfaces["canvas"]["gateway_path"] == "/mobile/"
     assert surfaces["models"]["gateway_path"] == "/models"
     assert isinstance(surfaces["explore"]["available"], bool)
@@ -241,6 +243,7 @@ def test_media_studio_video_is_owner_visible_but_machine_callers_receive_only_a_
         "workflow_id": "ltx23-regular-fp8",
         "image_base64": f"data:image/png;base64,{encoded}",
         "duration_seconds": 2,
+        "loras": [{"id": "ltx/style.safetensors", "strength": 0.8}],
     }
 
     response = client.post(
@@ -261,6 +264,7 @@ def test_media_studio_video_is_owner_visible_but_machine_callers_receive_only_a_
     assert str(output_path) not in response.text
     assert captured["workflow_id"] == "ltx23-regular-fp8"
     assert captured["duration_seconds"] == 2
+    assert captured["loras"] == [{"id": "ltx/style.safetensors", "strength": 0.8}]
     assert not Path(captured["image_path"]).exists()
     assert not (output_path.parent / "qa" / "mock.jpg").exists()
     assert not output_path.exists()
@@ -273,7 +277,6 @@ def test_media_studio_video_is_owner_visible_but_machine_callers_receive_only_a_
     partial = client.get(payload["url"], headers={"Range": "bytes=0-3"})
     assert partial.status_code == 206
     assert partial.content == b"mock"
-
     assert client.post("/api/owner/lock").status_code == 200
     machine = client.post(
         "/api/media-studio/video",
@@ -312,6 +315,433 @@ def test_media_studio_video_is_owner_visible_but_machine_callers_receive_only_a_
     assert client.get(guessed_url, headers={"Authorization": "Bearer control-secret"}).status_code == 401
     assert client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
     assert client.get(guessed_url).content == b"mock-video"
+
+
+def test_media_studio_video_job_flow_survives_long_generations(tmp_path: Path, monkeypatch) -> None:
+    output_path = tmp_path / "generated" / "media-studio" / "mock-eros.mp4"
+    started: dict = {}
+    finish_calls: dict = {}
+
+    def fake_start(**kwargs):
+        started.update(kwargs)
+        assert Path(kwargs["image_path"]).is_file()
+        return {"job_id": "job-eros-1", "uploaded_names": ["input-1.png"], "provider": "Media Studio"}
+
+    def fake_finish(job_id, *, uploaded_names=None, output_dir=None, **_):
+        finish_calls.update({"job_id": job_id, "uploaded_names": uploaded_names})
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"mock-video")
+        return {"job_id": job_id, "provider": "Media Studio", "output": str(output_path), "qa": {"ok": True}}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", fake_start)
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_finish", fake_finish)
+    check_calls = {"count": 0}
+
+    def fake_check(job_id):
+        check_calls["count"] += 1
+        if check_calls["count"] <= 2:
+            return {"status": "running", "failed": False, "error": "", "video_url": "", "progress": 0.4}
+        return {"status": "completed", "failed": False, "error": "", "video_url": "http://gateway/video.mp4", "progress": 1.0}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_check", fake_check)
+    client, _, _ = _client(tmp_path, monkeypatch)
+    image = Image.new("RGB", (16, 16), "white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    queued = client.post(
+        "/api/media-studio/video/start",
+        json={
+            "prompt": "slow push in",
+            "workflow_id": "ltx23-eros-fast",
+            "image_base64": f"data:image/png;base64,{encoded}",
+            "duration_seconds": 2,
+            "resolution": "high",
+        },
+    )
+    assert queued.status_code == 200
+    assert queued.json() == {"ok": True, "job_id": "job-eros-1", "status": "running"}
+    # The staged control-api input copy is removed as soon as the job is queued.
+    assert not Path(started["image_path"]).exists()
+
+    payload: dict = {}
+    for _ in range(100):
+        poll = client.get("/api/media-studio/video/job/job-eros-1")
+        assert poll.status_code == 200
+        payload = poll.json()
+        if payload.get("status") != "running":
+            break
+        time.sleep(0.05)
+    assert payload["ok"] is True
+    assert payload["url"] == "/api/media-studio/generated/mock-eros.mp4"
+    assert payload["output"] == "mock-eros.mp4"
+    assert payload["encrypted_at_rest"] is True
+    assert finish_calls == {"job_id": "job-eros-1", "uploaded_names": ["input-1.png"]}
+    assert "slow push in" not in poll.text
+    # The sealed result stays retrievable on later polls (browser may re-ask).
+    assert client.get("/api/media-studio/video/job/job-eros-1").json()["output"] == "mock-eros.mp4"
+    assert client.get("/api/media-studio/video/job/unknown-job").status_code == 404
+    media = client.get(payload["url"])
+    assert media.status_code == 200
+    assert media.content == b"mock-video"
+
+
+def test_simple_catalog_serves_cached_payload_instead_of_reprobing(tmp_path: Path, monkeypatch) -> None:
+    calls = {"count": 0}
+
+    def fake_brain_catalog(**_):
+        calls["count"] += 1
+        return {"ok": True, "providers": [{"slug": "probe", "name": "Probe", "models": []}]}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.brain_catalog", fake_brain_catalog)
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    first = client.get("/api/simple/catalog")
+    assert first.status_code == 200
+    assert first.json()["brains"][0]["slug"] == "probe"
+    probes_after_first = calls["count"]
+    assert probes_after_first >= 1
+    # Within the TTL, repeat opens are served from the cache — the studio's
+    # model UI must not wait on live provider probes every page load.
+    second = client.get("/api/simple/catalog")
+    assert second.status_code == 200
+    assert calls["count"] == probes_after_first
+
+
+def test_media_studio_detects_e2e_envelope_downloads(tmp_path: Path) -> None:
+    from hivemind_content_studio.media_studio import _looks_like_e2e_envelope
+
+    envelope = tmp_path / "clip.mp4"
+    envelope.write_text(json.dumps({"v": 1, "wrapped_dek": "aa", "ciphertext": "bb", "media_type": "video/mp4"}))
+    assert _looks_like_e2e_envelope(envelope) is True
+    real = tmp_path / "real.mp4"
+    real.write_bytes(b"\x00\x00\x00\x18ftypisom-not-json")
+    assert _looks_like_e2e_envelope(real) is False
+    other_json = tmp_path / "meta.mp4"
+    other_json.write_text(json.dumps({"anything": "else"}))
+    assert _looks_like_e2e_envelope(other_json) is False
+
+
+def test_media_studio_video_job_flow_returns_gateway_proxy_for_e2e_sealed_outputs(tmp_path: Path, monkeypatch) -> None:
+    def fake_start(**kwargs):
+        return {"job_id": "job-e2e-1", "uploaded_names": [], "provider": "Media Studio"}
+
+    def fake_finish(job_id, **_):
+        # finish_video detected the sealed envelope: no local copy, no QA — it
+        # hands back the gateway output name for browser-side decryption.
+        return {
+            "job_id": job_id,
+            "provider": "Media Studio",
+            "gateway_output": "mlx_ltx23_eros_job_121f.mp4",
+            "qa": {"ok": True, "visual_inspection_required": True},
+        }
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", fake_start)
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_finish", fake_finish)
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_check",
+        lambda job_id: {"status": "completed", "failed": False, "error": "", "video_url": "http://gw/x.mp4", "progress": 1.0},
+    )
+    monkeypatch.setattr(
+        "hivemind_content_studio.canvas_history.CanvasGatewayClient.media",
+        lambda self, name: (b'{"ciphertext":"sealed","wrapped_dek":"sealed"}', "application/vnd.hivemind.e2e+json"),
+    )
+    client, _, _ = _client(tmp_path, monkeypatch)
+    image = Image.new("RGB", (16, 16), "white")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    queued = client.post(
+        "/api/media-studio/video/start",
+        json={"prompt": "high res", "workflow_id": "ltx23-eros-fast", "image_base64": f"data:image/png;base64,{encoded}", "resolution": "high"},
+    )
+    assert queued.status_code == 200
+
+    payload: dict = {}
+    for _ in range(100):
+        poll = client.get("/api/media-studio/video/job/job-e2e-1")
+        assert poll.status_code == 200
+        payload = poll.json()
+        if payload.get("status") != "running":
+            break
+        time.sleep(0.05)
+    assert payload["ok"] is True
+    assert payload["url"] == "/api/media-studio/gateway/mlx_ltx23_eros_job_121f.mp4"
+    assert payload["encrypted_at_rest"] is True
+    assert payload["output"] == "mlx_ltx23_eros_job_121f.mp4"
+
+    media = client.get(payload["url"])
+    assert media.status_code == 200
+    assert media.headers["content-type"].startswith("application/vnd.hivemind.e2e+json")
+    assert media.content.startswith(b'{"ciphertext"')
+    assert media.headers["cache-control"] == "private, no-store"
+
+
+def test_media_studio_ingredients_rehydrates_encrypted_reference_views_without_timeline_input(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+    output_path = tmp_path / "generated" / "media-studio" / "ingredients.mp4"
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        assert kwargs["image_path"] is None
+        assert kwargs["video_path"] is None
+        assert len(kwargs["ingredient_images"]) == 2
+        assert all(Path(item["image_path"]).is_file() for item in kwargs["ingredient_images"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"ingredients-video")
+        return {"job_id": "ingredients-job", "output": str(output_path), "qa": {"ok": True}}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video", fake_generate)
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    references = []
+    for filename, color in (("front.png", "red"), ("profile.png", "blue")):
+        buffer = io.BytesIO()
+        Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
+        upload = client.post(
+            "/api/media-studio/references",
+            files={"file": (filename, buffer.getvalue(), "image/png")},
+        )
+        assert upload.status_code == 200
+        assert upload.json()["encrypted_at_rest"] is True
+        references.append(upload.json()["url"])
+
+    response = client.post(
+        "/api/media-studio/video",
+        json={
+            "workflow_id": "ltx23-ic-ingredients-lora",
+            "prompt": "The same character turns toward camera.",
+            "ingredient_images": [
+                {"image_reference": references[0], "description": "front view"},
+                {"image_reference": references[1], "description": "right profile"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["workflow_id"] == "ltx23-ic-ingredients-lora"
+    assert [item["description"] for item in captured["ingredient_images"]] == ["front view", "right profile"]
+    assert all(not Path(item["image_path"]).exists() for item in captured["ingredient_images"])
+
+
+def test_media_studio_ingredients_rehydrates_start_frame_and_views_together(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+    output_path = tmp_path / "generated" / "media-studio" / "ingredients-start.mp4"
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        assert Path(kwargs["image_path"]).is_file()
+        assert len(kwargs["ingredient_images"]) == 2
+        assert all(Path(item["image_path"]).is_file() for item in kwargs["ingredient_images"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"ingredients-start-video")
+        return {"job_id": "ingredients-start-job", "output": str(output_path), "qa": {"ok": True}}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video", fake_generate)
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    references = []
+    for filename, color in (("start.png", "green"), ("front.png", "red"), ("profile.png", "blue")):
+        buffer = io.BytesIO()
+        Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
+        upload = client.post(
+            "/api/media-studio/references",
+            files={"file": (filename, buffer.getvalue(), "image/png")},
+        )
+        assert upload.status_code == 200
+        references.append(upload.json()["url"])
+
+    response = client.post(
+        "/api/media-studio/video",
+        json={
+            "workflow_id": "ltx23-ic-ingredients-lora",
+            "prompt": "The same character turns toward camera.",
+            "image_reference": references[0],
+            "ingredient_images": [
+                {"image_reference": references[1], "description": "front view"},
+                {"image_reference": references[2], "description": "right profile"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["workflow_id"] == "ltx23-ic-ingredients-lora"
+    assert not Path(captured["image_path"]).exists()
+    assert all(not Path(item["image_path"]).exists() for item in captured["ingredient_images"])
+    for reference in references:
+        encrypted = tmp_path / "uploads" / "media-studio-references" / f"{Path(reference).name}.zenc"
+        assert encrypted.is_file()
+
+
+def test_media_studio_ingredients_preview_uses_encrypted_views_and_the_generation_compositor(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    references = []
+    for filename, color in (("front.png", "red"), ("profile.png", "blue")):
+        buffer = io.BytesIO()
+        Image.new("RGB", (32, 32), color).save(buffer, format="PNG")
+        upload = client.post(
+            "/api/media-studio/references",
+            files={"file": (filename, buffer.getvalue(), "image/png")},
+        )
+        assert upload.status_code == 200
+        references.append(upload.json()["url"])
+
+    response = client.post(
+        "/api/media-studio/ingredients/preview",
+        json={
+            "ingredient_images": [
+                {"image_reference": references[0]},
+                {"image_reference": references[1]},
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["x-ingredients-columns"] == "2"
+    assert response.headers["x-ingredients-rows"] == "1"
+    assert response.headers["x-ingredients-width"] == "768"
+    assert response.headers["x-ingredients-height"] == "448"
+    with Image.open(io.BytesIO(response.content)) as sheet:
+        assert sheet.size == (768, 448)
+        assert sheet.getpixel((198, 224)) == (255, 0, 0)
+        assert sheet.getpixel((570, 224)) == (0, 0, 255)
+        assert sheet.getpixel((384, 224)) == (0, 0, 0)
+    staged_root = tmp_path / "uploads" / "media-studio"
+    assert list(staged_root.glob("*")) == []
+
+    assert client.post("/api/owner/lock").status_code == 200
+    assert client.post(
+        "/api/media-studio/ingredients/preview",
+        json={"ingredient_images": [{"image_reference": references[0]}]},
+    ).status_code == 401
+
+
+def test_encrypted_media_reference_survives_reload_and_is_staged_only_for_generation(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+    output_path = tmp_path / "generated" / "media-studio" / "reference-video.mp4"
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        image_path = Path(kwargs["image_path"])
+        captured["image_bytes"] = image_path.read_bytes()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"reference-video")
+        return {
+            "job_id": "reference-job",
+            "provider": "Media Studio",
+            "output": str(output_path),
+            "qa": {"ok": True},
+        }
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video", fake_generate)
+    client, _, _ = _client(tmp_path, monkeypatch)
+    image = Image.new("RGB", (16, 16), "pink")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    source = buffer.getvalue()
+
+    uploaded = client.post(
+        "/api/media-studio/references",
+        files={"file": ("start.png", source, "image/png")},
+    )
+
+    assert uploaded.status_code == 200
+    upload_payload = uploaded.json()
+    assert upload_payload["encrypted_at_rest"] is True
+    reference_url = upload_payload["url"]
+    assert reference_url.startswith("/api/media-studio/references/reference-")
+    reference_path = tmp_path / "uploads" / "media-studio-references" / Path(reference_url).name
+    encrypted_path = reference_path.with_name(f"{reference_path.name}.zenc")
+    assert not reference_path.exists()
+    assert encrypted_path.is_file()
+    assert source not in encrypted_path.read_bytes()
+
+    restored = client.get(reference_url)
+    assert restored.status_code == 200
+    assert restored.content == source
+    assert restored.headers["cache-control"] == "private, no-store"
+    assert restored.headers["x-content-type-options"] == "nosniff"
+
+    generated = client.post(
+        "/api/media-studio/video",
+        json={
+            "prompt": "subtle motion",
+            "workflow_id": "ltx23-regular-fast",
+            "image_reference": reference_url,
+            "duration_seconds": 2,
+        },
+    )
+
+    assert generated.status_code == 200
+    assert generated.json()["url"] == "/api/media-studio/generated/reference-video.mp4"
+    assert captured["image_bytes"] == source
+    assert not Path(captured["image_path"]).exists()
+    assert not reference_path.exists()
+    assert encrypted_path.is_file()
+
+    assert client.post("/api/owner/lock").status_code == 200
+    assert client.get(reference_url).status_code == 401
+    machine = client.post(
+        "/api/media-studio/video",
+        json={
+            "prompt": "subtle motion",
+            "workflow_id": "ltx23-regular-fast",
+            "image_reference": reference_url,
+            "duration_seconds": 2,
+        },
+        headers={"Authorization": "Bearer control-secret"},
+    )
+    assert machine.status_code == 403
+
+    assert client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
+    assert client.delete(reference_url).status_code == 200
+    assert not encrypted_path.exists()
+    assert client.get(reference_url).status_code == 404
+
+
+def test_encrypted_video_reference_flows_directly_into_extension_generation(tmp_path: Path, monkeypatch) -> None:
+    captured: dict = {}
+    output_path = tmp_path / "generated" / "media-studio" / "extension.mp4"
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        captured["video_bytes"] = Path(kwargs["video_path"]).read_bytes()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"extended-video")
+        return {"job_id": "extension-job", "output": str(output_path), "qa": {"ok": True}}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video", fake_generate)
+    client, _, _ = _client(tmp_path, monkeypatch)
+    source = b"\x00\x00\x00\x18ftypisomvideo-reference"
+    uploaded = client.post(
+        "/api/media-studio/references",
+        files={"file": ("source.mp4", source, "video/mp4")},
+    )
+    assert uploaded.status_code == 200
+    reference_url = uploaded.json()["url"]
+
+    generated = client.post(
+        "/api/media-studio/video",
+        json={
+            "prompt": "continue naturally",
+            "workflow_id": "ltx23-regular-fast",
+            "video_reference": reference_url,
+            "video_mode": "extend",
+            "duration_seconds": 3,
+        },
+    )
+
+    assert generated.status_code == 200
+    assert captured["video_bytes"] == source
+    assert captured["image_path"] is None
+    assert captured["video_mode"] == "extend"
+    assert not Path(captured["video_path"]).exists()
+    encrypted_path = tmp_path / "uploads" / "media-studio-references" / f"{Path(reference_url).name}.zenc"
+    assert encrypted_path.is_file()
 
 
 def test_simple_catalog_falls_back_to_the_builtin_local_planner(tmp_path: Path, monkeypatch) -> None:
@@ -646,10 +1076,11 @@ def test_simple_brain_run_attaches_its_runtime_neutral_script_and_advances(tmp_p
     assert all(action["intent"] != "attach_script" for action in run["next_actions"])
     assert next(step for step in run["steps"] if step["step_id"] == "script")["status"] == "completed"
     script = next(item for item in run["artifact_records"] if item["role"] == "script")
-    script_text = Path(script["path"]).read_text(encoding="utf-8")
+    script_text = read_private_text(Path(script["path"]))
     assert "# One idea people remember" in script_text
     assert "Clarity wins." in script_text
     assert "Your ad does not need to look expensive." in script_text
+    assert Path(script["path"]).read_text(encoding="utf-8").startswith(ENCRYPTED_PREFIX)
 
 
 def test_advanced_draft_options_reach_the_canonical_manifest(tmp_path: Path, monkeypatch) -> None:

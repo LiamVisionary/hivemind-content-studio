@@ -1920,7 +1920,7 @@ Confirmed from the official Lightricks model card and shipped Comfy workflow:
 Implemented paths:
 
 - Comfy/CUDA: FP8 dev checkpoint -> official distilled LoRA at `0.5` -> `LTXICLoRALoaderModelOnly` -> repeated-sheet `LTXAddVideoICLoRAGuide` -> joint AV sample -> guide crop -> tiled video decode and audio decode.
-- Apple MLX: `ltx-2-mlx ic-lora` with the regular q8 distilled model, Ingredients at `1.4`, full-resolution `--single-stage`, and a temporary lossless FFV1 video containing the repeated reference sheet. This reaches the same `VideoConditionByReferenceLatent` mechanism rather than using a frame-zero I2V anchor.
+- Apple MLX: `ltx-2-mlx ic-lora` with the regular q8 dev transformer, the official distilled LoRA at `0.5`, Ingredients at `1.4`, full-resolution `--single-stage`, and a temporary lossless FFV1 video containing the repeated reference sheet. This reaches the same `VideoConditionByReferenceLatent` mechanism. A separate starting image, when supplied, remains an ordinary frame-zero target-latent anchor.
 - MCP: `reference_description` is assembled with `prompt` into the official two-part contract. A caller may instead provide an already assembled prompt containing both headings.
 
 Rejected or avoided approaches:
@@ -1933,7 +1933,40 @@ Rejected or avoided approaches:
 Download state at implementation time:
 
 - The public official distilled LoRA from `Lightricks/LTX-2.3` was installed and verified at `7,605,507,256` bytes with SHA-256 `f5d4953f3386197a4b4f5abdb17616ff256171e8075c111d6e7d2dfa6e823b3a`.
-- The Ingredients file is gated. The first three conventional token names were absent, but the established shared-Hive alias `HUGGINGFACE_READ_WRITE_KEY` was present. Installer support was expanded to recognize it so authenticated downloads can run through `hive-env-run` without copying or persisting the credential. The credential authenticated successfully against Hugging Face (`whoami` returned `200`), while the gated file returned `403`; the account still needs access to the Ingredients repository before an end-to-end render can run.
+- The Ingredients file is gated. The shared-Hive alias `HUGGINGFACE_READ_WRITE_KEY` is recognized so authenticated downloads run through `hive-env-run` without copying or persisting the credential. Repository access was later granted and the file was installed successfully.
+
+## 2026-07-20 Ingredients inset/glitch reproduction and correction
+
+Rejected reproduction:
+
+- Job `6b9484f921be` ran the Ingredients IC-LoRA against the regular pre-distilled q8 transformer at 768x448, 121 frames, and 24 fps. It completed in 274.94 seconds but leaked a small reference-sheet view into the top-left of the generated target and produced poor, unstable imagery.
+- Its persisted metadata contained `keyframes: []`, confirming that the starting image selected in the UI had not reached that submitted job.
+- The procedural sheet was square and was resized to the widescreen output geometry, distorting every reference view before VAE encoding.
+- The CUDA graph compiler placed target image conditioning after `LTXAddVideoICLoRAGuide`. At that point the latent already contained appended IC reference tokens, so the image-conditioning node could reinterpret reference tokens as target pixels.
+
+Corrections:
+
+- Apple Ingredients now has a dedicated `regular-q8-dev-ic` variant backed by `transformer-dev.safetensors` (20,597,189,549 bytes), the official distilled LoRA at `0.5`, and Ingredients at `1.4`. Missing dev or distilled files hard-fail instead of silently falling back.
+- CUDA/Windows target anchors now modify the clean target latent before the IC guide. A single frame-zero image uses the official `LTXVImgToVideoConditionOnly` topology; multiple anchors use `LTXVImgToVideoInplaceKJ` at the same pre-IC position.
+- The server compositor now emits the reference sheet at the exact target video width and height. It uses contain-only panels on black, so no reference is cropped, stretched, or upscaled merely to fill a panel. Studio preview and generation call the same compositor geometry.
+- The Studio's selected aspect ratio now maps to explicit LTX dimensions and is forwarded through the Content Studio adapter. Previously the field was accepted by the API but ignored.
+- Encrypted ingredient references and an encrypted starting frame are forwarded independently. The sheet remains conditioning-only and the start image appears as a frame-zero keyframe in native job metadata.
+
+Validation:
+
+- Job `ae769d04fc64` ran the official safe Greenfield hedgehog/rabbit sheet and prompt with the official output's first frame supplied separately as frame zero.
+- Live metadata confirmed `mlx-ltx-regular-regular-q8-dev-ic`, dev model directory, Ingredients `1.4`, reference strength `1.0`, 768x448, 121 frames, 24 fps, and a distinct frame-zero keyframe.
+- It completed in 270.75 seconds and produced 5.04 seconds of H.264 video with AAC audio.
+- Raw first-frame and one-frame-per-second inspection found no inset, no stacked reference sheet, and no IC token leakage. The supplied frame-zero composition and character identities were retained closely across the shot.
+- The Hugging Face gallery files themselves are presentation composites with a static reference sheet stacked above the generated target. That gallery layout is not the expected raw inference output; Media Studio returns only the generated target video.
+
+Follow-up Studio-path correction:
+
+- The next three owner-UI jobs (`4ae6da766247`, `046767e5613f`, and `7d5c05aa5048`) all reached the corrected dev IC lane but arrived at 576x576 with no keyframes. Two were also only 25 frames. This proved the backend repair had not fixed the browser submission contract.
+- The dynamic workflow catalog discarded MCP aspect-ratio and duration defaults. Video Studio then hard-coded square as the first Hivemind aspect and reset duration to the first list item (one second).
+- Local video submission attached `uploadedImageUrl` only while an internal `imageMode` flag was true. The Ingredients shortcut could display a retained start image while that flag no longer represented the visible state, dropping the frame-zero reference from the request.
+- The MCP registry now publishes workflow-specific `aspect_ratios`; the Content Studio catalog carries them and `default_duration_seconds`; Ingredients advertises only `16:9` and five seconds. Video Studio selects the declared duration and always sends a visible start image for a local workflow.
+- Safe no-start control `c1fe973219fb` ran at 768x448/25 frames in 51.74 seconds and produced one full-frame garden-center shot with no panel collage. This rules out intrinsic reference-sheet leakage in the corrected MLX recipe at its validated geometry.
 
 ## 2026-07-18 Fast/Regular source-video extension parity
 
@@ -2031,9 +2064,170 @@ Do not repeat these mistakes:
 - Do not treat an all-zero latent as silence. Encode a silent waveform through the audio VAE, and generate the full soundtrack when the source has no audio stream.
 - Do not accept audio from codec/sample-rate/duration metadata alone; inspect or listen to the decoded waveform.
 
+### Reboot-safe native runtime discovery
+
+- Reproduced three post-reboot failures: jobs `604f9ed33761`, `9d9e6b41eb35`, and `2dfffc816c19` all failed before denoising with `ltx-2-mlx checkout not found: /tmp/ltx-2-mlx-opt`.
+- Root cause: the gateway defaulted the executable checkout to `/tmp/ltx-2-mlx-opt`. macOS removed that directory during reboot even though the persistent optimized checkout and all MLX model weights remained intact.
+- Startup logs also contained an earlier transient `No space left on device` condition. Current storage had 297 GiB free, and the repeatable generation failure remained the missing temp checkout, so disk pressure was not accepted as the final root cause.
+- Replaced the volatile default with persistent runtime discovery: explicit `LTX2_MLX_DIR`, repository-adjacent checkout, `~/comfy/ltx-2-mlx-opt`, then a validated temp checkout as legacy fallback.
+- Job `79044db8879a`: successful cold submission after a full managed-stack restart.
+  - Workflow/backend: `ltx23-eros-fast` / `mlx-ltx-eros-fast-q8-v12`.
+  - Model loaded automatically from `/Users/liam/comfy/mlx-models/ltx-2.3-10eros-v1.2-mlx-q8-distilled-subset`.
+  - Backend elapsed: `25.0s`.
+  - Result: 9-frame, `0.375s`, `1024x1024` H.264 video with AAC audio; technical QA passed.
+
+Do not put an executable runtime needed after reboot only under an operating-system temp directory. Cold generation must discover a persistent checkout and load the workflow-selected model itself.
+
 Verification:
 
 - MLX distilled-retake unit tests: `8 passed`.
 - Full MLX suite with the declared `trainer` extra: `602 passed`, `22 skipped`.
-- Media Gateway unit tests: `47 passed`.
+- Media Gateway unit tests: `53 passed`.
 - MCP contract tests excluding the pre-existing machine-private URL-redaction test: `9 passed`, `1 deselected`.
+
+## 2026-07-20 Ingredients portrait anchor and reference-bucket correction
+
+### Reproduction and rejected attempts
+
+- A safe 720x1024 portrait start reproduced the reported failure through the authenticated MCP path in job `65e5a54dd8c1`: the frame was center-cropped to 768x448, followed by dark vertical smears while the model pulled back toward the reference-sheet composition. It completed in 53.09 seconds for 25 frames.
+- Root cause 1 was shared by MLX and Comfy: both image-conditioning paths performed a hidden center crop when source and target aspect ratios differed.
+- Fitting the complete portrait over a blurred full-canvas fill preserved frame zero with SSIM `0.972998` in job `8670f1083508` (59.1 seconds), but a strength-1.0 latent replacement left a hard dark transition seam. The fit was kept; strength 1.0 was rejected as the automatic default.
+- The same fitted start at strength 0.9 removed the black seam in job `959bfbbfe2ba` (50.9 seconds). This matches the official Comfy image-conditioning node default. Explicit MCP keyframe strength remains an override.
+- These 25-frame diagnostics were not accepted as Ingredients quality validations after the official model contract was rechecked: the static reference stream must contain at least 121 frames.
+
+### Confirmed model-contract defect
+
+- The official Ingredients card specifies a static reference-sheet video at output resolution and frame rate, with its length clamped to at least 121 frames. Our MLX encoder and CUDA/Windows `RepeatImageBatch` both used the requested target length directly, so a normal 97-frame Studio clip still supplied an undersized control stream.
+- The shared workflow metadata now declares `reference_min_frames: 121`. MLX encodes `max(target_frames, 121)` lossless reference frames while preserving the requested target `-f` value. The compiled Comfy graph uses the same maximum independently of `EmptyLTXVLatentVideo.length`; the direct Mobile workflow defaults its unlinked reference repeat to 121.
+- Safe job `3617fcfcdd4f` verified the repaired split with 97 target frames, 121 reference frames, a portrait frame-zero anchor at strength 0.9, and the regular q8 dev IC lane. It completed in 233.89 seconds. Frame inspection found the full starting composition, no black blotches, no exposure flash, and recognizable character identity through the shot.
+
+### Reference-sheet occupancy correction
+
+- Reducing fixed gutters from 24px to 4px fixed uniform portrait sheets but not mixed assets. The safe ten-reference Greenfield set still measured 44% near-black because equal cells made wide setting and turnaround references tiny inside tall cells.
+- Replaced equal cells for high-aspect-variance sets with a no-crop equal-area MaxRects-style packer. Uniform references retain the predictable grid. Every panel remains unlabeled, aspect-preserving, spatially described, and conditioning-only.
+- On the same safe mixed set, packed occupancy measured 23% near-black, equal to the official Greenfield example sheet. The prior equal-cell result was 44%.
+- Same-prompt/seed packed-sheet job `67e23ef83ea3` completed in 222.72 seconds, versus 233.89 seconds for the equal-cell job. It produced 97 H.264 frames at 768x448/24 fps with AAC audio and a 4.041667-second duration.
+- Frame-zero SSIM against the staged fitted anchor was `0.973172`. Frame-average luma stayed between `104.338` and `125.425`, and no output frame exceeded 1% near-black pixels. These numerical checks did not catch the visible composition change: the narrow portrait with blurred sidebars transitioned to a full-width shot around 1.5 to 2 seconds. The run is rejected as a portrait-start solution, though it remains valid evidence for packed-sheet occupancy.
+
+### Timeline-anchor outpaint correction
+
+- Replaced the visible portrait-over-blurred-cover fit with a shared Krea 2 Turbo mask-outpaint graph. For a 720x1024 source targeting 768x448, exact aspect-preserving geometry is 315x448 with 226px left and 227px right expansion. Only the missing canvas is sampled; the untouched source pixels are composited back after sampling.
+- Prompt-only side outpainting was insufficient. It duplicated the Greenfield leaf mark even with explicit no-duplicate language. The accepted graph first builds an internal blurred cover prior, composites the exact contained source over it, samples the side mask at denoise `0.7` with `DifferentialDiffusion`, then restores the source center. The blurred prior supplies layout continuity but is never visible in the final anchor.
+- Automatic job `4e50cc180b83` was stopped because the full Ingredients prompt leaked the supporting rabbit inventory into anchor preparation. Anchor outpainting now receives only `### Target Description`.
+- Automatic job `81ac0c3a2943` removed the rabbit but duplicated the location logo. A separate prompt-only no-duplicate trial did the same, confirming that negative wording alone was not enough. Both were rejected before LTX completion.
+- Manual LTX proof job `4c767a09e6da` used the first clean full-width outpaint and held a stable wide shot for all 97 frames. The final structural-prior graph was then promoted to both runtime paths.
+- Apple MLX runs anchor preparation asynchronously as the queued job's `preparing-anchor` phase, releases Comfy before loading LTX, and caches the prepared PNG under the private input root. Windows/CUDA embeds the same compiled graph fragment before the normal pre-IC LTX anchor nodes. Exact-size inputs pass through; same-aspect inputs receive only a Lanczos resize.
+- Final normal-MCP job `52732a4c1de4` started from the untouched safe 720x1024 portrait, ten packed Ingredients references, 768x448, 97 target frames, 121 static reference frames, 24fps, and seed 4242. Nine contact samples at frames 0, 12, 24, 36, 48, 60, 72, 84, and 96 retained one stable full-width composition with no pullback, sidebar dissolve, sheet leakage, duplicate subject, black blotch, or exposure flash.
+- That H.264/AAC output is 4.041667 seconds. The LTX subprocess took 154.53 seconds; observed first-use Krea preparation runs were 26.1 to 35.24 seconds. Frame-zero SSIM against the prepared anchor was `0.937931`, average luma ranged from `100.884` to `118.441`, maximum near-black area was 0%, and audio was present. A same-key cache replay returned in 0.086 seconds. Dense onset review below supersedes its earlier acceptance.
+
+### Dense onset-blur correction
+
+- User review at 0.2 seconds exposed a defect that the sparse 12-frame contact cadence missed. In job `52732a4c1de4`, frame 0 was sharp, frames 1 through 7 softened globally, blur peaked at frame 4 (`9.1861897` versus `6.5923572` at frame 0), and detail rebuilt after the first eight-frame temporal block. The job is therefore rejected as the final quality result despite passing framing, luma, black-area, and sparse-contact checks.
+- Re-encoding the prepared anchor as a 17-frame CRF-18 H.264 control held a flat blur score around `6.10`. The artifact was present in LTX's decoded frames, not introduced by the player, screenshot, encryption layer, or output encoder.
+- Strength `1.0` plus delayed motion removed the short-run blur but generated conspicuous reference-derived prop and text fragments. Strength `1.0` is rejected; automatic Ingredients starts remain at `0.9`.
+- One-second 25-frame controls stayed sharp at both strengths and with both prompt timings. They proved that the onset failure depends on the full 97-frame temporal solve and cannot be validated with the shortest diagnostic alone.
+- Full-duration prompt-only job `3244d7444c6c` reduced the peak to `8.5909014` but remained visibly blurred. It is rejected.
+- Full-duration duplicate-anchor job `46081ea0fadb` added the same prepared image at frame 8. It shifted and worsened the blur peak to `9.1300573` around frames 7 through 9. Repeating the first anchor at the temporal-block boundary is rejected.
+- Root cause was a backend parity mismatch. The MLX CLI silently used the upstream generic CRF-33 H.264 round trip for every image-conditioning input, while the CUDA/Windows Ingredients graph feeds the prepared pixels directly. The workflow now declares `native_mlx.ic_lora.image_crf: 0`; gateway commands emit `--image PATH FRAME STRENGTH 0`. Output encoding remains CRF 18.
+- Original-prompt job `234ea74f6d6e` changed only anchor preprocessing to CRF 0. Frames 0 through 16 stayed between `6.2138648` and `6.3883009`, confirming the root-cause fix. Its generated hose still moved, so it was retained as a conditioning proof rather than the final visual sample.
+- Job `545e868e4250` also stayed sharp (`6.1801562` to `6.3058925` over the dense onset sample), but a loose green hose arced across the sign despite a stationary-environment instruction. It is rejected as the final sample.
+- Job `4d33676a1f66` used CRF 0, strength 0.9, seed 4261, and removed the focus bloom, but it was still wrong. Dense luminance review showed frame 0 at `118.133`, a fall to `106.994` by frame 7, and a slow recovery toward `110.8`. The apparent overexposure, dark dip, and recovery were missed because the earlier gate measured sharpness without measuring frame-level exposure. The job is rejected.
+
+### Frame-zero exposure and color-boundary correction
+
+- The official Ingredients model card records `first_frame_conditioning_p: 0.0`: the adapter was trained for reference-sheet video conditioning, not a simultaneous exact timeline anchor. Combining the two remains useful, but it is a hybrid path and the preserved frame-zero latent can decode at a different exposure from the first generated temporal block.
+- The first stabilization attempt was incomplete. Job `341c6108f945` flattened luminance with ffmpeg `deflicker`, but user review still found a color transition. Dense signal analysis confirmed why: saturation fell from `20.749` to about `18.05`, while U moved from `112.212` to about `114.3`. The luma-only result is rejected.
+- The Y/Cb/Cr boundary matcher in job `b801be2b9a5e` also failed user review. Although its aggregate signal metrics were flatter, a visible color shift remained. Decoder/mux time rose from 7.3 seconds in the luma-only run to 9.4 seconds, so the transform added about 2.1 seconds of processing. It is rejected and fully removed from MLX, Comfy, bootstrap, registry, and documentation. There is no active onset post-process.
+
+### Ingredients guided quality-sampler experiment (superseded)
+
+- A later Studio failure exposed a more serious workflow mismatch through non-content job metadata: the target had 73 frames and the lane used the dev checkpoint plus distilled LoRA `0.5`, the fixed eight-step distilled sigma table, and CFG `1.0`. The MLX `ICLoraPipeline` also silently truncated any larger `stage1_steps` request to that nine-value table.
+- This did not match the Ingredients model card: dev base, 30 inference steps, CFG `4.0`, STG `stg_v` block 29 at `1.0`, LoRA `1.4`, and training targets of at least 121 frames. The under-length target and unguided distilled schedule can reduce prompt motion and detail stability.
+- An experimental `--guided-dev` IC-LoRA mode was added. It rejects missing dev weights and any simultaneous distilled LoRA, uses the token-adaptive 30-step LTX schedule, video CFG `4.0`, audio CFG `7.0`, STG `1.0`, rescale `0.7`, modality guidance `3.0`, and zero-based block index 28 for authored block 29.
+- Experimental CUDA/Windows parity used the same dev base without the distilled LoRA, `LTXVApplySTG` block `29`, `STGGuider` CFG `4.0`/STG `1.0`/rescale `0.7`, and `LTXVScheduler` at 30 steps. The API graph validated against the live Comfy node catalog.
+- Both the MCP compiler and native gateway clamp Ingredients targets to at least 121 frames. The 121-frame reference minimum remains independent, so neither target nor static reference can fall outside the adapter's trained minimum.
+- A 256x160, 9-frame, two-step technical smoke completed through the new MLX guided path in 18.33 seconds with H.264 video and generated audio. This proves runtime wiring only; it is not a quality result because it intentionally uses a reduced diagnostic shape and step count.
+- Guidance-pass batching was implemented and tested as a mathematically equivalent execution-only optimization. At 256x160 it reduced the same two-step smoke from 18.33 to 11.53 seconds, but the production geometry reversed the result: one 768x448/121-frame guided step took 136.01 seconds batched versus about 100.71 seconds serial because the 22B model entered unified-memory pressure. The batching code and Studio setting were fully removed; production remains serial.
+- A full 30-step serial validation was started only long enough to measure the production cost and then stopped: three steps consumed 414.66 seconds wall-clock. The quality recipe is wired correctly, but full visual acceptance is intentionally left to owner review rather than inferred from a reduced-step diagnostic.
+
+Do not repeat these mistakes:
+
+- Do not judge Ingredients conditioning with a reference stream shorter than 121 frames, even when the target clip is shorter.
+- Do not let target-frame controls also set the reference-sheet repeat length.
+- Do not center-crop a portrait timeline anchor into a landscape latent without making that reframing explicit.
+- Do not expose blurred cover fill as the final timeline anchor; it creates a visible reframing transition even when frame-zero similarity and exposure metrics pass.
+- Do not pass the Ingredients reference inventory into timeline-anchor outpainting. Use only the target scene description.
+- Do not accept prompt-only outpainting as proof against duplicated scene elements; inspect the prepared anchor before paying the LTX generation cost.
+- Do not validate onset quality only at 0.5-second or wider intervals. Inspect every frame through at least the first two temporal blocks.
+- Do not use the generic MLX CRF-33 image-conditioning default for an already prepared Ingredients anchor; it causes a visible first-block blur and breaks CUDA parity.
+- Do not add a duplicate frame-8 anchor to hide onset blur; it moves the transition artifact instead of fixing it.
+- Do not accept gutter reduction alone as proof that mixed-aspect references occupy the sheet; measure the composed pixels and inspect the actual sheet.
+- Do not validate frame-zero transitions with blur metrics alone. Measure luminance for every frame through the first two temporal blocks.
+- Do not accept stable luminance as proof of a stable onset. Measure U, V, and saturation through the first two temporal blocks as well.
+- Do not assume Ingredients plus an exact timeline anchor is part of the adapter's training contract. The model card sets first-frame conditioning probability to zero, so the combined path needs explicit full-length validation.
+- Do not hide a model-level transition with an output color transform. Both onset post-process attempts were rejected and rolled back.
+- Do not run Ingredients with fewer than 121 target or reference frames.
+- Do not batch guided passes at 768x448/121 on this 48 GB Apple Silicon host; the extra activation pressure makes each step slower.
+
+## 2026-07-21 Ingredients official distilled-route restoration
+
+The 30-step guided-dev experiment was incorrectly promoted from an opt-in model-card validation recipe to the default Studio route. At production geometry, three guided steps took `414.66s`, projecting close to an hour. That cost was caused by CFG/STG guidance multiplying full 22B forwards under unified-memory pressure; it is not an inherent Ingredients requirement.
+
+Lightricks ships `LTX-2.3_ICLoRA_Ingredients_Single_Stage_Distilled.json` in the official ComfyUI-LTXVideo repository. The Studio default now matches that supported topology again:
+
+- dev base transformer;
+- distilled LoRA at `0.5`;
+- Ingredients IC-LoRA at `1.4`;
+- CFG `1.0` with the official nine-value distilled sigma schedule;
+- full-resolution single-stage generation;
+- 121-frame minimum for both target and static reference streams.
+
+Apple MLX emits `--dev-transformer transformer-dev.safetensors`, `--distilled-lora ltx-2.3-22b-distilled-lora-384-1.1.safetensors`, and `--single-stage`, without `--guided-dev`. Windows/CUDA uses the equivalent `LoraLoaderModelOnly -> LTXICLoRALoaderModelOnly -> CFGGuider -> ManualSigmas` graph. All later sheet packing, prompt contract, pre-IC timeline-anchor ordering, outpaint cache, and CRF-0 anchor fixes remain in place.
+
+The prior corrected distilled Ingredients benchmark was `270.75s` for 121 frames at `768x448`; a later fully corrected 97-frame LTX subprocess took `154.53s` before the target minimum was enforced. These are the appropriate several-minute range. The 50-70 minute projection applied only to the now-removed guided-dev default.
+
+## 2026-07-21 Eros Ingredients parity lane
+
+Status: implemented and runtime-verified on Apple MLX.
+
+The regular Ingredients workflow was not sufficient for the requested Eros parity. A separate `ltx23-eros-ic-ingredients-lora` workflow now inherits the complete regular Ingredients contract and changes only the base-model selection:
+
+- Apple MLX: local 10Eros v1 q8 dev transformer through the new `eros-q8-dev-ic` variant;
+- Windows/CUDA: `ltx/10Eros_v1-fp8mixed_learned.safetensors` in both checkpoint and audio-VAE loaders;
+- unchanged distilled LoRA `0.5`, Ingredients IC-LoRA `1.4`, CFG `1.0`, fixed eight-step sigmas, 121-frame target/reference minima, reference-sheet compositor, and pre-IC timeline anchors.
+
+The workflow registry supports inheritance so future Ingredients fixes live in the regular definition and flow into Eros automatically. Runtime API and embedded editor graphs apply explicit checkpoint overrides, and the Studio shortcut now keeps the currently selected Ingredients-capable model instead of hard-switching to regular. Do not stack Ingredients onto the unrelated pre-distilled Eros Fast/Exact workflow IDs; use the dedicated Eros Ingredients workflow.
+
+### Controlled regular/Eros parity render
+
+The 2026-07-21 A/B used the same completed Ingredients sheet, separate frame-zero anchor, reference description, target prompt, seed `4261`, `768x448` canvas, 121-frame target, 24 fps, Ingredients strength `1.4`, distilled LoRA strength `0.5`, and eight-step schedule. The workflow ID was the only changed request field.
+
+- Regular job `c9c1ab50a85b` completed in `268.10s` with backend `mlx-ltx-regular-regular-q8-dev-ic`.
+- Eros job `dfbaa4f2631b` completed in `233.95s` with backend `mlx-ltx-eros-eros-q8-dev-ic`.
+- Both outputs are 5.041667-second H.264 videos at 768x448 and 24 fps with AAC stereo audio at 48 kHz.
+- Distributed-frame review confirmed both retained the same two characters, hose-reel prop, garden-center framing, and requested restrained motion. The earlier Eros test that duplicated a subject used a single text-heavy poster as its only ingredient and is not representative of a valid Ingredients sheet.
+- Dense frames 0 through 15 confirmed the same known onset behavior in both lanes: frame zero is sharp, frames 1 through 7 soften and shift slightly, then the shot settles. This is the shared hybrid start-anchor plus Ingredients limitation documented above, not a base-model parity regression. The rejected luma and Y/Cb/Cr post-processes remain removed.
+
+Review copies:
+
+```text
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ingredients-parity/regular.mp4
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ingredients-parity/eros.mp4
+/Users/liam/comfy/hivemind-content-studio/output/ltx23-ingredients-parity/regular-vs-eros.mp4
+```
+
+## 2026-07-21 Ingredients face-detail geometry correction
+
+The owner-reported soft face and blurred motion in Eros Ingredients job `fee48a83ea62` were traced without inspecting its prompt or source-image content. The job rendered at `768x448` with the official eight-step distilled topology and high-quality CRF-18 output encoding. Its `720x1024` portrait start was nevertheless forced into the workflow's only advertised `16:9` option. Aspect-preserving anchor preparation therefore reduced the retained source to `315x448` and generated 226/227 pixels on the sides. The face entered LTX as a small fraction of an already modest latent, so facial and moving detail had too few spatial samples before temporal denoising. The encoder was not the root cause.
+
+The shared regular Ingredients workflow now advertises every geometry already supported by the API and graph compiler: `16:9`, `9:16`, `4:3`, `3:4`, and `1:1`. Eros inherits that list. Studio measures a selected start image and chooses the nearest supported ratio; `720x1024` maps to `3:4`. Users can still choose a different ratio afterward when deliberate reframing is required. The same change applies to Apple MLX and Windows/CUDA because dimensions continue through the shared MCP request and workflow compiler.
+
+This correction increases useful subject occupancy without adding sampler steps, an upscale pass, or output post-processing. It does not claim to remove the separate, known frames-1-through-7 softness caused by combining an exact frame-zero timeline anchor with Ingredients conditioning under the eight-step distilled temporal solve. The rejected color/blur post-processes remain removed.
+
+## 2026-07-21 Ingredients activation observability
+
+The persisted Ingredients collection is shared by the regular and Eros Ingredients workflows and is attached automatically whenever the selected workflow advertises `ingredient_images`. There is no separate activation switch. Saved references remain visible when another model is selected, but they are intentionally inactive for workflows that do not support Ingredients conditioning.
+
+Non-content metadata from the two latest Eros Ingredients submissions confirmed the full path was active: `eros-q8-dev-ic`, a composed reference image, a 121-frame static reference stream, conditioning/reference strengths of `1.0`, Ingredients LoRA strength `1.4`, and one independent frame-zero keyframe. The observed identity drift was therefore not caused by omitted references.
+
+Studio now shows the active reference count on the Ingredients control and an explicit `Active in next generation` status in Advanced. New native MLX job receipts record the source-view count, sheet rows/columns, and conditioning-only flag so future activation checks do not require inspecting prompts or media.

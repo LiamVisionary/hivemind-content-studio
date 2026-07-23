@@ -170,6 +170,9 @@ describe('MediaViewer workflow availability', () => {
   it('uses the original image instead of an orientation-stripping preview', async () => {
     const item = makeImageItem('output/photo.jpg', 'photo.jpg');
     item.displaySrc = 'http://example.local/photo.jpg?preview=webp;90';
+    // The E2E resolve layer probes the URL first; a failing fetch fails open
+    // to the original src (asynchronously, hence the effect flushes below).
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
 
     await act(async () => {
       root.render(
@@ -185,6 +188,8 @@ describe('MediaViewer workflow availability', () => {
         />,
       );
     });
+    await flushEffects();
+    await flushEffects();
 
     expect(document.querySelector<HTMLImageElement>('#media-viewer-overlay img')?.src).toBe(
       item.src,
@@ -194,6 +199,7 @@ describe('MediaViewer workflow availability', () => {
   it('uses the original image for non-JPEG fullscreen detail instead of the blurred preview', async () => {
     const item = makeImageItem('output/generated.png', 'generated.png');
     item.displaySrc = 'http://example.local/generated.png?preview=webp;90';
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
 
     await act(async () => {
       root.render(
@@ -209,6 +215,8 @@ describe('MediaViewer workflow availability', () => {
         />,
       );
     });
+    await flushEffects();
+    await flushEffects();
 
     expect(document.querySelector<HTMLImageElement>('#media-viewer-overlay img')?.src).toBe(
       item.src,

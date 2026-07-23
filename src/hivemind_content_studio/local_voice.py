@@ -10,6 +10,7 @@ from typing import Any
 
 from .config import load_config
 from .manifest import add_artifact, load_manifest, write_manifest
+from .private_access import encrypt_private_media
 
 
 def _json_get(path: str) -> dict[str, Any]:
@@ -81,5 +82,6 @@ def generate_local_voice_lines(manifest_path: str | Path) -> dict[str, Any]:
         path.write_bytes(audio)
         files.append(str(path))
         add_artifact(manifest, role="voice-line", path=path, provider="universal-tts", scene=index, model=model_id)
+        encrypt_private_media(path)
     write_manifest(manifest_file, manifest)
     return {"provider": "universal-tts", "model": model_id, "voice": voice_id, "audio_files": files}

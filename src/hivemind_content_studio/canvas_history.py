@@ -35,6 +35,27 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+# Sealed on-disk forms of a logical output: legacy server-key sidecars (.zenc)
+# and client-only E2E envelopes (.e2e). A record may point at either physical
+# form; indexing always works in logical names.
+PRIVATE_OUTPUT_SUFFIXES = (".zenc", ".e2e")
+
+
+def _logical_output_path(stored: Path) -> Path:
+    for suffix in PRIVATE_OUTPUT_SUFFIXES:
+        if stored.name.endswith(suffix):
+            return stored.with_name(stored.name.removesuffix(suffix))
+    return stored
+
+
+def _sealed_output_path(logical: Path) -> Path | None:
+    for suffix in PRIVATE_OUTPUT_SUFFIXES:
+        candidate = Path(str(logical) + suffix)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _history_metadata(record: dict[str, Any], *, timestamp_source: str) -> dict[str, Any]:
     outputs = record.get("outputs") if isinstance(record.get("outputs"), list) else []
     return {
@@ -87,6 +108,25 @@ class CanvasHistoryStore:
                 connection.execute("ALTER TABLE canvas_history ADD COLUMN provenance TEXT")
             if schema_version < 2:
                 connection.execute("PRAGMA user_version = 2")
+            if schema_version < 3:
+                self._purge_sealed_locator_rows(connection)
+                connection.execute("PRAGMA user_version = 3")
+
+    def _purge_sealed_locator_rows(self, connection: sqlite3.Connection) -> None:
+        """Drop rows indexed under a sealed physical path (….zenc/.e2e). Earlier
+        builds ingested job records verbatim, so a record whose outputs held the
+        sealed filename produced a duplicate row that rendered as a broken
+        octet-stream entry; ingestion now normalizes to logical names."""
+        stale = []
+        for row in connection.execute("SELECT history_id, output_name FROM canvas_history").fetchall():
+            try:
+                locator = self.cipher.decrypt(str(row["output_name"]))
+            except Exception:
+                continue
+            if locator.endswith(PRIVATE_OUTPUT_SUFFIXES):
+                stale.append(str(row["history_id"]))
+        if stale:
+            connection.executemany("DELETE FROM canvas_history WHERE history_id = ?", [(item,) for item in stale])
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -108,19 +148,18 @@ class CanvasHistoryStore:
                 outputs = record.get("outputs") if isinstance(record.get("outputs"), list) else []
                 for output in outputs:
                     stored = Path(str(output)).expanduser()
-                    logical = stored.with_name(stored.name.removesuffix(".zenc")) if stored.name.endswith(".zenc") else stored
-                    logical = logical.resolve()
+                    logical = _logical_output_path(stored).resolve()
                     output_name = logical.name
                     if not output_name:
                         continue
-                    encrypted_path = Path(str(logical) + ".zenc")
-                    if not logical.is_file() and not encrypted_path.is_file():
+                    sealed_path = _sealed_output_path(logical)
+                    if not logical.is_file() and sealed_path is None:
                         continue
                     output_locator = str(logical)
                     output_digest = self.cipher.digest(output_locator)
                     history_id = "canvas_" + hashlib.sha256(f"{source_id}\0{output_locator}".encode("utf-8")).hexdigest()[:20]
                     media_type = mimetypes.guess_type(output_name)[0] or "application/octet-stream"
-                    encrypted = stored.name.endswith(".zenc") or encrypted_path.is_file()
+                    encrypted = stored.name != logical.name or sealed_path is not None
                     before = connection.total_changes
                     connection.execute(
                         """
@@ -390,11 +429,7 @@ class CanvasGatewayClient:
                 for stored_path in candidates:
                     if not stored_path.is_file() or stored_path.name.startswith("."):
                         continue
-                    logical_path = (
-                        stored_path.with_name(stored_path.name.removesuffix(".zenc"))
-                        if stored_path.name.endswith(".zenc")
-                        else stored_path
-                    )
+                    logical_path = _logical_output_path(stored_path)
                     if logical_path.suffix.lower() not in CANVAS_MEDIA_SUFFIXES:
                         continue
                     logical_path = logical_path.resolve()

@@ -15,6 +15,9 @@ import * as z from 'zod/v4';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = dirname(__dirname);
+const repositoryRoot = resolve(projectRoot, '..', '..');
+const ingredientsSheetComposerPath = join(__dirname, 'compose-ingredients-sheet.py');
+const ltxAnchorCanvasCompilerPath = join(__dirname, 'compile-ltx-anchor-canvas.py');
 const mediaStateRoot = process.env.HIVEMIND_MEDIA_STATE_DIR || join(homedir(), '.hivemindos/media-studio');
 const tokenPath = process.env.MEDIA_STUDIO_TOKEN_FILE || process.env.ZIMG_TOKEN_FILE || join(mediaStateRoot, 'secure/zimg-token');
 const backendTokenPath = process.env.MEDIA_STUDIO_BACKEND_TOKEN_FILE || process.env.ZIMG_TOKEN_FILE || join(mediaStateRoot, 'secure/zimg-token');
@@ -119,9 +122,18 @@ const builtInVideoWorkflowRegistry = {
     family: 'ltx-2.3',
     builder: 'ltx-eros',
     variant: 'fast-q8-v12',
+    supports_loras: true,
+    compatible_base_models: ['LTXV'],
+    lora_injection: {
+      class_type: 'LTX2LoraLoaderAdvanced',
+      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
+      name_input: 'lora_name',
+      strength_input: 'strength_model',
+      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
+    },
     default: true,
     requires: { prompt: false, image: false },
-    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed'],
+    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'loras'],
   },
   'ltx23-eros-exact': {
     id: 'ltx23-eros-exact',
@@ -131,9 +143,18 @@ const builtInVideoWorkflowRegistry = {
     family: 'ltx-2.3',
     builder: 'ltx-eros',
     variant: 'exact-v1-merged-q8',
+    supports_loras: true,
+    compatible_base_models: ['LTXV'],
+    lora_injection: {
+      class_type: 'LTX2LoraLoaderAdvanced',
+      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
+      name_input: 'lora_name',
+      strength_input: 'strength_model',
+      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
+    },
     default: false,
     requires: { prompt: false, image: false },
-    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed'],
+    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'loras'],
   },
 };
 
@@ -153,6 +174,9 @@ const workflowAliases = {
   'ic-ingredients': 'ltx23-ic-ingredients-lora',
   'ltx23-ingredients': 'ltx23-ic-ingredients-lora',
   'reference-sheet': 'ltx23-ic-ingredients-lora',
+  'eros-ingredients': 'ltx23-eros-ic-ingredients-lora',
+  'eros-ic-ingredients': 'ltx23-eros-ic-ingredients-lora',
+  'ltx23-eros-ingredients': 'ltx23-eros-ic-ingredients-lora',
 };
 
 function token() {
@@ -200,7 +224,8 @@ function generationUsage() {
       ref_boost: { type: 'number', default: 4, note: 'Krea2 identity reference-fidelity dial.' },
       identity_strength: { type: 'number', default: 1, note: 'Krea2 identity LoRA strength.' },
       grounding_px: { type: 'integer', default: 768, note: 'Krea2 identity vision-grounding size.' },
-      reference_description: { type: 'string', note: 'For Ingredients IC-LoRA, describe every labeled panel in the supplied reference sheet. The server wraps this with the required Reference Sheet and Target headings.' },
+      reference_description: { type: 'string', note: 'For Ingredients IC-LoRA, describe every panel in the reference sheet. The server wraps this with the required Reference Sheet and Target headings.' },
+      ingredient_images: { type: 'array', maxItems: 12, note: 'Ingredients IC-LoRA only. Independent image sources are composed server-side into one conditioning-only sheet and never become timeline anchors.' },
       image_path: { type: 'string', note: 'Absolute path or Comfy input filename for edit backends.' },
       image_base64: { type: 'string', note: 'Inline source image as raw base64 or data:image/...;base64,... data URL. Wins over image_path.' },
       image_url: { type: 'string', note: 'Optional HTTP(S) source image fetched server-side. image_base64 wins when both are supplied.' },
@@ -269,11 +294,18 @@ function publicWorkflow(workflow) {
     description: workflow.description,
     family: workflow.family,
     builder: workflow.builder,
+    ...(workflow.backend !== undefined ? { backend: workflow.backend } : {}),
     default: Boolean(workflow.default),
     requires: workflow.requires,
     accepts: workflow.accepts,
+    supports_loras: Boolean(workflow.supports_loras),
+    compatible_base_models: Array.isArray(workflow.compatible_base_models) ? workflow.compatible_base_models : [],
+    ...(workflow.max_reference_images ? { max_reference_images: workflow.max_reference_images } : {}),
     defaults: publicWorkflowDefaults(workflow.id),
+    ...(workflow.prompt_helper ? { prompt_helper: workflow.prompt_helper } : {}),
     ...(workflow.prompt_contract ? { prompt_contract: workflow.prompt_contract } : {}),
+    ...(workflow.ingredient_inputs ? { ingredient_inputs: workflow.ingredient_inputs } : {}),
+    ...(Array.isArray(workflow.aspect_ratios) ? { aspect_ratios: workflow.aspect_ratios } : {}),
   };
 }
 
@@ -288,23 +320,52 @@ function listRegisteredWorkflows({ media_type, query } = {}) {
     .map(publicWorkflow);
 }
 
+function mergeWorkflowDefinition(base, override) {
+  if (!base || typeof base !== 'object' || Array.isArray(base)) return cloneJson(override);
+  if (!override || typeof override !== 'object' || Array.isArray(override)) return cloneJson(override);
+  const out = cloneJson(base);
+  for (const [key, value] of Object.entries(override)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)
+        && out[key] && typeof out[key] === 'object' && !Array.isArray(out[key])) {
+      out[key] = mergeWorkflowDefinition(out[key], value);
+    } else {
+      out[key] = cloneJson(value);
+    }
+  }
+  return out;
+}
+
 function externalWorkflowRegistry() {
   if (!existsSync(workflowRegistryPath)) return {};
   const data = loadJsonFile(workflowRegistryPath, 'Media Studio workflow registry');
   const items = Array.isArray(data) ? data : (Array.isArray(data.workflows) ? data.workflows : Object.values(data.workflows || {}));
+  const definitions = new Map(items
+    .filter((item) => item && typeof item === 'object' && String(item.id || '').trim())
+    .map((item) => [String(item.id).trim(), item]));
   const out = {};
-  for (const item of items) {
-    if (!item || typeof item !== 'object') continue;
-    const id = String(item.id || '').trim();
-    if (!id) continue;
+  const resolving = new Set();
+  const resolveDefinition = (id) => {
+    if (out[id]) return out[id];
+    const item = definitions.get(id);
+    if (!item) throw new Error(`workflow ${id} was not found in the registry`);
+    if (resolving.has(id)) throw new Error(`workflow inheritance cycle detected at ${id}`);
+    resolving.add(id);
+    const parentId = String(item.inherits || '').trim();
+    const resolved = parentId
+      ? mergeWorkflowDefinition(resolveDefinition(parentId), item)
+      : cloneJson(item);
+    delete resolved.inherits;
+    resolving.delete(id);
     out[id] = {
       media_type: 'video',
       requires: { prompt: false, image: false },
       accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'width', 'height', 'frames', 'frame_rate', 'seed'],
-      ...item,
+      ...resolved,
       id,
     };
-  }
+    return out[id];
+  };
+  for (const id of definitions.keys()) resolveDefinition(id);
   return out;
 }
 
@@ -393,6 +454,9 @@ function extensionForMime(mime) {
     'image/webp': '.webp',
     'image/gif': '.gif',
     'image/bmp': '.bmp',
+    'image/heic': '.heic',
+    'image/heif': '.heif',
+    'image/avif': '.avif',
   }[normalized] || '';
 }
 
@@ -404,7 +468,7 @@ function detectImageExtension(buffer, mime, sourceName) {
   const fromMime = extensionForMime(mime);
   if (fromMime) return fromMime;
   const fromName = extname(String(sourceName || '')).toLowerCase();
-  if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'].includes(fromName)) return fromName === '.jpeg' ? '.jpg' : fromName;
+  if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.heic', '.heif', '.avif'].includes(fromName)) return fromName === '.jpeg' ? '.jpg' : fromName;
   return '';
 }
 
@@ -576,6 +640,125 @@ async function imageSourceFromPrefixedArgs(args = {}, prefix) {
   return staged || source.image_path;
 }
 
+function ingredientPythonExecutable() {
+  const configured = String(process.env.MEDIA_STUDIO_PYTHON || '').trim();
+  if (configured) return configured;
+  const projectPython = process.platform === 'win32'
+    ? join(repositoryRoot, '.venv', 'Scripts', 'python.exe')
+    : join(repositoryRoot, '.venv', 'bin', 'python');
+  if (existsSync(projectPython)) return projectPython;
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
+function ingredientImageAbsolutePath(imageName) {
+  const absolute = resolve(comfyInputDir, String(imageName || ''));
+  const rel = relative(resolve(comfyInputDir), absolute);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel) || !existsSync(absolute)) {
+    throw new Error(`staged ingredient image is unavailable: ${imageName}`);
+  }
+  return absolute;
+}
+
+function composeIngredientSheet(imageNames, { width, height } = {}) {
+  if (!existsSync(ingredientsSheetComposerPath)) throw new Error('Ingredients sheet compositor is unavailable');
+  const outputName = `mcp_ingredients_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}.png`;
+  const outputPath = join(comfyInputDir, outputName);
+  const geometryArgs = Number.isFinite(Number(width)) && Number.isFinite(Number(height))
+    ? ['--width', String(width), '--height', String(height)]
+    : [];
+  const result = spawnSync(ingredientPythonExecutable(), [
+    ingredientsSheetComposerPath,
+    '--output',
+    outputPath,
+    ...geometryArgs,
+    ...imageNames.map(ingredientImageAbsolutePath),
+  ], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    timeout: 120000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error) throw new Error(`Ingredients sheet composition failed: ${result.error.message}`);
+  if (result.status !== 0 || !existsSync(outputPath)) {
+    throw new Error(`Ingredients sheet composition failed: ${String(result.stderr || result.stdout || 'unknown error').trim()}`);
+  }
+  try {
+    return { imageName: outputName, layout: JSON.parse(String(result.stdout || '').trim()) };
+  } catch {
+    throw new Error('Ingredients sheet compositor returned invalid metadata');
+  }
+}
+
+function compileLtxAnchorCanvas(imageName, { width, height, prompt, seed }) {
+  if (!existsSync(ltxAnchorCanvasCompilerPath)) throw new Error('LTX anchor canvas compiler is unavailable');
+  const result = spawnSync(ingredientPythonExecutable(), [ltxAnchorCanvasCompilerPath], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    input: JSON.stringify({
+      source: ingredientImageAbsolutePath(imageName),
+      image_name: imageName,
+      width,
+      height,
+      prompt: String(prompt || ''),
+      seed: Number(seed ?? 42),
+    }),
+    timeout: 120000,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  if (result.error) throw new Error(`LTX anchor canvas compilation failed: ${result.error.message}`);
+  if (result.status !== 0) {
+    throw new Error(`LTX anchor canvas compilation failed: ${String(result.stderr || result.stdout || 'unknown error').trim()}`);
+  }
+  try {
+    const compiled = JSON.parse(String(result.stdout || '').trim());
+    if (!compiled.graph || !Array.isArray(compiled.output)) throw new Error('missing graph output');
+    return compiled;
+  } catch (error) {
+    throw new Error(`LTX anchor canvas compiler returned invalid metadata: ${error.message}`);
+  }
+}
+
+async function ingredientSheetFromArgs(args, workflow, dimensions = {}) {
+  const raw = args.ingredient_images ?? args.params?.ingredient_images;
+  if (raw === undefined) return null;
+  if (workflow.prompt_contract?.type !== 'ltx23-ingredients') {
+    throw new Error('ingredient_images is only supported by the Ingredients IC-LoRA workflow');
+  }
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 12) {
+    throw new Error('ingredient_images must contain between 1 and 12 reference images');
+  }
+  const entries = [];
+  for (const [index, item] of raw.entries()) {
+    if (!item || typeof item !== 'object') throw new Error(`ingredient_images[${index}] must be an object`);
+    const source = await imageSourceFromArgs(item, {});
+    if (!source) {
+      throw new Error(`ingredient_images[${index}] requires image_path, image_base64, or image_url`);
+    }
+    entries.push({
+      imageName: stageLtxErosImage(source),
+      description: String(item.description || item.label || '').trim().slice(0, 1000),
+    });
+  }
+  const composed = composeIngredientSheet(entries.map((entry) => entry.imageName), dimensions);
+  // A single source is usually a finished multi-view sheet supplied as-is;
+  // describing it as one positioned panel ("left panel: reference view 1")
+  // misleads the model. Describe it as the whole sheet instead.
+  const generatedDescription = entries.length === 1
+    ? (entries[0].description
+      ? `The reference sheet: ${entries[0].description}`
+      : 'The reference sheet shows the same character from multiple angles; every panel depicts one identical person whose face, hair, and wardrobe must be preserved in the target shot.')
+    : composed.layout.panels.map((panel, index) => {
+      const description = entries[index].description || `reference view ${index + 1} of the same character or ingredient`;
+      return `${panel.position} panel: ${description}`;
+    }).join('\n');
+  return {
+    imageName: composed.imageName,
+    layout: composed.layout,
+    sourceCount: entries.length,
+    referenceDescription: generatedDescription,
+  };
+}
+
 function inputRelativeName(path) {
   const inputRoot = resolve(comfyInputDir);
   const absolute = resolve(path);
@@ -661,6 +844,25 @@ function setMappedApiInput(prompt, slot, value) {
   setApiInput(prompt, normalized.node, normalized.input, value);
 }
 
+function applyApiInputOverrides(prompt, overrides) {
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) return;
+  for (const [nodeId, inputs] of Object.entries(overrides)) {
+    if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) continue;
+    const node = apiPromptNode(prompt, nodeId);
+    node.inputs = { ...node.inputs, ...cloneJson(inputs) };
+  }
+}
+
+function applyEditorWidgetOverrides(workflow, overrides) {
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) return;
+  for (const [nodeId, widgets] of Object.entries(overrides)) {
+    if (!Array.isArray(widgets)) continue;
+    const node = editorNode(workflow, nodeId);
+    if (!node) throw new Error(`editor workflow is missing override node ${nodeId}`);
+    node.widgets_values = cloneJson(widgets);
+  }
+}
+
 function argOrDefault(args, defaults, key) {
   if (args[key] !== undefined) return args[key];
   if (args.params && typeof args.params === 'object' && args.params[key] !== undefined) return args.params[key];
@@ -677,14 +879,17 @@ function normalizedLtxFrameCount(value, fallback = 233) {
 function videoFrameCount(args, settings, defaults = {}) {
   const direct = args.frames ?? args.params?.frames ?? settings.frames ?? defaults.frames;
   if (direct !== undefined && direct !== null && direct !== '') {
-    return normalizedLtxFrameCount(direct);
+    return Math.max(normalizedLtxFrameCount(direct), Number(settings.minimumFrames) || 9);
   }
   const duration = Number(args.duration_seconds ?? args.params?.duration_seconds ?? settings.duration_seconds ?? defaults.duration_seconds);
   const frameRate = Number(args.frame_rate ?? args.params?.frame_rate ?? settings.frame_rate ?? settings.frameRate ?? defaults.frame_rate ?? 24);
   if (Number.isFinite(duration) && duration > 0 && Number.isFinite(frameRate) && frameRate > 0) {
-    return normalizedLtxFrameCount(Math.round(duration * frameRate) + 1);
+    return Math.max(
+      normalizedLtxFrameCount(Math.round(duration * frameRate) + 1),
+      Number(settings.minimumFrames) || 9,
+    );
   }
-  return normalizedLtxFrameCount(defaults.frames ?? 233);
+  return Math.max(normalizedLtxFrameCount(defaults.frames ?? 233), Number(settings.minimumFrames) || 9);
 }
 
 function videoAnchorFrame(entry, frames, frameRate) {
@@ -703,7 +908,13 @@ async function normalizeVideoKeyframes(args, settings, defaults = {}) {
   const frameRate = Number(args.frame_rate ?? args.params?.frame_rate ?? settings.frame_rate ?? settings.frameRate ?? defaults.frame_rate ?? 24) || 24;
   const ordered = [];
   if (settings.imageName) {
-    ordered.push({ image_path: settings.imageName, frame: 0, strength: 1, role: 'start' });
+    const defaultStrength = Number(settings.defaultImageStrength ?? 1);
+    ordered.push({
+      image_path: settings.imageName,
+      frame: 0,
+      strength: Math.max(0, Math.min(1, Number.isFinite(defaultStrength) ? defaultStrength : 1)),
+      role: 'start',
+    });
   }
   for (const role of ['middle', 'end']) {
     const source = await imageSourceFromPrefixedArgs(args, role);
@@ -737,6 +948,94 @@ async function normalizeVideoKeyframes(args, settings, defaults = {}) {
 function nextPromptNodeId(promptGraph) {
   let next = Math.max(0, ...Object.keys(promptGraph).map((value) => Number(value)).filter(Number.isFinite)) + 1;
   return () => String(next++);
+}
+
+function mergePromptGraphFragment(promptGraph, fragment, outputRef) {
+  const nextId = nextPromptNodeId(promptGraph);
+  const idMap = new Map(Object.keys(fragment).map((nodeId) => [String(nodeId), nextId()]));
+  const remap = (value) => {
+    if (Array.isArray(value)) {
+      if (value.length === 2 && idMap.has(String(value[0])) && Number.isFinite(Number(value[1]))) {
+        return [idMap.get(String(value[0])), Number(value[1])];
+      }
+      return value.map(remap);
+    }
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, remap(item)]));
+    }
+    return value;
+  };
+  for (const [sourceId, node] of Object.entries(fragment)) {
+    promptGraph[idMap.get(String(sourceId))] = remap(cloneJson(node));
+  }
+  return remap(outputRef);
+}
+
+function normalizeWorkflowLoras(args, workflow) {
+  const raw = args.loras ?? args.params?.loras;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) throw new Error('loras must be an array');
+  if (raw.length > 20) throw new Error('video generation supports at most 20 LoRAs');
+  if (raw.length && !workflow.supports_loras) throw new Error(`workflow ${workflow.id} does not support add-on LoRAs`);
+  const byId = new Map();
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') throw new Error('each LoRA must include an id and optional strength');
+    const id = String(item.id || item.name || '').trim().replaceAll('\\', '/');
+    if (!id || id.includes('\0') || id.startsWith('/') || /^[A-Za-z]:\//.test(id) || id.split('/').includes('..')) {
+      throw new Error(`invalid LoRA id: ${id || '(missing)'}`);
+    }
+    const strength = Number(item.strength ?? 1);
+    if (!Number.isFinite(strength) || strength < -10 || strength > 10) {
+      throw new Error(`LoRA strength for ${id} must be between -10 and 10`);
+    }
+    byId.set(id, { id, strength });
+  }
+  return [...byId.values()];
+}
+
+function injectWorkflowLoras(promptGraph, loras, injection) {
+  if (!loras.length) return;
+  if (!injection || typeof injection !== 'object') throw new Error('workflow is missing its LoRA graph injection contract');
+  const targets = Array.isArray(injection.targets) ? injection.targets : [];
+  if (!targets.length) throw new Error('workflow LoRA graph injection contract has no targets');
+  const targetInputs = targets.map((target) => {
+    const node = promptGraph[String(target.node)];
+    const input = String(target.input || 'model');
+    if (!node?.inputs || !Array.isArray(node.inputs[input])) {
+      throw new Error(`workflow LoRA target ${target.node}.${input} is unavailable`);
+    }
+    return { node, input, source: node.inputs[input] };
+  });
+  const sourceKey = JSON.stringify(targetInputs[0].source);
+  if (targetInputs.some((target) => JSON.stringify(target.source) !== sourceKey)) {
+    throw new Error('workflow LoRA targets do not share a model source');
+  }
+  const nextId = nextPromptNodeId(promptGraph);
+  let source = targetInputs[0].source;
+  for (const lora of loras) {
+    const nodeId = nextId();
+    promptGraph[nodeId] = {
+      class_type: String(injection.class_type || 'LoraLoaderModelOnly'),
+      inputs: {
+        model: source,
+        ...(injection.static_inputs && typeof injection.static_inputs === 'object' ? injection.static_inputs : {}),
+        [String(injection.name_input || 'lora_name')]: lora.id,
+        [String(injection.strength_input || 'strength_model')]: lora.strength,
+      },
+    };
+    source = [nodeId, Number(injection.output_index || 0)];
+  }
+  for (const target of targetInputs) target.node.inputs[target.input] = source;
+}
+
+function mergeNativeWorkflowLoras(nativeLoras, selectedLoras) {
+  const merged = new Map();
+  for (const item of Array.isArray(nativeLoras) ? nativeLoras : []) {
+    const name = String(item?.name || item?.id || '').trim();
+    if (name) merged.set(name.replaceAll('\\', '/'), item);
+  }
+  for (const item of selectedLoras) merged.set(item.id, { name: item.id, strength: item.strength });
+  return [...merged.values()];
 }
 
 function promptNodesByClass(promptGraph, classType) {
@@ -811,6 +1110,80 @@ function compileLtxImageAnchors(promptGraph, keyframes) {
   if (previousId !== guideId) {
     for (const consumer of consumers) consumer.node.inputs[consumer.key] = [previousId, consumer.output];
   }
+}
+
+function compileLtxIcTimelineAnchors(promptGraph, keyframes) {
+  if (!Array.isArray(keyframes) || keyframes.length === 0) return;
+  const icGuide = promptNodesByClass(promptGraph, 'LTXAddVideoICLoRAGuide')[0];
+  if (!icGuide) throw new Error('Ingredients workflow is missing its IC-LoRA guide node');
+  const [, icGuideNode] = icGuide;
+  const vae = icGuideNode.inputs?.vae;
+  if (!Array.isArray(vae)) throw new Error('Ingredients IC-LoRA guide is missing its VAE input');
+  const sourceLatent = icGuideNode.inputs?.latent;
+  if (!Array.isArray(sourceLatent)) throw new Error('Ingredients IC-LoRA guide is missing its source latent');
+
+  const nextId = nextPromptNodeId(promptGraph);
+  const imageRefs = keyframes.map((anchor) => {
+    if (Array.isArray(anchor.image_ref)) return anchor.image_ref;
+    const nodeId = nextId();
+    promptGraph[nodeId] = { class_type: 'LoadImage', inputs: { image: anchor.image_path } };
+    return [nodeId, 0];
+  });
+
+  // Match Lightricks' official workflow: image conditioning modifies the clean
+  // target latent first, then the IC guide appends reference-sheet tokens.
+  // Applying an image node after the IC guide treats reference tokens as target
+  // pixels and can leak the sheet into the rendered frame.
+  const anchorNodeId = nextId();
+  if (keyframes.length === 1 && keyframes[0].frame === 0) {
+    promptGraph[anchorNodeId] = {
+      class_type: 'LTXVImgToVideoConditionOnly',
+      inputs: {
+        vae,
+        image: imageRefs[0],
+        latent: sourceLatent,
+        strength: keyframes[0].strength,
+        bypass: false,
+      },
+    };
+  } else {
+    promptGraph[anchorNodeId] = {
+      class_type: 'LTXVImgToVideoInplaceKJ',
+      inputs: {
+        vae,
+        latent: sourceLatent,
+        num_images: String(keyframes.length),
+        ...Object.fromEntries(keyframes.flatMap((anchor, index) => {
+          const slot = index + 1;
+          return [
+            [`num_images.image_${slot}`, imageRefs[index]],
+            [`num_images.index_${slot}`, anchor.frame],
+            [`num_images.strength_${slot}`, anchor.strength],
+          ];
+        })),
+      },
+    };
+  }
+  icGuideNode.inputs.latent = [anchorNodeId, 0];
+}
+
+function configureLtxIcReferenceFrames(promptGraph, outputFrames, minimumFrames = 121) {
+  const referenceFrames = Math.max(
+    1,
+    Math.round(Number(outputFrames) || 1),
+    Math.round(Number(minimumFrames) || 121),
+  );
+  let configured = false;
+  for (const [, guide] of promptNodesByClass(promptGraph, 'LTXAddVideoICLoRAGuide')) {
+    const imageRef = guide.inputs?.image;
+    if (!Array.isArray(imageRef)) continue;
+    const repeat = promptGraph[String(imageRef[0])];
+    if (repeat?.class_type !== 'RepeatImageBatch') continue;
+    repeat.inputs = { ...(repeat.inputs || {}), amount: referenceFrames };
+    configured = true;
+  }
+  if (!configured) throw new Error('Ingredients workflow is missing its reference-sheet repeat node');
+  return referenceFrames;
 }
 
 function normalizedLtxExtensionFrames(durationSeconds, frameRate) {
@@ -1110,6 +1483,7 @@ function updateLtxErosEditorWorkflow(workflow, spec, settings) {
       seed: settings.seed,
     },
     keyframes: Array.isArray(settings.keyframes) ? settings.keyframes : [],
+    ...(Array.isArray(settings.loras) && settings.loras.length ? { loras: settings.loras.map((item) => ({ name: item.id, strength: item.strength })) } : {}),
     ...(settings.videoName ? { video: {
       mode: 'extend',
       path: settings.videoName,
@@ -1158,6 +1532,7 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
     frameRate,
     extensionFrames: normalizedLtxExtensionFrames(durationSeconds, frameRate),
     seed: positiveInt(args.seed, defaults.seed, { min: 0, max: 1_000_000_000 }),
+    loras: normalizeWorkflowLoras(args, workflow),
   };
   settings.keyframes = videoName ? [] : await normalizeVideoKeyframes(args, settings, defaults);
   const apiWorkflow = loadJsonFile(ltxErosApiWorkflowPath, 'LTX Eros API workflow');
@@ -1172,6 +1547,7 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
   setApiInput(promptGraph, 812, 'noise_seed', settings.seed);
   if (videoName) compileLtxVideoExtension(promptGraph, settings);
   else compileLtxImageAnchors(promptGraph, settings.keyframes);
+  injectWorkflowLoras(promptGraph, settings.loras, workflow.lora_injection);
 
   const mobileWorkflowPath = join(ltxErosMobileWorkflowDir, spec.mobileWorkflow);
   const mobileWorkflow = updateLtxErosEditorWorkflow(
@@ -1230,15 +1606,50 @@ function contractedVideoPrompt(args, defaults, workflow) {
   return `${referenceHeading}\n${String(referenceDescription).trim()}\n${targetHeading}\n${prompt}`;
 }
 
+function ltxTargetDescription(prompt) {
+  const text = String(prompt || '').trim();
+  const marker = '### Target Description';
+  const index = text.lastIndexOf(marker);
+  return index >= 0 ? text.slice(index + marker.length).trim() : text;
+}
+
+function assertWorkflowAspectRatio(workflow, width, height) {
+  const allowed = Array.isArray(workflow.aspect_ratios) ? workflow.aspect_ratios : [];
+  if (!allowed.length || !Number.isFinite(width) || !Number.isFinite(height) || height <= 0) return;
+  const actual = width / height;
+  const matches = allowed.some((value) => {
+    const match = String(value).trim().match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+    if (!match) return false;
+    const expected = Number(match[1]) / Number(match[2]);
+    return Math.abs(actual - expected) / expected <= 0.05;
+  });
+  if (!matches) {
+    throw new Error(
+      `workflow ${workflow.id} supports ${allowed.join(', ')} output; received ${width}x${height}`,
+    );
+  }
+}
+
 async function buildComfyApiPromptBody(args = {}, workflow) {
   const apiWorkflowPath = resolveWorkflowFile(workflow.api_workflow || workflow.workflow || workflow.apiWorkflow);
   const apiWorkflow = loadJsonFile(apiWorkflowPath, `${workflow.id} API workflow`);
   const promptGraph = cloneJson(apiWorkflow.prompt || apiWorkflow);
+  applyApiInputOverrides(promptGraph, workflow.workflow_overrides?.api_inputs);
   const defaults = workflowDefaults(workflow.id);
   const slots = workflow.slots || {};
-  const settings = {};
+  const settings = { loras: normalizeWorkflowLoras(args, workflow) };
+  const targetWidth = positiveInt(argOrDefault(args, defaults, 'width'), defaults.width, { min: 64, max: 4096 });
+  const targetHeight = positiveInt(argOrDefault(args, defaults, 'height'), defaults.height, { min: 64, max: 4096 });
+  assertWorkflowAspectRatio(workflow, targetWidth, targetHeight);
+  const ingredientSheet = await ingredientSheetFromArgs(args, workflow, {
+    width: targetWidth,
+    height: targetHeight,
+  });
+  const promptArgs = ingredientSheet && !String(args.reference_description || '').trim()
+    ? { ...args, reference_description: ingredientSheet.referenceDescription }
+    : args;
 
-  const promptText = contractedVideoPrompt(args, defaults, workflow);
+  const promptText = contractedVideoPrompt(promptArgs, defaults, workflow);
   if (promptText !== undefined) {
     settings.prompt = String(promptText);
     setMappedApiInput(promptGraph, slots.prompt, settings.prompt);
@@ -1258,10 +1669,26 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     settings.audioMode = settings.sourceHasAudio ? 'extend' : 'generate';
   }
 
-  const rawImage = settings.videoName ? undefined : await imageSourceFromArgs(args, defaults);
+  let timelineImageName;
+  if (!settings.videoName && ingredientSheet) {
+    const timelineImage = await imageSourceFromArgs(args, {});
+    if (timelineImage) timelineImageName = stageLtxErosImage(timelineImage);
+  }
+  const rawImage = settings.videoName
+    ? undefined
+    : (ingredientSheet?.imageName || await imageSourceFromArgs(args, defaults));
   if (!settings.videoName && rawImage !== undefined && slots.image_path) {
     settings.imageName = stageLtxErosImage(rawImage, defaults.image);
     setMappedApiInput(promptGraph, slots.image_path, settings.imageName);
+  }
+  if (timelineImageName) settings.timelineImageName = timelineImageName;
+  if (ingredientSheet) {
+    settings.ingredientSheet = {
+      sourceCount: ingredientSheet.sourceCount,
+      columns: ingredientSheet.layout.columns,
+      rows: ingredientSheet.layout.rows,
+      conditioningOnly: true,
+    };
   }
   if (workflow.requires?.image && !settings.imageName && !settings.videoName) {
     throw new Error(`workflow ${workflow.id} requires image_path, image_base64, or image_url`);
@@ -1300,14 +1727,59 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     setMappedApiInput(promptGraph, slots.frames, settings.frames);
   }
   settings.extensionFrames = normalizedLtxExtensionFrames(settings.durationSeconds, settings.frameRate);
-  settings.keyframes = settings.videoName ? [] : await normalizeVideoKeyframes(args, settings, defaults);
+  const usesIngredientConditioning = workflow.prompt_contract?.type === 'ltx23-ingredients';
+  if (usesIngredientConditioning) {
+    settings.minimumFrames = Number(workflow.native_mlx?.ic_lora?.target_min_frames) || 121;
+    settings.frames = Math.max(normalizedLtxFrameCount(settings.frames), settings.minimumFrames);
+    settings.durationSeconds = (settings.frames - 1) / settings.frameRate;
+    setMappedApiInput(promptGraph, slots.frames, settings.frames);
+    settings.ingredientReferenceFrames = configureLtxIcReferenceFrames(
+      promptGraph,
+      settings.frames,
+      workflow.native_mlx?.ic_lora?.reference_min_frames ?? 121,
+    );
+  }
+  const normalizedKeyframes = settings.videoName
+    ? []
+    : await normalizeVideoKeyframes(
+        args,
+        usesIngredientConditioning
+          ? { ...settings, imageName: timelineImageName, defaultImageStrength: 0.9 }
+          : settings,
+        defaults,
+      );
+  let compiledKeyframes = normalizedKeyframes;
+  if (!settings.videoName && usesIngredientConditioning) {
+    compiledKeyframes = normalizedKeyframes.map((anchor) => {
+      const canvas = compileLtxAnchorCanvas(anchor.image_path, {
+        width: targetWidth,
+        height: targetHeight,
+        prompt: ltxTargetDescription(argOrDefault(args, defaults, 'prompt')),
+        seed: settings.seed ?? defaults.seed ?? 42,
+      });
+      return {
+        ...anchor,
+        image_ref: mergePromptGraphFragment(promptGraph, canvas.graph, canvas.output),
+        canvas_preparation: canvas.geometry,
+      };
+    });
+    settings.anchorCanvasPreparations = compiledKeyframes.map((anchor) => anchor.canvas_preparation);
+  }
+  settings.keyframes = normalizedKeyframes;
+  const fittedStart = settings.keyframes.find((anchor) => Number(anchor.frame) === 0);
+  if (fittedStart) settings.timelineImageName = fittedStart.image_path;
   if (settings.videoName) compileLtxVideoExtension(promptGraph, settings);
+  else if (usesIngredientConditioning) {
+    compileLtxIcTimelineAnchors(promptGraph, compiledKeyframes);
+  }
   else compileLtxImageAnchors(promptGraph, settings.keyframes);
+  injectWorkflowLoras(promptGraph, settings.loras, workflow.lora_injection);
 
   const extraPngInfo = {};
   const mobileWorkflowPath = resolveWorkflowFile(workflow.mobile_workflow || workflow.editor_workflow || workflow.mobileWorkflow);
   if (mobileWorkflowPath && existsSync(mobileWorkflowPath)) {
     const editorWorkflow = loadJsonFile(mobileWorkflowPath, `${workflow.id} editor workflow`);
+    applyEditorWidgetOverrides(editorWorkflow, workflow.workflow_overrides?.editor_widgets);
     editorWorkflow.extra = editorWorkflow.extra && typeof editorWorkflow.extra === 'object' ? editorWorkflow.extra : {};
     const existingNative = editorWorkflow.extra.nativeMlxLtx && typeof editorWorkflow.extra.nativeMlxLtx === 'object'
       ? editorWorkflow.extra.nativeMlxLtx
@@ -1329,6 +1801,7 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
         ...(settings.seed !== undefined ? { seed: settings.seed } : {}),
       },
       keyframes: settings.keyframes,
+      ...(settings.ingredientSheet ? { ingredientSheet: settings.ingredientSheet } : {}),
       ...(settings.videoName ? { video: {
         mode: 'extend',
         path: settings.videoName,
@@ -1339,7 +1812,9 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
         cfg_scale: 3,
         stg_scale: 1,
       } } : {}),
-      ...(Array.isArray(nativeSpec.loras) ? { loras: nativeSpec.loras } : {}),
+      ...((Array.isArray(nativeSpec.loras) || settings.loras.length) ? {
+        loras: mergeNativeWorkflowLoras(nativeSpec.loras, settings.loras),
+      } : {}),
       ...(nativeSpec.ic_lora || existingNative.icLora ? { icLora: {
         ...(existingNative.icLora && typeof existingNative.icLora === 'object' ? existingNative.icLora : {}),
         ...(nativeSpec.ic_lora && typeof nativeSpec.ic_lora === 'object' ? nativeSpec.ic_lora : {}),
@@ -1495,7 +1970,7 @@ function ok(data) {
 function fail(error) {
   const structuredContent = {
     ok: false,
-    error: String(error?.message || error),
+    error: String(error?.message || error?.error || error?.error_type || error),
     status: error?.status,
     response: error?.response,
   };
@@ -1753,7 +2228,7 @@ function buildServer() {
     title: 'List Media Workflows',
     description: 'List registered workflows. Agents should inspect this when choosing a workflow for vague media requests.',
     inputSchema: {
-      media_type: z.string().optional().describe('Optional media type filter, currently video.'),
+      media_type: z.string().optional().describe('Optional media type filter, such as image or video.'),
       query: z.string().optional(),
     },
   }, tool(async (args) => {
@@ -1770,6 +2245,7 @@ function buildServer() {
     description: 'Queue an image generation job. Returns a job snapshot; set wait=true only for short jobs.',
     inputSchema: {
       prompt: z.string().min(1).describe('Private prompt to render. The backend redacts prompts in stored history.'),
+      workflow_id: z.string().optional().describe('Optional registered image workflow id from media_list_workflows. The workflow selects the backend and defaults.'),
       backend: z.string().optional().describe('Optional backend route, such as comfy-krea2-turbo-identity-edit or mlx-mxfp8-bigloves-klein3-edit.'),
       width: z.number().int().min(64).max(4096).optional(),
       height: z.number().int().min(64).max(4096).optional(),
@@ -1795,19 +2271,33 @@ function buildServer() {
     },
   }, tool(async (args) => {
     const includeUrls = machinePrivate ? false : args.include_urls;
+    const workflow = args.workflow_id ? videoWorkflowRegistry()[args.workflow_id] : null;
+    if (args.workflow_id && (!workflow || workflow.media_type !== 'image')) {
+      throw new Error(`Unknown image workflow: ${args.workflow_id}`);
+    }
+    const hasImage = Boolean(args.image_base64 || args.image_url || args.image_path);
+    if (workflow?.requires?.image && !hasImage) {
+      throw new Error(`${workflow.title || workflow.id} requires a source image`);
+    }
     const stagedImage = await stageInlineImageFromArgs(args);
     const body = Object.fromEntries(Object.entries(args).filter(([key, value]) => (
-      !['wait', 'timeout_s', 'include_urls', 'image_base64', 'image_url'].includes(key) && value !== undefined
+      !['workflow_id', 'wait', 'timeout_s', 'include_urls', 'image_base64', 'image_url'].includes(key) && value !== undefined
     )));
+    if (workflow) {
+      for (const [key, value] of Object.entries(workflowDefaults(workflow.id))) {
+        if (body[key] === undefined) body[key] = value;
+      }
+    }
+    if (!body.backend && workflow?.backend) body.backend = workflow.backend;
     if (stagedImage) body.image_path = stagedImage;
     const queued = normalizeRecord(await requestJson('/api/generate', {
       method: 'POST',
       body,
       timeoutMs: 30000,
     }), { includeUrls });
-    if (!args.wait || !queued.id) return { job: queued };
+    if (!args.wait || !queued.id) return { ...(workflow ? { workflow: publicWorkflow(workflow) } : {}), job: queued };
     const job = await waitForJob(queued.id, { timeoutS: args.timeout_s, includeUrls });
-    return { job };
+    return { ...(workflow ? { workflow: publicWorkflow(workflow) } : {}), job };
   }, { privateReceipt: true }));
 
   server.registerTool('media_generate_video', {
@@ -1817,6 +2307,12 @@ function buildServer() {
       workflow_id: z.string().optional().describe(`Registered workflow id. Defaults to ${defaultVideoWorkflowId()}. Use media_list_workflows to discover options.`),
       prompt: z.string().min(1).optional().describe('Optional positive video prompt. Long natural-language prompts are preserved without a client-side character cap.'),
       reference_description: z.string().optional().describe('Ingredients IC-LoRA only: panel-by-panel description of the reference sheet. Omit only when prompt already contains the required Reference Sheet Description and Target Description headings.'),
+      ingredient_images: z.array(z.object({
+        image_path: z.string().optional(),
+        image_base64: z.string().optional(),
+        image_url: z.string().optional(),
+        description: z.string().max(1000).optional(),
+      })).min(1).max(12).optional().describe('Ingredients IC-LoRA only: independent conditioning references composed server-side into one black, unlabeled, contain-only sheet. These images never become timeline anchors.'),
       negative_prompt: z.string().max(2000).optional().describe('Optional negative video prompt mapped through the registered workflow when supported.'),
       image_path: z.string().optional().describe('Absolute local image path or existing Comfy input filename. Absolute paths are copied into the private Comfy input folder before queueing if the workflow needs Comfy access.'),
       image_base64: z.string().optional().describe('Inline source image as raw base64 or data:image/...;base64,... data URL. Wins over image_path.'),
@@ -1841,6 +2337,10 @@ function buildServer() {
         role: z.enum(['start', 'middle', 'end']).optional(),
         strength: z.number().min(0).max(1).optional(),
       })).max(20).optional().describe('Arbitrary image anchors. Later anchors targeting the same normalized frame win.'),
+      loras: z.array(z.object({
+        id: z.string().min(1),
+        strength: z.number().min(-10).max(10).optional(),
+      })).max(20).optional().describe('Installed workflow-compatible LoRAs. Each is applied to video/model layers only so generated audio conditioning stays unchanged.'),
       params: z.record(z.string(), z.any()).optional().describe('Additional workflow parameters for registry-defined slots, e.g. steps, cfg, guidance, or model-specific controls.'),
       width: z.number().int().min(64).max(4096).optional(),
       height: z.number().int().min(64).max(4096).optional(),
@@ -1849,7 +2349,7 @@ function buildServer() {
       duration_seconds: z.number().min(1 / 24).max(30).optional().describe('For video input, seconds of new footage to append. For image input, requested output duration.'),
       seed: z.number().int().min(0).max(1000000000).optional(),
       wait: z.boolean().default(false).describe('Poll until native wrapper success/error, or until Comfy fallback appears in history.'),
-      timeout_s: z.number().min(1).max(3600).default(1800),
+      timeout_s: z.number().min(1).max(7200).default(5400),
       include_urls: z.boolean().default(false).describe('Include token-bearing absolute Studio URLs in wrapper-native results.'),
     },
   }, tool(async (args) => {

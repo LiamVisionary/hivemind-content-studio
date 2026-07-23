@@ -6,6 +6,24 @@
       "runtimeExecutable": "uv",
       "runtimeArgs": ["run", "uvicorn", "--factory", "hivemind_content_studio.control_api:build_control_app", "--host", "127.0.0.1", "--port", "8768"],
       "port": 8768
+    },
+    {
+      "name": "open-generative-ai",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "packages/open-generative-ai", "run", "vite:dev"],
+      "port": 5173
+    },
+    {
+      "name": "open-generative-ai-alt",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "packages/open-generative-ai", "run", "vite:dev", "--", "--port", "5273", "--strictPort"],
+      "port": 5273
+    },
+    {
+      "name": "open-generative-ai-dist",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd packages/open-generative-ai && npx vite preview --port 4273 --strictPort"],
+      "port": 4273
     }
   ]
 }

@@ -19,6 +19,11 @@ class MediaModel:
     max_reference_images: int | None = 0
     limit_source: str = "provider contract"
     accepts: tuple[str, ...] = ()
+    supports_loras: bool = False
+    compatible_base_models: tuple[str, ...] = ()
+    ingredient_inputs: dict | None = None
+    aspect_ratios: tuple[str, ...] = ()
+    default_duration_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -30,10 +35,11 @@ class MediaProviderModels:
 
 
 BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS: tuple[MediaModel, ...] = (
-    MediaModel("workflow-default", "Workflow default", ("start", "reference"), None, "selected MCP workflow schema", ("image_base64", "video_base64", "video_mode")),
-    MediaModel("ltx23-eros-fast", "LTX 2.3 Eros Fast", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode")),
-    MediaModel("ltx23-eros-exact", "LTX 2.3 Eros Exact", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode")),
-    MediaModel("ltx23-regular-fp8", "LTX 2.3 Regular FP8", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode")),
+    MediaModel("workflow-default", "Workflow default", ("start", "reference"), None, "selected MCP workflow schema", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-fast", "LTX 2.3 Eros Fast", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-exact", "LTX 2.3 Eros Exact", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-regular-fp8", "LTX 2.3 Regular FP8", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-ic-ingredients-lora", "LTX 2.3 Eros IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "ingredient_images", "loras"), True, ("LTXV",)),
 )
 
 
@@ -141,13 +147,19 @@ def _media_studio_video_models(status: dict | None = None) -> tuple[MediaModel, 
         if not workflow_id:
             continue
         label = str(workflow.get("title") or workflow_id).strip()
+        defaults = workflow.get("defaults") if isinstance(workflow.get("defaults"), dict) else {}
         models[workflow_id] = MediaModel(
-            workflow_id,
-            label,
-            ("start", "reference"),
-            None,
-            "live Media Studio MCP workflow registry",
-            tuple(str(value) for value in workflow.get("accepts", []) if str(value).strip()),
+            id=workflow_id,
+            label=label,
+            reference_roles=("start", "reference"),
+            max_reference_images=None,
+            limit_source="live Media Studio MCP workflow registry",
+            accepts=tuple(str(value) for value in workflow.get("accepts", []) if str(value).strip()),
+            supports_loras=bool(workflow.get("supports_loras")),
+            compatible_base_models=tuple(str(value) for value in workflow.get("compatible_base_models", []) if str(value).strip()),
+            ingredient_inputs=dict(workflow.get("ingredient_inputs")) if isinstance(workflow.get("ingredient_inputs"), dict) else None,
+            aspect_ratios=tuple(str(value) for value in workflow.get("aspect_ratios", []) if str(value).strip()),
+            default_duration_seconds=float(defaults["duration_seconds"]) if defaults.get("duration_seconds") is not None else None,
         )
     return tuple(models.values())
 
@@ -163,7 +175,13 @@ def media_catalog() -> dict[str, list[dict]]:
             "label": provider.label,
             "available": bool(status.get("available")),
             "detail": str(status.get("detail") or ""),
-            "models": [{**asdict(model), "reference_roles": list(model.reference_roles), "accepts": list(model.accepts)} for model in models],
+            "models": [{
+                **asdict(model),
+                "reference_roles": list(model.reference_roles),
+                "accepts": list(model.accepts),
+                "compatible_base_models": list(model.compatible_base_models),
+                "aspect_ratios": list(model.aspect_ratios),
+            } for model in models],
         })
     return result
 

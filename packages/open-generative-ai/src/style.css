@@ -1,12 +1,14 @@
 @import './styles/global.css';
 @import './styles/studio.css';
+@import './styles/hub.css';
 
-/* App-specific layout */
+/* App-specific layout — rail | (topbar / content) shell */
 #app {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   background: var(--bg-app);
 }

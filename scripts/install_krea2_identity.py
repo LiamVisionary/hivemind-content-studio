@@ -116,6 +116,11 @@ def main() -> int:
     parser.add_argument("--comfy-dir", type=Path, default=Path.home() / "comfy/ComfyUI")
     parser.add_argument("--skip-model", action="store_true")
     parser.add_argument("--verify-model", action="store_true")
+    parser.add_argument(
+        "--build-apple-checkpoint",
+        action="store_true",
+        help="Build the reusable identity-baked ConvRot checkpoint through a running ComfyUI",
+    )
     args = parser.parse_args()
     comfy_dir = args.comfy_dir.expanduser().resolve()
     if not (comfy_dir / "main.py").exists():
@@ -128,6 +133,16 @@ def main() -> int:
         "workflows": [str(path) for path in install_api_workflows(comfy_dir)],
         "restart_required": True,
     }
+    if args.build_apple_checkpoint:
+        builder = ROOT / "scripts/build_krea2_identity_convrot_checkpoint.py"
+        proc = subprocess.run(
+            [sys.executable, str(builder), "--comfy-dir", str(comfy_dir)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        result["identity_checkpoint"] = json.loads(proc.stdout)
     print(json.dumps(result, indent=2))
     return 0
 

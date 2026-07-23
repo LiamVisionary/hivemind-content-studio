@@ -1,6 +1,6 @@
 # LTX 2.3 Workflows and MCP Operator Guide
 
-Last verified: 2026-07-17
+Last verified: 2026-07-20
 
 This document explains the LTX 2.3 video workflows currently registered in Media Studio, how requests move through the Apple Silicon MLX and Windows/CUDA ComfyUI routes, how frame anchors and audio work, and how to perform the complete generation lifecycle through the Media Studio MCP.
 
@@ -21,9 +21,9 @@ The live service on this Mac currently exposes:
 | Surface | URL | Purpose |
 | --- | --- | --- |
 | Local MCP | `http://127.0.0.1:8796/mcp` | MCP from this Mac |
-| Tailnet MCP | `https://liams-macbook-pro-1.tail629894.ts.net:8789/mcp` | MCP from other Tailscale machines |
-| Tailnet Studio | `https://liams-macbook-pro-1.tail629894.ts.net:8789/app/` | Browser Studio |
-| Tailnet ComfyUI Mobile | `https://liams-macbook-pro-1.tail629894.ts.net:8789/mobile/` | Mobile workflow editor and output browser |
+| Tailnet MCP | `https://liams-macbook-pro-2.tail629894.ts.net:8789/mcp` | MCP from other Tailscale machines |
+| Tailnet Studio | `https://liams-macbook-pro-2.tail629894.ts.net:8789/app/` | Browser Studio |
+| Tailnet ComfyUI Mobile | `https://liams-macbook-pro-2.tail629894.ts.net:8789/mobile/` | Mobile workflow editor and output browser |
 | Local backend | `http://127.0.0.1:8787` | Private generation API behind the MCP |
 | Local ComfyUI | `http://127.0.0.1:8188` | Default ComfyUI runtime |
 | Dedicated Apple LTX lane | `http://127.0.0.1:8199` | MPS ComfyUI fallback lane |
@@ -77,6 +77,15 @@ The native route currently uses:
 
 The native route does not lower the configured resolution, frame count, or sampler passes to gain speed. It uses the optimized MLX model and execution path while preserving the workflow's authored generation settings.
 
+The native runtime and model are loaded automatically when a generation is submitted; there is no manual model-equip or warmup prerequisite. Runtime checkout discovery is reboot-safe and follows this order:
+
+1. Explicit `LTX2_MLX_DIR`, when configured.
+2. The persistent `ltx-2-mlx-opt` checkout beside the Studio repository.
+3. `~/comfy/ltx-2-mlx-opt`.
+4. The legacy operating-system temp checkout, only when it still exists and contains `pyproject.toml`.
+
+Do not configure the production runtime exclusively under `/tmp`: macOS clears it during reboot. The selected workflow still owns the model variant, and each `ltx-2-mlx` process loads that checkpoint as part of the job before denoising begins.
+
 ### Windows, CUDA, and other non-MLX routes
 
 On a non-Apple profile, the native marker is ignored and the same API-format workflow is forwarded to ComfyUI. The MCP contract, workflow IDs, job polling, and output retrieval remain the same. CUDA, Python, model, and process differences stay behind the ComfyUI adapter.
@@ -117,11 +126,11 @@ For the two Eros IDs, Apple Silicon selects distinct MLX model variants. The cur
 | Native MLX on Apple and Comfy fallback on Windows/CUDA | Yes | Yes | Yes |
 | Real denoise progress and explicit output/latent frame units | Yes | Yes | Yes |
 
-This parity applies to shared generation controls and transports. Transition, Better Motion, Dual Character, and Ingredients are separate regular-family workflows because those LoRAs target the regular LTX 2.3 base or require a specialized IC-LoRA conditioning topology. They are not automatically injected into Eros Fast/Exact: doing so without a compatible model card and validation could change quality or fail outright. A specialized LoRA should receive an Eros workflow only after its compatibility is confirmed, not merely to make the workflow list look symmetrical.
+This parity applies to shared generation controls and transports. Transition, Better Motion, and Dual Character remain separate regular-family workflows. Ingredients has both regular and Eros dev-family lanes because its specialized IC-LoRA topology is now shared while the base checkpoint is selected explicitly. It is not injected into the unrelated Eros Fast or Exact workflow IDs.
 
 ## Registered LTX workflows
 
-Call `media_list_workflows` at runtime instead of hard-coding this list forever. As of the verification date, six video workflows are available.
+Call `media_list_workflows` at runtime instead of hard-coding this list forever. As of the verification date, eight video workflows are available.
 
 ### `ltx23-eros-fast`
 
@@ -335,6 +344,7 @@ Use `wait: true` only when a client can safely hold a long MCP call open. LTX ca
 | `middle_image_*` | path, base64, or URL | Convenience midpoint anchor |
 | `end_image_*` | path, base64, or URL | Convenience final-frame anchor |
 | `keyframes` | array | Arbitrary anchors with source, frame/time/role, and strength |
+| `ingredient_images` | array, 1 to 12 items | Ingredients IC-LoRA only; independent image sources are stitched into one conditioning-only sheet and never become timeline anchors |
 | `params` | object | Registry-defined extras such as `cfg`, `guidance`, or `steps` |
 | `width`, `height` | integer, 64 to 4096 | Requested output dimensions |
 | `duration_seconds` | number, 1/24 to 30 | Image workflow duration, or amount of new footage appended in video mode |
@@ -394,7 +404,7 @@ Connector syntax differs by host, but the logical configuration is:
 {
   "name": "media-studio",
   "type": "http",
-  "url": "https://liams-macbook-pro-1.tail629894.ts.net:8789/mcp",
+  "url": "https://liams-macbook-pro-2.tail629894.ts.net:8789/mcp",
   "headers": {
     "Authorization": "Bearer ${MEDIA_STUDIO_TOKEN}"
   }
@@ -408,7 +418,7 @@ Both machines must be on the same tailnet. Store `MEDIA_STUDIO_TOKEN` in the cli
 The server uses streamable HTTP and currently returns tool results as SSE `data:` lines. This helper sends one tool call:
 
 ```bash
-export MEDIA_STUDIO_MCP_URL="https://liams-macbook-pro-1.tail629894.ts.net:8789/mcp"
+export MEDIA_STUDIO_MCP_URL="https://liams-macbook-pro-2.tail629894.ts.net:8789/mcp"
 export MEDIA_STUDIO_TOKEN="$(< ~/.hivemindos/media-studio/secure/zimg-token)"
 
 mcp_call() {
@@ -482,7 +492,7 @@ mcp_call media_get_job "$(jq -cn --arg id "$JOB_ID" '{id:$id,include_urls:true}'
 When the status is `success`, the response contains a tailnet URL similar to:
 
 ```text
-https://liams-macbook-pro-1.tail629894.ts.net:8789/image/<output>.mp4?token=<private-token>
+https://liams-macbook-pro-2.tail629894.ts.net:8789/image/<output>.mp4?token=<private-token>
 ```
 
 Download it without rewriting the host:
@@ -664,18 +674,30 @@ The registered native LoRA strength is `0.3`; callers do not need to select the 
 
 ### IC-LoRA Ingredients
 
-Workflow ID: `ltx23-ic-ingredients-lora`. Aliases: `ingredients`, `ic-ingredients`, `ltx23-ingredients`, and `reference-sheet`.
+Regular workflow ID: `ltx23-ic-ingredients-lora`. Aliases: `ingredients`, `ic-ingredients`, `ltx23-ingredients`, and `reference-sheet`.
 
-This workflow does not treat the supplied image as the first video frame. The image is a clean reference sheet that inventories the characters, wardrobe, props, and location. Each distinct ingredient should occupy its own panel on a black background, with no labels rendered into the image. Put more pixels into the most important identity panels.
+Eros workflow ID: `ltx23-eros-ic-ingredients-lora`. Aliases: `eros-ingredients`, `eros-ic-ingredients`, and `ltx23-eros-ingredients`. It inherits the complete regular Ingredients contract and changes only the LTX base-model lane.
+
+Ingredient references do not become video frames. You may provide either one finished sheet through the normal `image_*` fields or 1 to 12 independent images through `ingredient_images`. For independent images, the MCP builds a black, unlabeled sheet at the exact requested output dimensions. It preserves each source image's complete aspect ratio, never crops or stretches it, and only downsizes views that exceed their panel. The resulting PNG is used exclusively as IC-LoRA reference conditioning.
+
+When `ingredient_images` is present, the normal `image_*` field is instead a separate frame-zero anchor. This is the Studio UI's combined Ingredients plus starting-frame path. The generated sheet remains conditioning-only while the starting image is encoded into the target latent before IC reference tokens are appended. `keyframes`, `middle_image_*`, and `end_image_*` use the same pre-IC target-latent path when supplied through MCP; frame zero is the path validated end to end below.
+
+If that timeline anchor has a different aspect ratio from the requested canvas, Media Studio first prepares a matching anchor with the shared Krea 2 Turbo identity-edit graph. The source is scaled without cropping, only the missing canvas is sampled, and the original source pixels are composited back over the generated result. The sampler receives only the `### Target Description`; reference-sheet inventory is intentionally excluded because it can cause Ingredients characters or props to be painted into the expansion. A blurred cover is used only as a hidden structural prior inside the inpaint graph, never as visible output. Apple runs this as an asynchronous preflight before MLX and caches the result by source, prompt, seed, and dimensions. Windows/CUDA embeds the same graph fragment directly before the LTX anchor nodes.
+
+Each `ingredient_images` item accepts one of `image_base64`, `image_url`, or `image_path`, plus an optional `description`. Descriptions are associated with panel positions automatically. When descriptions are omitted, the MCP identifies each panel as another view of the same character or ingredient. The Studio UI uploads these images through the encrypted private reference cache and lets the user add optional angle descriptions.
 
 Use `reference_description` for a panel-by-panel inventory and `prompt` for the shot to generate. The MCP combines them into the two headings required by the model. A fully assembled prompt containing both headings is also accepted unchanged.
 
 ```json
 {
   "workflow_id": "ingredients",
-  "reference_description": "Top left character panel: an adult Black woman with copper micro-braids, a crescent gold earring, mustard wool coat, and dark green blouse. Top right character panel: an adult East Asian man with wavy black hair, round wire-frame glasses, a teal work jacket, and charcoal shirt. Middle left prop panel: one closed cream envelope. Bottom wide location panel: an empty vintage night-train dining car with warm tungsten lamps and cool rain-streaked windows.",
   "prompt": "Cinematic medium-wide dialogue shot inside the exact dining car. The two adults sit opposite one another with the cream envelope between them. The woman slides it forward while the man watches, both identities and wardrobes remain exact, rain moves across the windows, subtle breathing and blinking, stable exposure, synchronized train ambience.",
-  "image_base64": "<REFERENCE_SHEET_BASE64>",
+  "ingredient_images": [
+    {"image_base64": "<CHARACTER_FRONT_BASE64>", "description": "Character A front view with copper micro-braids, crescent earring, mustard coat, and exact face."},
+    {"image_base64": "<CHARACTER_PROFILE_BASE64>", "description": "Character A right profile with the same face, hair, earring, and mustard coat."},
+    {"image_base64": "<CHARACTER_FULL_BODY_BASE64>", "description": "Character A full-body wardrobe and proportions."},
+    {"image_base64": "<LOCATION_BASE64>", "description": "Empty vintage night-train dining car with warm tungsten lamps and rain-streaked windows."}
+  ],
   "width": 768,
   "height": 448,
   "frames": 121,
@@ -687,10 +709,13 @@ Use `reference_description` for a panel-by-panel inventory and `prompt` for the 
 
 Implementation parity:
 
-- Apple Silicon routes to `ltx-2-mlx ic-lora`. The server losslessly repeats the sheet into a temporary FFV1 reference video, applies the Ingredients IC-LoRA at `1.4`, uses reference conditioning at `1.0`, and runs the full-resolution single-stage topology.
-- Windows and CUDA route through ComfyUI. `RepeatImageBatch` expands the sheet to the output frame count, `LTXICLoRALoaderModelOnly` reads the LoRA metadata, and `LTXAddVideoICLoRAGuide` appends the reference latents. `LTXVCropGuides` removes guide tokens before decode.
-- Both paths use the same labeled prompt, `768x448`, 121 frames, 24 fps, the official distilled sigma schedule, jointly generated audio, and the recommended Ingredients strength of `1.4`.
-- Middle and ending anchors are intentionally not part of this workflow. Use the regular, Transition, or Eros workflows when temporal image anchors are the desired control mechanism.
+- Apple Silicon routes both workflow IDs to `ltx-2-mlx ic-lora`. The server losslessly repeats the sheet into a temporary FFV1 reference video, applies the Ingredients IC-LoRA at `1.4`, uses reference conditioning at `1.0`, and runs the full-resolution single-stage topology.
+- Apple timeline anchors bypass the upstream CRF-33 image-conditioning round trip (`image_crf: 0`). The prepared PNG is already at the target geometry, and preserving it losslessly matches the direct-pixel CUDA/Windows graph. The final MP4 still uses the normal high-quality CRF-18 encoder.
+- The regular Apple recipe uses the regular q8 **dev** transformer. The Eros recipe uses the 10Eros v1 q8 **dev** transformer. Both fuse Lightricks' distilled LoRA at `0.5`, apply Ingredients at `1.4`, use the official full-resolution single-stage distilled topology, and leave `--guided-dev` disabled.
+- Windows and CUDA route through the same ComfyUI graph topology. The regular ID loads the official FP8 dev checkpoint; the Eros ID overrides both video and audio checkpoint loaders with `ltx/10Eros_v1-fp8mixed_learned.safetensors`. Both use distilled LoRA `0.5`, `CFGGuider` at `1.0`, and the official nine-value `ManualSigmas` schedule. `RepeatImageBatch` expands the sheet to at least 121 frames, `LTXICLoRALoaderModelOnly` reads the IC-LoRA metadata, and `LTXAddVideoICLoRAGuide` appends reference latents. Any target image anchors are applied to the clean target latent first. `LTXVCropGuides` removes guide tokens before decode.
+- Both paths use the same labeled prompt, output-sized sheet, official distilled schedule, jointly generated audio, and Ingredients strength of `1.4`. Target and reference streams are both clamped to at least 121 frames. The workflow supports `16:9`, `9:16`, `4:3`, `3:4`, and `1:1`; Studio automatically chooses the nearest supported ratio when a start frame is selected, while keeping the aspect control available for an intentional override. Defaults remain `768x448`, 121 frames, 24 fps, and five seconds when no source geometry is available.
+
+The controlled Apple MLX parity run on 2026-07-21 used the same sheet, frame-zero anchor, prompt, seed, `768x448` canvas, 121-frame bucket, 24 fps, and eight-step topology for both models. Regular completed in `268.10s`; Eros completed in `233.95s`. Both retained the two reference characters, prop, framing, and requested motion after the opening temporal block. Both also reproduced the already documented shared Ingredients limitation: frames 1 through 7 soften and shift slightly after the sharp frame-zero anchor before settling. This is not an Eros-only defect, and no rejected onset post-process is active. Expect a several-minute generation, with normal cold-start variance, not the 50-70 minute projection from the rejected guided-dev experiment.
 
 The Ingredients repository is gated. Accept its terms at `https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients`, then run the installer through `hive-env-run` or the shared Hive environment. The installer reads `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HUGGINGFACE_TOKEN`, or the fleet-standard `HUGGINGFACE_READ_WRITE_KEY` at runtime and never writes the credential into project files.
 
@@ -922,6 +947,29 @@ The IC run confirmed native LoRA fusion at `0.80`, a frame-zero image anchor, H.
 - Poll `media_get_job`; do not infer failure from a long MCP call.
 - Inspect `progress_phase`, `current_step`, and `elapsed_seconds`.
 - Long 1024x576, 241-frame runs can take several minutes.
+
+### Ingredients fails immediately
+
+- The Ingredients workflow requires the gated `Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients` Hugging Face repository to be accepted and its LoRA installed at `models/loras/ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors`.
+- Media Studio now surfaces the exact trusted backend error to the owner UI when the public MCP receipt is redacted, instead of only reporting a generic failed-generation message.
+- Uploaded ingredient references are encrypted at rest and survive failed jobs and service restarts. Retry the generation from the persisted Studio state; re-uploading them is not required.
+- The stitched ingredient sheet is IC-LoRA conditioning, while an uploaded starting frame is a separate frame-zero timeline anchor. Automatic Ingredients starts use strength `0.9`; an explicit MCP keyframe strength still wins. On Apple Silicon this compiles to `ic-lora --video-conditioning ... --image ... 0 0.9`; CUDA/Windows applies `LTXVImgToVideoConditionOnly` (one frame-zero anchor) or `LTXVImgToVideoInplaceKJ` (multiple anchors) to the clean target latent **before** `LTXAddVideoICLoRAGuide` appends reference tokens.
+- Exact-size timeline anchors pass through unchanged, and same-aspect anchors receive only a Lanczos resize. Aspect-mismatched anchors use the shared Krea mask-outpaint contract: preserve the complete source, generate only the missing canvas, then restore the original source pixels. The old visible portrait-over-blurred-cover fit is rejected because LTX dissolved its sidebars and pulled back to a different wide frame around 1.5 to 2 seconds.
+- Native MLX consumes the prepared timeline anchor with `image_crf: 0`. CRF-33 is the upstream generic image-conditioning default, but it caused an eight-frame onset blur in this already-prepared Ingredients path and did not match CUDA's direct-pixel conditioning.
+- The Ingredients reference sheet and target video are both clamped to at least 121 frames. This matches the adapter's trained minimum and is enforced by the MCP compiler, native gateway, MLX reference encoder, and Comfy `RepeatImageBatch` graph.
+- Mixed portrait/landscape references use a no-crop packed layout with equal-area panels. Uniform references retain the simpler grid. Both use model-scale 4px gutters at 768x448, black background, no labels, and unique spatial descriptions. The safe mixed Greenfield set dropped from 44% near-black in the equal-cell grid to 23% in the packed sheet.
+- Temporary static IC control videos are staged under the private Comfy input root at `.ltx-reference/`, outside the generated-output encryption sweep, and are deleted when the job ends.
+- A 2026-07-20 end-to-end MLX smoke test completed the combined Ingredients plus starting-frame path in 10.59 seconds at 256x160 and 9 frames, producing H.264 video with AAC audio. This old tiny run only verified transport; it is invalid for judging Ingredients quality because it is outside the trained 768x448/121-frame bucket.
+- Quality validation job `ae769d04fc64` reproduced Lightricks' safe Greenfield hedgehog/rabbit example through the real MCP adapter using the official sheet plus a separate official first-frame anchor. It ran on `mlx-ltx-regular-regular-q8-dev-ic` at 768x448, 121 frames, 24 fps in 270.75 seconds and produced a 5.04-second H.264/AAC video. Raw-frame inspection confirmed one full-frame video only, no inset or stacked sheet, no reference-token leakage, and close frame-zero composition/identity adherence.
+- Jobs `4ae6da766247`, `046767e5613f`, and `7d5c05aa5048` exposed a Studio-only contract regression: all arrived as 576x576 and `keyframes: []`; the latter two were also reset to one second. The model recipe was correct, but the UI had dropped its visible start image behind an internal `imageMode` flag and ignored workflow-specific aspect/duration defaults. Model selection now respects the five-second workflow default, any visible local start image is always included, and the start image selects the nearest supported output ratio instead of silently forcing an unrelated canvas.
+- Control job `c1fe973219fb` ran the same safe Ingredients sheet without any start image at 768x448 for 25 frames. It produced one full-frame shot with no collage or sheet leakage, isolating the five-panel failure to the square Studio submission rather than the native IC-LoRA recipe.
+- Safe portrait-start job `3617fcfcdd4f` requested 97 target frames while the repaired backend encoded 121 static reference frames. It completed in 233.89 seconds with the complete portrait visible at frame zero, no black transition blotches, no exposure flash, and recognizable hedgehog identity through the shot. Its equal-cell mixed-reference sheet remained a measured 44% near-black, which motivated the packed compositor rather than accepting that run as the final sheet-layout validation.
+- Same-seed packed-sheet job `67e23ef83ea3` completed in 222.72 seconds and passed numerical exposure checks, but visual review rejected it: the visible narrow portrait with blurred sidebars changed to a full-width composition around 1.5 to 2 seconds. It is useful evidence for the packed reference-sheet fix, not an accepted timeline-anchor result.
+- Portrait-start job `52732a4c1de4` fixed the framing defects but was later rejected after dense onset review. Sparse samples at frames 0, 12, 24, and later missed a global blur that peaked at frame 4 (0.167 seconds) and recovered after the first eight-frame temporal block. The decoded-frame blur score rose from `6.5923572` to `9.1861897`; an identical-anchor CRF-18 codec control stayed near `6.10`, proving the MP4 encoder was not responsible.
+- Sharpness-only job `4d33676a1f66` is rejected. Although CRF-0 conditioning removed its focus bloom, frame luminance fell from `118.133` to `106.994` over the first seven frames and then recovered, creating the visible overexposed/dark/light sequence.
+- Ingredients plus a timeline start is a supported Studio hybrid, not an adapter training configuration: the official model card records `first_frame_conditioning_p: 0.0`. No onset color or blur post-process is active. Earlier luma and Y/Cb/Cr correction attempts were rejected because the visible transition remained and the latter added about 2.1 seconds of decoder processing.
+- Luma-only job `341c6108f945` is rejected. Its brightness was stable, but saturation fell from `20.749` to about `18.05` and U shifted by roughly `2.1`, producing the visible color transition reported during playback.
+- Y/Cb/Cr job `b801be2b9a5e` is also rejected after user playback review still found a color shift. That output transform remains removed. The Ingredients route now uses Lightricks' official single-stage distilled workflow while retaining the 121-frame target/reference minimum and direct-pixel anchor corrections on both MLX and CUDA/Windows.
 
 ### Output URL points to localhost
 

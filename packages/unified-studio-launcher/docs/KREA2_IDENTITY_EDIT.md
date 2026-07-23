@@ -9,13 +9,14 @@ The unified studio exposes `conradlocke/krea2-identity-edit` v1.2 through one im
 The reference image is optional.
 
 - No image: the API compiler emits the literal regular Krea 2 Turbo graph.
-- Image supplied: the same Turbo lane adds the full identity LoRA, the official VAE source-token patch, and image-grounded Qwen3-VL conditioning.
+- Image supplied: Apple Silicon selects a reusable identity-baked ConvRot checkpoint, then adds the official VAE source-token patch, image-grounded Qwen3-VL conditioning, and exact pre-block source/text caching.
 
 Pinned dependencies:
 
 - Model: [`conradlocke/krea2-identity-edit`](https://huggingface.co/conradlocke/krea2-identity-edit), revision `29f4b0b96bf01bf3de7c9f1313ca3337538ca247`
 - Full v1.2 weight: `krea2_identity_edit_v1_2.safetensors`, SHA-256 `6adf9a69cc9502d286db7b69964d37da7e9cfe4b05b4d004bc275f087d3fd3cf`
 - Official nodes: [`lbouaraba/comfyui-krea2edit`](https://github.com/lbouaraba/comfyui-krea2edit), commit `b5d3c2f3485ea9990ca8190b930a209c9f6d5e39`
+- Apple identity checkpoint: `Krea2_Turbo_identity_v1_2_convrot_int8mixed.safetensors`, 14,132,232,352 bytes, SHA-256 `5228dad910bcc71bc30f11214d349f94bffaeddd9203902a139213731de80339`
 
 The full-rank 1.83GB weight is intentional. Rank-reduced alternatives were not substituted because this lane is quality-first.
 
@@ -26,15 +27,25 @@ From the repository root:
 ```bash
 hive-env-run -- python3 scripts/install_krea2_identity.py --comfy-dir ~/comfy/ComfyUI
 ~/.local/bin/zimage-stack restart
+python3 scripts/build_krea2_identity_convrot_checkpoint.py
+~/.local/bin/zimage-stack restart
 ```
 
-The installer pins the official node checkout, verifies the model size and SHA-256, links or copies the project adapter, and installs the API/editor workflows. The model is public; a configured Hugging Face token is used when available but is not written to the project.
+The installer pins the official node checkout, verifies the LoRA size and SHA-256, links or copies the project adapter, and installs the API/editor workflows. The checkpoint builder applies the full v1.2 LoRA to the BF16 Turbo model before ConvRot quantization, validates all 224 quantized layers, and installs the reusable result under `models/diffusion_models`. Re-running the builder validates and reuses an existing artifact; pass `--force` to rebuild it. The model is public; a configured Hugging Face token is used when available but is not written to the project.
+
+On a machine with the required nodes already active, setup can request the build in one command:
+
+```bash
+hive-env-run -- python3 scripts/install_krea2_identity.py \
+  --comfy-dir ~/comfy/ComfyUI \
+  --build-apple-checkpoint
+```
 
 Installed editor workflow:
 
 `Krea2 Turbo Identity Optional Apple Silicon.json`
 
-Leave **Optional Reference Image** at `None` for regular Turbo. Select or upload an image to activate identity edit.
+Leave **Optional Reference Image** at `None` for the regular prebuilt Turbo ConvRot checkpoint. Select or upload an image to switch to the prebuilt identity checkpoint and activate source-token editing.
 
 ## MCP
 
@@ -89,9 +100,18 @@ Poll `/api/job/{id}` until `status` is `success` or `error`.
 
 Apple Silicon uses the established quality-preserving lane:
 
-`full identity LoRA -> krea2_turbo_bf16 -> on-the-fly ConvRot INT8 -> euler_ancestral/beta`
+`full identity LoRA -> krea2_turbo_bf16 -> ConvRot INT8 saved once -> direct checkpoint load -> euler_ancestral/beta`
 
-The LoRA is applied before quantization. Applying runtime LoRAs to the already quantized ConvRot checkpoint previously produced blotchy artifacts.
+The LoRA is still applied before quantization. Applying runtime LoRAs to an already quantized ConvRot checkpoint previously produced blotchy artifacts. The saved checkpoint removes repeated LoRA preparation and quantization without changing the resulting precision or sampling path. Requests using the trained `identity_strength=1` take this fast route. A custom identity strength intentionally falls back to the older BF16 plus pre-LoRA ConvRot build because a fixed checkpoint cannot represent an arbitrary strength.
+
+Within denoising, the adapter caches only timestep-independent work scoped to that one patched job:
+
+- projected source tokens;
+- fused/projected grounded text tokens;
+- RoPE frequencies and reference-attention bias;
+- the target-sized, VAE-encoded source latent after `process_latent_in`.
+
+The 28 joint transformer blocks are not cached. Their source states depend on the changing noisy target through full source-target self-attention, so caching block outputs or K/V tensors would change the model and fail the no-quality-loss requirement.
 
 CUDA/Windows uses the portable Comfy path:
 
@@ -121,10 +141,20 @@ Measured on this M5 Apple Silicon studio through the supervised Comfy lane:
 | Identity edit | 768x768, 10 steps | cold model/LoRA bake | 82.81s |
 | Identity edit | 768x768, 10 steps | warm, new seed | 60.62s |
 | Identity edit through MCP inline base64 | 384x384, 8 steps | warm model | 42.04s gateway elapsed |
+| Identity edit, runtime LoRA bake | 384x576, 10 steps | matched cold baseline | 43.73s total; 15.30s loader; 23.13s sampler |
+| Identity edit, saved checkpoint | 384x576, 10 steps | first direct load | 27.65s total; 0.085s loader |
+| Identity edit, saved checkpoint, cache off | 384x576, 10 steps | warm control | 23.16s total; 22.32s sampler |
+| Identity edit, saved checkpoint, cache on | 384x576, 10 steps | warm | 21.62s total; 21.31s sampler |
+| Identity edit, original pink-hair settings | 768x1024, 10 steps | prior runtime-bake path | 137.85s Comfy; 106.01s sampler |
+| Identity edit, original pink-hair settings | 768x1024, 10 steps | saved checkpoint plus cache | 96.42s Comfy; 98.43s gateway; 94.69s sampler |
 
 The 528x368 no-image control and regular workflow produced byte-for-byte identical decrypted PNGs at the same seed. The API compiler was then tightened further: no-image requests now emit the exact regular graph, eliminating adapter-specific cache switching rather than merely approximating the regular path.
 
-Identity edit is slower because the diffusion model attends over reference-image source tokens at every denoise step, in addition to Qwen3-VL grounding and VAE work. No step reduction, lower-rank LoRA, smaller source-token representation, or lower-quality model was used to hide this cost.
+The saved checkpoint reduced loader preparation from 15.30s to 0.085s in the matched benchmark. Static pre-block caching reduced the warmed sampler from 22.32s to 21.31s. Two repeated cache-on MPS renders at the same seed differed by `0.402/255` mean absolute pixel value (`46.36 dB` PSNR), establishing the runtime's own nondeterministic repeatability band. Cache-off versus cache-on differed by `0.439/255` (`45.96 dB` PSNR), within that band, and visual inspection showed no quality or identity change.
+
+At the original 768x1024 pink-hair settings, the optimized real API run completed in 98.43s versus 137.85s in the earlier Comfy run, a 28.6% end-to-end reduction. Comfy execution itself fell to 96.42s, and KSampler fell from 106.01s to 94.69s. The optimized full-size render preserved the same identity, composition, detail, and pink-hair edit under side-by-side visual inspection.
+
+Identity edit remains slower than text-to-image because the diffusion model attends over reference-image source tokens at every denoise step, in addition to Qwen3-VL grounding and VAE work. At the earlier 768x1024 test, the target contributed 3,072 image tokens and the fitted reference contributed 2,688 more; joint attention therefore operated over roughly 5,760 image tokens plus grounded text. Base64 decoding and file loading were under 0.13s and were not the cause. No step reduction, lower-rank LoRA, smaller source-token representation, lower resolution, or lower-quality model was used to manufacture the speedup.
 
 ## Apple MPS finding
 

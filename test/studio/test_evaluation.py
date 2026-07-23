@@ -8,6 +8,7 @@ import pytest
 from hivemind_content_studio.evaluation import record_semantic_evaluation, semantic_preflight
 from hivemind_content_studio.manifest import load_manifest
 from hivemind_content_studio.planner import plan
+from hivemind_content_studio.private_access import read_private_json
 
 
 def test_semantic_evaluation_records_scene_failures_and_regeneration_instructions(tmp_path: Path, monkeypatch) -> None:
@@ -28,7 +29,7 @@ def test_semantic_evaluation_records_scene_failures_and_regeneration_instruction
 
     assert result["passed"] is False
     artifact = next(item for item in load_manifest(manifest_path)["artifacts"] if item["role"] == "semantic-evaluation")
-    payload = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
+    payload = read_private_json(Path(artifact["path"]))
     assert payload["regeneration_instructions"][0]["scene"] == 1
 
 

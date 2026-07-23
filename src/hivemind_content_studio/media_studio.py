@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import time
@@ -20,6 +21,28 @@ from .config import load_config
 from .mcp_http import PROTOCOL_VERSION, McpHttpClient
 from .publishing import encode_multipart
 from .qa import qa_video
+
+
+_VIDEO_ASPECT_DIMENSIONS = {
+    "16:9": (768, 448),
+    "9:16": (448, 768),
+    "4:3": (640, 480),
+    "3:4": (480, 640),
+    "1:1": (576, 576),
+}
+
+# The high tier (~2.5x the pixels) trades render time for detail. It also
+# sharpens IC-LoRA identity transfer: reference sheets are re-encoded at
+# output resolution, so reference faces gain latent tokens 1:1 with output.
+# All buckets stay divisible by 32 (LTX VAE alignment) and within the
+# workflows' 5% aspect-ratio tolerance.
+_VIDEO_ASPECT_DIMENSIONS_HIGH = {
+    "16:9": (1216, 704),
+    "9:16": (704, 1216),
+    "4:3": (1024, 768),
+    "3:4": (768, 1024),
+    "1:1": (896, 896),
+}
 
 
 @dataclass(frozen=True)
@@ -107,47 +130,93 @@ def list_media_studio_workflows(media_type: str = "video") -> list[dict[str, Any
     return [item for item in workflows if isinstance(item, dict)]
 
 
-def generate_video(
+def start_video(
     *,
     image_path: str | Path | None = None,
     video_path: str | Path | None = None,
     video_mode: str = "extend",
     prompt: str,
+    reference_description: str = "",
+    ingredient_images: list[dict[str, Any]] | None = None,
     duration_seconds: float = 4,
+    aspect_ratio: str = "",
+    resolution: str = "",
     workflow_id: str | None = None,
-    output_dir: str | Path | None = None,
-    poll_interval_seconds: float = 6,
-    max_polls: int = 90,
+    loras: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Validate + upload the inputs and enqueue the generation, returning as
+    soon as the gateway hands back a job id. High-resolution runs can take tens
+    of minutes, so callers poll check_video / call finish_video instead of
+    holding one blocking request open. The uploaded input names are returned so
+    finish_video can delete them from the gateway once the job completes."""
     descriptor = _required_descriptor()
     video = Path(video_path).expanduser().resolve() if video_path else None
     image = Path(image_path).expanduser().resolve() if image_path else None
+    ingredients = [
+        {
+            "image_path": Path(str(item.get("image_path") or "")).expanduser().resolve(),
+            "description": str(item.get("description") or "").strip()[:1000],
+        }
+        for item in (ingredient_images or [])
+    ]
+    if len(ingredients) > 12:
+        raise ValueError("At most 12 ingredient reference images are supported")
     if video is not None and not video.is_file():
         raise FileNotFoundError(f"Input video not found: {video}")
-    if video is None and (image is None or not image.is_file()):
+    if image is not None and not image.is_file():
         raise FileNotFoundError(f"Input image not found: {image}")
+    missing_ingredient = next((item["image_path"] for item in ingredients if not item["image_path"].is_file()), None)
+    if missing_ingredient is not None:
+        raise FileNotFoundError(f"Ingredient reference not found: {missing_ingredient}")
+    if video is None and image is None and not ingredients:
+        raise FileNotFoundError("An input image, source video, or ingredient reference is required")
     if video is not None and video_mode != "extend":
         raise ValueError("video_mode must be extend")
-    uploaded_name = _upload_video(descriptor, video) if video is not None else _upload_image(descriptor, image)
+    uploaded_names: list[str] = []
     try:
+        uploaded_name = _upload_video(descriptor, video) if video is not None else (
+            _upload_image(descriptor, image) if image is not None else ""
+        )
+        if uploaded_name:
+            uploaded_names.append(uploaded_name)
+        uploaded_ingredients = []
+        for item in ingredients:
+            name = _upload_image(descriptor, item["image_path"])
+            uploaded_names.append(name)
+            uploaded_ingredients.append({"image_path": name, "description": item["description"]})
         duration = max(1 / 24, min(30.0, float(duration_seconds)))
         frame_rate = 24
         frames = max(9, min(721, round(duration * frame_rate) + 1))
         client = _client(descriptor)
         arguments: dict[str, Any] = {
             **({"workflow_id": workflow_id or descriptor.workflow_id} if workflow_id or descriptor.workflow_id else {}),
-            **({"video_path": uploaded_name, "video_mode": video_mode} if video is not None else {"image_path": uploaded_name}),
+            **({"video_path": uploaded_name, "video_mode": video_mode} if video is not None else {}),
+            **({"ingredient_images": uploaded_ingredients} if uploaded_ingredients else {}),
+            **({"image_path": uploaded_name} if image is not None else {}),
             "frames": frames,
             "frame_rate": frame_rate,
             "duration_seconds": duration,
             "wait": False,
             "include_urls": True,
         }
-        if image is not None:
-            width, height = _video_dimensions(image)
+        dimensions = (
+            video_dimensions_for_request(image=image, aspect_ratio=aspect_ratio, resolution=resolution)
+            if video is None
+            else None
+        )
+        if dimensions:
+            width, height = dimensions
             arguments.update({"width": width, "height": height})
         if prompt.strip():
             arguments["prompt"] = prompt.strip()
+        if reference_description.strip():
+            arguments["reference_description"] = reference_description.strip()
+        if loras:
+            arguments["loras"] = [
+                {"id": str(item.get("id") or "").strip(), "strength": float(item.get("strength", 1.0))}
+                for item in loras
+                if str(item.get("id") or "").strip()
+            ]
         queued = _result_json(
             client.call_tool(
                 descriptor.tool,
@@ -157,22 +226,83 @@ def generate_video(
         job_id = _job_id(queued)
         if not job_id:
             raise RuntimeError("Media Studio did not return a job id")
-        payload = queued
-        video_url = _first_video_url(payload)
-        status = _generation_status(payload)
-        if not video_url and re.search(r"\b(success|succeeded|complete|completed)\b", status):
+        return {"job_id": job_id, "uploaded_names": list(uploaded_names), "provider": descriptor.app_name}
+    except BaseException:
+        for uploaded_name in uploaded_names:
+            with contextlib.suppress(Exception):
+                _delete_uploaded_image(descriptor, uploaded_name)
+        raise
+
+
+def _looks_like_e2e_envelope(path: Path) -> bool:
+    """True when a downloaded 'video' is actually the gateway's client-only E2E
+    envelope (JSON sealed to the owner vault): this process holds no key for it."""
+    try:
+        with path.open("rb") as handle:
+            if handle.read(1) != b"{":
+                return False
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return bool(payload.get("wrapped_dek")) and bool(payload.get("ciphertext"))
+
+
+def _job_progress(payload: Any) -> float | None:
+    candidates = (payload, payload.get("job"), payload.get("result")) if isinstance(payload, dict) else ()
+    for candidate in candidates:
+        if isinstance(candidate, dict) and isinstance(candidate.get("progress"), (int, float)):
+            return max(0.0, min(1.0, float(candidate["progress"])))
+    return None
+
+
+def check_video(job_id: str) -> dict[str, Any]:
+    """One non-blocking status poll for a started job."""
+    descriptor = _required_descriptor()
+    client = _client(descriptor)
+    payload = _result_json(client.call_tool(descriptor.job_tool, {"id": job_id, "include_urls": True}))
+    status = _generation_status(payload)
+    failed = bool(re.search(r"\b(error|failed|cancelled|canceled)\b", status))
+    error = ""
+    if failed:
+        error = _generation_error(payload)
+        if not error:
+            with contextlib.suppress(Exception):
+                error = _generation_error(_private_json(descriptor, f"/api/job/{quote(job_id, safe='')}"))
+    video_url = _first_video_url(payload)
+    if not video_url and re.search(r"\b(success|succeeded|complete|completed)\b", status):
+        with contextlib.suppress(Exception):
             video_url = _private_video_url(descriptor, job_id)
-        for _ in range(max_polls):
-            if video_url:
+    return {
+        "status": status or "running",
+        "failed": failed,
+        "error": error,
+        "video_url": video_url,
+        "progress": _job_progress(payload),
+    }
+
+
+def finish_video(
+    job_id: str,
+    *,
+    uploaded_names: list[str] | None = None,
+    output_dir: str | Path | None = None,
+    poll_interval_seconds: float = 6,
+    max_polls: int = 450,
+) -> dict[str, Any]:
+    """Wait for a started job to complete, then download + QA the result and
+    delete the uploaded inputs from the gateway."""
+    descriptor = _required_descriptor()
+    try:
+        video_url = ""
+        for index in range(max_polls):
+            state = check_video(job_id)
+            if state["failed"]:
+                raise RuntimeError(state["error"] or "Media Studio reported a failed generation")
+            if state["video_url"]:
+                video_url = state["video_url"]
                 break
-            time.sleep(max(0.1, poll_interval_seconds))
-            payload = _result_json(client.call_tool(descriptor.job_tool, {"id": job_id, "include_urls": True}))
-            video_url = _first_video_url(payload)
-            status = _generation_status(payload)
-            if re.search(r"\b(error|failed|cancelled|canceled)\b", status):
-                raise RuntimeError(_generation_error(payload) or "Media Studio reported a failed generation")
-            if not video_url and re.search(r"\b(success|succeeded|complete|completed)\b", status):
-                video_url = _private_video_url(descriptor, job_id)
+            if index < max_polls - 1:
+                time.sleep(max(0.1, poll_interval_seconds))
         if not video_url:
             raise TimeoutError("Media Studio did not return a finished video before the poll limit")
 
@@ -182,14 +312,69 @@ def generate_video(
         destination = destination_root / f"media-studio-{job_id}-{int(time.time())}.mp4"
         local_token = _token(descriptor) if _same_origin(reachable_url, descriptor.upload_base) else ""
         _download(reachable_url, destination, token=local_token)
+        if _looks_like_e2e_envelope(destination):
+            # The gateway sealed the output to the owner vault and served the
+            # envelope. Server-side QA and a local re-encrypted copy are
+            # impossible BY DESIGN — return the gateway output name so the
+            # studio proxies the envelope and the browser decrypts it.
+            with contextlib.suppress(OSError):
+                destination.unlink()
+            return {
+                "job_id": job_id,
+                "provider": descriptor.app_name,
+                "gateway_output": Path(urlparse(video_url).path).name,
+                "qa": {"ok": True, "visual_inspection_required": True},
+            }
         qa = qa_video(destination, output_dir=destination_root / "qa", require_audio=False)
         qa = _remove_qa_frame(qa, destination_root)
         if not qa["ok"]:
             raise RuntimeError("Media Studio output failed technical QA: " + "; ".join(qa["failures"]))
         return {"job_id": job_id, "output": str(destination), "qa": qa, "provider": descriptor.app_name}
     finally:
-        with contextlib.suppress(Exception):
-            _delete_uploaded_image(descriptor, uploaded_name)
+        for uploaded_name in (uploaded_names or []):
+            with contextlib.suppress(Exception):
+                _delete_uploaded_image(descriptor, uploaded_name)
+
+
+def generate_video(
+    *,
+    image_path: str | Path | None = None,
+    video_path: str | Path | None = None,
+    video_mode: str = "extend",
+    prompt: str,
+    reference_description: str = "",
+    ingredient_images: list[dict[str, Any]] | None = None,
+    duration_seconds: float = 4,
+    aspect_ratio: str = "",
+    resolution: str = "",
+    workflow_id: str | None = None,
+    loras: list[dict[str, Any]] | None = None,
+    output_dir: str | Path | None = None,
+    poll_interval_seconds: float = 6,
+    # 45 minutes at the default interval — high-resolution LTX runs regularly
+    # exceed the old 9-minute budget (a 13-minute job hit the cap live).
+    max_polls: int = 450,
+) -> dict[str, Any]:
+    started = start_video(
+        image_path=image_path,
+        video_path=video_path,
+        video_mode=video_mode,
+        prompt=prompt,
+        reference_description=reference_description,
+        ingredient_images=ingredient_images,
+        duration_seconds=duration_seconds,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+        workflow_id=workflow_id,
+        loras=loras,
+    )
+    return finish_video(
+        started["job_id"],
+        uploaded_names=started["uploaded_names"],
+        output_dir=output_dir,
+        poll_interval_seconds=poll_interval_seconds,
+        max_polls=max_polls,
+    )
 
 
 def _remove_qa_frame(qa: dict[str, Any], destination_root: Path) -> dict[str, Any]:
@@ -315,8 +500,33 @@ def _upload_input(descriptor: MediaStudioDescriptor, media: Path, label: str) ->
 def _video_dimensions(image: Path) -> tuple[int, int]:
     with Image.open(image) as opened:
         width, height = opened.size
-    clamp = lambda value: max(384, min(1024, round(value / 32) * 32))
-    return clamp(width), clamp(height)
+    ratio = width / max(1, height)
+    target_area = 768 * 448
+    target_width = math.sqrt(target_area * ratio)
+    target_height = target_width / ratio
+    if max(target_width, target_height) > 1024:
+        scale = 1024 / max(target_width, target_height)
+        target_width *= scale
+        target_height *= scale
+    snap = lambda value: max(256, min(1024, round(value / 32) * 32))
+    return snap(target_width), snap(target_height)
+
+
+def video_dimensions_for_request(
+    *,
+    image: Path | None = None,
+    aspect_ratio: str = "",
+    resolution: str = "",
+) -> tuple[int, int] | None:
+    tier = (
+        _VIDEO_ASPECT_DIMENSIONS_HIGH
+        if str(resolution or "").strip().lower() == "high"
+        else _VIDEO_ASPECT_DIMENSIONS
+    )
+    selected = tier.get(str(aspect_ratio or "").strip())
+    if selected:
+        return selected
+    return _video_dimensions(image) if image is not None else None
 
 
 def _result_json(result: dict[str, Any]) -> dict[str, Any]:

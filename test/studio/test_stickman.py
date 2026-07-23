@@ -5,8 +5,11 @@ from pathlib import Path
 
 from PIL import Image
 
+import io
+
 from hivemind_content_studio.manifest import load_manifest
 from hivemind_content_studio.planner import plan
+from hivemind_content_studio.private_access import ENCRYPTED_PREFIX, read_private_json, read_private_media
 from hivemind_content_studio.stickman import render_stickman_frames
 
 
@@ -33,13 +36,15 @@ scenes:
     result = render_stickman_frames(manifest_path)
 
     assert len(result["frames"]) == 2
-    with Image.open(result["frames"][0]) as image:
+    frame = Path(result["frames"][0])
+    assert not frame.is_file()  # keyframes are encrypted at rest
+    with Image.open(io.BytesIO(read_private_media(frame))) as image:
         assert image.size == (1080, 1920)
     manifest = load_manifest(manifest_path)
     assert len([item for item in manifest["artifacts"] if item["role"] == "keyframe"]) == 2
 
 
-def test_stickman_scene_contract_is_plain_json(tmp_path: Path, monkeypatch) -> None:
+def test_stickman_scene_contract_is_json_encrypted_at_rest(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CONTENT_STUDIO_RUNS_DIR", str(tmp_path / "runs"))
     brief = tmp_path / "brief.yaml"
     brief.write_text("id: one\nlane: stickman-performance-ad\nscenes:\n  - beat: One clear idea.\n", encoding="utf-8")
@@ -47,4 +52,5 @@ def test_stickman_scene_contract_is_plain_json(tmp_path: Path, monkeypatch) -> N
     manifest_path = plan(brief)
     scenes_path = next(Path(item["path"]) for item in load_manifest(manifest_path)["artifacts"] if item["role"] == "stickman-scenes")
 
-    assert json.loads(scenes_path.read_text(encoding="utf-8"))[0]["beat"] == "One clear idea."
+    assert read_private_json(scenes_path)[0]["beat"] == "One clear idea."
+    assert scenes_path.read_text(encoding="utf-8").startswith(ENCRYPTED_PREFIX)

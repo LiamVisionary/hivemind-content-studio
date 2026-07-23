@@ -1,27 +1,10 @@
 {
   "name": "open-generative-ai",
-  "description": "Open-source alternative to HF AI — AI image, video, cinema and lip sync studio",
-  "homepage": "https://github.com/Anil-matcha/Open-Generative-AI",
+  "description": "Hivemind Content Studio — unified local AI image, video, cinema and lip sync studio",
   "private": true,
   "version": "2.0.0",
   "license": "MIT",
-  "workspaces": [
-    "packages/studio",
-    "packages/Vibe-Workflow/packages/workflow-builder",
-    "packages/Open-Poe-AI/packages/agents",
-    "packages/Open-AI-Design-Agent/packages/design-agent"
-  ],
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint",
-    "build:studio": "npm run build -w studio",
-    "build:workflow": "npm run build -w workflow-builder",
-    "build:agent": "npm run build -w ai-agent",
-    "build:design": "npm run build -w design-agent",
-    "build:packages": "npm run build:workflow && npm run build:agent && npm run build:design && npm run build:studio",
-    "setup": "git submodule update --init --recursive && npm install && npm run build:packages",
     "vite:dev": "vite",
     "vite:build": "vite build",
     "electron:dev": "npm run vite:build && electron .",
@@ -38,7 +21,7 @@
   },
   "build": {
     "appId": "ai.generative.open",
-    "productName": "Open Generative AI",
+    "productName": "Hivemind Content Studio",
     "copyright": "Copyright © 2025",
     "directories": {
       "output": "release"
@@ -115,14 +98,10 @@
     }
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/space-grotesk": "^5.3.0",
     "axios": "^1.7.0",
-    "next": "^15.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "react-hot-toast": "^2.4.1",
-    "studio": "*",
-    "workflow-builder": "file:./packages/Vibe-Workflow/packages/workflow-builder",
-    "ai-agent": "file:./packages/Open-Poe-AI/packages/agents"
+    "react-hot-toast": "^2.4.1"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

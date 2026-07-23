@@ -11,10 +11,12 @@ import os
 import re
 import select
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
+import tempfile
 import uuid
 import zlib
 import shutil
@@ -47,7 +49,31 @@ SWIFT_FLUX2_BIN = Path(os.environ.get("SWIFT_FLUX2_BIN", str(STUDIO_ROOT / "engi
 SWIFT_MLX_METALLIB = Path(os.environ.get("SWIFT_MLX_METALLIB", str(Path.home() / "comfy/Flux2CLI-v2.1.0/mlx.metallib")))
 SWIFT_FLUX2_SERVER_URL = os.environ.get("SWIFT_FLUX2_SERVER_URL", "http://127.0.0.1:8791")
 SWIFT_MODELS_CACHE = Path(os.environ.get("SWIFT_MODELS_CACHE", str(Path.home() / "Library/Caches/models")))
-LTX2_MLX_DIR = Path(os.environ.get("LTX2_MLX_DIR", "/tmp/ltx-2-mlx-opt"))
+
+
+def resolve_ltx2_mlx_dir(*, env=None, studio_root=None, home=None, temp_root=None):
+    """Find the persistent optimized MLX runtime; /tmp is legacy fallback only."""
+    env = os.environ if env is None else env
+    explicit = str(env.get("LTX2_MLX_DIR") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+
+    root = Path(studio_root or STUDIO_ROOT).expanduser().resolve()
+    home = Path(home or Path.home()).expanduser().resolve()
+    temp_root = Path(temp_root or tempfile.gettempdir()).expanduser().resolve()
+    persistent = root.parent / "ltx-2-mlx-opt"
+    candidates = (
+        persistent,
+        home / "comfy" / "ltx-2-mlx-opt",
+        temp_root / "ltx-2-mlx-opt",
+    )
+    for candidate in candidates:
+        if candidate.is_dir() and (candidate / "pyproject.toml").is_file():
+            return candidate
+    return persistent
+
+
+LTX2_MLX_DIR = resolve_ltx2_mlx_dir()
 LTX2_MLX_GEMMA = os.environ.get("LTX2_MLX_GEMMA", "mlx-community/gemma-3-12b-it-4bit")
 MLX_MODELS_ROOT = Path(os.environ.get("MLX_MODELS_ROOT", str(Path.home() / "comfy/mlx-models")))
 LTX2_MLX_VARIANTS = {
@@ -77,6 +103,26 @@ LTX2_MLX_VARIANTS = {
         "backend_prefix": "mlx-ltx-regular",
         "output_subdir": "LTX23",
     },
+    "regular-q8-dev-ic": {
+        "title": "LTX 2.3 regular q8 dev IC-LoRA",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-mlx-q8-dev"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-mlx-q8-dev"),
+        "video_distilled": False,
+        "output_prefix": "mlx_ltx23_regular_q8_dev_ic_mobile",
+        "benchmark_seconds": 270.75,
+        "backend_prefix": "mlx-ltx-regular",
+        "output_subdir": "LTX23",
+    },
+    "eros-q8-dev-ic": {
+        "title": "LTX 2.3 10Eros v1 q8 dev IC-LoRA",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-mlx-q8-dev"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-mlx-q8-dev"),
+        "video_distilled": False,
+        "output_prefix": "mlx_ltx23_10eros_v1_q8_dev_ic_mobile",
+        "benchmark_seconds": None,
+        "backend_prefix": "mlx-ltx-eros",
+        "output_subdir": "Eros",
+    },
 }
 LTX2_MLX_VARIANT_ALIASES = {
     "fast": "fast-q8-v12",
@@ -95,6 +141,9 @@ LTX2_MLX_VARIANT_ALIASES = {
     "regular-fast": "regular-q8-distilled",
     "ltx23-regular": "regular-q8-distilled",
     "ltx-2.3-regular": "regular-q8-distilled",
+    "eros-ingredients": "eros-q8-dev-ic",
+    "eros-ic": "eros-q8-dev-ic",
+    "eros-dev-ic": "eros-q8-dev-ic",
 }
 HISTORY_FILE = GATEWAY_STATE_DIR / "history.jsonl"
 PREVIEW_CACHE_ROOTS = [
@@ -110,6 +159,15 @@ PORT = int(os.environ.get("ZIMG_PORT", "8787"))
 FRONTEND_HTTP = os.environ.get("ZIMG_FRONTEND_HTTP", "http://127.0.0.1:8788")
 TOKEN = os.environ.get("ZIMG_TOKEN") or (TOKEN_FILE.read_text().strip() if TOKEN_FILE.exists() else "")
 COMFY_HTTP_DEFAULT = os.environ.get("COMFY_HTTP_DEFAULT") or os.environ.get("COMFY_HTTP", "http://127.0.0.1:8188")
+
+# Drop-in auto-detected workflows: any API-format ComfyUI graph placed in one
+# of these folders is exposed as a local image model (see hosted-server's
+# auto-workflow-discovery) and executed by run_comfy_api_image.
+AUTO_WORKFLOW_DIRS = [
+    Path(entry).expanduser()
+    for entry in (os.environ.get("ZIMG_AUTO_WORKFLOW_DIRS", "").split(os.pathsep) if os.environ.get("ZIMG_AUTO_WORKFLOW_DIRS") else [])
+    if entry.strip()
+] or [COMFY / "workflows" / "auto"]
 COMFY_HTTP = COMFY_HTTP_DEFAULT
 MAX_JSON_BODY_BYTES = int(os.environ.get("MEDIA_GATEWAY_MAX_JSON_BODY_BYTES", str(25 * 1024 * 1024)))
 
@@ -118,8 +176,11 @@ if str(BASE) not in sys.path:
 
 from krea2_identity_workflow import (
     KREA2_IDENTITY_BACKENDS,
+    KREA2_IDENTITY_CONVROT_MODEL,
     KREA2_TURBO_PRE_LORA_SOURCE_MODEL,
+    build_krea2_turbo_outpaint_prompt,
     build_krea2_turbo_identity_prompt as compile_krea2_turbo_identity_prompt,
+    resolve_seed_option,
 )
 
 try:
@@ -242,7 +303,25 @@ OUTPUT_ENCRYPTION_SERVICE = os.environ.get("ZIMG_OUTPUT_KEYCHAIN_SERVICE", "zima
 OUTPUT_ENCRYPTION_ITER = int(os.environ.get("ZIMG_OUTPUT_ENCRYPTION_ITER", "50000"))
 OUTPUT_PLAINTEXT_GRACE_SECONDS = int(os.environ.get("ZIMG_OUTPUT_PLAINTEXT_GRACE", "0"))
 OUTPUT_ENCRYPTION_SUFFIX = ".zenc"
-PRIVATE_INPUT_PREFIXES = ("media-studio-input-", "mcp_inline_", "mcp_ltx_", "mcp_video_")
+# Phase-2 client-side E2E media (off by default; coexists with legacy .zenc).
+# When on AND the owner has created a vault (public key present), new output is
+# sealed to that public key so the gateway can encrypt but never decrypt — only
+# the browser holding the passphrase-derived private key can. See media_seal.py.
+E2E_MEDIA_ENABLED = os.environ.get("ZIMG_E2E_MEDIA", "0") == "1"
+E2E_MEDIA_SUFFIX = ".e2e"
+VAULT_DB = Path(os.environ.get(
+    "ZIMG_VAULT_DB",
+    str(Path(os.environ.get("CONTENT_STUDIO_DATA_DIR", str(Path(__file__).resolve().parents[2] / "data"))) / "owner-vault.sqlite3"),
+)).expanduser()
+PRIVATE_INPUT_PREFIXES = (
+    "media-studio-inline-",
+    "media-studio-input-",
+    "media-studio-reference-",
+    "mcp_inline_",
+    "mcp_ingredients_",
+    "mcp_ltx_",
+    "mcp_video_",
+)
 PRIVATE_INPUT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_MAX_AGE", "7200"))
 jobs = {}
 jobs_lock = threading.Lock()
@@ -368,6 +447,8 @@ def logical_path_for_encrypted(path):
     path = Path(path)
     if path.name.endswith(OUTPUT_ENCRYPTION_SUFFIX):
         return path.with_name(path.name[:-len(OUTPUT_ENCRYPTION_SUFFIX)])
+    if path.name.endswith(E2E_MEDIA_SUFFIX):
+        return path.with_name(path.name[:-len(E2E_MEDIA_SUFFIX)])
     return path
 
 
@@ -392,13 +473,134 @@ def is_encryptable_output(path):
         return False
     if output_path_is_active(path):
         return False
-    if path.name.endswith(OUTPUT_ENCRYPTION_SUFFIX):
+    if path.name.endswith(OUTPUT_ENCRYPTION_SUFFIX) or path.name.endswith(E2E_MEDIA_SUFFIX):
         return False
     if path.suffix.lower() not in OUTPUT_MEDIA_EXTS:
         return False
     if _is_under(path, DEBUG_OUTPUT_DIR):
         return False
     return _is_under(path, OUT_DIR) or _is_under(path, COMFY_OUTPUT_DIR)
+
+
+_vault_public_key_cache = {"mtime": None, "spki": None}
+
+
+def e2e_envelope_path_for(path):
+    path = Path(path)
+    return path.with_name(path.name + E2E_MEDIA_SUFFIX)
+
+
+def existing_output_path(logical):
+    """The physical file for a logical output: plaintext, legacy .zenc, or E2E
+    .e2e envelope. Returns None if none exists. Used so history/gallery listing
+    finds E2E outputs (whose only on-disk form is the .e2e envelope)."""
+    logical = Path(logical)
+    for candidate in (logical, encrypted_path_for(logical), e2e_envelope_path_for(logical)):
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+# The gateway runs under the system python3 (no `cryptography`). Reading the
+# public key needs only sqlite, but sealing (RSA-OAEP + AES-GCM) shells out to a
+# python that has `cryptography` — the repo venv by default.
+E2E_SEAL_PYTHON = os.environ.get("ZIMG_E2E_PYTHON", str(Path(__file__).resolve().parents[2] / ".venv" / "bin" / "python"))
+E2E_SEAL_HELPER = str(Path(__file__).resolve().parent / "media_seal.py")
+
+
+def vault_public_key_spki():
+    """The owner vault public key (base64url spki), or None until the browser
+    has created a vault. Read directly from sqlite; cached against the DB mtime."""
+    try:
+        mtime = VAULT_DB.stat().st_mtime_ns if VAULT_DB.is_file() else None
+    except OSError:
+        return None
+    if mtime == _vault_public_key_cache["mtime"]:
+        return _vault_public_key_cache["spki"]
+    spki = None
+    if mtime is not None:
+        try:
+            connection = sqlite3.connect(VAULT_DB, timeout=10)
+            try:
+                row = connection.execute("SELECT identity_json FROM vault_identity WHERE id = 1").fetchone()
+            finally:
+                connection.close()
+            if row:
+                spki = json.loads(row[0]).get("public_key")
+        except Exception as exc:
+            print(f"[e2e-media] could not read vault public key: {exc}", file=sys.stderr)
+    _vault_public_key_cache.update(mtime=mtime, spki=spki)
+    return spki
+
+
+def vault_identity_json():
+    """The owner vault identity as stored — salt, wrapped keys, public key.
+    Everything in it is public-or-wrapped material (vault_store rejects bare
+    secrets), useless without the owner passphrase or recovery key. Served to
+    token-authed clients (the mobile canvas) so they can unlock in-browser."""
+    if not VAULT_DB.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(VAULT_DB, timeout=10)
+        try:
+            row = connection.execute("SELECT identity_json FROM vault_identity WHERE id = 1").fetchone()
+        finally:
+            connection.close()
+        return json.loads(row[0]) if row else None
+    except Exception as exc:
+        print(f"[e2e-media] could not read vault identity: {exc}", file=sys.stderr)
+        return None
+
+
+def seal_output_to_e2e(path):
+    """Seal media to the owner vault public key as <name>.e2e; delete plaintext.
+
+    Returns True when sealed, False to fall back to legacy encryption (e.g. no
+    vault exists yet). The gateway can encrypt here but can never decrypt.
+    """
+    path = Path(path).resolve()
+    spki = vault_public_key_spki()
+    if not spki:
+        return False
+    envelope = e2e_envelope_path_for(path)
+    if envelope.exists() and not path.exists():
+        return True
+    if not path.exists() or not path.is_file():
+        return False
+    tmp = envelope.with_name(envelope.name + f".{os.getpid()}.tmp")
+    pub_tmp = envelope.with_name(envelope.name + f".{os.getpid()}.pub")
+    with encryption_lock:
+        if envelope.exists() and not path.exists():
+            return True
+        source_stat = path.stat()
+        try:
+            pub_tmp.write_text(spki, encoding="utf-8")
+            proc = subprocess.run(
+                [E2E_SEAL_PYTHON, E2E_SEAL_HELPER, "--pub", f"@{pub_tmp}", "--in", str(path), "--out", str(tmp)],
+                capture_output=True, text=True, timeout=300,
+            )
+            if proc.returncode != 0 or not tmp.exists():
+                raise RuntimeError(f"seal helper exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+            sealed = json.loads(tmp.read_text(encoding="utf-8"))
+            sealed["v"] = 1
+            sealed["media_type"] = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            tmp.write_text(json.dumps(sealed), encoding="utf-8")
+            os.replace(tmp, envelope)
+            os.utime(envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        finally:
+            for leftover in (pub_tmp, tmp):
+                try:
+                    leftover.unlink()
+                except FileNotFoundError:
+                    pass
+    return True
 
 
 def encrypt_output_file(path):
@@ -409,6 +611,14 @@ def encrypt_output_file(path):
     path = Path(path).resolve()
     if not is_encryptable_output(path):
         return path
+    # Prefer client-side E2E sealing when enabled and a vault exists; otherwise
+    # fall through to the legacy Keychain-key .zenc path unchanged.
+    if E2E_MEDIA_ENABLED or e2e_envelope_path_for(path).exists():
+        try:
+            if seal_output_to_e2e(path):
+                return path
+        except Exception as exc:
+            print(f"[e2e-media] seal failed for {path.name}; falling back: {exc}", file=sys.stderr)
     enc = encrypted_path_for(path)
     if enc.exists() and not path.exists():
         return path
@@ -493,11 +703,13 @@ def find_output_logical_path(name):
         return None
     for root in [OUT_DIR, COMFY_OUTPUT_DIR, DEBUG_OUTPUT_DIR]:
         root = root.resolve()
-        candidates = [root / name, root / f"{name}{OUTPUT_ENCRYPTION_SUFFIX}"]
+        candidates = [root / name, root / f"{name}{OUTPUT_ENCRYPTION_SUFFIX}", root / f"{name}{E2E_MEDIA_SUFFIX}"]
         for candidate in candidates:
             logical = logical_path_for_encrypted(candidate).resolve()
             existing = candidate.resolve()
-            if str(logical).startswith(str(root)) and (existing.exists() or encrypted_path_for(logical).exists()):
+            if str(logical).startswith(str(root)) and (
+                existing.exists() or encrypted_path_for(logical).exists() or e2e_envelope_path_for(logical).exists()
+            ):
                 return logical
         try:
             matches = []
@@ -523,13 +735,32 @@ def find_exact_output_logical_path(value):
         return None
     if not any(_is_under(logical, root) for root in [OUT_DIR, COMFY_OUTPUT_DIR]):
         return None
-    if logical.is_file() or encrypted_path_for(logical).is_file():
+    # plaintext, legacy .zenc, or E2E .e2e — an E2E-only output must still
+    # resolve or its history thumbnail 404s.
+    if existing_output_path(logical):
         return logical
     return None
 
 
 def send_output_file(handler, path):
     path = encrypt_output_file(path)
+    envelope = e2e_envelope_path_for(Path(path))
+    if envelope.is_file():
+        # Client-side E2E: the gateway holds no key for this file. Hand the
+        # sealed envelope to the browser, which decrypts it with the vault
+        # private key. A legacy client that ignores X-E2E-Media simply can't
+        # render it — by design, only the owner's browser can.
+        data = envelope.read_bytes()
+        handler.send_response(200)
+        handler.cors_headers()
+        handler.send_header("Content-Type", "application/vnd.hivemind.e2e+json")
+        handler.send_header("X-E2E-Media", "1")
+        handler.send_header("Cache-Control", "private, no-store, max-age=0")
+        handler.send_header("Pragma", "no-cache")
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+        return
     data, ctype = decrypt_output_bytes(path)
     handler.send_response(200)
     handler.cors_headers()
@@ -1232,11 +1463,13 @@ def _native_loras_from_prompt_nodes(prompt):
     return _dedupe_lora_requests(loras), [x for x in unresolved if x]
 
 
-def _native_loras_from_generation_request(data):
+def _native_loras_from_generation_request(data, base_models=None):
     if isinstance(data, dict) and data.get('loras') is not None:
-        selected = save_selected_loras(data.get('loras') or [])
+        selected = resolve_lora_selection(data.get('loras') or [], base_models)
     else:
         selected = load_selected_loras()
+        if base_models:
+            selected = [item for item in selected if lora_base_matches(item.get('baseModel'), base_models)]
     loras = []
     for item in selected:
         try:
@@ -1555,6 +1788,9 @@ def build_krea2_turbo_identity_prompt(prompt, image_name=None, options=None, pro
         options=options,
         profile=profile or accelerator_profile(),
         filename_prefix=filename_prefix,
+        identity_checkpoint_available=(
+            COMFY / "models" / "diffusion_models" / KREA2_IDENTITY_CONVROT_MODEL
+        ).is_file(),
     )
 
 
@@ -1580,10 +1816,20 @@ def output_file_records(limit=200):
                         paths.append(logical)
         except Exception:
             continue
-    records = []
-    for p in sorted(set(paths), key=lambda x: (x.stat().st_mtime if x.exists() else encrypted_path_for(x).stat().st_mtime if encrypted_path_for(x).exists() else 0), reverse=True)[:limit]:
+    def _mtime(x):
+        physical = existing_output_path(x)
         try:
-            st = p.stat() if p.exists() else encrypted_path_for(p).stat()
+            return physical.stat().st_mtime if physical else 0
+        except OSError:
+            return 0
+
+    records = []
+    for p in sorted(set(paths), key=_mtime, reverse=True)[:limit]:
+        physical = existing_output_path(p)
+        if physical is None:
+            continue
+        try:
+            st = physical.stat()
         except Exception:
             continue
         indexed = workflow_index_record_for_filename(p.name) or {}
@@ -1712,6 +1958,13 @@ def float_option(options, key, default, lo, hi):
     return max(lo, min(hi, value))
 
 
+def bool_option(options, key, default):
+    value = options.get(key, default)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off", ""}
+    return bool(value)
+
+
 def stage_inline_image_base64(value):
     if not isinstance(value, str) or not value.strip():
         return None
@@ -1747,7 +2000,7 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
     options = options or {}
     steps = int_option(options, 'steps', 4, 1, 12)
     cfg = float_option(options, 'cfg', float_option(options, 'guidance', 1.0, 0.0, 20.0), 0.0, 20.0)
-    seed = int_option(options, 'seed', int(time.time()) % 1_000_000_000, 0, 1_000_000_000)
+    seed = resolve_seed_option(options)
     denoise = float_option(options, 'denoise', 0.45, 0.0, 1.0)
     width = int_quality_option(options, 'width', 512)
     height = int_quality_option(options, 'height', 768)
@@ -1759,7 +2012,15 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
         "backend": "comfy-bigloves-klein3-edit",
         "created_at": started,
         "outputs": [],
-        "options": {"steps": steps, "cfg": cfg, "seed": seed, "denoise": denoise, "width": width, "height": height},
+        "options": {
+            "steps": steps,
+            "cfg": cfg,
+            "seed": seed,
+            "denoise": denoise,
+            "width": width,
+            "height": height,
+            "lora_count": len(options.get('loras') or []),
+        },
     }
     with jobs_lock:
         jobs[job_id] = rec
@@ -1787,6 +2048,27 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
             '9': {'class_type':'VAEDecode','inputs':{'samples':['8',0], 'vae':['3',0]}},
             '10': {'class_type':'SaveImage','inputs':{'images':['9',0], 'filename_prefix':filename_prefix}},
         }
+        model_ref = ['1', 0]
+        lora_root = (COMFY / 'models' / 'loras').resolve()
+        for index, item in enumerate(options.get('loras') or [], start=11):
+            lora_path = Path(str(item.get('filePath') or '')).resolve()
+            try:
+                lora_name = str(lora_path.relative_to(lora_root))
+            except ValueError as exc:
+                raise RuntimeError("BigLove LoRA is outside the private Comfy model folder") from exc
+            if not lora_path.is_file():
+                raise RuntimeError(f"BigLove LoRA is missing: {lora_name}")
+            node_id = str(index)
+            api_prompt[node_id] = {
+                'class_type': 'LoraLoaderModelOnly',
+                'inputs': {
+                    'model': model_ref,
+                    'lora_name': lora_name,
+                    'strength_model': float(item.get('scale', 1.0)),
+                },
+            }
+            model_ref = [node_id, 0]
+        api_prompt['8']['inputs']['model'] = model_ref
         body = json.dumps({'prompt': api_prompt, 'client_id': f'zimage-klein3-{job_id}'}).encode('utf-8')
         t0 = time.monotonic()
         req = Request(f"{COMFY_HTTP_DEFAULT}/prompt", data=body, headers={'Content-Type':'application/json'})
@@ -1839,6 +2121,466 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
         jobs[job_id] = rec
 
 
+def _load_auto_api_workflow(workflow_file):
+    """Load + validate an auto-detected API-format graph from an allowed folder."""
+    path = Path(str(workflow_file or "")).expanduser().resolve()
+    allowed_roots = [root.resolve() for root in AUTO_WORKFLOW_DIRS]
+    if path.suffix.lower() != ".json" or not any(str(path).startswith(f"{root}{os.sep}") for root in allowed_roots):
+        raise RuntimeError("workflow file is outside the auto-workflow folders")
+    if not path.is_file():
+        raise RuntimeError(f"workflow file is missing: {path.name}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    graph = data.get("prompt") if isinstance(data, dict) and isinstance(data.get("prompt"), dict) else data
+    if not isinstance(graph, dict) or not graph or not all(
+        isinstance(node, dict) and node.get("class_type") for node in graph.values()
+    ):
+        raise RuntimeError(f"{path.name} is not an API-format ComfyUI graph (use ComfyUI's 'Save (API format)')")
+    return path, json.loads(json.dumps(graph))
+
+
+_AUTO_PROMPT_TEXT_KEYS = ("text", "positive_text", "prompt")
+_AUTO_SAMPLER_CLASSES = {"KSampler", "KSamplerAdvanced"}
+
+
+def _auto_find_text_node(graph, start_id, seen=None):
+    """Follow a conditioning ref upstream to the first node carrying prompt text."""
+    seen = seen or set()
+    node_id = str(start_id)
+    if node_id in seen or node_id not in graph:
+        return None, None
+    seen.add(node_id)
+    node = graph[node_id]
+    inputs = node.get("inputs") or {}
+    for key in _AUTO_PROMPT_TEXT_KEYS:
+        if isinstance(inputs.get(key), str):
+            return node_id, key
+    for value in inputs.values():
+        if isinstance(value, list) and value:
+            found = _auto_find_text_node(graph, value[0], seen)
+            if found[0] is not None:
+                return found
+    return None, None
+
+
+def _auto_submit_prompt(lane_url, graph, client_id):
+    body = json.dumps({"prompt": graph, "client_id": client_id}).encode("utf-8")
+    req = Request(f"{lane_url}/prompt", data=body, headers={"Content-Type": "application/json"})
+    return json.loads(urlopen(req, timeout=30).read().decode("utf-8"))
+
+
+def _auto_fill_missing_required_inputs(graph, error_payload, lane_url):
+    """Self-heal stale API exports: fill inputs a node gained after the export.
+
+    ComfyUI 400s with node_errors listing required_input_missing entries; the
+    lane's /object_info declares each input's default. Returns True when at
+    least one input was filled (caller retries once).
+    """
+    try:
+        detail = json.loads(error_payload or "{}")
+    except Exception:
+        return False
+    healed = False
+    for node_id, node_error in (detail.get("node_errors") or {}).items():
+        node = graph.get(str(node_id))
+        if not isinstance(node, dict):
+            continue
+        missing = [
+            err.get("extra_info", {}).get("input_name")
+            for err in (node_error.get("errors") or [])
+            if err.get("type") == "required_input_missing"
+        ]
+        missing = [name for name in missing if name]
+        if not missing:
+            continue
+        class_type = str(node.get("class_type") or "")
+        try:
+            payload = urlopen(f"{lane_url}/object_info/{class_type}", timeout=10).read().decode("utf-8")
+            spec = (json.loads(payload).get(class_type) or {}).get("input") or {}
+        except Exception:
+            continue
+        declared = {}
+        for group in ("required", "optional"):
+            declared.update(spec.get(group) or {})
+        for input_name in missing:
+            entry = declared.get(input_name)
+            if not (isinstance(entry, list) and len(entry) >= 2 and isinstance(entry[1], dict) and "default" in entry[1]):
+                continue
+            node.setdefault("inputs", {})[input_name] = entry[1]["default"]
+            healed = True
+    return healed
+
+
+def _auto_fit_regional_prompt(node, prompt_text):
+    """Regional-prompt nodes (ForgeCouple style) need one prompt line per region.
+
+    The region count comes from the node's own advanced_mapping; a shorter
+    prompt is padded by repeating its last line so a plain one-line prompt
+    still renders instead of failing validation.
+    """
+    inputs = node.get("inputs") or {}
+    if "advanced_mapping" not in inputs:
+        return str(prompt_text)
+    try:
+        regions = len(json.loads(inputs.get("advanced_mapping") or "[]"))
+    except Exception:
+        regions = 0
+    if regions < 2:
+        return str(prompt_text)
+    lines = [line.strip() for line in str(prompt_text).splitlines() if line.strip()] or [str(prompt_text)]
+    while len(lines) < regions:
+        lines.append(lines[-1])
+    return "\n".join(lines)
+
+
+def _normalize_couple_options(options):
+    """Coerce couple_* options to safe primitives — they land in job records."""
+    if not isinstance(options, dict):
+        return options
+    for flag in ("couple_mode", "couple_shared"):
+        if flag in options:
+            options[flag] = str(options.get(flag)).strip().lower() in ("1", "true", "yes", "on")
+    if "couple_split" in options:
+        try:
+            options["couple_split"] = min(0.9, max(0.1, float(options["couple_split"])))
+        except (TypeError, ValueError):
+            options["couple_split"] = 0.5
+    if "couple_direction" in options:
+        vertical = str(options.get("couple_direction") or "").strip().lower() in ("vertical", "stacked", "vert")
+        options["couple_direction"] = "vertical" if vertical else "horizontal"
+    if "couple_pair" in options:
+        pair = str(options.get("couple_pair") or "").strip().lower()
+        options["couple_pair"] = pair if pair in ("girls", "mixed", "boys") else "girls"
+    return options
+
+
+_COUPLE_PAIR_ANCHORS = {"girls": "2girls", "mixed": "1boy, 1girl", "boys": "2boys"}
+_COUPLE_SOLO_TAG_PREFIX = re.compile(r"^\s*(?:(?:1girl|1boy|2girls|2boys|solo|couple)\s*,\s*)+", re.IGNORECASE)
+
+
+def _couple_anchor_line(line, anchor):
+    """Prefix a character line with the pair's composition anchor.
+
+    Empirically (anima turbo lane, 2026-07-22): regional masks steer per-area
+    attributes but only a composition tag on every line makes TWO characters
+    appear — without it the regions blend into one subject. Leading solo/pair
+    tags are stripped first so user-typed "1girl, ..." doesn't fight the pair.
+    """
+    return f"{anchor}, {_COUPLE_SOLO_TAG_PREFIX.sub('', str(line)).strip()}"
+
+
+def _auto_bypass_regional_prompt_node(graph, node_id, prompt, negative):
+    """Single-subject default for regional/couple graphs (couple mode off).
+
+    Splices the regional-prompt node out of the graph: the sampler's model is
+    rewired to the node's upstream model and its conditioning is replaced by
+    full-canvas CLIPTextEncode nodes on the same CLIP — including a real
+    negative encode, so cfg behaves normally. Returns False when the node is
+    referenced in a way that can't be rewired (caller falls back to padding).
+    """
+    node = graph.get(str(node_id)) or {}
+    inputs = node.get("inputs") or {}
+    model_ref = inputs.get("model")
+    clip_ref = inputs.get("clip")
+    if not (isinstance(model_ref, list) and isinstance(clip_ref, list)):
+        return False
+    ref_sites = []
+    for other_id, other in graph.items():
+        if str(other_id) == str(node_id):
+            continue
+        for key, value in (other.get("inputs") or {}).items():
+            if isinstance(value, list) and len(value) == 2 and str(value[0]) == str(node_id):
+                if int(value[1]) > 1:
+                    return False  # auxiliary output (parsed prompt) we can't substitute
+                ref_sites.append((other, key, int(value[1])))
+    numeric_ids = [int(k) for k in graph if str(k).isdigit()]
+    pos_id = str(max(numeric_ids or [0]) + 1)
+    neg_id = str(max(numeric_ids or [0]) + 2)
+    for other, key, output_index in ref_sites:
+        if output_index == 0:
+            other["inputs"][key] = list(model_ref)
+        else:
+            other["inputs"][key] = [neg_id if key == "negative" else pos_id, 0]
+    graph[pos_id] = {"class_type": "CLIPTextEncode", "inputs": {"clip": list(clip_ref), "text": str(prompt)}}
+    graph[neg_id] = {"class_type": "CLIPTextEncode", "inputs": {"clip": list(clip_ref), "text": str(negative or "")}}
+    del graph[str(node_id)]
+    return True
+
+
+def _auto_split_regional_negative(graph, sampler_inputs, node_id, negative):
+    """Give a regional-prompt graph a real negative conditioning input.
+
+    Couple templates wire the sampler's negative to the SAME regional output
+    as the positive, which turns cfg into a mathematical no-op (uncond ==
+    cond). When the regional node stays in the graph, rewire negative to a
+    plain CLIPTextEncode on the node's own CLIP — ComfyUI skips it entirely
+    at cfg 1.0, and it provides real guidance above that.
+    """
+    node = graph.get(str(node_id)) or {}
+    clip_ref = (node.get("inputs") or {}).get("clip")
+    negative_ref = sampler_inputs.get("negative")
+    if not isinstance(clip_ref, list):
+        return False
+    if not (isinstance(negative_ref, list) and negative_ref and str(negative_ref[0]) == str(node_id)):
+        return False
+    numeric_ids = [int(k) for k in graph if str(k).isdigit()]
+    neg_id = str(max(numeric_ids or [0]) + 1)
+    graph[neg_id] = {"class_type": "CLIPTextEncode", "inputs": {"clip": list(clip_ref), "text": str(negative or "")}}
+    sampler_inputs["negative"] = [neg_id, 0]
+    return True
+
+
+def _auto_apply_model_loras(graph, sampler_inputs, resolved_loras):
+    """Chain user LoRAs into an auto-workflow graph (model-only patches).
+
+    Walks the sampler's model conditioning upstream to the edge right above
+    the checkpoint/UNET loader and splices LoraLoaderModelOnly nodes there —
+    upstream of any regional-prompt or template LoRA nodes, matching the
+    established anima pattern. Returns how many LoRAs were applied.
+    """
+    if not resolved_loras:
+        return 0
+    holder = sampler_inputs
+    for _ in range(len(graph) + 1):
+        ref = holder.get("model")
+        if not (isinstance(ref, list) and ref and str(ref[0]) in graph):
+            return 0
+        upstream_inputs = (graph[str(ref[0])].get("inputs") or {})
+        if isinstance(upstream_inputs.get("model"), list):
+            holder = upstream_inputs
+            continue
+        break
+    lora_root = (COMFY / "models" / "loras").resolve()
+    previous = list(holder["model"])
+    next_id = max([int(k) for k in graph if str(k).isdigit()] or [0]) + 1
+    applied = 0
+    for item in resolved_loras:
+        try:
+            lora_name = str(Path(item["path"]).resolve().relative_to(lora_root))
+        except Exception:
+            lora_name = str(item.get("id") or "").strip()
+        if not lora_name:
+            continue
+        graph[str(next_id)] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"model": previous, "lora_name": lora_name, "strength_model": float(item.get("strength", 1.0))},
+        }
+        previous = [str(next_id), 0]
+        next_id += 1
+        applied += 1
+    if applied:
+        holder["model"] = previous
+    return applied
+
+
+def _auto_apply_couple_regions(node, pos_key, prompt, options):
+    """Couple mode: map prompt lines to explicit regions via Advanced mapping.
+
+    Line order: optional shared full-canvas scene line first (couple_shared),
+    then one character line per region. couple_split is the first character's
+    share of the canvas along couple_direction (horizontal = side by side,
+    vertical = stacked); remaining characters divide the rest evenly.
+    """
+    inputs = node.setdefault("inputs", {})
+    lines = [line.strip() for line in str(prompt).splitlines() if line.strip()] or [str(prompt).strip()]
+    shared = bool(options.get("couple_shared")) and len(lines) >= 2
+    shared_line = lines[0] if shared else None
+    regions = lines[1:] if shared else list(lines)
+    while len(regions) < 2:
+        regions.append(regions[-1])
+    anchor = _COUPLE_PAIR_ANCHORS.get(str(options.get("couple_pair") or "girls"), "2girls")
+    regions = [_couple_anchor_line(region, anchor) for region in regions]
+    split = options.get("couple_split")
+    try:
+        split = min(0.9, max(0.1, float(split)))
+    except (TypeError, ValueError):
+        split = 0.5
+    vertical = str(options.get("couple_direction") or "").strip().lower() in ("vertical", "stacked", "vert")
+    rows = []
+    if shared_line is not None:
+        try:
+            weight = float(inputs.get("background_weight") or 0.3)
+        except (TypeError, ValueError):
+            weight = 0.3
+        rows.append([0.0, 1.0, 0.0, 1.0, weight])
+    bounds = [0.0, split]
+    step = (1.0 - split) / max(1, len(regions) - 1)
+    while len(bounds) < len(regions) + 1:
+        bounds.append(bounds[-1] + step)
+    bounds[-1] = 1.0
+    for index in range(len(regions)):
+        lo, hi = round(bounds[index], 4), round(bounds[index + 1], 4)
+        rows.append([0.0, 1.0, lo, hi, 1.0] if vertical else [lo, hi, 0.0, 1.0, 1.0])
+    inputs["mode"] = "Advanced"
+    inputs["background"] = "None"
+    inputs["advanced_mapping"] = json.dumps(rows)
+    inputs[pos_key] = "\n".join(([shared_line] if shared_line is not None else []) + regions)
+
+
+def run_comfy_api_image(job_id, prompt, options=None):
+    """Generic runner for auto-detected API-format ComfyUI image workflows.
+
+    The template graph keeps its own tuned defaults; only explicitly provided
+    options (prompt, negative, seed, steps, cfg, dimensions) are patched in.
+    Lane selection reuses the shared checkpoint-name router, so e.g. waiANIMA
+    graphs land on the anima lane automatically.
+    """
+    started = now_iso()
+    options = _normalize_couple_options(dict(options or {}))
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "comfy-api-image",
+        "created_at": started,
+        "outputs": [],
+        "options": {k: v for k, v in options.items() if k not in ("negative_prompt", "workflow_file", "loras")},
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    try:
+        workflow_path, graph = _load_auto_api_workflow(options.get("workflow_file"))
+        rec["workflow"] = workflow_path.stem
+
+        sampler = next(
+            (node for node in graph.values() if str(node.get("class_type")) in _AUTO_SAMPLER_CLASSES),
+            None,
+        )
+        if sampler is None:
+            raise RuntimeError(f"{workflow_path.name} has no KSampler node to drive")
+        sampler_inputs = sampler.setdefault("inputs", {})
+
+        seed = resolve_seed_option(options)
+        for seed_key in ("seed", "noise_seed"):
+            if seed_key in sampler_inputs:
+                sampler_inputs[seed_key] = seed
+                rec["options"]["seed"] = seed
+                break
+        if options.get("steps"):
+            sampler_inputs["steps"] = int_option(options, "steps", int(sampler_inputs.get("steps") or 8), 1, 60)
+        if options.get("cfg") is not None or options.get("guidance") is not None:
+            default_cfg = float(sampler_inputs.get("cfg") or 1.0)
+            sampler_inputs["cfg"] = float_option(options, "cfg", float_option(options, "guidance", default_cfg, 0.0, 20.0), 0.0, 20.0)
+
+        # Positive prompt: follow the sampler's positive conditioning upstream.
+        positive_ref = sampler_inputs.get("positive")
+        pos_node_id, pos_key = _auto_find_text_node(graph, positive_ref[0]) if isinstance(positive_ref, list) and positive_ref else (None, None)
+        if pos_node_id is None:
+            raise RuntimeError(f"{workflow_path.name} has no reachable prompt text node")
+        negative = str(options.get("negative_prompt") or "").strip()
+        regional = "advanced_mapping" in (graph[pos_node_id].get("inputs") or {})
+        couple_on = bool(options.get("couple_mode"))
+        negative_handled = False
+        if regional and couple_on:
+            _auto_apply_couple_regions(graph[pos_node_id], pos_key, prompt, options)
+            rec["couple_mode"] = True
+            if _auto_split_regional_negative(graph, sampler_inputs, pos_node_id, negative):
+                negative_handled = True
+        elif regional and str(prompt or "").strip():
+            # Couple/regional graphs run single-subject by default: splice the
+            # regional node out for full-canvas conditioning; regions only
+            # when couple mode is explicitly enabled.
+            if _auto_bypass_regional_prompt_node(graph, pos_node_id, prompt, negative):
+                rec["couple_bypassed"] = True
+                negative_handled = True
+            else:
+                graph[pos_node_id]["inputs"][pos_key] = _auto_fit_regional_prompt(graph[pos_node_id], prompt)
+                if _auto_split_regional_negative(graph, sampler_inputs, pos_node_id, negative):
+                    negative_handled = True
+        elif str(prompt or "").strip():
+            graph[pos_node_id]["inputs"][pos_key] = str(prompt)
+
+        # Negative prompt: only when it resolves to a DIFFERENT node (regional
+        # prompt nodes expose positive+negative from one node — leave those).
+        negative_ref = sampler_inputs.get("negative")
+        if not negative_handled and negative and isinstance(negative_ref, list) and negative_ref:
+            neg_node_id, neg_key = _auto_find_text_node(graph, negative_ref[0])
+            if neg_node_id is not None and neg_node_id != pos_node_id:
+                graph[neg_node_id]["inputs"][neg_key] = negative
+
+        # User LoRAs: validated against the local catalog, chained above the
+        # model loader. Only the count is recorded — names stay client-side.
+        requested_loras = options.get("loras") or []
+        if requested_loras:
+            resolved = resolve_lora_selection(requested_loras)
+            applied = _auto_apply_model_loras(graph, sampler_inputs, resolved)
+            if applied:
+                rec["loras_applied"] = applied
+
+        # Dimensions: patch every node that carries a width+height pair so
+        # latent size and regional-prompt canvases stay consistent.
+        width = int(options.get("width") or 0)
+        height = int(options.get("height") or 0)
+        if width > 0 and height > 0:
+            for node in graph.values():
+                inputs = node.get("inputs") or {}
+                if isinstance(inputs.get("width"), (int, float)) and isinstance(inputs.get("height"), (int, float)):
+                    inputs["width"] = width
+                    inputs["height"] = height
+            rec["options"]["width"] = width
+            rec["options"]["height"] = height
+
+        lane_url = comfy_http_for_prompt_body(json.dumps({"prompt": graph}))
+        rec["lane"] = lane_url
+        t0 = time.monotonic()
+        client_id = f"zimage-auto-{job_id}"
+        try:
+            queued = _auto_submit_prompt(lane_url, graph, client_id)
+        except HTTPError as exc:
+            error_payload = exc.read().decode("utf-8", errors="replace")
+            if exc.code != 400 or not _auto_fill_missing_required_inputs(graph, error_payload, lane_url):
+                raise RuntimeError(f"ComfyUI rejected the workflow: {error_payload[:500]}") from exc
+            rec["healed_inputs"] = True
+            queued = _auto_submit_prompt(lane_url, graph, client_id)
+        prompt_id = queued.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI did not return prompt_id: {queued}")
+        rec["comfy_prompt_id"] = prompt_id
+        with jobs_lock:
+            jobs[job_id] = rec
+        history = None
+        for _ in range(300):
+            time.sleep(2)
+            try:
+                payload = urlopen(f"{lane_url}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                data = json.loads(payload or "{}")
+                if prompt_id in data:
+                    history = data[prompt_id]
+                    break
+            except Exception:
+                pass
+        if history is None:
+            raise RuntimeError(f"auto workflow timed out waiting for prompt {prompt_id}")
+        status = history.get("status") or {}
+        if status.get("status_str") != "success" or not status.get("completed"):
+            raise RuntimeError(f"auto workflow failed: {status}")
+        outputs = []
+        for node_out in (history.get("outputs") or {}).values():
+            for img in node_out.get("images") or []:
+                name = safe_name(img.get("filename") or "")
+                subfolder = img.get("subfolder") or ""
+                typ = img.get("type") or "output"
+                root = COMFY_OUTPUT_DIR if typ == "output" else COMFY_INPUT_DIR
+                p = (root / subfolder / name).resolve()
+                # The privacy sweeper may seal the plaintext (.zenc or .e2e)
+                # before this check runs — any sealed form counts as existing.
+                if existing_output_path(p):
+                    outputs.append(str(p))
+        if not outputs:
+            raise RuntimeError("auto workflow completed without output images")
+        outputs = encrypt_outputs(outputs)
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": outputs,
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as e:
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(e)})
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
 def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
     started = now_iso()
     options = options or {}
@@ -1855,10 +2597,19 @@ def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
             "height": int_option(options, "height", 1024, 64, 4096),
             "steps": int_option(options, "steps", 10, 1, 50),
             "cfg": float_option(options, "cfg", float_option(options, "guidance", 1.0, 0.0, 20.0), 0.0, 20.0),
-            "seed": int_option(options, "seed", int(time.time()) % 1_000_000_000, 0, 1_000_000_000),
+            "seed": resolve_seed_option(options),
             "ref_boost": float_option(options, "ref_boost", 4.0, 0.0, 1000.0),
             "identity_strength": float_option(options, "identity_strength", 1.0, -10.0, 10.0),
             "grounding_px": int_option(options, "grounding_px", 768, 0, 4096),
+            "cache_static_tokens": bool_option(options, "cache_static_tokens", True),
+            "loras": [
+                {
+                    "id": str(item.get("id") or ""),
+                    "strength": float_option(item, "strength", 1.0, LORA_STRENGTH_MIN, LORA_STRENGTH_MAX),
+                }
+                for item in (options.get("loras") or [])
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ],
         },
     }
     with jobs_lock:
@@ -2129,10 +2880,28 @@ def _is_biglove_klein3_model_name(name):
 
 
 def _image_dimensions(path):
+    p = Path(path)
+    if not p.exists():
+        return None
+    ffprobe = shutil.which('ffprobe')
+    if ffprobe:
+        try:
+            payload = subprocess.check_output(
+                [
+                    ffprobe, '-v', 'error', '-select_streams', 'v:0',
+                    '-show_entries', 'stream=width,height', '-of', 'json', str(p),
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            stream = (json.loads(payload or '{}').get('streams') or [{}])[0]
+            width, height = int(stream.get('width') or 0), int(stream.get('height') or 0)
+            if width > 0 and height > 0:
+                return width, height
+        except Exception:
+            pass
     try:
-        p = Path(path)
-        if not p.exists():
-            return None
         out = subprocess.check_output(
             ['/usr/bin/sips', '-g', 'pixelWidth', '-g', 'pixelHeight', str(p)],
             text=True,
@@ -2148,7 +2917,7 @@ def _image_dimensions(path):
         if width and height:
             return width, height
     except Exception:
-        return None
+        pass
     return None
 
 
@@ -2385,6 +3154,7 @@ def _native_mlx_ltx_metadata_from_workflow(workflow):
         'keyframes': native.get('keyframes') if isinstance(native.get('keyframes'), list) else [],
         'loras': native.get('loras') if isinstance(native.get('loras'), list) else [],
         'video': native.get('video') if isinstance(native.get('video'), dict) else None,
+        'ingredient_sheet': (native.get('ingredientSheet') or native.get('ingredient_sheet')) if isinstance(native.get('ingredientSheet') or native.get('ingredient_sheet'), dict) else None,
         'ic_lora': (native.get('icLora') or native.get('ic_lora')) if isinstance(native.get('icLora') or native.get('ic_lora'), dict) else None,
     }
 
@@ -2688,6 +3458,7 @@ def detect_native_mlx_ltx_prompt(body):
     pipeline = str(meta.get('pipeline') or 'generate').strip().lower()
     if pipeline == 'ic-lora':
         ic_lora = meta.get('ic_lora') if isinstance(meta.get('ic_lora'), dict) else {}
+        ingredient_sheet = meta.get('ingredient_sheet') if isinstance(meta.get('ingredient_sheet'), dict) else {}
         image_name = _prompt_string(ic_lora.get('reference_image') or defaults.get('image')) or _first_ltx_image_name(nodes)
         if not image_name:
             return None
@@ -2709,14 +3480,32 @@ def detect_native_mlx_ltx_prompt(body):
             reference_strength = max(0.0, min(1.0, float(ic_lora.get('reference_strength', 1.0))))
         except Exception:
             reference_strength = 1.0
+        reference_min_frames = int_option(ic_lora, 'reference_min_frames', 121, 1, 10000)
+        target_min_frames = int_option(ic_lora, 'target_min_frames', 9, 9, 721)
+        frames = max(frames, target_min_frames)
+        image_crf = int_option(ic_lora, 'image_crf', 33, 0, 63)
         single_stage_value = ic_lora.get('single_stage', True)
         low_ram_value = ic_lora.get('low_ram', False)
+        dev_transformer = _prompt_string(ic_lora.get('dev_transformer'))
+        distilled_lora = _prompt_string(ic_lora.get('distilled_lora'))
+        guided_dev_value = ic_lora.get('guided_dev', False)
+        guided_dev = guided_dev_value is not False and str(guided_dev_value).strip().lower() not in {
+            '0', 'false', 'off', 'no'
+        }
+        stage1_steps = int_option(ic_lora, 'stage1_steps', 30, 1, 100)
+        cfg_scale = float_quality_option(ic_lora, 'cfg_scale', 4.0)
+        stg_scale = float_quality_option(ic_lora, 'stg_scale', 1.0)
+        runtime_timeout_seconds = int_option(ic_lora, 'runtime_timeout_seconds', 2400, 60, 14400)
+        try:
+            distilled_lora_strength = float(ic_lora.get('distilled_lora_strength', 0.5))
+        except Exception:
+            distilled_lora_strength = 0.5
         return {
             'variant': variant,
             'operation': 'ic-lora',
             'prompt': prompt_text,
             'reference_image_path': image_name,
-            'images': [],
+            'images': _native_ltx_keyframes(meta.get('keyframes') or [], frames, frame_rate),
             'options': {
                 'width': width,
                 'height': height,
@@ -2728,8 +3517,24 @@ def detect_native_mlx_ltx_prompt(body):
                 'benchmark_seconds': spec.get('benchmark_seconds'),
                 'conditioning_strength': conditioning_strength,
                 'reference_strength': reference_strength,
+                'reference_min_frames': reference_min_frames,
+                'target_min_frames': target_min_frames,
+                **({
+                    'ingredient_source_count': int_option(ingredient_sheet, 'sourceCount', 0, 0, 12),
+                    'ingredient_sheet_columns': int_option(ingredient_sheet, 'columns', 0, 0, 12),
+                    'ingredient_sheet_rows': int_option(ingredient_sheet, 'rows', 0, 0, 12),
+                    'ingredient_conditioning_only': bool(ingredient_sheet.get('conditioningOnly', True)),
+                } if ingredient_sheet else {}),
+                'image_crf': image_crf,
                 'single_stage': single_stage_value is not False and str(single_stage_value).strip().lower() not in {'0', 'false', 'off', 'no'},
                 'low_ram': low_ram_value is not False and str(low_ram_value).strip().lower() not in {'0', 'false', 'off', 'no'},
+                **({'dev_transformer': dev_transformer} if dev_transformer else {}),
+                'guided_dev': guided_dev,
+                'stage1_steps': stage1_steps,
+                'cfg_scale': cfg_scale,
+                'stg_scale': stg_scale,
+                'runtime_timeout_seconds': runtime_timeout_seconds,
+                **({'distilled_lora': distilled_lora, 'distilled_lora_strength': distilled_lora_strength} if distilled_lora else {}),
                 **({'loras': loras} if loras else {}),
             },
         }
@@ -3076,7 +3881,7 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
     width, height = _cap_native_mx_dimensions(bucket_width, bucket_height)
     steps = normalize_biglove_klein3_steps(options.get('steps', 4))
     guidance = float_quality_option(options, 'guidance', 1.0)
-    seed = int_option(options, 'seed', int(time.time()) % 1_000_000_000, 0, 1_000_000_000)
+    seed = resolve_seed_option(options)
     cache_gb = int_option(options, 'mlx_cache_limit_gb', 64, 8, 96)
     native_loras = _dedupe_lora_requests(options.get('loras') or [])
     reference_images = []
@@ -3278,6 +4083,11 @@ def queue_native_mlx_ltx_job(native, workflow=None):
                 "frame_rate": options.get('frame_rate'),
                 "seed": options.get('seed'),
                 "operation": operation,
+                **({"ingredient_source_count": options.get('ingredient_source_count'),
+                    "ingredient_sheet_columns": options.get('ingredient_sheet_columns'),
+                    "ingredient_sheet_rows": options.get('ingredient_sheet_rows'),
+                    "ingredient_conditioning_only": options.get('ingredient_conditioning_only', True),
+                    } if operation == 'ic-lora' and options.get('ingredient_source_count') else {}),
                 **({"source_video": Path(str(native.get('video_path') or '')).name,
                     "duration_seconds": options.get('duration_seconds'),
                     "extension_output_frames": options.get('extension_output_frames'),
@@ -3341,6 +4151,8 @@ def _create_native_ltx_static_reference_video(image_path, output_path, frames, f
 
 def _native_ltx_runtime_keyframes(native, frames):
     specs = native.get('images') if isinstance(native.get('images'), list) else []
+    options = native.get('options') if isinstance(native.get('options'), dict) else {}
+    default_crf = int_option(options, 'image_crf', 33, 0, 63)
     if not specs:
         specs = [{'image_path': native.get('image_path'), 'frame': 0, 'strength': 1.0, 'role': 'start'}]
     out = []
@@ -3358,6 +4170,7 @@ def _native_ltx_runtime_keyframes(native, frames):
             'path': _resolve_native_ltx_image_path(image_name),
             'frame': frame,
             'strength': _native_ltx_keyframe_strength(item),
+            'crf': int_option(item, 'crf', default_crf, 0, 63),
             'role': str(item.get('role') or '').strip() or None,
         })
     if not out and native.get('image_path'):
@@ -3365,9 +4178,161 @@ def _native_ltx_runtime_keyframes(native, frames):
             'path': _resolve_native_ltx_image_path(native.get('image_path')),
             'frame': 0,
             'strength': 1.0,
+            'crf': default_crf,
             'role': 'start',
         })
     return sorted(out, key=lambda item: item['frame'])
+
+
+def _ltx_anchor_cache_path(source, width, height, prompt, seed):
+    digest = hashlib.sha256()
+    digest.update(b'ltx-anchor-canvas-v4\0')
+    digest.update(Path(source).read_bytes())
+    digest.update(f'\0{int(width)}x{int(height)}\0{int(seed)}\0'.encode('utf-8'))
+    digest.update(str(prompt or '').encode('utf-8'))
+    return COMFY_INPUT_DIR / '.ltx-anchor-cache' / f'{digest.hexdigest()[:24]}.png'
+
+
+def _ltx_target_description(prompt):
+    text = str(prompt or '').strip()
+    marker = '### Target Description'
+    if marker in text:
+        return text.rsplit(marker, 1)[1].strip()
+    return text
+
+
+def _stage_ltx_anchor_source_for_comfy(source):
+    source = Path(source).resolve()
+    input_root = COMFY_INPUT_DIR.resolve()
+    if _is_under(source, input_root):
+        return source, source.relative_to(input_root).as_posix()
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:24]
+    suffix = source.suffix.lower() if source.suffix.lower() in {'.png', '.jpg', '.jpeg', '.webp'} else '.png'
+    staged = input_root / '.ltx-anchor-sources' / f'{digest}{suffix}'
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    if not staged.exists():
+        shutil.copyfile(source, staged)
+    return staged, staged.relative_to(input_root).as_posix()
+
+
+def _write_ltx_anchor_resize(source, output, width, height):
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise RuntimeError('ffmpeg is required to prepare LTX timeline anchors')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp = output.with_name(f'.{output.stem}.{uuid.uuid4().hex[:8]}.tmp.png')
+    result = subprocess.run(
+        [
+            ffmpeg, '-y', '-loglevel', 'error', '-i', str(source),
+            '-vf', f'scale={int(width)}:{int(height)}:flags=lanczos',
+            '-frames:v', '1', str(temp),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+    if result.returncode != 0 or not temp.is_file():
+        temp.unlink(missing_ok=True)
+        detail = (result.stderr or result.stdout or 'unknown ffmpeg error').strip()
+        raise RuntimeError(f'failed to resize LTX anchor: {detail[-1200:]}')
+    os.replace(temp, output)
+
+
+def _prepare_native_ltx_anchor_canvas(source, width, height, prompt, seed):
+    """Prepare one physical target-sized anchor with the shared Krea graph."""
+    source = Path(source).resolve()
+    dimensions = _image_dimensions(source)
+    if not dimensions:
+        raise RuntimeError(f'could not read LTX anchor dimensions: {source.name}')
+    source_width, source_height = dimensions
+    staged_source, image_name = _stage_ltx_anchor_source_for_comfy(source)
+    compiled = build_krea2_turbo_outpaint_prompt(
+        prompt,
+        image_name,
+        source_width=source_width,
+        source_height=source_height,
+        options={
+            'width': width,
+            'height': height,
+            'seed': seed,
+            'steps': 10,
+            'cfg': 1.0,
+            'ref_boost': 4.0,
+            'identity_strength': 1.0,
+            'grounding_px': 768,
+            'feathering': 48,
+        },
+        profile=accelerator_profile(),
+        filename_prefix='ltx_anchor_canvas',
+    )
+    geometry = compiled['geometry']
+    if geometry['mode'] == 'passthrough':
+        return staged_source, geometry
+
+    output = _ltx_anchor_cache_path(staged_source, width, height, prompt, seed)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.is_file():
+        return output, {**geometry, 'cached': True}
+    if geometry['mode'] == 'resize':
+        _write_ltx_anchor_resize(staged_source, output, width, height)
+        return output, {**geometry, 'cached': False}
+
+    graph = compiled['graph']
+    prefix = f'ltx_anchor_canvas_{output.stem}'
+    graph['12']['inputs']['filename_prefix'] = prefix
+    body = json.dumps({
+        'prompt': graph,
+        'client_id': f'media-ltx-anchor-{uuid.uuid4().hex[:12]}',
+    }).encode('utf-8')
+    request = Request(
+        f'{COMFY_HTTP_DEFAULT}/prompt',
+        data=body,
+        headers={'Content-Type': 'application/json'},
+    )
+    try:
+        queued = json.loads(urlopen(request, timeout=30).read().decode('utf-8'))
+    except HTTPError as exc:
+        detail = exc.read().decode('utf-8', errors='replace')
+        raise RuntimeError(f'ComfyUI rejected LTX anchor outpaint graph: {detail[:4000]}') from exc
+    prompt_id = queued.get('prompt_id')
+    if not prompt_id:
+        raise RuntimeError(f'ComfyUI did not return an LTX anchor prompt id: {queued}')
+
+    history = None
+    for _ in range(900):
+        time.sleep(0.5)
+        try:
+            payload = urlopen(f'{COMFY_HTTP_DEFAULT}/history/{prompt_id}', timeout=10).read().decode('utf-8')
+            data = json.loads(payload or '{}')
+            if prompt_id in data:
+                history = data[prompt_id]
+                break
+        except Exception:
+            pass
+    if history is None:
+        raise RuntimeError(f'LTX anchor outpaint timed out waiting for prompt {prompt_id}')
+    status = history.get('status') or {}
+    if status.get('status_str') != 'success' or not status.get('completed'):
+        raise RuntimeError(f'LTX anchor outpaint failed: {status}')
+    media = None
+    for node_output in (history.get('outputs') or {}).values():
+        images = node_output.get('images') or []
+        if images:
+            media = images[0]
+            break
+    if not media:
+        raise RuntimeError('LTX anchor outpaint completed without an image')
+    logical = (COMFY_OUTPUT_DIR / str(media.get('subfolder') or '') / safe_name(media.get('filename') or '')).resolve()
+    if logical.is_file():
+        image_bytes = logical.read_bytes()
+    elif encrypted_path_for(logical).is_file():
+        image_bytes, _ = decrypt_output_bytes(logical)
+    else:
+        raise RuntimeError('LTX anchor outpaint image disappeared before staging')
+    temp = output.with_name(f'.{output.stem}.{uuid.uuid4().hex[:8]}.tmp.png')
+    temp.write_bytes(image_bytes)
+    os.replace(temp, output)
+    return output, {**geometry, 'cached': False}
 
 
 def _update_native_ltx_process_progress(job_id, rec, text):
@@ -3447,6 +4412,10 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
     width = int_quality_option(options, 'width', 480)
     height = int_quality_option(options, 'height', 832)
     frames = _ltx_valid_frame_count(options.get('frames', 233), 233)
+    if operation == 'ic-lora':
+        frames = max(frames, int_option(options, 'target_min_frames', 9, 9, 721))
+    reference_min_frames = int_option(options, 'reference_min_frames', 121, 1, 10000)
+    reference_frames = max(frames, reference_min_frames)
     frame_rate = float_quality_option(options, 'frame_rate', 24.0)
     frame_rate_arg = str(int(frame_rate)) if float(frame_rate).is_integer() else str(frame_rate)
     seed = int_option(options, 'seed', 42, 0, 1_000_000_000)
@@ -3483,7 +4452,14 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             **({"reference_image": Path(str(native.get('reference_image_path') or '')).name,
                 "conditioning_strength": options.get('conditioning_strength', 1.0),
                 "reference_strength": options.get('reference_strength', 1.0),
-                "single_stage": bool(options.get('single_stage', True))} if operation == 'ic-lora' else {}),
+                "reference_frames": reference_frames,
+                "single_stage": bool(options.get('single_stage', True)),
+                **({"ingredient_source_count": options.get('ingredient_source_count'),
+                    "ingredient_sheet_columns": options.get('ingredient_sheet_columns'),
+                    "ingredient_sheet_rows": options.get('ingredient_sheet_rows'),
+                    "ingredient_conditioning_only": options.get('ingredient_conditioning_only', True),
+                    } if options.get('ingredient_source_count') else {}),
+                } if operation == 'ic-lora' else {}),
             **({"source_video": Path(str(native.get('video_path') or '')).name,
                 "duration_seconds": options.get('duration_seconds'),
                 "extension_output_frames": extension_output_frames,
@@ -3499,6 +4475,7 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                     "image": item['path'].name,
                     "frame": item['frame'],
                     "strength": item['strength'],
+                    "crf": item['crf'],
                     **({"role": item["role"]} if item.get("role") else {}),
                 }
                 for item in keyframes
@@ -3506,7 +4483,7 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             "benchmark_seconds": spec.get('benchmark_seconds'),
         },
         "current_step": 0,
-        "total_steps": 8 if distilled_extension else (int(options.get('steps') or 30) if operation == 'extend' else 2),
+        "total_steps": 8 if operation == 'ic-lora' or distilled_extension else (int(options.get('steps') or 30) if operation == 'extend' else 2),
         "progress": 0,
         "step_progress": 0,
         "progress_phase": "queued",
@@ -3535,6 +4512,16 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                 raise RuntimeError("IC-LoRA reference image is outside private Comfy storage or does not exist")
             if not native_loras:
                 raise RuntimeError("native MLX IC-LoRA generation requires at least one IC-LoRA model")
+            for item in keyframes:
+                image_path = item['path']
+                if not image_path.exists() or not any(_is_under(image_path, root) for root in allowed):
+                    raise RuntimeError("input image is outside private Comfy storage or does not exist")
+            dev_transformer = _prompt_string(options.get('dev_transformer'))
+            distilled_lora = _prompt_string(options.get('distilled_lora'))
+            if dev_transformer and not (model_path / dev_transformer).is_file():
+                raise RuntimeError(f"native MLX IC-LoRA dev transformer not found: {dev_transformer}")
+            if distilled_lora and not (model_path / distilled_lora).is_file():
+                raise RuntimeError(f"native MLX IC-LoRA distilled LoRA not found: {distilled_lora}")
         else:
             if not keyframes:
                 raise RuntimeError("at least one input image is required for native MLX LTX generation")
@@ -3548,6 +4535,41 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             if not lora_path or not lora_path.exists() or not _is_under(lora_path, lora_root):
                 raise RuntimeError(f"native MLX LTX LoRA not found: {item.get('source') or item.get('name') or 'unnamed LoRA'}")
             item['filePath'] = str(lora_path)
+        if operation == 'ic-lora' and keyframes:
+            rec.update({'progress': 2, 'progress_phase': 'preparing-anchor'})
+            with jobs_lock:
+                jobs[job_id] = rec
+            prepared_keyframes = []
+            preparation = []
+            anchor_prompt = _ltx_target_description(prompt)
+            for item in keyframes:
+                prepared_path, canvas = _prepare_native_ltx_anchor_canvas(
+                    item['path'],
+                    width,
+                    height,
+                    anchor_prompt,
+                    seed,
+                )
+                prepared_keyframes.append({**item, 'path': prepared_path})
+                preparation.append({
+                    **canvas,
+                    'frame': item['frame'],
+                    **({'role': item['role']} if item.get('role') else {}),
+                })
+            keyframes = prepared_keyframes
+            rec['options']['keyframes'] = [
+                {
+                    'image': item['path'].name,
+                    'frame': item['frame'],
+                    'strength': item['strength'],
+                    'crf': item['crf'],
+                    **({'role': item['role']} if item.get('role') else {}),
+                }
+                for item in keyframes
+            ]
+            rec['options']['anchor_preparation'] = preparation
+            with jobs_lock:
+                jobs[job_id] = rec
         if _env_enabled("ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN", "1"):
             rec["progress_phase"] = "free-comfy"
             with jobs_lock:
@@ -3575,8 +4597,8 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                 ])
             cmd.extend(["--seed", str(seed), "-o", str(out)])
         elif operation == 'ic-lora':
-            reference_video_path = OUT_DIR / '.ltx-reference' / f'{job_id}.mkv'
-            _create_native_ltx_static_reference_video(reference_image, reference_video_path, frames, frame_rate)
+            reference_video_path = COMFY_INPUT_DIR / '.ltx-reference' / f'{job_id}.mkv'
+            _create_native_ltx_static_reference_video(reference_image, reference_video_path, reference_frames, frame_rate)
             cmd = [
                 "uv", "run", "ltx-2-mlx", "ic-lora",
                 "--model", str(model_path),
@@ -3585,10 +4607,28 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             ]
             for item in native_loras:
                 cmd.extend(["--lora", str(item['filePath']), str(item.get('scale', 1.0))])
+            if options.get('dev_transformer'):
+                cmd.extend(["--dev-transformer", str(options['dev_transformer'])])
+            if options.get('guided_dev'):
+                cmd.extend([
+                    "--guided-dev",
+                    "--stage1-steps", str(options.get('stage1_steps', 30)),
+                    "--cfg-scale", str(options.get('cfg_scale', 4.0)),
+                    "--stg-scale", str(options.get('stg_scale', 1.0)),
+                ])
+            if options.get('distilled_lora'):
+                cmd.extend([
+                    "--distilled-lora", str(options['distilled_lora']),
+                    "--distilled-lora-strength", str(options.get('distilled_lora_strength', 0.5)),
+                ])
             cmd.extend([
                 "--video-conditioning", str(reference_video_path), str(options.get('reference_strength', 1.0)),
                 "--conditioning-strength", str(options.get('conditioning_strength', 1.0)),
             ])
+            for item in keyframes:
+                cmd.extend([
+                    "--image", str(item['path']), str(item['frame']), str(item['strength']), str(item['crf'])
+                ])
             if options.get('single_stage', True):
                 cmd.append("--single-stage")
             if options.get('low_ram', False):
@@ -3610,7 +4650,9 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                 "--prompt", prompt,
             ]
             for item in keyframes:
-                cmd.extend(["--image", str(item['path']), str(item['frame']), str(item['strength'])])
+                cmd.extend([
+                    "--image", str(item['path']), str(item['frame']), str(item['strength']), str(item['crf'])
+                ])
             for item in native_loras:
                 cmd.extend(["--lora", str(item['filePath']), str(item.get('scale', 1.0))])
             if cfg_scale:
@@ -3638,7 +4680,7 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                 cmd,
                 cwd=str(LTX2_MLX_DIR),
                 env=env,
-                timeout=2400,
+                timeout=int_option(options, 'runtime_timeout_seconds', 2400, 60, 14400),
             )
             elapsed = round(time.monotonic() - t0, 2)
             stdout = proc.stdout.strip()
@@ -4057,6 +5099,16 @@ def resolve_civitai_url(value):
     return {'versionId': str(version.get('id')), 'fileId': str(file_id or ''), 'model': model, 'version': version}
 
 
+def validate_civitai_expected_type(version, expected_type=None):
+    expected = str(expected_type or '').strip().lower()
+    if not expected:
+        return
+    actual = str((version.get('model') or {}).get('type') or '').strip()
+    normalized_actual = actual.lower().replace(' ', '')
+    if expected == 'lora' and not any(token in normalized_actual for token in ('lora', 'locon', 'lycoris')):
+        raise RuntimeError(f'Expected a Civitai LoRA URL, but the selected model type is {actual or "unknown"}')
+
+
 def comfy_dir_for_civitai(model_type, file_name=''):
     mt = (model_type or '').lower().replace(' ', '')
     name = (file_name or '').lower()
@@ -4156,9 +5208,13 @@ def civitai_base_model_options(force=False):
 
 
 def compatible_base(base):
-    cur = {normalize_base(x) for x in current_base_models()}
+    return lora_base_matches(base, current_base_models())
+
+
+def lora_base_matches(base, base_models):
+    cur = {normalize_base(x) for x in (base_models or []) if normalize_base(x)}
     b = normalize_base(base)
-    if not b:
+    if not b or not cur:
         return False
     return b in cur or any(b.startswith(x) or x.startswith(b) for x in cur)
 
@@ -4218,17 +5274,105 @@ def local_loras_unfiltered():
     return out
 
 
-def save_selected_loras(items):
-    available = {l['id']: l for l in local_loras_unfiltered()}
-    clean=[]
+def lora_preview_source(path, meta):
+    """Return a local image path or remote image URL for a LoRA card."""
+    model_path = Path(path)
+    candidates = []
+    for key in ['preview_url', 'previewUrl', 'image', 'thumbnail']:
+        if meta.get(key):
+            candidates.append(str(meta.get(key)))
+    for ext in ['.preview.png', '.preview.jpg', '.preview.jpeg', '.png', '.jpg', '.jpeg', '.webp']:
+        candidates.append(str(model_path.with_suffix(ext)))
+    for candidate in candidates:
+        if candidate.startswith(('http://', 'https://')):
+            return candidate
+        preview_path = Path(candidate)
+        if not preview_path.is_absolute():
+            preview_path = model_path.parent / preview_path
+        if preview_path.exists() and preview_path.is_file():
+            return str(preview_path.resolve())
+
+    image_groups = [
+        (meta.get('civitai') or {}).get('images') or [],
+        meta.get('images') or [],
+        (meta.get('modelVersion') or {}).get('images') or [],
+    ]
+    for images in image_groups:
+        for image in images:
+            if not isinstance(image, dict) or not image.get('url'):
+                continue
+            if str(image.get('type') or 'image').lower() == 'video':
+                continue
+            return str(image['url'])
+    return ''
+
+
+def compact_lora_record(item):
+    meta = item.get('metadata') if isinstance(item.get('metadata'), dict) else {}
+    version = meta.get('modelVersion') if isinstance(meta.get('modelVersion'), dict) else {}
+    model = version.get('model') if isinstance(version.get('model'), dict) else {}
+    display_name = str(
+        model.get('name')
+        or meta.get('displayName')
+        or meta.get('name')
+        or Path(item.get('name') or item.get('id') or 'LoRA').stem
+    ).strip()
+    trigger_words = version.get('trainedWords') or meta.get('trainedWords') or meta.get('triggerWords') or []
+    if isinstance(trigger_words, str):
+        trigger_words = [value.strip() for value in re.split(r'[,\n]', trigger_words) if value.strip()]
+    trigger_words = [str(value).strip() for value in trigger_words if str(value).strip()][:8]
+    return {
+        'id': item['id'],
+        'name': item['name'],
+        'displayName': display_name,
+        'baseModel': item.get('baseModel') or 'Unknown/local',
+        'triggerWords': trigger_words,
+        'hasPreview': bool(lora_preview_source(item['path'], meta)),
+        'defaultWeight': 1.0,
+    }
+
+
+def local_lora_catalog(base_models):
+    matches = [
+        item for item in local_loras_unfiltered()
+        if lora_base_matches(item.get('baseModel'), base_models)
+    ]
+    records = [compact_lora_record(item) for item in matches]
+    records.sort(key=lambda item: (item['displayName'].lower(), item['name'].lower()))
+    return records
+
+
+def resolve_lora_selection(items, base_models=None):
+    available = {item['id']: item for item in local_loras_unfiltered()}
+    clean = []
+    seen = set()
     for item in items or []:
-        lid = str(item.get('id',''))
-        if lid in available and compatible_base(available[lid].get('baseModel')):
-            try: strength = float(item.get('strength', 1.0))
-            except Exception: strength = 1.0
-            strength = max(LORA_STRENGTH_MIN, min(LORA_STRENGTH_MAX, strength))
-            m = available[lid]
-            clean.append({'id': lid, 'name': m['name'], 'strength': strength, 'path': m['path'], 'baseModel': m.get('baseModel','')})
+        if not isinstance(item, dict):
+            continue
+        lid = str(item.get('id', '')).strip()
+        model = available.get(lid)
+        if not model or lid in seen:
+            continue
+        if base_models and not lora_base_matches(model.get('baseModel'), base_models):
+            continue
+        try:
+            strength = float(item.get('strength', 1.0))
+        except Exception:
+            strength = 1.0
+        strength = max(LORA_STRENGTH_MIN, min(LORA_STRENGTH_MAX, strength))
+        clean.append({
+            'id': lid,
+            'name': model['name'],
+            'strength': strength,
+            'path': model['path'],
+            'baseModel': model.get('baseModel', ''),
+        })
+        seen.add(lid)
+    return clean
+
+
+def save_selected_loras(items):
+    clean = resolve_lora_selection(items, current_base_models())
     SELECTED_LORAS_FILE.write_text(json.dumps(clean, indent=2))
     return clean
 
@@ -5241,6 +6385,9 @@ class Handler(BaseHTTPRequestHandler):
             # only in loaded-tab memory, so the backend must not return a
             # decrypt key.
             return self.send_json({"error": "workflow key endpoint disabled; unlock in the browser"}, status=410)
+        if parsed.path == "/api/e2e/vault-identity":
+            identity = vault_identity_json()
+            return self.send_json({"ok": True, "exists": identity is not None, "identity": identity})
         if parsed.path == "/workflow-for-output":
             name = safe_name(qs.get('filename', [''])[0])
             envelope = workflow_envelope_for_filename(name) if name else None
@@ -5265,7 +6412,44 @@ class Handler(BaseHTTPRequestHandler):
             ctype = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
             data = p.read_bytes()
             self.send_response(200); self.cors_headers(); self.send_header("Content-Type", ctype); self.send_header("Cache-Control", "public, max-age=86400"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+        if parsed.path == "/api/loras/preview":
+            lora_id = qs.get('id', [''])[0]
+            item = next((value for value in local_loras_unfiltered() if value.get('id') == lora_id), None)
+            if not item:
+                return self.send_text("not found\n", 404, "text/plain")
+            source = lora_preview_source(item['path'], item.get('metadata') or {})
+            if not source:
+                return self.send_text("not found\n", 404, "text/plain")
+            try:
+                if source.startswith(('http://', 'https://')):
+                    preview_request = Request(source, headers={'User-Agent': 'HivemindContentStudio/1.0'})
+                    with urlopen(preview_request, timeout=30) as upstream:
+                        data = upstream.read()
+                        ctype = upstream.headers.get('Content-Type', 'image/jpeg').split(';', 1)[0]
+                else:
+                    preview_path = Path(source).resolve()
+                    lora_root = (COMFY / 'models' / 'loras').resolve()
+                    if not preview_path.exists() or not preview_path.is_file() or not _is_under(preview_path, lora_root):
+                        return self.send_text("not found\n", 404, "text/plain")
+                    data = preview_path.read_bytes()
+                    ctype = mimetypes.guess_type(str(preview_path))[0] or 'application/octet-stream'
+                self.send_response(200)
+                self.cors_headers()
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except Exception:
+                return self.send_text("not found\n", 404, "text/plain")
         if parsed.path == "/api/loras":
+            requested_bases = []
+            for raw in qs.get('baseModels', []):
+                requested_bases.extend(value.strip() for value in raw.split(',') if value.strip())
+            if qs.get('compact', [''])[0].lower() in {'1', 'true', 'yes'}:
+                base_models = requested_bases or current_base_models()
+                return self.send_json({"baseModels": base_models, "loras": local_lora_catalog(base_models)})
             return self.send_json({"baseModels": current_base_models(), "loras": local_loras(), "selected": load_selected_loras()})
         if parsed.path == "/api/civitai/base-models":
             force = qs.get('refresh', [''])[0] in {'1', 'true', 'yes'}
@@ -5388,6 +6572,7 @@ class Handler(BaseHTTPRequestHandler):
                 civitai_key = data.get('civitai_key') or data.get('civitai_token') or data.get('civitaiToken') or data.get('civitaiApiKey')
                 if data.get('url'):
                     resolved = resolve_civitai_url(data.get('url'))
+                    validate_civitai_expected_type(resolved.get('version') or {}, data.get('expectedType'))
                     job = start_civitai_download_job(resolved.get('versionId'), data.get('fileId') or resolved.get('fileId'), token_override=civitai_key)
                     job['resolved'] = {'versionId': resolved.get('versionId'), 'fileId': data.get('fileId') or resolved.get('fileId')}
                     return self.send_json(job, 202)
@@ -5444,11 +6629,42 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "prompt required"}, 400)
             options = {}
             if isinstance(data, dict):
-                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'negative_prompt', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px']:
+                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'negative_prompt', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'couple_mode', 'couple_shared', 'couple_split', 'couple_direction', 'couple_pair']:
                     if key in data:
                         options[key] = data.get(key)
+                _normalize_couple_options(options)
             backend = str(data.get('backend', '') if isinstance(data, dict) else '')
+            if backend == 'comfy-api-image':
+                options['workflow_file'] = str(data.get('workflow_file', '') if isinstance(data, dict) else '')
+                if isinstance(data, dict) and isinstance(data.get('loras'), list):
+                    options['loras'] = data.get('loras')
+                job_id = uuid.uuid4().hex[:12]
+                with jobs_lock:
+                    jobs[job_id] = {
+                        "id": job_id,
+                        "prompt": PRIVATE_PROMPT_LABEL,
+                        "status": "queued",
+                        "created_at": now_iso(),
+                        "backend": "comfy-api-image",
+                        "options": {k: v for k, v in options.items() if k not in ('negative_prompt', 'workflow_file', 'loras')},
+                    }
+                t = threading.Thread(target=run_comfy_api_image, args=(job_id, prompt, options), daemon=True)
+                t.start()
+                return self.send_json({
+                    "id": job_id,
+                    "status": "queued",
+                    "backend": "comfy-api-image",
+                    "job_url": f"/api/job/{job_id}",
+                    "page_url": f"/job/{job_id}",
+                    "history_url": "/api/history",
+                }, 202)
             if backend in KREA2_IDENTITY_BACKENDS:
+                if isinstance(data, dict) and data.get('loras') is not None:
+                    krea_loras = resolve_lora_selection(data.get('loras') or [], ['Krea 2'])
+                    options['loras'] = [
+                        {'id': item['id'], 'strength': item['strength']}
+                        for item in krea_loras
+                    ]
                 if uploaded_image is None:
                     maybe_image = str(data.get('image_path', '') if isinstance(data, dict) else '')
                     if maybe_image:
@@ -5482,7 +6698,7 @@ class Handler(BaseHTTPRequestHandler):
                     "history_url": "/api/history",
                 }, 202)
             if backend in {'mlx-bigloves-klein3-edit', 'mlx-mxfp8-bigloves-klein3-edit'} or uploaded_image is not None:
-                native_loras = _native_loras_from_generation_request(data)
+                native_loras = _native_loras_from_generation_request(data, ['Flux.2 Klein 9B'])
                 if native_loras:
                     options['loras'] = native_loras
                 if uploaded_image is None:
@@ -5497,8 +6713,6 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"id": job_id, "status": "queued", "backend": "mlx-mxfp8-bigloves-klein3-edit", "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
                 if backend in {'mlx-bigloves-klein3-edit', 'mlx-mxfp8-bigloves-klein3-edit'}:
                     return self.send_json({"error": f"native MLX BigLove route is not available for accelerator profile {accelerator_profile()}"}, 400)
-                if native_loras:
-                    return self.send_json({"error": "LoRA BigLove image edit fallback requires a Comfy workflow on non-Apple-Silicon devices"}, 400)
                 job_id = uuid.uuid4().hex[:12]
                 with jobs_lock:
                     jobs[job_id] = {"id": job_id, "prompt": PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": now_iso(), "backend": "comfy-bigloves-klein3-edit", "options": {k: v for k, v in options.items() if k != 'negative_prompt'}}
@@ -5506,7 +6720,7 @@ class Handler(BaseHTTPRequestHandler):
                 t.start()
                 return self.send_json({"id": job_id, "status": "queued", "backend": "comfy-bigloves-klein3-edit", "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
             req_loras = data.get('loras') if isinstance(data, dict) else None
-            loras = save_selected_loras(req_loras) if req_loras is not None else load_selected_loras()
+            loras = resolve_lora_selection(req_loras, current_base_models()) if req_loras is not None else load_selected_loras()
             job_id = uuid.uuid4().hex[:12]
             with jobs_lock:
                 jobs[job_id] = {"id": job_id, "prompt": PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": now_iso(), "loras": loras, "options": {k: v for k, v in options.items() if k != 'negative_prompt'}}

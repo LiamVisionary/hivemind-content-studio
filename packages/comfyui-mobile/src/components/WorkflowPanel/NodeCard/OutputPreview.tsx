@@ -1,5 +1,6 @@
 import { useGenerationSettingsStore } from '@/hooks/useGenerationSettings';
 import { getHistoryImagePreviewUrl } from '@/utils/historyImageUrls';
+import { E2EImage } from '@/components/E2EMedia';
 
 interface NodeCardOutputPreviewProps {
   show: boolean;
@@ -40,7 +41,7 @@ export function NodeCardOutputPreview({
       </div>
       {displaySrc && (
         <div className="relative">
-          <img
+          <E2EImage
             key={previewImage ? 'preview' : 'latent'}
             src={displaySrc}
             alt={`${displayName} output`}

@@ -4,17 +4,45 @@ import { AuthModal } from './AuthModal.js';
 import { t } from '../lib/i18n.js';
 import { createUploadPicker } from './UploadPicker.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
+import { resolveMediaSrc } from '../lib/e2eMedia.js';
+
+const LIPSYNC_PREFERENCES_KEY = 'lipsync_generation_preferences';
+
+export function normalizeLipSyncPreferences(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const inputMode = value.inputMode === 'video' ? 'video' : 'image';
+    const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
+    if (!modelId) return null;
+    return {
+        inputMode,
+        modelId,
+        resolution: typeof value.resolution === 'string' ? value.resolution.trim() : '',
+    };
+}
 
 export function LipSyncStudio() {
     const container = document.createElement('div');
-    container.className = 'w-full h-full flex flex-col items-center justify-center bg-app-bg relative p-4 md:p-6 overflow-y-auto custom-scrollbar overflow-x-hidden';
+    // `justify-content: safe center` centers content while it fits but falls back to
+    // start-alignment once it overflows, so a tall advanced panel stays scrollable to the top.
+    container.className = 'w-full h-full flex flex-col items-center [justify-content:safe_center] bg-transparent relative p-4 md:p-6 overflow-y-auto custom-scrollbar overflow-x-hidden';
 
     // --- State ---
     // 'image' mode: portrait image + audio → video
     // 'video' mode: existing video + audio → lipsync video
-    let inputMode = 'image';
-    let selectedModel = imageLipSyncModels[0].id;
-    let selectedResolution = imageLipSyncModels[0].inputs?.resolution?.default || '480p';
+    let persistedPreferences = null;
+    try {
+        persistedPreferences = normalizeLipSyncPreferences(
+            JSON.parse(localStorage.getItem(LIPSYNC_PREFERENCES_KEY) || 'null'),
+        );
+    } catch {}
+    let inputMode = persistedPreferences?.inputMode || 'image';
+    const initialModels = inputMode === 'image' ? imageLipSyncModels : videoLipSyncModels;
+    const initialModel = initialModels.find((model) => model.id === persistedPreferences?.modelId) || initialModels[0];
+    let selectedModel = initialModel.id;
+    const initialResolutions = getResolutionsForLipSyncModel(selectedModel);
+    let selectedResolution = initialResolutions.includes(persistedPreferences?.resolution)
+        ? persistedPreferences.resolution
+        : (initialModel.inputs?.resolution?.default || initialResolutions[0] || '');
     let uploadedImageUrl = null;
     let uploadedVideoUrl = null;
     let uploadedAudioUrl = null;
@@ -22,35 +50,31 @@ export function LipSyncStudio() {
 
     const getCurrentModels = () => inputMode === 'image' ? imageLipSyncModels : videoLipSyncModels;
     const getCurrentModel = () => lipsyncModels.find(m => m.id === selectedModel);
+    const persistLipSyncPreferences = () => {
+        const preferences = normalizeLipSyncPreferences({ inputMode, modelId: selectedModel, resolution: selectedResolution });
+        if (!preferences) return;
+        try { localStorage.setItem(LIPSYNC_PREFERENCES_KEY, JSON.stringify(preferences)); } catch {}
+    };
 
     // ==========================================
     // 1. HERO SECTION
     // ==========================================
     const hero = document.createElement('div');
-    hero.className = 'flex flex-col items-center mb-10 md:mb-20 animate-fade-in-up transition-all duration-700';
+    hero.className = 'flex flex-col items-center mb-8 md:mb-10 animate-fade-in-up transition-all duration-700';
     hero.innerHTML = `
-        <div class="mb-10 relative group">
-            <div class="absolute inset-0 bg-primary/20 blur-[100px] rounded-full opacity-40 group-hover:opacity-70 transition-opacity duration-1000"></div>
-            <div class="relative w-24 h-24 md:w-32 md:h-32 bg-teal-900/40 rounded-3xl flex items-center justify-center border border-white/5 overflow-hidden">
-                <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="text-primary opacity-20 absolute -right-4 -bottom-4">
+        <div class="mb-5 relative">
+            <div class="absolute inset-0 bg-primary/25 blur-3xl rounded-full opacity-50"></div>
+            <div class="relative grid h-14 w-14 place-items-center rounded-2xl border border-white/10 bg-gradient-to-br from-primary/15 to-accent/10 shadow-glow">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" class="text-primary">
                     <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
                     <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
                     <line x1="12" y1="19" x2="12" y2="23"/>
                     <line x1="8" y1="23" x2="16" y2="23"/>
                 </svg>
-                <div class="w-16 h-16 bg-primary/10 rounded-2xl flex items-center justify-center border border-primary/20 shadow-glow relative z-10">
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-primary">
-                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                        <line x1="12" y1="19" x2="12" y2="23"/>
-                        <line x1="8" y1="23" x2="16" y2="23"/>
-                    </svg>
-                </div>
-                <div class="absolute top-4 right-4 text-primary animate-pulse">🎙</div>
             </div>
         </div>
-        <h1 class="text-2xl sm:text-4xl md:text-7xl font-black text-white tracking-widest uppercase mb-4 selection:bg-primary selection:text-black text-center px-4">${t('lipsync.title')}</h1>
-        <p class="text-secondary text-sm font-medium tracking-wide opacity-60">${t('lipsync.subtitle')}</p>
+        <h1 class="font-display text-3xl md:text-4xl font-bold tracking-tight text-white mb-2 text-center px-4">${t('lipsync.title')}</h1>
+        <p class="text-secondary text-sm md:text-[15px] text-center px-4">${t('lipsync.subtitle')}</p>
     `;
     container.appendChild(hero);
 
@@ -62,7 +86,7 @@ export function LipSyncStudio() {
     promptWrapper.style.animationDelay = '0.2s';
 
     const bar = document.createElement('div');
-    bar.className = 'w-full bg-[#111]/90 backdrop-blur-xl border border-white/10 rounded-[1.5rem] md:rounded-[2.5rem] p-3 md:p-5 flex flex-col gap-3 md:gap-5 shadow-3xl';
+    bar.className = 'w-full bg-card-bg/90 backdrop-blur-xl border border-white/10 rounded-2xl md:rounded-3xl p-3 md:p-5 flex flex-col gap-3 md:gap-5 shadow-panel transition-colors focus-within:border-primary/40';
 
     // --- Mode Toggle (Image vs Video) ---
     const modeToggleRow = document.createElement('div');
@@ -288,7 +312,7 @@ export function LipSyncStudio() {
     modelBtn.id = 'ls-model-btn';
     modelBtn.type = 'button';
     modelBtn.className = 'flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 hover:border-primary/40 transition-all text-xs font-bold text-white group';
-    modelBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-primary"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><span id="ls-model-btn-label">${getCurrentModels()[0].name}</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-muted group-hover:text-white transition-colors"><polyline points="6 9 12 15 18 9"/></svg>`;
+    modelBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-primary"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><span id="ls-model-btn-label">${initialModel.name}</span><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="text-muted group-hover:text-white transition-colors"><polyline points="6 9 12 15 18 9"/></svg>`;
 
     // Resolution selector
     const resolutionBtn = document.createElement('button');
@@ -347,6 +371,7 @@ export function LipSyncStudio() {
                         resolutionBtn.classList.add('hidden');
                     }
                     textarea.style.display = m.hasPrompt ? '' : 'none';
+                    persistLipSyncPreferences();
                     closeDropdown();
                 };
                 dropdown.appendChild(item);
@@ -361,6 +386,7 @@ export function LipSyncStudio() {
                 item.onclick = () => {
                     selectedResolution = r;
                     document.getElementById('ls-resolution-btn-label').textContent = r;
+                    persistLipSyncPreferences();
                     closeDropdown();
                 };
                 dropdown.appendChild(item);
@@ -402,7 +428,7 @@ export function LipSyncStudio() {
     // ==========================================
     // 4. MODE SWITCHING LOGIC
     // ==========================================
-    const updateUIForMode = () => {
+    const updateUIForMode = ({ preserveSelection = false } = {}) => {
         if (inputMode === 'image') {
             imageModeBtn.className = 'px-4 py-1.5 rounded-xl text-xs font-bold transition-all border border-primary bg-primary/10 text-primary';
             videoModeBtn.className = 'px-4 py-1.5 rounded-xl text-xs font-bold transition-all border border-white/10 text-muted hover:border-white/30 hover:text-white';
@@ -421,13 +447,16 @@ export function LipSyncStudio() {
 
         // Switch to first model of new mode
         const models = getCurrentModels();
-        selectedModel = models[0].id;
-        document.getElementById('ls-model-btn-label').textContent = models[0].name;
+        const target = preserveSelection ? (models.find((model) => model.id === selectedModel) || models[0]) : models[0];
+        selectedModel = target.id;
+        document.getElementById('ls-model-btn-label').textContent = target.name;
 
         // Update resolution
         const resolutions = getResolutionsForLipSyncModel(selectedModel);
         if (resolutions.length > 0) {
-            selectedResolution = models[0].inputs?.resolution?.default || resolutions[0];
+            selectedResolution = preserveSelection && resolutions.includes(selectedResolution)
+                ? selectedResolution
+                : (target.inputs?.resolution?.default || resolutions[0]);
             document.getElementById('ls-resolution-btn-label').textContent = selectedResolution;
             resolutionBtn.classList.remove('hidden');
         } else {
@@ -435,7 +464,8 @@ export function LipSyncStudio() {
         }
 
         // Show/hide prompt
-        textarea.style.display = models[0].hasPrompt ? '' : 'none';
+        textarea.style.display = target.hasPrompt ? '' : 'none';
+        persistLipSyncPreferences();
     };
 
     imageModeBtn.onclick = () => {
@@ -453,6 +483,7 @@ export function LipSyncStudio() {
         imagePicker.reset();
         updateUIForMode();
     };
+    queueMicrotask(() => updateUIForMode({ preserveSelection: true }));
 
     // Hide resolution if first model has none
     if (getResolutionsForLipSyncModel(selectedModel).length === 0) {
@@ -465,7 +496,7 @@ export function LipSyncStudio() {
     const generationHistory = [];
 
     const historySidebar = document.createElement('div');
-    historySidebar.className = 'fixed right-0 top-0 h-full w-20 md:w-24 bg-black/60 backdrop-blur-xl border-l border-white/5 z-50 flex flex-col items-center py-4 gap-3 overflow-y-auto transition-all duration-500 translate-x-full opacity-0';
+    historySidebar.className = 'fixed right-0 top-[100px] h-[calc(100%-100px)] lg:top-14 lg:h-[calc(100%-3.5rem)] w-20 md:w-24 bg-panel-bg/75 backdrop-blur-xl border-l border-white/[0.06] z-40 flex flex-col items-center py-4 gap-3 overflow-y-auto transition-all duration-500 translate-x-full opacity-0';
     historySidebar.id = 'lipsync-history-sidebar';
 
     const historyLabel = document.createElement('div');
@@ -519,7 +550,9 @@ export function LipSyncStudio() {
     const showVideoInCanvas = (videoUrl) => {
         hero.classList.add('hidden');
         promptWrapper.classList.add('hidden');
-        resultVideo.src = videoUrl;
+        // E2E-sealed outputs decrypt in-page to a blob URL; everything else
+        // passes through untouched (resolveMediaSrc is fail-open).
+        void resolveMediaSrc(videoUrl).then((resolved) => { resultVideo.src = resolved; });
         resultVideo.onloadeddata = () => {
             canvas.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-10', 'scale-95');
             canvas.classList.add('opacity-100', 'translate-y-0', 'scale-100');
@@ -542,13 +575,14 @@ export function LipSyncStudio() {
             const thumb = document.createElement('div');
             thumb.className = `relative group/thumb cursor-pointer rounded-xl overflow-hidden border-2 transition-all duration-300 ${idx === 0 ? 'border-primary shadow-glow' : 'border-white/10 hover:border-white/30'}`;
             thumb.innerHTML = `
-                <video src="${entry.url}" preload="metadata" muted class="w-full aspect-square object-cover"></video>
+                <video preload="metadata" muted class="w-full aspect-square object-cover"></video>
                 <div class="absolute inset-0 bg-black/60 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center">
                     <button class="hist-download p-1.5 bg-primary rounded-lg text-black hover:scale-110 transition-transform" title="Download">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
                     </button>
                 </div>
             `;
+            void resolveMediaSrc(entry.url).then((resolved) => { const v = thumb.querySelector('video'); if (v) v.src = resolved; });
             thumb.onclick = (e) => {
                 if (e.target.closest('.hist-download')) { downloadFile(entry.url, `lipsync-${entry.id || idx}.mp4`); return; }
                 showVideoInCanvas(entry.url);
@@ -562,7 +596,7 @@ export function LipSyncStudio() {
 
     const downloadFile = async (url, filename) => {
         try {
-            const response = await fetch(url);
+            const response = await fetch(await resolveMediaSrc(url));
             const blob = await response.blob();
             const blobUrl = URL.createObjectURL(blob);
             const a = document.createElement('a');

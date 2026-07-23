@@ -1,12 +1,139 @@
 {
   "workflows": [
     {
+      "id": "z-image-turbo",
+      "media_type": "image",
+      "title": "Z-Image Turbo LoRA Optimizer",
+      "description": "Fast local text-to-image generation through the optimized Z-Image Turbo route.",
+      "family": "z-image",
+      "builder": "image-backend",
+      "backend": "",
+      "supports_loras": true,
+      "compatible_base_models": ["ZImageTurbo"],
+      "default": true,
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "width",
+        "height",
+        "steps",
+        "cfg",
+        "seed",
+        "loras"
+      ],
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 8,
+        "cfg": 1.0,
+        "seed": -1
+      },
+      "aspect_ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"],
+      "tags": ["text-to-image", "turbo", "local"],
+      "featured": true
+    },
+    {
+      "id": "comfy-krea2-turbo-identity-edit",
+      "media_type": "image",
+      "title": "Krea 2 Turbo - Identity Optional",
+      "description": "Krea 2 Turbo text-to-image with an optional identity reference. Apple Silicon uses the optimized ASFP8/ConvRot path; Windows and CUDA use the portable ComfyUI path.",
+      "family": "krea-2",
+      "builder": "image-backend",
+      "backend": "comfy-krea2-turbo-identity-edit",
+      "supports_loras": true,
+      "compatible_base_models": ["Krea 2"],
+      "prompt_helper": {
+        "profile": "swarm_krea2_photo_json",
+        "label": "Krea photo prompt",
+        "helper_mode": "None",
+        "timeout_seconds": 60
+      },
+      "default": false,
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "width",
+        "height",
+        "steps",
+        "cfg",
+        "seed",
+        "ref_boost",
+        "identity_strength",
+        "grounding_px",
+        "loras"
+      ],
+      "max_reference_images": 1,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 10,
+        "cfg": 1.0,
+        "seed": -1
+      },
+      "aspect_ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"],
+      "tags": ["text-to-image", "image-edit", "identity", "turbo", "local"],
+      "featured": true
+    },
+    {
+      "id": "comfy-bigloves-klein3-edit",
+      "media_type": "image",
+      "title": "BigLove Klein 3 Image Edit",
+      "description": "Prompt-guided image editing with a required source image. Apple Silicon uses native MLX; Windows and CUDA fall back to the portable ComfyUI workflow.",
+      "family": "flux-2-klein",
+      "builder": "image-backend",
+      "backend": "comfy-bigloves-klein3-edit",
+      "supports_loras": true,
+      "compatible_base_models": ["Flux.2 Klein 9B"],
+      "default": false,
+      "requires": {
+        "prompt": true,
+        "image": true
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "width",
+        "height",
+        "steps",
+        "guidance",
+        "seed",
+        "loras"
+      ],
+      "max_reference_images": 1,
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 4,
+        "guidance": 3.5,
+        "seed": -1
+      },
+      "aspect_ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"],
+      "tags": ["image-edit", "mlx", "local"],
+      "featured": true
+    },
+    {
       "id": "ltx23-regular-fp8",
       "media_type": "video",
       "title": "LTX 2.3 Regular FP8",
       "description": "Regular LTX 2.3 image-to-video and source-video extension workflow. Apple Silicon uses the regular q8 distilled MLX model; Windows/CUDA uses the official Lightricks FP8 ComfyUI graph. This workflow never selects an Eros checkpoint.",
       "family": "ltx-2.3",
       "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": ["LTXV"],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-regular-anchor/ltx23-regular-anchor.user-image-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Regular FP8 Mobile.json",
       "default": false,
@@ -16,6 +143,13 @@
         "title": "LTX 2.3 regular q8 distilled",
         "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
         "output_subdir": "LTX23"
+      },
+      "lora_injection": {
+        "class_type": "LTX2LoraLoaderAdvanced",
+        "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+        "name_input": "lora_name",
+        "strength_input": "strength_model",
+        "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1}
       },
       "requires": {
         "prompt": false,
@@ -43,6 +177,7 @@
         "end_image_base64",
         "end_image_url",
         "keyframes",
+        "loras",
         "width",
         "height",
         "duration_seconds",
@@ -120,6 +255,8 @@
       "description": "First-frame/last-frame LTX 2.3 transition workflow using joyfox's Apache-2.0 Transition LoRA, with the same Apple Silicon MLX fast lane as regular LTX 2.3.",
       "family": "ltx-2.3",
       "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": ["LTXV"],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-transition-lora/ltx23-transition-lora.user-image-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Transition LoRA Mobile.json",
       "default": false,
@@ -130,6 +267,13 @@
         "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
         "output_subdir": "LTX23"
       },
+      "lora_injection": {
+        "class_type": "LTX2LoraLoaderAdvanced",
+        "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+        "name_input": "lora_name",
+        "strength_input": "strength_model",
+        "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1}
+      },
       "transition_lora": {
         "enabled": true,
         "name": "ltx/2.3/ltx2.3-transition.safetensors",
@@ -139,7 +283,7 @@
         "baseModel": "Lightricks/LTX-2.3",
         "trigger": "zhuanchang",
         "strength": 1.0,
-        "cfg": 4.0,
+        "cfg": 1.0,
         "guidance": 1.0,
         "append_trigger": true
       },
@@ -164,6 +308,7 @@
         "end_image_base64",
         "end_image_url",
         "keyframes",
+        "loras",
         "width",
         "height",
         "duration_seconds",
@@ -255,6 +400,8 @@
       "description": "Regular LTX 2.3 image-to-video workflow with Better Motion LTX 2.3 T2V/I2V LoRA at the recommended 0.3 strength, using the same Apple Silicon MLX fast lane as regular LTX 2.3 while preserving the normal ComfyUI path for Windows and non-native users.",
       "family": "ltx-2.3",
       "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": ["LTXV"],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-better-motion-lora/ltx23-better-motion-lora.user-image-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Better Motion LoRA Mobile.json",
       "default": false,
@@ -271,6 +418,13 @@
             "repo": "civitai:2734359@3087364"
           }
         ]
+      },
+      "lora_injection": {
+        "class_type": "LTX2LoraLoaderAdvanced",
+        "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+        "name_input": "lora_name",
+        "strength_input": "strength_model",
+        "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1}
       },
       "requires": {
         "prompt": false,
@@ -293,6 +447,7 @@
         "end_image_base64",
         "end_image_url",
         "keyframes",
+        "loras",
         "width",
         "height",
         "duration_seconds",
@@ -376,6 +531,8 @@
       "description": "Regular LTX 2.3 image-to-video workflow with MaqueAI's IC dual-character multi-shot dialogue LoRA at 0.8 strength. It is tuned for storyboarded two-shots, over-the-shoulder coverage, and identity retention across angle changes. Apple Silicon uses the native MLX fast lane; Windows and non-native users stay on the normal ComfyUI path.",
       "family": "ltx-2.3",
       "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": ["LTXV"],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-ic-dual-character-lora/ltx23-ic-dual-character-lora.user-image-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 IC Dual Character LoRA Mobile.json",
       "default": false,
@@ -392,6 +549,13 @@
             "repo": "civitai:2500098@2810376"
           }
         ]
+      },
+      "lora_injection": {
+        "class_type": "LTX2LoraLoaderAdvanced",
+        "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+        "name_input": "lora_name",
+        "strength_input": "strength_model",
+        "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1}
       },
       "requires": {
         "prompt": false,
@@ -414,6 +578,7 @@
         "end_image_base64",
         "end_image_url",
         "keyframes",
+        "loras",
         "width",
         "height",
         "duration_seconds",
@@ -496,23 +661,37 @@
       "id": "ltx23-ic-ingredients-lora",
       "media_type": "video",
       "title": "LTX 2.3 IC-LoRA Ingredients",
-      "description": "Lightricks' official Ingredients IC-LoRA for generating a coherent shot from a labeled reference sheet containing characters, props, wardrobe, and locations. Apple Silicon uses the native MLX IC-LoRA reference-latent lane; Windows and CUDA use the equivalent ComfyUI IC guide graph.",
+      "description": "Lightricks' official Ingredients IC-LoRA for generating a coherent shot from characters, props, wardrobe, and locations. Supply one finished reference sheet or up to 12 independent references that the server assembles into a black, unlabeled conditioning-only sheet. Apple Silicon uses the native MLX IC-LoRA reference-latent lane; Windows and CUDA use the equivalent ComfyUI IC guide graph.",
       "family": "ltx-2.3",
       "builder": "comfy-api",
+      "supports_loras": true,
+      "compatible_base_models": ["LTXV"],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/huggingface/ltx23-ic-ingredients-lora/ltx23-ic-ingredients-lora.user-reference-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 IC LoRA Ingredients Mobile.json",
       "default": false,
+      "benchmark_seconds": 270.75,
       "native_mlx": {
         "enabled": true,
-        "variant": "regular-q8-distilled",
+        "variant": "regular-q8-dev-ic",
         "pipeline": "ic-lora",
         "title": "LTX 2.3 regular q8 distilled + Ingredients IC-LoRA",
-        "marker": "LTX23/native_mlx_ltx__regular-q8-distilled",
+        "marker": "LTX23/native_mlx_ltx__regular-q8-dev-ic",
         "output_subdir": "LTX23",
         "ic_lora": {
           "single_stage": true,
+          "reference_min_frames": 121,
+          "target_min_frames": 121,
+          "image_crf": 0,
           "conditioning_strength": 1.0,
-          "reference_strength": 1.0
+          "reference_strength": 1.0,
+          "dev_transformer": "transformer-dev.safetensors",
+          "distilled_lora": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "distilled_lora_strength": 0.5,
+          "guided_dev": false,
+          "stage1_steps": 8,
+          "cfg_scale": 1.0,
+          "stg_scale": 0.0,
+          "runtime_timeout_seconds": 2400
         },
         "loras": [
           {
@@ -522,12 +701,40 @@
           }
         ]
       },
+      "lora_injection": {
+        "class_type": "LoraLoaderModelOnly",
+        "targets": [{"node": "5011", "input": "model"}],
+        "name_input": "lora_name",
+        "strength_input": "strength_model"
+      },
       "prompt_contract": {
         "type": "ltx23-ingredients",
         "reference_heading": "### Reference Sheet Description",
         "target_heading": "### Target Description",
         "reference_description_param": "reference_description"
       },
+    "ingredient_inputs": {
+      "max_images": 12,
+      "layout": "adaptive-pack",
+      "conditioning_only": true,
+      "preserve_aspect_ratio": true,
+      "render_labels": false
+    },
+    "timeline_anchor_preparation": {
+      "mode": "generative-outpaint",
+      "preserve_source_aspect_ratio": true,
+      "preserve_source_pixels": true,
+      "apple": "native-preflight",
+      "windows_cuda": "embedded-comfy-graph",
+      "cache": true
+    },
+    "aspect_ratios": [
+      "16:9",
+      "9:16",
+      "4:3",
+      "3:4",
+      "1:1"
+    ],
       "requires": {
         "prompt": true,
         "image": true
@@ -535,10 +742,12 @@
       "accepts": [
         "prompt",
         "reference_description",
+        "ingredient_images",
         "negative_prompt",
         "image_path",
         "image_base64",
         "image_url",
+        "loras",
         "width",
         "height",
         "duration_seconds",
@@ -605,6 +814,61 @@
           "required": true,
           "bytes": 29145431166,
           "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+          "required": true,
+          "bytes": 7605507256,
+          "sha256": "f5d4953f3386197a4b4f5abdb17616ff256171e8075c111d6e7d2dfa6e823b3a"
+        },
+        {
+          "folder": "loras",
+          "relativePath": "ltx/2.3/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+          "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients/resolve/main/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+          "required": true,
+          "gated": true,
+          "auth_env": ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_READ_WRITE_KEY"]
+        }
+      ]
+    },
+    {
+      "id": "ltx23-eros-ic-ingredients-lora",
+      "inherits": "ltx23-ic-ingredients-lora",
+      "title": "LTX 2.3 Eros IC-LoRA Ingredients",
+      "description": "The same official Ingredients IC-LoRA reference-sheet workflow as the regular lane, using the 10Eros v1 dev-family checkpoint instead. Apple Silicon uses the native MLX Eros q8 dev IC-LoRA lane; Windows and CUDA use the equivalent Eros FP8 ComfyUI graph. Reference assembly, timeline anchors, prompt contract, audio, frame bucket, LoRA strengths, and generation controls remain inherited from the regular workflow.",
+      "benchmark_seconds": null,
+      "native_mlx": {
+        "variant": "eros-q8-dev-ic",
+        "title": "LTX 2.3 10Eros v1 q8 dev + Ingredients IC-LoRA",
+        "marker": "Eros/native_mlx_ltx__eros-q8-dev-ic",
+        "output_subdir": "Eros"
+      },
+      "workflow_overrides": {
+        "api_inputs": {
+          "3940": {
+            "ckpt_name": "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+          },
+          "4010": {
+            "ckpt_name": "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+          }
+        },
+        "editor_widgets": {
+          "3940": ["ltx/10Eros_v1-fp8mixed_learned.safetensors"],
+          "4010": ["ltx/10Eros_v1-fp8mixed_learned.safetensors"]
+        }
+      },
+      "model_dependencies": [
+        {
+          "folder": "checkpoints",
+          "relativePath": "ltx/10Eros_v1-fp8mixed_learned.safetensors",
+          "url": "https://civitai.com/api/download/models/2892069?type=Model&format=SafeTensor&size=full&fp=fp8",
+          "required": true,
+          "bytes": 29161842950,
+          "sha256": "5c00038d4f1527e9842a832eb35192990de410ed2dd722c70aaf0f23cb3c9fd6",
+          "modelVersionId": 2892069,
+          "fileId": 2794413
         },
         {
           "folder": "loras",

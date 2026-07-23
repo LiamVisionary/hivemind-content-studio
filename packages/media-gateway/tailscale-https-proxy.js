@@ -224,7 +224,15 @@ const server = http2.createSecureServer({
       res.end();
     }
   });
-  req.pipe(upstreamReq);
+  // Bodyless requests can already be complete before the compatibility
+  // request reaches this callback (notably after a fresh h2 connection). In
+  // that case pipe() never closes the upstream request, so the browser waits
+  // forever even though the local app is healthy.
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    upstreamReq.end();
+  } else {
+    req.pipe(upstreamReq);
+  }
 });
 
 // The tailnet path to remote clients flaps (relayed CGNAT route): when it
@@ -258,5 +266,5 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(listenPort, listenHost, () => {
-  console.log(`[tailscale-https-proxy] listening on https://${listenHost}:${listenPort} -> ${target}`);
+  console.log(`[tailscale-https-proxy] listening on https://${listenHost}:${listenPort} -> studio ${studioTarget}, gateway ${target}, mcp ${mcpTarget}`);
 });

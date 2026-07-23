@@ -1,201 +1,92 @@
-import { t } from '../lib/i18n.js';
+// MCP & agent access page — documents THIS studio's own MCP endpoint and API
+// surfaces so agents and IDEs can drive the local stack. No external services.
+
+function mcpBaseUrl() {
+    // Behind the Tailscale HTTPS proxy (8789) /mcp is same-origin; otherwise
+    // the MCP HTTP server listens on 8796 locally.
+    if (window.location.port === '8789') return `${window.location.origin}/mcp`;
+    return `http://127.0.0.1:8796/mcp`;
+}
+
+function copyButton(value) {
+    return `<button type="button" class="mcp-copy grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-white/5 text-secondary transition-colors hover:bg-white/10 hover:text-white" data-copy="${value.replaceAll('"', '&quot;')}" title="Copy" aria-label="Copy to clipboard">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+    </button>`;
+}
+
+function codeRow(code) {
+    return `<div class="flex items-center gap-2 rounded-xl border border-white/[0.07] bg-black/30 px-4 py-3">
+        <code class="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-[13px] text-primary/90 no-scrollbar">${code}</code>
+        ${copyButton(code.replaceAll('&lt;', '<').replaceAll('&gt;', '>'))}
+    </div>`;
+}
 
 export function McpCliStudio() {
     const container = document.createElement('div');
-    container.className = 'w-full h-full overflow-y-auto bg-app-bg text-white';
+    container.className = 'w-full h-full overflow-y-auto bg-transparent text-white custom-scrollbar';
 
-    const inner = document.createElement('div');
-    inner.className = 'max-w-5xl mx-auto px-6 py-12 flex flex-col gap-12';
-    container.appendChild(inner);
+    const mcpUrl = mcpBaseUrl();
+    const addCommand = `claude mcp add --transport http hivemind-media ${mcpUrl}`;
 
-    // Hero
-    const hero = document.createElement('section');
-    hero.className = 'flex flex-col items-center text-center gap-4';
-    hero.innerHTML = `
-        <div class="px-3 py-1 rounded-full border border-white/10 bg-white/5 text-[11px] font-bold uppercase tracking-widest text-secondary">
-            ${t('mcp.tagline')}
+    container.innerHTML = `
+    <div class="mx-auto w-full max-w-4xl px-5 py-10 md:py-14 animate-fade-in-up">
+        <div class="mb-10 text-center">
+            <span class="mb-4 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 py-1.5 text-[11px] font-semibold uppercase tracking-widest text-secondary">For agents &amp; automation</span>
+            <h1 class="font-display text-3xl md:text-4xl font-bold tracking-tight text-white mb-3">MCP &amp; API access</h1>
+            <p class="mx-auto max-w-2xl text-[15px] leading-relaxed text-secondary">
+                Everything this studio does — image, video, cinema, lip sync, durable runs — is also
+                available to agents through the built-in Media Studio MCP server and the local REST API.
+                Same engine, same history, same privacy boundary.
+            </p>
         </div>
-        <h1 class="text-4xl md:text-5xl font-bold tracking-tight">${t('mcp.title')}</h1>
-        <p class="text-secondary text-base md:text-lg max-w-2xl">
-            ${t('mcp.subtitle')}
+
+        <section class="mb-6 rounded-3xl border border-white/[0.07] bg-card-bg/80 p-6 shadow-panel">
+            <div class="mb-4 flex items-center justify-between gap-3">
+                <div><p class="text-[11px] font-semibold uppercase tracking-widest text-primary/80">MCP server</p>
+                <h2 class="font-display text-lg font-semibold text-white">Media Studio MCP</h2></div>
+                <span class="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] font-semibold text-secondary">HTTP transport</span>
+            </div>
+            <p class="mb-3 text-sm leading-relaxed text-secondary">Endpoint (this machine and any tailnet device):</p>
+            ${codeRow(mcpUrl)}
+            <p class="mb-3 mt-5 text-sm leading-relaxed text-secondary">Add it to Claude Code:</p>
+            ${codeRow(addCommand)}
+            <p class="mt-4 text-xs leading-relaxed text-muted">The server lives in this repository at <code class="font-mono text-secondary">packages/media-gateway/bin/media-studio-mcp.mjs</code> and is supervised by the local stack — no cloud account, no external keys.</p>
+        </section>
+
+        <section class="mb-6 grid gap-6 md:grid-cols-2">
+            <div class="rounded-3xl border border-white/[0.07] bg-card-bg/80 p-6 shadow-panel">
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-widest text-primary/80">REST API</p>
+                <h3 class="mb-3 font-display text-base font-semibold text-white">Durable runs</h3>
+                <p class="mb-4 text-sm leading-relaxed text-secondary">Create and drive production runs the same way the Planner does — plans, scenes, artifacts, retries, and approvals are all API-first.</p>
+                ${codeRow('POST /api/runs')}
+                <div class="h-2"></div>
+                ${codeRow('GET  /api/runs/&lt;run_id&gt;')}
+            </div>
+            <div class="rounded-3xl border border-white/[0.07] bg-card-bg/80 p-6 shadow-panel">
+                <p class="mb-1 text-[11px] font-semibold uppercase tracking-widest text-primary/80">Telemetry</p>
+                <h3 class="mb-3 font-display text-base font-semibold text-white">Generation evidence</h3>
+                <p class="mb-4 text-sm leading-relaxed text-secondary">Providers, latency, cost, and success rates for every generation attempt — local metadata only, no prompts or media.</p>
+                ${codeRow('GET /api/telemetry/generations')}
+                <div class="h-2"></div>
+                ${codeRow('GET /api/providers')}
+            </div>
+        </section>
+
+        <p class="text-center text-xs leading-relaxed text-muted">
+            Owner-gated routes require the studio to be unlocked in this browser, or an operator token.
+            Agent-safe routes (runs, catalog, telemetry) are available without a session on the local machine.
         </p>
-    `;
-    inner.appendChild(hero);
+    </div>`;
 
-    // Quick start
-    const quick = document.createElement('section');
-    quick.className = 'glass-panel rounded-2xl p-6 md:p-8 flex flex-col gap-4';
-    quick.innerHTML = `
-        <div class="flex items-center gap-2">
-            <span class="text-[11px] font-bold uppercase tracking-widest text-secondary">${t('mcp.quickStart')}</span>
-            <div class="flex-1 h-px bg-white/5"></div>
-        </div>
-        <div class="grid md:grid-cols-3 gap-4">
-            ${quickStep('1', 'Install the CLI', 'npm install -g muapi-cli')}
-            ${quickStep('2', 'Sign in', 'muapi auth login')}
-            ${quickStep('3', 'Generate from chat', 'npx skills add SamurAIGPT/Generative-Media-Skills')}
-        </div>
-    `;
-    inner.appendChild(quick);
-
-    // Feature cards
-    const cards = document.createElement('section');
-    cards.className = 'grid md:grid-cols-3 gap-4';
-
-    cards.appendChild(featureCard({
-        tag: 'CLI',
-        title: 'muapi-cli',
-        body: 'Generate images, videos, and audio from the terminal across 14+ AI models. Dual interface — colored human output plus JSON for agents (--output-json, --jq filtering). Async workflows, file uploads, credit tracking.',
-        code: 'npm install -g muapi-cli\nmuapi image generate "a cyberpunk city" \\\n  --model flux-dev',
-        link: 'https://github.com/SamurAIGPT/muapi-cli',
-        linkLabel: 'View muapi-cli on GitHub',
-        icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`,
-    }));
-
-    cards.appendChild(featureCard({
-        tag: 'MCP',
-        title: 'muapi-mcp-server',
-        body: 'Connect Claude, Cursor, Windsurf, and any MCP-compatible assistant to 100+ generative models. Hosted endpoint — no install. 19 structured tools with input/output schemas, async polling, and account management.',
-        code: 'claude mcp add --transport http muapi \\\n  https://api.muapi.ai/mcp \\\n  --header "Authorization: Bearer YOUR_KEY"',
-        link: 'https://github.com/SamurAIGPT/muapi-mcp-server',
-        linkLabel: 'View muapi-mcp-server on GitHub',
-        icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>`,
-    }));
-
-    cards.appendChild(featureCard({
-        tag: 'Skills',
-        title: 'Generative Media Skills',
-        body: 'Multimodal toolkit for Claude Code, Cursor, and Gemini CLI. Cinema Director, Nano-Banana, UI Designer, Logo Creator, Seedance 2, AI Clipping, and YouTube Shorts presets. Agent-native with JSON outputs and semantic exit codes.',
-        code: 'npx skills add SamurAIGPT/Generative-Media-Skills --all',
-        link: 'https://github.com/SamurAIGPT/Generative-Media-Skills',
-        linkLabel: 'View Generative-Media-Skills on GitHub',
-        icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.39 4.84L20 8l-4 3.9.94 5.5L12 14.77 7.06 17.4 8 11.9 4 8l5.61-1.16L12 2z"/></svg>`,
-    }));
-
-    inner.appendChild(cards);
-
-    // Usage examples
-    const examples = document.createElement('section');
-    examples.className = 'flex flex-col gap-4';
-    examples.innerHTML = `
-        <div class="flex items-center gap-2">
-            <span class="text-[11px] font-bold uppercase tracking-widest text-secondary">Examples</span>
-            <div class="flex-1 h-px bg-white/5"></div>
-        </div>
-        <div class="grid md:grid-cols-2 gap-4">
-            ${exampleBlock('Image generation', 'muapi image generate "a serene mountain lake at sunrise" \\\n  --model flux-dev --download ./outputs')}
-            ${exampleBlock('Text-to-video', 'muapi video generate "a dog running on a beach" \\\n  --model kling-master')}
-            ${exampleBlock('Audio creation', 'muapi audio create "upbeat lo-fi hip hop for studying"')}
-            ${exampleBlock('Run a skill', 'bash library/visual/nano-banana/scripts/\\\n  generate-nano-art.sh --file image.jpg --view')}
-        </div>
-    `;
-    inner.appendChild(examples);
-
-    // NEW FEATURE: Interactive Command Generator Playground
-    const playground = document.createElement('section');
-    playground.className = 'glass-panel rounded-2xl p-6 md:p-8 flex flex-col gap-6';
-    playground.innerHTML = `
-        <div class="flex items-center gap-2">
-            <span class="text-[11px] font-bold uppercase tracking-widest text-secondary">Interactive Builder</span>
-            <div class="flex-1 h-px bg-white/5"></div>
-        </div>
-        <div class="flex flex-col md:flex-row gap-4 items-end">
-            <div class="flex flex-col gap-1.5 flex-1 w-full">
-                <label class="text-[11px] font-bold tracking-wider uppercase text-secondary">Select Target Model</label>
-                <select id="modelSelector" class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/30">
-                    <option value="image generate 'a retro-futuristic synthwave car' --model flux-dev">Flux Dev (Image)</option>
-                    <option value="image generate 'oil painting of an astronaut' --model midjourney">Midjourney (Image)</option>
-                    <option value="video generate 'cinematic drone shot of an ancient castle' --model kling-master">Kling Master (Video)</option>
-                    <option value="video generate 'cyberpunk neon alleyway rain' --model luma-ray">Luma Ray (Video)</option>
-                    <option value="audio create 'ambient electronic space synth for gaming'">Lyria 3 (Audio)</option>
-                </select>
-            </div>
-            <div class="flex flex-col gap-1.5 flex-1 w-full">
-                <label class="text-[11px] font-bold tracking-wider uppercase text-secondary">Output Format</label>
-                <select id="flagSelector" class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-white/30">
-                    <option value="">Default (Human-Readable)</option>
-                    <option value=" --output-json">JSON Object (AI Agent Native)</option>
-                    <option value=" --output-json | jq '.data.url'">Filtered URL Stream (JQ)</option>
-                </select>
-            </div>
-        </div>
-        <div class="flex flex-col gap-2">
-            <span class="text-[12px] font-bold text-white/80">Generated Terminal Command</span>
-            <pre id="interactiveTerminal" class="text-[12px] font-mono text-primary bg-black/60 border border-white/5 rounded-lg px-4 py-3 overflow-x-auto whitespace-pre"></pre>
-        </div>
-    `;
-    inner.appendChild(playground);
-
-    // Event listener block to power the dynamic playground execution
-    const modelSel = playground.querySelector('#modelSelector');
-    const flagSel = playground.querySelector('#flagSelector');
-    const termDisp = playground.querySelector('#interactiveTerminal');
-
-    const updateCommandDisplay = () => {
-        termDisp.textContent = `muapi ${modelSel.value}${flagSel.value}`;
-    };
-
-    modelSel.addEventListener('change', updateCommandDisplay);
-    flagSel.addEventListener('change', updateCommandDisplay);
-    updateCommandDisplay(); // Run once immediately on build mount
-
-    // Footer note
-    const footer = document.createElement('p');
-    footer.className = 'text-center text-xs text-secondary opacity-60 pb-4';
-    footer.textContent = 'Open-source · MIT licensed · Works with Claude, Cursor, Windsurf, and Gemini CLI';
-    inner.appendChild(footer);
+    container.addEventListener('click', async (event) => {
+        const button = event.target.closest('[data-copy]');
+        if (!button) return;
+        try {
+            await navigator.clipboard.writeText(button.dataset.copy);
+            button.classList.add('text-primary');
+            setTimeout(() => button.classList.remove('text-primary'), 900);
+        } catch { /* clipboard unavailable */ }
+    });
 
     return container;
-}
-
-function quickStep(num, title, code) {
-    return `
-        <div class="rounded-xl border border-white/5 bg-white/[0.02] p-4 flex flex-col gap-2">
-            <div class="flex items-center gap-2">
-                <span class="w-6 h-6 rounded-full bg-white text-black text-xs font-bold flex items-center justify-center">${num}</span>
-                <span class="text-sm font-bold">${title}</span>
-            </div>
-            <code class="text-[12px] font-mono text-primary bg-black/40 rounded-md px-2 py-1.5 break-all">${escapeHtml(code)}</code>
-        </div>
-    `;
-}
-
-function featureCard({ tag, title, body, code, link, linkLabel, icon }) {
-    const card = document.createElement('a');
-    card.href = link;
-    card.target = '_blank';
-    card.rel = 'noopener noreferrer';
-    card.setAttribute('aria-label', linkLabel);
-    card.className = 'glass-panel rounded-2xl p-6 flex flex-col gap-3 hover:bg-white/[0.04] transition-colors group';
-    card.innerHTML = `
-        <div class="flex items-center justify-between">
-            <div class="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-white">${icon}</div>
-            <span class="text-[10px] font-bold uppercase tracking-widest text-secondary">${tag}</span>
-        </div>
-        <h3 class="text-lg font-bold">${title}</h3>
-        <p class="text-[13px] text-secondary leading-relaxed">${body}</p>
-        <pre class="text-[11px] font-mono text-primary bg-black/40 rounded-md px-3 py-2 overflow-x-auto whitespace-pre">${escapeHtml(code)}</pre>
-        <div class="flex items-center gap-1 text-[12px] font-bold text-secondary group-hover:text-white transition-colors mt-auto">
-            <span>View on GitHub</span>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
-        </div>
-    `;
-    return card;
-}
-
-function exampleBlock(title, code) {
-    return `
-        <div class="rounded-xl border border-white/5 bg-white/[0.02] p-4 flex flex-col gap-2">
-            <span class="text-[12px] font-bold text-white/80">${title}</span>
-            <pre class="text-[11px] font-mono text-primary bg-black/40 rounded-md px-3 py-2 overflow-x-auto whitespace-pre">${escapeHtml(code)}</pre>
-        </div>
-    `;
-}
-
-function escapeHtml(s) {
-    return s
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
 }

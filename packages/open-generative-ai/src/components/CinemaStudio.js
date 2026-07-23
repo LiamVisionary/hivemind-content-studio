@@ -4,19 +4,52 @@ import { CameraControls } from './CameraControls.js';
 import { buildNanoBananaPrompt, CAMERA_MAP, LENS_MAP, FOCAL_PERSPECTIVE, APERTURE_EFFECT } from '../lib/promptUtils.js';
 import { AuthModal } from './AuthModal.js';
 import { t } from '../lib/i18n.js';
+import { resolveMediaSrc } from '../lib/e2eMedia.js';
+
+const CINEMA_PREFERENCES_KEY = 'cinema_generation_preferences';
+const CINEMA_ASPECT_RATIOS = ['16:9', '21:9', '9:16', '1:1', '4:5'];
+const CINEMA_RESOLUTIONS = ['1K', '2K', '4K'];
+
+export function normalizeCinemaPreferences(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const camera = Object.keys(CAMERA_MAP).includes(value.camera) ? value.camera : Object.keys(CAMERA_MAP)[0];
+    const lens = Object.keys(LENS_MAP).includes(value.lens) ? value.lens : Object.keys(LENS_MAP)[0];
+    const focalOptions = Object.keys(FOCAL_PERSPECTIVE).map(Number);
+    const focal = focalOptions.includes(Number(value.focal)) ? Number(value.focal) : 35;
+    const aperture = Object.keys(APERTURE_EFFECT).includes(value.aperture) ? value.aperture : 'f/1.4';
+    return {
+        aspect_ratio: CINEMA_ASPECT_RATIOS.includes(value.aspect_ratio) ? value.aspect_ratio : '16:9',
+        resolution: CINEMA_RESOLUTIONS.includes(value.resolution) ? value.resolution : '2K',
+        camera,
+        lens,
+        focal,
+        aperture,
+    };
+}
 
 export function CinemaStudio() {
     const container = document.createElement('div');
-    container.className = 'w-full h-full flex flex-col items-center justify-center bg-black relative overflow-hidden';
+    container.className = 'w-full h-full flex flex-col items-center justify-center bg-transparent relative overflow-hidden';
 
     // --- State ---
-    const currentSettings = {
-        prompt: '',
+    let persistedPreferences = null;
+    try {
+        persistedPreferences = normalizeCinemaPreferences(
+            JSON.parse(localStorage.getItem(CINEMA_PREFERENCES_KEY) || 'null'),
+        );
+    } catch {}
+    const currentSettings = persistedPreferences || {
         aspect_ratio: '16:9',
+        resolution: '2K',
         camera: Object.keys(CAMERA_MAP)[0],
         lens: Object.keys(LENS_MAP)[0],
         focal: 35,
         aperture: "f/1.4"
+    };
+    const persistCinemaPreferences = () => {
+        const preferences = normalizeCinemaPreferences(currentSettings);
+        if (!preferences) return;
+        try { localStorage.setItem(CINEMA_PREFERENCES_KEY, JSON.stringify(preferences)); } catch {}
     };
     
     // Camera builder panel state
@@ -28,8 +61,8 @@ export function CinemaStudio() {
     const heroSection = document.createElement('div');
     heroSection.className = 'flex flex-col items-center justify-center text-center px-4 animate-fade-in-up';
     heroSection.innerHTML = `
-        <div class="mb-4 text-xs font-bold text-white/40 tracking-[0.2em] uppercase">${t('cinema.tagline')}</div>
-        <h1 class="text-4xl md:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white to-white/50 tracking-tight leading-tight mb-2">
+        <div class="mb-4 text-xs font-semibold text-primary/70 tracking-[0.25em] uppercase">${t('cinema.tagline')}</div>
+        <h1 class="font-display text-3xl md:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-b from-white to-white/55 tracking-tight leading-tight mb-2">
             ${t('cinema.headline')}
         </h1>
     `;
@@ -43,7 +76,7 @@ export function CinemaStudio() {
 
     const overlayContent = document.createElement('div');
     // Reduced padding for mobile (p-4) and added max-height/overflow handling
-    overlayContent.className = 'w-full max-w-4xl bg-[#141414] border border-white/10 rounded-3xl p-4 md:p-8 shadow-2xl transform scale-95 transition-transform duration-300 flex flex-col max-h-[90vh]';
+    overlayContent.className = 'w-full max-w-4xl bg-card-bg border border-white/10 rounded-3xl p-4 md:p-8 shadow-2xl transform scale-95 transition-transform duration-300 flex flex-col max-h-[90vh]';
     overlayBackdrop.appendChild(overlayContent);
 
     // Header for Overlay
@@ -66,7 +99,8 @@ export function CinemaStudio() {
         currentSettings.focal = state.focal;
         currentSettings.aperture = state.aperture;
         updateSummaryCard();
-    });
+        persistCinemaPreferences();
+    }, currentSettings);
     overlayContent.appendChild(cameraControls);
 
     document.body.appendChild(overlayBackdrop); // Append to body to sit above everything
@@ -93,7 +127,7 @@ export function CinemaStudio() {
     promptBarWrapper.className = 'absolute bottom-8 left-4 right-4 md:left-1/2 md:-translate-x-1/2 md:w-full md:max-w-4xl z-30';
 
     const promptBar = document.createElement('div');
-    promptBar.className = 'bg-[#1a1a1a] border border-white/10 rounded-[2rem] p-4 flex justify-between shadow-3xl items-end relative';
+    promptBar.className = 'bg-card-bg/90 backdrop-blur-xl border border-white/10 rounded-2xl md:rounded-3xl p-4 flex justify-between shadow-panel items-end relative transition-colors focus-within:border-primary/40';
 
     // --- LEFT COLUMN (Input + Settings) ---
     const leftColumn = document.createElement('div');
@@ -131,7 +165,7 @@ export function CinemaStudio() {
 
         const rect = trigger.getBoundingClientRect();
         const menu = document.createElement('div');
-        menu.className = 'custom-dropdown fixed bg-[#1a1a1a] border border-white/10 rounded-xl py-1 shadow-2xl z-50 flex flex-col min-w-[100px] animate-fade-in';
+        menu.className = 'custom-dropdown fixed bg-elevated-bg border border-white/10 rounded-xl py-1 shadow-2xl z-50 flex flex-col min-w-[100px] animate-fade-in';
         menu.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
         menu.style.left = rect.left + 'px';
 
@@ -165,9 +199,10 @@ export function CinemaStudio() {
     };
     updateArBtn();
     arBtn.onclick = () => {
-        createDropdown(['16:9', '21:9', '9:16', '1:1', '4:5'], currentSettings.aspect_ratio, (val) => {
+        createDropdown(CINEMA_ASPECT_RATIOS, currentSettings.aspect_ratio, (val) => {
             currentSettings.aspect_ratio = val;
             updateArBtn();
+            persistCinemaPreferences();
         }, arBtn);
     };
     settingsToolbar.appendChild(arBtn);
@@ -175,13 +210,17 @@ export function CinemaStudio() {
     // Resolution
     const resBtn = document.createElement('button');
     resBtn.className = 'flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold text-white/50 hover:text-white transition-colors bg-white/5 hover:bg-white/10 rounded-lg border border-white/5';
-    const updateResBtn = (val) => {
-        resBtn.dataset.value = val || '2K';
+    const updateResBtn = (val = currentSettings.resolution) => {
+        currentSettings.resolution = CINEMA_RESOLUTIONS.includes(val) ? val : '2K';
+        resBtn.dataset.value = currentSettings.resolution;
         resBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg> ${resBtn.dataset.value}`;
     };
-    updateResBtn('2K');
+    updateResBtn();
     resBtn.onclick = () => {
-        createDropdown(['1K', '2K', '4K'], resBtn.dataset.value, (val) => { updateResBtn(val); }, resBtn);
+        createDropdown(CINEMA_RESOLUTIONS, currentSettings.resolution, (val) => {
+            updateResBtn(val);
+            persistCinemaPreferences();
+        }, resBtn);
     };
     settingsToolbar.appendChild(resBtn);
     
@@ -203,7 +242,7 @@ export function CinemaStudio() {
     // Summary Card (Triggers Overlay)
     const summaryCard = document.createElement('button');
     // Removed 'hidden' class, added 'flex' and refined width constraints for mobile
-    summaryCard.className = 'flex flex-col items-start justify-center px-4 py-2 bg-[#2a2a2a] rounded-xl border border-white/5 hover:border-white/20 transition-colors text-left flex-1 min-w-[100px] md:min-w-[140px] max-w-[240px] h-[56px] relative group overflow-hidden';
+    summaryCard.className = 'flex flex-col items-start justify-center px-4 py-2 bg-white/[0.07] rounded-xl border border-white/5 hover:border-white/20 transition-colors text-left flex-1 min-w-[100px] md:min-w-[140px] max-w-[240px] h-[56px] relative group overflow-hidden';
     summaryCard.setAttribute('data-tooltip', t('cinema.cameraSettings'));
 
     // Dot indicator
@@ -235,7 +274,7 @@ export function CinemaStudio() {
 
     // Generate Button
     const generateBtn = document.createElement('button');
-    generateBtn.className = 'h-[56px] px-8 bg-[#22d3ee] text-black rounded-xl font-black text-xs uppercase hover:bg-white transition-colors shadow-lg disabled:opacity-50 disabled:cursor-not-allowed';
+    generateBtn.className = 'h-[56px] px-8 bg-primary text-black rounded-xl font-bold text-sm hover:bg-primary-hover hover:shadow-glow transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed';
     generateBtn.setAttribute('data-tooltip', 'Generate cinema shot');
     generateBtn.innerHTML = t('cinema.generateBtn');
 
@@ -254,7 +293,7 @@ export function CinemaStudio() {
     cameraBuilderPanel.style.display = 'none'; // Hidden by default
     
     const builderCard = document.createElement('div');
-    builderCard.className = 'bg-[#1a1a1a] border border-white/10 rounded-2xl p-4 shadow-3xl';
+    builderCard.className = 'bg-elevated-bg border border-white/10 rounded-2xl p-4 shadow-3xl';
     
     builderCard.innerHTML = `
         <div class="flex items-center justify-between mb-4">
@@ -280,7 +319,7 @@ export function CinemaStudio() {
             <div class="flex flex-col gap-1.5">
                 <label class="text-[10px] font-bold text-muted uppercase">${t('cinema.focal')}</label>
                 <select id="builder-focal" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-primary/50">
-                    ${Object.keys(FOCAL_PERSPECTIVE).map(f => `<option value="${f}" ${f === currentSettings.focal ? 'selected' : ''}>${f}mm</option>`).join('')}
+                    ${Object.keys(FOCAL_PERSPECTIVE).map(f => `<option value="${f}" ${Number(f) === Number(currentSettings.focal) ? 'selected' : ''}>${f}mm</option>`).join('')}
                 </select>
             </div>
             <div class="flex flex-col gap-1.5">
@@ -349,6 +388,7 @@ export function CinemaStudio() {
             currentSettings.focal = parseInt(builderFocal?.value || currentSettings.focal);
             currentSettings.aperture = builderAperture?.value || currentSettings.aperture;
             updateSummaryCard();
+            persistCinemaPreferences();
             showCameraBuilder = false;
             cameraBuilderPanel.style.display = 'none';
         };
@@ -362,7 +402,7 @@ export function CinemaStudio() {
 
     // History Sidebar - VISIBLE BY DEFAULT (removed translate-x-full opacity-0)
     const historySidebar = document.createElement('div');
-    historySidebar.className = 'fixed right-0 top-0 h-full w-20 md:w-24 bg-black/60 backdrop-blur-xl border-l border-white/5 z-50 flex flex-col items-center py-4 gap-3 overflow-y-auto transition-all duration-500';
+    historySidebar.className = 'fixed right-0 top-[100px] h-[calc(100%-100px)] lg:top-14 lg:h-[calc(100%-3.5rem)] w-20 md:w-24 bg-panel-bg/75 backdrop-blur-xl border-l border-white/[0.06] z-40 flex flex-col items-center py-4 gap-3 overflow-y-auto transition-all duration-500';
 
     const historyLabel = document.createElement('div');
     historyLabel.className = 'text-[9px] font-bold text-white/40 uppercase tracking-widest mb-2';
@@ -372,6 +412,7 @@ export function CinemaStudio() {
     const historyList = document.createElement('div');
     historyList.className = 'flex flex-col gap-2 w-full px-2';
     historySidebar.appendChild(historyList);
+    historySidebar.classList.add('hidden');
 
     container.appendChild(historySidebar);
 
@@ -415,17 +456,22 @@ export function CinemaStudio() {
 
     // --- History Logic ---
     const renderHistory = () => {
+        // No entries yet → keep the rail out of the way entirely.
+        historySidebar.classList.toggle('hidden', generationHistory.length === 0);
         historyList.innerHTML = '';
         generationHistory.forEach((entry, idx) => {
             const thumb = document.createElement('div');
-            thumb.className = `relative group/thumb cursor-pointer rounded-lg overflow-hidden border-2 transition-all duration-300 aspect-square ${idx === 0 ? 'border-[#22d3ee] shadow-glow-sm' : 'border-white/10 hover:border-white/30'}`;
+            thumb.className = `relative group/thumb cursor-pointer rounded-lg overflow-hidden border-2 transition-all duration-300 aspect-square ${idx === 0 ? 'border-primary shadow-glow-sm' : 'border-white/10 hover:border-white/30'}`;
 
             thumb.innerHTML = `
-                <img src="${entry.url}" class="w-full h-full object-cover opacity-80 group-hover/thumb:opacity-100 transition-opacity">
+                <img class="w-full h-full object-cover opacity-80 group-hover/thumb:opacity-100 transition-opacity">
                 <div class="absolute inset-0 bg-black/50 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center">
                     <span class="text-[8px] font-bold text-white uppercase">${t('cinema.load')}</span>
                 </div>
             `;
+            // E2E-sealed outputs decrypt in-page to a blob URL; everything else
+            // passes through untouched (resolveMediaSrc is fail-open).
+            void resolveMediaSrc(entry.url).then((resolved) => { const im = thumb.querySelector('img'); if (im) im.src = resolved; });
 
             thumb.onclick = () => loadHistoryItem(entry, thumb);
             historyList.appendChild(thumb);
@@ -446,12 +492,14 @@ export function CinemaStudio() {
             currentSettings.focal = entry.settings.focal;
             currentSettings.aperture = entry.settings.aperture;
             currentSettings.aspect_ratio = entry.settings.aspect_ratio;
+            currentSettings.resolution = entry.settings.resolution || '2K';
 
             // Update UI elements
             textarea.value = entry.settings.prompt || '';
             updateSummaryCard();
             updateArBtn();
             updateResBtn(entry.settings.resolution || '2K');
+            persistCinemaPreferences();
         }
 
         showCanvas(entry.url);
@@ -459,16 +507,16 @@ export function CinemaStudio() {
         // Highlight active history item
         if (thumbElement) {
             historyList.querySelectorAll('div').forEach(t => {
-                t.classList.remove('border-[#22d3ee]', 'shadow-glow-sm');
+                t.classList.remove('border-primary', 'shadow-glow-sm');
                 t.classList.add('border-white/10');
             });
             thumbElement.classList.remove('border-white/10');
-            thumbElement.classList.add('border-[#22d3ee]', 'shadow-glow-sm');
+            thumbElement.classList.add('border-primary', 'shadow-glow-sm');
         }
     };
 
     const showCanvas = (url) => {
-        resultImg.src = url;
+        void resolveMediaSrc(url).then((resolved) => { resultImg.src = resolved; });
 
         // Hide Input UI
         heroSection.classList.add('opacity-0', 'pointer-events-none', 'scale-95');

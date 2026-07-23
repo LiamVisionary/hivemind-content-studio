@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import { getImagePreviewUrl } from '@/api/client';
 import { useGenerationSettingsStore } from '@/hooks/useGenerationSettings';
 import { MenuIcon } from '@/components/icons/MenuIcon';
+import { E2EImage } from '@/components/E2EMedia';
 
 interface ComparerImage {
   filename: string;
@@ -97,7 +98,7 @@ export function NodeCardImageComparer({
         <div className="text-xs text-slate-500 mb-1.5 uppercase tracking-wide">
           Image Comparer
         </div>
-        <img
+        <E2EImage
           src={onlySrc}
           alt={`${displayName} output`}
           className="w-full h-auto rounded-lg border border-white/10"
@@ -119,14 +120,14 @@ export function NodeCardImageComparer({
         className="relative w-full overflow-hidden rounded-lg border border-white/10 select-none"
       >
         {/* Base layer: image B drives the box height at its natural aspect. */}
-        <img
+        <E2EImage
           src={bSrc}
           alt={`${displayName} image B`}
           className="block w-full h-auto pointer-events-none"
           draggable={false}
         />
         {/* Overlay: image A, revealed from the left up to the divider. */}
-        <img
+        <E2EImage
           src={aSrc}
           alt={`${displayName} image A`}
           className="absolute inset-0 w-full h-full object-contain pointer-events-none"

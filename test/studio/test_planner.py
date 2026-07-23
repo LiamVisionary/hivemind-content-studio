@@ -5,6 +5,7 @@ from pathlib import Path
 
 from hivemind_content_studio.manifest import approve_manifest, load_manifest
 from hivemind_content_studio.planner import plan
+from hivemind_content_studio.private_access import read_private_json
 
 
 def test_animation_plan_uses_one_provider_neutral_artifact_set(tmp_path: Path, monkeypatch) -> None:
@@ -51,7 +52,7 @@ def test_faceless_plan_and_approval(tmp_path: Path, monkeypatch) -> None:
     manifest_path = plan(brief)
     manifest = load_manifest(manifest_path)
     params_path = Path(next(item["path"] for item in manifest["artifacts"] if item["role"] == "faceless-params"))
-    params = json.loads(params_path.read_text(encoding="utf-8"))
+    params = read_private_json(params_path)
     assert params["video_subject"] == "Three practical AI tools"
     assert params["video_aspect"] == "9:16"
 

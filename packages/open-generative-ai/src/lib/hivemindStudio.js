@@ -2,16 +2,21 @@ const HIVE_VIDEO_PREFIX = 'hivemind-media:';
 const VIDEO_SELECTION_KEY = 'hivemind.explore.videoSelection';
 const OPTIONS_KEY = 'hivemind.explore.options';
 const PENDING_JOBS_KEY = 'muapi_pending_jobs';
+const MEDIA_STUDIO_REFERENCE_PREFIX = '/api/media-studio/references/';
 
 let contextPromise = null;
 let contextCache = null;
+let contextRequest = 0;
 let hiveVideoModels = [];
 const uploadedFiles = new Map();
 
 const qs = () => new URLSearchParams(window.location.search);
 
 export function isHivemindStudioEnabled() {
-    return qs().get('hivemindStudio') === '1';
+    // True when served by the Hivemind Content Studio server (which injects
+    // the marker into index.html), or when explicitly flagged via URL — the
+    // old hub-iframe convention, kept for /open-gen/ links and the desktop shell.
+    return window.__HIVEMIND_STUDIO__ === 1 || qs().get('hivemindStudio') === '1';
 }
 
 function scrubLegacyPersistentCreativeState() {
@@ -46,6 +51,7 @@ export function saveStudioGenerationHistory(storageKey, entries, limit) {
 
 export function clearHivemindStudioPrivateState() {
     scrubLegacyPersistentCreativeState();
+    void import('./composerState.js').then((mod) => mod.clearComposerStateCache()).catch(() => {});
     try { sessionStorage.removeItem(PENDING_JOBS_KEY); } catch {}
     try { sessionStorage.removeItem(VIDEO_SELECTION_KEY); } catch {}
     try { sessionStorage.removeItem(OPTIONS_KEY); } catch {}
@@ -53,6 +59,8 @@ export function clearHivemindStudioPrivateState() {
     uploadedFiles.clear();
     contextPromise = null;
     contextCache = null;
+    contextRequest += 1;
+    hiveVideoModels = [];
 }
 
 function defaultContext() {
@@ -79,7 +87,7 @@ export function getHivemindVideoModelById(id) {
     return hiveVideoModels.find((model) => model.id === id) || null;
 }
 
-function mapWorkflowModels(catalog) {
+export function mapHivemindWorkflowModels(catalog) {
     const provider = workflowProvider(catalog);
     if (!provider?.models?.length) return [];
     return provider.models.map((workflow) => ({
@@ -89,6 +97,12 @@ function mapWorkflowModels(catalog) {
                 accepts,
                 supportsVideoInput: accepts.some((field) => String(field).startsWith('video_')),
                 videoModes: accepts.includes('video_mode') ? ['extend'] : [],
+                supportsLoras: Boolean(workflow.supports_loras),
+                compatibleBaseModels: Array.isArray(workflow.compatible_base_models) ? workflow.compatible_base_models : [],
+                supportsIngredientImages: accepts.includes('ingredient_images'),
+                ingredientInputs: workflow.ingredient_inputs && typeof workflow.ingredient_inputs === 'object'
+                    ? workflow.ingredient_inputs
+                    : null,
             };
         })(),
         id: workflowModelId(workflow.id),
@@ -101,9 +115,11 @@ function mapWorkflowModels(catalog) {
         needsImage: !Array.isArray(workflow.accepts) || !workflow.accepts.some((field) => String(field).startsWith('video_')),
         ready: Boolean(provider.available),
         detail: provider.detail || '',
-        aspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
+        aspectRatios: Array.isArray(workflow.aspect_ratios) && workflow.aspect_ratios.length
+            ? workflow.aspect_ratios
+            : ['16:9', '9:16', '1:1', '4:3', '3:4'],
         durations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        defaultDuration: 4,
+        defaultDuration: Number(workflow.default_duration_seconds) || 4,
         tags: ['video', 'workflow', 'local'],
     }));
 }
@@ -112,17 +128,27 @@ export async function loadHivemindStudioContext({ refresh = false } = {}) {
     if (!isHivemindStudioEnabled()) return defaultContext();
     if (contextCache && !refresh) return contextCache;
     if (!contextPromise || refresh) {
+        const request = ++contextRequest;
         contextPromise = Promise.all([
             fetch('/api/simple/catalog', { credentials: 'same-origin', cache: 'no-store' }).then((r) => r.ok ? r.json() : null).catch(() => null),
             fetch('/api/simple/prompts?favorites=true&limit=40', { credentials: 'same-origin', cache: 'no-store' }).then((r) => r.ok ? r.json() : null).catch(() => null),
         ]).then(([catalog, promptPayload]) => {
             const normalizedCatalog = catalog?.ok ? catalog : null;
-            hiveVideoModels = mapWorkflowModels(normalizedCatalog);
-            contextCache = {
-                catalog: normalizedCatalog,
-                prompts: Array.isArray(promptPayload?.prompts) ? promptPayload.prompts : [],
-                videoModels: hiveVideoModels,
+            const catalogForContext = normalizedCatalog || contextCache?.catalog || null;
+            const discoveredModels = mapHivemindWorkflowModels(catalogForContext);
+            const candidate = {
+                catalog: catalogForContext,
+                prompts: Array.isArray(promptPayload?.prompts) ? promptPayload.prompts : (contextCache?.prompts || []),
+                videoModels: discoveredModels.length ? discoveredModels : hiveVideoModels,
             };
+            if (request !== contextRequest) return contextCache || candidate;
+            hiveVideoModels = candidate.videoModels;
+            contextCache = candidate;
+            if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+                window.dispatchEvent(new CustomEvent('hivemind-context-updated', {
+                    detail: { context: contextCache },
+                }));
+            }
             return contextCache;
         });
     }
@@ -130,9 +156,59 @@ export async function loadHivemindStudioContext({ refresh = false } = {}) {
 }
 
 export async function uploadFileToHivemindStudio(file) {
-    const url = URL.createObjectURL(file);
-    uploadedFiles.set(url, file);
-    return { url, path: url };
+    const form = new FormData();
+    form.append('file', file, file.name || 'reference-image');
+    const response = await fetch('/api/media-studio/references', {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: form,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false || !data.url) {
+        throw new Error(data.detail || data.error || `Reference upload failed with HTTP ${response.status}`);
+    }
+    return {
+        url: data.url,
+        path: data.url,
+        thumbnail: data.url,
+        encryptedAtRest: Boolean(data.encrypted_at_rest),
+    };
+}
+
+export function mediaStudioReferencePath(value) {
+    const source = String(value || '').trim();
+    if (!source) return null;
+    const normalizeReferencePath = (path) => {
+        if (!path.startsWith(MEDIA_STUDIO_REFERENCE_PREFIX)) return null;
+        const encodedName = path.slice(MEDIA_STUDIO_REFERENCE_PREFIX.length);
+        if (!encodedName || encodedName.includes('/') || path.includes('?') || path.includes('#')) return null;
+        try {
+            const name = decodeURIComponent(encodedName);
+            return name && name === name.split('/').pop() ? path : null;
+        } catch {
+            return null;
+        }
+    };
+    if (source.startsWith(MEDIA_STUDIO_REFERENCE_PREFIX)) return normalizeReferencePath(source);
+    if (typeof window === 'undefined') return null;
+    try {
+        const parsed = new URL(source, window.location.origin);
+        return parsed.origin === window.location.origin && !parsed.search && !parsed.hash
+            ? normalizeReferencePath(parsed.pathname)
+            : null;
+    } catch {
+        return null;
+    }
+}
+
+export async function deleteHivemindStudioUpload(value) {
+    const reference = mediaStudioReferencePath(value);
+    if (!reference) return false;
+    const response = await fetch(reference, { method: 'DELETE', credentials: 'same-origin' });
+    if (!response.ok && response.status !== 404) {
+        throw new Error(`Reference deletion failed with HTTP ${response.status}`);
+    }
+    return true;
 }
 
 function blobToDataUrl(blob) {
@@ -178,28 +254,142 @@ function saveHivemindVideoSelection(selection) {
     sessionStorage.setItem(VIDEO_SELECTION_KEY, JSON.stringify(selection));
 }
 
-export async function generateHivemindVideo(params) {
-    const videoBase64 = params.video_base64 || await mediaSourceToDataUrl(params.video || params.video_url, 'video');
-    const imageBase64 = videoBase64 ? null : (params.image_base64 || await mediaSourceToDataUrl(params.image || params.image_url, 'image'));
-    if (!videoBase64 && !imageBase64) throw new Error('Upload a start image or source video for this local workflow.');
-    const workflowId = params.workflow_id || workflowIdFromHivemindModelId(params.model);
-    const response = await fetch('/api/media-studio/video', {
+async function ingredientImagesToRequest(items) {
+    return Promise.all((Array.isArray(items) ? items : [])
+        .slice(0, 12)
+        .map(async (item) => {
+            const source = item?.image || item?.image_url || item?.url;
+            const reference = item?.image_base64 ? null : mediaStudioReferencePath(source);
+            return {
+                ...(reference
+                    ? { image_reference: reference }
+                    : { image_base64: item?.image_base64 || await mediaSourceToDataUrl(source, 'image') }),
+                ...(String(item?.description || '').trim() ? { description: String(item.description).trim() } : {}),
+            };
+        }));
+}
+
+export async function previewHivemindIngredientSheet(items, { aspectRatio = '16:9' } = {}) {
+    const ingredientImages = await ingredientImagesToRequest(items);
+    if (!ingredientImages.length) throw new Error('Add at least one ingredient reference.');
+    const response = await fetch('/api/media-studio/ingredients/preview', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            prompt: params.prompt || '',
-            workflow_id: workflowId,
-            ...(videoBase64 ? { video_base64: videoBase64, video_mode: 'extend' } : { image_base64: imageBase64 }),
-            duration_seconds: params.duration || params.duration_seconds || 4,
-            aspect_ratio: params.aspect_ratio || '',
-        }),
+        body: JSON.stringify({ ingredient_images: ingredientImages, aspect_ratio: aspectRatio }),
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.ok === false) {
-        throw new Error(data.detail || data.error || `Media Studio generation failed with HTTP ${response.status}`);
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.detail || data.error || `Ingredients preview failed with HTTP ${response.status}`);
     }
-    return { ...data, id: data.job_id || data.id, url: data.url || data.media_url || data.output_url };
+    return {
+        blob: await response.blob(),
+        columns: Number(response.headers?.get?.('X-Ingredients-Columns')) || null,
+        rows: Number(response.headers?.get?.('X-Ingredients-Rows')) || null,
+        sourceCount: Number(response.headers?.get?.('X-Ingredients-Sources')) || ingredientImages.length,
+        width: Number(response.headers?.get?.('X-Ingredients-Width')) || null,
+        height: Number(response.headers?.get?.('X-Ingredients-Height')) || null,
+    };
+}
+
+export async function generateHivemindVideo(params) {
+    const videoSource = params.video || params.video_url;
+    const videoReference = params.video_base64 ? null : mediaStudioReferencePath(videoSource);
+    const videoBase64 = videoReference
+        ? null
+        : (params.video_base64 || await mediaSourceToDataUrl(videoSource, 'video'));
+    const imageSource = params.image || params.image_url;
+    const imageReference = videoBase64 || params.image_base64 ? null : mediaStudioReferencePath(imageSource);
+    const imageBase64 = videoBase64 || imageReference
+        ? null
+        : (params.image_base64 || await mediaSourceToDataUrl(imageSource, 'image'));
+    const ingredientImages = await ingredientImagesToRequest(params.ingredientImages);
+    if (!videoReference && !videoBase64 && !imageBase64 && !imageReference && !ingredientImages.length) {
+        throw new Error('Upload a start image or source video for this local workflow.');
+    }
+    const workflowId = params.workflow_id || workflowIdFromHivemindModelId(params.model);
+    const requestBody = JSON.stringify({
+        prompt: params.prompt || '',
+        workflow_id: workflowId,
+        ...(String(params.referenceDescription || '').trim()
+            ? { reference_description: String(params.referenceDescription).trim() }
+            : {}),
+        ...(ingredientImages.length ? { ingredient_images: ingredientImages } : {}),
+        ...(videoReference
+            ? { video_reference: videoReference, video_mode: 'extend' }
+            : videoBase64
+            ? { video_base64: videoBase64, video_mode: 'extend' }
+            : imageReference
+                ? { image_reference: imageReference }
+                : imageBase64
+                    ? { image_base64: imageBase64 }
+                    : {}),
+        duration_seconds: params.duration || params.duration_seconds || 4,
+        aspect_ratio: params.aspect_ratio || '',
+        ...(String(params.resolution || '').trim()
+            ? { resolution: String(params.resolution).trim().toLowerCase() }
+            : {}),
+        ...(Array.isArray(params.loras) && params.loras.length ? { loras: params.loras } : {}),
+    });
+    const postJson = async (path) => {
+        const response = await fetch(path, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: requestBody,
+        });
+        const data = await response.json().catch(() => ({}));
+        return { response, data };
+    };
+    const finished = (data) => ({ ...data, id: data.job_id || data.id, url: data.url || data.media_url || data.output_url });
+
+    // Job-based flow: high-resolution runs take tens of minutes — far beyond
+    // what one blocking HTTP request survives — so start the job, then poll.
+    const start = await postJson('/api/media-studio/video/start');
+    if (start.response.status === 404 || start.response.status === 405) {
+        // Older studio API without the start route: single blocking request.
+        const legacy = await postJson('/api/media-studio/video');
+        if (!legacy.response.ok || legacy.data.ok === false) {
+            throw new Error(legacy.data.detail || legacy.data.error || `Media Studio generation failed with HTTP ${legacy.response.status}`);
+        }
+        return finished(legacy.data);
+    }
+    if (!start.response.ok || start.data.ok === false || !start.data.job_id) {
+        throw new Error(start.data.detail || start.data.error || `Media Studio generation failed with HTTP ${start.response.status}`);
+    }
+    // A server that already finished synchronously answers with the media URL.
+    if (start.data.url || start.data.media_url || start.data.output_url) return finished(start.data);
+    const jobId = String(start.data.job_id);
+    const deadline = Date.now() + 90 * 60 * 1000;
+    let missing = 0;
+    while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        let payload;
+        try {
+            const response = await fetch(`/api/media-studio/video/job/${encodeURIComponent(jobId)}`, { credentials: 'same-origin' });
+            if (response.status === 404) {
+                // The studio API restarted and lost the job registry. The
+                // gateway job itself keeps running and lands in History.
+                missing += 1;
+                if (missing >= 3) throw new Error('The studio restarted mid-generation. The finished video will appear in the History tab.');
+                continue;
+            }
+            missing = 0;
+            payload = await response.json().catch(() => ({}));
+        } catch (error) {
+            if (missing >= 3) throw error;
+            continue; // transient network blip — the job survives server-side
+        }
+        if (payload.status === 'error' || payload.ok === false) {
+            throw new Error(payload.detail || payload.error || 'Media Studio reported a failed generation');
+        }
+        if (payload.status === 'running') {
+            if (typeof params.onProgress === 'function' && typeof payload.progress === 'number') params.onProgress(payload.progress);
+            continue;
+        }
+        if (payload.ok && (payload.url || payload.media_url || payload.output_url)) return finished(payload);
+    }
+    throw new Error('Media Studio generation timed out. If it finishes later, the video will appear in the History tab.');
 }
 
 function escapeHtml(value) {
@@ -285,10 +475,10 @@ export function installHivemindExploreDock() {
     scrubLegacyPersistentCreativeState();
     const root = document.createElement('div');
     root.id = 'hivemind-explore-dock';
-    root.className = 'fixed right-3 top-[76px] z-[90] flex flex-col items-end gap-2';
+    root.className = 'fixed right-3 top-[112px] lg:top-[64px] z-[90] flex flex-col items-end gap-2';
     const toggle = document.createElement('button');
     toggle.type = 'button';
-    toggle.className = 'h-10 rounded-xl border border-white/10 bg-black/80 px-3 text-xs font-black text-white shadow-2xl backdrop-blur-xl hover:border-primary/50';
+    toggle.className = 'h-10 rounded-xl border border-white/10 bg-elevated-bg/90 px-3 text-xs font-bold text-white shadow-2xl backdrop-blur-xl transition-colors hover:border-primary/50';
     toggle.textContent = 'Hivemind';
     const panel = document.createElement('div');
     panel.className = 'hidden w-[min(21rem,calc(100vw-1.5rem))] rounded-2xl border border-white/10 bg-black/90 p-3 shadow-2xl backdrop-blur-xl';
@@ -349,7 +539,11 @@ export function installHivemindExploreDock() {
             return;
         }
         if (event.data?.type === 'hivemind-explore-insert-prompt') insertIntoPrompt(event.data.text || '');
-        if (event.data?.type === 'hivemind-explore-refresh') void loadHivemindStudioContext({ refresh: true });
+        if (event.data?.type === 'hivemind-explore-refresh') {
+            void loadHivemindStudioContext({ refresh: true }).then((context) => {
+                if (!panel.classList.contains('hidden')) renderDock(panel, context);
+            });
+        }
     });
 
     window.parent?.postMessage?.({ type: 'hivemind-explore-ready' }, window.location.origin);

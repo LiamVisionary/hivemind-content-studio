@@ -11,7 +11,11 @@ import json
 import mimetypes
 import os
 import re
+import secrets
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -45,14 +49,36 @@ from .lanes import LANE_MATRIX
 from .manifest import load_manifest, write_manifest
 from .machine_privacy import machine_operation_receipt, machine_run_receipt
 from .media_catalog import media_catalog
-from .media_studio import generate_video as run_media_studio_video
+from .media_studio import (
+    check_video as run_media_studio_video_check,
+    finish_video as run_media_studio_video_finish,
+    generate_video as run_media_studio_video,
+    start_video as run_media_studio_video_start,
+    video_dimensions_for_request,
+)
 from .hivemindos_oauth import oauth_provider_status, start_oauth_login
 from .orchestrator import ContentOrchestrator
 from .prompt_history import PromptHistoryStore
 from .providers import provider_report, providers_for
-from .private_access import OWNER_SESSION_SECONDS, OwnerAccess, PrivateFieldCipher, owner_unlock_html
+from .private_access import (
+    OWNER_SESSION_SECONDS,
+    OwnerAccess,
+    PrivateFieldCipher,
+    configure_private_cipher,
+    encrypt_private_media,
+    is_private_text_file,
+    owner_unlock_html,
+    private_media_exists,
+    private_media_sidecar,
+    read_private_media,
+    read_private_text,
+    write_private_text,
+)
+from .run_privacy import migrate_private_runs
 from .shared_env import apply_shared_hive_env
 from .studio_drafts import StudioRunDraft
+from .studio_state import StudioStateStore
+from .vault_store import VaultStore
 from .template_catalog import template_report
 from .unified_runtime import unified_runtime_snapshot
 
@@ -86,14 +112,49 @@ class CanvasProvenanceBody(BaseModel):
     seeds: list[dict[str, Any]] = []
 
 
+class StudioStateBody(BaseModel):
+    state: dict[str, Any]
+
+
+class VaultIdentityBody(BaseModel):
+    identity: dict[str, Any]
+    allow_replace: bool = False
+
+
+class VaultBlobBody(BaseModel):
+    ciphertext: str
+
+
+class MediaStudioLoraBody(BaseModel):
+    id: str
+    strength: float = 1.0
+
+
+class MediaStudioIngredientImageBody(BaseModel):
+    image_base64: str | None = None
+    image_reference: str | None = None
+    description: str = ""
+
+
 class MediaStudioVideoBody(BaseModel):
     prompt: str = ""
     workflow_id: str = ""
+    reference_description: str = ""
+    ingredient_images: list[MediaStudioIngredientImageBody] = []
     image_base64: str | None = None
+    image_reference: str | None = None
     video_base64: str | None = None
+    video_reference: str | None = None
     video_mode: Literal["extend"] = "extend"
     duration_seconds: float = 4
     aspect_ratio: str = ""
+    resolution: Literal["", "standard", "high"] = ""
+    loras: list[MediaStudioLoraBody] = []
+
+
+class MediaStudioIngredientPreviewBody(BaseModel):
+    ingredient_images: list[MediaStudioIngredientImageBody] = []
+    aspect_ratio: str = "16:9"
 
 
 _INLINE_IMAGE_SUFFIXES = {
@@ -115,50 +176,34 @@ _INLINE_VIDEO_SUFFIXES = {
 }
 
 _PRIVATE_MEDIA_SUFFIX = ".zenc"
-
-
-def _private_media_context(path: Path) -> str:
-    return f"media-studio-output:{path.name}"
+_MAX_PRIVATE_IMAGE_BYTES = 32 * 1024 * 1024
+_MAX_PRIVATE_VIDEO_BYTES = 100 * 1024 * 1024
 
 
 def _private_media_sidecar(path: Path) -> Path:
-    return path.with_name(path.name + _PRIVATE_MEDIA_SUFFIX)
+    return private_media_sidecar(path)
 
 
-def _encrypt_private_media(path: Path, cipher: PrivateFieldCipher) -> bool:
-    if os.environ.get("ZIMG_OUTPUT_ENCRYPTION", "1") == "0":
-        return False
-    path = path.expanduser().resolve()
-    sidecar = _private_media_sidecar(path)
-    if sidecar.is_file() and not path.exists():
-        return True
-    if not path.is_file():
-        return False
-    original_stat = path.stat()
-    tmp = sidecar.with_name(f"{sidecar.name}.{os.getpid()}.tmp")
-    encrypted = cipher.encrypt_bytes(path.read_bytes(), context=_private_media_context(path))
-    try:
-        tmp.write_bytes(encrypted)
-        os.replace(tmp, sidecar)
-        os.utime(sidecar, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-        path.unlink()
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            tmp.unlink()
-    return True
+def _encrypt_private_media(
+    path: Path,
+    cipher: PrivateFieldCipher,
+    *,
+    scope: str = "media-studio-output",
+) -> bool:
+    return encrypt_private_media(path, scope=scope, cipher=cipher)
 
 
 def _private_media_exists(path: Path) -> bool:
-    return path.is_file() or _private_media_sidecar(path).is_file()
+    return private_media_exists(path)
 
 
-def _read_private_media(path: Path, cipher: PrivateFieldCipher) -> bytes:
-    if path.is_file():
-        return path.read_bytes()
-    sidecar = _private_media_sidecar(path)
-    if not sidecar.is_file():
-        raise FileNotFoundError(str(path))
-    return cipher.decrypt_bytes(sidecar.read_bytes(), context=_private_media_context(path))
+def _read_private_media(
+    path: Path,
+    cipher: PrivateFieldCipher,
+    *,
+    scope: str = "media-studio-output",
+) -> bytes:
+    return read_private_media(path, scope=scope, cipher=cipher)
 
 
 def _private_media_response(body: bytes, *, media_type: str, range_header: str = "") -> Response:
@@ -167,6 +212,7 @@ def _private_media_response(body: bytes, *, media_type: str, range_header: str =
         "Accept-Ranges": "bytes",
         "Cache-Control": "private, no-store",
         "Content-Length": str(total),
+        "X-Content-Type-Options": "nosniff",
     }
     if range_header:
         match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
@@ -278,7 +324,7 @@ def _write_inline_image(value: str, destination_dir: Path) -> Path:
         field_name="image_base64",
         mime_suffixes=_INLINE_IMAGE_SUFFIXES,
         default_suffix=".png",
-        max_bytes=32 * 1024 * 1024,
+        max_bytes=_MAX_PRIVATE_IMAGE_BYTES,
     )
 
 
@@ -305,7 +351,9 @@ def _machine_route_allowed(path: str, method: str) -> bool:
         return True
     if path == "/api/runs" and method in {"GET", "POST"}:
         return True
-    if path == "/api/media-studio/video" and method == "POST":
+    if path in {"/api/media-studio/video", "/api/media-studio/video/start"} and method == "POST":
+        return True
+    if method == "GET" and re.fullmatch(r"/api/media-studio/video/job/[^/]+", path):
         return True
     if method == "GET" and re.fullmatch(r"/api/runs/[^/]+", path):
         return True
@@ -375,8 +423,11 @@ def build_control_app(
     cipher = private_cipher or PrivateFieldCipher.from_keychain(
         service=os.environ.get("ZIMG_OUTPUT_KEYCHAIN_SERVICE", "zimage-output-encryption")
     )
+    configure_private_cipher(cipher)
     access = owner_access or OwnerAccess.from_runtime(cipher)
     prompt_history = PromptHistoryStore(Path(runs.store.path).parent / "prompt-history.sqlite3", cipher=cipher)
+    studio_state = StudioStateStore(Path(runs.store.path).parent / "studio-state.sqlite3", cipher=cipher)
+    vault = VaultStore(Path(runs.store.path).parent / "owner-vault.sqlite3")
     canvas_store = canvas_history or CanvasHistoryStore(Path(runs.store.path).parent / "canvas-history.sqlite3", cipher=cipher)
     canvas_gateway = CanvasGatewayClient()
     fetch_canvas_history = canvas_history_fetcher or canvas_gateway.history
@@ -387,15 +438,23 @@ def build_control_app(
     configured_operator_token = operator_token if operator_token is not None else os.environ.get("CONTENT_STUDIO_OPERATOR_TOKEN", "")
     if approvals is None:
         approvals = load_approval_ledger(required=False)
+    try:
+        migrate_private_runs(store_path=Path(runs.store.path))
+    except Exception as exc:  # startup must survive a partial legacy layout
+        print(f"[content-studio] run privacy migration warning: {exc}", file=sys.stderr)
 
     app = FastAPI(title="Hivemind Content Studio", version="0.2.0")
     unlock_failures: dict[str, deque[float]] = defaultdict(deque)
-    ui_root = Path(__file__).resolve().parent / "ui"
     repository_root = Path(__file__).resolve().parents[2]
     open_gen_dist = repository_root / "packages/open-generative-ai/dist"
     media_studio_input_root = Path(runs.store.path).parent / "uploads" / "media-studio"
+    media_studio_reference_root = Path(runs.store.path).parent / "uploads" / "media-studio-references"
     media_studio_output_root = Path(runs.store.path).parent / "generated" / "media-studio"
-    app.mount("/assets", StaticFiles(directory=ui_root), name="studio-assets")
+    ingredients_sheet_compositor = repository_root / "packages/media-gateway/bin/compose-ingredients-sheet.py"
+    # The unified studio frontend (packages/open-generative-ai, Vite build) is
+    # the ONLY UI this server ships. /open-gen stays mounted for older links
+    # and the desktop shell; /assets serves the same build's hashed bundles.
+    app.mount("/assets", StaticFiles(directory=open_gen_dist / "assets", check_dir=False), name="studio-assets")
     app.mount("/open-gen", StaticFiles(directory=open_gen_dist, html=True, check_dir=False), name="open-generative-ai")
 
     def record_prompt(
@@ -424,8 +483,8 @@ def build_control_app(
         descriptor, draft_name = tempfile.mkstemp(prefix="studio-draft-", suffix=".yaml", dir=draft_root)
         draft_path = Path(draft_name)
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                yaml.safe_dump(body.to_brief(), handle, sort_keys=False)
+            os.close(descriptor)
+            write_private_text(draft_path, yaml.safe_dump(body.to_brief(), sort_keys=False))
             return runs.execute_content_run(
                 draft_path,
                 policy={"privacy": body.privacy},
@@ -475,6 +534,29 @@ def build_control_app(
     def owner_visible(request: Request, value: dict[str, Any]) -> dict[str, Any]:
         return value if bool(getattr(request.state, "is_owner", False)) else machine_run_receipt(value)
 
+    def stage_media_studio_reference(value: str) -> Path:
+        prefix = "/api/media-studio/references/"
+        if not value.startswith(prefix):
+            raise ValueError("Media reference is not a private Studio reference")
+        encoded_name = value.removeprefix(prefix)
+        if not encoded_name or "/" in encoded_name or "?" in encoded_name or "#" in encoded_name:
+            raise ValueError("Media reference is invalid")
+        name = urllib.parse.unquote(encoded_name)
+        reference = (media_studio_reference_root / name).resolve()
+        reference_root = media_studio_reference_root.resolve()
+        if name != Path(name).name or not reference.is_relative_to(reference_root) or not _private_media_exists(reference):
+            raise ValueError("Media reference is unavailable")
+        decrypted = _read_private_media(reference, cipher, scope="media-studio-reference")
+        media_studio_input_root.mkdir(parents=True, exist_ok=True)
+        descriptor, staged_name = tempfile.mkstemp(
+            prefix="media-studio-reference-",
+            suffix=reference.suffix,
+            dir=media_studio_input_root,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(decrypted)
+        return Path(staged_name)
+
     @app.get("/healthz")
     def healthz() -> dict:
         return {"ok": True, "service": "hivemind-content-studio", "owner_lock": True}
@@ -519,9 +601,24 @@ def build_control_app(
         response.delete_cookie(access.cookie_name, path="/", samesite="strict")
         return response
 
-    @app.get("/", response_class=FileResponse, include_in_schema=False)
-    def index() -> FileResponse:
-        return FileResponse(ui_root / "index.html")
+    @app.get("/", include_in_schema=False)
+    def index() -> Response:
+        unified_index = open_gen_dist / "index.html"
+        if unified_index.is_file():
+            # Inject the studio marker so the frontend knows it is running as
+            # the integrated studio (enables local workflows, run history via
+            # the studio API, and the Hivemind dock) without URL params.
+            html = unified_index.read_text(encoding="utf-8").replace(
+                "<head>",
+                "<head><script>window.__HIVEMIND_STUDIO__=1</script>",
+                1,
+            )
+            return HTMLResponse(html)
+        return HTMLResponse(
+            "<h1>Hivemind Content Studio</h1><p>The frontend build is missing. "
+            "Run <code>npm --prefix packages/open-generative-ai run vite:build</code>.</p>",
+            status_code=503,
+        )
 
     @app.get("/api/catalog")
     def catalog() -> dict:
@@ -541,15 +638,23 @@ def build_control_app(
 
     @app.get("/api/surfaces")
     def surfaces() -> dict:
+        open_gen_index = open_gen_dist / "index.html"
+        open_gen_version = str(open_gen_index.stat().st_mtime_ns) if open_gen_index.is_file() else "missing"
         return {
             "ok": True,
             "surfaces": {
-                "explore": {"path": "/open-gen/", "available": (open_gen_dist / "index.html").is_file()},
+                "explore": {"path": f"/open-gen/?build={open_gen_version}", "available": open_gen_index.is_file()},
                 "canvas": {"gateway_path": "/mobile/", "available": True},
                 "models": {"gateway_path": "/models", "available": True},
                 "gateway": {"gateway_path": "/", "available": True},
             },
         }
+
+    # /local-ai/* is the same bridge without the prefix — the unified frontend
+    # served at "/" calls it same-origin (hosted-local-ai.js apiBase = '').
+    @app.api_route("/local-ai/{subpath:path}", methods=["GET", "POST"], dependencies=[Depends(require_owner)])
+    async def local_ai_bridge(subpath: str, request: Request) -> Response:
+        return await open_gen_api(f"local-ai/{subpath}", request)
 
     @app.api_route("/open-gen-api/{path:path}", methods=["GET", "POST"], dependencies=[Depends(require_owner)])
     async def open_gen_api(path: str, request: Request) -> Response:
@@ -559,8 +664,15 @@ def build_control_app(
             "local-ai/binary-status",
             "local-ai/models",
             "local-ai/generate",
+            "local-ai/prompt-helper",
+            "local-ai/civitai-download",
         }
-        if path not in allowed and not (path.startswith("local-ai/job/") and path.removeprefix("local-ai/job/").replace("-", "").replace("_", "").isalnum()):
+        dynamic_local_ai_route = any(
+            path.startswith(prefix)
+            and path.removeprefix(prefix).replace("-", "").replace("_", "").replace("%", "").isalnum()
+            for prefix in ("local-ai/job/", "local-ai/loras/", "local-ai/lora-preview/", "local-ai/civitai-download/")
+        )
+        if path not in allowed and not dynamic_local_ai_route:
             raise HTTPException(status_code=404, detail="OpenGen bridge route not found")
         body = await request.body()
 
@@ -585,8 +697,7 @@ def build_control_app(
             raise HTTPException(status_code=503, detail=str(exc)) from None
         return Response(content=content, status_code=status, media_type=content_type.split(";", 1)[0])
 
-    @app.get("/api/simple/catalog")
-    def simple_catalog() -> dict:
+    def _build_simple_catalog() -> dict:
         brains: list[dict] = []
         brain_error = ""
         try:
@@ -604,6 +715,46 @@ def build_control_app(
             "attachment_intake_limit": 30,
             "attachment_note": "The studio can retain up to 30 ordered references. Each selected provider/model receives only roles allowed by its capability schema.",
         }
+
+    # The catalog aggregates provider probes (the HivemindOS brains call can
+    # take many seconds when that app is busy), and every model UI in the
+    # studio waits on it. Serve the last-built catalog immediately and refresh
+    # in the background instead of stalling each studio open on live probes.
+    simple_catalog_cache: dict[str, Any] = {"payload": None, "at": 0.0}
+    simple_catalog_refreshing = threading.Event()
+    SIMPLE_CATALOG_TTL_SECONDS = 30.0
+
+    def _refresh_simple_catalog() -> None:
+        try:
+            payload = _build_simple_catalog()
+            simple_catalog_cache.update(payload=payload, at=time.time())
+        except Exception:
+            pass  # keep serving the previous catalog; the next request retries
+        finally:
+            simple_catalog_refreshing.clear()
+
+    def _kick_simple_catalog_refresh() -> None:
+        if simple_catalog_refreshing.is_set():
+            return
+        simple_catalog_refreshing.set()
+        threading.Thread(target=_refresh_simple_catalog, name="simple-catalog-refresh", daemon=True).start()
+
+    @app.get("/api/simple/catalog")
+    def simple_catalog() -> dict:
+        cached = simple_catalog_cache["payload"]
+        if cached is None:
+            payload = _build_simple_catalog()
+            simple_catalog_cache.update(payload=payload, at=time.time())
+            return payload
+        if time.time() - simple_catalog_cache["at"] > SIMPLE_CATALOG_TTL_SECONDS:
+            _kick_simple_catalog_refresh()
+        return cached
+
+    @app.on_event("startup")
+    def _warm_simple_catalog() -> None:
+        # Build the catalog once at boot so even the first studio open after a
+        # stack restart gets an instant model list.
+        _kick_simple_catalog_refresh()
 
     @app.get("/api/templates")
     def templates() -> dict:
@@ -686,15 +837,18 @@ def build_control_app(
                 raise HTTPException(status_code=400, detail="The saved reference image is not an image")
             manifest_root = Path(source_run["manifest_path"]).expanduser().resolve().parent
             source_path = Path(str(record.get("path") or "")).expanduser().resolve()
-            if not source_path.is_file() or not source_path.is_relative_to(manifest_root):
+            if not private_media_exists(source_path) or not source_path.is_relative_to(manifest_root):
                 raise HTTPException(status_code=400, detail="The saved reference image is unavailable")
-            size = source_path.stat().st_size
-            if size > 50 * 1024 * 1024:
+            try:
+                data = read_private_media(source_path)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="The saved reference image could not be decrypted") from None
+            if len(data) > 50 * 1024 * 1024:
                 raise HTTPException(status_code=400, detail="A saved reference image exceeds 50 MB")
-            total_bytes += size
+            total_bytes += len(data)
             if total_bytes > 500 * 1024 * 1024:
                 raise HTTPException(status_code=400, detail="Reference images exceed the 500 MB production limit")
-            payloads.append((source_path.name or f"saved-reference-{index}.png", source_path.read_bytes()))
+            payloads.append((source_path.name or f"saved-reference-{index}.png", data))
         for upload in uploads:
             if not (upload.content_type or "").startswith("image/"):
                 raise HTTPException(status_code=400, detail=f"{upload.filename or 'Attachment'} is not an image")
@@ -739,7 +893,7 @@ def build_control_app(
         }
         write_manifest(manifest_path, manifest)
         script_path = manifest_path.parent / "script.md"
-        script_path.write_text(draft.to_script_markdown(), encoding="utf-8")
+        write_private_text(script_path, draft.to_script_markdown())
         brain = composer.get("brain") if isinstance(composer.get("brain"), dict) else {}
         runtime = f"{brain.get('provider', 'agent-brain')}:{brain.get('model', 'automatic')}"
         attach_script(manifest_path, script_path, runtime=runtime, copy=False)
@@ -772,6 +926,67 @@ def build_control_app(
         record_prompt(body, source="advanced", run_id=run["run_id"])
         return owner_visible(request, run)
 
+    @app.get("/api/studio-state/{state_key}", dependencies=[Depends(require_owner)])
+    def get_studio_state(state_key: str) -> dict:
+        try:
+            return {"ok": True, "state": studio_state.get(state_key)}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @app.put("/api/studio-state/{state_key}", dependencies=[Depends(require_owner)])
+    def put_studio_state(state_key: str, body: StudioStateBody) -> dict:
+        try:
+            studio_state.put(state_key, body.state)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return {"ok": True}
+
+    @app.delete("/api/studio-state/{state_key}", dependencies=[Depends(require_owner)])
+    def delete_studio_state(state_key: str) -> dict:
+        try:
+            return {"ok": True, "removed": studio_state.delete(state_key)}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    # ── owner vault (client-side E2E; server stores only ciphertext/wrapped keys) ──
+    @app.get("/api/vault/identity", dependencies=[Depends(require_owner)])
+    def get_vault_identity() -> dict:
+        identity = vault.get_identity()
+        return {"ok": True, "exists": identity is not None, "identity": identity}
+
+    @app.put("/api/vault/identity", dependencies=[Depends(require_owner)])
+    def put_vault_identity(body: VaultIdentityBody) -> dict:
+        try:
+            vault.put_identity(body.identity, allow_replace=body.allow_replace)
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return {"ok": True}
+
+    @app.get("/api/vault/blob/{namespace}/{blob_key}", dependencies=[Depends(require_owner)])
+    def get_vault_blob(namespace: str, blob_key: str) -> dict:
+        try:
+            ciphertext = vault.get_blob(namespace, blob_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return {"ok": True, "ciphertext": ciphertext}
+
+    @app.put("/api/vault/blob/{namespace}/{blob_key}", dependencies=[Depends(require_owner)])
+    def put_vault_blob(namespace: str, blob_key: str, body: VaultBlobBody) -> dict:
+        try:
+            vault.put_blob(namespace, blob_key, body.ciphertext)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return {"ok": True}
+
+    @app.delete("/api/vault/blob/{namespace}/{blob_key}", dependencies=[Depends(require_owner)])
+    def delete_vault_blob(namespace: str, blob_key: str) -> dict:
+        try:
+            return {"ok": True, "removed": vault.delete_blob(namespace, blob_key)}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
     @app.get("/api/simple/prompts", dependencies=[Depends(require_owner)])
     def list_prompts(favorites: bool = False, limit: int = 200) -> dict:
         return {"ok": True, "prompts": prompt_history.list(favorites_only=favorites, limit=limit)}
@@ -791,50 +1006,92 @@ def build_control_app(
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return {"ok": True}
 
-    @app.post("/api/media-studio/video", dependencies=[Depends(require_owner_or_control)])
-    async def generate_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
+    def _staged_media_studio_video_inputs(
+        body: MediaStudioVideoBody, request: Request
+    ) -> tuple[Path | None, Path | None, list[dict[str, Any]]]:
         image: Path | None = None
         video: Path | None = None
+        ingredient_images: list[dict[str, Any]] = []
+        has_private_reference = body.image_reference or body.video_reference or any(
+            item.image_reference for item in body.ingredient_images
+        )
+        if has_private_reference and not bool(getattr(request.state, "is_owner", False)):
+            raise HTTPException(status_code=403, detail="Private media references require an owner session")
         try:
-            if body.video_base64:
+            if len(body.ingredient_images) > 12:
+                raise ValueError("At most 12 ingredient reference images are supported")
+            for index, item in enumerate(body.ingredient_images):
+                if item.image_base64:
+                    source = _write_inline_image(item.image_base64, media_studio_input_root)
+                elif item.image_reference:
+                    source = stage_media_studio_reference(item.image_reference)
+                else:
+                    raise ValueError(f"Ingredient reference {index + 1} has no image")
+                ingredient_images.append({
+                    "image_path": source,
+                    "description": item.description.strip()[:1000],
+                })
+            if body.video_reference:
+                video = stage_media_studio_reference(body.video_reference)
+            elif body.video_base64:
                 video = _write_inline_video(body.video_base64, media_studio_input_root)
             elif body.image_base64:
                 image = _write_inline_image(body.image_base64, media_studio_input_root)
-            else:
-                raise ValueError("image_base64 or video_base64 is required")
+            elif body.image_reference:
+                image = stage_media_studio_reference(body.image_reference)
+            elif not ingredient_images:
+                raise ValueError("An image or video input is required")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        started = time.perf_counter()
-        try:
-            result = await asyncio.to_thread(
-                run_media_studio_video,
-                image_path=image,
-                video_path=video,
-                video_mode=body.video_mode,
-                prompt=body.prompt.strip(),
-                duration_seconds=body.duration_seconds,
-                workflow_id=body.workflow_id.strip() or None,
-                output_dir=media_studio_output_root,
-            )
-        except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
-            detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
-            raise HTTPException(status_code=503, detail=detail) from None
-        finally:
-            for source in (image, video):
-                if source is not None:
-                    with contextlib.suppress(FileNotFoundError):
-                        source.unlink()
+        return image, video, ingredient_images
+
+    def _validated_media_studio_loras(body: MediaStudioVideoBody) -> list[dict[str, Any]]:
+        loras: list[dict[str, Any]] = []
+        for item in body.loras:
+            lora_id = item.id.strip()
+            if not lora_id or len(lora_id) > 512 or "\0" in lora_id:
+                raise HTTPException(status_code=400, detail="LoRA id is invalid")
+            if item.strength < -10 or item.strength > 10:
+                raise HTTPException(status_code=400, detail=f"LoRA strength for {lora_id} must be between -10 and 10")
+            loras.append({"id": lora_id, "strength": item.strength})
+        return loras
+
+    def _unlink_staged_media_studio_sources(
+        image: Path | None, video: Path | None, ingredient_images: list[dict[str, Any]]
+    ) -> None:
+        for source in [image, video, *(item["image_path"] for item in ingredient_images)]:
+            if source is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    source.unlink()
+
+    def _finalize_media_studio_video(result: dict[str, Any], started: float) -> dict[str, Any]:
+        gateway_output = Path(str(result.get("gateway_output") or "")).name
+        if gateway_output:
+            # Client-only E2E output: the gateway holds the sealed envelope and
+            # no server can decrypt it. Serve it through the owner-gated proxy;
+            # the browser's vault does the decryption (same as the History tab).
+            url = f"/api/media-studio/gateway/{urllib.parse.quote(gateway_output)}"
+            return {
+                "ok": True,
+                **_public_media_studio_result(result),
+                "output": gateway_output,
+                "qa": _public_media_studio_qa(result.get("qa")),
+                "encrypted_at_rest": True,
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+                "url": url,
+                "media_url": url,
+            }
         _remove_media_studio_qa_artifacts(result.get("qa"), media_studio_output_root)
         output = Path(str(result.get("output") or "")).expanduser().resolve()
         root = media_studio_output_root.resolve()
         if not output.is_relative_to(root) or not _private_media_exists(output):
-            raise HTTPException(status_code=502, detail="Media Studio returned an unavailable output")
+            raise RuntimeError("Media Studio returned an unavailable output")
         encrypted_at_rest = _encrypt_private_media(output, cipher)
         if not _private_media_exists(output):
-            raise HTTPException(status_code=502, detail="Media Studio output could not be secured")
+            raise RuntimeError("Media Studio output could not be secured")
         elapsed = round(time.perf_counter() - started, 3)
         url = f"/api/media-studio/generated/{urllib.parse.quote(output.name)}"
-        response = {
+        return {
             "ok": True,
             **_public_media_studio_result(result),
             "output": output.name,
@@ -844,7 +1101,290 @@ def build_control_app(
             "url": url,
             "media_url": url,
         }
+
+    @app.post("/api/media-studio/video", dependencies=[Depends(require_owner_or_control)])
+    async def generate_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
+        image, video, ingredient_images = _staged_media_studio_video_inputs(body, request)
+        loras = _validated_media_studio_loras(body)
+        started = time.perf_counter()
+        try:
+            result = await asyncio.to_thread(
+                run_media_studio_video,
+                image_path=image,
+                video_path=video,
+                video_mode=body.video_mode,
+                prompt=body.prompt.strip(),
+                reference_description=body.reference_description.strip(),
+                ingredient_images=ingredient_images,
+                duration_seconds=body.duration_seconds,
+                aspect_ratio=body.aspect_ratio,
+                resolution=body.resolution,
+                workflow_id=body.workflow_id.strip() or None,
+                loras=loras,
+                output_dir=media_studio_output_root,
+            )
+        except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
+            detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
+            raise HTTPException(status_code=503, detail=detail) from None
+        finally:
+            _unlink_staged_media_studio_sources(image, video, ingredient_images)
+        try:
+            response = _finalize_media_studio_video(result, started)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
         return response if bool(getattr(request.state, "is_owner", False)) else machine_operation_receipt(response)
+
+    # Job-based variant: high-resolution runs take tens of minutes, far beyond
+    # what one browser HTTP request survives. start returns a gateway job id
+    # immediately; a background task finishes (download, QA, sealing) while the
+    # browser polls the job route. If the studio restarts mid-run the registry
+    # entry is lost but the gateway job still completes into History.
+    media_studio_video_jobs: dict[str, dict[str, Any]] = {}
+
+    def _prune_media_studio_video_jobs() -> None:
+        cutoff = time.time() - 6 * 3600
+        for key in [key for key, entry in media_studio_video_jobs.items() if entry.get("created", 0.0) < cutoff]:
+            media_studio_video_jobs.pop(key, None)
+
+    async def _finish_media_studio_video_job(job_id: str) -> None:
+        """Drive a running job to its terminal state. Kicked off as a background
+        task at start and re-entered (idempotently, via the finalizing flag) by
+        the poll route, so a lost event loop can never strand a finished job."""
+        entry = media_studio_video_jobs.get(job_id)
+        if entry is None or entry.get("status") != "running":
+            return
+        # The finalizing flag is scoped to the event loop that set it: if that
+        # loop died mid-finalize (its tasks are cancelled but the flag would
+        # stay set), a caller on a NEW loop may reclaim the job.
+        loop_id = id(asyncio.get_running_loop())
+        if entry.get("finalizing") and entry.get("finalizing_loop") == loop_id:
+            return
+        entry["finalizing"] = True
+        entry["finalizing_loop"] = loop_id
+        try:
+            result = await asyncio.to_thread(
+                run_media_studio_video_finish,
+                job_id,
+                uploaded_names=list(entry.get("uploaded_names") or []),
+                output_dir=media_studio_output_root,
+            )
+            entry.update(status="done", response=_finalize_media_studio_video(result, float(entry.get("started") or time.perf_counter())))
+        except Exception as exc:
+            entry.update(status="error", detail=str(exc) or "Media generation failed")
+
+    @app.post("/api/media-studio/video/start", dependencies=[Depends(require_owner_or_control)])
+    async def start_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
+        image, video, ingredient_images = _staged_media_studio_video_inputs(body, request)
+        loras = _validated_media_studio_loras(body)
+        started = time.perf_counter()
+        try:
+            queued = await asyncio.to_thread(
+                run_media_studio_video_start,
+                image_path=image,
+                video_path=video,
+                video_mode=body.video_mode,
+                prompt=body.prompt.strip(),
+                reference_description=body.reference_description.strip(),
+                ingredient_images=ingredient_images,
+                duration_seconds=body.duration_seconds,
+                aspect_ratio=body.aspect_ratio,
+                resolution=body.resolution,
+                workflow_id=body.workflow_id.strip() or None,
+                loras=loras,
+            )
+        except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
+            detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
+            raise HTTPException(status_code=503, detail=detail) from None
+        finally:
+            # start_video uploads the inputs to the gateway before returning,
+            # so the staged control-api copies are no longer needed either way.
+            _unlink_staged_media_studio_sources(image, video, ingredient_images)
+        job_id = str(queued["job_id"])
+        _prune_media_studio_video_jobs()
+        media_studio_video_jobs[job_id] = {
+            "status": "running",
+            "created": time.time(),
+            "started": started,
+            "uploaded_names": list(queued.get("uploaded_names") or []),
+        }
+        asyncio.get_running_loop().create_task(_finish_media_studio_video_job(job_id))
+        return {"ok": True, "job_id": job_id, "status": "running"}
+
+    @app.get("/api/media-studio/video/job/{job_id}", dependencies=[Depends(require_owner_or_control)])
+    async def media_studio_video_job(job_id: str, request: Request) -> dict:
+        entry = media_studio_video_jobs.get(job_id)
+        if entry is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Unknown media job. If the studio restarted mid-generation, the finished video still appears in History.",
+            )
+        progress = None
+        if entry["status"] == "running":
+            state = None
+            with contextlib.suppress(Exception):
+                state = await asyncio.to_thread(run_media_studio_video_check, job_id)
+            if state:
+                progress = state.get("progress")
+                # The background finisher normally lands the job; if its event
+                # loop was lost, adopt the finished (or failed) job right here.
+                if state.get("failed") or state.get("video_url"):
+                    await _finish_media_studio_video_job(job_id)
+        if entry["status"] == "done":
+            response = entry["response"]
+            return response if bool(getattr(request.state, "is_owner", False)) else machine_operation_receipt(response)
+        if entry["status"] == "error":
+            detail = entry.get("detail") if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
+            return {"ok": False, "status": "error", "detail": detail}
+        return {"ok": True, "status": "running", **({"progress": progress} if progress is not None else {})}
+
+    @app.get("/api/media-studio/gateway/{output_name}", response_class=Response, dependencies=[Depends(require_owner)])
+    def media_studio_gateway_media(output_name: str) -> Response:
+        name = Path(output_name).name
+        if not name or name != output_name:
+            raise HTTPException(status_code=400, detail="A bare output filename is required")
+        try:
+            content, media_type = fetch_canvas_media(name)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, no-store"})
+
+    @app.post("/api/media-studio/ingredients/preview", dependencies=[Depends(require_owner)])
+    async def preview_media_studio_ingredients(body: MediaStudioIngredientPreviewBody) -> Response:
+        if not 1 <= len(body.ingredient_images) <= 12:
+            raise HTTPException(status_code=400, detail="Between 1 and 12 ingredient reference images are required")
+        sources: list[Path] = []
+        output: Path | None = None
+        try:
+            for index, item in enumerate(body.ingredient_images):
+                if item.image_base64:
+                    source = _write_inline_image(item.image_base64, media_studio_input_root)
+                elif item.image_reference:
+                    source = stage_media_studio_reference(item.image_reference)
+                else:
+                    raise ValueError(f"Ingredient reference {index + 1} has no image")
+                sources.append(source)
+            if not ingredients_sheet_compositor.is_file():
+                raise RuntimeError("Ingredients sheet compositor is unavailable")
+            media_studio_input_root.mkdir(parents=True, exist_ok=True)
+            descriptor, output_name = tempfile.mkstemp(
+                prefix="media-studio-ingredients-preview-",
+                suffix=".png",
+                dir=media_studio_input_root,
+            )
+            os.close(descriptor)
+            output = Path(output_name)
+            dimensions = video_dimensions_for_request(aspect_ratio=body.aspect_ratio)
+            geometry_args = (
+                ["--width", str(dimensions[0]), "--height", str(dimensions[1])]
+                if dimensions else []
+            )
+            completed = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    sys.executable,
+                    str(ingredients_sheet_compositor),
+                    "--output",
+                    str(output),
+                    *geometry_args,
+                    *(str(source) for source in sources),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if completed.returncode != 0 or not output.is_file():
+                raise RuntimeError("Ingredients sheet preview could not be composed")
+            try:
+                layout = json.loads(completed.stdout)
+            except (json.JSONDecodeError, TypeError):
+                layout = {}
+            return Response(
+                content=output.read_bytes(),
+                media_type="image/png",
+                headers={
+                    "Cache-Control": "private, no-store",
+                    "X-Ingredients-Columns": str(layout.get("columns", "")),
+                    "X-Ingredients-Rows": str(layout.get("rows", "")),
+                    "X-Ingredients-Sources": str(len(sources)),
+                    "X-Ingredients-Width": str(layout.get("width", "")),
+                    "X-Ingredients-Height": str(layout.get("height", "")),
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+        finally:
+            for source in sources:
+                source.unlink(missing_ok=True)
+            if output is not None:
+                output.unlink(missing_ok=True)
+
+    @app.post("/api/media-studio/references", dependencies=[Depends(require_owner)])
+    async def upload_media_studio_reference(file: UploadFile = File(...)) -> dict:
+        content_type = str(file.content_type or "").split(";", 1)[0].strip().lower()
+        mime_suffixes = {**_INLINE_IMAGE_SUFFIXES, **_INLINE_VIDEO_SUFFIXES}
+        suffix = mime_suffixes.get(content_type)
+        if not suffix:
+            candidate = Path(str(file.filename or "")).suffix.lower()
+            if candidate in set(mime_suffixes.values()):
+                suffix = candidate
+        if not suffix:
+            raise HTTPException(status_code=415, detail="Reference must be a supported image or video")
+        is_video = content_type in _INLINE_VIDEO_SUFFIXES or suffix in set(_INLINE_VIDEO_SUFFIXES.values())
+        max_bytes = _MAX_PRIVATE_VIDEO_BYTES if is_video else _MAX_PRIVATE_IMAGE_BYTES
+        body = await file.read(max_bytes + 1)
+        await file.close()
+        if not body:
+            raise HTTPException(status_code=400, detail="Media reference is empty")
+        if len(body) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"Media reference is too large; max {max_bytes // 1024 // 1024} MB")
+
+        media_studio_reference_root.mkdir(parents=True, exist_ok=True)
+        name = f"reference-{secrets.token_hex(16)}{suffix}"
+        reference = (media_studio_reference_root / name).resolve()
+        reference.write_bytes(body)
+        try:
+            encrypted_at_rest = _encrypt_private_media(reference, cipher, scope="media-studio-reference")
+        except Exception as exc:
+            with contextlib.suppress(FileNotFoundError):
+                reference.unlink()
+            raise HTTPException(status_code=503, detail="Reference image could not be secured") from exc
+        if not _private_media_exists(reference):
+            raise HTTPException(status_code=503, detail="Reference image could not be secured")
+        url = f"/api/media-studio/references/{urllib.parse.quote(name)}"
+        return {"ok": True, "url": url, "encrypted_at_rest": encrypted_at_rest}
+
+    @app.get("/api/media-studio/references/{filename}", dependencies=[Depends(require_owner)])
+    def media_studio_reference(filename: str, request: Request) -> Response:
+        name = Path(filename).name
+        reference = (media_studio_reference_root / name).resolve()
+        root = media_studio_reference_root.resolve()
+        if name != filename or not reference.is_relative_to(root) or not _private_media_exists(reference):
+            raise HTTPException(status_code=404, detail="Reference image not found")
+        try:
+            body = _read_private_media(reference, cipher, scope="media-studio-reference")
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail="Reference image could not be decrypted") from exc
+        media_type = mimetypes.guess_type(reference.name)[0] or "image/png"
+        return _private_media_response(body, media_type=media_type, range_header=request.headers.get("range", ""))
+
+    @app.delete("/api/media-studio/references/{filename}", dependencies=[Depends(require_owner)])
+    def delete_media_studio_reference(filename: str) -> dict:
+        name = Path(filename).name
+        reference = (media_studio_reference_root / name).resolve()
+        root = media_studio_reference_root.resolve()
+        if name != filename or not reference.is_relative_to(root):
+            raise HTTPException(status_code=404, detail="Reference image not found")
+        removed = False
+        for candidate in (reference, _private_media_sidecar(reference)):
+            if candidate.is_file():
+                candidate.unlink()
+                removed = True
+        if not removed:
+            raise HTTPException(status_code=404, detail="Reference image not found")
+        return {"ok": True}
 
     @app.get("/api/media-studio/generated/{filename}", dependencies=[Depends(require_owner)])
     def media_studio_generated_video(filename: str, request: Request) -> Response:
@@ -952,10 +1492,10 @@ def build_control_app(
 
     @app.get(
         "/api/runs/{run_id}/artifacts/{artifact_id}",
-        response_class=FileResponse,
+        response_class=Response,
         dependencies=[Depends(require_owner)],
     )
-    def artifact(run_id: str, artifact_id: str) -> FileResponse:
+    def artifact(run_id: str, artifact_id: str, request: Request) -> Response:
         try:
             run = runs.get_run(run_id)
         except KeyError as exc:
@@ -965,9 +1505,32 @@ def build_control_app(
             raise HTTPException(status_code=404, detail="Artifact not found")
         manifest_root = Path(run["manifest_path"]).expanduser().resolve().parent
         artifact_path = Path(str(record.get("path") or "")).expanduser().resolve()
-        if not artifact_path.is_file() or not artifact_path.is_relative_to(manifest_root):
+        if not private_media_exists(artifact_path) or not artifact_path.is_relative_to(manifest_root):
             raise HTTPException(status_code=404, detail="Artifact is unavailable")
-        return FileResponse(artifact_path, media_type=record.get("mime_type"), filename=artifact_path.name)
+        if artifact_path.is_file() and is_private_text_file(artifact_path):
+            try:
+                body = read_private_text(artifact_path).encode("utf-8")
+            except Exception:
+                raise HTTPException(status_code=503, detail="Artifact could not be decrypted") from None
+            return Response(
+                content=body,
+                media_type=record.get("mime_type") or "text/plain",
+                headers={
+                    "Cache-Control": "private, no-store",
+                    "Content-Disposition": f'inline; filename="{artifact_path.name}"',
+                },
+            )
+        if artifact_path.is_file():
+            return FileResponse(artifact_path, media_type=record.get("mime_type"), filename=artifact_path.name)
+        try:
+            body = read_private_media(artifact_path)
+        except ValueError:
+            raise HTTPException(status_code=503, detail="Artifact could not be decrypted") from None
+        return _private_media_response(
+            body,
+            media_type=record.get("mime_type") or "application/octet-stream",
+            range_header=request.headers.get("range", ""),
+        )
 
     @app.get("/api/providers")
     def providers() -> dict:
@@ -1019,6 +1582,11 @@ def build_control_app(
         if approvals is None or len(configured_operator_token) < 12:
             raise HTTPException(status_code=503, detail="Approval ledger is not configured")
         return {"ok": True, "approval": approvals.deny(approval_id, operator_token=configured_operator_token, decided_by=body.decided_by)}
+
+    # Registered last so every API route above wins; serves root-level build
+    # files the unified frontend references absolutely (/hosted-local-ai.js,
+    # /vite.svg, …).
+    app.mount("/", StaticFiles(directory=open_gen_dist, html=True, check_dir=False), name="unified-frontend")
 
     return app
 

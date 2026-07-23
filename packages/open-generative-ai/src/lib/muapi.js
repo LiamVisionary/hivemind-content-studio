@@ -1,5 +1,14 @@
 import { getModelById, getVideoModelById, getI2IModelById, getI2VModelById, getV2VModelById, getLipSyncModelById } from './models.js';
 
+export function applyDeclaredModelInputs(payload, params, modelInfo) {
+    Object.keys(modelInfo?.inputs || {}).forEach((name) => {
+        if (Object.prototype.hasOwnProperty.call(params, name) && params[name] !== undefined && params[name] !== null) {
+            payload[name] = params[name];
+        }
+    });
+    return payload;
+}
+
 export class MuapiClient {
     constructor() {
         // Ideally user provides this in settings
@@ -185,6 +194,7 @@ export class MuapiClient {
         if (params.quality) finalPayload.quality = params.quality;
         if (params.mode) finalPayload.mode = params.mode;
         if (params.image_url) finalPayload.image_url = params.image_url;
+        applyDeclaredModelInputs(finalPayload, params, modelInfo);
 
         console.log('[Muapi] Video Request:', url);
         console.log('[Muapi] Video Payload:', finalPayload);
@@ -352,6 +362,7 @@ export class MuapiClient {
         if (params.quality) finalPayload.quality = params.quality;
         if (params.mode) finalPayload.mode = params.mode;
         if (params.name) finalPayload.name = params.name;
+        applyDeclaredModelInputs(finalPayload, params, modelInfo);
 
         console.log('[Muapi] I2V Request:', url);
         console.log('[Muapi] I2V Payload:', finalPayload);

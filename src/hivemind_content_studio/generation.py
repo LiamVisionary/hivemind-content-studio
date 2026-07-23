@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .manifest import add_artifact, load_manifest, write_manifest
+from .private_access import encrypt_private_media, is_private_text_file, read_private_json
 
 
 PAID_GENERATION_CONFIRMATION = "PAID_GENERATE"
@@ -45,6 +46,8 @@ def record_generated_asset(manifest_path: str | Path, result: dict[str, Any], *,
     if result.get("source_url"):
         artifact["source_url"] = str(result["source_url"])
     write_manifest(manifest_file, manifest)
+    if output.is_relative_to(manifest_file.parent):
+        encrypt_private_media(output)
     return artifact
 
 
@@ -484,8 +487,21 @@ def generate_muapi_asset(
     if not MUAPI_HELPER.is_file():
         raise RuntimeError("Bundled MUAPI helper is missing; sync shared skills")
     destination = Path(output).expanduser().resolve()
-    command = build_muapi_submit_command(endpoint=endpoint, payload=payload, output=destination, state=state)
-    completed = runner(command, text=True, capture_output=True, timeout=1800, check=False)
+    payload_path = Path(payload).expanduser().resolve()
+    staged_payload: Path | None = None
+    if is_private_text_file(payload_path):
+        # The MUAPI helper is an external process; stage a plaintext copy and
+        # remove it as soon as the submission finishes.
+        staged_payload = payload_path.with_name(f".{payload_path.stem}-staged-{os.getpid()}.json")
+        staged_payload.write_text(json.dumps(read_private_json(payload_path)) + "\n", encoding="utf-8")
+    command = build_muapi_submit_command(
+        endpoint=endpoint, payload=staged_payload or payload_path, output=destination, state=state
+    )
+    try:
+        completed = runner(command, text=True, capture_output=True, timeout=1800, check=False)
+    finally:
+        if staged_payload is not None:
+            staged_payload.unlink(missing_ok=True)
     if completed.returncode != 0:
         raise RuntimeError(f"MUAPI generation failed with exit code {completed.returncode}; verify endpoint schema and credentials")
     if not destination.is_file() or destination.stat().st_size == 0:
@@ -532,7 +548,7 @@ def generate_higgsfield_cloud_asset(
     if not key_id or not key_secret:
         raise RuntimeError("HIGGSFIELD_API_KEY_ID and HIGGSFIELD_API_KEY_SECRET are required")
     payload_path = Path(payload).expanduser().resolve()
-    data = json.loads(payload_path.read_text(encoding="utf-8"))
+    data = read_private_json(payload_path)
     if not isinstance(data, dict):
         raise ValueError("Higgsfield Cloud payload must be a JSON object")
     base_url = os.environ.get("HIGGSFIELD_CLOUD_BASE_URL", "https://platform.higgsfield.ai").rstrip("/")

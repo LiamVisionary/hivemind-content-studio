@@ -11,6 +11,7 @@ from typing import Any
 
 from .generation import require_paid_generation
 from .manifest import add_artifact, load_manifest, write_manifest
+from .private_access import encrypt_private_media
 
 
 def generate_elevenlabs_lines(manifest_path: str | Path, *, confirm: str) -> dict[str, Any]:
@@ -65,5 +66,6 @@ def generate_elevenlabs_lines(manifest_path: str | Path, *, confirm: str) -> dic
         output.write_bytes(audio)
         generated.append(str(output))
         add_artifact(manifest, role="voice-line", path=output, provider="elevenlabs")
+        encrypt_private_media(output)
     write_manifest(manifest_file, manifest)
     return {"provider": "elevenlabs", "model": model_id, "audio_files": generated}

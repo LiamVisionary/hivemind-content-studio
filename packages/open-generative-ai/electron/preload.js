@@ -8,6 +8,10 @@ contextBridge.exposeInMainWorld('localAI', {
     downloadBinary: () => ipcRenderer.invoke('local-ai:download-binary'),
 
     listModels: () => ipcRenderer.invoke('local-ai:list-models'),
+    listLoras: async (modelId) => ({ model: modelId, supported: false, baseModels: [], loras: [] }),
+    generatePrompt: async () => { throw new Error('Workflow prompt helpers are available through Unified Studio.'); },
+    startCivitaiDownload: async () => { throw new Error('Civitai downloads are available through Unified Studio.'); },
+    getCivitaiDownloadJob: async () => { throw new Error('Civitai downloads are available through Unified Studio.'); },
     downloadModel: (modelId) => ipcRenderer.invoke('local-ai:download-model', modelId),
     downloadAuxiliary: (auxKey) => ipcRenderer.invoke('local-ai:download-auxiliary', auxKey),
     deleteModel: (modelId) => ipcRenderer.invoke('local-ai:delete-model', modelId),

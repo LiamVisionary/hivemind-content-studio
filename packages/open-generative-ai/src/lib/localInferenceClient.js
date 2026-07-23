@@ -71,6 +71,34 @@ class LocalInferenceClient {
         ];
     }
 
+    async listLoras(modelId) {
+        if (!isLocalAIAvailable() || typeof window.localAI.listLoras !== 'function') {
+            return { model: modelId, supported: false, baseModels: [], loras: [] };
+        }
+        return window.localAI.listLoras(modelId);
+    }
+
+    async generatePrompt(params) {
+        if (!isLocalAIAvailable() || typeof window.localAI.generatePrompt !== 'function') {
+            throw new Error('This local workflow does not expose a prompt helper.');
+        }
+        return window.localAI.generatePrompt(params);
+    }
+
+    async startCivitaiDownload(url) {
+        if (!isLocalAIAvailable() || typeof window.localAI.startCivitaiDownload !== 'function') {
+            throw new Error('Civitai downloads are available through Unified Studio.');
+        }
+        return window.localAI.startCivitaiDownload(url);
+    }
+
+    async getCivitaiDownloadJob(jobId) {
+        if (!isLocalAIAvailable() || typeof window.localAI.getCivitaiDownloadJob !== 'function') {
+            throw new Error('Civitai downloads are available through Unified Studio.');
+        }
+        return window.localAI.getCivitaiDownloadJob(jobId);
+    }
+
     // ── Provider-aware generate ───────────────────────────────────────────
     async generate(params) {
         if (!isLocalAIAvailable()) throw new Error('Local AI only available in the desktop app.');

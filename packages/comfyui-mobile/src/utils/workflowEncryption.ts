@@ -169,6 +169,13 @@ export function isWorkflowEncryptionUnlocked(): boolean {
   return Boolean(loadSessionSecret());
 }
 
+// The raw unlock passphrase for modules that derive further client-side keys
+// (the E2E media vault in utils/e2eMedia.ts). Null when locked or expired.
+// Like every use of this secret, it must never be sent to the backend.
+export function getWorkflowEncryptionSecret(): string | null {
+  return loadSessionSecret();
+}
+
 export function getWorkflowEncryptionUnlockExpiresAt(): number | null {
   loadSessionSecret();
   return memorySecretExpiresAt;

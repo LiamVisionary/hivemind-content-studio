@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -19,6 +20,12 @@ from .generation import (
 )
 from .manifest import load_manifest
 from .media_studio import generate_video as generate_media_studio_video
+from .private_access import (
+    private_media_exists,
+    read_private_json,
+    read_private_media,
+    write_private_json,
+)
 from .hivemindos_hosted_media import generate_hosted_media_asset
 
 
@@ -80,7 +87,7 @@ class ProviderExecutors:
         request_artifact = next((item for item in manifest["artifacts"] if item["role"] == request_role), None)
         if not request_artifact:
             raise ValueError(f"Run has no {request_role} contract")
-        requests = json.loads(Path(request_artifact["path"]).read_text(encoding="utf-8"))
+        requests = read_private_json(Path(request_artifact["path"]))
         if not isinstance(requests, list):
             raise ValueError(f"{request_role} must contain a JSON list")
         existing = {
@@ -95,12 +102,17 @@ class ProviderExecutors:
             scene = int(raw.get("scene") or 0)
             if scene <= 0 or scene in existing:
                 continue
-            result = self._execute_scene(manifest_file, manifest, raw, provider, kind=kind, authorization=authorization or {})
+            staged: list[Path] = []
+            try:
+                result = self._execute_scene(manifest_file, manifest, raw, provider, kind=kind, authorization=authorization or {}, staged=staged)
+            finally:
+                for item in staged:
+                    item.unlink(missing_ok=True)
             record_generated_asset(manifest_file, result, role=output_role, scene=scene)
             outputs.append(str(result["output"]))
         return {"provider": provider, "artifacts": outputs}
 
-    def _execute_scene(self, manifest_file: Path, manifest: dict[str, Any], request: dict[str, Any], provider: str, *, kind: str, authorization: dict[str, Any]) -> dict[str, Any]:
+    def _execute_scene(self, manifest_file: Path, manifest: dict[str, Any], request: dict[str, Any], provider: str, *, kind: str, authorization: dict[str, Any], staged: list[Path]) -> dict[str, Any]:
         scene = int(request["scene"])
         extension = ".png" if kind == "keyframe" else ".mp4"
         output_dir = manifest_file.parent / ("keyframes" if kind == "keyframe" else "scene-videos")
@@ -112,7 +124,7 @@ class ProviderExecutors:
         generation_options = _studio_generation_options(manifest)
         if provider == "higgsfield-consumer":
             model = _selected_model(options, kind, "gpt_image_2" if kind == "keyframe" else "seedance_2_0")
-            source = self._source_path(manifest, scene) if kind == "motion" else None
+            source = self._source_path(manifest, scene, staged) if kind == "motion" else None
             return self.higgsfield_consumer(
                 kind=kind,
                 model=model,
@@ -145,7 +157,7 @@ class ProviderExecutors:
                 model=model,
                 aspect_ratio=aspect_ratio,
                 output=output,
-                source=self._source_path(manifest, scene) if kind == "motion" else None,
+                source=self._source_path(manifest, scene, staged) if kind == "motion" else None,
                 duration_seconds=float(request.get("duration_seconds") or 5) if kind == "motion" else None,
                 resolution=str(options.get(f"{kind}_resolution") or ("1k" if kind == "keyframe" else "720p")),
                 confirm=PAID_GENERATION_CONFIRMATION,
@@ -160,7 +172,7 @@ class ProviderExecutors:
                 payload.update({"image_url": source_url, "duration": float(request.get("duration_seconds") or 4)})
             payload.update(options.get(f"{kind}_payload") if isinstance(options.get(f"{kind}_payload"), dict) else {})
             payload_path = output.with_suffix(".payload.json")
-            payload_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            write_private_json(payload_path, payload)
             return self.higgsfield_cloud(model_id=model, payload=payload_path, output=output, confirm=PAID_GENERATION_CONFIRMATION)
         if provider == "muapi":
             contract = options.get(kind) if isinstance(options.get(kind), dict) else {}
@@ -179,7 +191,7 @@ class ProviderExecutors:
             payload = _format_template(template, values)
             payload_path = output.with_suffix(".payload.json")
             state_path = manifest_file.parent / "muapi-state.json"
-            payload_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            write_private_json(payload_path, payload)
             return self.muapi(endpoint=endpoint, payload=payload_path, output=output, state=state_path, confirm=PAID_GENERATION_CONFIRMATION)
         if provider == "hivemindos-hosted-media":
             contract = options.get(kind) if isinstance(options.get(kind), dict) else {}
@@ -223,7 +235,7 @@ class ProviderExecutors:
                 or ""
             ).strip()
             return self.media_studio(
-                image_path=self._source_path(manifest, scene),
+                image_path=self._source_path(manifest, scene, staged),
                 prompt=prompt,
                 duration_seconds=float(request.get("duration_seconds") or 4),
                 workflow_id=workflow_id or None,
@@ -232,14 +244,24 @@ class ProviderExecutors:
         raise ValueError(f"No manifest executor exists for {provider!r} and {kind!r}")
 
     @staticmethod
-    def _source_path(manifest: dict[str, Any], scene: int) -> str:
+    def _source_path(manifest: dict[str, Any], scene: int, staged: list[Path]) -> str:
         artifact = next(
             (item for item in reversed(manifest["artifacts"]) if item.get("role") == "keyframe" and int(item.get("scene") or 0) == scene),
             None,
         )
-        if not artifact or not Path(str(artifact.get("path") or "")).is_file():
+        source = Path(str(artifact.get("path") or "")) if artifact else None
+        if source is None or not private_media_exists(source):
             raise ValueError(f"Scene {scene} requires a recorded local keyframe")
-        return str(artifact["path"])
+        if source.is_file():
+            return str(source)
+        # Encrypted at rest: stage a plaintext copy for the generator; the
+        # caller unlinks everything in `staged` once the scene completes.
+        body = read_private_media(source)
+        descriptor, name = tempfile.mkstemp(prefix=f".staged-{source.stem}-", suffix=source.suffix, dir=source.parent)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+        staged.append(Path(name))
+        return name
 
     @staticmethod
     def _source_url(manifest: dict[str, Any], scene: int) -> str | None:

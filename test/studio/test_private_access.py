@@ -213,6 +213,59 @@ def test_canvas_history_keeps_same_named_outputs_from_distinct_roots(tmp_path: P
     assert len(store.list()) == 1
 
 
+def test_canvas_history_indexes_e2e_only_outputs_and_purges_sealed_locator_rows(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    # A post-E2E generation exists ONLY as the sealed envelope on disk.
+    (output_root / "anima_00034_.png.e2e").write_bytes(b"opaque-envelope")
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    store = CanvasHistoryStore(tmp_path / "canvas.sqlite3", cipher=cipher)
+
+    # Filesystem indexing must strip the envelope suffix to the logical name.
+    fs_records = CanvasGatewayClient(output_roots=[output_root]).filesystem_history()
+    assert len(fs_records) == 1
+    store.sync(fs_records)
+    # A gateway job record carrying the sealed PHYSICAL path must normalize to
+    # the same logical row instead of adding a broken octet-stream duplicate.
+    store.sync([{
+        "id": "job-1",
+        "status": "success",
+        "created_at": "2026-07-22T00:00:00Z",
+        "finished_at": "2026-07-22T00:00:01Z",
+        "outputs": [str(output_root / "anima_00034_.png.e2e")],
+        "timestamp_source": "gateway-history",
+    }])
+
+    items = store.page(page=1, page_size=10)["items"]
+    assert len(items) == 1
+    assert items[0]["file_format"] == "png"
+    assert items[0]["media_type"] == "image/png"
+    assert items[0]["encrypted_at_rest"] is True
+
+    # Rows written by pre-fix builds (locator ends in the sealed suffix) are
+    # purged by the v3 schema migration on the next open.
+    with sqlite3.connect(tmp_path / "canvas.sqlite3") as connection:
+        connection.execute(
+            "INSERT INTO canvas_history(history_id, source_digest, output_digest, output_name, media_type, status, encrypted_at_rest, timestamp_source, created_at, updated_at)"
+            " VALUES(?, ?, ?, ?, ?, ?, 1, 'gateway-history', 'x', 'x')",
+            (
+                "canvas_polluted",
+                cipher.digest("job-old"),
+                cipher.digest(str(output_root / "old_00001_.png.e2e")),
+                cipher.encrypt(str(output_root / "old_00001_.png.e2e")),
+                "application/octet-stream",
+                "success",
+            ),
+        )
+        connection.execute("PRAGMA user_version = 2")
+    reopened = CanvasHistoryStore(tmp_path / "canvas.sqlite3", cipher=cipher)
+    assert all(item["media_type"] == "image/png" for item in reopened.page(page=1, page_size=10)["items"])
+    with sqlite3.connect(tmp_path / "canvas.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM canvas_history WHERE history_id = 'canvas_polluted'"
+        ).fetchone()[0] == 0
+
+
 def test_canvas_history_pages_deduplicated_outputs_and_filters_by_file_format(tmp_path: Path) -> None:
     output_root = tmp_path / "output"
     output_root.mkdir()

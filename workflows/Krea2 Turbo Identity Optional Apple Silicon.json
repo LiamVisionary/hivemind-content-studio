@@ -147,7 +147,7 @@
     },
     {
       "id": 55,
-      "type": "OTUNetLoaderW8A8",
+      "type": "Krea2IdentityOptionalAppleModelLoader",
       "pos": [
         60,
         -160
@@ -161,8 +161,8 @@
       "mode": 0,
       "inputs": [
         {
-          "name": "pre_lora",
-          "type": "PRE_LORA",
+          "name": "image",
+          "type": "IMAGE",
           "link": 1,
           "shape": 7
         }
@@ -179,7 +179,7 @@
       "properties": {
         "cnr_id": "comfy-core",
         "ver": "0.26.0",
-        "Node name for S&R": "OTUNetLoaderW8A8",
+        "Node name for S&R": "Krea2IdentityOptionalAppleModelLoader",
         "models": [
           {
             "name": "krea2_turbo_fp8_scaled.safetensors",
@@ -189,12 +189,8 @@
         ]
       },
       "widgets_values": [
-        "krea2_turbo_bf16.safetensors",
-        "default",
-        "krea2",
-        true,
-        true,
-        "None"
+        "Krea2_Turbo_convrot_int8mixed.safetensors",
+        "Krea2_Turbo_identity_v1_2_convrot_int8mixed.safetensors"
       ]
     },
     {
@@ -282,47 +278,6 @@
       ]
     },
     {
-      "id": 71,
-      "type": "Krea2IdentityOptionalPreLora",
-      "pos": [
-        60,
-        370
-      ],
-      "size": [
-        480,
-        120
-      ],
-      "flags": {},
-      "order": 14,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 8,
-          "shape": 7
-        }
-      ],
-      "outputs": [
-        {
-          "name": "PRE_LORA",
-          "type": "PRE_LORA",
-          "links": [
-            1
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.26.0",
-        "Node name for S&R": "Krea2IdentityOptionalPreLora"
-      },
-      "widgets_values": [
-        "krea2_identity_edit_v1_2.safetensors",
-        1.0
-      ]
-    },
-    {
       "id": 72,
       "type": "HivemindOptionalLoadImage",
       "pos": [
@@ -342,7 +297,7 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            8,
+            1,
             9,
             10,
             11
@@ -410,7 +365,8 @@
       },
       "widgets_values": [
         4.0,
-        "fit"
+        "fit",
+        false
       ]
     },
     {
@@ -619,7 +575,7 @@
         "Node name for S&R": "Note"
       },
       "widgets_values": [
-        "Pinned dependencies:\n- krea2_turbo_bf16.safetensors\n- qwen3vl_4b_bf16.safetensors\n- qwen_image_vae.safetensors\n- krea2_identity_edit_v1_2.safetensors\n- lbouaraba/comfyui-krea2edit"
+        "Pinned dependencies:\n- Krea2_Turbo_convrot_int8mixed.safetensors\n- Krea2_Turbo_identity_v1_2_convrot_int8mixed.safetensors\n- qwen3vl_4b_bf16.safetensors\n- qwen_image_vae.safetensors\n- lbouaraba/comfyui-krea2edit"
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -645,7 +601,7 @@
         "Node name for S&R": "Note"
       },
       "widgets_values": [
-        "OPTIONAL REFERENCE IMAGE\n\nLeave this set to None for the unchanged regular Krea 2 Turbo route. Load one adult reference image to enable the identity LoRA, VAE source tokens, and grounded Qwen3-VL edit conditioning."
+        "OPTIONAL REFERENCE IMAGE\n\nLeave this set to None for the regular prebuilt Krea 2 Turbo ConvRot route. Load one adult reference image to select the prebuilt identity ConvRot model, VAE source tokens, grounded Qwen3-VL conditioning, and static source-token cache."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -749,7 +705,7 @@
         "Node name for S&R": "Note"
       },
       "widgets_values": [
-        "KREA 2 TURBO IDENTITY EDIT v1.2\n\nNo image: regular optimized Krea 2 Turbo.\nImage supplied: the same Turbo lane plus identity pre-LoRA, source-token patch, and grounded vision conditioning."
+        "KREA 2 TURBO IDENTITY EDIT v1.2\n\nNo image: regular optimized Krea 2 Turbo.\nImage supplied: the dedicated identity-baked ConvRot lane plus source-token patch, grounded vision conditioning, and exact pre-block caching."
       ],
       "color": "#232",
       "bgcolor": "#353"
@@ -784,11 +740,11 @@
   "links": [
     [
       1,
-      71,
+      72,
       0,
       55,
       0,
-      "PRE_LORA"
+      "IMAGE"
     ],
     [
       2,
@@ -837,14 +793,6 @@
       79,
       1,
       "VAE"
-    ],
-    [
-      8,
-      72,
-      0,
-      71,
-      0,
-      "IMAGE"
     ],
     [
       9,
@@ -942,7 +890,7 @@
     },
     {
       "id": 2,
-      "title": "1 · IMAGE TO EDIT",
+      "title": "1 \u00b7 IMAGE TO EDIT",
       "bounding": [
         620,
         -240,
@@ -954,7 +902,7 @@
     },
     {
       "id": 4,
-      "title": "3 · INSTRUCTION",
+      "title": "3 \u00b7 INSTRUCTION",
       "bounding": [
         1600,
         -240,
@@ -966,7 +914,7 @@
     },
     {
       "id": 5,
-      "title": "4 · FIDELITY",
+      "title": "4 \u00b7 FIDELITY",
       "bounding": [
         2300,
         -240,
@@ -978,7 +926,7 @@
     },
     {
       "id": 6,
-      "title": "5 · GENERATE",
+      "title": "5 \u00b7 GENERATE",
       "bounding": [
         2780,
         -240,

@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import os
 import socket
@@ -10,11 +11,38 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 import pytest
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[2]
 MCP_SOURCE = ROOT / "packages" / "media-gateway" / "bin" / "media-studio-mcp.mjs"
 WORKFLOW_REGISTRY = ROOT / "packages" / "media-gateway" / "workflow-registry.json"
+
+
+def _resolved_registry_workflows(registry: dict) -> list[dict]:
+    definitions = {item["id"]: item for item in registry["workflows"]}
+    resolved: dict[str, dict] = {}
+
+    def merge(base: dict, override: dict) -> dict:
+        result = json.loads(json.dumps(base))
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = merge(result[key], value)
+            else:
+                result[key] = json.loads(json.dumps(value))
+        return result
+
+    def resolve(workflow_id: str) -> dict:
+        if workflow_id in resolved:
+            return resolved[workflow_id]
+        definition = definitions[workflow_id]
+        parent_id = str(definition.get("inherits") or "").strip()
+        workflow = merge(resolve(parent_id), definition) if parent_id else merge({}, definition)
+        workflow.pop("inherits", None)
+        resolved[workflow_id] = workflow
+        return workflow
+
+    return [resolve(item["id"]) for item in registry["workflows"]]
 
 
 def test_positive_prompt_schemas_do_not_cap_character_count():
@@ -49,6 +77,25 @@ def test_video_tool_accepts_negative_prompt_before_building_workflow():
     video_tool = video_tool.split("}, tool(async (args) =>", 1)[0]
 
     assert "negative_prompt: z.string().max(2000).optional()" in video_tool
+
+
+def test_video_loras_have_native_mlx_and_comfy_graph_parity():
+    source = MCP_SOURCE.read_text(encoding="utf-8")
+    video_tool = source.split("server.registerTool('media_generate_video'", 1)[1]
+    video_tool = video_tool.split("}, tool(async (args) =>", 1)[0]
+    assert "loras: z.array(z.object({" in video_tool
+    assert "injectWorkflowLoras(promptGraph, settings.loras, workflow.lora_injection)" in source
+    assert "mergeNativeWorkflowLoras(nativeSpec.loras, settings.loras)" in source
+
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    for workflow in (item for item in _resolved_registry_workflows(registry) if item["media_type"] == "video"):
+        assert workflow["supports_loras"] is True
+        assert workflow["compatible_base_models"] == ["LTXV"]
+        assert "loras" in workflow["accepts"]
+        injection = workflow["lora_injection"]
+        graph = json.loads(Path(workflow["api_workflow"]).read_text(encoding="utf-8"))["prompt"]
+        sources = [graph[target["node"]]["inputs"][target["input"]] for target in injection["targets"]]
+        assert all(source_ref == sources[0] for source_ref in sources)
 
 
 def _free_port():
@@ -96,6 +143,8 @@ def _ltx_api_workflow():
                 "inputs": {"model": ["723", 0], "reference_image": ["531", 0], "anchor_frame": 0},
             },
             "723": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["646", 0]}},
+            "719": {"class_type": "LTX2LoraLoaderAdvanced", "inputs": {"model": ["646", 0], "lora_name": "distilled.safetensors", "strength_model": 1.0}},
+            "722": {"class_type": "LTX2LoraLoaderAdvanced", "inputs": {"model": ["646", 0], "lora_name": "distilled.safetensors", "strength_model": 1.0}},
             "767": {
                 "class_type": "LTXVAddGuide",
                 "inputs": {
@@ -257,6 +306,15 @@ def test_video_mcp_compiles_shared_keyframes_into_comfy_cuda_graph(tmp_path, wor
         "title": "LTX regular test",
         "family": "ltx-2.3",
         "builder": "comfy-api",
+        "supports_loras": True,
+        "compatible_base_models": ["LTXV"],
+        "lora_injection": {
+            "class_type": "LTX2LoraLoaderAdvanced",
+            "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+            "name_input": "lora_name",
+            "strength_input": "strength_model",
+            "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1},
+        },
         "api_workflow": str(api_workflow),
         "mobile_workflow": str(mobile_dir / "LTX 2.3 Regular FP8 Mobile.json"),
         "native_mlx": {"enabled": True, "variant": "regular-q8-distilled"},
@@ -347,6 +405,7 @@ def test_video_mcp_compiles_shared_keyframes_into_comfy_cuda_graph(tmp_path, wor
             "middle_image_path": str(reference),
             "end_image_path": str(reference),
             "keyframes": [{"image_path": str(reference), "frame": 30, "strength": 0.65}],
+            "loras": [{"id": "ltx/test-style.safetensors", "strength": 0.7}],
             "frames": 121,
             "frame_rate": 24,
             "wait": False,
@@ -395,9 +454,19 @@ def test_video_mcp_compiles_shared_keyframes_into_comfy_cuda_graph(tmp_path, wor
     assert all(node["inputs"]["num_images.strength_2"] == 0.65 for node in inplace_nodes)
     assert sorted(node["inputs"]["frame_idx"] for node in guide_nodes) == [0, 30, 60, 120]
     assert len(load_nodes) == 4
+    user_lora_nodes = [
+        node for node in graph.values()
+        if node.get("class_type") == "LTX2LoraLoaderAdvanced"
+        and node.get("inputs", {}).get("lora_name") == "ltx/test-style.safetensors"
+    ]
+    assert len(user_lora_nodes) == 1
+    assert user_lora_nodes[0]["inputs"]["strength_model"] == 0.7
+    assert user_lora_nodes[0]["inputs"]["audio"] == 0
     metadata = captures[0]["extra_data"]["extra_pnginfo"]["workflow"]["extra"]["nativeMlxLtx"]["keyframes"]
     assert [item["frame"] for item in metadata] == [0, 30, 60, 120]
     assert [item["strength"] for item in metadata] == [1, 0.65, 1, 1]
+    native_loras = captures[0]["extra_data"]["extra_pnginfo"]["workflow"]["extra"]["nativeMlxLtx"]["loras"]
+    assert native_loras == [{"name": "ltx/test-style.safetensors", "strength": 0.7}]
 
 
 def test_video_mcp_stages_inline_video_and_compiles_ltx_extension_graph(tmp_path):
@@ -604,21 +673,88 @@ def test_ltx_ingredients_workflow_uses_real_ic_reference_conditioning():
 
     assert workflow["requires"] == {"prompt": True, "image": True}
     assert workflow["prompt_contract"]["type"] == "ltx23-ingredients"
+    assert "ingredient_images" in workflow["accepts"]
+    assert workflow["ingredient_inputs"] == {
+        "max_images": 12,
+        "layout": "adaptive-pack",
+        "conditioning_only": True,
+        "preserve_aspect_ratio": True,
+        "render_labels": False,
+    }
+    assert workflow["timeline_anchor_preparation"] == {
+        "mode": "generative-outpaint",
+        "preserve_source_aspect_ratio": True,
+        "preserve_source_pixels": True,
+        "apple": "native-preflight",
+        "windows_cuda": "embedded-comfy-graph",
+        "cache": True,
+    }
+    assert workflow["aspect_ratios"] == ["16:9", "9:16", "4:3", "3:4", "1:1"]
+    assert workflow["defaults"]["duration_seconds"] == 5
+    assert workflow["defaults"]["cfg"] == 1.0
     assert workflow["native_mlx"]["pipeline"] == "ic-lora"
+    assert workflow["native_mlx"]["variant"] == "regular-q8-dev-ic"
+    assert workflow["benchmark_seconds"] == 270.75
     assert workflow["native_mlx"]["ic_lora"]["single_stage"] is True
+    assert workflow["native_mlx"]["ic_lora"]["reference_min_frames"] == 121
+    assert workflow["native_mlx"]["ic_lora"]["target_min_frames"] == 121
+    assert workflow["native_mlx"]["ic_lora"]["image_crf"] == 0
+    assert workflow["native_mlx"]["ic_lora"]["dev_transformer"] == "transformer-dev.safetensors"
+    assert workflow["native_mlx"]["ic_lora"]["guided_dev"] is False
+    assert workflow["native_mlx"]["ic_lora"]["stage1_steps"] == 8
+    assert workflow["native_mlx"]["ic_lora"]["cfg_scale"] == 1.0
+    assert workflow["native_mlx"]["ic_lora"]["stg_scale"] == 0.0
+    assert workflow["native_mlx"]["ic_lora"]["runtime_timeout_seconds"] == 2400
+    assert workflow["native_mlx"]["ic_lora"]["distilled_lora"] == "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    assert workflow["native_mlx"]["ic_lora"]["distilled_lora_strength"] == 0.5
     assert workflow["native_mlx"]["loras"][0]["strength"] == 1.4
+    assert graph["4922"] == {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {
+            "model": ["3940", 0],
+            "lora_name": "ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+            "strength_model": 0.5,
+        },
+    }
     assert graph["5011"]["class_type"] == "LTXICLoRALoaderModelOnly"
+    assert graph["5011"]["inputs"]["model"] == ["4922", 0]
     assert graph["5012"]["class_type"] == "LTXAddVideoICLoRAGuide"
     assert graph["5012"]["inputs"]["image"] == ["5093", 0]
     assert graph["5093"]["class_type"] == "RepeatImageBatch"
-    assert graph["5093"]["inputs"]["amount"] == ["5072", 0]
+    assert graph["5093"]["inputs"]["amount"] == 121
     assert graph["5012"]["inputs"]["latent_downscale_factor"] == ["5011", 1]
+    assert graph["4828"]["class_type"] == "CFGGuider"
+    assert graph["4828"]["inputs"]["cfg"] == 1.0
+    assert graph["5025"] == {
+        "class_type": "ManualSigmas",
+        "inputs": {"sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"},
+    }
     assert not any(node["class_type"] == "LTXVAddGuide" for node in graph.values())
     assert mobile["extra"]["nativeMlxLtx"]["pipeline"] == "ic-lora"
+    mobile_nodes = {node["id"]: node for node in mobile["nodes"]}
+    assert mobile_nodes[4922]["type"] == "LoraLoaderModelOnly"
+    assert mobile_nodes[4922]["widgets_values"] == ["ltx/2.3/ltx-2.3-22b-distilled-lora-384-1.1.safetensors", 0.5]
+    assert mobile_nodes[4828]["type"] == "CFGGuider"
+    assert mobile_nodes[4828]["widgets_values"] == [1]
+    assert mobile_nodes[5025]["type"] == "ManualSigmas"
+
+    eros = next(item for item in registry["workflows"] if item["id"] == "ltx23-eros-ic-ingredients-lora")
+    assert eros["inherits"] == workflow["id"]
+    assert eros["native_mlx"]["variant"] == "eros-q8-dev-ic"
+    assert eros["workflow_overrides"]["api_inputs"] == {
+        "3940": {"ckpt_name": "ltx/10Eros_v1-fp8mixed_learned.safetensors"},
+        "4010": {"ckpt_name": "ltx/10Eros_v1-fp8mixed_learned.safetensors"},
+    }
+    assert eros["workflow_overrides"]["editor_widgets"] == {
+        "3940": ["ltx/10Eros_v1-fp8mixed_learned.safetensors"],
+        "4010": ["ltx/10Eros_v1-fp8mixed_learned.safetensors"],
+    }
+    assert eros["model_dependencies"][0]["relativePath"] == "ltx/10Eros_v1-fp8mixed_learned.safetensors"
 
 
 def test_ltx_ingredients_mcp_builds_prompt_contract_and_native_metadata(tmp_path):
     captures = []
+    square_response = ""
 
     class BackendHandler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -667,8 +803,11 @@ def test_ltx_ingredients_mcp_builds_prompt_contract_and_native_metadata(tmp_path
         stderr=subprocess.PIPE,
         text=True,
     )
-    reference = tmp_path / "ingredients.png"
-    reference.write_bytes(b"\x89PNG\r\n\x1a\nreference-sheet")
+    def image_data_url(color: str) -> str:
+        buffer = io.BytesIO()
+        Image.new("RGB", (600, 400), color).save(buffer, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
     try:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -692,9 +831,18 @@ def test_ltx_ingredients_mcp_builds_prompt_contract_and_native_metadata(tmp_path
                     "name": "media_generate_video",
                     "arguments": {
                         "workflow_id": "ingredients",
-                        "reference_description": "Top panel: Character A. Bottom panel: the location.",
                         "prompt": "Character A crosses the location in one continuous shot.",
-                        "image_path": str(reference),
+                        "image_base64": image_data_url("green"),
+                        "ingredient_images": [
+                            {
+                                "image_base64": image_data_url("red"),
+                                "description": "Character A front view with exact face and wardrobe.",
+                            },
+                            {
+                                "image_base64": image_data_url("blue"),
+                                "description": "Character A right profile with the same face and wardrobe.",
+                            },
+                        ],
                         "duration_seconds": 1,
                         "frame_rate": 24,
                         "wait": False,
@@ -711,6 +859,67 @@ def test_ltx_ingredients_mcp_builds_prompt_contract_and_native_metadata(tmp_path
         with urlopen(request, timeout=10) as response:
             assert response.status == 200
             response.read()
+
+        eros_request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "media_generate_video",
+                    "arguments": {
+                        "workflow_id": "eros-ingredients",
+                        "prompt": "Character A crosses the location in one continuous shot.",
+                        "ingredient_images": [{
+                            "image_base64": image_data_url("red"),
+                            "description": "Character A front view with exact face and wardrobe.",
+                        }],
+                        "duration_seconds": 1,
+                        "frame_rate": 24,
+                        "wait": False,
+                    },
+                },
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(eros_request, timeout=10) as response:
+            assert response.status == 200
+            response.read()
+
+        square_request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "media_generate_video",
+                    "arguments": {
+                        "workflow_id": "ingredients",
+                        "prompt": "One full-frame shot using the references.",
+                        "ingredient_images": [{"image_base64": image_data_url("red")}],
+                        "width": 576,
+                        "height": 576,
+                        "wait": False,
+                    },
+                },
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(square_request, timeout=10) as response:
+            assert response.status == 200
+            square_response = response.read().decode("utf-8")
     finally:
         process.terminate()
         try:
@@ -720,20 +929,119 @@ def test_ltx_ingredients_mcp_builds_prompt_contract_and_native_metadata(tmp_path
         backend.shutdown()
         backend.server_close()
 
-    assert len(captures) == 1
+    assert len(captures) == 3
+    assert '"isError":true' not in square_response
+    assert "supports ${allowed.join(', ')} output; received ${width}x${height}" in MCP_SOURCE.read_text(encoding="utf-8")
     graph = captures[0]["prompt"]
     prompt = graph["2483"]["inputs"]["text"]
     assert prompt == (
         "### Reference Sheet Description\n"
-        "Top panel: Character A. Bottom panel: the location.\n"
+        "left panel: Character A front view with exact face and wardrobe.\n"
+        "right panel: Character A right profile with the same face and wardrobe.\n"
         "### Target Description\n"
         "Character A crosses the location in one continuous shot."
     )
-    assert graph["2004"]["inputs"]["image"].startswith("mcp_")
-    assert graph["5072"]["inputs"]["value"] == 25
+    sheet_name = graph["2004"]["inputs"]["image"]
+    assert sheet_name.startswith("mcp_ingredients_")
+    with Image.open(comfy_input / sheet_name) as sheet:
+        assert sheet.size == (768, 448)
+        assert sheet.getpixel((198, 224)) == (255, 0, 0)
+        assert sheet.getpixel((570, 224)) == (0, 0, 255)
+        assert sheet.getpixel((384, 224)) == (0, 0, 0)
+    assert graph["5072"]["inputs"]["value"] == 121
+    assert graph["4828"]["inputs"]["cfg"] == 1.0
+    reference_repeat = next(node for node in graph.values() if node.get("class_type") == "RepeatImageBatch")
+    assert reference_repeat["inputs"]["amount"] == 121
+    anchor = next(node for node in graph.values() if node.get("class_type") == "LTXVImgToVideoConditionOnly")
+    anchor_id = next(key for key, node in graph.items() if node is anchor)
+    prepared_start = graph[str(anchor["inputs"]["image"][0])]
+    assert prepared_start["class_type"] == "ImageCompositeMasked"
+    outpaint_prompt = next(
+        node["inputs"]["prompt"]
+        for node in graph.values()
+        if node.get("class_type") == "Krea2IdentityOptionalEncode" and node.get("inputs", {}).get("prompt")
+    )
+    assert "Character A crosses the location" in outpaint_prompt
+    assert "front view with exact face" not in outpaint_prompt
+    assert "Reference Sheet Description" not in outpaint_prompt
+    outpaint_pad = graph[str(prepared_start["inputs"]["source"][0])]
+    assert outpaint_pad["class_type"] == "ImagePadForOutpaint"
+    assert outpaint_pad["inputs"]["left"] == 48
+    assert outpaint_pad["inputs"]["right"] == 48
+    start_scale = graph[str(outpaint_pad["inputs"]["image"][0])]
+    start_load = graph[str(start_scale["inputs"]["image"][0])]
+    assert start_load["class_type"] == "HivemindOptionalLoadImage"
+    assert start_load["inputs"]["image"] != sheet_name
+    with Image.open(comfy_input / start_load["inputs"]["image"]) as staged_start:
+        assert staged_start.size == (600, 400)
+        assert staged_start.getpixel((300, 200)) == (0, 128, 0)
+    assert not any(
+        node.get("class_type") == "SaveImage"
+        and str(node.get("inputs", {}).get("filename_prefix", "")).startswith("ltx_anchor")
+        for node in graph.values()
+    )
+    assert anchor["inputs"]["latent"] == ["3059", 0]
+    assert anchor["inputs"]["strength"] == 0.9
+    assert anchor["inputs"]["bypass"] is False
+    assert graph["5012"]["inputs"]["latent"] == [anchor_id, 0]
+    assert graph["4528"]["inputs"]["video_latent"] == ["5012", 2]
+    create_video = next(node for node in graph.values() if node.get("class_type") == "CreateVideo")
+    assert create_video["inputs"]["images"] == ["5065", 0]
     metadata = captures[0]["extra_data"]["extra_pnginfo"]["workflow"]["extra"]["nativeMlxLtx"]
     assert captures[0]["extra_data"]["extra_pnginfo"]["nativeMlxLtx"] == metadata
     assert metadata["pipeline"] == "ic-lora"
+    assert metadata["ingredientSheet"] == {
+        "sourceCount": 2,
+        "columns": 2,
+        "rows": 1,
+        "conditioningOnly": True,
+    }
+    assert metadata["keyframes"] == [{
+        "image_path": start_load["inputs"]["image"],
+        "frame": 0,
+        "strength": 0.9,
+        "role": "start",
+    }]
     assert metadata["icLora"]["reference_image"] == graph["2004"]["inputs"]["image"]
     assert metadata["icLora"]["single_stage"] is True
+    assert metadata["icLora"]["reference_min_frames"] == 121
+    assert metadata["icLora"]["target_min_frames"] == 121
+    assert metadata["variant"] == "regular-q8-dev-ic"
+    assert metadata["icLora"]["dev_transformer"] == "transformer-dev.safetensors"
+    assert metadata["icLora"]["guided_dev"] is False
+    assert metadata["icLora"]["stage1_steps"] == 8
+    assert metadata["icLora"]["cfg_scale"] == 1.0
+    assert metadata["icLora"]["stg_scale"] == 0.0
+    assert metadata["icLora"]["runtime_timeout_seconds"] == 2400
+    assert metadata["icLora"]["distilled_lora"] == "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    assert metadata["icLora"]["distilled_lora_strength"] == 0.5
+    assert metadata["defaults"]["frames"] == 121
     assert metadata["loras"][0]["strength"] == 1.4
+
+    eros_graph = captures[1]["prompt"]
+    eros_checkpoint = "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+    assert eros_graph["3940"]["inputs"]["ckpt_name"] == eros_checkpoint
+    assert eros_graph["4010"]["inputs"]["ckpt_name"] == eros_checkpoint
+    eros_metadata = captures[1]["extra_data"]["extra_pnginfo"]["nativeMlxLtx"]
+    assert eros_metadata["variant"] == "eros-q8-dev-ic"
+    assert eros_metadata["pipeline"] == "ic-lora"
+    assert eros_metadata["ingredientSheet"] == {
+        "sourceCount": 1,
+        "columns": 1,
+        "rows": 1,
+        "conditioningOnly": True,
+    }
+    assert eros_metadata["icLora"]["dev_transformer"] == "transformer-dev.safetensors"
+    assert eros_metadata["icLora"]["distilled_lora"] == "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    eros_mobile_nodes = {
+        str(node["id"]): node
+        for node in captures[1]["extra_data"]["extra_pnginfo"]["workflow"]["nodes"]
+    }
+    assert eros_mobile_nodes["3940"]["widgets_values"] == [eros_checkpoint]
+    assert eros_mobile_nodes["4010"]["widgets_values"] == [eros_checkpoint]
+
+    square_graph = captures[2]["prompt"]
+    assert square_graph["809"]["inputs"]["value"] == 576
+    assert square_graph["811"]["inputs"]["value"] == 576
+    with Image.open(comfy_input / square_graph["2004"]["inputs"]["image"]) as square_sheet:
+        assert square_sheet.size == (576, 576)

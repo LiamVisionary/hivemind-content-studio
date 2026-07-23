@@ -13,12 +13,13 @@ import { getUploadHistory, saveUpload, removeUpload, generateThumbnail } from '.
  * @param {number} [options.maxImages=1] - Maximum number of images selectable
  * @returns {{ trigger: HTMLElement, panel: HTMLElement, reset: function, setMaxImages: function }}
  */
-export function createUploadPicker({ anchorContainer, onSelect, onClear, maxImages: initialMaxImages = 1, uploadFn, requireApiKey }) {
+export function createUploadPicker({ anchorContainer, onSelect, onClear, maxImages: initialMaxImages = 1, uploadFn, requireApiKey, persistUpload, onRemoveUpload }) {
     // uploadFn(file) → Promise<string url>. Defaults to Muapi-hosted upload.
     // requireApiKey() → boolean. Lets the caller suppress the AuthModal when
     // the active provider doesn't need a Muapi key (e.g. local Wan2GP).
     const doUpload = uploadFn || ((file) => muapi.uploadFile(file));
     const needsKey = typeof requireApiKey === 'function' ? requireApiKey : () => true;
+    const shouldPersistUpload = typeof persistUpload === 'function' ? persistUpload : () => true;
     let panelOpen = false;
     let maxImages = initialMaxImages;
     let selectedEntries = []; // [{ url, thumbnail }, ...]
@@ -229,6 +230,11 @@ export function createUploadPicker({ anchorContainer, onSelect, onClear, maxImag
             delBtn.onclick = (e) => {
                 e.stopPropagation();
                 removeUpload(entry.id);
+                if (typeof onRemoveUpload === 'function') {
+                    Promise.resolve(onRemoveUpload(entry)).catch((error) => {
+                        console.warn('[UploadPicker] Remote reference cleanup failed:', error);
+                    });
+                }
                 const idx = selectedEntries.findIndex(e => e.url === entry.uploadedUrl);
                 if (idx !== -1) {
                     selectedEntries.splice(idx, 1);
@@ -342,9 +348,10 @@ export function createUploadPicker({ anchorContainer, onSelect, onClear, maxImag
                     generateThumbnail(file)
                 ]);
                 const uploadedUrl = typeof uploadResult === 'string' ? uploadResult : uploadResult?.url;
-                const entry = { id: Date.now().toString(), name: file.name, uploadedUrl, thumbnail, timestamp: new Date().toISOString() };
-                saveUpload(entry);
-                selectedEntries = [{ url: uploadedUrl, thumbnail }];
+                const displayThumbnail = typeof uploadResult === 'string' ? thumbnail : (uploadResult?.thumbnail || thumbnail);
+                const entry = { id: Date.now().toString(), name: file.name, uploadedUrl, thumbnail: displayThumbnail, timestamp: new Date().toISOString() };
+                if (shouldPersistUpload(entry)) saveUpload(entry);
+                selectedEntries = [{ url: uploadedUrl, thumbnail: displayThumbnail }];
                 updateTrigger();
                 fireOnSelect();
             } else {
@@ -359,11 +366,12 @@ export function createUploadPicker({ anchorContainer, onSelect, onClear, maxImag
                         generateThumbnail(file)
                     ]);
                     const uploadedUrl = typeof uploadResult === 'string' ? uploadResult : uploadResult?.url;
-                    return { id: Date.now().toString() + Math.random(), name: file.name, uploadedUrl, thumbnail, timestamp: new Date().toISOString() };
+                    const displayThumbnail = typeof uploadResult === 'string' ? thumbnail : (uploadResult?.thumbnail || thumbnail);
+                    return { id: Date.now().toString() + Math.random(), name: file.name, uploadedUrl, thumbnail: displayThumbnail, timestamp: new Date().toISOString() };
                 }));
 
                 results.forEach(entry => {
-                    saveUpload(entry);
+                    if (shouldPersistUpload(entry)) saveUpload(entry);
                     if (selectedEntries.length < maxImages) {
                         selectedEntries.push({ url: entry.uploadedUrl, thumbnail: entry.thumbnail });
                     }
@@ -411,5 +419,15 @@ export function createUploadPicker({ anchorContainer, onSelect, onClear, maxImag
         fireOnSelect();
     };
 
-    return { trigger, panel, reset, setMaxImages, getSelectedUrls, setImage };
+    // Reflect a set of already-uploaded URLs as the current selection. Defaults to silent
+    // (no onSelect) so restoring a past generation's setup doesn't re-trigger the model/mode
+    // switching that a fresh upload performs.
+    const setImages = (urls, { silent = true } = {}) => {
+        const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean).slice(0, maxImages);
+        selectedEntries = list.map((url) => ({ url, thumbnail: url }));
+        updateTrigger();
+        if (!silent) fireOnSelect();
+    };
+
+    return { trigger, panel, reset, setMaxImages, getSelectedUrls, setImage, setImages };
 }
