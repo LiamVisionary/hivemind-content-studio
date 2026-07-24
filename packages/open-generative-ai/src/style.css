@@ -1,31 +1,15 @@
-@import './styles/global.css';
-@import './styles/studio.css';
-@import './styles/hub.css';
+@import './styles/variables.css';
+@import './styles/base.css';
 
-/* App-specific layout — rail | (topbar / content) shell */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Shell frame — sidebar | (topbar / content) */
 #app {
-  display: flex;
-  flex-direction: row;
   width: 100vw;
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
-  background: var(--bg-app);
-}
-
-main {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
-  display: flex;
-}
-
-/* Utilities */
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
-}
-
-.no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
+  background: var(--bg-0);
 }

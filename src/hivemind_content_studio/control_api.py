@@ -14,6 +14,7 @@ import re
 import secrets
 import subprocess
 import sys
+import statistics
 import tempfile
 import threading
 import time
@@ -50,6 +51,7 @@ from .manifest import load_manifest, write_manifest
 from .machine_privacy import machine_operation_receipt, machine_run_receipt
 from .media_catalog import media_catalog
 from .media_studio import (
+    cancel_video as run_media_studio_video_cancel,
     check_video as run_media_studio_video_check,
     finish_video as run_media_studio_video_finish,
     generate_video as run_media_studio_video,
@@ -65,13 +67,18 @@ from .private_access import (
     OwnerAccess,
     PrivateFieldCipher,
     configure_private_cipher,
+    e2e_media_exists,
+    e2e_media_sidecar,
     encrypt_private_media,
     is_private_text_file,
     owner_unlock_html,
     private_media_exists,
     private_media_sidecar,
+    read_e2e_envelope,
     read_private_media,
     read_private_text,
+    read_vault_public_key,
+    seal_private_media_e2e,
     write_private_text,
 )
 from .run_privacy import migrate_private_runs
@@ -143,18 +150,106 @@ class MediaStudioVideoBody(BaseModel):
     ingredient_images: list[MediaStudioIngredientImageBody] = []
     image_base64: str | None = None
     image_reference: str | None = None
+    middle_image_base64: str | None = None
+    end_image_base64: str | None = None
     video_base64: str | None = None
     video_reference: str | None = None
     video_mode: Literal["extend"] = "extend"
     duration_seconds: float = 4
     aspect_ratio: str = ""
     resolution: Literal["", "standard", "high"] = ""
+    # -1 (or omitted) lets the runner pick a random seed; >= 0 is a fixed seed.
+    seed: int | None = None
     loras: list[MediaStudioLoraBody] = []
 
 
 class MediaStudioIngredientPreviewBody(BaseModel):
     ingredient_images: list[MediaStudioIngredientImageBody] = []
     aspect_ratio: str = "16:9"
+
+
+# First-run fallback before any real durations are recorded for a signature.
+_DEFAULT_VIDEO_ESTIMATE_SECONDS = 150.0
+
+
+def _video_timing_signature(body: "MediaStudioVideoBody") -> tuple[str, str]:
+    """A canonical key over the params that meaningfully affect generation time,
+    so similar runs share an estimate. Metadata only — never prompt text."""
+    workflow = (body.workflow_id or "default").strip() or "default"
+    duration = max(1.0 / 24, min(30.0, float(body.duration_seconds or 4)))
+    frames = max(9, min(721, round(duration * 24) + 1))
+    resolution = (body.resolution or "standard").strip().lower() or "standard"
+    lora_n = len([item for item in body.loras if str(getattr(item, "id", "") or "").strip()])
+    ingredient_n = len(body.ingredient_images)
+    if body.video_base64 or body.video_reference:
+        mode = "extend"
+    elif body.image_base64 or body.image_reference or body.middle_image_base64 or body.end_image_base64:
+        mode = "i2v"
+    elif ingredient_n:
+        mode = "ingredients"
+    else:
+        mode = "t2v"
+    return f"v1|{workflow}|{mode}|res={resolution}|frames={frames}|loras={lora_n}|ing={ingredient_n}", workflow
+
+
+class GenerationTimings:
+    """Records actual generation durations keyed by a param signature so a new run
+    can display an elapsed / expected-duration estimate. Owner-local metadata only
+    (durations + opaque signatures), persisted as JSONL — no prompts, no media."""
+
+    def __init__(self, path: Path, per_sig: int = 12, per_workflow: int = 80):
+        self._path = Path(path)
+        self._by_sig: dict[str, deque] = defaultdict(lambda: deque(maxlen=per_sig))
+        self._by_workflow: dict[str, deque] = defaultdict(lambda: deque(maxlen=per_workflow))
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            with self._path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    sig = str(record.get("sig") or "")
+                    seconds = record.get("seconds")
+                    if not sig or not isinstance(seconds, (int, float)) or not (0 < seconds < 86400):
+                        continue
+                    self._by_sig[sig].append(float(seconds))
+                    workflow = str(record.get("wf") or "")
+                    if workflow:
+                        self._by_workflow[workflow].append(float(seconds))
+        except OSError:
+            return
+
+    def record(self, signature: str, workflow: str, seconds: float) -> None:
+        if not signature or not (0 < seconds < 86400):
+            return
+        with self._lock:
+            self._by_sig[signature].append(float(seconds))
+            if workflow:
+                self._by_workflow[workflow].append(float(seconds))
+            with contextlib.suppress(OSError):
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                with self._path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({
+                        "sig": signature, "wf": workflow,
+                        "seconds": round(float(seconds), 2), "at": round(time.time()),
+                    }) + "\n")
+
+    def estimate(self, signature: str, workflow: str, fallback: float | None = None) -> float | None:
+        with self._lock:
+            samples = list(self._by_sig.get(signature) or [])
+            if samples:
+                return round(statistics.median(samples), 1)
+            workflow_samples = list(self._by_workflow.get(workflow) or [])
+            if len(workflow_samples) >= 2:
+                return round(statistics.median(workflow_samples), 1)
+        return round(float(fallback), 1) if fallback else None
 
 
 _INLINE_IMAGE_SUFFIXES = {
@@ -204,6 +299,21 @@ def _read_private_media(
     scope: str = "media-studio-output",
 ) -> bytes:
     return read_private_media(path, scope=scope, cipher=cipher)
+
+
+def _e2e_envelope_response(envelope: bytes) -> Response:
+    """Serve a client-only E2E envelope verbatim. The browser detects it via
+    X-E2E-Media/Content-Type and decrypts with the vault private key; the server
+    holds no key. Mirrors the media-gateway send_output_file headers."""
+    return Response(
+        content=envelope,
+        media_type="application/vnd.hivemind.e2e+json",
+        headers={
+            "X-E2E-Media": "1",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 def _private_media_response(body: bytes, *, media_type: str, range_header: str = "") -> Response:
@@ -425,9 +535,20 @@ def build_control_app(
     )
     configure_private_cipher(cipher)
     access = owner_access or OwnerAccess.from_runtime(cipher)
-    prompt_history = PromptHistoryStore(Path(runs.store.path).parent / "prompt-history.sqlite3", cipher=cipher)
+    vault_db_path = Path(runs.store.path).parent / "owner-vault.sqlite3"
+
+    def _vault_public_key() -> str | None:
+        """Owner vault RSA public key (SPKI) for client-only E2E sealing, or None
+        until the owner has created a vault in-browser. No secret is involved."""
+        return read_vault_public_key(vault_db_path)
+
+    # Prompt text is sealed to the owner vault (client-only E2E) when a vault
+    # exists — never readable by a process holding only the Keychain key.
+    prompt_history = PromptHistoryStore(
+        Path(runs.store.path).parent / "prompt-history.sqlite3", cipher=cipher, vault_key=_vault_public_key
+    )
     studio_state = StudioStateStore(Path(runs.store.path).parent / "studio-state.sqlite3", cipher=cipher)
-    vault = VaultStore(Path(runs.store.path).parent / "owner-vault.sqlite3")
+    vault = VaultStore(vault_db_path)
     canvas_store = canvas_history or CanvasHistoryStore(Path(runs.store.path).parent / "canvas-history.sqlite3", cipher=cipher)
     canvas_gateway = CanvasGatewayClient()
     fetch_canvas_history = canvas_history_fetcher or canvas_gateway.history
@@ -450,6 +571,7 @@ def build_control_app(
     media_studio_input_root = Path(runs.store.path).parent / "uploads" / "media-studio"
     media_studio_reference_root = Path(runs.store.path).parent / "uploads" / "media-studio-references"
     media_studio_output_root = Path(runs.store.path).parent / "generated" / "media-studio"
+    generation_timings = GenerationTimings(Path(runs.store.path).parent / "generation-timings.jsonl")
     ingredients_sheet_compositor = repository_root / "packages/media-gateway/bin/compose-ingredients-sheet.py"
     # The unified studio frontend (packages/open-generative-ai, Vite build) is
     # the ONLY UI this server ships. /open-gen stays mounted for older links
@@ -544,6 +666,10 @@ def build_control_app(
         name = urllib.parse.unquote(encoded_name)
         reference = (media_studio_reference_root / name).resolve()
         reference_root = media_studio_reference_root.resolve()
+        # A sealed (.e2e) reference cannot be staged server-side — this host holds
+        # no key. The client decrypts it in-browser and re-sends it as base64.
+        if reference.is_relative_to(reference_root) and e2e_media_exists(reference):
+            raise ValueError("Sealed reference must be sent as inline base64 (decrypted in-browser)")
         if name != Path(name).name or not reference.is_relative_to(reference_root) or not _private_media_exists(reference):
             raise ValueError("Media reference is unavailable")
         decrypted = _read_private_media(reference, cipher, scope="media-studio-reference")
@@ -664,6 +790,7 @@ def build_control_app(
             "local-ai/binary-status",
             "local-ai/models",
             "local-ai/generate",
+            "local-ai/upscale",
             "local-ai/prompt-helper",
             "local-ai/civitai-download",
         }
@@ -1008,8 +1135,10 @@ def build_control_app(
 
     def _staged_media_studio_video_inputs(
         body: MediaStudioVideoBody, request: Request
-    ) -> tuple[Path | None, Path | None, list[dict[str, Any]]]:
+    ) -> tuple[Path | None, Path | None, Path | None, Path | None, list[dict[str, Any]]]:
         image: Path | None = None
+        middle: Path | None = None
+        end: Path | None = None
         video: Path | None = None
         ingredient_images: list[dict[str, Any]] = []
         has_private_reference = body.image_reference or body.video_reference or any(
@@ -1039,11 +1168,22 @@ def build_control_app(
                 image = _write_inline_image(body.image_base64, media_studio_input_root)
             elif body.image_reference:
                 image = stage_media_studio_reference(body.image_reference)
-            elif not ingredient_images:
-                raise ValueError("An image or video input is required")
+            elif not ingredient_images and not body.prompt.strip():
+                # LTX 2.3 supports text-to-video, so a prompt alone is a valid
+                # request; only reject a truly empty submission.
+                raise ValueError("An image, video, or prompt is required")
+            # First/middle/end keyframes are image anchors that only apply to
+            # image-driven generation. The client sends them inline (any E2E
+            # reference is decrypted in-browser before upload), so there is no
+            # server-side reference path to stage here.
+            if video is None:
+                if body.middle_image_base64:
+                    middle = _write_inline_image(body.middle_image_base64, media_studio_input_root)
+                if body.end_image_base64:
+                    end = _write_inline_image(body.end_image_base64, media_studio_input_root)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        return image, video, ingredient_images
+        return image, middle, end, video, ingredient_images
 
     def _validated_media_studio_loras(body: MediaStudioVideoBody) -> list[dict[str, Any]]:
         loras: list[dict[str, Any]] = []
@@ -1057,9 +1197,10 @@ def build_control_app(
         return loras
 
     def _unlink_staged_media_studio_sources(
-        image: Path | None, video: Path | None, ingredient_images: list[dict[str, Any]]
+        image: Path | None, middle: Path | None, end: Path | None,
+        video: Path | None, ingredient_images: list[dict[str, Any]]
     ) -> None:
-        for source in [image, video, *(item["image_path"] for item in ingredient_images)]:
+        for source in [image, middle, end, video, *(item["image_path"] for item in ingredient_images)]:
             if source is not None:
                 with contextlib.suppress(FileNotFoundError):
                     source.unlink()
@@ -1086,8 +1227,16 @@ def build_control_app(
         root = media_studio_output_root.resolve()
         if not output.is_relative_to(root) or not _private_media_exists(output):
             raise RuntimeError("Media Studio returned an unavailable output")
-        encrypted_at_rest = _encrypt_private_media(output, cipher)
-        if not _private_media_exists(output):
+        # Prefer client-only E2E sealing (vault public key) so this host holds no
+        # decrypt key; fall back to the legacy Keychain .zenc only with no vault.
+        spki = _vault_public_key()
+        if spki and output.is_file():
+            media_type = mimetypes.guess_type(output.name)[0] or "video/mp4"
+            seal_private_media_e2e(output, spki, media_type=media_type)
+            encrypted_at_rest = True
+        else:
+            encrypted_at_rest = _encrypt_private_media(output, cipher)
+        if not (_private_media_exists(output) or e2e_media_exists(output)):
             raise RuntimeError("Media Studio output could not be secured")
         elapsed = round(time.perf_counter() - started, 3)
         url = f"/api/media-studio/generated/{urllib.parse.quote(output.name)}"
@@ -1104,13 +1253,15 @@ def build_control_app(
 
     @app.post("/api/media-studio/video", dependencies=[Depends(require_owner_or_control)])
     async def generate_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
-        image, video, ingredient_images = _staged_media_studio_video_inputs(body, request)
+        image, middle, end, video, ingredient_images = _staged_media_studio_video_inputs(body, request)
         loras = _validated_media_studio_loras(body)
         started = time.perf_counter()
         try:
             result = await asyncio.to_thread(
                 run_media_studio_video,
                 image_path=image,
+                middle_image_path=middle,
+                end_image_path=end,
                 video_path=video,
                 video_mode=body.video_mode,
                 prompt=body.prompt.strip(),
@@ -1127,7 +1278,7 @@ def build_control_app(
             detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
             raise HTTPException(status_code=503, detail=detail) from None
         finally:
-            _unlink_staged_media_studio_sources(image, video, ingredient_images)
+            _unlink_staged_media_studio_sources(image, middle, end, video, ingredient_images)
         try:
             response = _finalize_media_studio_video(result, started)
         except RuntimeError as exc:
@@ -1169,18 +1320,26 @@ def build_control_app(
                 output_dir=media_studio_output_root,
             )
             entry.update(status="done", response=_finalize_media_studio_video(result, float(entry.get("started") or time.perf_counter())))
+            # Record the real duration so future runs of the same shape get a
+            # sharper elapsed/expected estimate.
+            with contextlib.suppress(Exception):
+                duration = time.perf_counter() - float(entry.get("started") or time.perf_counter())
+                if entry.get("signature") and duration > 0:
+                    generation_timings.record(entry["signature"], entry.get("workflow") or "", duration)
         except Exception as exc:
             entry.update(status="error", detail=str(exc) or "Media generation failed")
 
     @app.post("/api/media-studio/video/start", dependencies=[Depends(require_owner_or_control)])
     async def start_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
-        image, video, ingredient_images = _staged_media_studio_video_inputs(body, request)
+        image, middle, end, video, ingredient_images = _staged_media_studio_video_inputs(body, request)
         loras = _validated_media_studio_loras(body)
         started = time.perf_counter()
         try:
             queued = await asyncio.to_thread(
                 run_media_studio_video_start,
                 image_path=image,
+                middle_image_path=middle,
+                end_image_path=end,
                 video_path=video,
                 video_mode=body.video_mode,
                 prompt=body.prompt.strip(),
@@ -1190,6 +1349,7 @@ def build_control_app(
                 aspect_ratio=body.aspect_ratio,
                 resolution=body.resolution,
                 workflow_id=body.workflow_id.strip() or None,
+                seed=body.seed,
                 loras=loras,
             )
         except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
@@ -1198,17 +1358,29 @@ def build_control_app(
         finally:
             # start_video uploads the inputs to the gateway before returning,
             # so the staged control-api copies are no longer needed either way.
-            _unlink_staged_media_studio_sources(image, video, ingredient_images)
+            _unlink_staged_media_studio_sources(image, middle, end, video, ingredient_images)
         job_id = str(queued["job_id"])
         _prune_media_studio_video_jobs()
+        signature, workflow = _video_timing_signature(body)
+        estimate_seconds = generation_timings.estimate(
+            signature, workflow, fallback=_DEFAULT_VIDEO_ESTIMATE_SECONDS
+        )
         media_studio_video_jobs[job_id] = {
             "status": "running",
             "created": time.time(),
             "started": started,
+            "signature": signature,
+            "workflow": workflow,
+            "estimate_seconds": estimate_seconds,
             "uploaded_names": list(queued.get("uploaded_names") or []),
         }
         asyncio.get_running_loop().create_task(_finish_media_studio_video_job(job_id))
-        return {"ok": True, "job_id": job_id, "status": "running"}
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "status": "running",
+            **({"estimate_seconds": estimate_seconds} if estimate_seconds else {}),
+        }
 
     @app.get("/api/media-studio/video/job/{job_id}", dependencies=[Depends(require_owner_or_control)])
     async def media_studio_video_job(job_id: str, request: Request) -> dict:
@@ -1232,10 +1404,33 @@ def build_control_app(
         if entry["status"] == "done":
             response = entry["response"]
             return response if bool(getattr(request.state, "is_owner", False)) else machine_operation_receipt(response)
-        if entry["status"] == "error":
+        if entry["status"] in ("error", "cancelled"):
             detail = entry.get("detail") if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
-            return {"ok": False, "status": "error", "detail": detail}
-        return {"ok": True, "status": "running", **({"progress": progress} if progress is not None else {})}
+            return {"ok": False, "status": entry["status"], "detail": detail or "Generation cancelled"}
+        elapsed_seconds = round(max(0.0, time.perf_counter() - float(entry.get("started") or time.perf_counter())), 1)
+        return {
+            "ok": True,
+            "status": "running",
+            "elapsed_seconds": elapsed_seconds,
+            **({"progress": progress} if progress is not None else {}),
+            **({"estimate_seconds": entry["estimate_seconds"]} if entry.get("estimate_seconds") else {}),
+        }
+
+    @app.post("/api/media-studio/video/job/{job_id}/cancel", dependencies=[Depends(require_owner_or_control)])
+    def cancel_media_studio_video_job(job_id: str) -> dict:
+        """Cancel/reset a video job. Marks the tracked job terminal so its finalizer
+        stops and further polls return a cancelled state, and forwards a best-effort
+        interrupt to the backend. Always succeeds (even for an unknown or already-
+        finished job) so the studio can unblock the UI regardless — this is also the
+        escape hatch for a job whose output never resolved a URL and hung 'running'."""
+        entry = media_studio_video_jobs.get(job_id)
+        interrupted = False
+        with contextlib.suppress(Exception):
+            interrupted = bool(run_media_studio_video_cancel(job_id))
+        if entry is not None:
+            entry["status"] = "cancelled"
+            entry["detail"] = "Cancelled by the owner."
+        return {"ok": True, "status": "cancelled", "known": entry is not None, "interrupted": interrupted}
 
     @app.get("/api/media-studio/gateway/{output_name}", response_class=Response, dependencies=[Depends(require_owner)])
     def media_studio_gateway_media(output_name: str) -> Response:
@@ -1345,23 +1540,41 @@ def build_control_app(
         name = f"reference-{secrets.token_hex(16)}{suffix}"
         reference = (media_studio_reference_root / name).resolve()
         reference.write_bytes(body)
+        # Seal to the owner vault (client-only E2E) so this host holds no decrypt
+        # key. Reuse is client-side: the browser decrypts and re-sends base64 (the
+        # server can no longer stage a sealed reference). Legacy Keychain .zenc is
+        # only a no-vault fallback.
+        spki = _vault_public_key()
         try:
-            encrypted_at_rest = _encrypt_private_media(reference, cipher, scope="media-studio-reference")
+            if spki:
+                media_type = mimetypes.guess_type(reference.name)[0] or "image/png"
+                seal_private_media_e2e(reference, spki, media_type=media_type)
+            else:
+                _encrypt_private_media(reference, cipher, scope="media-studio-reference")
         except Exception as exc:
             with contextlib.suppress(FileNotFoundError):
                 reference.unlink()
+            with contextlib.suppress(FileNotFoundError):
+                e2e_media_sidecar(reference).unlink()
             raise HTTPException(status_code=503, detail="Reference image could not be secured") from exc
-        if not _private_media_exists(reference):
+        if not (_private_media_exists(reference) or e2e_media_exists(reference)):
             raise HTTPException(status_code=503, detail="Reference image could not be secured")
         url = f"/api/media-studio/references/{urllib.parse.quote(name)}"
-        return {"ok": True, "url": url, "encrypted_at_rest": encrypted_at_rest}
+        return {"ok": True, "url": url, "encrypted_at_rest": True}
 
     @app.get("/api/media-studio/references/{filename}", dependencies=[Depends(require_owner)])
     def media_studio_reference(filename: str, request: Request) -> Response:
         name = Path(filename).name
         reference = (media_studio_reference_root / name).resolve()
         root = media_studio_reference_root.resolve()
-        if name != filename or not reference.is_relative_to(root) or not _private_media_exists(reference):
+        if name != filename or not reference.is_relative_to(root):
+            raise HTTPException(status_code=404, detail="Reference image not found")
+        # Client-only E2E envelope (re-sealed reference): serve verbatim for the
+        # browser to decrypt for display.
+        envelope = read_e2e_envelope(reference)
+        if envelope is not None:
+            return _e2e_envelope_response(envelope)
+        if not _private_media_exists(reference):
             raise HTTPException(status_code=404, detail="Reference image not found")
         try:
             body = _read_private_media(reference, cipher, scope="media-studio-reference")
@@ -1386,12 +1599,53 @@ def build_control_app(
             raise HTTPException(status_code=404, detail="Reference image not found")
         return {"ok": True}
 
+    @app.get("/api/media-studio/references", dependencies=[Depends(require_owner)])
+    def list_media_studio_references() -> dict:
+        # Enumerate the owner's saved reference uploads so past uploads reappear in
+        # the picker even when the browser's composer state is empty (fresh browser,
+        # cleared state). Each stays E2E: the URL points at the .e2e envelope route,
+        # which the browser decrypts for display — this host never decrypts them.
+        root = media_studio_reference_root
+        newest: dict[str, float] = {}
+        if root.is_dir():
+            for path in root.iterdir():
+                if not path.is_file():
+                    continue
+                base = path.name
+                for suffix in (".e2e", _PRIVATE_MEDIA_SUFFIX):
+                    if base.endswith(suffix):
+                        base = base[: -len(suffix)]
+                        break
+                if not base.startswith("reference-"):
+                    continue
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                if base not in newest or mtime > newest[base]:
+                    newest[base] = mtime
+        references = [
+            {
+                "name": base,
+                "url": f"/api/media-studio/references/{urllib.parse.quote(base)}",
+                "timestamp": mtime,
+            }
+            for base, mtime in sorted(newest.items(), key=lambda item: item[1], reverse=True)
+        ]
+        return {"ok": True, "references": references}
+
     @app.get("/api/media-studio/generated/{filename}", dependencies=[Depends(require_owner)])
     def media_studio_generated_video(filename: str, request: Request) -> Response:
         name = Path(filename).name
         output = (media_studio_output_root / name).resolve()
         root = media_studio_output_root.resolve()
-        if name != filename or not output.is_relative_to(root) or not _private_media_exists(output):
+        if name != filename or not output.is_relative_to(root):
+            raise HTTPException(status_code=404, detail="Generated video not found")
+        # Client-only E2E envelope: serve verbatim, the browser decrypts.
+        envelope = read_e2e_envelope(output)
+        if envelope is not None:
+            return _e2e_envelope_response(envelope)
+        if not _private_media_exists(output):
             raise HTTPException(status_code=404, detail="Generated video not found")
         media_type = mimetypes.guess_type(output.name)[0] or "video/mp4"
         if output.is_file():

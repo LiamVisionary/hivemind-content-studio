@@ -1,3 +1,6 @@
+import { decryptMedia } from './e2eVault.js';
+import { ensureVaultReady } from './vaultSession.js';
+
 const HIVE_VIDEO_PREFIX = 'hivemind-media:';
 const VIDEO_SELECTION_KEY = 'hivemind.explore.videoSelection';
 const OPTIONS_KEY = 'hivemind.explore.options';
@@ -211,6 +214,33 @@ export async function deleteHivemindStudioUpload(value) {
     return true;
 }
 
+// List the owner's saved reference uploads (server-side, sealed to the vault) so
+// past uploads reappear in the picker even when the browser's composer state is
+// empty. Returns upload-history-shaped entries; each uploadedUrl points at the
+// E2E envelope route, so the picker's Thumb decrypts it in-browser — this host
+// never decrypts. Empty outside studio mode or when the endpoint is unavailable.
+export async function fetchHivemindReferences() {
+    if (!isHivemindStudioEnabled()) return [];
+    try {
+        const response = await fetch('/api/media-studio/references', { credentials: 'same-origin' });
+        if (!response.ok) return [];
+        const data = await response.json().catch(() => ({}));
+        const references = Array.isArray(data.references) ? data.references : [];
+        return references
+            .filter((ref) => ref && ref.url)
+            .map((ref) => ({
+                id: String(ref.name || ref.url),
+                name: String(ref.name || ''),
+                uploadedUrl: String(ref.url),
+                thumbnail: null, // no stored thumbnail — Thumb decrypts the full E2E image
+                timestamp: typeof ref.timestamp === 'number' ? new Date(ref.timestamp * 1000).toISOString() : '',
+                serverReference: true,
+            }));
+    } catch {
+        return [];
+    }
+}
+
 function blobToDataUrl(blob) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -225,8 +255,22 @@ async function mediaSourceToDataUrl(source, kind) {
     if (String(source).startsWith(`data:${kind}/`)) return source;
     const remembered = uploadedFiles.get(source);
     if (remembered) return blobToDataUrl(remembered);
-    const response = await fetch(source);
+    // A saved reference is sealed to the owner vault. Fetch the source directly and,
+    // if it is a client-only E2E envelope, decrypt it in-browser and re-send inline
+    // as base64 (the server holds no key). We do NOT route this through
+    // resolveMediaSrc: that helper is fail-OPEN, so on any hiccup it hands back the
+    // raw reference URL — whose bytes are the ciphertext envelope, not an image —
+    // and we would upload that as image_base64. The server then rejects a non-image
+    // data URL, which the user sees as "did not return a job id: MediaStudioError".
+    const response = await fetch(source, { credentials: 'same-origin', cache: 'no-store' });
     if (!response.ok) throw new Error(`Could not read the selected ${kind}.`);
+    const contentType = response.headers.get('Content-Type') || '';
+    if (response.headers.get('X-E2E-Media') === '1' || contentType.includes('hivemind.e2e')) {
+        if (!(await ensureVaultReady())) throw new Error(`Unlock the studio to reuse the selected ${kind}.`);
+        const envelope = await response.json();
+        const bytes = await decryptMedia(envelope.ciphertext, envelope.wrapped_dek);
+        return blobToDataUrl(new Blob([bytes], { type: envelope.media_type || `${kind}/png` }));
+    }
     return blobToDataUrl(await response.blob());
 }
 
@@ -255,15 +299,15 @@ function saveHivemindVideoSelection(selection) {
 }
 
 async function ingredientImagesToRequest(items) {
+    // References are always sent as inline base64: they are sealed to the owner
+    // vault at rest, so the server cannot decrypt a reference path — the browser
+    // decrypts each envelope (mediaSourceToDataUrl) and re-sends the bytes.
     return Promise.all((Array.isArray(items) ? items : [])
         .slice(0, 12)
         .map(async (item) => {
             const source = item?.image || item?.image_url || item?.url;
-            const reference = item?.image_base64 ? null : mediaStudioReferencePath(source);
             return {
-                ...(reference
-                    ? { image_reference: reference }
-                    : { image_base64: item?.image_base64 || await mediaSourceToDataUrl(source, 'image') }),
+                image_base64: item?.image_base64 || await mediaSourceToDataUrl(source, 'image'),
                 ...(String(item?.description || '').trim() ? { description: String(item.description).trim() } : {}),
             };
         }));
@@ -293,21 +337,38 @@ export async function previewHivemindIngredientSheet(items, { aspectRatio = '16:
 }
 
 export async function generateHivemindVideo(params) {
+    // References (image + video) are sealed to the owner vault at rest, so they
+    // are always decrypted in-browser and re-sent inline as base64 — the server
+    // holds no key to stage a reference path.
     const videoSource = params.video || params.video_url;
-    const videoReference = params.video_base64 ? null : mediaStudioReferencePath(videoSource);
-    const videoBase64 = videoReference
-        ? null
-        : (params.video_base64 || await mediaSourceToDataUrl(videoSource, 'video'));
+    const videoBase64 = params.video_base64 || await mediaSourceToDataUrl(videoSource, 'video');
     const imageSource = params.image || params.image_url;
-    const imageReference = videoBase64 || params.image_base64 ? null : mediaStudioReferencePath(imageSource);
-    const imageBase64 = videoBase64 || imageReference
+    const imageBase64 = videoBase64
         ? null
         : (params.image_base64 || await mediaSourceToDataUrl(imageSource, 'image'));
+    // LTX 2.3 first/middle/end keyframes. Like the start frame, a saved reference
+    // is sealed to the owner vault, so it is decrypted in-browser and re-sent
+    // inline as base64. Middle/end anchors only apply to image-driven generation.
+    const middleSource = params.middleImage || params.middle_image_url;
+    const endSource = params.endImage || params.end_image_url;
+    const middleBase64 = (videoBase64 || !middleSource)
+        ? null
+        : (params.middle_image_base64 || await mediaSourceToDataUrl(middleSource, 'image'));
+    const endBase64 = (videoBase64 || !endSource)
+        ? null
+        : (params.end_image_base64 || await mediaSourceToDataUrl(endSource, 'image'));
     const ingredientImages = await ingredientImagesToRequest(params.ingredientImages);
-    if (!videoReference && !videoBase64 && !imageBase64 && !imageReference && !ingredientImages.length) {
-        throw new Error('Upload a start image or source video for this local workflow.');
+    // LTX 2.3 supports text-to-video: a prompt alone is enough. Only a completely
+    // empty request (no prompt and no media) is rejected.
+    if (!videoBase64 && !imageBase64 && !ingredientImages.length && !String(params.prompt || '').trim()) {
+        throw new Error('Enter a prompt, or add a start image or source video.');
     }
-    const workflowId = params.workflow_id || workflowIdFromHivemindModelId(params.model);
+    const rawWorkflowId = params.workflow_id || workflowIdFromHivemindModelId(params.model);
+    // "workflow-default" is a catalog placeholder meaning "use the server's default
+    // workflow", not a real workflow id. Sending it verbatim makes the MCP reject
+    // the job ("unknown video workflow_id: workflow-default"), which the redaction
+    // hides as a generic MediaStudioError. Send empty so the server picks its default.
+    const workflowId = rawWorkflowId === 'workflow-default' ? '' : rawWorkflowId;
     const requestBody = JSON.stringify({
         prompt: params.prompt || '',
         workflow_id: workflowId,
@@ -315,20 +376,20 @@ export async function generateHivemindVideo(params) {
             ? { reference_description: String(params.referenceDescription).trim() }
             : {}),
         ...(ingredientImages.length ? { ingredient_images: ingredientImages } : {}),
-        ...(videoReference
-            ? { video_reference: videoReference, video_mode: 'extend' }
-            : videoBase64
+        ...(videoBase64
             ? { video_base64: videoBase64, video_mode: 'extend' }
-            : imageReference
-                ? { image_reference: imageReference }
-                : imageBase64
-                    ? { image_base64: imageBase64 }
-                    : {}),
+            : imageBase64
+                ? { image_base64: imageBase64 }
+                : {}),
+        ...(middleBase64 ? { middle_image_base64: middleBase64 } : {}),
+        ...(endBase64 ? { end_image_base64: endBase64 } : {}),
         duration_seconds: params.duration || params.duration_seconds || 4,
         aspect_ratio: params.aspect_ratio || '',
         ...(String(params.resolution || '').trim()
             ? { resolution: String(params.resolution).trim().toLowerCase() }
             : {}),
+        // A concrete seed makes each run differ; omit for the runner's default.
+        ...(Number.isFinite(params.seed) && params.seed >= 0 ? { seed: Math.floor(params.seed) } : {}),
         ...(Array.isArray(params.loras) && params.loras.length ? { loras: params.loras } : {}),
     });
     const postJson = async (path) => {
@@ -360,13 +421,60 @@ export async function generateHivemindVideo(params) {
     // A server that already finished synchronously answers with the media URL.
     if (start.data.url || start.data.media_url || start.data.output_url) return finished(start.data);
     const jobId = String(start.data.job_id);
+    // Surface the job id so the studio can persist it (sessionStorage) and resume
+    // polling after a tab switch / reload — a long local render must not be lost
+    // just because the studio component remounts.
+    if (typeof params.onJobId === 'function') params.onJobId(jobId);
+    // Seed the expected-duration estimate (from historical timings) so the bar can
+    // show elapsed / ~expected immediately, before the first status poll lands.
+    const estimateSeconds = Number(start.data.estimate_seconds) || null;
+    if (typeof params.onProgress === 'function' && estimateSeconds) {
+        params.onProgress({ progress: null, estimateSeconds });
+    }
+    return pollHivemindVideoJob(jobId, { onProgress: params.onProgress, estimateSeconds, signal: params.signal });
+}
+
+// Best-effort cancel of a started Media Studio video job: tells the server to stop
+// finalizing/polling it and to forward an interrupt to whichever backend is running
+// it. Always resolves (never throws) — the studio resets its local generation state
+// regardless, so a job that already finished or vanished still unblocks the UI.
+export async function cancelHivemindVideoJob(jobId) {
+    if (!jobId) return { ok: false, reason: 'no-job-id' };
+    try {
+        const response = await fetch(`/api/media-studio/video/job/${encodeURIComponent(String(jobId))}/cancel`, {
+            method: 'POST',
+            credentials: 'same-origin',
+        });
+        return await response.json().catch(() => ({ ok: response.ok }));
+    } catch (error) {
+        return { ok: false, reason: String(error?.message || error) };
+    }
+}
+
+// Poll an already-started Media Studio video job to completion. Shared by the
+// initial generation (above) and the mount-time resume path in VideoStudio, so a
+// generation survives the studio remounting mid-render. Resolves to the same
+// { id, url, ... } shape as generateHivemindVideo.
+export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds = null, signal = null } = {}) {
+    const id = String(jobId);
+    let estimate = Number(estimateSeconds) || null;
+    const cancelled = () => Object.assign(new Error('Generation cancelled'), { cancelled: true });
+    const done = (payload) => ({
+        ...payload,
+        id: payload.job_id || payload.id || id,
+        url: payload.url || payload.media_url || payload.output_url,
+    });
     const deadline = Date.now() + 90 * 60 * 1000;
     let missing = 0;
     while (Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+        if (signal?.aborted) throw cancelled();
+        // 2s poll: the bar is smoothed client-side between polls, so this only needs
+        // to keep real progress / estimate / completion reasonably fresh.
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        if (signal?.aborted) throw cancelled();
         let payload;
         try {
-            const response = await fetch(`/api/media-studio/video/job/${encodeURIComponent(jobId)}`, { credentials: 'same-origin' });
+            const response = await fetch(`/api/media-studio/video/job/${encodeURIComponent(id)}`, { credentials: 'same-origin', ...(signal ? { signal } : {}) });
             if (response.status === 404) {
                 // The studio API restarted and lost the job registry. The
                 // gateway job itself keeps running and lands in History.
@@ -377,6 +485,7 @@ export async function generateHivemindVideo(params) {
             missing = 0;
             payload = await response.json().catch(() => ({}));
         } catch (error) {
+            if (signal?.aborted || error?.name === 'AbortError') throw cancelled();
             if (missing >= 3) throw error;
             continue; // transient network blip — the job survives server-side
         }
@@ -384,10 +493,17 @@ export async function generateHivemindVideo(params) {
             throw new Error(payload.detail || payload.error || 'Media Studio reported a failed generation');
         }
         if (payload.status === 'running') {
-            if (typeof params.onProgress === 'function' && typeof payload.progress === 'number') params.onProgress(payload.progress);
+            estimate = Number(payload.estimate_seconds) || estimate;
+            if (typeof onProgress === 'function') {
+                onProgress({
+                    progress: typeof payload.progress === 'number' ? payload.progress : null,
+                    estimateSeconds: estimate,
+                    elapsedSeconds: Number(payload.elapsed_seconds) || null,
+                });
+            }
             continue;
         }
-        if (payload.ok && (payload.url || payload.media_url || payload.output_url)) return finished(payload);
+        if (payload.ok && (payload.url || payload.media_url || payload.output_url)) return done(payload);
     }
     throw new Error('Media Studio generation timed out. If it finishes later, the video will appear in the History tab.');
 }

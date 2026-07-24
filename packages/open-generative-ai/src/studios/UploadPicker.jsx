@@ -1,0 +1,453 @@
+// Reference upload picker (React port of components/UploadPicker.js).
+//
+// CONTROLLED API — other studios code against exactly this:
+//   <UploadPicker
+//     values={string[]}            // selected uploaded URLs (source of truth)
+//     onChange={(urls) => void}    // fires on upload / history pick / chip remove
+//     uploadFn={async (file) => url | { url, thumbnail? }}   // optional override
+//     requireApiKey={() => boolean}
+//     maxImages={number}           // 1 = single mode (replace), >1 = multi
+//     accept={string}              // file input accept, default 'image/*'
+//     disabled={boolean}
+//     compact={boolean}            // square icon trigger instead of labelled button
+//     label={string}               // trigger label (non-compact)
+//     ignored={boolean}            // dims attached chips (e.g. option makes refs unused)
+//     chipClassName={string}       // className hook for each attached chip
+//   />
+//
+// Ported behaviors (see specs/small-components.json):
+// - default upload path: muapi.uploadFile, or uploadFileToHivemindStudio in studio mode
+// - missing-key gate opens AuthModal; the picked files are retained and processed
+//   after the key is saved (same retry-continuation semantics)
+// - single mode uploads files[0] and replaces; multi mode uploads remaining slots
+//   in parallel and reopens the panel
+// - Promise.all([uploadFn(file), generateThumbnail(file)]); uploadFn results are
+//   polymorphic (string url | { url, thumbnail })
+// - history persisted via uploadHistory (localStorage 'muapi_uploads' capped at 20;
+//   encrypted composer uploads in studio mode) gated by isPersistentUploadReference
+// - history delete also fires deleteHivemindStudioUpload fire-and-forget (remote
+//   reference cleanup, warn on failure) and drops the URL from the selection
+// - upload failure: console.error + toast (replaces alert), file input reset
+// Restore-a-past-generation is silent by construction: the parent sets `values`
+// directly, which never fires onChange (replaces the old setImages({silent}) API).
+import { useEffect, useRef, useState } from 'react';
+import { toast } from 'react-hot-toast';
+import { AuthModal } from '../dialogs/AuthModal.jsx';
+import { useMediaSrc } from '../hooks/hooks.js';
+import {
+  deleteHivemindStudioUpload,
+  fetchHivemindReferences,
+  isHivemindStudioEnabled,
+  uploadFileToHivemindStudio,
+} from '../lib/hivemindStudio.js';
+import { muapi } from '../lib/muapi.js';
+import {
+  generateThumbnail,
+  getUploadHistory,
+  isPersistentUploadReference,
+  removeUpload,
+  saveUpload,
+} from '../lib/uploadHistory.js';
+import { useDismissable } from '../ui/Menu.jsx';
+import { Icon } from '../ui/icons.jsx';
+import { Button, SectionLabel, Spinner, cx } from '../ui/kit.jsx';
+
+export function Thumb({ src, alt = '', className = '' }) {
+  const resolved = useMediaSrc(src);
+  // Empty while an E2E reference is still decrypting — show a skeleton, not a
+  // broken image.
+  if (!resolved) {
+    return <div className={cx('h-full w-full animate-pulse bg-bg3', className)} aria-label="Decrypting" />;
+  }
+  return <img src={resolved} alt={alt} className={cx('h-full w-full object-cover', className)} />;
+}
+
+function AttachedChip({ url, name, thumbnail, onRemove, disabled, ignored, className = '' }) {
+  return (
+    <span
+      className={cx(
+        'group/chip relative inline-flex h-9 shrink-0 items-center gap-1.5 overflow-hidden rounded-md border border-line1 bg-bg2 pr-1 transition-all duration-150',
+        ignored ? 'opacity-40 grayscale' : 'hover:border-line2',
+        className,
+      )}
+      title={name || url}
+    >
+      <span className="h-9 w-9 shrink-0 overflow-hidden border-r border-line1 bg-bg3">
+        <Thumb src={thumbnail || url} alt={name || 'Reference'} />
+      </span>
+      {name ? <span className="max-w-[96px] truncate text-[11px] text-ink2">{name}</span> : null}
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={disabled}
+        aria-label="Remove reference"
+        title="Remove reference"
+        className="grid h-5 w-5 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-40"
+      >
+        <Icon name="x" size={11} />
+      </button>
+    </span>
+  );
+}
+
+export function UploadPicker({
+  values = [],
+  onChange,
+  uploadFn,
+  requireApiKey,
+  maxImages = 1,
+  accept = 'image/*',
+  disabled = false,
+  compact = false,
+  label,
+  ignored = false,
+  chipClassName = '',
+}) {
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [history, setHistory] = useState(() => getUploadHistory());
+  // Past uploads saved server-side (sealed) so they reappear even when the
+  // browser's composer state is empty. Merged (deduped) into the displayed grid.
+  const [serverRefs, setServerRefs] = useState([]);
+  const fileInputRef = useRef(null);
+  const pendingFilesRef = useRef(null);
+  const panelRef = useDismissable(panelOpen, () => setPanelOpen(false));
+
+  useEffect(() => {
+    let alive = true;
+    fetchHivemindReferences().then((refs) => { if (alive) setServerRefs(refs); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const isMulti = maxImages > 1;
+  const studioMode = isHivemindStudioEnabled();
+  const doUpload =
+    uploadFn || (studioMode ? uploadFileToHivemindStudio : (file) => muapi.uploadFile(file));
+  // Old default was () => true; studio-mode default uploads go to the local
+  // reference store and need no Muapi key, so the default follows the upload path.
+  const needsKey =
+    typeof requireApiKey === 'function' ? requireApiKey : () => !studioMode;
+
+  // Trim when the max shrinks (old setMaxImages semantics: slice + notify).
+  useEffect(() => {
+    if (values.length > maxImages) onChange?.(values.slice(0, maxImages));
+  }, [maxImages, values, onChange]);
+
+  const refreshHistory = () => setHistory(getUploadHistory());
+
+  const processFiles = async (files) => {
+    setUploading(true);
+    try {
+      if (maxImages === 1) {
+        // Single mode: first file only, replace the selection.
+        const file = files[0];
+        const [uploadResult, thumbnail] = await Promise.all([doUpload(file), generateThumbnail(file)]);
+        const uploadedUrl = typeof uploadResult === 'string' ? uploadResult : uploadResult?.url;
+        const displayThumbnail =
+          typeof uploadResult === 'string' ? thumbnail : uploadResult?.thumbnail || thumbnail;
+        const entry = {
+          id: Date.now().toString(),
+          name: file.name,
+          uploadedUrl,
+          thumbnail: displayThumbnail,
+          timestamp: new Date().toISOString(),
+        };
+        if (isPersistentUploadReference(uploadedUrl)) saveUpload(entry);
+        refreshHistory();
+        onChange?.([uploadedUrl]);
+      } else {
+        // Multi mode: upload all files (up to remaining slots) in parallel.
+        const slots = maxImages - values.length;
+        const toUpload = files.slice(0, Math.max(slots, 1));
+        const results = await Promise.all(
+          toUpload.map(async (file) => {
+            const [uploadResult, thumbnail] = await Promise.all([doUpload(file), generateThumbnail(file)]);
+            const uploadedUrl = typeof uploadResult === 'string' ? uploadResult : uploadResult?.url;
+            const displayThumbnail =
+              typeof uploadResult === 'string' ? thumbnail : uploadResult?.thumbnail || thumbnail;
+            return {
+              id: Date.now().toString() + Math.random(),
+              name: file.name,
+              uploadedUrl,
+              thumbnail: displayThumbnail,
+              timestamp: new Date().toISOString(),
+            };
+          }),
+        );
+        const next = [...values];
+        results.forEach((entry) => {
+          if (isPersistentUploadReference(entry.uploadedUrl)) saveUpload(entry);
+          if (next.length < maxImages) next.push(entry.uploadedUrl);
+        });
+        refreshHistory();
+        onChange?.(next);
+        setPanelOpen(true); // reopen so the user sees the selection state
+      }
+    } catch (err) {
+      console.error('[UploadPicker] Upload failed:', err);
+      toast.error(`Image upload failed: ${err.message}`);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleFiles = (fileList) => {
+    const files = Array.from(fileList || []).filter(Boolean);
+    if (!files.length || disabled) return;
+    if (needsKey() && !localStorage.getItem('muapi_key')) {
+      // Abort and gate behind AuthModal — the files are retained and processed
+      // once the key is saved (retry continuation).
+      pendingFilesRef.current = files;
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      setAuthOpen(true);
+      return;
+    }
+    void processFiles(files);
+  };
+
+  const acceptsFile = (file) => {
+    if (!accept || accept === '*' || accept === '*/*') return true;
+    const prefix = accept.split('/')[0];
+    return accept.endsWith('/*') ? file.type.startsWith(`${prefix}/`) : true;
+  };
+
+  const onDrop = (event) => {
+    event.preventDefault();
+    setDragOver(false);
+    if (disabled) return;
+    handleFiles(Array.from(event.dataTransfer?.files || []).filter(acceptsFile));
+  };
+
+  const removeValue = (url) => onChange?.(values.filter((u) => u !== url));
+
+  const toggleFromHistory = (entry) => {
+    const url = entry.uploadedUrl;
+    const idx = values.indexOf(url);
+    if (!isMulti) {
+      // Single-select: select & close immediately.
+      onChange?.([url]);
+      setPanelOpen(false);
+      return;
+    }
+    if (idx !== -1) {
+      onChange?.(values.filter((u) => u !== url));
+    } else {
+      if (values.length >= maxImages) return; // at max — can't select more
+      onChange?.([...values, url]);
+    }
+  };
+
+  const deleteHistoryEntry = (entry) => {
+    removeUpload(entry.id);
+    // Remote reference cleanup (studio uploads) — fire and forget; a plain
+    // muapi/data URL resolves to a no-op inside deleteHivemindStudioUpload.
+    Promise.resolve(deleteHivemindStudioUpload(entry.uploadedUrl)).catch((error) => {
+      console.warn('[UploadPicker] Remote reference cleanup failed:', error);
+    });
+    setServerRefs((refs) => refs.filter((r) => r.uploadedUrl !== entry.uploadedUrl));
+    refreshHistory();
+    if (values.includes(entry.uploadedUrl)) {
+      onChange?.(values.filter((u) => u !== entry.uploadedUrl));
+    }
+  };
+
+  const knownUrls = new Set(history.map((entry) => entry.uploadedUrl));
+  const mergedHistory = [...history, ...serverRefs.filter((entry) => !knownUrls.has(entry.uploadedUrl))];
+  const historyByUrl = new Map(mergedHistory.map((entry) => [entry.uploadedUrl, entry]));
+  const count = values.length;
+  const canAddMore = count < maxImages;
+  const triggerTitle =
+    count === 0
+      ? isMulti
+        ? `Add up to ${maxImages} images`
+        : 'Reference image'
+      : count > 1
+        ? canAddMore
+          ? `${count} of ${maxImages} images selected — click to manage`
+          : `${count} images selected`
+        : isMulti && canAddMore
+          ? `1 image selected — click to add more (up to ${maxImages})`
+          : 'Reference image';
+  const triggerLabel = label || (isMulti ? `Add up to ${maxImages} images` : 'Reference image');
+
+  return (
+    <div
+      data-upload-picker=""
+      className={cx('relative inline-flex max-w-full flex-wrap items-center gap-1.5', disabled && 'opacity-60')}
+      onDragOver={(e) => {
+        e.preventDefault();
+        if (!disabled) setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+    >
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={accept}
+        multiple={isMulti}
+        className="hidden"
+        disabled={disabled}
+        onChange={(e) => handleFiles(e.target.files)}
+      />
+
+      {/* Attached chips */}
+      {values.map((url) => {
+        const entry = historyByUrl.get(url);
+        return (
+          <AttachedChip
+            key={url}
+            url={url}
+            name={entry?.name}
+            thumbnail={entry?.thumbnail}
+            onRemove={() => removeValue(url)}
+            disabled={disabled}
+            ignored={ignored}
+            className={chipClassName}
+          />
+        );
+      })}
+
+      {/* Trigger */}
+      <button
+        type="button"
+        disabled={disabled}
+        title={triggerTitle}
+        aria-label={triggerTitle}
+        onClick={() => setPanelOpen((v) => !v)}
+        className={cx(
+          'inline-flex h-9 shrink-0 select-none items-center justify-center gap-1.5 rounded-md border text-xs font-medium transition-colors duration-150',
+          compact ? 'w-9' : 'px-2.5',
+          dragOver
+            ? 'border-honey bg-honey-tint text-honey'
+            : count > 0
+              ? 'border-honey/40 bg-bg2 text-ink2 hover:border-honey/60 hover:text-ink1'
+              : 'border-line1 bg-bg2 text-ink2 hover:border-line2 hover:text-ink1',
+          disabled && 'cursor-not-allowed',
+        )}
+      >
+        {uploading ? (
+          <Spinner size={14} className="text-honey" />
+        ) : (
+          <Icon name={count > 0 && isMulti && canAddMore ? 'plus' : 'upload'} size={14} />
+        )}
+        {compact ? null : (
+          <span className="max-w-[140px] truncate">
+            {count > 0 ? (isMulti ? `${count}/${maxImages}` : 'Replace') : triggerLabel}
+          </span>
+        )}
+      </button>
+
+      {/* History / upload panel */}
+      {panelOpen ? (
+        <div
+          ref={panelRef}
+          className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[288px] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop"
+        >
+          <div className="mb-2.5 flex items-center justify-between gap-2 border-b border-line1 pb-2.5">
+            <div className="min-w-0">
+              <SectionLabel>Reference images</SectionLabel>
+              {isMulti ? (
+                <span className="mt-0.5 block text-[11px] text-ink3">Select up to {maxImages} images</span>
+              ) : null}
+            </div>
+            <Button
+              size="sm"
+              icon="upload"
+              onClick={() => {
+                setPanelOpen(false);
+                fileInputRef.current?.click();
+              }}
+            >
+              {isMulti ? 'Upload files' : 'Upload new'}
+            </Button>
+          </div>
+
+          {mergedHistory.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-6 text-ink3">
+              <Icon name="upload" size={22} />
+              <span className="text-xs">No uploads yet</span>
+            </div>
+          ) : (
+            <div className="grid max-h-56 grid-cols-3 gap-2 overflow-y-auto pr-0.5">
+              {mergedHistory.map((entry) => {
+                const selIdx = values.indexOf(entry.uploadedUrl);
+                const isSelected = selIdx !== -1;
+                const atMax = isMulti && !isSelected && values.length >= maxImages;
+                return (
+                  <div
+                    key={entry.id}
+                    role="button"
+                    tabIndex={0}
+                    title={entry.name}
+                    onClick={() => {
+                      if (!atMax) toggleFromHistory(entry);
+                    }}
+                    onKeyDown={(e) => {
+                      if ((e.key === 'Enter' || e.key === ' ') && !atMax) {
+                        e.preventDefault();
+                        toggleFromHistory(entry);
+                      }
+                    }}
+                    className={cx(
+                      'group/cell relative aspect-square overflow-hidden rounded-md border transition-all duration-150',
+                      isSelected ? 'border-honey' : 'border-line1 hover:border-line2',
+                      atMax ? 'cursor-not-allowed opacity-40' : 'cursor-pointer',
+                    )}
+                  >
+                    <Thumb src={entry.thumbnail || entry.uploadedUrl} alt={entry.name} />
+                    {isSelected ? (
+                      <span className="absolute left-1 top-1 grid h-5 min-w-[20px] place-items-center rounded-full bg-honey px-1 text-[10px] font-bold text-on-honey">
+                        {isMulti ? selIdx + 1 : <Icon name="check" size={11} />}
+                      </span>
+                    ) : null}
+                    <span className="absolute inset-x-0 bottom-0 flex justify-end bg-gradient-to-t from-black/60 to-transparent p-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/cell:opacity-100">
+                      <button
+                        type="button"
+                        aria-label="Remove from history"
+                        title="Remove from history"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteHistoryEntry(entry);
+                        }}
+                        className="grid h-5 w-5 place-items-center rounded-sm bg-danger/80 text-white transition-colors hover:bg-danger"
+                      >
+                        <Icon name="x" size={10} />
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {isMulti && count > 0 ? (
+            <div className="mt-2.5 flex items-center justify-between border-t border-line1 pt-2.5">
+              <span className="text-xs text-ink2">
+                {count} of {maxImages} selected
+              </span>
+              <Button size="sm" variant="primary" onClick={() => setPanelOpen(false)}>
+                Done
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {authOpen ? (
+        <AuthModal
+          onClose={() => setAuthOpen(false)}
+          onSaved={() => {
+            const pending = pendingFilesRef.current;
+            pendingFilesRef.current = null;
+            if (pending?.length) void processFiles(pending);
+            else fileInputRef.current?.click();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}

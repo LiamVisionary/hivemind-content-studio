@@ -26,6 +26,14 @@ MAX_BLOB_BYTES = 200 * 1024 * 1024  # generous; media DEK-sealed ciphertext live
 # could let the server decrypt (a bare master key, passphrase, recovery key) is
 # structurally absent from the schema.
 IDENTITY_FIELDS = ("salt", "wrapped_mk_pass", "wrapped_mk_recovery", "public_key", "wrapped_private_key", "kdf")
+# Namespaces that accrue one entry per generation (and, for lookup, several keys
+# per entry) would otherwise grow without bound — this store reached 3.27 GB
+# before retention existed. The server cannot read these blobs, so retention is
+# enforced purely on recency and size: keep the newest entries that fit both
+# budgets and drop the rest.
+NAMESPACE_RETENTION: dict[str, dict[str, int]] = {
+    "gen-setup": {"max_rows": 300, "max_bytes": 512 * 1024 * 1024},
+}
 
 
 def _now() -> str:
@@ -138,6 +146,33 @@ class VaultStore:
                 " ON CONFLICT(namespace, blob_key) DO UPDATE SET ciphertext = excluded.ciphertext, updated_at = excluded.updated_at",
                 (ns, key, ciphertext, _now()),
             )
+        self.prune_namespace(ns)
+
+    def prune_namespace(self, namespace: str, *, max_rows: int | None = None, max_bytes: int | None = None) -> int:
+        """Drop the oldest blobs in a namespace beyond its row/byte budget.
+        Ordering uses updated_at only — the ciphertext is never inspected."""
+        ns, _ = self._validate_ref(namespace, "x")
+        policy = NAMESPACE_RETENTION.get(ns, {})
+        rows_limit = policy.get("max_rows") if max_rows is None else max_rows
+        bytes_limit = policy.get("max_bytes") if max_bytes is None else max_bytes
+        if not rows_limit and not bytes_limit:
+            return 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT blob_key, LENGTH(ciphertext) FROM vault_blobs WHERE namespace = ?"
+                " ORDER BY updated_at DESC, blob_key DESC",
+                (ns,),
+            ).fetchall()
+            doomed, kept_bytes = [], 0
+            for index, (blob_key, size) in enumerate(rows):
+                kept_bytes += int(size or 0)
+                over_rows = rows_limit is not None and index >= rows_limit
+                over_bytes = bytes_limit is not None and kept_bytes > bytes_limit
+                if over_rows or over_bytes:
+                    doomed.append((ns, blob_key))
+            if doomed:
+                connection.executemany("DELETE FROM vault_blobs WHERE namespace = ? AND blob_key = ?", doomed)
+        return len(doomed)
 
     def delete_blob(self, namespace: str, blob_key: str) -> bool:
         ns, key = self._validate_ref(namespace, blob_key)

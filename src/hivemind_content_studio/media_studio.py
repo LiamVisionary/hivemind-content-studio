@@ -133,6 +133,8 @@ def list_media_studio_workflows(media_type: str = "video") -> list[dict[str, Any
 def start_video(
     *,
     image_path: str | Path | None = None,
+    middle_image_path: str | Path | None = None,
+    end_image_path: str | Path | None = None,
     video_path: str | Path | None = None,
     video_mode: str = "extend",
     prompt: str,
@@ -142,6 +144,7 @@ def start_video(
     aspect_ratio: str = "",
     resolution: str = "",
     workflow_id: str | None = None,
+    seed: int | None = None,
     loras: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate + upload the inputs and enqueue the generation, returning as
@@ -150,8 +153,20 @@ def start_video(
     holding one blocking request open. The uploaded input names are returned so
     finish_video can delete them from the gateway once the job completes."""
     descriptor = _required_descriptor()
+    # "workflow-default" is a catalog placeholder meaning "use the MCP's default/
+    # selected workflow" (media_catalog.BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS), not a
+    # real workflow id. Forwarding it verbatim makes the MCP reject the job with
+    # "unknown video workflow_id: workflow-default", which the machine-private
+    # redaction then hides as a generic MediaStudioError. Drop it so the MCP falls
+    # back to its configured default (e.g. ltx23-eros-fast, which takes a reference).
+    if str(workflow_id or "").strip().lower() == "workflow-default":
+        workflow_id = None
     video = Path(video_path).expanduser().resolve() if video_path else None
     image = Path(image_path).expanduser().resolve() if image_path else None
+    # First/middle/end keyframes only apply to image-driven generation, never to
+    # video extension (which continues an existing clip rather than anchoring one).
+    middle = Path(middle_image_path).expanduser().resolve() if (middle_image_path and video is None) else None
+    end = Path(end_image_path).expanduser().resolve() if (end_image_path and video is None) else None
     ingredients = [
         {
             "image_path": Path(str(item.get("image_path") or "")).expanduser().resolve(),
@@ -165,11 +180,15 @@ def start_video(
         raise FileNotFoundError(f"Input video not found: {video}")
     if image is not None and not image.is_file():
         raise FileNotFoundError(f"Input image not found: {image}")
+    if middle is not None and not middle.is_file():
+        raise FileNotFoundError(f"Middle keyframe image not found: {middle}")
+    if end is not None and not end.is_file():
+        raise FileNotFoundError(f"End keyframe image not found: {end}")
     missing_ingredient = next((item["image_path"] for item in ingredients if not item["image_path"].is_file()), None)
     if missing_ingredient is not None:
         raise FileNotFoundError(f"Ingredient reference not found: {missing_ingredient}")
-    if video is None and image is None and not ingredients:
-        raise FileNotFoundError("An input image, source video, or ingredient reference is required")
+    if video is None and image is None and not ingredients and not prompt.strip():
+        raise FileNotFoundError("An input image, source video, ingredient reference, or prompt is required")
     if video is not None and video_mode != "extend":
         raise ValueError("video_mode must be extend")
     uploaded_names: list[str] = []
@@ -179,6 +198,12 @@ def start_video(
         )
         if uploaded_name:
             uploaded_names.append(uploaded_name)
+        middle_name = _upload_image(descriptor, middle) if middle is not None else ""
+        if middle_name:
+            uploaded_names.append(middle_name)
+        end_name = _upload_image(descriptor, end) if end is not None else ""
+        if end_name:
+            uploaded_names.append(end_name)
         uploaded_ingredients = []
         for item in ingredients:
             name = _upload_image(descriptor, item["image_path"])
@@ -193,6 +218,12 @@ def start_video(
             **({"video_path": uploaded_name, "video_mode": video_mode} if video is not None else {}),
             **({"ingredient_images": uploaded_ingredients} if uploaded_ingredients else {}),
             **({"image_path": uploaded_name} if image is not None else {}),
+            **({"middle_image_path": middle_name} if middle_name else {}),
+            **({"end_image_path": end_name} if end_name else {}),
+            # Forward a concrete seed so each run differs; a missing/-1 seed makes the
+            # runner fall back to its FIXED default (42), which is why "every video
+            # looked the same". Callers send a fresh random seed for random mode.
+            **({"seed": int(seed)} if isinstance(seed, int) and seed >= 0 else {}),
             "frames": frames,
             "frame_rate": frame_rate,
             "duration_seconds": duration,
@@ -225,7 +256,23 @@ def start_video(
         )
         job_id = _job_id(queued)
         if not job_id:
-            raise RuntimeError("Media Studio did not return a job id")
+            # Surface the backend's real reason instead of an opaque failure — the
+            # tool answered but with no job id, which almost always carries an
+            # error/status field explaining why (bad workflow, model not ready…).
+            reason = ""
+            if isinstance(queued, dict):
+                job = queued.get("job") if isinstance(queued.get("job"), dict) else {}
+                reason = str(
+                    queued.get("error")
+                    or queued.get("detail")
+                    or queued.get("message")
+                    or job.get("error")
+                    or _generation_status(queued)
+                    or ""
+                ).strip()[:400]
+            raise RuntimeError(
+                f"Media Studio did not return a job id{f': {reason}' if reason else ' (backend returned no id and no error detail)'}"
+            )
         return {"job_id": job_id, "uploaded_names": list(uploaded_names), "provider": descriptor.app_name}
     except BaseException:
         for uploaded_name in uploaded_names:
@@ -336,9 +383,36 @@ def finish_video(
                 _delete_uploaded_image(descriptor, uploaded_name)
 
 
+def cancel_video(job_id: str) -> bool:
+    """Best-effort request to stop a running backend video job. There is no MCP
+    cancel tool and native MLX runs cannot be interrupted mid-step, so this asks the
+    studio backend directly and reports whether it acknowledged. Returns False when
+    no backend interrupt is available — the caller still resets the UI so a stuck or
+    finished job unblocks the studio either way."""
+    descriptor = discover_media_studio()
+    if descriptor is None:
+        return False
+    token = _token(descriptor)
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    base = descriptor.upload_base.rstrip("/")
+    for path in (f"/api/job/{quote(job_id, safe='')}/cancel", f"/api/cancel/{quote(job_id, safe='')}"):
+        try:
+            request = urllib.request.Request(f"{base}{path}", data=b"{}", method="POST", headers=headers)
+            with urllib.request.urlopen(request, timeout=10) as response:
+                if 200 <= int(getattr(response, "status", 200)) < 300:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
 def generate_video(
     *,
     image_path: str | Path | None = None,
+    middle_image_path: str | Path | None = None,
+    end_image_path: str | Path | None = None,
     video_path: str | Path | None = None,
     video_mode: str = "extend",
     prompt: str,
@@ -357,6 +431,8 @@ def generate_video(
 ) -> dict[str, Any]:
     started = start_video(
         image_path=image_path,
+        middle_image_path=middle_image_path,
+        end_image_path=end_image_path,
         video_path=video_path,
         video_mode=video_mode,
         prompt=prompt,
@@ -497,18 +573,22 @@ def _upload_input(descriptor: MediaStudioDescriptor, media: Path, label: str) ->
     return name
 
 
-def _video_dimensions(image: Path) -> tuple[int, int]:
+def _video_dimensions(image: Path, high: bool = False) -> tuple[int, int]:
+    # Derive LTX-valid output dimensions that preserve the source image's exact
+    # aspect ratio (so a start frame is never cropped to a fixed tier). Targets the
+    # same pixel budget as the aspect tiers so render time stays comparable.
     with Image.open(image) as opened:
         width, height = opened.size
     ratio = width / max(1, height)
-    target_area = 768 * 448
+    target_area = (1216 * 704) if high else (768 * 448)
+    max_dim = 1216 if high else 1024
     target_width = math.sqrt(target_area * ratio)
     target_height = target_width / ratio
-    if max(target_width, target_height) > 1024:
-        scale = 1024 / max(target_width, target_height)
+    if max(target_width, target_height) > max_dim:
+        scale = max_dim / max(target_width, target_height)
         target_width *= scale
         target_height *= scale
-    snap = lambda value: max(256, min(1024, round(value / 32) * 32))
+    snap = lambda value: max(256, min(max_dim, round(value / 32) * 32))
     return snap(target_width), snap(target_height)
 
 
@@ -526,7 +606,9 @@ def video_dimensions_for_request(
     selected = tier.get(str(aspect_ratio or "").strip())
     if selected:
         return selected
-    return _video_dimensions(image) if image is not None else None
+    # No fixed aspect requested: match the source frame's aspect ratio exactly.
+    high = str(resolution or "").strip().lower() == "high"
+    return _video_dimensions(image, high=high) if image is not None else None
 
 
 def _result_json(result: dict[str, Any]) -> dict[str, Any]:

@@ -126,13 +126,27 @@ function listModels() {
   return [...registryModels, ...autoModels];
 }
 
+// The Media Studio MCP defines the eros LTX variants in its OWN built-in registry
+// (media-studio-mcp.mjs builtInVideoWorkflowRegistry), NOT in workflow-registry.json
+// that this bridge reads — so /local-ai/loras/<id> 404'd them ("Unknown local
+// workflow: ltx23-eros-fast") and video LoRAs couldn't load for the default model.
+// Mirror only the LoRA-resolution metadata (base models) here; the registry wins on
+// id collision so nothing here can shadow a real registry entry.
+const BUILT_IN_VIDEO_WORKFLOWS = [
+  { id: 'ltx23-eros-fast', name: 'LTX 2.3 Eros Fast', mediaType: 'video', family: 'ltx-2.3', supportsLoras: true, compatibleBaseModels: ['LTXV'] },
+  { id: 'ltx23-eros-exact', name: 'LTX 2.3 Eros Exact', mediaType: 'video', family: 'ltx-2.3', supportsLoras: true, compatibleBaseModels: ['LTXV'] },
+];
+
 function listWorkflowModels() {
+  let registryModels = [];
   try {
-    return loadHostedWorkflowModels(WORKFLOW_REGISTRY);
+    registryModels = loadHostedWorkflowModels(WORKFLOW_REGISTRY);
   } catch (error) {
     console.error(`[open-generative-ai-hosted] unable to load workflow metadata: ${error.message}`);
-    return [];
   }
+  const knownIds = new Set(registryModels.map((model) => model.id));
+  const builtIn = BUILT_IN_VIDEO_WORKFLOWS.filter((model) => !knownIds.has(model.id));
+  return [...registryModels, ...builtIn];
 }
 
 async function handleLocalAi(req, res, pathname) {
@@ -302,6 +316,26 @@ async function handleLocalAi(req, res, pathname) {
         payload.image_base64 = `data:${String(source.contentType).split(';')[0]};base64,${source.buffer.toString('base64')}`;
       }
       const submitted = await requestJson(`${ZIMAGE_URL}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+      });
+      return sendJson(res, 202, submitted);
+    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+  }
+  if (pathname === '/local-ai/upscale' && req.method === 'POST') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      if (!body.image_base64) return sendJson(res, 400, { error: 'image_base64 is required' });
+      const payload = {
+        image_base64: body.image_base64,
+        mode: body.mode === 'max' ? 'max' : 'fast',
+        scale: Number(body.scale || 1.5),
+      };
+      if (body.prompt) payload.prompt = String(body.prompt);
+      const submitted = await requestJson(`${ZIMAGE_URL}/api/upscale`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(payload),

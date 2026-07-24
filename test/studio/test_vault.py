@@ -89,3 +89,32 @@ def test_vault_store_holds_no_key_material_and_rejects_bare_secrets(tmp_path: Pa
         store.put_blob("BAD NS", "k", "ct")
     store.put_blob("media", "run_abc.mp4", "v1.iv.ct")
     assert store.get_blob("media", "run_abc.mp4") == "v1.iv.ct"
+
+
+def test_generation_setup_blobs_are_pruned_to_a_bounded_budget(tmp_path: Path) -> None:
+    # One entry per generation (several lookup keys each) grew this store to
+    # 3.27 GB before retention existed. The server prunes on recency and size
+    # alone — it never reads the ciphertext it is dropping.
+    store = VaultStore(tmp_path / "vault.sqlite3")
+    store.put_identity(_identity())
+    for index in range(12):
+        store.put_blob("gen-setup", f"b_{index:03d}", f"opaque-{index}-" + "x" * 100)
+
+    # put_blob enforces the namespace budget as it writes.
+    assert store.prune_namespace("gen-setup", max_rows=12) == 0
+
+    # Newest entries survive; oldest are dropped.
+    assert store.prune_namespace("gen-setup", max_rows=4) == 8
+    assert store.get_blob("gen-setup", "b_011") is not None
+    assert store.get_blob("gen-setup", "b_000") is None
+
+    # A byte budget prunes independently of row count: 4 rows of ~110 bytes
+    # against a 200-byte budget keeps only the newest.
+    assert store.prune_namespace("gen-setup", max_rows=None, max_bytes=200) == 3
+    assert store.get_blob("gen-setup", "b_011") is not None
+    assert store.get_blob("gen-setup", "b_010") is None
+
+    # Namespaces without a policy are never pruned implicitly.
+    store.put_blob("composer", "state", "opaque-composer-state")
+    assert store.prune_namespace("composer") == 0
+    assert store.get_blob("composer", "state") == "opaque-composer-state"

@@ -323,6 +323,13 @@ PRIVATE_INPUT_PREFIXES = (
     "mcp_video_",
 )
 PRIVATE_INPUT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_MAX_AGE", "7200"))
+# Uploads that arrive through the generic ComfyUI upload route keep the caller's
+# own filename, so they match none of the staging prefixes above and used to sit
+# in the input directory as plaintext forever. The local generator has to read
+# these pixels, so they cannot be sealed to the owner vault the way outputs are —
+# bounded retention is what keeps the exposure window short. Durable references
+# live sealed in the owner reference store (data/uploads), never here.
+PRIVATE_INPUT_UPLOAD_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_UPLOAD_MAX_AGE", "86400"))
 jobs = {}
 jobs_lock = threading.Lock()
 download_jobs = {}
@@ -365,17 +372,30 @@ def delete_private_input(name):
     return True
 
 
-def cleanup_staged_private_inputs_once(max_age_seconds=PRIVATE_INPUT_MAX_AGE_SECONDS):
+def cleanup_staged_private_inputs_once(
+    max_age_seconds=PRIVATE_INPUT_MAX_AGE_SECONDS,
+    upload_max_age_seconds=None,
+):
+    """Expire plaintext inputs. Pipeline staging (the known prefixes) is short
+    lived; anything else — user-named uploads, keyframes, nested reference
+    folders — expires on the longer upload budget instead of living forever."""
+    upload_age = (
+        PRIVATE_INPUT_UPLOAD_MAX_AGE_SECONDS if upload_max_age_seconds is None else upload_max_age_seconds
+    )
     root = COMFY_INPUT_DIR.expanduser().resolve()
     if not root.exists():
         return 0
     now = time.time()
     deleted = 0
-    for candidate in root.iterdir():
-        if not candidate.name.startswith(PRIVATE_INPUT_PREFIXES) or not candidate.is_file():
+    for candidate in root.rglob("*"):
+        if not candidate.is_file():
             continue
+        # Already-sealed envelopes are client-only; nothing to expire for privacy.
+        if candidate.suffix in (OUTPUT_ENCRYPTION_SUFFIX, E2E_MEDIA_SUFFIX):
+            continue
+        limit = max_age_seconds if candidate.name.startswith(PRIVATE_INPUT_PREFIXES) else upload_age
         try:
-            if now - candidate.stat().st_mtime < max_age_seconds:
+            if now - candidate.stat().st_mtime < limit:
                 continue
             candidate.unlink()
             deleted += 1
@@ -867,7 +887,7 @@ def _load_workflow_index():
                 except Exception:
                     continue
                 workflow = rec.get("workflow")
-                if not _is_encrypted_workflow_envelope(workflow):
+                if not _is_loadable_workflow_envelope(workflow):
                     continue
                 for name in rec.get("filenames") or []:
                     if isinstance(name, str) and name:
@@ -937,6 +957,161 @@ def workflow_index_record_for_filename(name):
     with workflow_index_lock:
         rec = _workflow_index_records.get(name)
         return dict(rec) if isinstance(rec, dict) else None
+
+
+VAULT_SEALED_SETUP_FORMAT = "hivemind-vault-sealed-setup"
+
+
+def _is_vault_sealed_setup(value):
+    return (
+        isinstance(value, dict)
+        and value.get("format") == VAULT_SEALED_SETUP_FORMAT
+        and isinstance(value.get("ciphertext"), str)
+        and isinstance(value.get("wrapped_dek"), str)
+    )
+
+
+def _is_loadable_workflow_envelope(value):
+    return _is_encrypted_workflow_envelope(value) or _is_vault_sealed_setup(value)
+
+
+def seal_json_to_vault(obj):
+    """Seal a small JSON object to the owner vault public key (RSA-OAEP + AES-GCM),
+    the same wire format as media (frontend `decryptMedia`). Server can encrypt but
+    never decrypt. Returns the envelope dict, or None if no vault exists yet."""
+    spki = vault_public_key_spki()
+    if not spki:
+        return None
+    stamp = uuid.uuid4().hex[:12]
+    tmp_in = GATEWAY_STATE_DIR / f".setup-{stamp}.json"
+    tmp_out = GATEWAY_STATE_DIR / f".setup-{stamp}.e2e"
+    tmp_pub = GATEWAY_STATE_DIR / f".setup-{stamp}.pub"
+    try:
+        tmp_in.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+        tmp_pub.write_text(spki, encoding="utf-8")
+        proc = subprocess.run(
+            [E2E_SEAL_PYTHON, E2E_SEAL_HELPER, "--pub", f"@{tmp_pub}", "--in", str(tmp_in), "--out", str(tmp_out)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if proc.returncode != 0 or not tmp_out.exists():
+            raise RuntimeError(f"seal helper exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+        sealed = json.loads(tmp_out.read_text(encoding="utf-8"))
+        return {
+            "format": VAULT_SEALED_SETUP_FORMAT,
+            "v": 1,
+            "ciphertext": sealed["ciphertext"],
+            "wrapped_dek": sealed["wrapped_dek"],
+        }
+    finally:
+        for leftover in (tmp_in, tmp_out, tmp_pub):
+            try:
+                leftover.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _studio_setup_from_graph(graph):
+    """Extract the FULL composer-recoverable setup (prompt, negative, seed, steps,
+    cfg, dimensions, model checkpoint, LoRAs) from a resolved auto-workflow API
+    graph, so 'Load in Studio' can restore every exact setting."""
+    sampler = next((n for n in graph.values() if isinstance(n, dict) and str(n.get("class_type")) in _AUTO_SAMPLER_CLASSES), None)
+    prompt_text = ""
+    negative_text = ""
+    seed_val = steps_val = cfg_val = None
+    pos_id = None
+    if sampler:
+        si = sampler.get("inputs") or {}
+        seed_val = si.get("seed", si.get("noise_seed"))
+        steps_val = si.get("steps")
+        cfg_val = si.get("cfg")
+        positive_ref = si.get("positive")
+        if isinstance(positive_ref, list) and positive_ref:
+            pos_id, pos_key = _auto_find_text_node(graph, positive_ref[0])
+            if pos_id is not None:
+                prompt_text = str((graph[pos_id].get("inputs") or {}).get(pos_key) or "")
+        negative_ref = si.get("negative")
+        if isinstance(negative_ref, list) and negative_ref:
+            neg_id, neg_key = _auto_find_text_node(graph, negative_ref[0])
+            if neg_id is not None and neg_id != pos_id:
+                negative_text = str((graph[neg_id].get("inputs") or {}).get(neg_key) or "")
+    width = height = None
+    for node in graph.values():
+        inputs = node.get("inputs") if isinstance(node, dict) else {}
+        if isinstance(inputs.get("width"), (int, float)) and isinstance(inputs.get("height"), (int, float)):
+            width, height = int(inputs["width"]), int(inputs["height"])
+            break
+    models = []
+    loras = []
+    for node in graph.values():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        for key, value in (inputs or {}).items():
+            if key in ("unet_name", "ckpt_name") and isinstance(value, str) and value:
+                models.append(re.sub(r"\.(safetensors|ckpt|gguf)$", "", value, flags=re.IGNORECASE))
+            if key == "lora_name" and isinstance(value, str) and value:
+                strength = (inputs or {}).get("strength_model", (inputs or {}).get("strength", 1.0))
+                loras.append({"name": value, "strength": float(strength) if isinstance(strength, (int, float)) else 1.0})
+    seeds = [{"value": int(seed_val), "mode": "fixed"}] if isinstance(seed_val, (int, float)) else []
+    return {
+        "primaryPrompt": prompt_text,
+        "negativePrompt": negative_text,
+        "seeds": seeds,
+        "seed": int(seed_val) if isinstance(seed_val, (int, float)) else None,
+        "steps": int(steps_val) if isinstance(steps_val, (int, float)) else None,
+        "cfg": float(cfg_val) if isinstance(cfg_val, (int, float)) else None,
+        "width": width,
+        "height": height,
+        "models": sorted(set(models)),
+        "loras": loras,
+    }
+
+
+def _studio_model_id_from_workflow(workflow_stem):
+    """Match auto-workflow-discovery.js slugFromFilename → the studio's model id."""
+    if not workflow_stem:
+        return None
+    slug = re.sub(r"[^a-z0-9]+", "-", str(workflow_stem).lower()).strip("-")
+    return f"comfy-auto-{slug}" if slug else None
+
+
+def record_studio_workflow_setup(filenames, graph, prompt_id=None, workflow_stem=None):
+    """Vault-seal the FULL setup (prompt, negative, seed, steps, cfg, dims, model,
+    LoRAs, + resolved API graph) for a studio (auto-workflow) generation and index
+    it by output filename, so 'Load in Studio' restores every exact setting for
+    server-generated outputs (which carry no ComfyUI-mobile workflow envelope).
+    The setup stays private: sealed to the vault, server can never read it back."""
+    names = [safe_name(Path(p).name) for p in (filenames or []) if str(p).strip()]
+    if not names:
+        return
+    try:
+        payload = _studio_setup_from_graph(graph)
+        # The studio model id (comfy-auto-<slug>) so the studio re-selects the
+        # exact local model, not just the raw checkpoint name.
+        payload["modelId"] = _studio_model_id_from_workflow(workflow_stem)
+        # Also carry the resolved API graph so "Load in Canvas" can rebuild the
+        # exact node graph client-side. Sealed to the vault (never server-readable).
+        payload["apiGraph"] = graph
+        envelope = seal_json_to_vault(payload)
+        if not envelope:
+            return
+        recorded_at = now_iso()
+        rec = {
+            "prompt_id": prompt_id or f"studio-{uuid.uuid4().hex[:12]}",
+            "filenames": names,
+            "workflow": envelope,
+            "recorded_at": recorded_at,
+            "source": "studio",
+        }
+        with workflow_index_lock:
+            for name in names:
+                _workflow_index[name] = envelope
+                _workflow_index_records[name] = {"prompt_id": rec["prompt_id"], "lane": "studio", "recorded_at": recorded_at}
+            if rec["prompt_id"]:
+                _workflow_index_prompts.add(rec["prompt_id"])
+            WORKFLOW_INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with WORKFLOW_INDEX_FILE.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[workflow-index] studio setup record failed: {e}", file=sys.stderr)
 
 
 def _atomic_write_jsonl(path, records):
@@ -1171,12 +1346,62 @@ def nice_time(value):
 
 PRIVATE_PROMPT_LABEL = "[private prompt hidden]"
 
+# Workflow graphs ride along with job records so clients can inspect node
+# structure, but a graph also carries the generation prompt — in text widgets
+# and in per-runtime defaults (e.g. extra.nativeMlxLtx.defaults.prompt). That
+# text must never be persisted or served in the clear. Full-fidelity workflows
+# stay available through the E2E-sealed workflow index (/workflow-for-output),
+# which only the owner's browser can decrypt.
+_PROMPT_TEXT_KEYS = {
+    "prompt", "negative_prompt", "negativeprompt", "negative", "positive",
+    "text", "text_g", "text_l", "clip_l", "t5xxl", "caption", "description",
+    "prompt_text", "user_prompt", "reference_description",
+}
+# Positional widget values carry no key, so classify by shape: free text is
+# long and contains spaces; checkpoints, LoRA files, samplers, and enum values
+# do not.
+_WIDGET_FREE_TEXT_MIN = 24
+
+
+def _looks_like_free_text(value):
+    return isinstance(value, str) and len(value) >= _WIDGET_FREE_TEXT_MIN and " " in value.strip()
+
+
+def scrub_workflow_prompt_text(value, _key=None):
+    """Blank prompt-bearing text in a workflow graph, keeping structure
+    (node types, links, model and sampler settings) intact."""
+    if isinstance(value, dict):
+        scrubbed = {}
+        for key, item in value.items():
+            if isinstance(key, str) and key.lower() in _PROMPT_TEXT_KEYS and isinstance(item, str):
+                scrubbed[key] = ""
+            else:
+                scrubbed[key] = scrub_workflow_prompt_text(item, key)
+        return scrubbed
+    if isinstance(value, list):
+        if isinstance(_key, str) and _key.lower() == "widgets_values":
+            return ["" if _looks_like_free_text(item) else scrub_workflow_prompt_text(item) for item in value]
+        return [scrub_workflow_prompt_text(item, _key) for item in value]
+    return value
+
+
+def scrub_record_workflows(out):
+    """Strip prompt text from every workflow graph carried by a job record.
+    Applied at the persistence and serving chokepoints so no write path can
+    leak prompt text even if it bypasses the tuple builders."""
+    tuple_value = out.get("comfy_prompt")
+    if isinstance(tuple_value, list):
+        out["comfy_prompt"] = [scrub_workflow_prompt_text(item) for item in tuple_value]
+    if isinstance(out.get("workflow"), dict):
+        out["workflow"] = scrub_workflow_prompt_text(out["workflow"])
+    return out
+
 
 def private_rec(rec):
     out = dict(rec or {})
     if "prompt" in out:
         out["prompt"] = PRIVATE_PROMPT_LABEL
-    return out
+    return scrub_record_workflows(out)
 
 
 def append_history(rec):
@@ -1226,9 +1451,18 @@ def update_download_job(job_id, **fields):
 
 
 def public_record(rec):
-    out = dict(rec or {})
+    # Live in-memory jobs never pass through private_rec, so redact here too:
+    # /api/history must not hand prompt text to any token-bearing caller,
+    # whatever a current or future queueing path chose to keep in memory.
+    out = private_rec(rec)
     if out.get("outputs"):
         out["image_urls"] = [f"/image/{safe_name(Path(p).name)}?token={TOKEN}" for p in out["outputs"]]
+    options = out.get("options")
+    if isinstance(options, dict):
+        out["options"] = {
+            key: ("" if key.lower() in _PROMPT_TEXT_KEYS and isinstance(value, str) else value)
+            for key, value in options.items()
+        }
     return out
 
 
@@ -2103,7 +2337,9 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
                 typ = img.get('type') or 'output'
                 root = COMFY_OUTPUT_DIR if typ == 'output' else COMFY_INPUT_DIR
                 p = (root / subfolder / name).resolve()
-                if p.exists():
+                # The privacy sweeper may seal the plaintext (.zenc or .e2e)
+                # before this check runs — any sealed form counts as existing.
+                if existing_output_path(p):
                     outputs.append(str(p))
         if not outputs:
             raise RuntimeError("ComfyUI Klein3 edit completed without output images")
@@ -2567,6 +2803,12 @@ def run_comfy_api_image(job_id, prompt, options=None):
                     outputs.append(str(p))
         if not outputs:
             raise RuntimeError("auto workflow completed without output images")
+        # Record the vault-sealed setup so "Load in Studio" can recover the exact
+        # prompt/seed/model for a studio output (which carries no mobile envelope).
+        try:
+            record_studio_workflow_setup([Path(p).name for p in outputs], graph, rec.get("comfy_prompt_id"), rec.get("workflow"))
+        except Exception as exc:
+            print(f"[workflow-index] studio record skipped: {exc}", file=sys.stderr)
         outputs = encrypt_outputs(outputs)
         rec.update({
             "status": "success",
@@ -2674,7 +2916,9 @@ def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
                 typ = image.get("type") or "output"
                 root = COMFY_OUTPUT_DIR if typ == "output" else COMFY_INPUT_DIR
                 path = (root / subfolder / name).resolve()
-                if path.exists():
+                # The privacy sweeper may seal the plaintext (.zenc or .e2e)
+                # before this check runs — any sealed form counts as existing.
+                if existing_output_path(path):
                     outputs.append(str(path))
         if not outputs:
             raise RuntimeError("ComfyUI Krea2 identity generation completed without output images")
@@ -2691,6 +2935,124 @@ def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
         jobs[job_id] = rec
 
 
+def run_comfy_upscale(job_id, image_path, options=None):
+    """Upscale an existing image. mode='fast' = R-ESRGAN 4x+ Anime6B only
+    (~seconds); mode='max' = R-ESRGAN then a tiled Anima diffusion refine pass
+    (adds detail, minutes on MPS). The input arrives already-decrypted from the
+    browser (image_base64), so this never needs the vault key."""
+    started = now_iso()
+    options = options or {}
+    mode = "max" if str(options.get("mode") or "fast").lower() == "max" else "fast"
+    scale = float_option(options, "scale", 1.5, 1.0, 4.0)
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "comfy-upscale",
+        "created_at": started,
+        "outputs": [],
+        "mode": mode,
+        "options": {"scale": scale, "mode": mode},
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    try:
+        image_path = Path(image_path).resolve()
+        allowed = [OUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), COMFY_INPUT_DIR.resolve()]
+        if not any(str(image_path).startswith(str(root)) for root in allowed) or not image_path.exists():
+            raise RuntimeError("input image is outside private image storage or does not exist")
+        COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+        input_name = safe_name(image_path.name)
+        comfy_input = (COMFY_INPUT_DIR / input_name).resolve()
+        if comfy_input != image_path:
+            comfy_input.write_bytes(image_path.read_bytes())
+        filename_prefix = f"upscale_{job_id}"
+        # R-ESRGAN_x4plus is a 4x model; downscale to hit the requested net factor.
+        esrgan_downscale = max(0.05, min(1.0, scale / 4.0))
+        graph = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": input_name}},
+            "2": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": "RealESRGAN_x4plus_anime_6B.pth"}},
+            "3": {"class_type": "ImageUpscaleWithModel", "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+            "4": {"class_type": "ImageScaleBy", "inputs": {"image": ["3", 0], "upscale_method": "bilinear", "scale_by": esrgan_downscale}},
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["4", 0], "filename_prefix": filename_prefix}},
+        }
+        if mode == "max":
+            # Re-encode the upscaled pixels (tiled = MPS-safe: the Anima WanVAE
+            # overflows MPSGraph's INT_MAX on a full-frame encode) and run a
+            # light Anima refine pass to hallucinate detail at the new size.
+            prompt_text = str(options.get("prompt") or "masterpiece, best quality, highly detailed, anime coloring")
+            negative = str(options.get("negative_prompt") or "worst quality, low quality, blurry, jpeg artifacts, lowres")
+            refine_steps = int_option(options, "refine_steps", 16, 4, 40)
+            refine_denoise = float_option(options, "refine_denoise", 0.4, 0.05, 0.8)
+            seed = resolve_seed_option(options)
+            graph.update({
+                "10": {"class_type": "UNETLoader", "inputs": {"unet_name": "waiANIMA_v10Base10.safetensors", "weight_dtype": "default"}},
+                "11": {"class_type": "CLIPLoader", "inputs": {"clip_name": "waiANIMA_v10Base10_txt.safetensors", "type": "stable_diffusion", "device": "default"}},
+                "12": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
+                "13": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["11", 0], "text": prompt_text}},
+                "14": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["11", 0], "text": negative}},
+                "15": {"class_type": "VAEEncodeTiled", "inputs": {"pixels": ["4", 0], "vae": ["12", 0], "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 8}},
+                "16": {"class_type": "KSampler", "inputs": {"model": ["10", 0], "positive": ["13", 0], "negative": ["14", 0], "latent_image": ["15", 0], "seed": seed, "steps": refine_steps, "cfg": 4.0, "sampler_name": "er_sde", "scheduler": "simple", "denoise": refine_denoise}},
+                "17": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["16", 0], "vae": ["12", 0], "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 8}},
+            })
+            graph["9"]["inputs"]["images"] = ["17", 0]
+        body = json.dumps({"prompt": graph, "client_id": f"media-upscale-{job_id}"}).encode("utf-8")
+        lane_url = comfy_http_for_prompt_body(body)
+        rec["lane"] = lane_url
+        t0 = time.monotonic()
+        req = Request(f"{lane_url}/prompt", data=body, headers={"Content-Type": "application/json"})
+        try:
+            queued = json.loads(urlopen(req, timeout=30).read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"ComfyUI rejected the upscale graph: {detail[:2000]}") from exc
+        prompt_id = queued.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI did not return prompt_id: {queued}")
+        rec["comfy_prompt_id"] = prompt_id
+        with jobs_lock:
+            jobs[job_id] = rec
+        history = None
+        for _ in range(450):
+            time.sleep(2)
+            try:
+                payload = urlopen(f"{lane_url}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                data = json.loads(payload or "{}")
+                if prompt_id in data:
+                    history = data[prompt_id]
+                    break
+            except Exception:
+                pass
+        if history is None:
+            raise RuntimeError(f"ComfyUI upscale timed out waiting for prompt {prompt_id}")
+        status = history.get("status") or {}
+        if status.get("status_str") != "success" or not status.get("completed"):
+            raise RuntimeError(f"ComfyUI upscale failed: {status}")
+        outputs = []
+        for node_out in (history.get("outputs") or {}).values():
+            for img in node_out.get("images") or []:
+                name = safe_name(img.get("filename") or "")
+                subfolder = img.get("subfolder") or ""
+                typ = img.get("type") or "output"
+                root = COMFY_OUTPUT_DIR if typ == "output" else COMFY_INPUT_DIR
+                p = (root / subfolder / name).resolve()
+                # The privacy sweeper may seal the plaintext (.zenc or .e2e)
+                # before this check runs — any sealed form counts as existing.
+                if existing_output_path(p):
+                    outputs.append(str(p))
+        if not outputs:
+            raise RuntimeError("ComfyUI upscale completed without output images")
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": encrypt_outputs(outputs),
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as exc:
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(exc)})
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
 
 
 def _node_inputs(node):
@@ -3591,13 +3953,14 @@ def detect_native_mlx_ltx_prompt(body):
     loras = _native_ltx_loras(meta.get('loras') or [])
     if not image_name and keyframes:
         image_name = keyframes[0].get('image_path')
-    if not image_name:
-        return None
+    # image_name may legitimately be empty: LTX 2.3 generate supports text-to-video
+    # (no anchor image), so route a prompt-only request to the native generate
+    # pipeline all the same instead of bailing out here.
 
     return {
         'variant': variant,
         'prompt': prompt_text,
-        'image_path': image_name,
+        'image_path': image_name or '',
         'images': keyframes,
         'options': {
             'width': width,
@@ -3776,7 +4139,7 @@ def _mobile_prompt_workflow_from_body(body):
 def _comfy_history_prompt_tuple(job_id, workflow=None):
     extra = {'backend': 'mlx-mxfp8-bigloves-klein3-edit'}
     if workflow:
-        extra['extra_pnginfo'] = {'workflow': workflow}
+        extra['extra_pnginfo'] = {'workflow': scrub_workflow_prompt_text(workflow)}
     return [0, job_id, {}, extra, []]
 
 
@@ -4048,7 +4411,7 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
 def _comfy_history_prompt_tuple_for_native_ltx(job_id, workflow=None, backend='mlx-ltx-eros-video'):
     extra = {'backend': backend}
     if workflow:
-        extra['extra_pnginfo'] = {'workflow': workflow}
+        extra['extra_pnginfo'] = {'workflow': scrub_workflow_prompt_text(workflow)}
     return [0, job_id, {}, extra, []]
 
 
@@ -4523,8 +4886,9 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             if distilled_lora and not (model_path / distilled_lora).is_file():
                 raise RuntimeError(f"native MLX IC-LoRA distilled LoRA not found: {distilled_lora}")
         else:
-            if not keyframes:
-                raise RuntimeError("at least one input image is required for native MLX LTX generation")
+            # LTX 2.3 generate supports text-to-video: zero keyframes is valid
+            # (the ltx-2-mlx CLI simply omits --image). Only validate anchors the
+            # caller actually supplied.
             for item in keyframes:
                 image_path = item['path']
                 if not image_path.exists() or not any(_is_under(image_path, root) for root in allowed):
@@ -6548,6 +6912,40 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "deleted": delete_private_input(data.get("filename"))})
             except (json.JSONDecodeError, ValueError) as exc:
                 return self.send_json({"error": str(exc)}, 400)
+        if parsed.path == "/api/upscale":
+            try:
+                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+                staged = stage_inline_image_base64(data.get("image_base64"))
+                if staged is None:
+                    return self.send_json({"error": "image_base64 is required"}, 400)
+                options = {
+                    "mode": data.get("mode"),
+                    "scale": data.get("scale"),
+                    "prompt": data.get("prompt"),
+                    "negative_prompt": data.get("negative_prompt"),
+                    "refine_steps": data.get("refine_steps"),
+                    "refine_denoise": data.get("refine_denoise"),
+                    "seed": data.get("seed"),
+                }
+                job_id = uuid.uuid4().hex[:12]
+                mode = "max" if str(data.get("mode") or "fast").lower() == "max" else "fast"
+                with jobs_lock:
+                    jobs[job_id] = {"id": job_id, "prompt": PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": now_iso(), "backend": "comfy-upscale", "mode": mode, "options": {"mode": mode}}
+                t = threading.Thread(target=run_comfy_upscale, args=(job_id, staged, options), daemon=True)
+                t.start()
+                return self.send_json({
+                    "id": job_id,
+                    "status": "queued",
+                    "backend": "comfy-upscale",
+                    "mode": mode,
+                    "job_url": f"/api/job/{job_id}",
+                    "page_url": f"/job/{job_id}",
+                    "history_url": "/api/history",
+                }, 202)
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 400)
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, 500)
         if parsed.path in ["/api/models/equip", "/api/models/unequip"]:
             try:
                 data = json.loads((self.read_body() or b"{}").decode("utf-8"))

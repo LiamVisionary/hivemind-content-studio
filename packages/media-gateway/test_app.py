@@ -211,7 +211,36 @@ class ZImageAppTests(unittest.TestCase):
             self.assertFalse(reference.exists())
             self.assertFalse(sheet.exists())
             self.assertFalse(inline.exists())
+            # User-named uploads outlive pipeline staging, but only up to the
+            # longer upload budget — they are plaintext the generator must read,
+            # so they must not live in the input directory indefinitely.
             self.assertTrue(unrelated.exists())
+
+    def test_user_named_uploads_expire_on_the_upload_budget(self):
+        # Uploads through the generic ComfyUI route keep the caller's filename and
+        # match no staging prefix. They used to persist forever in plaintext.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_root = Path(td) / 'input'
+            (input_root / '.ltx-reference').mkdir(parents=True)
+            photo = input_root / 'bigref.jpg'
+            nested = input_root / '.ltx-reference' / 'clip.mkv'
+            sealed = input_root / 'kept.png.e2e'
+            fresh = input_root / 'today.png'
+            for path in (photo, nested, sealed, fresh):
+                path.write_bytes(b'pixels')
+            stale = time.time() - app.PRIVATE_INPUT_UPLOAD_MAX_AGE_SECONDS - 60
+            for path in (photo, nested, sealed):
+                os.utime(path, (stale, stale))
+
+            with patch.object(app, 'COMFY_INPUT_DIR', input_root):
+                removed = app.cleanup_staged_private_inputs_once()
+
+            self.assertEqual(removed, 2)
+            self.assertFalse(photo.exists(), 'stale user upload must be expired')
+            self.assertFalse(nested.exists(), 'nested reference folders must be swept too')
+            self.assertTrue(sealed.exists(), 'sealed envelopes are already client-only')
+            self.assertTrue(fresh.exists(), 'recent uploads stay usable')
 
     def test_private_media_defaults_do_not_allow_plaintext_grace_or_token_printing(self):
         source = (BASE / 'app.py').read_text(encoding='utf-8')

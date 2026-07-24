@@ -5,6 +5,7 @@ import { useWorkflowStore } from '@/hooks/useWorkflow';
 import { isWorkflow } from '@/utils/imageWorkflowMetadata';
 import { summarizeOwnerHistoryWorkflow } from '@/utils/ownerHistoryProvenance';
 import { isTrustedOwnerParentEvent } from '@/utils/trustedOwnerParent';
+import { apiGraphToWorkflow } from '@/utils/apiGraphToWorkflow';
 import {
   decryptWorkflowFromStorage,
   isWorkflowEncryptionUnlocked,
@@ -34,9 +35,15 @@ export function OwnerHistoryBridge() {
       const requestId = typeof event.data.requestId === 'string' ? event.data.requestId : '';
       if (!requestId) return;
       try {
-        const workflow = await decryptWorkflowFromStorage(event.data.workflow);
-        if (!isWorkflow(workflow)) throw new Error('This output has no loadable exact workflow');
         const workflowState = useWorkflowStore.getState();
+        // Studio outputs send a plaintext API graph (already decrypted by the
+        // owner hub); rebuild it into a UI workflow. Everything else is a
+        // ComfyUI-mobile encrypted envelope decrypted here.
+        const apiWorkflow = event.data.apiWorkflow;
+        const workflow = (apiWorkflow && typeof apiWorkflow === 'object')
+          ? apiGraphToWorkflow(apiWorkflow as Record<string, { class_type: string; inputs?: Record<string, unknown> }>, workflowState.nodeTypes ?? {})
+          : await decryptWorkflowFromStorage(event.data.workflow);
+        if (!isWorkflow(workflow)) throw new Error('This output has no loadable exact workflow');
         const setup = summarizeOwnerHistoryWorkflow(workflow, workflowState.nodeTypes);
         if (event.data.action === 'load-canvas') {
           workflowState.loadWorkflow(workflow, `canvas-history-${String(event.data.historyId || 'output')}.json`, {

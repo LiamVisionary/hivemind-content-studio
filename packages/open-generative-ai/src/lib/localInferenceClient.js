@@ -109,6 +109,14 @@ class LocalInferenceClient {
         return window.localAI.generate(params);
     }
 
+    // Post-generation upscale (fast R-ESRGAN, or max = ESRGAN + diffusion refine).
+    async upscale(params) {
+        if (!isLocalAIAvailable() || typeof window.localAI.upscale !== 'function') {
+            throw new Error('Upscale is available through Unified Studio.');
+        }
+        return window.localAI.upscale(params);
+    }
+
     async warmIdeogram4() {
         if (!isLocalAIAvailable()) throw new Error('Local AI only available in the desktop app.');
         return window.localAI.warmIdeogram4();

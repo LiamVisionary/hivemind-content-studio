@@ -9,7 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .private_access import ENCRYPTED_PREFIX, PrivateFieldCipher
+from collections.abc import Callable
+
+from .private_access import (
+    ENCRYPTED_PREFIX,
+    PrivateFieldCipher,
+    is_vault_sealed_text,
+    seal_text_to_vault,
+)
 
 
 def _now() -> str:
@@ -24,13 +31,34 @@ class PromptHistoryStore:
     either can be reused from the composer.
     """
 
-    def __init__(self, path: str | Path, *, cipher: PrivateFieldCipher | None = None):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        cipher: PrivateFieldCipher | None = None,
+        vault_key: Callable[[], str | None] | None = None,
+    ):
         self.path = Path(path).expanduser().resolve()
         self.cipher = cipher
+        # When present, prompt text is sealed to the owner vault (client-only E2E)
+        # instead of the server Keychain cipher — the server can never read it back.
+        self.vault_key = vault_key
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
         if self.cipher:
             self._migrate_private_fields()
+
+    def _seal_field(self, text: str) -> str:
+        spki = self.vault_key() if self.vault_key else None
+        if spki:
+            return seal_text_to_vault(text, spki)
+        return self.cipher.encrypt(text) if self.cipher else text
+
+    def _reveal_field(self, value: str) -> str:
+        # Vault-sealed fields are opaque to the server — the browser decrypts them.
+        if is_vault_sealed_text(value):
+            return value
+        return self.cipher.decrypt(value) if self.cipher else value
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -74,6 +102,10 @@ class PromptHistoryStore:
         with self._connect() as connection:
             rows = connection.execute("SELECT prompt_id, prompt, user_prompt, title, prompt_digest FROM prompts").fetchall()
             for row in rows:
+                # Vault-sealed rows are already client-only E2E — never touch them
+                # (the server holds no key to decrypt/re-encrypt them).
+                if any(is_vault_sealed_text(str(row[field])) for field in ("prompt", "user_prompt", "title")):
+                    continue
                 prompt = self.cipher.decrypt(str(row["prompt"]))
                 user_prompt = self.cipher.decrypt(str(row["user_prompt"]))
                 title = self.cipher.decrypt(str(row["title"]))
@@ -135,9 +167,9 @@ class PromptHistoryStore:
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     prompt_id,
-                    self.cipher.encrypt(text) if self.cipher else text,
-                    self.cipher.encrypt(user_prompt.strip()[:20_000]) if self.cipher else user_prompt.strip()[:20_000],
-                    self.cipher.encrypt(title.strip()[:180]) if self.cipher else title.strip()[:180],
+                    self._seal_field(text),
+                    self._seal_field(user_prompt.strip()[:20_000]),
+                    self._seal_field(title.strip()[:180]),
                     lane.strip()[:80],
                     source.strip()[:40] or "simple",
                     run_id,
@@ -188,9 +220,9 @@ class PromptHistoryStore:
             composer = {}
         return {
             "prompt_id": row["prompt_id"],
-            "prompt": self.cipher.decrypt(row["prompt"]) if self.cipher else row["prompt"],
-            "user_prompt": self.cipher.decrypt(row["user_prompt"]) if self.cipher else row["user_prompt"],
-            "title": self.cipher.decrypt(row["title"]) if self.cipher else row["title"],
+            "prompt": self._reveal_field(row["prompt"]),
+            "user_prompt": self._reveal_field(row["user_prompt"]),
+            "title": self._reveal_field(row["title"]),
             "lane": row["lane"],
             "source": row["source"],
             "run_id": row["run_id"],

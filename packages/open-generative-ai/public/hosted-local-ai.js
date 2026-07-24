@@ -53,6 +53,30 @@
     }
   }
 
+  async function upscale(params) {
+    emitProgress({ status: 'queued', progress: 0, message: 'Upscaling on hosted Open Generative AI' });
+    const submitted = await jsonFetch('/local-ai/upscale', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    });
+    const jobId = submitted.id;
+    if (!jobId) throw new Error('No job id returned by upscaler');
+
+    let last = null;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, last ? 1500 : 800));
+      last = await jsonFetch(`/local-ai/job/${encodeURIComponent(jobId)}`);
+      const status = last.status || 'running';
+      const progress = status === 'success' ? 1 : status === 'running' ? 0.4 : 0.1;
+      emitProgress({ status, progress, message: status === 'success' ? 'Upscaled' : 'Upscaling' });
+      if (status === 'success') {
+        if (!last.url) throw new Error('Upscale finished without an image');
+        return { url: last.url, seed: last.seed };
+      }
+      if (status === 'error') throw new Error(last.error || 'Upscale failed');
+    }
+  }
+
   async function listLoras(modelId) {
     const data = await jsonFetch(`/local-ai/loras/${encodeURIComponent(modelId)}`);
     return {
@@ -84,6 +108,7 @@
     downloadAuxiliary: async (auxKey) => ({ ok: true, id: auxKey, source: 'hosted' }),
     deleteModel: async () => ({ ok: false, error: 'Hosted mode keeps shared models managed by the Mac.' }),
     generate,
+    upscale,
     cancelGeneration: async () => ({ ok: true }),
     wan2gp: {
       getConfig: async () => ({ url: '' }),

@@ -1515,7 +1515,11 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
   const rawVideo = await videoSourceFromArgs(args);
   const videoName = rawVideo ? stageLtxVideo(rawVideo) : null;
   const sourceHasAudio = videoName ? stagedVideoHasAudio(videoName) : null;
-  const imageName = videoName ? null : stageLtxErosImage(await imageSourceFromArgs(args, defaults), defaults.image);
+  // LTX 2.3 image is optional (requires.image is false): with no start frame,
+  // generate text-to-video instead of forcing a default anchor. Only stage an
+  // anchor when the caller actually supplies one — never fall back to defaults.image.
+  const erosImageSource = videoName ? null : await imageSourceFromArgs(args, {});
+  const imageName = erosImageSource ? stageLtxErosImage(erosImageSource) : null;
   const frameRate = positiveFloat(args.frame_rate ?? args.params?.frame_rate, defaults.frame_rate, { min: 1, max: 120 });
   const durationSeconds = positiveFloat(args.duration_seconds ?? args.params?.duration_seconds, defaults.duration_seconds || 4, { min: 1 / 24, max: 30 });
   const settings = {
@@ -1539,7 +1543,10 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
   const promptGraph = cloneJson(apiWorkflow.prompt || apiWorkflow);
   setApiInput(promptGraph, 597, 'filename_prefix', spec.marker);
   setApiInput(promptGraph, 597, 'frame_rate', ['826', 0]);
-  if (settings.imageName) setApiInput(promptGraph, 773, 'image', settings.imageName);
+  // Always write node 773's LoadImage value: the staged anchor for image-to-video,
+  // or '' to clear the workflow's baked-in default (codex_ltx23_user_ref.png) so a
+  // text-to-video request isn't detected as anchored on a non-existent image.
+  setApiInput(promptGraph, 773, 'image', settings.imageName || '');
   setApiInput(promptGraph, 824, 'value', settings.prompt);
   setApiInput(promptGraph, 809, 'value', settings.width);
   setApiInput(promptGraph, 811, 'value', settings.height);
@@ -1550,11 +1557,17 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
   injectWorkflowLoras(promptGraph, settings.loras, workflow.lora_injection);
 
   const mobileWorkflowPath = join(ltxErosMobileWorkflowDir, spec.mobileWorkflow);
-  const mobileWorkflow = updateLtxErosEditorWorkflow(
-    loadJsonFile(mobileWorkflowPath, 'LTX Eros Mobile workflow'),
-    spec,
-    settings,
-  );
+  // The mobile workflow is ComfyUI editor metadata (extra_pnginfo.workflow), not
+  // what actually executes — generation runs body.prompt (the API graph above).
+  // Its only functional contribution is extra.nativeMlxLtx, which drives native
+  // MLX routing on the gateway and is synthesized fresh from spec+settings by
+  // updateLtxErosEditorWorkflow. So when the per-variant Mobile.json isn't
+  // installed, fall back to a minimal base object instead of throwing and failing
+  // the whole generation (the editor graph is just less richly annotated).
+  const mobileWorkflowBase = existsSync(mobileWorkflowPath)
+    ? loadJsonFile(mobileWorkflowPath, 'LTX Eros Mobile workflow')
+    : { nodes: [], extra: {} };
+  const mobileWorkflow = updateLtxErosEditorWorkflow(mobileWorkflowBase, spec, settings);
   return {
     spec,
     workflow: publicWorkflow(workflow || videoWorkflowRegistry()[defaultVideoWorkflowId()]),
@@ -1674,12 +1687,23 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     const timelineImage = await imageSourceFromArgs(args, {});
     if (timelineImage) timelineImageName = stageLtxErosImage(timelineImage);
   }
+  // Image optional (requires.image is false unless declared): only an actual
+  // ingredient sheet or a caller-supplied start frame becomes the anchor — no
+  // default.image fallback, so a prompt-only request stays text-to-video.
   const rawImage = settings.videoName
     ? undefined
-    : (ingredientSheet?.imageName || await imageSourceFromArgs(args, defaults));
-  if (!settings.videoName && rawImage !== undefined && slots.image_path) {
-    settings.imageName = stageLtxErosImage(rawImage, defaults.image);
-    setMappedApiInput(promptGraph, slots.image_path, settings.imageName);
+    : (ingredientSheet?.imageName || await imageSourceFromArgs(args, {}));
+  if (!settings.videoName && slots.image_path) {
+    if (rawImage !== undefined) {
+      settings.imageName = stageLtxErosImage(rawImage);
+      setMappedApiInput(promptGraph, slots.image_path, settings.imageName);
+    } else {
+      // No anchor supplied → clear the workflow's baked-in default LoadImage value
+      // (setMappedApiInput skips empty writes, so use setApiInput directly) so a
+      // prompt-only request stays text-to-video instead of anchoring on a missing image.
+      const imageSlot = normalizeSlot(slots.image_path);
+      if (imageSlot) setApiInput(promptGraph, imageSlot.node, imageSlot.input, '');
+    }
   }
   if (timelineImageName) settings.timelineImageName = timelineImageName;
   if (ingredientSheet) {
@@ -2056,7 +2080,13 @@ function tool(handler, { privateReceipt = false } = {}) {
       const result = await handler(args || {});
       return ok(machinePrivate && privateReceipt ? machineOperationReceipt(result) : result);
     } catch (error) {
-      if (machinePrivate && privateReceipt) return fail(machineFailureReceipt(error));
+      if (machinePrivate && privateReceipt) {
+        // The browser-facing receipt is redacted to a generic MediaStudioError,
+        // which makes failures un-debuggable. Log the real reason to stderr only
+        // (server logs are not browser-exposed, so this leaks nothing).
+        console.error('[media-studio-mcp] tool failed (redacted to client):', error?.stack || error?.message || error);
+        return fail(machineFailureReceipt(error));
+      }
       return fail(error);
     }
   };
