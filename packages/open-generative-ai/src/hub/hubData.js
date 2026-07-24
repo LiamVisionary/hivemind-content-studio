@@ -815,7 +815,21 @@ async function postOwnerAccess(frame, type) {
 /* History / prompts (hubApp.js:859-934)                              */
 /* ------------------------------------------------------------------ */
 
+// The History view re-polls every 10s while it is open. Publishing an identical
+// payload would re-render the whole archive — every card, every thumbnail — for
+// nothing, which reads as the view spontaneously refreshing itself under the
+// user (and lands right about when a short video finishes playing). Compare
+// before publishing so an unchanged poll is completely inert.
+function historySnapshotSignature(prompts, canvasHistory, total, hasMore, formats, models) {
+  return JSON.stringify([
+    prompts.map((entry) => [entry.prompt_id, entry.updated_at, entry.favorite, entry.use_count]),
+    canvasHistory.map((entry) => [entry.history_id, entry.created_at, entry.models, entry.seeds, entry.encrypted_at_rest]),
+    total, hasMore, formats, models,
+  ]);
+}
+
 export async function loadPrompts({ quiet = false } = {}) {
+  let changed = true;
   try {
     hubState.canvasPage = 0;
     hubState.canvasHasMore = true;
@@ -830,19 +844,29 @@ export async function loadPrompts({ quiet = false } = {}) {
       api('/api/simple/prompts'),
       api(`/api/canvas/history?${query.toString()}`),
     ]);
-    hubState.prompts = await Promise.all((promptPayload.prompts || []).map(decryptPromptEntry));
-    hubState.canvasHistory = canvasPayload.history || [];
+    const prompts = await Promise.all((promptPayload.prompts || []).map(decryptPromptEntry));
+    const canvasHistory = canvasPayload.history || [];
+    const total = Number(canvasPayload.pagination?.total || canvasHistory.length);
+    const hasMore = Boolean(canvasPayload.pagination?.has_more);
+    const formats = canvasPayload.filters?.formats || [];
+    const models = canvasPayload.filters?.models || [];
+    changed = historySnapshotSignature(hubState.prompts, hubState.canvasHistory, hubState.canvasTotal, hubState.canvasHasMore, hubState.canvasFormats, hubState.canvasModels)
+      !== historySnapshotSignature(prompts, canvasHistory, total, hasMore, formats, models);
+    if (changed) {
+      hubState.prompts = prompts;
+      hubState.canvasHistory = canvasHistory;
+      hubState.canvasTotal = total;
+      hubState.canvasFormats = formats;
+      hubState.canvasModels = models;
+    }
     hubState.canvasPage = canvasPayload.pagination?.page || 1;
-    hubState.canvasHasMore = Boolean(canvasPayload.pagination?.has_more);
-    hubState.canvasTotal = Number(canvasPayload.pagination?.total || hubState.canvasHistory.length);
-    hubState.canvasFormats = canvasPayload.filters?.formats || [];
-    hubState.canvasModels = canvasPayload.filters?.models || [];
+    hubState.canvasHasMore = hasMore;
   } catch (error) {
     if (!quiet) toast.error(error.message);
   } finally {
     hubState.canvasLoading = false;
   }
-  notifyHub();
+  if (changed) notifyHub();
 }
 
 export async function loadMoreCanvasHistory() {
