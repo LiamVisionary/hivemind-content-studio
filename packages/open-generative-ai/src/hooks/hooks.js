@@ -13,17 +13,21 @@ function needsDecryptResolve(url) {
   return typeof url === 'string' && (url.startsWith('/api/') || url.startsWith('/open-gen-api/'));
 }
 
-// Whether it is worth probing this URL for an E2E envelope at all. Same-origin API
-// media can be sealed; so can an absolute URL to the gateway on another origin (its
-// custom header is hidden cross-origin, hence the Content-Type sniff in
-// resolveMediaSrc). Every OTHER same-origin path — /local-ai/ bridge art, static
-// assets — never is, and probing it downloads the whole image a second time just to
-// read a header, then throws it away. LoRA card art is exactly that case.
-function couldBeSealed(url) {
-  if (typeof url !== 'string' || !url) return false;
-  if (url.startsWith('data:') || url.startsWith('blob:')) return false;
-  if (needsDecryptResolve(url)) return true;
-  return /^https?:\/\//i.test(url);
+// Which URLs provably CANNOT be an E2E envelope, so probing them is pure waste.
+//
+// This deliberately lists what to SKIP rather than what to probe. An earlier
+// version enumerated the sealed paths instead (/api/, /open-gen-api/, cross-origin)
+// and broke generated media outright: the gateway serves outputs from `/image/…`,
+// which that list missed, so the <img> was pointed at raw envelope JSON and every
+// result rendered broken. Anything not named here gets probed, which is fail-safe —
+// the cost of a needless probe is a wasted request, the cost of a missed one is
+// undecryptable media.
+function cannotBeSealed(url) {
+  if (typeof url !== 'string' || !url) return true;
+  if (url.startsWith('data:') || url.startsWith('blob:')) return true;
+  // The local-AI bridge (model + LoRA card art) is never sealed, and probing it
+  // downloaded every thumbnail a second time just to read a header.
+  return /^(\/open-gen-api)?\/local-ai\//.test(url);
 }
 
 function initialMediaSrc(url) {
@@ -47,10 +51,8 @@ export function useMediaSrc(url) {
       setSrc(cached);
       return () => { alive = false; };
     }
-    if (!couldBeSealed(url)) {
-      // Render it directly. No probe: it cannot be an envelope, and the extra
-      // request competed with the <img>'s own load for the same URL.
-      setSrc(url);
+    if (cannotBeSealed(url)) {
+      setSrc(url); // render directly; no probe possible or needed
       return () => { alive = false; };
     }
     setSrc(needsDecryptResolve(url) ? '' : url);

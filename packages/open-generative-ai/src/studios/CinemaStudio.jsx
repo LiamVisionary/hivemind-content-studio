@@ -104,10 +104,11 @@ function CinemaGalleryCard({ entry, active, onOpen, onDownload }) {
       tabIndex={0}
       onKeyDown={(e) => { if (e.key === 'Enter') onOpen(); }}
     >
+      {/* Not lazy — see GalleryAndViewer: a lazy image in a strip that never
+          scrolls stays deferred forever. */}
       <img
         src={src}
         alt={setup.prompt?.substring(0, 30) || 'Cinema shot'}
-        loading="lazy"
         className="aspect-square w-full object-cover"
       />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-bg0/90 to-transparent p-2 pt-6 opacity-0 transition-opacity duration-150 group-hover:opacity-100">

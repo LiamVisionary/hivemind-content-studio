@@ -128,3 +128,29 @@ test('every studio download goes through the one helper', () => {
     }
     assert.match(read('src/lib/downloadNames.js'), /export function mediaDownloadName/);
 });
+
+test('gateway-served /image/ media is still decrypted, not rendered as raw envelope', async () => {
+    const media = await import('../src/lib/e2eMedia.js');
+    await setup('image/png', new Uint8Array([137, 80, 78, 71]));
+    media.clearResolvedMediaCache();
+
+    // The gateway serves generated outputs from `/image/<name>?token=…` — a
+    // same-origin path that is NOT under /api/. A predicate that enumerated the
+    // sealed paths missed this one and pointed <img> at the envelope JSON, so
+    // every generated result rendered broken.
+    const resolved = await media.resolveMediaSrc('/image/krea2-out.png?token=abc');
+    assert.match(resolved, /^blob:/, '/image/ media must be decrypted to a blob URL');
+});
+
+test('the seal probe is skipped only for URLs that provably cannot be sealed', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const hooks = fs.readFileSync(path.join(__dirname, '..', 'src/hooks/hooks.js'), 'utf8');
+
+    // Must be an explicit skip-list, never an allow-list: anything unlisted has to
+    // fall through to the probe, because a missed probe means broken media while a
+    // needless one only costs a request.
+    assert.match(hooks, /function cannotBeSealed/);
+    assert.doesNotMatch(hooks, /function couldBeSealed/, 'an allow-list predicate is what broke /image/ media');
+    assert.match(hooks, /local-ai/, 'the bridge art is the one thing worth skipping');
+});

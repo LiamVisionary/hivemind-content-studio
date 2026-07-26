@@ -12,7 +12,10 @@ import { zh } from './videoLogic.jsx';
 
 function RefImage({ url, alt, className }) {
   const src = useMediaSrc(url);
-  return <img src={src} alt={alt} loading="lazy" className={className} />;
+  // Not lazy — these sit in the video settings panel, which often does not scroll,
+  // and Chrome never revisits a deferral without a scroll or resize. See
+  // GalleryAndViewer for the measurement.
+  return <img src={src} alt={alt} className={className} />;
 }
 
 function SheetCard({ sheetId, label, detail, selected, onSelect, children, corner }) {

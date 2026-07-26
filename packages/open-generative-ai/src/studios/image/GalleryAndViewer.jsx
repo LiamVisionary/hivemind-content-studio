@@ -27,10 +27,14 @@ export function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReu
       }}
       onKeyDown={(e) => { if (e.key === 'Enter') onOpen(); }}
     >
+      {/* No loading="lazy" on result art. Chrome defers a lazy image until a scroll
+          or resize re-triggers evaluation, and these strips frequently do not
+          scroll — so the deferral is never revisited and the result never appears.
+          Same failure the LoRA panel hit. Hub archive lists keep lazy: those really
+          do scroll, and they can hold hundreds of entries. */}
       <img
         src={src}
         alt={entry.prompt?.substring(0, 30) || 'Generated'}
-        loading="lazy"
         className="aspect-square w-full object-cover"
       />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-bg0/90 to-transparent p-2 pt-6 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
