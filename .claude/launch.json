@@ -20,6 +20,12 @@
       "port": 5273
     },
     {
+      "name": "open-generative-ai-alt2",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "packages/open-generative-ai", "run", "vite:dev", "--", "--port", "5373", "--strictPort"],
+      "port": 5373
+    },
+    {
       "name": "open-generative-ai-dist",
       "runtimeExecutable": "sh",
       "runtimeArgs": ["-c", "cd packages/open-generative-ai && npx vite preview --port 4273 --strictPort"],

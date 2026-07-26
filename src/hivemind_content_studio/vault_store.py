@@ -32,7 +32,20 @@ IDENTITY_FIELDS = ("salt", "wrapped_mk_pass", "wrapped_mk_recovery", "public_key
 # enforced purely on recency and size: keep the newest entries that fit both
 # budgets and drop the rest.
 NAMESPACE_RETENTION: dict[str, dict[str, int]] = {
-    "gen-setup": {"max_rows": 300, "max_bytes": 512 * 1024 * 1024},
+    # Each generation seals ~4-6 keys (its URL plus every filename spelling it could
+    # be re-dropped under), so a row cap is really a cap on RESTORABLE GENERATIONS
+    # divided by that fan-out. The original 300 left only ~60-100 of them, which
+    # silently evicted older outputs' settings and surfaced as "No saved settings
+    # found for this file" on drag-to-restore. Rows are ~2 KB now that oversized
+    # inline references are stripped before sealing (see generationSetupStore.js
+    # compactContextForSeal), so the byte budget is the real bound and the row cap
+    # only exists as a backstop.
+    # The byte budget deliberately sits ABOVE what the legacy fat rows already
+    # occupy (~400 MB as of 2026-07-26): lowering it would make the next write
+    # prune real settings by recency to get under budget, which is the very
+    # failure being fixed. New rows are ~2 KB, so this allows tens of thousands
+    # of generations; the legacy rows only age out if the budget is ever reached.
+    "gen-setup": {"max_rows": 20000, "max_bytes": 512 * 1024 * 1024},
     # Named libraries (LoRA groups, saved prompts) are ONE blob each, so these
     # bounds never evict a user's saved entry — they only stop a buggy or hostile
     # writer from turning this namespace into another unbounded store.

@@ -1,4 +1,4 @@
-// Persistent embedded tool surface (ComfyUI canvas / local model manager).
+// Persistent embedded tool surface (the ComfyUI canvas).
 // The iframe mounts exactly once and is NEVER unmounted — hidden views stay in
 // the tree so ComfyUI canvas state, the owner-unlock handshake, and the history
 // bridge all survive tab switches. src is set once by loadToolSurface (guarded

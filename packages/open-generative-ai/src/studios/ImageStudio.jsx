@@ -32,6 +32,7 @@ import {
 } from '../lib/hivemindStudio.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
+import { downloadMedia } from '../lib/downloadMedia.js';
 import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
@@ -57,6 +58,7 @@ import { UploadPicker } from './UploadPicker.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
+import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
 
 import { computeSmoothProgress, formatElapsed, estimateGenerationSeconds, recordGenerationSeconds } from '../lib/genProgress.js';
 import {
@@ -239,6 +241,7 @@ function createEngine() {
     cloudRefApproved: new Set(),
     cloudRefUploads: new Map(),
     civitaiOpen: false,
+    localPromptHelperOpen: false,
     resumeRemaining: 0,
     promptHelper: { open: false, busy: false, title: '', result: '', status: '', negative: '', ready: false },
     enhancerOpen: false,
@@ -896,23 +899,7 @@ export function ImageStudio({ active = true } = {}) {
     bump();
   };
 
-  const downloadImage = async (url, filename) => {
-    try {
-      const response = await fetch(await resolveMediaSrc(url));
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      // Fallback: open in new tab
-      window.open(url, '_blank');
-    }
-  };
+  const downloadImage = downloadMedia;
 
   const newPrompt = () => {
     // Start fresh — clears prompt, refs and the viewed setup, keeps saved tuning.
@@ -2024,6 +2011,19 @@ export function ImageStudio({ active = true } = {}) {
             onClick={newPrompt}
           />
 
+          {/* The app's own helper, available for every model rather than only the
+              workflows that ship a ComfyUI prompt_assistant node. The workflow
+              helper below still renders when a workflow declares one. */}
+          <ChipButton
+            icon="sparkles"
+            value="Prompt helper"
+            chevron={false}
+            disabled={!s.prompt.trim()}
+            onClick={() => { s.localPromptHelperOpen = true; bump(); }}
+            title="Refine this idea with a local LLM on this machine"
+            className="border-honey/40 text-honey"
+          />
+
           {helper ? (
             <ChipButton
               icon="wand"
@@ -2032,7 +2032,6 @@ export function ImageStudio({ active = true } = {}) {
               disabled={s.promptHelper.busy}
               onClick={runPromptHelper}
               title="Refine with this workflow prompt helper"
-              className="border-honey/40 text-honey"
             />
           ) : null}
 
@@ -2112,7 +2111,13 @@ export function ImageStudio({ active = true } = {}) {
                     active={s.viewerUrl ? s.viewerUrl === entry.url : idx === 0}
                     canReuse={refsSupported}
                     onOpen={() => viewImage(entry.url)}
-                    onDownload={() => downloadImage(entry.url, imageDownloadName(entry.model, entry.id || idx))}
+                    onDownload={() => {
+                      // No `|| idx` fallback: the seal keys off entry.id, so an index
+                      // would name the file something the vault never recorded — and
+                      // idx shifts as new generations arrive, so it isn't even stable
+                      // for the same output.
+                      downloadImage(entry.url, imageDownloadName(entry.model, entry.id));
+                    }}
                     onReuse={() => {
                       const next = [...s.uploadedImageUrls.filter((u) => u !== entry.url), entry.url]
                         .slice(0, Math.max(s.maxImages, 1));
@@ -2187,6 +2192,15 @@ export function ImageStudio({ active = true } = {}) {
           }}
         />
       ) : null}
+
+      <PromptHelperDialog
+        open={Boolean(s.localPromptHelperOpen)}
+        onClose={() => { s.localPromptHelperOpen = false; bump(); }}
+        idea={s.prompt}
+        targetModel={s.useLocalModel ? s.selectedLocalModel : s.selectedModel}
+        mediaType="image"
+        onUse={(prompt) => { setPromptValue(prompt); persistImagePreferences(); }}
+      />
 
       {s.civitaiOpen ? (
         <CivitaiDownloadDialog

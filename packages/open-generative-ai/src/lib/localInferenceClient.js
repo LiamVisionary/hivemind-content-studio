@@ -8,6 +8,12 @@ import { getLocalModelById } from './localModels.js';
 
 export const isLocalAIAvailable = () => typeof window !== 'undefined' && !!window.localAI?.isElectron;
 
+// Hosted mode: the weights are managed by the Mac running the stack, not by this
+// app. The bundled-engine install / per-model download / delete controls are no-ops
+// there, so surfaces that offer them must ask first — the Models view is the real
+// manager in hosted mode.
+export const isHostedLocalAI = () => isLocalAIAvailable() && !!window.localAI?.isHosted;
+
 class LocalInferenceClient {
     // ── sd.cpp APIs ───────────────────────────────────────────────────────
     async getBinaryStatus() {
@@ -86,6 +92,52 @@ class LocalInferenceClient {
             throw new Error('This local workflow does not expose a prompt helper.');
         }
         return window.localAI.generatePrompt(params);
+    }
+
+    // ── Installed library + Civitai browse (hosted bridge only) ───────────
+    // The desktop build manages its own weights, so these are absent there: the
+    // Models view asks `supportsLibrary()` first and hides the surface instead.
+    supportsLibrary() {
+        return isLocalAIAvailable() && typeof window.localAI.listLibrary === 'function';
+    }
+
+    async listLibrary() {
+        if (!this.supportsLibrary()) return { assets: [], stats: {}, baseModels: [], tags: [] };
+        const data = await window.localAI.listLibrary();
+        return {
+            assets: Array.isArray(data?.assets) ? data.assets : [],
+            stats: data?.stats && typeof data.stats === 'object' ? data.stats : {},
+            baseModels: Array.isArray(data?.baseModels) ? data.baseModels : [],
+            tags: Array.isArray(data?.tags) ? data.tags : [],
+        };
+    }
+
+    supportsCivitaiSearch() {
+        return isLocalAIAvailable() && typeof window.localAI.searchCivitai === 'function';
+    }
+
+    async searchCivitai(params) {
+        if (!this.supportsCivitaiSearch()) throw new Error('Civitai browsing is available through Unified Studio.');
+        const data = await window.localAI.searchCivitai(params);
+        return {
+            items: Array.isArray(data?.items) ? data.items : [],
+            installedVersionIds: Array.isArray(data?.installedVersionIds) ? data.installedVersionIds : [],
+            installedFileIds: Array.isArray(data?.installedFileIds) ? data.installedFileIds : [],
+            baseModelOptions: Array.isArray(data?.baseModelOptions) ? data.baseModelOptions : [],
+            nextCursor: typeof data?.nextCursor === 'string' ? data.nextCursor : '',
+        };
+    }
+
+    // Civitai's own base-model vocabulary for the browse filter. Never throws: the
+    // filter falls back to the values the search results carry.
+    async listCivitaiBaseModels() {
+        if (!isLocalAIAvailable() || typeof window.localAI.listCivitaiBaseModels !== 'function') return [];
+        try {
+            const data = await window.localAI.listCivitaiBaseModels();
+            return Array.isArray(data?.baseModels) ? data.baseModels : [];
+        } catch {
+            return [];
+        }
     }
 
     async startCivitaiDownload(url, options) {

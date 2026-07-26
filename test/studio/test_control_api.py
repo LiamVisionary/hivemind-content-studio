@@ -189,7 +189,8 @@ def test_simple_catalog_combines_safe_hivemind_brains_and_media_capabilities(tmp
     gpt_image = next(item for item in catalog["media"]["image"] if item["id"] == "openai-gpt-image")
     assert next(model for model in gpt_image["models"] if model["id"] == "gpt-image-1.5")["max_reference_images"] == 16
     media_studio = next(item for item in catalog["media"]["video"] if item["id"] == "media-studio-mcp")
-    assert {model["id"] for model in media_studio["models"]} >= {"ltx23-eros-fast", "ltx23-eros-exact"}
+    # ltx23-eros-exact was retired with its exact-v1-merged-q8 model directory.
+    assert {model["id"] for model in media_studio["models"]} >= {"ltx23-eros-fast", "ltx23-eros-v14-dmd"}
     assert next(model for model in media_studio["models"] if model["id"] == "ltx23-eros-fast")["label"] == "LTX 2.3 Eros Fast"
     seedance = next(item for item in catalog["media"]["video"] if item["id"] == "muapi")
     assert next(model for model in seedance["models"] if model["id"] == "seedance-v2.0-t2v")["max_reference_images"] is None
@@ -205,7 +206,9 @@ def test_unified_tool_surfaces_are_discoverable_without_checkout_paths(tmp_path:
     surfaces = response.json()["surfaces"]
     assert surfaces["explore"]["path"].startswith("/open-gen/?build=")
     assert surfaces["canvas"]["gateway_path"] == "/mobile/"
-    assert surfaces["models"]["gateway_path"] == "/models"
+    # The model manager is a native view served by this app; it must NOT come back
+    # as an embedded gateway surface (that was the legacy Media Studio iframe).
+    assert "models" not in surfaces
     assert isinstance(surfaces["explore"]["available"], bool)
     assert "/Users/" not in response.text
 
@@ -1411,6 +1414,46 @@ def test_opengen_bridge_proxy_exposes_the_lora_update_and_cancel_routes(tmp_path
 
     # DELETE cannot reach a path the allowlist never granted.
     assert client.delete("/local-ai/secrets").status_code == 404
+
+
+def test_opengen_bridge_proxy_exposes_the_model_manager_routes(tmp_path: Path, monkeypatch) -> None:
+    """The native Models view reads the installed library and browses Civitai through
+    this proxy. A route missing here works on the vite dev server (which talks to the
+    bridge directly) and 404s in the real app."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    seen: dict[str, str] = {}
+
+    class _Upstream:
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def read(self) -> bytes:
+            return b'{"assets": []}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def fake_urlopen(request, timeout=0):  # noqa: ARG001
+        seen["url"] = request.full_url
+        return _Upstream()
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.urllib.request.urlopen", fake_urlopen)
+
+    assert client.get("/local-ai/library").status_code == 200
+    assert seen["url"] == "http://127.0.0.1:8794/local-ai/library"
+
+    assert client.get("/local-ai/civitai-search", params={"query": "krea 2", "types": "LORA"}).status_code == 200
+    assert seen["url"] == "http://127.0.0.1:8794/local-ai/civitai-search?query=krea%202&types=LORA"
+
+    assert client.get("/local-ai/civitai-base-models").status_code == 200
+    assert seen["url"] == "http://127.0.0.1:8794/local-ai/civitai-base-models"
+
+    # Card art for anything that is not a LoRA: an opaque base64url reference.
+    assert client.get("/local-ai/model-preview/aHR0cHM6Ly9pbWFnZS5jaXZpdGFpLmNvbS94L3kuanBlZw").status_code == 200
+    assert seen["url"].startswith("http://127.0.0.1:8794/local-ai/model-preview/")
 
 
 def _video_body(**overrides):

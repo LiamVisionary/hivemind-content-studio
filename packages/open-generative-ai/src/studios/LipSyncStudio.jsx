@@ -29,6 +29,7 @@ import { muapi } from '../lib/muapi.js';
 import { lipsyncModels, imageLipSyncModels, videoLipSyncModels, getResolutionsForLipSyncModel } from '../lib/models.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
+import { downloadMedia } from '../lib/downloadMedia.js';
 import { t } from '../lib/i18n.js';
 
 import { useMediaSrc } from '../hooks/hooks.js';
@@ -369,22 +370,7 @@ export function LipSyncStudio({ active = true } = {}) {
     });
   };
 
-  const downloadFile = async (url, filename) => {
-    try {
-      const response = await fetch(await resolveMediaSrc(url));
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(url, '_blank');
-    }
-  };
+  const downloadFile = downloadMedia;
 
   const generate = async () => {
     const model = getCurrentModel();

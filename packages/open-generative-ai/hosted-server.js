@@ -78,13 +78,35 @@ function requestJson(url, options = {}) {
   });
 }
 
-function requestBuffer(url, headers = {}) {
+function requestBuffer(url, headers = {}, options = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const mod = u.protocol === 'https:' ? https : http;
+    const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : Infinity;
+    const maxRedirects = Number(options.maxRedirects) > 0 ? Number(options.maxRedirects) : 0;
     const r = mod.request({ method: 'GET', hostname: u.hostname, port: u.port, path: u.pathname + u.search, headers, timeout: 60000 }, (up) => {
+      // Civitai's media CDN answers with a 301 to its storage host, so a fetch that
+      // never follows one silently rendered every remote preview as "not found".
+      if (maxRedirects > 0 && up.statusCode >= 300 && up.statusCode < 400 && up.headers.location) {
+        up.resume();
+        let next = null;
+        try { next = new URL(up.headers.location, url); } catch { reject(new Error('bad redirect')); return; }
+        if (typeof options.allowHost === 'function' && !options.allowHost(next.hostname)) {
+          reject(new Error('redirect host not allowed'));
+          return;
+        }
+        requestBuffer(next.toString(), headers, { ...options, maxRedirects: maxRedirects - 1 }).then(resolve, reject);
+        return;
+      }
       const chunks = [];
-      up.on('data', d => chunks.push(d));
+      let size = 0;
+      up.on('data', d => {
+        size += d.length;
+        // Bounded because card art can be a video: a preview must not be able to
+        // pull an unbounded body into this process.
+        if (size > maxBytes) { up.destroy(); reject(new Error('response too large')); return; }
+        chunks.push(d);
+      });
       up.on('end', () => {
         if (up.statusCode < 200 || up.statusCode >= 300) reject(new Error(`HTTP ${up.statusCode}`));
         else resolve({ buffer: Buffer.concat(chunks), contentType: up.headers['content-type'] || 'application/octet-stream' });
@@ -157,6 +179,149 @@ function baseModelsFromQuery(value) {
     .map((item) => item.trim())
     .filter((item) => item && item.length <= 64 && /^[\w .+-]+$/.test(item))
     .slice(0, 8);
+}
+
+/* ---------------- installed library + Civitai browse ---------------- */
+
+// Only these hosts are fetched on the browser's behalf by /local-ai/model-preview.
+// Card art for installed and searched models lives on Civitai's image CDN; keeping
+// the fetch here means the browser never opens a connection to a third party.
+// Card art can be a short video, so the ceiling is generous — but it is a ceiling.
+const PREVIEW_MAX_BYTES = 12 * 1024 * 1024;
+// Civitai serves card art through a transform segment in the path. Asking for a
+// card-sized render is the difference between 1.5 MB and 85 MB on a video preview.
+const PREVIEW_TRANSFORM = 'width=450';
+// Still frame of a video preview: 216 KB instead of 1.5 MB, so a grid of video
+// LoRAs costs about what a grid of image LoRAs costs. Motion is fetched on demand.
+const PREVIEW_STILL_TRANSFORM = 'anim=false,width=450';
+
+function isCivitaiHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return host === 'civitai.com' || host.endsWith('.civitai.com');
+}
+
+// .../<hash>/<uuid>/original=true/file.mp4 -> .../<hash>/<uuid>/width=450/file.mp4
+function civitaiThumbnailUrl(parsed, still = false) {
+  const url = new URL(parsed.toString());
+  const transform = still ? PREVIEW_STILL_TRANSFORM : PREVIEW_TRANSFORM;
+  const parts = url.pathname.split('/').filter(Boolean);
+  if (parts.length >= 2) {
+    const transformIndex = parts.length - 2;
+    if (parts[transformIndex].includes('=')) parts[transformIndex] = transform;
+    else parts.splice(parts.length - 1, 0, transform);
+    url.pathname = `/${parts.join('/')}`;
+  }
+  return url.toString();
+}
+const CIVITAI_SEARCH_PARAMS = [
+  'query', 'tag', 'username', 'types', 'baseModels', 'sort', 'period',
+  'nsfw', 'checkpointType', 'primaryFileOnly', 'supportsGeneration', 'limit', 'cursor', 'page',
+];
+
+function previewRef(value) {
+  return Buffer.from(String(value), 'utf8').toString('base64url');
+}
+
+function previewKind(url) {
+  return /\.(mp4|webm|mov)(?:[?#]|$)/i.test(String(url || '')) ? 'video' : 'image';
+}
+
+// Model descriptions arrive as Civitai HTML. The UI shows them as plain text, and
+// unrendered markup is the kind of thing that ends up injected somewhere later.
+function plainText(value, limit = 600) {
+  const text = String(value || '')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/(p|div|li|h\d)>/gi, ' ')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&(nbsp|amp|lt|gt|quot|#39);/g, (_, entity) => (
+      { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" }[entity] || ' '
+    ))
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+// One installed file, stripped to what a card and a detail panel actually draw.
+// The gateway's own /api/library carries the full Civitai sidecar per file — 56 MB
+// for ~150 models — so the metadata blob and the absolute path stay on this side.
+function slimLibraryAsset(item, kind) {
+  const meta = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+  const version = meta.modelVersion && typeof meta.modelVersion === 'object' ? meta.modelVersion : {};
+  const preview = String(item.preview || '');
+  const id = String(item.id || '');
+  const kindOfPreview = previewKind(preview);
+  // The gateway hands back a path, a Civitai URL, or its own preview endpoint.
+  const source = preview.startsWith('/api/model-preview?path=')
+    ? decodeURIComponent(preview.slice('/api/model-preview?path='.length))
+    : preview;
+  const previewRoute = source ? `/local-ai/model-preview/${previewRef(source)}` : '';
+  // LoRA stills go through the gateway's encrypted, file-identity-keyed cache — the
+  // same art the studio's LoRA panel draws. Video card art has no entry there (that
+  // route only ever resolves stills), so it asks the CDN for a still frame instead,
+  // and the animation is a separate, on-demand fetch.
+  const loraId = kind === 'lora' && id.startsWith('loras/') ? id.slice('loras/'.length) : '';
+  let previewPath = '';
+  if (!source) previewPath = '';
+  else if (kindOfPreview === 'video') previewPath = `${previewRoute}?anim=0`;
+  else if (loraId) previewPath = `/local-ai/lora-preview/${previewRef(loraId)}`;
+  else previewPath = previewRoute;
+  return {
+    id,
+    kind,
+    name: String(item.name || ''),
+    displayName: String(item.displayName || item.name || ''),
+    folder: String(item.folder || ''),
+    category: String(item.category || ''),
+    role: String(item.role || ''),
+    baseModel: String(item.baseModel || 'Unknown'),
+    creator: String(item.creator || ''),
+    tags: (Array.isArray(item.tags) ? item.tags : []).map(String).slice(0, 12),
+    triggerWords: (Array.isArray(item.triggerWords) ? item.triggerWords : []).map(String).slice(0, 8),
+    size: String(item.size || ''),
+    sizeBytes: Number(item.size_bytes || 0),
+    favorite: Boolean(item.favorite),
+    notes: plainText(item.notes, 400),
+    description: plainText(item.description),
+    dateAdded: String(item.dateAdded || ''),
+    versionId: String(version.id || ''),
+    versionName: String(version.name || '').trim(),
+    civitaiModelId: String(version.modelId || (version.model && version.model.id) || ''),
+    previewPath,
+    // Only set when there is motion to load: the card shows the still until asked.
+    motionPath: kindOfPreview === 'video' ? previewRoute : '',
+    previewKind: kindOfPreview,
+  };
+}
+
+// A Civitai search hit, flattened to its newest version: the grid needs one card's
+// worth of fields, not the full version/file/image tree the API returns.
+function slimCivitaiItem(item) {
+  const version = (item.modelVersions || [])[0] || {};
+  const files = Array.isArray(version.files) ? version.files : [];
+  const file = files.find((entry) => entry.primary) || files[0] || {};
+  const image = (Array.isArray(version.images) ? version.images : []).find((entry) => entry && entry.url) || {};
+  const stats = item.stats || {};
+  return {
+    id: String(item.id || ''),
+    name: String(item.name || ''),
+    type: String(item.type || ''),
+    nsfw: Boolean(item.nsfw),
+    creator: String(item.creator || ''),
+    downloads: Number(stats.downloadCount || 0),
+    likes: Number(stats.thumbsUpCount ?? stats.favoriteCount ?? 0),
+    versionId: String(version.id || ''),
+    versionName: String(version.name || ''),
+    baseModel: String(version.baseModel || ''),
+    trainedWords: (Array.isArray(version.trainedWords) ? version.trainedWords : []).map(String).slice(0, 8),
+    fileId: String(file.id || ''),
+    fileName: String(file.name || ''),
+    sizeBytes: Math.round(Number(file.sizeKB || 0) * 1024),
+    previewPath: image.url ? `/local-ai/model-preview/${previewRef(image.url)}` : '',
+    previewKind: previewKind(image.url),
+    // Version-pinned page URL: this is also the download input the gateway
+    // resolves, so the client never needs a second download shape.
+    url: item.id ? `https://civitai.com/models/${encodeURIComponent(String(item.id))}${version.id ? `?modelVersionId=${encodeURIComponent(String(version.id))}` : ''}` : '',
+  };
 }
 
 async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) {
@@ -303,6 +468,117 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       return sendJson(res, 200, data);
     } catch (error) {
       return sendJson(res, 502, { error: error.message });
+    }
+  }
+  if (pathname === '/local-ai/library' && req.method === 'GET') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    try {
+      const data = await requestJson(`${ZIMAGE_URL}/api/library`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 120000,
+      });
+      const assets = [
+        ...(data.loras || []).map((item) => slimLibraryAsset(item, 'lora')),
+        ...(data.checkpoints || []).map((item) => slimLibraryAsset(item, 'checkpoint')),
+        ...(data.embeddings || []).map((item) => slimLibraryAsset(item, 'embedding')),
+        ...(data.other || []).map((item) => slimLibraryAsset(item, 'other')),
+      ];
+      return sendJson(res, 200, {
+        assets,
+        stats: data.stats || {},
+        baseModels: (data.baseModels || []).map(String),
+        tags: (data.tags || []).slice(0, 60),
+      });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
+  }
+  if (pathname === '/local-ai/civitai-search' && req.method === 'GET') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    const search = new URLSearchParams();
+    for (const key of CIVITAI_SEARCH_PARAMS) {
+      const value = query.get(key);
+      // The gateway validates the values themselves; this only bounds their size and
+      // keeps every other parameter out of the upstream request.
+      if (value !== null && value !== '' && String(value).length <= 200) search.set(key, String(value));
+    }
+    try {
+      const data = await requestJson(`${ZIMAGE_URL}/api/civitai/search?${search}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 60000,
+      });
+      const installed = data.installed || {};
+      return sendJson(res, 200, {
+        items: (data.items || []).map(slimCivitaiItem),
+        // Ids only: enough to mark a result as already installed, without shipping
+        // the installed files' names and download records to the browser.
+        installedVersionIds: (installed.versionIds || []).map(String),
+        installedFileIds: (installed.fileIds || []).map(String),
+        baseModelOptions: (data.baseModelOptions || []).map(String),
+        nextCursor: String((data.metadata || {}).nextCursor || ''),
+      });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
+  }
+  if (pathname === '/local-ai/civitai-base-models' && req.method === 'GET') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    try {
+      const data = await requestJson(`${ZIMAGE_URL}/api/civitai/base-models`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 60000,
+      });
+      return sendJson(res, 200, {
+        baseModels: (data.baseModels || []).map(String),
+        currentBaseModels: (data.currentBaseModels || []).map(String),
+      });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message });
+    }
+  }
+  // Card art for anything that is not a LoRA (those have their own cached route):
+  // a local file under the ComfyUI models tree, or Civitai-hosted art fetched here
+  // so the browser never talks to Civitai itself.
+  if (pathname.startsWith('/local-ai/model-preview/')) {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    let target = '';
+    try {
+      target = Buffer.from(pathname.slice('/local-ai/model-preview/'.length), 'base64url').toString('utf8');
+    } catch {
+      return sendText(res, 400, 'bad preview reference');
+    }
+    try {
+      if (/^https?:\/\//.test(target)) {
+        const parsed = new URL(target);
+        if (parsed.protocol !== 'https:' || !isCivitaiHost(parsed.hostname)) {
+          return sendText(res, 403, 'preview host not allowed');
+        }
+        const remote = await requestBuffer(civitaiThumbnailUrl(parsed, query.get('anim') === '0'), { 'User-Agent': 'HivemindContentStudio/1.0' }, {
+          maxBytes: PREVIEW_MAX_BYTES,
+          maxRedirects: 3,
+          allowHost: isCivitaiHost,
+        });
+        return send(res, 200, remote.buffer, {
+          'Content-Type': remote.contentType,
+          'Cache-Control': 'private, max-age=3600',
+        });
+      }
+      // Local file: the gateway owns the path allowlist (ComfyUI models / outputs),
+      // so it stays the one place that decides which files are readable.
+      if (!target.startsWith('/') || target.includes('..')) return sendText(res, 400, 'bad preview reference');
+      const local = await requestBuffer(`${ZIMAGE_URL}/api/model-preview?path=${encodeURIComponent(target)}`, {
+        Authorization: `Bearer ${token}`,
+      }, { maxBytes: PREVIEW_MAX_BYTES });
+      return send(res, 200, local.buffer, {
+        'Content-Type': local.contentType,
+        'Cache-Control': 'private, max-age=3600',
+      });
+    } catch {
+      return sendText(res, 404, 'not found');
     }
   }
   if (pathname.startsWith('/local-ai/lora-preview/')) {

@@ -14,6 +14,7 @@
 //     requireApiKey={() => boolean}
 //     label={string}                    // trigger label (default "Frames")
 //     disabled={boolean}
+//     autoOpen={boolean}                // mount with the panel already open
 //   />
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
@@ -42,8 +43,12 @@ export function FrameSlotsPicker({
   requireApiKey,
   label = 'Frames',
   disabled = false,
+  autoOpen = false,
 }) {
-  const [panelOpen, setPanelOpen] = useState(false);
+  // Mounted open when a start-frame pick switched to a model with keyframe slots:
+  // this control replaced the plain picker the user had open, so the remaining
+  // frames can be set in the same pass instead of after reopening.
+  const [panelOpen, setPanelOpen] = useState(autoOpen && !disabled);
   const [uploading, setUploading] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [history, setHistory] = useState(() => getUploadHistory());
@@ -51,7 +56,10 @@ export function FrameSlotsPicker({
   const [activeKey, setActiveKey] = useState(slots[0]?.key || 'start');
   const fileInputRef = useRef(null);
   const pendingFileRef = useRef(null);
-  const panelRef = useDismissable(panelOpen, () => setPanelOpen(false));
+  // The dismissable region wraps the TRIGGER as well as the panel: with it on the
+  // panel alone, clicking the open trigger dismissed on pointerdown and the click
+  // re-opened it, so the panel could never be closed from its own button.
+  const rootRef = useDismissable(panelOpen, () => setPanelOpen(false));
 
   const studioMode = isHivemindStudioEnabled();
   const doUpload =
@@ -117,9 +125,11 @@ export function FrameSlotsPicker({
   };
 
   const setCount = slots.filter((slot) => slot.url).length;
+  const activeSlot = slots.find((slot) => slot.key === activeKey);
+  const activeLabel = activeSlot?.label || 'frame';
 
   return (
-    <div className={cx('relative inline-flex', disabled && 'opacity-60')}>
+    <div ref={rootRef} className={cx('relative inline-flex', disabled && 'opacity-60')}>
       <input
         ref={fileInputRef}
         type="file"
@@ -152,10 +162,7 @@ export function FrameSlotsPicker({
       </button>
 
       {panelOpen ? (
-        <div
-          ref={panelRef}
-          className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[304px] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop"
-        >
+        <div className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[304px] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop">
           <div className="mb-2.5 border-b border-line1 pb-2.5">
             <SectionLabel>Keyframes</SectionLabel>
             <span className="mt-0.5 block text-[11px] text-ink3">Start, middle, and end frames — all optional</span>
@@ -238,12 +245,17 @@ export function FrameSlotsPicker({
               <div className="mt-2 grid max-h-40 grid-cols-4 gap-2 overflow-y-auto pr-0.5">
                 {mergedHistory.map((entry) => {
                   const usedIn = slots.filter((slot) => slot.url === entry.uploadedUrl).map((slot) => slot.label[0]);
+                  // Tapping the image already in the selected slot clears that slot,
+                  // so a frame can be dropped without hunting for the row's ✕.
+                  const inActiveSlot = activeSlot?.url === entry.uploadedUrl;
                   return (
                     <button
                       type="button"
                       key={entry.id}
-                      title={entry.name || `Assign to ${activeKey}`}
-                      onClick={() => assign(activeKey, entry.uploadedUrl)}
+                      title={`${entry.name || 'Reference'} — ${inActiveSlot
+                        ? `click to clear the ${activeLabel.toLowerCase()} frame`
+                        : `click to use as the ${activeLabel.toLowerCase()} frame`}`}
+                      onClick={() => assign(activeKey, inActiveSlot ? null : entry.uploadedUrl)}
                       className={cx(
                         'group/cell relative aspect-square overflow-hidden rounded-md border transition-colors',
                         usedIn.length ? 'border-honey' : 'border-line1 hover:border-honey/60',
@@ -260,7 +272,8 @@ export function FrameSlotsPicker({
                 })}
               </div>
               <div className="mt-2 text-[11px] text-ink3">
-                Selecting <span className="font-medium text-ink2">{slots.find((s) => s.key === activeKey)?.label || 'a frame'}</span> — tap a recent upload to assign it.
+                Selecting <span className="font-medium text-ink2">{activeLabel}</span> — tap a recent upload to assign it
+                {activeSlot?.url ? ', or tap the highlighted one to clear it' : ''}.
               </div>
             </>
           )}

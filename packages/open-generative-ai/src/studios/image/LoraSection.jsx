@@ -2,7 +2,7 @@
 // Presentational: all catalog/race/selection logic lives in ImageStudio.jsx.
 // The one piece of state it reads directly is the Civitai download in flight, so
 // an update-and-replace can draw its progress on the card being replaced.
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useCivitaiDownloads, useMediaSrc, useWindowEvent } from '../../hooks/hooks.js';
 import {
   cancelCivitaiDownload,
@@ -18,15 +18,28 @@ import { PendingLoraCard } from './PendingLoraCard.jsx';
 
 function LoraPreview({ lora, className = '' }) {
   const src = useMediaSrc(lora.previewUrl || '');
+  // Was `onError={(e) => e.currentTarget.remove()}`, which ripped the node out from
+  // under React: one transient failure became permanent, no re-render could bring the
+  // art back, and it erased the evidence that anything had failed. Fall back to the
+  // label instead, and re-arm whenever the source changes.
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [src]);
+
   return (
     <div className={cx('flex items-center justify-center overflow-hidden bg-bg3 text-[10px] font-semibold text-ink3', className)}>
-      {lora.previewUrl ? (
+      {lora.previewUrl && !failed ? (
         <img
           src={src}
           alt={`${lora.displayName || lora.name} preview`}
-          loading="lazy"
+          // Deliberately NOT loading="lazy". This grid lives in a settings panel that
+          // frequently does not scroll at all, and Chrome defers a lazy image until a
+          // scroll or resize re-triggers its evaluation — in a non-scrollable panel
+          // that never happens, so the art never loaded. Measured: these images sat at
+          // currentSrc="" with ZERO network requests while fully in view; flipping the
+          // one attribute to eager fired all seven immediately. The catalog is a
+          // bounded set behind an explicit Show toggle, so eager is right here.
           className="h-full w-full object-cover"
-          onError={(e) => { e.currentTarget.remove(); }}
+          onError={() => setFailed(true)}
         />
       ) : (
         <span>LoRA</span>

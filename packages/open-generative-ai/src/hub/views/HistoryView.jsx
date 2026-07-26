@@ -11,6 +11,8 @@
 // poll. Destructive deletes go through ConfirmModal (was a native <dialog>).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
+import { registerMediaDownloadName } from '../../lib/e2eMedia.js';
+import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { Menu, MenuItem } from '../../ui/Menu.jsx';
@@ -115,6 +117,14 @@ function HistoryMenu({ items }) {
 
 function CanvasCard({ entry, onDelete }) {
   const isVideo = entry.media_type?.startsWith('video/');
+  // Registered during render, not in an effect: child effects run BEFORE the
+  // parent's, so MediaThumb/CanvasVideo would already have decrypted and cached an
+  // unnamed blob by the time a parent effect fired. It is an idempotent Map write
+  // against the same module cache those children read.
+  registerMediaDownloadName(
+    entry.media_url,
+    mediaDownloadName(entry.models?.[0], entry.history_id, entry.file_format, { fallback: isVideo ? 'video' : 'image' }),
+  );
   const inspect = useCallback(() => { void inspectCanvasHistoryEntry(entry.history_id); }, [entry.history_id]);
   const ref = useOnVisible(inspect, { once: true, rootMargin: '320px 0px' });
 

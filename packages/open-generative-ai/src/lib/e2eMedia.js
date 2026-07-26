@@ -12,6 +12,22 @@ import { ensureVaultReady } from './vaultSession.js';
 
 const blobCache = new Map(); // original url -> object URL
 
+// Suggested download filename per media URL, registered by whoever knows which
+// MODEL produced the output (see downloadNames.js). A blob: URL carries no
+// filename of its own, so right-click "Save image as…" and the native <video>
+// download control fall back to a UUID — unless the object URL is backed by a
+// File, whose name the browser then offers. Registering here is what lets those
+// browser-native paths produce the same name as our own download button.
+const downloadNames = new Map(); // original url -> filename
+
+export function registerMediaDownloadName(url, name) {
+    if (url && name) downloadNames.set(String(url), String(name));
+}
+
+export function mediaDownloadNameFor(url) {
+    return downloadNames.get(String(url || '')) || '';
+}
+
 export function isProbablyMediaUrl(url) {
     return typeof url === 'string' && /\/(image|video)\//.test(url);
 }
@@ -39,7 +55,12 @@ export async function resolveMediaSrc(url) {
         if (!(await ensureVaultReady())) return url; // locked; can't decrypt now
         const envelope = await response.json();
         const bytes = await decryptMedia(envelope.ciphertext, envelope.wrapped_dek);
-        const blobUrl = URL.createObjectURL(new Blob([bytes], { type: envelope.media_type || 'application/octet-stream' }));
+        const type = envelope.media_type || 'application/octet-stream';
+        const name = mediaDownloadNameFor(url);
+        // A File IS a Blob, so this changes nothing about rendering — it only gives
+        // the object URL a filename for the browser's own download paths.
+        const payload = name ? new File([bytes], name, { type }) : new Blob([bytes], { type });
+        const blobUrl = URL.createObjectURL(payload);
         blobCache.set(url, blobUrl);
         return blobUrl;
     } catch {

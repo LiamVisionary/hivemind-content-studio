@@ -47,6 +47,7 @@ from .canvas_history import (
 from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brain, plan_with_local_brain
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
 from .lanes import LANE_MATRIX
+from . import local_llm, prompt_profiles
 from .manifest import load_manifest, write_manifest
 from .machine_privacy import machine_operation_receipt, machine_run_receipt
 from .media_catalog import media_catalog
@@ -130,6 +131,22 @@ class VaultIdentityBody(BaseModel):
 
 class VaultBlobBody(BaseModel):
     ciphertext: str
+
+
+class PromptHelperLoadBody(BaseModel):
+    modelId: str
+    unloadOthers: bool = True
+
+
+class PromptHelperUnloadBody(BaseModel):
+    modelId: str
+
+
+class PromptHelperGenerateBody(BaseModel):
+    modelId: str
+    idea: str
+    targetModel: str = ""
+    mediaType: Literal["video", "image"] = "video"
 
 
 class MediaStudioLoraBody(BaseModel):
@@ -856,7 +873,8 @@ def build_control_app(
             "surfaces": {
                 "explore": {"path": f"/open-gen/?build={open_gen_version}", "available": open_gen_index.is_file()},
                 "canvas": {"gateway_path": "/mobile/", "available": True},
-                "models": {"gateway_path": "/models", "available": True},
+                # No "models" surface: the model manager is a native view now, served
+                # by this app and talking to the /local-ai bridge below.
                 "gateway": {"gateway_path": "/", "available": True},
             },
         }
@@ -881,11 +899,22 @@ def build_control_app(
             "local-ai/prompt-helper",
             "local-ai/civitai-download",
             "local-ai/lora-updates",
+            # Model manager: the installed library, Civitai browse, and its filter
+            # vocabulary. All read-only; downloads still go through civitai-download.
+            "local-ai/library",
+            "local-ai/civitai-search",
+            "local-ai/civitai-base-models",
         }
         dynamic_local_ai_route = any(
             path.startswith(prefix)
             and path.removeprefix(prefix).replace("-", "").replace("_", "").replace("%", "").isalnum()
-            for prefix in ("local-ai/job/", "local-ai/loras/", "local-ai/lora-preview/", "local-ai/civitai-download/")
+            for prefix in (
+                "local-ai/job/",
+                "local-ai/loras/",
+                "local-ai/lora-preview/",
+                "local-ai/model-preview/",
+                "local-ai/civitai-download/",
+            )
         )
         if path not in allowed and not dynamic_local_ai_route:
             raise HTTPException(status_code=404, detail="OpenGen bridge route not found")
@@ -976,6 +1005,48 @@ def build_control_app(
         # Build the catalog once at boot so even the first studio open after a
         # stack restart gets an instant model list.
         _kick_simple_catalog_refresh()
+
+    # ---- prompt helper -------------------------------------------------
+    #
+    # An app-native replacement for the ComfyUI prompt_assistant node: the owner
+    # picks any GGUF on this machine and the studio runs it in a llama-server it
+    # owns, so loading and unloading are things the UI can actually do. Owner
+    # gated like the rest, and the idea text never leaves this machine.
+
+    @app.get("/api/prompt-helper/runtime", dependencies=[Depends(require_owner)])
+    def prompt_helper_runtime() -> dict:
+        return local_llm.runtime().snapshot()
+
+    @app.post("/api/prompt-helper/load", dependencies=[Depends(require_owner)])
+    def prompt_helper_load(body: PromptHelperLoadBody) -> dict:
+        try:
+            return local_llm.runtime().load(body.modelId, unload_others=body.unloadOthers)
+        except local_llm.LocalLlmError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/prompt-helper/unload", dependencies=[Depends(require_owner)])
+    def prompt_helper_unload(body: PromptHelperUnloadBody) -> dict:
+        return local_llm.runtime().unload(body.modelId)
+
+    @app.post("/api/prompt-helper/generate", dependencies=[Depends(require_owner)])
+    def prompt_helper_generate(body: PromptHelperGenerateBody) -> dict:
+        idea = body.idea.strip()
+        if not idea:
+            raise HTTPException(status_code=400, detail="Enter an idea before using the prompt helper")
+        profile = prompt_profiles.profile_for(body.targetModel, media_type=body.mediaType)
+        messages = [
+            {"role": "system", "content": prompt_profiles.system_prompt(profile)},
+            {"role": "user", "content": idea},
+        ]
+        try:
+            prompt = local_llm.runtime().chat(model_id=body.modelId, messages=messages)
+        except local_llm.LocalLlmError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "prompt": prompt,
+            "profile": profile,
+            "profileLabel": prompt_profiles.profile_label(profile),
+        }
 
     @app.get("/api/templates")
     def templates() -> dict:

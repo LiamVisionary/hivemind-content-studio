@@ -10,7 +10,8 @@
 import { useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { loadStudioSetup } from './promptTarget.js';
-import { basenameOf, resolveGenerationSetup } from '../lib/generationSetupStore.js';
+import { basenameOf, resolveGenerationSetup, warmGenerationSetupLookup } from '../lib/generationSetupStore.js';
+import { Spinner, cx } from '../ui/kit.jsx';
 
 const CUSTOM_TYPE = 'application/x-hivemind-output';
 
@@ -64,11 +65,22 @@ function restoreFullContext(section, context) {
   try {
     window.dispatchEvent(new CustomEvent('navigate', { detail: { page: section } }));
   } catch { /* non-critical */ }
+  const omitted = Number(context.omittedReferences || 0);
   const needsAttention =
     (Array.isArray(context.referenceImages) && context.referenceImages.length) ||
     (Array.isArray(context.ingredientImages) && context.ingredientImages.length) ||
     (Array.isArray(context.loras) && context.loras.length);
   const where = section === 'video' ? 'Video' : 'Image';
+  // Oversized inline references are not sealed (they would bloat the vault and cost
+  // the settings of older generations), so say so rather than letting the user
+  // generate with a silently smaller reference set than the run they restored.
+  if (omitted) {
+    toast.success(
+      `Settings restored into the ${where} studio — re-attach ${omitted} reference image${omitted === 1 ? '' : 's'}.`,
+      { duration: 6000 },
+    );
+    return;
+  }
   toast.success(
     needsAttention
       ? `Settings restored into the ${where} studio — re-check reference images / LoRAs.`
@@ -142,15 +154,22 @@ async function handleDrop(dataTransfer) {
 }
 
 export function OutputRestoreDropZone() {
-  const [dragging, setDragging] = useState(false);
+  // 'idle' | 'dragging' | 'restoring'. The overlay used to vanish the instant you
+  // let go, so a drop that had to open the vault and try several filename keys
+  // looked like nothing had happened at all.
+  const [phase, setPhase] = useState('idle');
   const depthRef = useRef(0);
 
   useEffect(() => {
-    const reset = () => { depthRef.current = 0; setDragging(false); };
+    const reset = () => { depthRef.current = 0; setPhase('idle'); };
+    const setDragging = (on) => setPhase((prev) => (on ? 'dragging' : (prev === 'restoring' ? prev : 'idle')));
     const onDragEnter = (e) => {
       if (!dragHasPayload(e.dataTransfer) || isUploadPickerTarget(e.target)) return;
       depthRef.current += 1;
       setDragging(true);
+      // Unlock the vault during the drag so the expensive key derivation is already
+      // done by the time the user lets go.
+      warmGenerationSetupLookup();
     };
     const onDragOver = (e) => {
       if (!dragHasPayload(e.dataTransfer) || isUploadPickerTarget(e.target)) return;
@@ -168,8 +187,12 @@ export function OutputRestoreDropZone() {
       if (!dragHasPayload(e.dataTransfer)) return;
       e.preventDefault();
       const dt = e.dataTransfer;
-      reset();
-      void handleDrop(dt);
+      depthRef.current = 0;
+      setPhase('restoring');
+      // handleDrop must keep reading dt.files synchronously before its first
+      // await — the DataTransfer is neutered once this handler returns.
+      handleDrop(dt).catch(() => { /* every tier reports its own failure */ })
+        .finally(() => setPhase('idle'));
     };
     window.addEventListener('dragenter', onDragEnter);
     window.addEventListener('dragover', onDragOver);
@@ -183,15 +206,35 @@ export function OutputRestoreDropZone() {
     };
   }, []);
 
-  if (!dragging) return null;
+  if (phase === 'idle') return null;
+  const restoring = phase === 'restoring';
   return (
     <div
       className="pointer-events-none fixed inset-0 z-[95] grid place-items-center"
       style={{ backgroundColor: 'rgba(10,10,14,0.55)' }}
+      role={restoring ? 'status' : undefined}
+      aria-live={restoring ? 'polite' : undefined}
     >
-      <div className="rounded-xl border-2 border-dashed border-honey bg-bg1/95 px-8 py-6 text-center shadow-pop">
-        <div className="text-sm font-medium text-ink1">Drop to restore its settings</div>
-        <div className="mt-1 text-xs text-ink3">Loads the prompt, model and every setting into the matching studio</div>
+      <div
+        className={cx(
+          'rounded-xl border-2 bg-bg1/95 px-8 py-6 text-center shadow-pop',
+          restoring ? 'border-solid border-honey/50' : 'border-dashed border-honey',
+        )}
+      >
+        {restoring ? (
+          <>
+            <div className="flex items-center justify-center gap-2 text-sm font-medium text-ink1">
+              <Spinner size={14} className="text-honey" />
+              Restoring settings…
+            </div>
+            <div className="mt-1 text-xs text-ink3">Decrypting this output’s saved setup with your key</div>
+          </>
+        ) : (
+          <>
+            <div className="text-sm font-medium text-ink1">Drop to restore its settings</div>
+            <div className="mt-1 text-xs text-ink3">Loads the prompt, model and every setting into the matching studio</div>
+          </>
+        )}
       </div>
     </div>
   );

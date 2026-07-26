@@ -13,6 +13,7 @@
 //     label={string}               // trigger label (non-compact)
 //     ignored={boolean}            // dims attached chips (e.g. option makes refs unused)
 //     chipClassName={string}       // className hook for each attached chip
+//     keepOpenOnSelect={boolean}   // single mode: don't close the panel on a pick
 //   />
 //
 // Ported behaviors (see specs/small-components.json):
@@ -102,6 +103,7 @@ export function UploadPicker({
   label,
   ignored = false,
   chipClassName = '',
+  keepOpenOnSelect = false,
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -113,7 +115,10 @@ export function UploadPicker({
   const [serverRefs, setServerRefs] = useState([]);
   const fileInputRef = useRef(null);
   const pendingFilesRef = useRef(null);
-  const panelRef = useDismissable(panelOpen, () => setPanelOpen(false));
+  // The dismissable region wraps the TRIGGER as well as the panel: with it on the
+  // panel alone, clicking the open trigger dismissed on pointerdown and the click
+  // re-opened it, so the panel could never be closed from its own button.
+  const rootRef = useDismissable(panelOpen, () => setPanelOpen(false));
 
   useEffect(() => {
     let alive = true;
@@ -227,9 +232,16 @@ export function UploadPicker({
     const url = entry.uploadedUrl;
     const idx = values.indexOf(url);
     if (!isMulti) {
-      // Single-select: select & close immediately.
+      // Tapping the already-selected reference clears it, and the panel stays open
+      // so a replacement can be picked in the same pass.
+      if (idx !== -1) {
+        onChange?.([]);
+        return;
+      }
       onChange?.([url]);
-      setPanelOpen(false);
+      // Models with more than one frame slot keep the panel open — closing after
+      // the first pick would make filling the rest a separate trip.
+      if (!keepOpenOnSelect) setPanelOpen(false);
       return;
     }
     if (idx !== -1) {
@@ -275,6 +287,7 @@ export function UploadPicker({
 
   return (
     <div
+      ref={rootRef}
       data-upload-picker=""
       className={cx('relative inline-flex max-w-full flex-wrap items-center gap-1.5', disabled && 'opacity-60')}
       onDragOver={(e) => {
@@ -343,10 +356,7 @@ export function UploadPicker({
 
       {/* History / upload panel */}
       {panelOpen ? (
-        <div
-          ref={panelRef}
-          className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[288px] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop"
-        >
+        <div className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[288px] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop">
           <div className="mb-2.5 flex items-center justify-between gap-2 border-b border-line1 pb-2.5">
             <div className="min-w-0">
               <SectionLabel>Reference images</SectionLabel>
@@ -382,7 +392,9 @@ export function UploadPicker({
                     key={entry.id}
                     role="button"
                     tabIndex={0}
-                    title={entry.name}
+                    title={isSelected
+                      ? `${entry.name || 'Reference'} — click to unselect`
+                      : entry.name}
                     onClick={() => {
                       if (!atMax) toggleFromHistory(entry);
                     }}

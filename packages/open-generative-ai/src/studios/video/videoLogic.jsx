@@ -533,6 +533,10 @@ export function startFrameClearedTransition(prev, c) {
   let s = { ...prev, imageUrl: null };
   // Motion-control v2v: keep the model selection; just lose the image
   if (isMotionControlV2V(s, c)) return s;
+  // Hivemind local workflows take the start frame as an OPTIONAL input, so
+  // clearing it must not drop the model: falling back to the first cloud t2v
+  // model unmounted the keyframe picker mid-edit and discarded middle/end.
+  if (isHivemindVideoModelId(s.modelId)) return s;
   // Clearing the start frame invalidates any selected end frame.
   s = {
     ...s,
@@ -725,6 +729,13 @@ export function getIngredientsWorkflow(s, hivemindI2V) {
 export function currentIngredientModel(s, c) {
   const model = currentModel(s, c);
   return model?.provider === 'hivemind-media-studio' && model.supportsIngredientImages ? model : null;
+}
+
+// Start / middle / end keyframe slots (one FrameSlotsPicker instead of the plain
+// start-frame picker): a Hivemind local workflow, image-driven rather than a video
+// extension, and not an ingredient-sheet model.
+export function frameSlotsVisible(s, c) {
+  return isHivemindVideoModelId(s.modelId) && !s.videoUrl && !currentIngredientModel(s, c);
 }
 
 // The references the next generation actually conditions on (old 1336-1341).

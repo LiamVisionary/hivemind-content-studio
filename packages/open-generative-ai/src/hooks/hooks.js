@@ -13,6 +13,19 @@ function needsDecryptResolve(url) {
   return typeof url === 'string' && (url.startsWith('/api/') || url.startsWith('/open-gen-api/'));
 }
 
+// Whether it is worth probing this URL for an E2E envelope at all. Same-origin API
+// media can be sealed; so can an absolute URL to the gateway on another origin (its
+// custom header is hidden cross-origin, hence the Content-Type sniff in
+// resolveMediaSrc). Every OTHER same-origin path — /local-ai/ bridge art, static
+// assets — never is, and probing it downloads the whole image a second time just to
+// read a header, then throws it away. LoRA card art is exactly that case.
+function couldBeSealed(url) {
+  if (typeof url !== 'string' || !url) return false;
+  if (url.startsWith('data:') || url.startsWith('blob:')) return false;
+  if (needsDecryptResolve(url)) return true;
+  return /^https?:\/\//i.test(url);
+}
+
 function initialMediaSrc(url) {
   if (!url) return url;
   return peekResolvedMediaSrc(url) || (needsDecryptResolve(url) ? '' : url);
@@ -32,6 +45,12 @@ export function useMediaSrc(url) {
     const cached = peekResolvedMediaSrc(url);
     if (cached) {
       setSrc(cached);
+      return () => { alive = false; };
+    }
+    if (!couldBeSealed(url)) {
+      // Render it directly. No probe: it cannot be an envelope, and the extra
+      // request competed with the <img>'s own load for the same URL.
+      setSrc(url);
       return () => { alive = false; };
     }
     setSrc(needsDecryptResolve(url) ? '' : url);

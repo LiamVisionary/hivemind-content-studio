@@ -25,6 +25,7 @@ import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
+import { downloadMedia } from '../lib/downloadMedia.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
 import { videoDownloadName } from '../lib/downloadNames.js';
 import {
@@ -65,6 +66,7 @@ import { UploadPicker } from './UploadPicker.jsx';
 import { FrameSlotsPicker } from './video/FrameSlotsPicker.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
+import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
 import { LoraSection } from './image/LoraSection.jsx';
 import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
 import { IngredientsPanel } from './video/IngredientsPanel.jsx';
@@ -72,7 +74,7 @@ import { IngredientsPanel } from './video/IngredientsPanel.jsx';
 import {
   VIDEO_PREFERENCES_KEY, zh,
   buildCatalogs, buildInitialSetup, adaptHivemindToVideoEntry, isLocalVideoModel, v2vModels,
-  currentModel, currentIngredientModel, activeIngredientSheetItems, ingredientSelectionSignature,
+  currentModel, currentIngredientModel, frameSlotsVisible, activeIngredientSheetItems, ingredientSelectionSignature,
   getIngredientsWorkflow,
   isMotionControlV2V, isHivemindVideoInputMode,
   aspectRatiosFor, durationsFor, resolutionsFor, modesFor, qualitiesFor, effectNamesFor,
@@ -162,6 +164,10 @@ function createEngine() {
     lastGenerationId: null,
     lastGenerationModel: null,
     preserveNextStartFrameAspect: false,
+    // Set when a start-frame pick switches to a model with keyframe slots, so the
+    // FrameSlotsPicker that replaces the plain picker mounts already open. Consumed
+    // by that mount and cleared on the next render.
+    framesPanelAutoOpen: false,
     // LoRA
     videoLoraSelectionsByModel,
     availableVideoLoras: [],
@@ -208,6 +214,7 @@ function createEngine() {
     authOpen: false,
     authRetry: null,
     civitaiOpen: false,
+    promptHelperOpen: false,
     resumeRemaining: 0,
     deleteTarget: null,
     persistTimer: null,
@@ -342,8 +349,16 @@ export function VideoStudio({ active = true } = {}) {
     }
     const preserve = s.preserveNextStartFrameAspect;
     s.preserveNextStartFrameAspect = false;
+    const hadFrameSlots = frameSlotsVisible(s.setup, s.catalogs);
     const { setup, matchAspect } = startFrameSelectedTransition(s.setup, url, s.catalogs);
     commit(setup);
+    // The pick switched to a model with middle/end keyframe slots, which replaces
+    // the plain picker the user was in. Open the slots picker so the rest of the
+    // frames can be set in one go instead of the panel just disappearing.
+    if (!hadFrameSlots && frameSlotsVisible(setup, s.catalogs)) {
+      s.framesPanelAutoOpen = true;
+      bump();
+    }
     if (matchAspect && !preserve) void matchIngredientsAspectToStartFrame(url);
   };
 
@@ -758,22 +773,7 @@ export function VideoStudio({ active = true } = {}) {
     bump();
   };
 
-  const downloadFile = async (url, filename) => {
-    try {
-      const response = await fetch(await resolveMediaSrc(url));
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(url, '_blank');
-    }
-  };
+  const downloadFile = downloadMedia;
 
   /* ---------------- generation context capture / restore ---------------- */
 
@@ -1443,11 +1443,9 @@ export function VideoStudio({ active = true } = {}) {
   // Drop a stale end-frame selection when leaving FLF-capable state.
   const model = currentModel(s.setup, s.catalogs);
   const endFrameVisible = s.setup.imageMode && !!model?.lastImageField;
-  // LTX 2.3 first/middle/end keyframe slots: a Hivemind local video model,
-  // image-driven (not a video extension), and not an ingredient-sheet model.
-  const ltxFramesVisible = isHivemindVideoModelId(s.setup.modelId)
-    && !s.setup.videoUrl
-    && !currentIngredientModel(s.setup, s.catalogs);
+  // LTX 2.3 first/middle/end keyframe slots (shared with onStartFrameChange, which
+  // opens this picker when a start-frame pick lands on a slots-capable model).
+  const ltxFramesVisible = frameSlotsVisible(s.setup, s.catalogs);
   // The grain pass runs on the gateway's own output file, so it only applies to
   // locally generated clips (the native MLX LTX route), not cloud providers.
   const denoiseAvailable = isHivemindVideoModelId(s.setup.modelId);
@@ -1465,6 +1463,10 @@ export function VideoStudio({ active = true } = {}) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ltxFramesVisible]);
+  // The keyframe picker reads framesPanelAutoOpen when it mounts; clear it right
+  // after so later remounts (a model change, clearing a source video) don't pop
+  // the panel open on their own.
+  useEffect(() => { s.framesPanelAutoOpen = false; });
 
   // The completion ping is shared with every other studio — follow the store so
   // the toggle stays truthful if it is flipped elsewhere.
@@ -1887,6 +1889,7 @@ export function VideoStudio({ active = true } = {}) {
               }}
               uploadFn={uploadFnForFrame}
               requireApiKey={frameRequiresApiKey}
+              autoOpen={s.framesPanelAutoOpen}
             />
           ) : (
             <UploadPicker
@@ -1898,6 +1901,8 @@ export function VideoStudio({ active = true } = {}) {
               accept="image/*"
               compact
               label={zh() ? '起始帧' : 'Start frame'}
+              // FLF models have an end frame to fill too — keep the panel up.
+              keepOpenOnSelect={endFrameVisible}
             />
           )}
 
@@ -1938,6 +1943,14 @@ export function VideoStudio({ active = true } = {}) {
             capture={() => captureGenerationContext(s.setup.prompt)}
             onLoadPrompt={({ prompt }) => { setPrompt(prompt); focusPrompt(); }}
             onLoadContext={(context) => restoreGenerationContext(context)}
+          />
+
+          <IconButton
+            icon="sparkles"
+            label={zh() ? '提示词助手' : 'Prompt helper'}
+            className="border border-line1"
+            disabled={!s.setup.prompt.trim()}
+            onClick={() => { s.promptHelperOpen = true; bump(); }}
           />
 
           <Pill tone={s.setup.videoUrl ? 'honey' : 'neutral'} className="hidden sm:inline-flex">{modeLabel}</Pill>
@@ -2086,7 +2099,11 @@ export function VideoStudio({ active = true } = {}) {
                           title={t('video.download')}
                           aria-label={zh() ? '下载视频' : 'Download video'}
                           className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-ink1 transition-colors hover:border-line2 hover:bg-bg1"
-                          onClick={(e) => { e.stopPropagation(); downloadFile(entry.url, videoDownloadName(entry.model, entry.id || idx)); }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // No `|| idx` — see ImageStudio: the seal keys off entry.id.
+                            downloadFile(entry.url, videoDownloadName(entry.model, entry.id));
+                          }}
                         >
                           <Icon name="download" size={13} />
                         </button>
@@ -2145,6 +2162,18 @@ export function VideoStudio({ active = true } = {}) {
           onClose={() => { s.civitaiOpen = false; bump(); }}
         />
       ) : null}
+
+      {/* targetModel is the workflow id, not the picker id: the helper chooses its
+          guidance from it, and 10Eros 1.3/1.4 want a different prompt shape than
+          the 1.2-era lanes. */}
+      <PromptHelperDialog
+        open={Boolean(s.promptHelperOpen)}
+        onClose={() => { s.promptHelperOpen = false; bump(); }}
+        idea={s.setup.prompt}
+        targetModel={workflowIdFromHivemindModelId(s.setup.modelId) || s.setup.modelId}
+        mediaType="video"
+        onUse={(prompt) => { setPrompt(prompt); focusPrompt(); }}
+      />
 
       <ConfirmModal
         open={Boolean(s.deleteTarget)}

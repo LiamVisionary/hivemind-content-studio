@@ -197,6 +197,25 @@ LTX2_MLX_VARIANTS = {
         "backend_prefix": "mlx-ltx-eros",
         "output_subdir": "Eros",
     },
+    # v1.4 DMD: the build the author actually intends. The v1.4 model card says
+    # the release "is also fully designed for use with the DMD lora I attached",
+    # so eros-v14-q8-fast above — which merges v1.2's cond-safe rank-384 LoRA —
+    # is running v1.4 with the wrong adapter. This merges the attached LoRA
+    # (ltx23DMDFro99.GKDv, Frobenius-resized to 99%) at 1.0 instead. It is
+    # Frobenius-resized so rank varies per module and every module ships an
+    # .alpha; ltx-core-mlx's apply_loras ignores .alpha, which is only safe here
+    # because alpha/rank == 1.0 for all 1660 modules (the build script asserts
+    # it). Distilled because DMD *is* the distillation — hence the fast lane.
+    "eros-v14-q8-dmd": {
+        "title": "LTX 2.3 10Eros v1.4 DMD q8 distilled",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-dmd-mlx-q8"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-dmd-mlx-q8"),
+        "video_distilled": True,
+        "output_prefix": "mlx_ltx23_10eros_v14_dmd_q8_distilled_mobile",
+        "benchmark_seconds": 193.11,
+        "backend_prefix": "mlx-ltx-eros",
+        "output_subdir": "Eros",
+    },
     # Plain image-to-video on the same v1.4 dev package. Separate from the -ic
     # variant below only so outputs are named for the lane that made them; both
     # point at one model directory. Runs --two-stage (see the runner), so it is
@@ -5352,176 +5371,6 @@ def status_chip(status):
     return f'<span class="status {s}"><span class="dot"></span>{s}</span>'
 
 
-def render_card(r):
-    rid = h(r.get("id", ""))
-    status = r.get("status", "")
-    prompt = h(r.get("prompt", ""))
-    t = h(nice_time(r.get("finished_at") or r.get("created_at")))
-    urls = r.get("image_urls") or []
-    if urls:
-        thumb = f'<a class="thumb" href="{h(urls[0])}" target="_blank" rel="noreferrer"><img src="{h(urls[0])}" loading="lazy" alt="Generated image"></a>'
-    elif status in {"queued", "running"}:
-        thumb = '<div class="thumb"><div><div class="spinner"></div><div>Generating…</div></div></div>'
-    else:
-        thumb = '<div class="thumb">No image</div>'
-    err = f'<div class="errorbox">{h(r.get("error"))}</div>' if r.get("error") else ""
-    return f'''<article class="card">
-{thumb}
-<div class="card-body">
-  <div class="card-row">{status_chip(status)}<span class="time">{t}</span></div>
-  <p class="prompt">{prompt}</p>
-  <div class="jobmeta"><a href="/job/{rid}?token={TOKEN}">View job</a> · <code>{rid}</code></div>
-  {err}
-</div>
-</article>'''
-
-
-def render_home():
-    recs = all_records(200)
-    has_active = any(r.get("status") in {"queued", "running"} for r in recs)
-    cards = "".join(render_card(r) for r in recs) or '<div class="empty">No generations yet. Write a prompt above and your images will appear here.</div>'
-    refresh = '<meta http-equiv="refresh" content="8">' if has_active else ""
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>Media Studio</title><style>{CSS}</style></head><body>
-<div class="wrap">
-  <header class="top">
-    <div class="brand"><div class="orb"></div><div><div class="eyebrow">Private Mac media endpoint</div><h1>Media Studio</h1></div></div>
-    <div class="pills"><span class="pill">Image + video</span><span class="pill">Apple Silicon MPS</span><span class="pill">History saved</span></div>
-  </header>
-  {nav('studio', show_top=False)}
-  <main class="hero">
-    <section class="glass composer">
-      <h2>Describe it. Generate it. Keep the best shots.</h2>
-      <p class="sub">Use natural language prompts. The image will render on your Mac, then appear in the live preview and history below.</p>
-      <form id="genForm" method="post" action="/generate?token={TOKEN}">
-        <div class="field"><textarea id="prompt" name="prompt" placeholder="Example: a cinematic portrait of a crystal fox in a neon rainforest, shallow depth of field, dramatic rim light"></textarea><span class="counter"><span id="count">0</span> characters</span></div>
-        <div class="jobmeta" style="margin-top:12px;padding:12px;border:1px solid rgba(255,255,255,.12);border-radius:18px;background:rgba(255,255,255,.045)">
-          <strong>Fast native Apple edit</strong><br>
-          Attach an image to use <code>BigLoveKlein3_mxfp8</code> through MLX instead of the slower ComfyUI/PyTorch MPS path.
-          <div class="actions" style="margin-top:10px"><input id="editImage" name="image" type="file" accept="image/png,image/jpeg,image/webp" class="mini" style="max-width:100%"><label class="pill">Steps <input id="mlxSteps" type="number" min="2" max="12" value="4" style="width:58px;background:transparent;color:white;border:0"></label><label class="pill">Size <select id="mlxSize" style="background:transparent;color:white;border:0"><option value="512">512</option><option value="768">768</option><option value="1024">1024</option></select></label></div>
-        </div>
-        <div class="actions"><button class="btn" id="generate" type="submit">Generate image</button><button class="mini" id="loraMenu" type="button">LoRAs</button><span class="hint">No image: default image workflow/ComfyUI. Attached image: native MLX BigLoveKlein3 MXFP8 edit.</span></div>
-        <div id="selectedLoras" class="jobmeta">No LoRAs selected.</div>
-      </form>
-      <div class="examples">
-        <button class="chip" data-prompt="a cozy robot barista making latte art, warm cinematic lighting, ultra detailed">Robot barista</button>
-        <button class="chip" data-prompt="a surreal glass whale floating above Tokyo at night, rain, reflections, cinematic">Glass whale</button>
-        <button class="chip" data-prompt="a tiny dragon sleeping inside a glowing mushroom forest, macro photography">Tiny dragon</button>
-      </div>
-    </section>
-    <aside class="glass live" id="livePanel">
-      <div class="live-head"><h3>Live preview</h3><span id="liveStatus">{status_chip('idle')}</span></div>
-      <div class="preview" id="preview"><div><div style="font-size:42px;margin-bottom:8px">✦</div><div>Your next image will appear here.</div></div></div>
-      <div class="jobmeta" id="jobMeta">No active job.</div>
-    </aside>
-  </main>
-  <section class="history" id="history">
-    <div class="history-head"><div><h2>Generation history</h2><p>Newest first. Click an image to open it full size.</p></div><a class="pill" href="/?token={TOKEN}">Refresh</a></div>
-    <div class="grid">{cards}</div>
-  </section>
-  <div class="footer">API: <code>POST /api/generate</code> · <code>GET /api/history</code></div>
-</div>
-<div id="loraModal" style="display:none;position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.72);backdrop-filter:blur(10px);padding:18px;overflow:auto">
-  <div class="glass" style="max-width:980px;margin:3vh auto;padding:18px;border-radius:26px">
-    <div class="live-head"><div><h3>Compatible LoRAs</h3><p class="sub" id="loraBases" style="margin:4px 0 0">Loading…</p></div><button class="mini" id="closeLoras">Close</button></div>
-    <div id="loraGrid" class="model-grid"></div>
-  </div>
-</div>
-<script>
-const TOKEN = {json.dumps(TOKEN)};
-const form = document.getElementById('genForm');
-const promptEl = document.getElementById('prompt');
-const editImageEl = document.getElementById('editImage');
-const mlxStepsEl = document.getElementById('mlxSteps');
-const mlxSizeEl = document.getElementById('mlxSize');
-const countEl = document.getElementById('count');
-const btn = document.getElementById('generate');
-const preview = document.getElementById('preview');
-const liveStatus = document.getElementById('liveStatus');
-const jobMeta = document.getElementById('jobMeta');
-const loraModal = document.getElementById('loraModal');
-const loraGrid = document.getElementById('loraGrid');
-const selectedLorasEl = document.getElementById('selectedLoras');
-let selectedLoras = [];
-async function loadLoras(){{
-  const res = await fetch('/api/loras', {{headers:{{Authorization:`Bearer ${{TOKEN}}`}}, cache:'no-store'}});
-  const data = await res.json();
-  selectedLoras = data.selected || [];
-  document.getElementById('loraBases').textContent = `Showing only LoRAs compatible with: ${{(data.baseModels||[]).join(', ') || 'current model'}}`;
-  renderSelectedLoras();
-  renderLoraGrid(data.loras || []);
-}}
-function renderSelectedLoras(){{
-  selectedLorasEl.innerHTML = selectedLoras.length ? selectedLoras.map(l=>`<span class="pill">${{l.name}} · strength <input data-strength="${{l.id}}" type="number" step="0.05" min="-100000" max="100000" value="${{l.strength ?? 1}}" style="width:70px;border-radius:10px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.25);color:white;padding:4px"></span>`).join(' ') : 'No LoRAs selected.';
-  selectedLorasEl.querySelectorAll('[data-strength]').forEach(inp=>inp.onchange=()=>{{const l=selectedLoras.find(x=>x.id===inp.dataset.strength); if(l) l.strength=parseFloat(inp.value||'1'); saveLoras(false);}});
-}}
-function renderLoraGrid(loras){{
-  loraGrid.innerHTML = loras.length ? loras.map(l=>`<div class="model ${{l.selected?'equipped':''}}"><div class="model-head"><div><div class="model-name">${{l.name}}</div><div class="model-meta">${{l.baseModel||'Unknown base'}} · ${'{'}l.id{'}'}</div></div><span class="badge ${{l.selected?'on':''}}">${{l.selected?'Selected':'Available'}}</span></div><div class="model-actions"><button class="mini" data-toggle-lora="${{l.id}}">${{l.selected?'Remove':'Select'}}</button><input data-grid-strength="${{l.id}}" type="number" step="0.05" min="-100000" max="100000" value="${{l.strength ?? 1}}" style="width:76px;border-radius:999px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.25);color:white;padding:8px"></div></div>`).join('') : '<div class="empty">No compatible local LoRAs yet. Download some from the Models tab.</div>';
-  loraGrid.querySelectorAll('[data-toggle-lora]').forEach(b=>b.onclick=()=>{{const id=b.dataset.toggleLora; const card=b.closest('.model'); const name=card.querySelector('.model-name').textContent; const inp=card.querySelector('[data-grid-strength]'); const existing=selectedLoras.find(x=>x.id===id); if(existing) selectedLoras=selectedLoras.filter(x=>x.id!==id); else selectedLoras.push({{id,name,strength:parseFloat(inp.value||'1')}}); saveLoras(true);}});
-}}
-async function saveLoras(refresh){{
-  await fetch('/api/loras/select', {{method:'POST',headers:{{'Content-Type':'application/json',Authorization:`Bearer ${{TOKEN}}`}},body:JSON.stringify({{loras:selectedLoras}})}}).then(r=>r.json()).then(d=>{{selectedLoras=d.selected||selectedLoras; renderSelectedLoras(); if(refresh) loadLoras();}});
-}}
-document.getElementById('loraMenu').onclick=()=>{{loraModal.style.display='block'; loadLoras();}};
-document.getElementById('closeLoras').onclick=()=>{{loraModal.style.display='none';}};
-loadLoras().catch(()=>{{}});
-function chip(status){{return `<span class="status ${{status}}"><span class="dot"></span>${{status}}</span>`}}
-function setPrompt(v){{promptEl.value=v; countEl.textContent=promptEl.value.length; promptEl.focus();}}
-promptEl.addEventListener('input',()=>countEl.textContent=promptEl.value.length);
-document.querySelectorAll('[data-prompt]').forEach(b=>b.addEventListener('click',()=>setPrompt(b.dataset.prompt)));
-async function poll(id){{
-  const res = await fetch(`/api/job/${{id}}`, {{headers:{{Authorization:`Bearer ${{TOKEN}}`}}, cache:'no-store'}});
-  const job = await res.json();
-  const status = job.status || 'unknown';
-  liveStatus.innerHTML = chip(status);
-  jobMeta.innerHTML = `Job <code>${{id}}</code> · ${{status === 'running' ? 'Rendering on your Mac…' : status}}`;
-  if(status === 'queued' || status === 'running'){{
-    preview.innerHTML = '<div><div class="spinner"></div><div>Generating your image…</div></div>';
-    setTimeout(()=>poll(id), 1800); return;
-  }}
-  btn.disabled = false; btn.textContent = 'Generate image';
-  if(status === 'success' && job.image_urls && job.image_urls.length){{
-    const url = job.image_urls[0];
-    preview.innerHTML = `<a href="${{url}}" target="_blank" rel="noreferrer"><img src="${{url}}" alt="Generated image"></a>`;
-    jobMeta.innerHTML = `Done · <a href="/job/${{id}}?token=${{TOKEN}}">open job</a> · <a href="/?token=${{TOKEN}}#history">refresh history</a>`;
-    setTimeout(()=>location.href='/?token='+encodeURIComponent(TOKEN)+'#history', 1400);
-  }} else {{
-    preview.innerHTML = `<div class="errorbox">${{job.error || 'Generation failed.'}}</div>`;
-  }}
-}}
-form.addEventListener('submit', async (e)=>{{
-  e.preventDefault();
-  const prompt = promptEl.value.trim();
-  if(!prompt){{promptEl.focus(); return;}}
-  btn.disabled = true; btn.textContent = 'Queued…';
-  preview.innerHTML = '<div><div class="spinner"></div><div>Submitting to ComfyUI…</div></div>';
-  liveStatus.innerHTML = chip('queued'); jobMeta.textContent = 'Sending prompt…';
-  try{{
-    let res;
-    if(editImageEl && editImageEl.files && editImageEl.files[0]){{
-      const fd = new FormData();
-      fd.append('prompt', prompt);
-      fd.append('backend', 'mlx-bigloves-klein3-edit');
-      fd.append('image', editImageEl.files[0]);
-      const size = mlxSizeEl?.value || '512';
-      fd.append('width', size); fd.append('height', size);
-      fd.append('steps', mlxStepsEl?.value || '4');
-      fd.append('guidance', '3.5');
-      res = await fetch('/api/generate', {{method:'POST', headers:{{Authorization:`Bearer ${{TOKEN}}`}}, body:fd}});
-    }} else {{
-      res = await fetch('/api/generate', {{method:'POST', headers:{{'Content-Type':'application/json', Authorization:`Bearer ${{TOKEN}}`}}, body:JSON.stringify({{prompt, loras:selectedLoras}})}});
-    }}
-    const data = await res.json();
-    if(!res.ok) throw new Error(data.error || 'Submit failed');
-    poll(data.id);
-  }}catch(err){{
-    btn.disabled = false; btn.textContent = 'Generate image';
-    liveStatus.innerHTML = chip('error'); preview.innerHTML = `<div class="errorbox">${{err.message}}</div>`;
-  }}
-}});
-</script>
-</body></html>'''
-
-
 def render_job_page(rec):
     r = public_record(rec)
     status = r.get("status", "unknown")
@@ -5539,22 +5388,6 @@ def render_job_page(rec):
     <section class="glass composer"><h2>{'Rendering…' if active else 'Result'}</h2><p class="sub">{h(r.get('prompt'))}</p>{err}</section>
   </main>
 </div></body></html>'''
-
-
-def nav(active, show_top=True):
-    def cls(name): return 'tab active' if active == name else 'tab'
-    def bcls(name): return 'bottom-tab active' if active == name else 'bottom-tab'
-    top = f'''<nav class="tabs" aria-label="Primary navigation">
-      <a class="{cls('studio')}" href="/?token={TOKEN}">Studio</a>
-      <a class="{cls('models')}" href="/models?token={TOKEN}">Models</a>
-      <a class="{cls('mobile')}" href="/workbench?token={TOKEN}">Mobile Workbench</a>
-    </nav>''' if show_top else ""
-    bottom = f'''<nav class="bottom-tabs" aria-label="Bottom navigation">
-      <a class="{bcls('studio')}" href="/?token={TOKEN}"><span class="ico">✦</span><span>Studio</span></a>
-      <a class="{bcls('models')}" href="/models?token={TOKEN}"><span class="ico">◈</span><span>Models</span></a>
-      <a class="{bcls('mobile')}" href="/workbench?token={TOKEN}"><span class="ico">▣</span><span>Workbench</span></a>
-    </nav>'''
-    return top + bottom
 
 
 def human_bytes(n):
@@ -6799,13 +6632,16 @@ def preview_for_model(path, meta):
     for c in candidates:
         if not c:
             continue
-        if c.startswith(('http://', 'https://', '/')):
+        if c.startswith(('http://', 'https://')):
             return c
+        # A local candidate only counts if the file is actually there. Absolute paths
+        # used to short-circuit this check, so every model reported the FIRST sibling
+        # extension whether it existed or not — a preview URL that always 404s.
         cp = Path(c)
         if not cp.is_absolute():
             cp = p.parent / c
         if cp.exists() and cp.is_file():
-            return '/api/model-preview?path=' + urlencode({'p': str(cp)})[2:]
+            return str(cp)
     return ''
 
 
@@ -7041,121 +6877,6 @@ def unequip_model(mid):
     except Exception:
         pass
     return len(after) != len(before)
-
-
-def render_models_page():
-    models = scan_models(); eq = {m.get('id') for m in load_equipped()}; ram = ram_info(); bundles = model_bundles(models)
-    groups = {}
-    for m in models: groups.setdefault(m['category'], []).append(m)
-    pct = int((ram['used']/ram['total'])*100) if ram.get('total') else 0
-    res_pct = int(((ram['used']+ram['reserved_equipped'])/ram['total'])*100) if ram.get('total') else 0
-    sections = []
-    for cat in ['Image generation','Video generation','LLM / text','Text encoders','VAE','LoRA / adapters','Control / conditioning','Upscalers','Audio generation']:
-        arr = groups.pop(cat, [])
-        if not arr: continue
-        cards=[]
-        for m in arr:
-            on = m['id'] in eq
-            bundle = bundles.get(m['id'])
-            dep_names = ', '.join(models_by_id['name'] for dep in (bundle or {}).get('deps', []) for models_by_id in [next((x for x in models if x['id'] == dep), {'name': dep})])
-            bundle_note = f'<div class="model-meta">Auto stack: {h(dep_names) if dep_names else "self-contained checkpoint"}</div>' if bundle else ''
-            action_label = 'Equip stack' if bundle else 'Equip'
-            cards.append(f'''<div class="model {'equipped' if on else ''}"><div class="model-head"><div><div class="model-name">{h(m['name'])}</div><div class="model-meta">{h(m['folder'])} · {h(m.get('role','aux'))} · {m['size']} · estimated RAM {human_bytes(m['estimated_ram_bytes'])}</div>{bundle_note}</div><span class="badge {'on' if on else ''}">{'Equipped' if on else 'Available'}</span></div><div class="model-actions"><button class="mini" data-equip="{h(m['id'])}">{action_label}</button><button class="mini danger" data-unequip="{h(m['id'])}" {'disabled' if not on else ''}>Unequip</button></div></div>''')
-        sections.append(f'<section class="model-section"><h2>{h(cat)} <span class="pill">{len(arr)}</span></h2><div class="model-grid">{"".join(cards)}</div></section>')
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Models · Media Studio</title><style>{CSS}</style></head><body><div class="wrap"><header class="top"><div class="brand"><div class="orb"></div><div><div class="eyebrow">Model control center</div><h1>Models</h1></div></div><div class="pills"><span class="pill">{len(models)} models</span><span class="pill">{len(eq)} equipped</span></div></header>{nav('models', show_top=False)}<section class="glass ram"><div class="ram-top"><div></div><span class="pill">Current base: {', '.join(current_base_models())}</span></div><div class="actions"><input id="cvQuery" placeholder="Search anything…" style="flex:1;min-width:180px;border-radius:999px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.25);color:white;padding:13px 15px"><select id="cvType" class="mini" title="Asset type"><option value="">Any type</option><option selected>LORA</option><option>Checkpoint</option><option>TextualInversion</option><option>VAE</option><option>Controlnet</option><option>Upscaler</option></select><input id="cvBase" placeholder="Optional base model filter" value="" title="Optional filter. Leave blank for global best LoRAs; use Current base to restrict to compatible models." style="min-width:220px;border-radius:999px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.25);color:white;padding:13px 15px"><select id="cvSort" class="mini"><option>Highest Rated</option><option>Most Downloaded</option><option>Newest</option></select><button class="btn" id="cvSearch">Search</button><button class="mini" id="cvClearBase" type="button" title="Search global LoRAs">All bases</button><button class="mini" id="cvCurrentBase" type="button" title="Restrict to the currently equipped base model">Current base only</button></div><div class="model-meta" style="margin-top:8px">Default now searches <b>all bases</b>. Use <b>Current base only</b> if you specifically want Z-Image-compatible LoRAs.</div><div id="cvResultsSummary" class="model-meta" style="margin-top:12px"></div><div id="cvResults" class="model-grid" style="margin-top:14px"></div></section><section class="glass ram"><div class="ram-top"><div><b>Unified memory</b><div class="model-meta">Used {human_bytes(ram['used'])} · Free {human_bytes(ram['free'])} · Equipped reserve {human_bytes(ram['reserved_equipped'])}</div></div><span class="pill">{pct}% live / {res_pct}% reserved</span></div><div class="bar"><span style="width:{min(res_pct,100)}%"></span></div></section>{''.join(sections) or '<div class="empty">No model files found.</div>'}</div><script>
-const TOKEN={json.dumps(TOKEN)};
-async function act(kind,id){{const r=await fetch(`/api/models/${{kind}}`,{{method:'POST',headers:{{'Content-Type':'application/json',Authorization:`Bearer ${{TOKEN}}`}},body:JSON.stringify({{id}})}});const d=await r.json(); if(!r.ok) alert(d.error||'Failed'); else location.reload();}}
-document.querySelectorAll('[data-equip]').forEach(b=>b.onclick=()=>act('equip',b.dataset.equip));
-document.querySelectorAll('[data-unequip]').forEach(b=>b.onclick=()=>act('unequip',b.dataset.unequip));
-async function cvSearch(){{
-  const q=document.getElementById('cvQuery').value.trim();
-  const type=document.getElementById('cvType').value; const base=document.getElementById('cvBase').value.trim(); const sort=document.getElementById('cvSort').value;
-  const params=new URLSearchParams({{limit:'48', sort, primaryFileOnly:'true'}}); if(q) params.set('query',q); if(type) params.set('types',type); if(base) params.set('baseModels',base);
-  const box=document.getElementById('cvResults'); const summary=document.getElementById('cvResultsSummary');
-  summary.textContent=''; box.innerHTML='<div class="empty">Searching Civitai…</div>';
-  const r=await fetch('/api/civitai/search?'+params.toString(),{{headers:{{Authorization:`Bearer ${{TOKEN}}`}},cache:'no-store'}}); const d=await r.json();
-  if(!r.ok||d.error){{box.innerHTML=`<div class="errorbox">${{d.error||'Search failed'}}</div>`;return;}}
-  const items=d.items||[]; const filterBits=[]; if(type) filterBits.push(type); if(base) filterBits.push(`base: ${{base}}`); if(q) filterBits.push(`query: ${{q}}`);
-  summary.innerHTML=`Found <b>${{items.length}}</b> result${{items.length===1?'':'s'}}${{filterBits.length?' for '+filterBits.join(' · '):''}}. ${{d.metadata?.nextPage?'More results are available from Civitai.':''}}`;
-  box.className='model-grid cv-grid';
-  box.innerHTML=items.length?items.map(item=>{{
-    const v=(item.modelVersions||[])[0]||{{}};
-    const img=(v.images||[])[0];
-    const file=(v.files||[]).find(f=>f.primary)||(v.files||[])[0]||{{}};
-    const downloads=(item.stats?.downloadCount||0).toLocaleString();
-    const up=item.stats?.thumbsUpCount;
-    const chips=[item.type||'Model', item.creator||'unknown', v.baseModel||'base?'].filter(Boolean);
-    const fileName=file.name||'file unavailable';
-    return `<article class="cv-card">
-      <div class="cv-thumb">${{img&&img.url?`<img src="${{img.url}}" alt="Preview for ${{item.name}}">`:'<div class="cv-thumb-empty">No preview supplied by Civitai</div>'}}</div>
-      <div class="cv-body">
-        <div class="cv-title-row"><div class="cv-title">${{item.name}}</div><div class="cv-downloads">${{downloads}} downloads</div></div>
-        <div class="cv-meta">${{chips.map(c=>`<span class="cv-chip">${{c}}</span>`).join('')}}</div>
-        <div class="cv-file">${{fileName}}</div>
-        ${{up!=null?`<div class="cv-stats">👍 ${{up.toLocaleString()}}</div>`:''}}
-        <div class="cv-actions"><button class="mini" data-cv-download="${{v.id}}" data-file="${{file.id||''}}">Download</button><a class="mini" href="https://civitai.com/models/${{item.id}}" target="_blank">Open</a></div>
-        <div class="cv-progress"><div class="cv-progress-bar"><span></span></div><div class="cv-progress-text">Waiting…</div></div>
-      </div>
-    </article>`;
-  }}).join(''):'<div class="empty">No Civitai results for those filters. Try clearing the base model or changing the asset type.</div>';
-  activeDownloadPolls.forEach(timer=>clearTimeout(timer));
-  activeDownloadPolls.clear();
-}}
-function fmtBytes(n){{
-  n=Number(n||0); const units=['B','KB','MB','GB','TB']; let i=0;
-  while(n>=1024&&i<units.length-1){{n/=1024;i++;}}
-  return i?`${{n.toFixed(1)}} ${{units[i]}}`:`${{Math.round(n)}} B`;
-}}
-const activeDownloadPolls = new Map();
-function setDownloadProgress(card, job){{
-  const progress=card.querySelector('.cv-progress'); const bar=card.querySelector('.cv-progress-bar span'); const text=card.querySelector('.cv-progress-text'); const btn=card.querySelector('[data-cv-download]');
-  progress.classList.add('on');
-  const pct=job.percent||0; bar.style.width=`${{pct}}%`;
-  if(job.status==='success'){{
-    btn.disabled=false; btn.textContent='Downloaded';
-    text.textContent=`Saved: ${{job.result?.filename||'download complete'}}`;
-  }} else if(job.status==='error'){{
-    btn.disabled=false; btn.textContent='Retry';
-    text.textContent=job.error||'Download failed';
-  }} else {{
-    btn.disabled=true; btn.textContent=pct?`${{pct}}%`:'Starting…';
-    text.textContent=job.total_bytes?`${{fmtBytes(job.downloaded_bytes)}} / ${{fmtBytes(job.total_bytes)}}`:'Preparing download…';
-  }}
-}}
-async function pollDownload(jobId, card){{
-  try{{
-    const r=await fetch(`/api/civitai/download/${{jobId}}`,{{headers:{{Authorization:`Bearer ${{TOKEN}}`}},cache:'no-store'}}); const job=await r.json();
-    if(!r.ok||job.error&&!job.status) throw new Error(job.error||'Progress check failed');
-    setDownloadProgress(card, job);
-    if(job.status==='queued'||job.status==='running'){{activeDownloadPolls.set(jobId,setTimeout(()=>pollDownload(jobId,card),900));}}
-    else activeDownloadPolls.delete(jobId);
-  }}catch(err){{
-    const btn=card.querySelector('[data-cv-download]'); const text=card.querySelector('.cv-progress-text');
-    btn.disabled=false; btn.textContent='Retry'; text.textContent=err.message;
-  }}
-}}
-document.getElementById('cvResults').addEventListener('click', async (e)=>{{
-  const b=e.target.closest('[data-cv-download]'); if(!b) return;
-  const card=b.closest('.cv-card'); b.disabled=true; b.textContent='Starting…';
-  card.querySelector('.cv-progress').classList.add('on'); card.querySelector('.cv-progress-text').textContent='Starting download…';
-  try{{
-    const rr=await fetch('/api/civitai/download',{{method:'POST',headers:{{'Content-Type':'application/json',Authorization:`Bearer ${{TOKEN}}`}},body:JSON.stringify({{versionId:b.dataset.cvDownload,fileId:b.dataset.file||null}})}});
-    const job=await rr.json(); if(!rr.ok||job.error) throw new Error(job.error||'Download failed');
-    setDownloadProgress(card, job); pollDownload(job.id, card);
-  }}catch(err){{
-    b.disabled=false; b.textContent='Retry'; card.querySelector('.cv-progress-text').textContent=err.message;
-  }}
-}});
-document.getElementById('cvSearch').onclick=cvSearch;
-document.getElementById('cvClearBase').onclick=()=>{{document.getElementById('cvBase').value=''; cvSearch();}};
-document.getElementById('cvCurrentBase').onclick=()=>{{document.getElementById('cvBase').value={json.dumps(current_base_models()[0])}; cvSearch();}};
-document.getElementById('cvQuery').addEventListener('keydown',e=>{{if(e.key==='Enter')cvSearch();}});
-cvSearch();
-</script></body></html>'''
-
-
-def render_workbench_page():
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mobile Workbench · Media Studio</title><style>{CSS}.workbench-wrap{{width:100%;margin:0;padding:18px 14px 82px}}.workbench-wrap .top{{width:min(1180px,100%);margin:0 auto 14px}}.workbench-wrap .mobile-frame{{width:100%;height:calc(100vh - 172px);min-height:420px;border:0;border-radius:22px;display:block}}</style></head><body><div class="workbench-wrap"><header class="top"><div class="brand"><div class="orb"></div><div><div class="eyebrow">ComfyUI Mobile</div><h1>Workbench</h1></div></div><div class="pills"><span class="pill">Live workflow editor</span><span class="pill">ComfyUI proxy</span></div></header>{nav('mobile', show_top=False)}<iframe class="mobile-frame" src="/mobile/?token={TOKEN}"></iframe></div></body></html>'''
 
 
 class Handler(BaseHTTPRequestHandler):

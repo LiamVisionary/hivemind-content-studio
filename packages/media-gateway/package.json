@@ -19,7 +19,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "http-proxy": "^1.18.1",
-    "lucide-react": "latest",
     "next": "^16.2.10",
     "react": "latest",
     "react-dom": "latest",

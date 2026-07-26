@@ -111,9 +111,9 @@ export const hubState = {
     publishCaption: '', publishCta: '', platforms: [], providerRoles: {},
     operatorToken: '',
   },
-  // Fallback so Canvas/Models still embed when /api/surfaces is unreachable
+  // Fallback so Canvas still embeds when /api/surfaces is unreachable
   // (e.g. running the UI standalone on the vite dev server).
-  surfaces: { surfaces: { canvas: { gateway_path: '/mobile/' }, models: { gateway_path: '/models' } } },
+  surfaces: { surfaces: { canvas: { gateway_path: '/mobile/' } } },
 };
 
 let version = 0;
@@ -729,7 +729,7 @@ export function activateHubView(view) {
   const selected = HUB_VIEWS.includes(view) ? view : 'create';
   hubState.activeView = selected;
   notifyHub();
-  if (['canvas', 'models'].includes(selected)) loadToolSurface(selected);
+  if (selected === 'canvas') loadToolSurface(selected);
   if (selected === 'history') void loadPrompts({ quiet: true });
   if (selected === 'telemetry') void loadGenerationTelemetry({ quiet: true });
 }
@@ -787,7 +787,7 @@ function toolSurfaceOrigin(frame) {
 function ownerAccessFrameForEvent(event) {
   if (event.data?.type !== 'hivemind-owner-unlock-ready') return null;
   for (const [name, frame] of surfaceFrames) {
-    if (['canvas', 'models'].includes(name) && frame.contentWindow === event.source && event.origin === toolSurfaceOrigin(frame)) return frame;
+    if (name === 'canvas' && frame.contentWindow === event.source && event.origin === toolSurfaceOrigin(frame)) return frame;
   }
   return null;
 }
@@ -1133,10 +1133,29 @@ function outputBasename(url) {
 
 // Ensure the owner's canvas history is loaded (it populates on hub load; a drop may
 // happen before the user ever opened the hub). Best-effort, quiet.
+//
+// Canvas outputs ONLY. This used to prime via loadPrompts(), which additionally
+// fetched and decrypted the entire prompt library — an RSA-OAEP unwrap per entry —
+// on the critical path of a drag-to-restore that never reads a prompt. That was the
+// bulk of the wait before "No saved settings found for this file" appeared.
 export async function ensureCanvasHistoryLoaded() {
-  if (!hubState.canvasHistory.length) {
-    try { await loadPrompts({ quiet: true }); } catch { /* best-effort */ }
-  }
+  if (hubState.canvasHistory.length) return;
+  try {
+    const query = new URLSearchParams({ page: '1', page_size: String(hubState.canvasPageSize) });
+    const payload = await api(`/api/canvas/history?${query.toString()}`);
+    const history = payload.history || [];
+    if (!history.length) return;
+    // Leave the pagination cursor consistent so opening History later refreshes
+    // from a valid page 1 rather than re-appending what is already here.
+    hubState.canvasHistory = history;
+    hubState.canvasTotal = Number(payload.pagination?.total || history.length);
+    hubState.canvasPage = payload.pagination?.page || 1;
+    hubState.canvasHasMore = Boolean(payload.pagination?.has_more);
+    hubState.canvasFormats = [...new Set([...hubState.canvasFormats, ...(payload.filters?.formats || [])])].sort();
+    hubState.canvasModels = [...new Set([...hubState.canvasModels, ...(payload.filters?.models || [])])]
+      .sort((left, right) => left.localeCompare(right));
+    notifyHub();
+  } catch { /* best-effort — the drop falls through to its own message */ }
 }
 
 // Reverse-lookup: find the canvas-history entry whose output matches a dropped URL or

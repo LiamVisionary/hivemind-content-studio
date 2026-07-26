@@ -111,6 +111,23 @@ const ltxErosVariants = {
       seed: 42,
     },
   },
+  // v1.4 DMD: v1.4 merged with the DMD LoRA the author attaches to that release
+  // and says it is "fully designed for use with". eros-v14-q8-fast above merges
+  // v1.2's cond-safe LoRA instead, so this is the intended fast build for v1.4.
+  'eros-v14-q8-dmd': {
+    title: 'LTX 2.3 10Eros v1.4 DMD q8 distilled',
+    marker: 'Eros/native_mlx_ltx__eros-v14-q8-dmd',
+    mobileWorkflow: 'LTX 2.3 Eros MLX v1.4 DMD Mobile.json',
+    benchmarkSeconds: 193.11,
+    defaults: {
+      prompt: defaultLtxErosPrompt,
+      width: 480,
+      height: 832,
+      frames: 121,
+      frame_rate: 24,
+      seed: 42,
+    },
+  },
   // v1.4 dev package, converted locally. Runs the CFG two-stage dev pipeline.
   'eros-v14-q8-dev': {
     title: 'LTX 2.3 10Eros v1.4 q8 dev',
@@ -268,6 +285,33 @@ const builtInVideoWorkflowRegistry = {
     requires: { prompt: false, image: false },
     accepts: ['prompt', 'negative_prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
   },
+  // The Lite half of the v1.4 pair, and the build the model's author intends:
+  // the v1.4 card says the release is "fully designed for use with the DMD lora
+  // I attached". DMD is a few-step distillation, so this runs the fast no-CFG
+  // distilled route while ltx23-eros-v14 runs the slow two-stage dev one.
+  'ltx23-eros-v14-dmd': {
+    id: 'ltx23-eros-v14-dmd',
+    tier_group: 'ltx23-eros-v14',
+    tier: 'lite',
+    media_type: 'video',
+    title: 'LTX 2.3 Eros v1.4 DMD',
+    description: "v1.4 merged with the DMD LoRA its author ships alongside it and says the model is fully designed for. Runs the fast 8-step distilled route. Note that v1.4 is a base-aligned fine-tune with deliberately near-zero anatomy of its own — the author's guidance is to add LoRAs for that, and to prompt it as a scene script rather than reusing v1.2-style prompts.",
+    family: 'ltx-2.3',
+    builder: 'ltx-eros',
+    variant: 'eros-v14-q8-dmd',
+    supports_loras: true,
+    compatible_base_models: ['LTXV'],
+    lora_injection: {
+      class_type: 'LTX2LoraLoaderAdvanced',
+      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
+      name_input: 'lora_name',
+      strength_input: 'strength_model',
+      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
+    },
+    default: false,
+    requires: { prompt: false, image: false },
+    accepts: ['prompt', 'negative_prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
+  },
   'ltx23-eros-v14': {
     id: 'ltx23-eros-v14',
     tier_group: 'ltx23-eros-v14',
@@ -342,6 +386,9 @@ const workflowAliases = {
   'eros-v14-ic-ingredients': 'ltx23-eros-v14-ic-ingredients-lora',
   'eros-dmd-v12': 'ltx23-eros-dmd-v12',
   'dmd-v12': 'ltx23-eros-dmd-v12',
+  'eros-v14-dmd': 'ltx23-eros-v14-dmd',
+  'v14-dmd': 'ltx23-eros-v14-dmd',
+  'dmd-v14': 'ltx23-eros-v14-dmd',
   'eros-dmd-ingredients': 'ltx23-eros-dmd-ic-ingredients-lora',
   'eros-dmd-ic-ingredients': 'ltx23-eros-dmd-ic-ingredients-lora',
   'ltx23-eros-dmd-ingredients': 'ltx23-eros-dmd-ic-ingredients-lora',

@@ -52,6 +52,7 @@ BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS: tuple[MediaModel, ...] = (
     MediaModel("ltx23-eros-dmd-ic-ingredients-lora", "LTX 2.3 Eros DMD IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "ingredient_images", "loras"), True, ("LTXV",)),
     MediaModel("ltx23-eros-v14-ic-ingredients-lora", "LTX 2.3 Eros v1.4 IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "ingredient_images", "loras"), True, ("LTXV",)),
     MediaModel("ltx23-eros-v14", "LTX 2.3 Eros v1.4", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-v14-dmd", "LTX 2.3 Eros v1.4 DMD", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
 )
 
 

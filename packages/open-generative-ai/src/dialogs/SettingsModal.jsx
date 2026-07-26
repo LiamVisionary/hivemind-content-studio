@@ -9,14 +9,17 @@ import { useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useLang } from '../hooks/hooks.js';
 import { getLang, setLang, t } from '../lib/i18n.js';
-import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
+import { isHostedLocalAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { Button, Divider, Field, SectionLabel, Segmented, Tabs, TextInput } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
 import { LocalModelManager } from './LocalModelManager.jsx';
 
 export function SettingsModal({ onClose }) {
   const { zh } = useLang();
-  const hasLocalAI = isLocalAIAvailable();
+  // Only the desktop build manages its own weights. In hosted mode these controls
+  // are no-ops (install/download/delete all resolve without doing anything), and the
+  // Models view is the real manager — so this section stays out of the way there.
+  const hasLocalAI = isLocalAIAvailable() && !isHostedLocalAI();
   const [tab, setTab] = useState('api');
   // Seeded at mount — the modal remounts per open (App renders it lazily), so a
   // key changed via AuthModal in between is always re-read.

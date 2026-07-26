@@ -92,10 +92,42 @@
     };
   }
 
+  // Installed models, and Civitai browse. Both carry preview paths that are relative
+  // to this bridge, so they get the same apiBase treatment as LoRA card art.
+  async function listLibrary() {
+    const data = await jsonFetch('/local-ai/library');
+    return {
+      ...data,
+      assets: (data.assets || []).map((asset) => ({
+        ...asset,
+        previewUrl: asset.previewPath ? `${apiBase}${asset.previewPath}` : '',
+        motionUrl: asset.motionPath ? `${apiBase}${asset.motionPath}` : '',
+      })),
+    };
+  }
+
+  async function searchCivitai(params) {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params || {})) {
+      if (value !== undefined && value !== null && value !== '' && value !== false) query.set(key, String(value));
+    }
+    const data = await jsonFetch(`/local-ai/civitai-search?${query}`);
+    return {
+      ...data,
+      items: (data.items || []).map((item) => ({
+        ...item,
+        previewUrl: item.previewPath ? `${apiBase}${item.previewPath}` : '',
+      })),
+    };
+  }
+
   window.localAI = {
     isElectron: true,
     isHosted: true,
     getBinaryStatus: () => jsonFetch('/local-ai/binary-status'),
+    listLibrary,
+    searchCivitai,
+    listCivitaiBaseModels: () => jsonFetch('/local-ai/civitai-base-models'),
     downloadBinary: async () => ({ ok: true, source: 'hosted' }),
     listModels: () => jsonFetch('/local-ai/models'),
     listLoras,

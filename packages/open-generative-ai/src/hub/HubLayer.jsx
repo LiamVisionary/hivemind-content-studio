@@ -1,15 +1,15 @@
 // Persistent hub layer. App.jsx mounts this ONCE after the first hub navigation
-// and never unmounts it — `visible` only toggles display, so the Canvas/Models
-// iframes (and all decrypted media, owner-unlock handshakes, and the history
-// bridge) survive every page switch. All seven views stay mounted forever once
-// this layer exists; only their display is toggled, keyed off the active view.
+// and never unmounts it — `visible` only toggles display, so the Canvas iframe
+// (and all decrypted media, owner-unlock handshakes, and the history bridge)
+// survives every page switch. All seven views stay mounted forever once this
+// layer exists; only their display is toggled, keyed off the active view.
 //
 // Contract with App.jsx: <HubLayer visible={isHub} view={'create'|'canvas'|…} />.
 // - on mount: startHub() (boot runs exactly once; it binds the window listeners
 //   for 'hivemind-hub-refresh' / 'hivemind-owner-lock-broadcast' / message /
 //   visibilitychange, and starts the 10s + 1s poll loops).
 // - on view change: activateHubView(view) (store sync + per-view lazy work:
-//   canvas/models → loadToolSurface, history → loadPrompts, telemetry → load…).
+//   canvas → loadToolSurface, history → loadPrompts, telemetry → load…).
 // - setHubRootEl wires this node so the poll loops can gate on root.isConnected.
 import { useEffect, useRef } from 'react';
 import { cx } from '../ui/kit.jsx';
