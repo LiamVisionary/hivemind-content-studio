@@ -154,3 +154,52 @@ test('the seal probe is skipped only for URLs that provably cannot be sealed', a
     assert.doesNotMatch(hooks, /function couldBeSealed/, 'an allow-list predicate is what broke /image/ media');
     assert.match(hooks, /local-ai/, 'the bridge art is the one thing worth skipping');
 });
+
+test('a data: URL carrying an E2E envelope is decrypted, not shoved into <img>', async () => {
+    const media = await import('../src/lib/e2eMedia.js');
+    const vault = await import('../src/lib/e2eVault.js');
+    if (!vaultIdentity) vaultIdentity = (await vault.createVaultIdentity('test-only-passphrase')).identity;
+
+    const pixels = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const sealed = await sealMedia(vaultIdentity.public_key, pixels);
+    const envelope = JSON.stringify({ ...sealed, media_type: 'image/png' });
+    // Exactly what hosted-server.js:611 produces when the gateway served a sealed
+    // output: the envelope inlined as a data: URL.
+    const dataUrl = `data:application/vnd.hivemind.e2e+json;base64,${Buffer.from(envelope).toString('base64')}`;
+
+    // Serve it the way a real fetch() of that data: URL would.
+    global.fetch = async (url) => {
+        if (String(url).includes('/api/vault/identity')) {
+            return { ok: true, status: 200, json: async () => ({ exists: true, identity: vaultIdentity }) };
+        }
+        assert.ok(String(url).startsWith('data:'), 'the data: URL itself must be fetched');
+        return {
+            ok: true,
+            status: 200,
+            headers: { get: (n) => (n === 'Content-Type' ? 'application/vnd.hivemind.e2e+json' : null) },
+            json: async () => JSON.parse(envelope),
+            body: null,
+        };
+    };
+
+    media.clearResolvedMediaCache();
+    const resolved = await media.resolveMediaSrc(dataUrl);
+    assert.match(resolved, /^blob:/, 'an inlined envelope must decrypt to a renderable blob URL');
+});
+
+test('the skip-list classifies data: URLs by their announced type', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const hooks = fs.readFileSync(path.join(__dirname, '..', 'src/hooks/hooks.js'), 'utf8');
+    const match = hooks.match(/function cannotBeSealed[\s\S]*?\n}/);
+    assert.ok(match, 'cannotBeSealed not found');
+    // Rebuild the predicate in isolation so the classification itself is asserted.
+    const cannotBeSealed = new Function(`${match[0]}; return cannotBeSealed;`)();
+
+    assert.equal(cannotBeSealed('data:application/vnd.hivemind.e2e+json;base64,eyJ='), false, 'sealed payloads must be probed');
+    assert.equal(cannotBeSealed('data:image/png;base64,iVBOR'), true, 'a plain inline image needs no probe');
+    assert.equal(cannotBeSealed('/image/krea2-out.png?token=abc'), false, 'gateway output must be probed');
+    assert.equal(cannotBeSealed('/api/media-studio/generated/x.png'), false);
+    assert.equal(cannotBeSealed('/local-ai/lora-preview/abc'), true);
+    assert.equal(cannotBeSealed('blob:http://x/1'), true);
+});

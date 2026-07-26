@@ -24,7 +24,15 @@ function needsDecryptResolve(url) {
 // undecryptable media.
 function cannotBeSealed(url) {
   if (typeof url !== 'string' || !url) return true;
-  if (url.startsWith('data:') || url.startsWith('blob:')) return true;
+  // A data: URL announces its own MIME type, so it classifies itself with no probe.
+  // Crucially it can still BE an envelope: the local bridge inlines whatever the
+  // gateway returned as `data:<contentType>;base64,…`, and for a sealed output that
+  // payload is the envelope JSON, not an image. Treating every data: URL as
+  // unsealed put the raw envelope in <img src> and every generated result rendered
+  // broken — a plain `data:image/png` still skips the probe, as intended.
+  if (url.startsWith('data:')) return !/^data:[^,]*hivemind\.e2e/i.test(url);
+  // We minted blob: URLs ourselves, from already-decrypted bytes.
+  if (url.startsWith('blob:')) return true;
   // The local-AI bridge (model + LoRA card art) is never sealed, and probing it
   // downloaded every thumbnail a second time just to read a header.
   return /^(\/open-gen-api)?\/local-ai\//.test(url);
