@@ -241,7 +241,7 @@ function LipSyncViewer({ url, entry, generating, onClose, onNew, onRegenerate, o
       <div className="flex flex-col gap-4">
         <div className="grid place-items-center overflow-hidden rounded-lg border border-line1 bg-bg0">
           {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-          <video src={src} controls loop autoPlay muted playsInline className="max-h-[56vh] w-auto max-w-full object-contain" />
+          <video src={src} controls controlsList="nodownload" loop autoPlay muted playsInline className="max-h-[56vh] w-auto max-w-full object-contain" />
         </div>
         <div className="flex flex-col gap-1.5">
           <MetaRow label="Prompt" value={entry?.prompt} />

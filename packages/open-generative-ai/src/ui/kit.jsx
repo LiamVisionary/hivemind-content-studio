@@ -1,6 +1,7 @@
 // Hive primitive kit — the only building blocks components should use.
 // See DESIGN.md. All plain JSX, no external deps.
-import { createContext, useContext, useId, useState } from 'react';
+import { createContext, useContext, useId, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Icon } from './icons.jsx';
 
 const FieldIdContext = createContext(undefined);
@@ -56,15 +57,87 @@ export function Button({
   );
 }
 
+const canHover = () => (
+  typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(hover: hover) and (pointer: fine)').matches
+);
+
+// The hint renders into <body>, not inside the button. A bubble anchored in the
+// button is clipped by any scroll/rounding container above it — a Modal panel is
+// overflow-hidden, so the last button in a footer row lost most of its label at
+// the panel's edge. Fixed coordinates, measured after mount and clamped to the
+// viewport, so the bubble also flips below when there is no room above.
+function HintBubble({ anchor, label }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState(null);
+
+  useLayoutEffect(() => {
+    if (!anchor || !ref.current) return undefined;
+    const place = () => {
+      const target = anchor.getBoundingClientRect();
+      const bubble = ref.current.getBoundingClientRect();
+      const margin = 8;
+      const centered = target.left + target.width / 2 - bubble.width / 2;
+      const rightmost = Math.max(margin, window.innerWidth - bubble.width - margin);
+      const above = target.top - bubble.height - 6;
+      const next = {
+        left: Math.min(Math.max(centered, margin), rightmost),
+        top: above >= margin ? above : target.bottom + 6,
+      };
+      setPos((prev) => (prev && prev.left === next.left && prev.top === next.top ? prev : next));
+    };
+    place();
+    // Fixed coordinates don't follow the anchor on their own: a scroll or resize
+    // under an open hint would leave it stranded where the button used to be.
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [anchor, label]);
+
+  return createPortal(
+    <div
+      ref={ref}
+      role="tooltip"
+      // Hidden for the measuring pass only — width has to settle before it can be
+      // placed, and an unplaced bubble must not flash in the corner.
+      style={{ position: 'fixed', left: pos?.left ?? 0, top: pos?.top ?? 0, visibility: pos ? 'visible' : 'hidden' }}
+      className="hive-fade-in pointer-events-none z-[200] w-max max-w-[200px] rounded-sm border border-line1 bg-bg3 px-2 py-1 text-center text-[11px] font-medium leading-snug text-ink1 shadow-pop"
+    >
+      {label}
+    </div>,
+    document.body,
+  );
+}
+
 // A Button whose label collapses into a hover hint wherever a pointer can hover,
 // so a crowded action row reads as icons instead of a wall of words. Touch devices
 // keep the label visible — they have no hover to reveal it. The label always
 // reaches assistive tech through aria-label, hidden or not.
 export function ActionButton({ icon, label, className = '', ...rest }) {
+  const [anchor, setAnchor] = useState(null);
+  const reveal = (event) => { if (canHover()) setAnchor(event.currentTarget); };
+
   return (
-    <Button icon={icon} aria-label={label} data-hint={label} className={className} {...rest}>
-      <span className="hive-hint-label">{label}</span>
-    </Button>
+    <>
+      <Button
+        icon={icon}
+        aria-label={label}
+        data-hint={label}
+        className={className}
+        {...rest}
+        onMouseEnter={(e) => { rest.onMouseEnter?.(e); reveal(e); }}
+        onMouseLeave={(e) => { rest.onMouseLeave?.(e); setAnchor(null); }}
+        onFocus={(e) => { rest.onFocus?.(e); if (e.currentTarget.matches(':focus-visible')) reveal(e); }}
+        onBlur={(e) => { rest.onBlur?.(e); setAnchor(null); }}
+      >
+        <span className="hive-hint-label">{label}</span>
+      </Button>
+      {anchor ? <HintBubble anchor={anchor} label={label} /> : null}
+    </>
   );
 }
 

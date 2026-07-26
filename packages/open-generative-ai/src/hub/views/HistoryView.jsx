@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { registerMediaDownloadName } from '../../lib/e2eMedia.js';
 import { mediaDownloadName } from '../../lib/downloadNames.js';
+import { downloadMedia } from '../../lib/downloadMedia.js';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { Menu, MenuItem } from '../../ui/Menu.jsx';
@@ -56,7 +57,7 @@ function useOnVisible(cb, { once = false, rootMargin = '0px', resetKey } = {}) {
 
 function CanvasVideoInner({ url }) {
   const src = useMediaSrc(url);
-  return <video src={src} controls preload="metadata" className="h-full w-full object-cover" />;
+  return <video src={src} controls controlsList="nodownload" preload="metadata" className="h-full w-full object-cover" />;
 }
 
 // Which videos the owner has opened this session. Module-level, mirroring the
@@ -117,14 +118,14 @@ function HistoryMenu({ items }) {
 
 function CanvasCard({ entry, onDelete }) {
   const isVideo = entry.media_type?.startsWith('video/');
+  const downloadName = mediaDownloadName(
+    entry.models?.[0], entry.history_id, entry.file_format, { fallback: isVideo ? 'video' : 'image' },
+  );
   // Registered during render, not in an effect: child effects run BEFORE the
   // parent's, so MediaThumb/CanvasVideo would already have decrypted and cached an
   // unnamed blob by the time a parent effect fired. It is an idempotent Map write
   // against the same module cache those children read.
-  registerMediaDownloadName(
-    entry.media_url,
-    mediaDownloadName(entry.models?.[0], entry.history_id, entry.file_format, { fallback: isVideo ? 'video' : 'image' }),
-  );
+  registerMediaDownloadName(entry.media_url, downloadName);
   const inspect = useCallback(() => { void inspectCanvasHistoryEntry(entry.history_id); }, [entry.history_id]);
   const ref = useOnVisible(inspect, { once: true, rootMargin: '320px 0px' });
 
@@ -135,6 +136,9 @@ function CanvasCard({ entry, onDelete }) {
           items={[
             { label: 'Load in Studio', icon: 'sparkles', onClick: () => loadCanvasOutputInStudio(entry.history_id) },
             { label: 'Load in Canvas', icon: 'nodes', onClick: () => loadCanvasOutputInCanvas(entry.history_id) },
+            // The players carry controlsList="nodownload", so this is the ONLY way
+            // to save from History — and it is the one that names the file properly.
+            { label: 'Download', icon: 'download', onClick: () => void downloadMedia(entry.media_url, downloadName) },
             { label: 'Copy prompt', icon: 'copy', onClick: () => copyCanvasPrompt(entry.history_id) },
             { label: 'Delete', icon: 'trash', danger: true, onClick: () => onDelete(entry) },
           ]}

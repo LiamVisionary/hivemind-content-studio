@@ -107,7 +107,7 @@ function ResultVideo({ url }) {
   return (
     <video
       src={src}
-      controls
+      controls controlsList="nodownload"
       loop
       autoPlay
       muted

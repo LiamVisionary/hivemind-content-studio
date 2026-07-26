@@ -103,38 +103,12 @@ input[type='range'].hive-range::-moz-range-thumb {
 /* ---- Media in cards ---- */
 img, video { max-width: 100%; display: block; }
 
-/* ---- Simple tooltip (title-attr replacement for chrome affordances) ----
-   Gated on a real pointer: on touch, :hover latches after a tap and leaves the
-   bubble stuck on screen. Keyboard users get the same hint on focus. */
-[data-hint] { position: relative; }
-
+/* ---- Hover hints ----
+   The bubble itself is ui/kit.jsx's HintBubble: a ::after anchored in the button
+   is clipped by the nearest overflow-hidden ancestor (a Modal panel), so it now
+   renders into <body> at fixed coordinates instead. Only the label collapse is
+   CSS, because it is a property of the pointer, not of any one button. */
 @media (hover: hover) and (pointer: fine) {
-  [data-hint]:hover::after,
-  [data-hint]:focus-visible::after {
-    content: attr(data-hint);
-    position: absolute;
-    left: 50%;
-    bottom: calc(100% + 6px);
-    transform: translateX(-50%);
-    /* max-content keeps short hints on one line; the cap makes long ones wrap
-       rather than run off the edge of a dialog and get clipped. */
-    width: max-content;
-    max-width: 200px;
-    text-align: center;
-    background: var(--bg-3);
-    border: 1px solid var(--line-1);
-    color: var(--ink-1);
-    font-size: 11px;
-    font-weight: 500;
-    line-height: 1.4;
-    padding: 4px 8px;
-    border-radius: var(--r-sm);
-    box-shadow: var(--shadow-pop);
-    pointer-events: none;
-    z-index: 60;
-    animation: hive-fade-in var(--t-fast) both;
-  }
-
   /* A crowded action row collapses to its icons where the hint above can carry
      the label. Touch keeps the words: nothing there reveals a tooltip. */
   .hive-hint-label { display: none; }

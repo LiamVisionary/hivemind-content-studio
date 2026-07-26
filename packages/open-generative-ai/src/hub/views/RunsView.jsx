@@ -59,7 +59,7 @@ function Lightbox({ src, isVideo, onClose }) {
       {isVideo ? (
         <video
           src={src}
-          controls
+          controls controlsList="nodownload"
           autoPlay
           onClick={(e) => e.stopPropagation()}
           className="max-h-full max-w-full rounded-lg object-contain shadow-overlay"

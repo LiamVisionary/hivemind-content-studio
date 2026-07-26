@@ -34,7 +34,7 @@ function ArtifactVideo({ run, artifact }) {
   return (
     <video
       src={src}
-      controls
+      controls controlsList="nodownload"
       preload="metadata"
       className="w-full rounded-md border border-line1 bg-black"
     />

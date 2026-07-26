@@ -203,3 +203,44 @@ test('the skip-list classifies data: URLs by their announced type', () => {
     assert.equal(cannotBeSealed('/local-ai/lora-preview/abc'), true);
     assert.equal(cannotBeSealed('blob:http://x/1'), true);
 });
+
+test('no video player offers the browser its own download path', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const root = path.join(__dirname, '..', 'src');
+
+    // Chrome names a blob: download from the URL's UUID and ignores the File's
+    // name, so a native <video> download can never agree with ours. The only way
+    // to guarantee one name is to leave exactly one download path: ours. Every
+    // player that shows controls must therefore suppress the download item.
+    const offenders = [];
+    const walk = (dir) => {
+        for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, item.name);
+            if (item.isDirectory()) { walk(full); continue; }
+            if (!/\.(jsx?|tsx?)$/.test(item.name)) continue;
+            // src/components and src/views hold the retired vanilla-JS UI.
+            if (/\/(components|views)\//.test(full)) continue;
+            const source = fs.readFileSync(full, 'utf8');
+            for (const tag of source.match(/<video\b[^>]*>/gs) || []) {
+                if (/\bcontrols\b/.test(tag) && !/controlsList=["'][^"']*nodownload/.test(tag)) {
+                    offenders.push(`${path.relative(root, full)}: ${tag.replace(/\s+/g, ' ').slice(0, 70)}`);
+                }
+            }
+        }
+    };
+    walk(root);
+    assert.deepEqual(offenders, [], 'these players still expose the native download');
+});
+
+test('History can still download, now that the native control is gone', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const view = fs.readFileSync(path.join(__dirname, '..', 'src/hub/views/HistoryView.jsx'), 'utf8');
+
+    // Suppressing the native item would otherwise leave History with NO way to
+    // save a clip at all.
+    assert.match(view, /label: 'Download'/, 'History cards need their own download action');
+    assert.match(view, /downloadMedia\(entry\.media_url, downloadName\)/);
+    assert.match(view, /from '\.\.\/\.\.\/lib\/downloadMedia\.js'/);
+});
