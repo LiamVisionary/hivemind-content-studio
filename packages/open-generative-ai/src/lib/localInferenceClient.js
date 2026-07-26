@@ -71,11 +71,14 @@ class LocalInferenceClient {
         ];
     }
 
-    async listLoras(modelId) {
+    // baseModels: optional compatible-base list from the workflow catalog. Video
+    // workflows live in the MCP registry, which the hosted bridge cannot read, so
+    // passing them keeps LoRAs working for every workflow without an id allowlist.
+    async listLoras(modelId, baseModels) {
         if (!isLocalAIAvailable() || typeof window.localAI.listLoras !== 'function') {
             return { model: modelId, supported: false, baseModels: [], loras: [] };
         }
-        return window.localAI.listLoras(modelId);
+        return window.localAI.listLoras(modelId, baseModels);
     }
 
     async generatePrompt(params) {
@@ -85,11 +88,25 @@ class LocalInferenceClient {
         return window.localAI.generatePrompt(params);
     }
 
-    async startCivitaiDownload(url) {
+    async startCivitaiDownload(url, options) {
         if (!isLocalAIAvailable() || typeof window.localAI.startCivitaiDownload !== 'function') {
             throw new Error('Civitai downloads are available through Unified Studio.');
         }
-        return window.localAI.startCivitaiDownload(url);
+        return window.localAI.startCivitaiDownload(url, options);
+    }
+
+    // Which installed LoRAs have a newer Civitai version. Never throws: an update
+    // check is an enhancement, so a rate limit must not break the LoRA panel.
+    async listLoraUpdates(baseModels) {
+        if (!isLocalAIAvailable() || typeof window.localAI.listLoraUpdates !== 'function') {
+            return {};
+        }
+        try {
+            const data = await window.localAI.listLoraUpdates(baseModels);
+            return data?.updates && typeof data.updates === 'object' ? data.updates : {};
+        } catch {
+            return {};
+        }
     }
 
     async getCivitaiDownloadJob(jobId) {
@@ -97,6 +114,13 @@ class LocalInferenceClient {
             throw new Error('Civitai downloads are available through Unified Studio.');
         }
         return window.localAI.getCivitaiDownloadJob(jobId);
+    }
+
+    async cancelCivitaiDownload(jobId) {
+        if (!isLocalAIAvailable() || typeof window.localAI.cancelCivitaiDownload !== 'function') {
+            throw new Error('Cancelling a Civitai download is available through Unified Studio.');
+        }
+        return window.localAI.cancelCivitaiDownload(jobId);
     }
 
     // ── Provider-aware generate ───────────────────────────────────────────

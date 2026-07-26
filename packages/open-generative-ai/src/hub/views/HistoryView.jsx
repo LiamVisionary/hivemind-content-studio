@@ -57,13 +57,19 @@ function CanvasVideoInner({ url }) {
   return <video src={src} controls preload="metadata" className="h-full w-full object-cover" />;
 }
 
+// Which videos the owner has opened this session. Module-level, mirroring the
+// decrypted-blob cache in e2eMedia.js, so a card that remounts (filter switch,
+// pagination rebuild) comes back as a player instead of reverting to the button
+// and forcing a second decrypt of media the browser already holds.
+const openedVideos = new Set();
+
 function CanvasVideo({ url }) {
-  const [load, setLoad] = useState(false);
+  const [load, setLoad] = useState(() => openedVideos.has(url));
   if (load) return <CanvasVideoInner url={url} />;
   return (
     <button
       type="button"
-      onClick={() => setLoad(true)}
+      onClick={() => { openedVideos.add(url); setLoad(true); }}
       className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-ink3 transition-colors hover:text-ink1"
       aria-label="Load encrypted video preview"
     >

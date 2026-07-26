@@ -68,6 +68,78 @@ const toolCatalog = [
 const defaultLtxErosPrompt = 'photorealistic close-up selfie video of an adult woman, black bob haircut, warm smile, looking into the camera, soft sunlight stripes across face and shoulders, natural blinking, subtle head movement, lips softly singing along to the audio, realistic skin texture, handheld phone camera, smooth natural motion, high quality, realistic lighting\n\n';
 
 const ltxErosVariants = {
+  // v1.3 + DMD: the distillation deltas are merged into the base rather than
+  // fused as a LoRA at runtime, which the build's card says avoids the
+  // resampling drift and conditioning loss the distilled LoRA introduces during
+  // the stage-2 upscale refine. Same --distilled flow and speed as v1.2.
+  'dmd-q8-v13': {
+    title: 'MLXBits 10Eros v1.3 DMD q8 distilled',
+    marker: 'Eros/native_mlx_ltx__dmd-q8-v13',
+    mobileWorkflow: 'LTX 2.3 Eros MLX DMD q8 v1.3 Mobile.json',
+    benchmarkSeconds: 193.11,
+    defaults: {
+      prompt: defaultLtxErosPrompt,
+      width: 480,
+      height: 832,
+      frames: 233,
+      frame_rate: 24,
+      seed: 42,
+    },
+  },
+  // v1.2 + DMD: same DMD merge as v1.3 above, held at the v1.2 fine-tune so the
+  // fine-tune and the distillation can be told apart rather than guessed at.
+  // v1.2 rebuilt through our merge path — the control for build arithmetic.
+  'eros-v12-q8-fast-rebuilt': {
+    title: 'LTX 2.3 10Eros v1.2 q8 distilled (rebuilt)',
+    marker: 'Eros/native_mlx_ltx__eros-v12-q8-fast-rebuilt',
+    mobileWorkflow: 'LTX 2.3 Eros MLX v1.2 q8 Rebuilt Mobile.json',
+    benchmarkSeconds: 193.11,
+    defaults: { prompt: defaultLtxErosPrompt, width: 480, height: 832, frames: 121, frame_rate: 24, seed: 42 },
+  },
+  // v1.4 Fast: the eros-fast recipe (cond-safe distilled LoRA) on v1.4.
+  'eros-v14-q8-fast': {
+    title: 'LTX 2.3 10Eros v1.4 q8 distilled (cond-safe)',
+    marker: 'Eros/native_mlx_ltx__eros-v14-q8-fast',
+    mobileWorkflow: 'LTX 2.3 Eros MLX v1.4 q8 Fast Mobile.json',
+    benchmarkSeconds: 193.11,
+    defaults: {
+      prompt: defaultLtxErosPrompt,
+      width: 480,
+      height: 832,
+      frames: 121,
+      frame_rate: 24,
+      seed: 42,
+    },
+  },
+  // v1.4 dev package, converted locally. Runs the CFG two-stage dev pipeline.
+  'eros-v14-q8-dev': {
+    title: 'LTX 2.3 10Eros v1.4 q8 dev',
+    marker: 'Eros/native_mlx_ltx__eros-v14-q8-dev',
+    mobileWorkflow: 'LTX 2.3 Eros MLX v1.4 q8 dev Mobile.json',
+    benchmarkSeconds: null,
+    defaults: {
+      prompt: defaultLtxErosPrompt,
+      width: 480,
+      height: 832,
+      frames: 121,
+      frame_rate: 24,
+      seed: 42,
+    },
+  },
+  'dmd-q8-v12': {
+    title: 'MLXBits 10Eros v1.2 DMD q8 distilled',
+    marker: 'Eros/native_mlx_ltx__dmd-q8-v12',
+    mobileWorkflow: 'LTX 2.3 Eros MLX DMD q8 v1.2 Mobile.json',
+    benchmarkSeconds: 193.11,
+    defaults: {
+      prompt: defaultLtxErosPrompt,
+      width: 480,
+      height: 832,
+      frames: 233,
+      frame_rate: 24,
+      seed: 42,
+    },
+  },
   'fast-q8-v12': {
     title: 'MLXBits 10Eros v1.2 q8 distilled',
     marker: 'Eros/native_mlx_ltx__fast-q8-v12',
@@ -106,11 +178,9 @@ const ltxErosVariantAliases = {
   'q8-v12': 'fast-q8-v12',
   'fast-q8': 'fast-q8-v12',
   fast_q8_v12: 'fast-q8-v12',
-  exact: 'exact-v1-merged-q8',
-  merged: 'exact-v1-merged-q8',
-  'exact-v1': 'exact-v1-merged-q8',
-  'merged-q8': 'exact-v1-merged-q8',
-  exact_v1_merged_q8: 'exact-v1-merged-q8',
+  'dmd-v12': 'dmd-q8-v12',
+  'dmd-q8': 'dmd-q8-v13',
+  dmd: 'dmd-q8-v13',
 };
 
 const builtInVideoWorkflowRegistry = {
@@ -133,16 +203,16 @@ const builtInVideoWorkflowRegistry = {
     },
     default: true,
     requires: { prompt: false, image: false },
-    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'loras'],
+    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
   },
-  'ltx23-eros-exact': {
-    id: 'ltx23-eros-exact',
+  'ltx23-eros-dmd': {
+    id: 'ltx23-eros-dmd',
     media_type: 'video',
-    title: 'LTX 2.3 Eros Exact',
-    description: 'Image-to-video workflow using the exact-v1 bf16 LoRA merged q8 distilled route on Apple Silicon, with normal ComfyUI fallback elsewhere.',
+    title: 'LTX 2.3 Eros DMD (v1.3)',
+    description: 'Image-to-video on the 10Eros v1.3 DMD-merged q8 distilled route. Same speed as Eros Fast; the DMD merge avoids the distilled-LoRA refine drift that leaves crawling grain on the v1.2 route.',
     family: 'ltx-2.3',
     builder: 'ltx-eros',
-    variant: 'exact-v1-merged-q8',
+    variant: 'dmd-q8-v13',
     supports_loras: true,
     compatible_base_models: ['LTXV'],
     lora_injection: {
@@ -154,7 +224,93 @@ const builtInVideoWorkflowRegistry = {
     },
     default: false,
     requires: { prompt: false, image: false },
-    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'loras'],
+    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
+  },
+  'ltx23-eros-v12-fast-rebuilt': {
+    id: 'ltx23-eros-v12-fast-rebuilt',
+    media_type: 'video',
+    title: 'LTX 2.3 Eros v1.2 Fast (rebuilt)',
+    description: 'Eros Fast rebuilt locally: same v1.2 base, same cond-safe distilled LoRA at 1.0, but merged into the int8 weights rather than merged in bf16 then quantized. A control — matching Eros Fast means the local merge path is sound, so a v1.4 gap is the fine-tune; falling short of it means the merge arithmetic is the weak link.',
+    family: 'ltx-2.3',
+    builder: 'ltx-eros',
+    variant: 'eros-v12-q8-fast-rebuilt',
+    supports_loras: true,
+    compatible_base_models: ['LTXV'],
+    lora_injection: {
+      class_type: 'LTX2LoraLoaderAdvanced',
+      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
+      name_input: 'lora_name',
+      strength_input: 'strength_model',
+      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
+    },
+    default: false,
+    requires: { prompt: false, image: false },
+    accepts: ['prompt', 'negative_prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
+  },
+  'ltx23-eros-v14-fast': {
+    id: 'ltx23-eros-v14-fast',
+    media_type: 'video',
+    title: 'LTX 2.3 Eros v1.4 Fast',
+    description: 'The v1.4 fine-tune built with the exact recipe behind Eros Fast: the cond-safe rank-384 distilled LoRA merged at 1.0, same 8-step distilled route. Pair it against Eros Fast to isolate the fine-tune, since everything else about the two lanes matches.',
+    family: 'ltx-2.3',
+    builder: 'ltx-eros',
+    variant: 'eros-v14-q8-fast',
+    supports_loras: true,
+    compatible_base_models: ['LTXV'],
+    lora_injection: {
+      class_type: 'LTX2LoraLoaderAdvanced',
+      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
+      name_input: 'lora_name',
+      strength_input: 'strength_model',
+      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
+    },
+    default: false,
+    requires: { prompt: false, image: false },
+    accepts: ['prompt', 'negative_prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
+  },
+  'ltx23-eros-v14': {
+    id: 'ltx23-eros-v14',
+    tier_group: 'ltx23-eros-v14',
+    tier: 'standard',
+    media_type: 'video',
+    title: 'LTX 2.3 Eros v1.4',
+    description: 'Image-to-video on the 10Eros v1.4 fine-tune, converted locally from TenStrip bf16 because no MLX v1.4 is published. v1.4 ships no distilled transformer, so this runs the dev two-stage pipeline with CFG rather than the no-CFG distilled route the other Eros lanes use — expect noticeably longer generations in exchange for the newer fine-tune.',
+    family: 'ltx-2.3',
+    builder: 'ltx-eros',
+    variant: 'eros-v14-q8-dev',
+    supports_loras: true,
+    compatible_base_models: ['LTXV'],
+    lora_injection: {
+      class_type: 'LTX2LoraLoaderAdvanced',
+      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
+      name_input: 'lora_name',
+      strength_input: 'strength_model',
+      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
+    },
+    default: false,
+    requires: { prompt: false, image: false },
+    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
+  },
+  'ltx23-eros-dmd-v12': {
+    id: 'ltx23-eros-dmd-v12',
+    media_type: 'video',
+    title: 'LTX 2.3 Eros DMD (v1.2)',
+    description: 'Image-to-video on the 10Eros v1.2 DMD-merged q8 distilled route. Pairs with Eros Fast (v1.2, distilled LoRA) and Eros DMD (v1.3, DMD merge) so a prompt-adherence change can be attributed to the fine-tune or to the distillation rather than to both at once.',
+    family: 'ltx-2.3',
+    builder: 'ltx-eros',
+    variant: 'dmd-q8-v12',
+    supports_loras: true,
+    compatible_base_models: ['LTXV'],
+    lora_injection: {
+      class_type: 'LTX2LoraLoaderAdvanced',
+      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
+      name_input: 'lora_name',
+      strength_input: 'strength_model',
+      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
+    },
+    default: false,
+    requires: { prompt: false, image: false },
+    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
   },
 };
 
@@ -177,6 +333,18 @@ const workflowAliases = {
   'eros-ingredients': 'ltx23-eros-ic-ingredients-lora',
   'eros-ic-ingredients': 'ltx23-eros-ic-ingredients-lora',
   'ltx23-eros-ingredients': 'ltx23-eros-ic-ingredients-lora',
+  'eros-v14': 'ltx23-eros-v14',
+  'eros-v14-fast': 'ltx23-eros-v14-fast',
+  'v12-rebuilt': 'ltx23-eros-v12-fast-rebuilt',
+  'v14-fast': 'ltx23-eros-v14-fast',
+  v14: 'ltx23-eros-v14',
+  'eros-v14-ingredients': 'ltx23-eros-v14-ic-ingredients-lora',
+  'eros-v14-ic-ingredients': 'ltx23-eros-v14-ic-ingredients-lora',
+  'eros-dmd-v12': 'ltx23-eros-dmd-v12',
+  'dmd-v12': 'ltx23-eros-dmd-v12',
+  'eros-dmd-ingredients': 'ltx23-eros-dmd-ic-ingredients-lora',
+  'eros-dmd-ic-ingredients': 'ltx23-eros-dmd-ic-ingredients-lora',
+  'ltx23-eros-dmd-ingredients': 'ltx23-eros-dmd-ic-ingredients-lora',
 };
 
 function token() {
@@ -437,6 +605,14 @@ function positiveFloat(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(min, Math.min(max, parsed));
+}
+
+// Mirrors normalize_ltx_denoise_mode in the gateway: '' (off), 'light', 'strong'.
+function normalizeLtxDenoiseMode(value) {
+  const mode = String(value ?? '').trim().toLowerCase();
+  if (mode === 'light' || mode === 'strong') return mode;
+  if (['1', 'true', 'yes', 'on'].includes(mode)) return 'light';
+  return '';
 }
 
 function safeCopyName(path) {
@@ -1481,6 +1657,7 @@ function updateLtxErosEditorWorkflow(workflow, spec, settings) {
       frames: settings.frames,
       frame_rate: settings.frameRate,
       seed: settings.seed,
+      ...(settings.denoise ? { denoise: settings.denoise } : {}),
     },
     keyframes: Array.isArray(settings.keyframes) ? settings.keyframes : [],
     ...(Array.isArray(settings.loras) && settings.loras.length ? { loras: settings.loras.map((item) => ({ name: item.id, strength: item.strength })) } : {}),
@@ -1536,6 +1713,9 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
     frameRate,
     extensionFrames: normalizedLtxExtensionFrames(durationSeconds, frameRate),
     seed: positiveInt(args.seed, defaults.seed, { min: 0, max: 1_000_000_000 }),
+    // Optional post-generation grain cleanup ('', 'light', 'strong'); the
+    // gateway owns the filter itself, this only carries the choice through.
+    denoise: normalizeLtxDenoiseMode(args.denoise ?? args.params?.denoise ?? defaults.denoise),
     loras: normalizeWorkflowLoras(args, workflow),
   };
   settings.keyframes = videoName ? [] : await normalizeVideoKeyframes(args, settings, defaults);
@@ -1668,7 +1848,16 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     setMappedApiInput(promptGraph, slots.prompt, settings.prompt);
   }
   const negativePrompt = argOrDefault(args, defaults, 'negative_prompt');
-  if (negativePrompt !== undefined) setMappedApiInput(promptGraph, slots.negative_prompt, String(negativePrompt));
+  if (negativePrompt !== undefined) {
+    settings.negative_prompt = String(negativePrompt);
+    setMappedApiInput(promptGraph, slots.negative_prompt, settings.negative_prompt);
+  }
+  // NAG strength for the native distilled lanes. Omitted means "runner default";
+  // an explicit value <= 1 disables guidance for this request.
+  const nagScale = args.nag_scale ?? args.params?.nag_scale;
+  if (nagScale !== undefined && Number.isFinite(Number(nagScale))) {
+    settings.nagScale = Number(nagScale);
+  }
 
   const rawVideo = await videoSourceFromArgs(args);
   if (rawVideo && !(workflow.accepts || []).some((field) => String(field).startsWith('video_'))) {
@@ -1823,6 +2012,11 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
         frames: videoFrameCount(args, settings, defaults),
         frame_rate: Number(settings.frame_rate ?? defaults.frame_rate ?? 24),
         ...(settings.seed !== undefined ? { seed: settings.seed } : {}),
+        // Carried for NAG. The distilled lanes run cfg=1, so the runner turns a
+        // negative prompt into attention-space guidance rather than CFG, which
+        // would be inert there. nag_scale <= 1 opts a request out.
+        ...(settings.negative_prompt ? { negative_prompt: settings.negative_prompt } : {}),
+        ...(settings.nagScale !== undefined ? { nag_scale: settings.nagScale } : {}),
       },
       keyframes: settings.keyframes,
       ...(settings.ingredientSheet ? { ingredientSheet: settings.ingredientSheet } : {}),
@@ -2344,6 +2538,7 @@ function buildServer() {
         description: z.string().max(1000).optional(),
       })).min(1).max(12).optional().describe('Ingredients IC-LoRA only: independent conditioning references composed server-side into one black, unlabeled, contain-only sheet. These images never become timeline anchors.'),
       negative_prompt: z.string().max(2000).optional().describe('Optional negative video prompt mapped through the registered workflow when supported.'),
+      nag_scale: z.number().min(0).max(30).optional().describe('Normalized Attention Guidance scale for the local distilled LTX lanes. Those run cfg=1, where a negative prompt is otherwise ignored; NAG applies it inside cross-attention for ~8% more time. Omit for the default (11), pass <=1 to disable.'),
       image_path: z.string().optional().describe('Absolute local image path or existing Comfy input filename. Absolute paths are copied into the private Comfy input folder before queueing if the workflow needs Comfy access.'),
       image_base64: z.string().optional().describe('Inline source image as raw base64 or data:image/...;base64,... data URL. Wins over image_path.'),
       image_url: z.string().optional().describe('Optional HTTP(S) source image fetched by Media Studio. Ignored when image_base64 is supplied.'),
@@ -2378,6 +2573,7 @@ function buildServer() {
       frame_rate: z.number().min(1).max(120).optional(),
       duration_seconds: z.number().min(1 / 24).max(30).optional().describe('For video input, seconds of new footage to append. For image input, requested output duration.'),
       seed: z.number().int().min(0).max(1000000000).optional(),
+      denoise: z.enum(['', 'light', 'strong']).optional().describe('Post-generation grain cleanup for the native MLX LTX path. Motion-adaptive temporal averaging (atadenoise); "strong" adds a spatial-only pass. Default off.'),
       wait: z.boolean().default(false).describe('Poll until native wrapper success/error, or until Comfy fallback appears in history.'),
       timeout_s: z.number().min(1).max(7200).default(5400),
       include_urls: z.boolean().default(false).describe('Include token-bearing absolute Studio URLs in wrapper-native results.'),

@@ -110,6 +110,10 @@ export function mapHivemindWorkflowModels(catalog) {
         })(),
         id: workflowModelId(workflow.id),
         workflowId: workflow.id,
+        // Models shipping both a distilled and a full-step build share a
+        // tierGroup; the picker collapses them into one row with a switch.
+        tierGroup: workflow.tier_group || null,
+        tier: workflow.tier || null,
         name: workflow.label || workflow.id,
         description: `${provider.label || 'Media Studio'} workflow`,
         type: 'video',
@@ -250,7 +254,7 @@ function blobToDataUrl(blob) {
     });
 }
 
-async function mediaSourceToDataUrl(source, kind) {
+export async function mediaSourceToDataUrl(source, kind) {
     if (!source) return null;
     if (String(source).startsWith(`data:${kind}/`)) return source;
     const remembered = uploadedFiles.get(source);
@@ -272,6 +276,20 @@ async function mediaSourceToDataUrl(source, kind) {
         return blobToDataUrl(new Blob([bytes], { type: envelope.media_type || `${kind}/png` }));
     }
     return blobToDataUrl(await response.blob());
+}
+
+// Turn a picked reference into the request fields a LOCAL image workflow takes.
+// A reference chosen from the saved list is a same-origin path to an owner-sealed
+// envelope — this host has no key, so its bytes must be decrypted in-browser and
+// sent inline, exactly as the video path does. A past cloud upload is an absolute
+// URL the bridge can fetch itself, so it stays a URL (its bytes are not sealed,
+// and fetching it here would be a cross-origin read the browser blocks).
+export async function referenceToLocalImageInput(source) {
+    const value = String(source || '').trim();
+    if (!value) return {};
+    if (value.startsWith('data:')) return { image_base64: value };
+    if (/^https?:\/\//i.test(value)) return { image_url: value };
+    return { image_base64: await mediaSourceToDataUrl(value, 'image') };
 }
 
 export function getHivemindStudioOptions() {
@@ -390,6 +408,12 @@ export async function generateHivemindVideo(params) {
             : {}),
         // A concrete seed makes each run differ; omit for the runner's default.
         ...(Number.isFinite(params.seed) && params.seed >= 0 ? { seed: Math.floor(params.seed) } : {}),
+        ...(params.denoise === 'light' || params.denoise === 'strong' ? { denoise: params.denoise } : {}),
+        // Negative prompt rides the encrypted request like the positive one. On
+        // the distilled lanes the runner applies it through NAG, since those run
+        // cfg=1 where a CFG negative prompt has no effect.
+        ...(String(params.negative_prompt || '').trim() ? { negative_prompt: String(params.negative_prompt).trim() } : {}),
+        ...(Number.isFinite(Number(params.nag_scale)) ? { nag_scale: Number(params.nag_scale) } : {}),
         ...(Array.isArray(params.loras) && params.loras.length ? { loras: params.loras } : {}),
     });
     const postJson = async (path) => {

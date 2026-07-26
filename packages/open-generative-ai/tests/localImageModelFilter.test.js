@@ -22,3 +22,32 @@ test('local picker hides workflows that cannot consume an attached image', () =>
         ['krea-2', 'biglove'],
     );
 });
+
+test('the negative prompt field only claims support the workflow actually has', async () => {
+    const { localModelSupportsNegativePrompt } = await import('../src/lib/localImageModelFilter.js');
+
+    // The Krea 2 identity graph hardcodes an empty negative encoder, so its registry
+    // entry no longer lists negative_prompt — and the field must not be offered.
+    const krea2 = { id: 'comfy-krea2-turbo-identity-edit', accepts: ['prompt', 'image_base64', 'cfg', 'seed', 'loras'] };
+    assert.equal(localModelSupportsNegativePrompt(krea2), false);
+
+    // Workflows that run through the generic Comfy path do wire one.
+    assert.equal(localModelSupportsNegativePrompt({ accepts: ['prompt', 'negative_prompt', 'cfg'] }), true);
+
+    // Unknown capability (no declared accepts) keeps the field: silence is not proof.
+    assert.equal(localModelSupportsNegativePrompt({ id: 'mystery' }), true);
+    assert.equal(localModelSupportsNegativePrompt({ accepts: [] }), true);
+    assert.equal(localModelSupportsNegativePrompt(null), true);
+});
+
+test('a negative prompt is flagged as inactive at guidance 1', async () => {
+    const { negativePromptNeedsGuidance } = await import('../src/lib/localImageModelFilter.js');
+
+    // ComfyUI skips the uncond pass at cfg 1.0, which is the default for the turbo
+    // workflows — the text is sent but never evaluated.
+    assert.equal(negativePromptNeedsGuidance(1), true);
+    assert.equal(negativePromptNeedsGuidance(0.5), true);
+    assert.equal(negativePromptNeedsGuidance(1.5), false);
+    assert.equal(negativePromptNeedsGuidance(7), false);
+    assert.equal(negativePromptNeedsGuidance(undefined), false); // unknown: no claim
+});

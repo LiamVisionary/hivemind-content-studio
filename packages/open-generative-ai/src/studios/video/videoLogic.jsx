@@ -33,7 +33,6 @@ import { getLang, t } from '../../lib/i18n.js';
 
 export const zh = () => getLang() === 'zh-CN';
 
-export const VIDEO_COMPLETION_PING_KEY = 'video_ping_when_complete';
 export const VIDEO_PREFERENCES_KEY = 'video_generation_preferences';
 
 const VIDEO_ADVANCED_EXCLUDED_INPUTS = new Set([
@@ -72,6 +71,8 @@ export const adaptHivemindToVideoEntry = (m) => ({
   name: m.name,
   provider: 'hivemind-media-studio',
   workflowId: m.workflowId,
+  tierGroup: m.tierGroup || null,
+  tier: m.tier || null,
   supportsVideoInput: Boolean(m.supportsVideoInput),
   supportsLoras: Boolean(m.supportsLoras),
   compatibleBaseModels: Array.isArray(m.compatibleBaseModels) ? m.compatibleBaseModels : [],
@@ -88,6 +89,8 @@ export const adaptHivemindToVideoEntry = (m) => ({
 /* ------------------------------------------------------------------ */
 /* Pure helpers (verbatim from VideoStudio.js lines 77-267)            */
 /* ------------------------------------------------------------------ */
+
+export { activeTierFor, groupModelTiers, tierPairFor } from '../../lib/modelTiers.js';
 
 export function getAdvancedVideoInputs(model) {
   return Object.entries(model?.inputs || {})
@@ -161,6 +164,8 @@ export function normalizeVideoPreferences(value) {
           displayName: stringValue(selection.displayName) || stringValue(selection.name) || id,
           previewUrl: stringValue(selection.previewUrl),
           strength,
+          // Muted LoRAs stay in the list (with their weight) across reloads.
+          enabled: selection.enabled !== false,
         }];
       });
     });
@@ -182,13 +187,19 @@ export function normalizeVideoPreferences(value) {
     mode: stringValue(value.mode),
     effectName: stringValue(value.effectName),
     matchStartFrameAr: typeof value.matchStartFrameAr === 'boolean' ? value.matchStartFrameAr : null,
+    denoise: ['light', 'strong'].includes(value.denoise) ? value.denoise : '',
+    // NAG strength is a setting, not prompt text, so it persists here. The
+    // negative prompt itself deliberately does not — it lives in the encrypted
+    // composer with the positive prompt.
+    nagScale: (typeof value.nagScale === 'number' && Number.isFinite(value.nagScale)) ? value.nagScale : null,
     seed: (typeof value.seed === 'number' && Number.isFinite(value.seed) && value.seed >= 0) ? Math.floor(value.seed) : -1,
     advancedValues,
     loraSelections,
     ingredientSelections,
     ingredientSheets,
     ingredientSelectedSheet,
-    pingWhenComplete: Boolean(value.pingWhenComplete),
+    // The completion ping is a shared all-studio setting (lib/completionPing.js),
+    // not a video preference — legacy values here are migrated once on load.
   };
 }
 
@@ -339,7 +350,11 @@ export const durationsFor = (s, id) => {
 export const resolutionsFor = (s, id) => {
   // Local Media Studio workflows render at aspect buckets; High requests the
   // larger bucket (~2.5x pixels) — synthetic list, old line 394.
-  if (getHivemindVideoModelById(id)) return ['Standard', 'High'];
+  // High leads because the first entry becomes the default: Standard is 0.34 MP
+  // at 16:9, roughly a third of what LTX 2.3 workflows in the wild generate at,
+  // and LTX anatomy degrades sharply below its trained resolution. High (0.86 MP)
+  // lands near that mark. Standard stays available for quick drafts.
+  if (getHivemindVideoModelById(id)) return ['High', 'Standard'];
   if (getLocalModelById(id)) return [];
   return s.imageMode ? getResolutionsForI2VModel(id) : getResolutionsForVideoModel(id);
 };
@@ -384,6 +399,8 @@ export function buildInitialSetup(c) {
     ltxMiddleUrl: null,
     ltxEndUrl: null,
     matchStartFrameAr: true,
+    // Post-generation grain cleanup: '' (off), 'light', 'strong'.
+    denoise: '',
     videoUrl: null,
     videoName: null,
     prompt: '',
@@ -598,6 +615,8 @@ export function newPromptTransition(prev, c) {
     ltxMiddleUrl: null,
     ltxEndUrl: null,
     matchStartFrameAr: true,
+    // Post-generation grain cleanup: '' (off), 'light', 'strong'.
+    denoise: '',
     imageMode: false,
     videoUrl: null,
     videoName: null,
@@ -653,6 +672,7 @@ export function applyRestoredPreferences(prev, preferences, c) {
   restoreChoice(modesFor(s.modelId), preferences.mode, (value) => { s.mode = value; });
   restoreChoice(effectNamesFor(s, c, s.modelId), preferences.effectName, (value) => { s.effectName = value; });
   if (typeof preferences.matchStartFrameAr === 'boolean') s.matchStartFrameAr = preferences.matchStartFrameAr;
+  if (['light', 'strong', ''].includes(preferences.denoise)) s.denoise = preferences.denoise;
   if (typeof preferences.seed === 'number') s.seed = preferences.seed;
   s.advancedValues = getRestoredAdvancedVideoValues(target, preferences.advancedValues);
   return s;

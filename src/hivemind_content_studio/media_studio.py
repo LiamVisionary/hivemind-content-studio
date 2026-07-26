@@ -145,6 +145,9 @@ def start_video(
     resolution: str = "",
     workflow_id: str | None = None,
     seed: int | None = None,
+    denoise: str = "",
+    negative_prompt: str = "",
+    nag_scale: float | None = None,
     loras: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate + upload the inputs and enqueue the generation, returning as
@@ -224,6 +227,10 @@ def start_video(
             # runner fall back to its FIXED default (42), which is why "every video
             # looked the same". Callers send a fresh random seed for random mode.
             **({"seed": int(seed)} if isinstance(seed, int) and seed >= 0 else {}),
+            # Optional post-generation grain cleanup on the native MLX LTX path.
+            **({"denoise": denoise} if denoise in {"light", "strong"} else {}),
+        **({"negative_prompt": negative_prompt.strip()} if negative_prompt.strip() else {}),
+        **({"nag_scale": float(nag_scale)} if nag_scale is not None else {}),
             "frames": frames,
             "frame_rate": frame_rate,
             "duration_seconds": duration,

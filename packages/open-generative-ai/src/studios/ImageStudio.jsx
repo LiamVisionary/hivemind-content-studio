@@ -26,14 +26,24 @@ import { LOCAL_MODEL_CATALOG, getLocalModelById } from '../lib/localModels.js';
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../lib/promptUtils.js';
 import { t } from '../lib/i18n.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
-import { isHivemindStudioEnabled, loadStudioGenerationHistory, saveStudioGenerationHistory } from '../lib/hivemindStudio.js';
+import { imageDownloadName } from '../lib/downloadNames.js';
+import {
+  isHivemindStudioEnabled, loadStudioGenerationHistory, referenceToLocalImageInput, saveStudioGenerationHistory,
+} from '../lib/hivemindStudio.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
-import { loraGenerationPayload, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
-import { localModelSupportsImageInput } from '../lib/localImageModelFilter.js';
+import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
+import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
+import { isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
+import { localModelSupportsImageInput, localModelSupportsNegativePrompt, negativePromptNeedsGuidance } from '../lib/localImageModelFilter.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
+import {
+  isCompletionPingEnabled, setCompletionPingEnabled, subscribeCompletionPing,
+  primeCompletionPing, playCompletionPing,
+} from '../lib/completionPing.js';
 
-import { registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
+import { loadStudioSetup, registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
+import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { Icon } from '../ui/icons.jsx';
 import {
@@ -44,12 +54,17 @@ import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { StudioLayout } from '../ui/kit.jsx';
 
 import { UploadPicker } from './UploadPicker.jsx';
+import { ConfirmModal } from '../ui/Modal.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
 
 import { computeSmoothProgress, formatElapsed, estimateGenerationSeconds, recordGenerationSeconds } from '../lib/genProgress.js';
-import { IMAGE_PREFERENCES_KEY, STYLE_PRESETS, normalizeImagePreferences } from './image/imagePrefs.js';
+import {
+  AUTO_SAMPLER_LOW_STEP_THRESHOLD, IMAGE_PREFERENCES_KEY, STYLE_PRESETS,
+  imageTimingProfile, normalizeImagePreferences,
+} from './image/imagePrefs.js';
 import { LoraSection } from './image/LoraSection.jsx';
+import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
 import { GalleryCard, ViewerModal } from './image/GalleryAndViewer.jsx';
 
 // Re-export the pure normalizer — tests and other callers import it from here.
@@ -60,6 +75,32 @@ export { normalizeImagePreferences };
 // require one. Models are never hidden based on attached references.
 const apiModelSupportsImage = (id) => i2iModels.some((m) => m.id === id);
 const apiModelRequiresImage = (id) => apiModelSupportsImage(id) && !t2iModels.some((m) => m.id === id);
+
+// Short-side resolutions offered for local workflows. 0 = the workflow's own
+// default (1024 for the Krea/SDXL-class graphs).
+const LOCAL_BASE_SIZES = [0, 1280, 1152, 1024, 896, 768, 640, 512];
+
+// Display-only mirror of hosted-server.js arToDimensions() — keep the two in
+// step. Explicit width/height always win; otherwise the aspect ratio is scaled
+// off the chosen short side.
+function resolveLocalDimensions({ aspectRatio, baseSize, customWidth, customHeight, model }) {
+  if (customWidth && customHeight) return { width: customWidth, height: customHeight, custom: true };
+  const requested = Number(baseSize);
+  const base = Number.isFinite(requested) && requested > 0
+    ? Math.round(Math.max(256, Math.min(2048, requested)) / 64) * 64
+    : Number(model?.defaultWidth) || 1024;
+  const long = Math.round(base * 16 / 9 / 64) * 64;
+  const wide = Math.round(base * 4 / 3 / 64) * 64;
+  const map = {
+    '1:1': [base, base],
+    '16:9': [long, base],
+    '9:16': [base, long],
+    '4:3': [wide, base],
+    '3:4': [base, wide],
+  };
+  const [width, height] = map[aspectRatio] || [base, base];
+  return { width, height, custom: false };
+}
 
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -137,6 +178,11 @@ function createEngine() {
     batchCount: persistedImagePreferences?.batchCount ?? 1,
     customWidth: persistedImagePreferences?.customWidth ?? 0,
     customHeight: persistedImagePreferences?.customHeight ?? 0,
+    // Sampler/scheduler override + short-side resolution for local workflows
+    // that expose them. Empty/0 = the workflow's own step-appropriate choice.
+    sampler: persistedImagePreferences?.sampler || '',
+    scheduler: persistedImagePreferences?.scheduler || '',
+    baseSize: persistedImagePreferences?.baseSize || 0,
     referenceStrength: persistedImagePreferences?.referenceStrength ?? 50,
     // Couple mode — OFF by default; character text is session-only, never persisted.
     coupleMode: Boolean(persistedImagePreferences?.coupleMode),
@@ -175,10 +221,23 @@ function createEngine() {
     progressReal: 0,
     progressEstimateSec: null,
     progressSignature: '',
+    // Work units (steps x megapixels) of the run in flight, captured at submit
+    // so the recorded duration lands in the right bucket.
+    progressWorkUnits: 1,
     generationStartedAt: 0,
     generationTimer: null,
+    // Mirror of the shared (all-studio) completion-ping setting, kept here only
+    // so the toggle re-renders; lib/completionPing.js owns the value.
+    pingWhenComplete: isCompletionPingEnabled(),
     viewerUrl: null,
+    sendingToVideo: false,
     authOpen: false,
+    // Sending a locally-held reference to a cloud model uploads a decrypted copy off
+    // this Mac, so it waits on an explicit confirm. Approvals and the resulting CDN
+    // URLs are session-only (never persisted): a fresh studio asks again.
+    cloudRefConfirm: null,
+    cloudRefApproved: new Set(),
+    cloudRefUploads: new Map(),
     civitaiOpen: false,
     resumeRemaining: 0,
     promptHelper: { open: false, busy: false, title: '', result: '', status: '', negative: '', ready: false },
@@ -227,6 +286,15 @@ export function ImageStudio({ active = true } = {}) {
     return model ? localModelSupportsImageInput(model) : true;
   };
 
+  // Whether the negative prompt reaches the sampler at all. Local workflows declare
+  // it in `accepts`; the Krea 2 identity graph, for one, hardcodes an empty negative
+  // encoder, so showing the field there would be a dead input.
+  const currentModelSupportsNegativePrompt = () => {
+    if (!s.useLocalModel) return true;
+    const model = localModelById(s.selectedLocalModel);
+    return model ? localModelSupportsNegativePrompt(model) : true;
+  };
+
   // A cloud model runs with its image-to-image configuration when references
   // are attached and usable, or when the model only exists as an editing tool.
   const useI2iConfig = (id) => !s.useLocalModel && apiModelSupportsImage(id)
@@ -245,25 +313,50 @@ export function ImageStudio({ active = true } = {}) {
 
   /* ---------------- generation progress (smooth time-based ETA) ---------------- */
 
-  const DEFAULT_IMAGE_ESTIMATE_SEC = 30;
-  // Opaque key over the params that meaningfully affect time (model, steps,
-  // quality, dims, batch, loras) — never prompt text — so similar runs share an
-  // elapsed/expected estimate. Local vs remote are tracked separately.
-  const imageTimingSignature = () => {
-    if (s.useLocalModel) {
-      const dims = (s.customWidth && s.customHeight) ? `${s.customWidth}x${s.customHeight}` : (s.selectedAr || '');
-      const loraCount = (currentLoraSelection() || []).length;
-      return `img|local|${s.selectedLocalModel}|steps=${s.steps}|dims=${dims}|batch=${s.batchCount}|loras=${loraCount}|couple=${s.coupleMode ? 1 : 0}`;
-    }
-    return `img|api|${s.selectedModel}|ar=${s.selectedAr}|q=${s.selectedResolution || ''}|refs=${s.uploadedImageUrls.length ? 1 : 0}`;
+  // Seconds per work unit before anything has been measured. Local work units
+  // are steps x megapixels, so ~1.2 puts a stock 25-step 1024^2 run near 30s;
+  // cloud runs expose no steps or dimensions, so they carry one unit of work
+  // and the whole 30s estimate sits in the rate.
+  const DEFAULT_LOCAL_IMAGE_RATE_SEC = 1.2;
+  const DEFAULT_API_IMAGE_ESTIMATE_SEC = 30;
+  // Opaque key over the params that change the COST PROFILE (model, adapters,
+  // graph shape) — never prompt text — so similar runs share an elapsed/expected
+  // estimate. Steps and dimensions deliberately stay OUT of the key: they belong
+  // in the work units below, which scale a measured run to an unmeasured one.
+  // Cost profile (opaque key) + work units (steps x megapixels) for this run —
+  // see imageTimingProfile. Only active LoRAs change the loaded adapter set, so
+  // only they change timing.
+  const currentTimingProfile = () => {
+    const model = localModelById(s.selectedLocalModel);
+    return imageTimingProfile({
+      settings: s,
+      model,
+      loraCount: (currentLoraSelection() || []).filter(isLoraEnabled).length,
+      dimensions: s.useLocalModel ? resolveLocalDimensions({
+        aspectRatio: s.selectedAr,
+        baseSize: s.baseSize,
+        customWidth: s.customWidth,
+        customHeight: s.customHeight,
+        model,
+      }) : null,
+    });
   };
   const startImageProgress = () => {
+    // Unlock audio while we are still close to the Generate click, so the
+    // completion chime is allowed to play when the result lands.
+    void primeCompletionPing();
     if (s.generationTimer) clearInterval(s.generationTimer);
-    s.progressSignature = imageTimingSignature();
+    const profile = currentTimingProfile();
+    s.progressSignature = profile.key;
+    s.progressWorkUnits = profile.work;
     s.generationStartedAt = Date.now();
     s.progressDisplay = 0;
     s.progressReal = 0;
-    s.progressEstimateSec = estimateGenerationSeconds(s.progressSignature, DEFAULT_IMAGE_ESTIMATE_SEC);
+    s.progressEstimateSec = estimateGenerationSeconds(
+      s.progressSignature,
+      s.progressWorkUnits,
+      s.useLocalModel ? DEFAULT_LOCAL_IMAGE_RATE_SEC : DEFAULT_API_IMAGE_ESTIMATE_SEC,
+    );
     s.generationTimer = setInterval(() => {
       if (!mountedRef.current) { clearInterval(s.generationTimer); s.generationTimer = null; return; }
       s.progressDisplay = computeSmoothProgress({
@@ -278,9 +371,19 @@ export function ImageStudio({ active = true } = {}) {
   const finishImageProgress = (success) => {
     if (s.generationTimer) { clearInterval(s.generationTimer); s.generationTimer = null; }
     if (success && s.progressSignature && s.generationStartedAt) {
-      recordGenerationSeconds(s.progressSignature, (Date.now() - s.generationStartedAt) / 1000);
+      recordGenerationSeconds(
+        s.progressSignature,
+        s.progressWorkUnits,
+        (Date.now() - s.generationStartedAt) / 1000,
+      );
     }
     s.progressDisplay = success ? 1 : 0;
+    if (success) void playCompletionPing();
+  };
+  const setPing = (checked) => {
+    s.pingWhenComplete = setCompletionPingEnabled(checked);
+    bump();
+    if (s.pingWhenComplete) void playCompletionPing();
   };
   const setCurrentLoraSelection = (selection) => {
     const model = currentLoraModel();
@@ -306,6 +409,9 @@ export function ImageStudio({ active = true } = {}) {
       customWidth: s.customWidth,
       customHeight: s.customHeight,
       localRuntimeMode: s.localRuntimeMode,
+      sampler: s.sampler,
+      scheduler: s.scheduler,
+      baseSize: s.baseSize,
       coupleMode: s.coupleMode,
       coupleDirection: s.coupleDirection,
       coupleSplit: s.coupleSplit,
@@ -331,6 +437,9 @@ export function ImageStudio({ active = true } = {}) {
       batchCount: s.batchCount,
       customWidth: s.customWidth,
       customHeight: s.customHeight,
+      sampler: s.sampler,
+      scheduler: s.scheduler,
+      baseSize: s.baseSize,
       referenceStrength: s.referenceStrength,
       coupleMode: s.coupleMode,
       coupleDirection: s.coupleDirection,
@@ -395,6 +504,9 @@ export function ImageStudio({ active = true } = {}) {
     s.negativePrompt = stored.negativePrompt;
     s.customWidth = stored.customWidth;
     s.customHeight = stored.customHeight;
+    s.sampler = stored.sampler || '';
+    s.scheduler = stored.scheduler || '';
+    s.baseSize = stored.baseSize || 0;
     s.coupleMode = Boolean(stored.coupleMode);
     s.coupleDirection = stored.coupleDirection === 'vertical' ? 'vertical' : 'horizontal';
     s.coupleSplit = stored.coupleSplit ?? s.coupleSplit;
@@ -466,12 +578,43 @@ export function ImageStudio({ active = true } = {}) {
         : s.availableLoras.length
           ? `${s.availableLoras.length} compatible LoRA${s.availableLoras.length === 1 ? '' : 's'} installed. Tap a card to load it.`
           : 'No compatible LoRAs are installed for this workflow.';
+      void refreshLoraUpdates(request, bases);
     } catch (error) {
       if (request !== s.loraCatalogRequest) return;
       s.loraCatalogStatus = 'error';
       s.loraCatalogMessage = `Unable to load LoRAs: ${error.message}`;
     }
     bump();
+  };
+
+  // Update availability comes from Civitai, so it lands after the catalog rather
+  // than holding it up. Same race token: a stale check never annotates a new list.
+  const refreshLoraUpdates = async (request, baseModels) => {
+    const updates = await localAI.listLoraUpdates(baseModels);
+    if (request !== s.loraCatalogRequest || !Object.keys(updates).length) return;
+    s.availableLoras = mergeLoraUpdates(s.availableLoras, updates);
+    bump();
+  };
+
+  // Shared completion path for every Civitai download that lands a LoRA: refresh
+  // the catalog, then carry the selection over when a file was replaced.
+  const finishLoraDownload = async (job, context) => {
+    await loadLorasForCurrentModel();
+    const replacedId = String(context?.replaces || '');
+    const newId = String(job?.result?.filename || '');
+    if (!replacedId || !newId) return;
+    const replacement = s.availableLoras.find((lora) => lora.id === newId) || { id: newId, name: newId };
+    setCurrentLoraSelection(replaceLoraInSelection(currentLoraSelection(), replacedId, replacement));
+    bump();
+  };
+
+  const startLoraUpdate = (lora, update, { replace }) => {
+    if (!update?.url) return;
+    void startCivitaiDownload(localAI, update.url, {
+      replaces: replace ? lora.id : '',
+      onComplete: finishLoraDownload,
+      onStarted: () => bump(),
+    });
   };
 
   /* ---------------- references ---------------- */
@@ -669,6 +812,30 @@ export function ImageStudio({ active = true } = {}) {
     return true;
   };
 
+  /* ---------------- hand off to the video studio ---------------- */
+
+  // Re-uploads the viewed image through the normal reference path (so it is
+  // sealed server-side and shows up in the pickers' recent grid), then opens the
+  // Video studio with it already set as the starting frame.
+  const sendToVideoStartFrame = async (url) => {
+    if (!url || s.sendingToVideo) return;
+    s.sendingToVideo = true;
+    bump();
+    try {
+      const referenceUrl = await promoteOutputToReference(url);
+      loadStudioSetup('video', { format: 'video-start-frame', imageUrl: referenceUrl });
+      s.viewerUrl = null;
+      window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'video' } }));
+      toast.success('Starting frame set in the Video studio.');
+    } catch (e) {
+      console.error('[ImageStudio] Use as video starting frame failed:', e);
+      toast.error(e.message || 'Could not send that image to the Video studio.');
+    } finally {
+      s.sendingToVideo = false;
+      bump();
+    }
+  };
+
   /* ---------------- history / canvas ---------------- */
 
   const addToHistory = (entry, generationContext = null) => {
@@ -680,7 +847,7 @@ export function ImageStudio({ active = true } = {}) {
         section: 'image',
         mediaType: 'image/*',
         context: generationContext,
-        downloadName: `muapi-${entry.id}.jpg`,
+        downloadName: imageDownloadName(entry.model, entry.id),
       });
     }
     s.history.unshift(entry);
@@ -799,13 +966,19 @@ export function ImageStudio({ active = true } = {}) {
     bump();
     try {
       const sourceImage = s.uploadedImageUrls[0] || '';
+      // A reference picked from the saved list is a sealed envelope, so it has to be
+      // decrypted here too — sending only bare `data:` refs meant the helper silently
+      // refined the prompt without ever seeing the image the owner attached.
+      const referenceInput = await referenceToLocalImageInput(sourceImage);
       const result = await localAI.generatePrompt({
         model: modelId,
         idea,
         negative_prompt: s.negativePrompt || undefined,
         seed: s.seed,
         active_loras: loraGenerationPayload(currentLoraSelection()),
-        ...(sourceImage.startsWith('data:image/') ? { reference_image: sourceImage } : {}),
+        ...(String(referenceInput.image_base64 || '').startsWith('data:image/')
+          ? { reference_image: referenceInput.image_base64 }
+          : {}),
       });
       if (request !== s.promptHelperRequest || modelId !== s.selectedLocalModel) return;
       const refined = String(result?.prompt || '').trim();
@@ -912,10 +1085,16 @@ export function ImageStudio({ active = true } = {}) {
       try {
         // References are ignored (not sent) when the model can't take them.
         const sourceImage = localModelSupportsImageInput(lm) ? (s.uploadedImageUrls[0] || '') : '';
+        // A reference picked from the saved list is a sealed same-origin envelope,
+        // not something the bridge can read: decrypt it here and send the bytes
+        // inline. Sending the bare path made the bridge fail on "Invalid URL".
+        const referenceInput = await referenceToLocalImageInput(sourceImage);
         const res = await localAI.generate({
           model: s.selectedLocalModel,
           prompt,
-          negative_prompt: s.negativePrompt || undefined,
+          // Not sent to workflows that ignore it — the UI says as much, and a field
+          // the user can no longer see must not keep riding along in the payload.
+          negative_prompt: (currentModelSupportsNegativePrompt() && s.negativePrompt) || undefined,
           aspect_ratio: s.selectedAr,
           steps: s.steps,
           guidance_scale: s.guidanceScale,
@@ -923,10 +1102,14 @@ export function ImageStudio({ active = true } = {}) {
           runtime_mode: s.localRuntimeMode,
           width: s.customWidth || undefined,
           height: s.customHeight || undefined,
+          // Width/height, when set, ARE the resolution and win outright; base_size
+          // only scales the aspect-ratio preset (short side) when they are Auto.
+          base_size: (!s.customWidth && !s.customHeight && s.baseSize) ? s.baseSize : undefined,
+          sampler_name: s.sampler || undefined,
+          scheduler: s.scheduler || undefined,
           loras: loraGenerationPayload(currentLoraSelection()),
           ...(coupleOptions || {}),
-          ...(sourceImage.startsWith('data:') ? { image_base64: sourceImage } : {}),
-          ...(sourceImage && !sourceImage.startsWith('data:') ? { image_url: sourceImage } : {}),
+          ...referenceInput,
         });
         unsub();
         s.localProgress = { active: false, pct: 0, label: '' };
@@ -969,6 +1152,18 @@ export function ImageStudio({ active = true } = {}) {
       return;
     }
 
+    // A cloud model fetches references by URL, so one held only on this Mac has to be
+    // decrypted and uploaded to MUAPI first — the bytes leave the machine. Stop here
+    // and let the owner decide; confirming re-enters generate() with it approved.
+    if (sendingRefs) {
+      const awaitingApproval = referencesNeedingApproval(s.uploadedImageUrls, s.cloudRefApproved);
+      if (awaitingApproval.length) {
+        s.cloudRefConfirm = { sources: awaitingApproval, model: s.selectedModelName || s.selectedModel };
+        bump();
+        return;
+      }
+    }
+
     s.generating = true;
     startImageProgress();
     bump();
@@ -980,10 +1175,13 @@ export function ImageStudio({ active = true } = {}) {
       let res;
       const qualityLabel = s.selectedResolution;
       if (sendingRefs) {
+        // Approved above: decrypt anything held locally and upload it so the provider
+        // has a URL it can fetch. Already-public references pass straight through.
+        const cloudRefs = await resolveCloudReferences(s.uploadedImageUrls, { cache: s.cloudRefUploads });
         const genParams = {
           model: s.selectedModel,
-          images_list: s.uploadedImageUrls,
-          image_url: s.uploadedImageUrls[0], // backward compat for single-image models
+          images_list: cloudRefs,
+          image_url: cloudRefs[0], // backward compat for single-image models
           aspect_ratio: s.selectedAr,
           onRequestId: (rid) => {
             capturedRequestId = rid;
@@ -1092,6 +1290,7 @@ export function ImageStudio({ active = true } = {}) {
           const url = result.outputs?.[0] || result.url || result.output?.url;
           if (url) {
             addToHistory({ id: job.requestId, url, ...job.historyMeta, timestamp: new Date().toISOString() });
+            void playCompletionPing();
           }
         } catch (e) {
           console.warn('[ImageStudio] Pending job failed on resume:', job.requestId, e.message);
@@ -1188,6 +1387,12 @@ export function ImageStudio({ active = true } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The completion ping is shared with every other studio — follow the store so
+  // the toggle stays truthful if it is flipped elsewhere.
+  useEffect(() => subscribeCompletionPing((value) => { s.pingWhenComplete = value; bump(); }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []);
+
   // Unmount: mark unmounted (guards the progress timer's bump) and stop the timer.
   useEffect(() => () => {
     mountedRef.current = false;
@@ -1275,6 +1480,20 @@ export function ImageStudio({ active = true } = {}) {
   const helper = currentPromptHelper();
   const runtimeModes = activeLocalModel?.runtimeModes || [];
   const showRuntimeMode = s.useLocalModel && runtimeModes.length > 0;
+  const samplerChoices = s.useLocalModel ? (activeLocalModel?.samplers || []) : [];
+  const schedulerChoices = s.useLocalModel ? (activeLocalModel?.schedulers || []) : [];
+  const showSampler = samplerChoices.length > 0;
+  // Sampling cost tracks pixel count, so the resolved size is worth showing:
+  // 16:9 at 1024 is ~1.75x the work of 1:1 at 1024.
+  const resolvedDims = s.useLocalModel
+    ? resolveLocalDimensions({
+      aspectRatio: s.selectedAr,
+      baseSize: s.baseSize,
+      customWidth: s.customWidth,
+      customHeight: s.customHeight,
+      model: activeLocalModel,
+    })
+    : null;
   const coupleOn = coupleActive();
   const viewerEntry = s.viewerUrl ? s.history.find((e) => e.url === s.viewerUrl) : null;
   const enhanced = [s.enhanceBase.trim(), Array.from(s.enhanceTags).join(', ')].filter(Boolean).join(', ');
@@ -1340,6 +1559,26 @@ export function ImageStudio({ active = true } = {}) {
             </NativeSelect>
           </Field>
         ) : null}
+        {s.useLocalModel && resolvedDims ? (
+          <Field
+            label="Resolution"
+            hint={resolvedDims.custom
+              ? `${resolvedDims.width} × ${resolvedDims.height} — set by Width/Height below`
+              : `${resolvedDims.width} × ${resolvedDims.height} — sampling time scales with pixel count (Krea 2 @ 8 steps: 1024≈42s, 896≈32s, 768≈26s, 640≈18s)`}
+          >
+            <NativeSelect
+              value={String(s.baseSize || 0)}
+              disabled={resolvedDims.custom}
+              onChange={(e) => { s.baseSize = Number(e.target.value) || 0; persistImagePreferences(); bump(); }}
+            >
+              {LOCAL_BASE_SIZES.map((size) => (
+                <option key={size} value={size}>
+                  {size === 0 ? `Workflow default (${activeLocalModel?.defaultWidth || 1024})` : `${size} short side`}
+                </option>
+              ))}
+            </NativeSelect>
+          </Field>
+        ) : null}
       </div>
 
       <div className="flex flex-col gap-3">
@@ -1348,6 +1587,38 @@ export function ImageStudio({ active = true } = {}) {
           <Slider min={1} max={50} step={1} value={s.steps}
             onChange={(v) => { s.steps = v; bump(); }} />
         </Field>
+        {showSampler ? (
+          <>
+            <Field
+              label="Sampler"
+              hint={s.sampler
+                ? undefined
+                : (s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD
+                  ? 'Auto: deis_3m — usable at 2–5 steps, but ~2.7 model evals per step (not a speed win)'
+                  : 'Auto: euler_ancestral — tuned for 8–10 steps, 1 eval per step')}
+            >
+              <NativeSelect
+                value={s.sampler}
+                onChange={(e) => { s.sampler = e.target.value; persistImagePreferences(); bump(); }}
+              >
+                <option value="">Auto (match steps)</option>
+                {samplerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
+              </NativeSelect>
+            </Field>
+            <Field
+              label="Scheduler"
+              hint={s.scheduler ? undefined : `Auto: ${s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD ? 'bong_tangent' : 'beta'}`}
+            >
+              <NativeSelect
+                value={s.scheduler}
+                onChange={(e) => { s.scheduler = e.target.value; persistImagePreferences(); bump(); }}
+              >
+                <option value="">Auto (match steps)</option>
+                {schedulerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
+              </NativeSelect>
+            </Field>
+          </>
+        ) : null}
         <Field label={t('image.guidanceScale')}>
           <Slider min={1} max={20} step={0.5} value={s.guidanceScale}
             onChange={(v) => { s.guidanceScale = v; bump(); }} />
@@ -1377,13 +1648,30 @@ export function ImageStudio({ active = true } = {}) {
             {STYLE_PRESETS.map((preset) => <option key={preset} value={preset}>{preset}</option>)}
           </NativeSelect>
         </Field>
-        <Field label={t('image.negPromptLabel')}>
-          <TextInput
-            placeholder={t('image.negPromptPlaceholder')}
-            value={s.negativePrompt}
-            onChange={(e) => { s.negativePrompt = e.target.value; bump(); }}
-          />
-        </Field>
+        {currentModelSupportsNegativePrompt() ? (
+          <Field
+            label={t('image.negPromptLabel')}
+            // At guidance 1 ComfyUI never evaluates the negative branch, so say so
+            // instead of letting the text look like it is doing something.
+            hint={s.useLocalModel && negativePromptNeedsGuidance(s.guidanceScale)
+              ? t('image.negPromptNeedsGuidance')
+              : undefined}
+          >
+            <TextInput
+              placeholder={t('image.negPromptPlaceholder')}
+              value={s.negativePrompt}
+              onChange={(e) => { s.negativePrompt = e.target.value; bump(); }}
+            />
+          </Field>
+        ) : s.negativePrompt ? (
+          // The field is gone, but text saved under another model is not: explain
+          // why it stopped applying rather than dropping it silently.
+          <p className="text-[11px] leading-relaxed text-ink3">
+            {/* Only local workflows reach here, so name the workflow — not the
+                cloud model that s.selectedModelName tracks. */}
+            {t('image.negPromptUnsupported')(localModelById(s.selectedLocalModel)?.name || 'This workflow')}
+          </p>
+        ) : null}
         <div className="grid grid-cols-2 gap-2">
           <Field label={t('image.width')}>
             <TextInput type="number" className="font-mono" placeholder={t('image.widthPlaceholder')}
@@ -1400,6 +1688,10 @@ export function ImageStudio({ active = true } = {}) {
           <Slider min={0} max={100} step={5} value={s.referenceStrength} format={(v) => `${v}%`}
             onChange={(v) => { s.referenceStrength = v; bump(); }} />
         </Field>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs font-medium text-ink2">{t('common.pingWhenComplete')}</span>
+          <Toggle label={t('common.pingWhenComplete')} checked={s.pingWhenComplete} onChange={setPing} />
+        </div>
       </div>
 
       {showRuntimeMode ? (
@@ -1505,12 +1797,19 @@ export function ImageStudio({ active = true } = {}) {
             if (s.loraOpen) void loadLorasForCurrentModel();
           }}
           baseLabel={s.loraBaseLabel}
+          baseModelId={currentLoraModel()?.id || ''}
           status={s.loraCatalogStatus}
           message={s.loraCatalogMessage}
           loras={s.availableLoras}
           selection={currentLoraSelection()}
+          getSelection={currentLoraSelection}
           onToggleLora={(lora) => {
             setCurrentLoraSelection(toggleLoraSelection(currentLoraSelection(), lora));
+            bump();
+          }}
+          onToggleEnabled={(lora) => {
+            setCurrentLoraSelection(toggleLoraEnabled(currentLoraSelection(), lora.id));
+            persistImagePreferences();
             bump();
           }}
           onSetStrength={(id, value) => {
@@ -1522,6 +1821,12 @@ export function ImageStudio({ active = true } = {}) {
           }}
           onClearAll={() => { setCurrentLoraSelection([]); bump(); }}
           onDownload={() => { s.civitaiOpen = true; bump(); }}
+          onUpdateLora={startLoraUpdate}
+          onLoadGroup={(selection) => {
+            setCurrentLoraSelection(selection);
+            persistImagePreferences();
+            bump();
+          }}
         />
       ) : null}
     </>
@@ -1695,6 +2000,30 @@ export function ImageStudio({ active = true } = {}) {
             )}
           </Menu>
 
+          <SavedPromptsMenu
+            section="image"
+            prompt={s.prompt}
+            negativePrompt={s.negativePrompt}
+            capture={() => captureImageContext(s.prompt)}
+            onLoadPrompt={({ prompt, negativePrompt }) => {
+              setPromptValue(prompt);
+              s.negativePrompt = negativePrompt;
+              persistImagePreferences();
+              bump();
+              promptRef.current?.focus();
+            }}
+            onLoadContext={(context) => restoreImageContext(context)}
+          />
+
+          {/* Starting over lives here rather than in the result viewer: it is how
+              you begin the next image, not something you do to the last one. */}
+          <ChipButton
+            icon="x"
+            label={t('common.startFresh')}
+            chevron={false}
+            onClick={newPrompt}
+          />
+
           {helper ? (
             <ChipButton
               icon="wand"
@@ -1783,7 +2112,7 @@ export function ImageStudio({ active = true } = {}) {
                     active={s.viewerUrl ? s.viewerUrl === entry.url : idx === 0}
                     canReuse={refsSupported}
                     onOpen={() => viewImage(entry.url)}
-                    onDownload={() => downloadImage(entry.url, `muapi-${entry.id || idx}.jpg`)}
+                    onDownload={() => downloadImage(entry.url, imageDownloadName(entry.model, entry.id || idx))}
                     onReuse={() => {
                       const next = [...s.uploadedImageUrls.filter((u) => u !== entry.url), entry.url]
                         .slice(0, Math.max(s.maxImages, 1));
@@ -1820,10 +2149,29 @@ export function ImageStudio({ active = true } = {}) {
           }}
           onDownload={() => {
             const entry = viewerEntry;
-            downloadImage(s.viewerUrl, `muapi-${entry?.id || 'image'}.jpg`);
+            downloadImage(s.viewerUrl, imageDownloadName(entry?.model, entry?.id));
           }}
-          onNew={newPrompt}
           onUpscale={isLocalAIAvailable() ? (mode) => upscaleEntry(viewerEntry, mode) : undefined}
+          onUseAsVideoFrame={() => void sendToVideoStartFrame(s.viewerUrl)}
+          videoFrameBusy={s.sendingToVideo}
+        />
+      ) : null}
+
+      {s.cloudRefConfirm ? (
+        <ConfirmModal
+          open
+          title="Send this reference to the cloud?"
+          confirmLabel="Upload and generate"
+          body={`${s.cloudRefConfirm.sources.length === 1
+            ? 'Your reference image is'
+            : `${s.cloudRefConfirm.sources.length} of your reference images are`} encrypted on this Mac. ${s.cloudRefConfirm.model} runs in the cloud and reads references by URL, so continuing uploads a decrypted copy to MUAPI — those bytes leave your machine and are out of your control. Local workflows never do this.`}
+          onClose={() => { s.cloudRefConfirm = null; bump(); }}
+          onConfirm={() => {
+            s.cloudRefConfirm.sources.forEach((source) => s.cloudRefApproved.add(source));
+            s.cloudRefConfirm = null;
+            bump();
+            void generate();
+          }}
         />
       ) : null}
 
@@ -1843,7 +2191,12 @@ export function ImageStudio({ active = true } = {}) {
       {s.civitaiOpen ? (
         <CivitaiDownloadDialog
           api={localAI}
-          onComplete={() => loadLorasForCurrentModel()}
+          onComplete={finishLoraDownload}
+          // The progress lives on a card in the LoRA grid, so open the panel it is in.
+          onStarted={() => {
+            if (!s.loraOpen) { s.loraOpen = true; void loadLorasForCurrentModel(); }
+            bump();
+          }}
           onClose={() => { s.civitaiOpen = false; bump(); }}
         />
       ) : null}

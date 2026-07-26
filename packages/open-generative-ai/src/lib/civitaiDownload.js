@@ -34,13 +34,20 @@ export async function downloadCivitaiLora(api, url, options = {}) {
     if (!isCivitaiUrl(url)) throw new Error('Enter a valid civitai.com or civitai.red URL.');
     const onUpdate = typeof options.onUpdate === 'function' ? options.onUpdate : () => {};
     const pollInterval = Math.max(0, Number(options.pollInterval ?? 900));
-    let job = await api.startCivitaiDownload(String(url).trim());
+    // replaceId (optional) makes this an update of an installed LoRA: the gateway
+    // retires the old file only after the new one is on disk.
+    let job = await api.startCivitaiDownload(String(url).trim(), { replaceId: options.replaceId || '' });
     if (!job?.id) throw new Error('The downloader did not return a job id.');
     onUpdate(job);
     while (job.status === 'queued' || job.status === 'running') {
         await wait(pollInterval, options.signal);
         job = await api.getCivitaiDownloadJob(job.id);
         onUpdate(job);
+    }
+    if (job.status === 'cancelled') {
+        // Distinct from a failure: the caller asked for this, so callers can report
+        // it as cancelled instead of surfacing it as an error.
+        throw Object.assign(new Error('Download cancelled'), { cancelled: true });
     }
     if (job.status !== 'success') throw new Error(job.error || 'Civitai download failed.');
     return job;

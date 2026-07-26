@@ -21,10 +21,16 @@ import { toast } from 'react-hot-toast';
 import { muapi } from '../lib/muapi.js';
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { isWan2gpModelId } from '../lib/localModels.js';
-import { loraGenerationPayload, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
+import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
+import { loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
+import { videoDownloadName } from '../lib/downloadNames.js';
+import {
+  isCompletionPingEnabled, setCompletionPingEnabled, subscribeCompletionPing,
+  primeCompletionPing, playCompletionPing,
+} from '../lib/completionPing.js';
 import {
   generateHivemindVideo,
   cancelHivemindVideoJob,
@@ -60,10 +66,11 @@ import { FrameSlotsPicker } from './video/FrameSlotsPicker.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
 import { LoraSection } from './image/LoraSection.jsx';
+import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
 import { IngredientsPanel } from './video/IngredientsPanel.jsx';
 
 import {
-  VIDEO_PREFERENCES_KEY, VIDEO_COMPLETION_PING_KEY, zh,
+  VIDEO_PREFERENCES_KEY, zh,
   buildCatalogs, buildInitialSetup, adaptHivemindToVideoEntry, isLocalVideoModel, v2vModels,
   currentModel, currentIngredientModel, activeIngredientSheetItems, ingredientSelectionSignature,
   getIngredientsWorkflow,
@@ -79,6 +86,7 @@ import {
   normalizeVideoGenerationProgress, classifyVideoGenerationStage, formatVideoGenerationElapsed,
   computeSmoothProgress,
   closestVideoAspectRatio, imageDimensions, redactPrivateHistoryEntry,
+  groupModelTiers, activeTierFor, tierPairFor,
 } from './video/videoLogic.jsx';
 
 // Re-export the spec-listed pure helpers so tests/other callers keep importing
@@ -125,10 +133,6 @@ function createEngine() {
     persisted = normalizeVideoPreferences(JSON.parse(localStorage.getItem(VIDEO_PREFERENCES_KEY) || 'null'));
   } catch { /* corrupted prefs — boot with defaults */ }
 
-  let pingWhenComplete = false;
-  try { pingWhenComplete = sessionStorage.getItem(VIDEO_COMPLETION_PING_KEY) === '1'; } catch { /* no session storage */ }
-  if (persisted) pingWhenComplete = persisted.pingWhenComplete;
-
   const videoLoraSelectionsByModel = new Map();
   Object.entries(persisted?.loraSelections || {}).forEach(([model, sel]) => videoLoraSelectionsByModel.set(model, sel));
   const sharedIngredientSelections = (persisted?.ingredientSelections || []).map((x) => ({ ...x }));
@@ -150,8 +154,9 @@ function createEngine() {
     catalogs,
     setup,
     hivemindWorkflowSignature: '',
-    pingWhenComplete,
-    completionAudioContext: null,
+    // Mirror of the shared (all-studio) completion-ping setting, kept here only
+    // so the toggle re-renders; lib/completionPing.js owns the value.
+    pingWhenComplete: isCompletionPingEnabled(),
     contextStore: createGenerationContextStore(),
     lastSubmittedContext: null,
     lastGenerationId: null,
@@ -237,13 +242,15 @@ export function VideoStudio({ active = true } = {}) {
       mode: s.setup.mode,
       effectName: s.setup.effectName,
       matchStartFrameAr: s.setup.matchStartFrameAr,
+      denoise: s.setup.denoise,
       seed: s.setup.seed,
       advancedValues: s.setup.advancedValues,
       loraSelections: Object.fromEntries(s.videoLoraSelectionsByModel),
       ingredientSelections: s.sharedIngredientSelections,
       ingredientSheets: s.sharedIngredientSheets,
       ingredientSelectedSheet: s.selectedIngredientSheet,
-      pingWhenComplete: s.pingWhenComplete,
+      // pingWhenComplete is deliberately NOT persisted here — it is a shared
+      // all-studio setting owned by lib/completionPing.js.
     });
     if (!prefs) return;
     s.persistedVideoPreferences = prefs;
@@ -296,12 +303,18 @@ export function VideoStudio({ active = true } = {}) {
     bump();
   };
 
-  const setPing = (checked) => {
-    s.pingWhenComplete = checked;
-    try { sessionStorage.setItem(VIDEO_COMPLETION_PING_KEY, checked ? '1' : '0'); } catch { /* no session storage */ }
-    persistVideoPreferences();
+  // Negative prompt is prompt text, so it follows the positive one into the
+  // encrypted composer section and never touches the plaintext settings store.
+  const setNegativePrompt = (v) => {
+    s.setup = { ...s.setup, negativePrompt: v };
+    updateComposerSection('video', { negativePrompt: v });
     bump();
-    if (checked) void playCompletionPing();
+  };
+
+  const setPing = (checked) => {
+    s.pingWhenComplete = setCompletionPingEnabled(checked);
+    bump();
+    if (s.pingWhenComplete) void playCompletionPing();
   };
 
   /* ---------------- start / end frame (UploadPicker) ---------------- */
@@ -605,7 +618,7 @@ export function VideoStudio({ active = true } = {}) {
     s.videoLoraCatalogMessage = `${zh() ? '正在加载 LoRA：' : 'Loading LoRAs for '}${model.name}…`;
     bump();
     try {
-      const data = await localAI.listLoras(model.workflowId);
+      const data = await localAI.listLoras(model.workflowId, model.compatibleBaseModels);
       if (request !== s.videoLoraCatalogRequest || model.workflowId !== currentVideoLoraModel()?.workflowId) return;
       s.availableVideoLoras = Array.isArray(data?.loras) ? data.loras : [];
       s.videoLoraCatalogStatus = data?.supported === false ? 'unsupported' : 'ready';
@@ -614,6 +627,7 @@ export function VideoStudio({ active = true } = {}) {
         : s.availableVideoLoras.length
           ? `${s.availableVideoLoras.length} ${zh() ? '个兼容 LoRA 已安装。' : `compatible LoRA${s.availableVideoLoras.length === 1 ? '' : 's'} installed.`}`
           : (zh() ? '此工作流未安装兼容的 LoRA。' : 'No compatible LoRAs are installed for this workflow.');
+      void refreshVideoLoraUpdates(request, model.compatibleBaseModels);
     } catch (error) {
       if (request !== s.videoLoraCatalogRequest) return;
       s.videoLoraCatalogStatus = 'error';
@@ -622,60 +636,34 @@ export function VideoStudio({ active = true } = {}) {
     bump();
   };
 
-  /* ---------------- completion ping (WebAudio) ---------------- */
-
-  const getCompletionAudioContext = () => {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return null;
-    if (!s.completionAudioContext || s.completionAudioContext.state === 'closed') {
-      s.completionAudioContext = new AudioContextClass();
-    }
-    return s.completionAudioContext;
+  // Update availability comes from Civitai, so it lands after the catalog rather
+  // than holding it up. Same race token: a stale check never annotates a new list.
+  const refreshVideoLoraUpdates = async (request, baseModels) => {
+    const updates = await localAI.listLoraUpdates(baseModels);
+    if (request !== s.videoLoraCatalogRequest || !Object.keys(updates).length) return;
+    s.availableVideoLoras = mergeLoraUpdates(s.availableVideoLoras, updates);
+    bump();
   };
 
-  const primeCompletionPing = async () => {
-    if (!s.pingWhenComplete) return;
-    const audioContext = getCompletionAudioContext();
-    if (!audioContext) return;
-    try {
-      if (audioContext.state !== 'running') await audioContext.resume();
-      if (audioContext.state !== 'running') return;
-      const oscillator = audioContext.createOscillator();
-      const gain = audioContext.createGain();
-      gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
-      oscillator.connect(gain);
-      gain.connect(audioContext.destination);
-      oscillator.start();
-      oscillator.stop(audioContext.currentTime + 0.01);
-    } catch (error) {
-      console.warn('[VideoStudio] Completion ping could not be enabled:', error?.message || 'audio unavailable');
-    }
+  // Shared completion path for every Civitai download that lands a LoRA: refresh
+  // the catalog, then carry the selection over when a file was replaced.
+  const finishVideoLoraDownload = async (job, context) => {
+    await loadLorasForCurrentVideoModel();
+    const replacedId = String(context?.replaces || '');
+    const newId = String(job?.result?.filename || '');
+    if (!replacedId || !newId) return;
+    const replacement = s.availableVideoLoras.find((lora) => lora.id === newId) || { id: newId, name: newId };
+    setCurrentVideoLoraSelection(replaceLoraInSelection(currentVideoLoraSelection(), replacedId, replacement));
+    bump();
   };
 
-  const playCompletionPing = async () => {
-    if (!s.pingWhenComplete) return;
-    const audioContext = getCompletionAudioContext();
-    if (!audioContext) return;
-    try {
-      if (audioContext.state !== 'running') await audioContext.resume();
-      if (audioContext.state !== 'running') return;
-      const start = audioContext.currentTime + 0.02;
-      [[659.25, start, 0.2], [880, start + 0.16, 0.34]].forEach(([frequency, noteStart, duration]) => {
-        const oscillator = audioContext.createOscillator();
-        const gain = audioContext.createGain();
-        oscillator.type = 'triangle';
-        oscillator.frequency.setValueAtTime(frequency, noteStart);
-        gain.gain.setValueAtTime(0.0001, noteStart);
-        gain.gain.linearRampToValueAtTime(0.2, noteStart + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + duration);
-        oscillator.connect(gain);
-        gain.connect(audioContext.destination);
-        oscillator.start(noteStart);
-        oscillator.stop(noteStart + duration + 0.02);
-      });
-    } catch (error) {
-      console.warn('[VideoStudio] Completion ping could not play:', error?.message || 'audio unavailable');
-    }
+  const startVideoLoraUpdate = (lora, update, { replace }) => {
+    if (!update?.url) return;
+    void startCivitaiDownload(localAI, update.url, {
+      replaces: replace ? lora.id : '',
+      onComplete: finishVideoLoraDownload,
+      onStarted: () => bump(),
+    });
   };
 
   /* ---------------- generation progress ---------------- */
@@ -725,7 +713,7 @@ export function VideoStudio({ active = true } = {}) {
       s.progressDisplay = 1;
       s.progressReal = 1;
       stopGenerationProgress();
-      if (s.pingWhenComplete) void playCompletionPing();
+      void playCompletionPing();
     }
     bump();
   };
@@ -740,7 +728,7 @@ export function VideoStudio({ active = true } = {}) {
         section: 'video',
         mediaType: 'video/*',
         context: generationContext,
-        downloadName: `video-${entry.id}.mp4`,
+        downloadName: videoDownloadName(entry.model, entry.id),
       });
     }
     s.generationHistory = [safeEntry, ...s.generationHistory];
@@ -1010,6 +998,9 @@ export function VideoStudio({ active = true } = {}) {
           resolution: String(setup.resolution || '').toLowerCase() === 'high' ? 'high' : 'standard',
           duration: setup.duration || 4,
           seed: resolvedSeed,
+          denoise: setup.denoise || '',
+          negative_prompt: String(setup.negativePrompt || '').trim(),
+          ...(Number.isFinite(Number(setup.nagScale)) ? { nag_scale: Number(setup.nagScale) } : {}),
           loras: loraGenerationPayload(currentVideoLoraSelection()),
           ...(hasIngredientReferences ? {
             ingredientImages: activeItems.map((item) => ({ image: item.url, description: item.description })),
@@ -1249,9 +1240,21 @@ export function VideoStudio({ active = true } = {}) {
     // Restore the encrypted composer draft prompt (owner vault) once it hydrates,
     // unless the user has already typed one this session.
     void hydrateComposerState().then(() => {
-      const savedPrompt = getComposerSection('video').prompt;
+      const saved = getComposerSection('video');
+      const savedPrompt = saved.prompt;
+      const savedNegative = saved.negativePrompt;
+      const next = { ...s.setup };
+      let changed = false;
       if (typeof savedPrompt === 'string' && savedPrompt && !s.setup.prompt.trim()) {
-        s.setup = { ...s.setup, prompt: savedPrompt };
+        next.prompt = savedPrompt;
+        changed = true;
+      }
+      if (typeof savedNegative === 'string' && savedNegative && !String(s.setup.negativePrompt || '').trim()) {
+        next.negativePrompt = savedNegative;
+        changed = true;
+      }
+      if (changed) {
+        s.setup = next;
         bump();
       }
     });
@@ -1381,6 +1384,14 @@ export function VideoStudio({ active = true } = {}) {
         focusPrompt();
         return;
       }
+      // "Use as video starting frame" from the image viewer: the image is already
+      // an uploaded reference, so this is exactly a picker selection (model flips
+      // to image-to-video, aspect follows the frame).
+      if (setup?.format === 'video-start-frame' && setup.imageUrl) {
+        onStartFrameChange([setup.imageUrl]);
+        focusPrompt();
+        return;
+      }
       setPrompt(setup?.primaryPrompt || '');
       focusPrompt();
     });
@@ -1437,6 +1448,9 @@ export function VideoStudio({ active = true } = {}) {
   const ltxFramesVisible = isHivemindVideoModelId(s.setup.modelId)
     && !s.setup.videoUrl
     && !currentIngredientModel(s.setup, s.catalogs);
+  // The grain pass runs on the gateway's own output file, so it only applies to
+  // locally generated clips (the native MLX LTX route), not cloud providers.
+  const denoiseAvailable = isHivemindVideoModelId(s.setup.modelId);
   useEffect(() => {
     if (!endFrameVisible && s.setup.endImageUrl) {
       s.setup = { ...s.setup, endImageUrl: null };
@@ -1451,6 +1465,12 @@ export function VideoStudio({ active = true } = {}) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ltxFramesVisible]);
+
+  // The completion ping is shared with every other studio — follow the store so
+  // the toggle stays truthful if it is flipped elsewhere.
+  useEffect(() => subscribeCompletionPing((value) => { s.pingWhenComplete = value; bump(); }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []);
 
   // Unmount: stop the elapsed timer + release the preview blob. Never abort an
   // in-flight generation poll — bump() is guarded by mountedRef instead.
@@ -1531,6 +1551,31 @@ export function VideoStudio({ active = true } = {}) {
           onSelectV2V={selectV2VModel}
         />
         <Pill tone="honey" className="w-fit">{modeLabel}</Pill>
+        {(() => {
+          // Lite/Standard for models that ship both a distilled and a full-step
+          // build. Only rendered when both are installed, and switching swaps the
+          // selected model so exactly one is ever active.
+          const pair = tierPairFor(s.catalogs.hivemindI2V, s.setup.modelId);
+          if (!pair) return null;
+          const active = pair.lite.id === s.setup.modelId ? 'lite' : 'standard';
+          return (
+            <Field
+              label={zh() ? '质量' : 'Quality'}
+              hint={active === 'lite'
+                ? (zh() ? '蒸馏模型，约 8 步，速度最快' : 'Distilled — ~8 steps, fastest')
+                : (zh() ? '完整步数 + CFG，约慢 3 倍' : 'Full-step CFG — around 3x slower')}
+            >
+              <Segmented
+                value={active}
+                onChange={(tier) => { if (pair[tier]) selectHiveModel(pair[tier]); }}
+                options={[
+                  { value: 'lite', label: zh() ? '精简' : 'Lite' },
+                  { value: 'standard', label: zh() ? '标准' : 'Standard' },
+                ]}
+              />
+            </Field>
+          );
+        })()}
         {(() => {
           // Quick jump to the LTX Ingredients workflow from any other model
           // (getIngredientsWorkflow's selected → ltx23-ic-ingredients-lora → any).
@@ -1640,9 +1685,69 @@ export function VideoStudio({ active = true } = {}) {
 
       <div className="flex flex-col gap-3">
         <SectionLabel>{zh() ? '高级' : 'Advanced'}</SectionLabel>
+        {denoiseAvailable ? (
+          <>
+            <Field
+              label={zh() ? '负面提示词' : 'Negative prompt'}
+              hint={zh()
+                ? '通过 NAG 生效（快速/精简通道 cfg=1，普通负面提示词无效）。'
+                : 'Applied through NAG. The fast and Lite lanes run cfg=1, where an ordinary negative prompt does nothing.'}
+            >
+              <textarea
+                rows={2}
+                value={s.setup.negativePrompt || ''}
+                onChange={(e) => setNegativePrompt(e.target.value)}
+                placeholder={zh()
+                  ? '模糊, 解剖错误, 多余手指, 水印'
+                  : 'blurry, bad anatomy, extra fingers, deformed hands, watermark'}
+                className="w-full resize-y rounded-md border border-line1 bg-bg2 px-2.5 py-2 text-xs text-ink1 outline-none placeholder:text-ink3 focus:border-honey/60"
+              />
+            </Field>
+            {String(s.setup.negativePrompt || '').trim() ? (
+              <Field
+                label={zh() ? '负面引导强度' : 'Negative guidance'}
+                hint={zh()
+                  ? 'NAG 强度。约 +8% 生成时间。'
+                  : 'NAG strength — costs about 8% more time. Raise it if the prompt still is not being followed.'}
+              >
+                <NativeSelect
+                  value={String(s.setup.nagScale ?? '')}
+                  onChange={(e) => commit({
+                    ...s.setup,
+                    nagScale: e.target.value === '' ? null : Number(e.target.value),
+                  })}
+                >
+                  <option value="">{zh() ? '默认 (11)' : 'Default (11)'}</option>
+                  <option value="5">{zh() ? '弱 (5)' : 'Subtle (5)'}</option>
+                  <option value="15">{zh() ? '强 (15)' : 'Strong (15)'}</option>
+                  <option value="1">{zh() ? '关闭' : 'Off'}</option>
+                </NativeSelect>
+              </Field>
+            ) : null}
+          </>
+        ) : null}
+        {denoiseAvailable ? (
+          <Field
+            label={zh() ? '颗粒清理' : 'Grain cleanup'}
+            hint={s.setup.denoise
+              ? (s.setup.denoise === 'strong'
+                ? 'Motion-adaptive temporal pass + a spatial pass. Re-encodes after generation.'
+                : 'Motion-adaptive temporal pass: averages static grain, leaves moving detail alone.')
+              : 'Off — the clip is saved exactly as the model rendered it.'}
+          >
+            <NativeSelect
+              value={s.setup.denoise || ''}
+              onChange={(e) => commit({ ...s.setup, denoise: e.target.value })}
+            >
+              <option value="">Off</option>
+              <option value="light">Light</option>
+              <option value="strong">Strong</option>
+            </NativeSelect>
+          </Field>
+        ) : null}
         <div className="flex items-center justify-between gap-3">
-          <span className="text-xs font-medium text-ink2">{t('video.pingWhenComplete')}</span>
-          <Toggle label={t('video.pingWhenComplete')} checked={s.pingWhenComplete} onChange={setPing} />
+          <span className="text-xs font-medium text-ink2">{t('common.pingWhenComplete')}</span>
+          <Toggle label={t('common.pingWhenComplete')} checked={s.pingWhenComplete} onChange={setPing} />
         </div>
         {advancedInputs.map((input) => {
           const value = s.setup.advancedValues[input.name];
@@ -1722,15 +1827,20 @@ export function VideoStudio({ active = true } = {}) {
               if (s.loraOpen) void loadLorasForCurrentVideoModel();
             }}
             baseLabel={loraModel.compatibleBaseModels?.join(', ') || loraModel.name}
+            baseModelId={loraModel.id || ''}
             status={s.videoLoraCatalogStatus}
             message={s.videoLoraCatalogMessage}
             loras={s.availableVideoLoras}
             selection={currentVideoLoraSelection()}
+            getSelection={currentVideoLoraSelection}
             onToggleLora={(lora) => setCurrentVideoLoraSelection(toggleLoraSelection(currentVideoLoraSelection(), lora))}
+            onToggleEnabled={(lora) => setCurrentVideoLoraSelection(toggleLoraEnabled(currentVideoLoraSelection(), lora.id))}
             onSetStrength={(id, value) => setCurrentVideoLoraSelection(updateLoraStrength(currentVideoLoraSelection(), id, value), { render: false })}
             onCommitStrength={(id, value) => setCurrentVideoLoraSelection(updateLoraStrength(currentVideoLoraSelection(), id, value))}
             onClearAll={() => setCurrentVideoLoraSelection([])}
             onDownload={() => { s.civitaiOpen = true; bump(); }}
+            onUpdateLora={startVideoLoraUpdate}
+            onLoadGroup={(selection) => setCurrentVideoLoraSelection(selection)}
           />
         </div>
       ) : null}
@@ -1821,6 +1931,14 @@ export function VideoStudio({ active = true } = {}) {
             onClick={onVideoRefClick}
           />
           {s.videoUploading ? <Spinner size={14} className="text-honey" /> : null}
+
+          <SavedPromptsMenu
+            section="video"
+            prompt={s.setup.prompt}
+            capture={() => captureGenerationContext(s.setup.prompt)}
+            onLoadPrompt={({ prompt }) => { setPrompt(prompt); focusPrompt(); }}
+            onLoadContext={(context) => restoreGenerationContext(context)}
+          />
 
           <Pill tone={s.setup.videoUrl ? 'honey' : 'neutral'} className="hidden sm:inline-flex">{modeLabel}</Pill>
 
@@ -1916,7 +2034,7 @@ export function VideoStudio({ active = true } = {}) {
                   icon="download"
                   onClick={() => {
                     const entry = s.generationHistory.find((e) => e.url === s.resultUrl);
-                    downloadFile(s.resultUrl, `video-${entry?.id || 'clip'}.mp4`);
+                    downloadFile(s.resultUrl, videoDownloadName(entry?.model || s.resultModel, entry?.id));
                   }}
                 >
                   {t('video.download')}
@@ -1968,7 +2086,7 @@ export function VideoStudio({ active = true } = {}) {
                           title={t('video.download')}
                           aria-label={zh() ? '下载视频' : 'Download video'}
                           className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-ink1 transition-colors hover:border-line2 hover:bg-bg1"
-                          onClick={(e) => { e.stopPropagation(); downloadFile(entry.url, `video-${entry.id || idx}.mp4`); }}
+                          onClick={(e) => { e.stopPropagation(); downloadFile(entry.url, videoDownloadName(entry.model, entry.id || idx)); }}
                         >
                           <Icon name="download" size={13} />
                         </button>
@@ -2018,7 +2136,12 @@ export function VideoStudio({ active = true } = {}) {
       {s.civitaiOpen ? (
         <CivitaiDownloadDialog
           api={localAI}
-          onComplete={() => loadLorasForCurrentVideoModel()}
+          onComplete={finishVideoLoraDownload}
+          // The progress lives on a card in the LoRA grid, so open the panel it is in.
+          onStarted={() => {
+            if (!s.loraOpen) { s.loraOpen = true; void loadLorasForCurrentVideoModel(); }
+            bump();
+          }}
           onClose={() => { s.civitaiOpen = false; bump(); }}
         />
       ) : null}
@@ -2084,9 +2207,11 @@ function VideoModelMenuList({ engine: s, hasSourceToggle, close, onSelectRegular
   const matches = (m) => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query);
 
   // Regular generation models — t2v prepends hivemind workflows (old line 2082).
-  const generationModels = (s.setup.imageMode ? s.catalogs.allI2V : [...s.catalogs.hivemindI2V, ...s.catalogs.allT2V])
-    .filter((m) => !hasSourceToggle || isLocalVideoModel(m.id) === s.setup.localMode)
-    .filter(matches);
+  const generationModels = groupModelTiers(
+    (s.setup.imageMode ? s.catalogs.allI2V : [...s.catalogs.hivemindI2V, ...s.catalogs.allT2V])
+      .filter((m) => !hasSourceToggle || isLocalVideoModel(m.id) === s.setup.localMode)
+      .filter(matches),
+  );
 
   // Video Tools (remote-only v2v) — hidden while filtering to Local sources.
   const toolModels = (hasSourceToggle && s.setup.localMode) ? [] : v2vModels.filter(matches);
@@ -2124,20 +2249,28 @@ function VideoModelMenuList({ engine: s, hasSourceToggle, close, onSelectRegular
       {generationModels.length ? (
         <div>
           <MenuHeading>{zh() ? '视频模型' : 'Video models'}</MenuHeading>
-          {generationModels.map((m) => (
-            <MenuItem
-              key={m.id}
-              selected={s.setup.modelId === m.id}
-              meta={metaFor(m)}
-              onClick={() => {
-                if (isHivemindVideoModelId(m.id)) onSelectHive(m);
-                else onSelectRegular(m);
-                close();
-              }}
-            >
-              {m.name}
-            </MenuItem>
-          ))}
+          {generationModels.map((m) => {
+            // A tier pair shows once here; Lite/Standard is chosen in settings.
+            // Selecting the row keeps whichever tier is already active.
+            const target = m.isTierGroup ? m.tiers[activeTierFor(m, s.setup.modelId)] : m;
+            const selected = m.isTierGroup
+              ? Object.values(m.tiers).some((entry) => entry.id === s.setup.modelId)
+              : s.setup.modelId === m.id;
+            return (
+              <MenuItem
+                key={m.isTierGroup ? m.tierGroup : m.id}
+                selected={selected}
+                meta={metaFor(m)}
+                onClick={() => {
+                  if (isHivemindVideoModelId(target.id)) onSelectHive(target);
+                  else onSelectRegular(target);
+                  close();
+                }}
+              >
+                {m.name}
+              </MenuItem>
+            );
+          })}
         </div>
       ) : null}
 

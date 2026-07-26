@@ -24,6 +24,12 @@ class MediaModel:
     ingredient_inputs: dict | None = None
     aspect_ratios: tuple[str, ...] = ()
     default_duration_seconds: float | None = None
+    # Models that ship both a distilled and a full-step build pair up here: same
+    # tier_group, different tier. The studio collapses a group into one row with
+    # a Lite/Standard switch instead of listing near-identical models twice.
+    # Left None for anything that only has one build.
+    tier_group: str | None = None
+    tier: Literal["lite", "standard"] | None = None
 
 
 @dataclass(frozen=True)
@@ -37,9 +43,15 @@ class MediaProviderModels:
 BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS: tuple[MediaModel, ...] = (
     MediaModel("workflow-default", "Workflow default", ("start", "reference"), None, "selected MCP workflow schema", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
     MediaModel("ltx23-eros-fast", "LTX 2.3 Eros Fast", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-exact", "LTX 2.3 Eros Exact", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-dmd", "LTX 2.3 Eros DMD (v1.3)", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-dmd-v12", "LTX 2.3 Eros DMD (v1.2)", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-v12-fast-rebuilt", "LTX 2.3 Eros v1.2 Fast (rebuilt)", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-v14-fast", "LTX 2.3 Eros v1.4 Fast", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
     MediaModel("ltx23-regular-fp8", "LTX 2.3 Regular FP8", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
     MediaModel("ltx23-eros-ic-ingredients-lora", "LTX 2.3 Eros IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "ingredient_images", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-dmd-ic-ingredients-lora", "LTX 2.3 Eros DMD IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "ingredient_images", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-v14-ic-ingredients-lora", "LTX 2.3 Eros v1.4 IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "ingredient_images", "loras"), True, ("LTXV",)),
+    MediaModel("ltx23-eros-v14", "LTX 2.3 Eros v1.4", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
 )
 
 

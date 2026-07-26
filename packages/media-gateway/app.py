@@ -75,6 +75,12 @@ def resolve_ltx2_mlx_dir(*, env=None, studio_root=None, home=None, temp_root=Non
 
 LTX2_MLX_DIR = resolve_ltx2_mlx_dir()
 LTX2_MLX_GEMMA = os.environ.get("LTX2_MLX_GEMMA", "mlx-community/gemma-3-12b-it-4bit")
+# Normalized Attention Guidance. Guides inside cross-attention instead of via a
+# second model pass, so the distilled lanes (cfg=1, where CFG does nothing and a
+# negative prompt is inert) get real negative guidance for ~8% more time.
+# Values match the LTX 2.3 community workflows.
+LTX_NAG_DEFAULTS = {"scale": 11.0, "alpha": 0.25, "tau": 2.5}
+
 MLX_MODELS_ROOT = Path(os.environ.get("MLX_MODELS_ROOT", str(Path.home() / "comfy/mlx-models")))
 LTX2_MLX_VARIANTS = {
     "fast-q8-v12": {
@@ -85,13 +91,41 @@ LTX2_MLX_VARIANTS = {
         "output_prefix": "mlx_10eros_q8_distilled_mobile",
         "benchmark_seconds": 193.11,
     },
-    "exact-v1-merged-q8": {
-        "title": "Exact-v1 bf16 LoRA merged q8 distilled",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-bf16-lora-merged-q8-distilled"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-bf16-lora-merged-q8-distilled"),
+    # v1.3 + DMD. Two reasons this exists: upstream v1.3 "substantially reduced
+    # ghost anatomy and subtitle artifacts" over v1.2, and the DMD deltas are
+    # merged into the base instead of fused as a distilled LoRA at runtime —
+    # which the build's own card says avoids the resampling-to-base drift and
+    # conditioning loss the LoRA introduces during the stage-2 upscale refine
+    # (the step that leaves the crawling grain on the v1.2 route).
+    "dmd-q8-v13": {
+        "title": "MLXBits 10Eros v1.3 DMD q8 distilled",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
         "video_distilled": True,
-        "output_prefix": "mlx_10eros_v1_bf16_lora_merged_q8_distilled_mobile",
-        "benchmark_seconds": 247.44,
+        "output_prefix": "mlx_10eros_v13_dmd_q8_distilled_mobile",
+        "benchmark_seconds": 193.11,
+        # Tried and rejected (2026-07-24): the sigma ramp from the author's own
+        # reference graph (10Eros_10SNodes_I2V_Basic_DMD_V5.json — 9-step first
+        # pass "1.0,0.955,0.893,0.812,0.715,0.603,0.482,0.241,0.121,0" + 3-step
+        # upscale "0.92,0.725,0.421875,0") measured WORSE here than ltx-2-mlx's
+        # built-in table: weaker prompt execution, less spatial detail, slightly
+        # more static-region crawl. Their recipe also samples euler_ancestral,
+        # which this runtime's x0-Euler loop has no faithful equivalent for, so
+        # the ramp alone is only half the recipe. Set LTX2_DISTILLED_SIGMAS /
+        # LTX2_STAGE2_SIGMAS (or a "runtime_env" here) to re-test.
+    },
+    # v1.2 + DMD. The control for the adherence question: v1.3-DMD lost prompt
+    # steering versus v1.2-fast, but those differ in BOTH the fine-tune (v1.2 ->
+    # v1.3) and the distillation (LoRA -> merged DMD). This holds the DMD merge
+    # constant at the v1.2 fine-tune, so a v1.2-fast/v1.2-DMD/v1.3-DMD triangle
+    # attributes the regression to one of them instead of guessing.
+    "dmd-q8-v12": {
+        "title": "MLXBits 10Eros v1.2 DMD q8 distilled",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-dmd-mlx-q8"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-dmd-mlx-q8"),
+        "video_distilled": True,
+        "output_prefix": "mlx_10eros_v12_dmd_q8_distilled_mobile",
+        "benchmark_seconds": 193.11,
     },
     "regular-q8-distilled": {
         "title": "LTX 2.3 regular q8 distilled",
@@ -119,6 +153,86 @@ LTX2_MLX_VARIANTS = {
         "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-mlx-q8-dev"),
         "video_distilled": False,
         "output_prefix": "mlx_ltx23_10eros_v1_q8_dev_ic_mobile",
+        "benchmark_seconds": None,
+        "backend_prefix": "mlx-ltx-eros",
+        "output_subdir": "Eros",
+    },
+    # Ingredients IC-LoRA on the v1.3 DMD build. The dev lane above fuses the
+    # generic distilled LoRA at 0.5 alongside the IC-LoRA (the Comfy recipe);
+    # a DMD build ships no dev transformer because the distillation is already
+    # merged, so this runs ic-lora's plain distilled mode with the IC-LoRA as
+    # the only adapter. Sibling lane on purpose — the dev one stays the default
+    # until an A/B says otherwise.
+    # v1.4, converted locally from TenStrip's bf16 with mlx-forge (int8, group 64)
+    # because no MLX v1.4 build is published. This is a DEV package: the fast
+    # --distilled two-stage path needs a distilled transformer this does not
+    # have, so v1.4 is wired to the dev/Ingredients lane, matching eros-q8-dev-ic.
+    # v1.2 rebuilt through OUR merge path, as a control. eros-fast is the same
+    # base and the same cond-safe LoRA, but MLXBits merged in bf16 and quantized
+    # afterwards, where we merge into already-int8 weights. Comparing this to
+    # eros-fast isolates that arithmetic; comparing it to v1.4 Fast isolates the
+    # fine-tune. Without it the two variables are tangled.
+    "eros-v12-q8-fast-rebuilt": {
+        "title": "LTX 2.3 10Eros v1.2 q8 distilled (rebuilt, cond-safe)",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-fast-rebuilt"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-fast-rebuilt"),
+        "video_distilled": True,
+        "output_prefix": "mlx_ltx23_10eros_v12_q8_fast_rebuilt_mobile",
+        "benchmark_seconds": 193.11,
+        "backend_prefix": "mlx-ltx-eros",
+        "output_subdir": "Eros",
+    },
+    # v1.4 Fast: eros-fast's recipe on the v1.4 fine-tune. eros-fast merges the
+    # *cond-safe* rank-384 distilled LoRA (Frobenius-clipped, built to preserve
+    # conditioning) rather than the stock one, which is the likeliest reason it
+    # follows prompts better than the Lite build. Same LoRA at the same strength
+    # here, so this and eros-fast differ only in base model.
+    "eros-v14-q8-fast": {
+        "title": "LTX 2.3 10Eros v1.4 q8 distilled (cond-safe)",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-fast"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-fast"),
+        "video_distilled": True,
+        "output_prefix": "mlx_ltx23_10eros_v14_q8_fast_mobile",
+        "benchmark_seconds": 193.11,
+        "backend_prefix": "mlx-ltx-eros",
+        "output_subdir": "Eros",
+    },
+    # Plain image-to-video on the same v1.4 dev package. Separate from the -ic
+    # variant below only so outputs are named for the lane that made them; both
+    # point at one model directory. Runs --two-stage (see the runner), so it is
+    # slower than the distilled Eros lanes — that is the cost of a dev build.
+    "eros-v14-q8-dev": {
+        "title": "LTX 2.3 10Eros v1.4 q8 dev",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
+        "video_distilled": False,
+        "output_prefix": "mlx_ltx23_10eros_v14_q8_dev_mobile",
+        # Measured 2026-07-25 (768x448/49f, seed 909, one prompt): 30 steps 140.7s
+        # detail 1.868 crawl 0.0023 | 12 steps 76.7s detail 1.872 crawl 0.0018 |
+        # 8 steps 60.4s detail 1.852 crawl 0.0015. Detail is flat within 1% and
+        # crawl mildly improves, so the stock 30 buys nothing here. Raise it if a
+        # prompt ever looks under-converged; the ceiling is quality, not safety.
+        "video_stage1_steps": 12,
+        "benchmark_seconds": 77.0,
+        "backend_prefix": "mlx-ltx-eros",
+        "output_subdir": "Eros",
+    },
+    "eros-v14-q8-dev-ic": {
+        "title": "LTX 2.3 10Eros v1.4 q8 dev IC-LoRA",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
+        "video_distilled": False,
+        "output_prefix": "mlx_ltx23_10eros_v14_q8_dev_ic_mobile",
+        "benchmark_seconds": None,
+        "backend_prefix": "mlx-ltx-eros",
+        "output_subdir": "Eros",
+    },
+    "eros-dmd-v13-ic": {
+        "title": "LTX 2.3 10Eros v1.3 DMD q8 IC-LoRA",
+        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
+        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
+        "video_distilled": True,
+        "output_prefix": "mlx_ltx23_10eros_v13_dmd_q8_ic_mobile",
         "benchmark_seconds": None,
         "backend_prefix": "mlx-ltx-eros",
         "output_subdir": "Eros",
@@ -177,9 +291,12 @@ if str(BASE) not in sys.path:
 from krea2_identity_workflow import (
     KREA2_IDENTITY_BACKENDS,
     KREA2_IDENTITY_CONVROT_MODEL,
+    KREA2_SAMPLERS,
+    KREA2_SCHEDULERS,
     KREA2_TURBO_PRE_LORA_SOURCE_MODEL,
     build_krea2_turbo_outpaint_prompt,
     build_krea2_turbo_identity_prompt as compile_krea2_turbo_identity_prompt,
+    krea2_sampler_defaults,
     resolve_seed_option,
 )
 
@@ -284,6 +401,9 @@ DOWNLOAD_JOBS_FILE = GATEWAY_STATE_DIR / "download_jobs.json"
 LAST_MOBILE_PROMPT_LORAS_FILE = GATEWAY_STATE_DIR / "last_mobile_prompt_loras.json"
 CIVITAI_BASE_MODELS_CACHE = {'at': 0, 'items': None}
 CIVITAI_BASE_MODELS_TTL = 6 * 60 * 60
+# modelId -> {'at': ts, 'versions': [{'id', 'name', 'baseModel'}]} for update checks.
+CIVITAI_MODEL_VERSIONS_CACHE = {}
+CIVITAI_MODEL_VERSIONS_TTL = 6 * 60 * 60
 CIVITAI_FALLBACK_BASE_MODELS = [
     'ZImageTurbo', 'Z-Image Turbo', 'Z Image',
     'SD 1.5', 'SD 1.4', 'SD 2.0', 'SD 2.1', 'SDXL 1.0', 'SDXL Turbo', 'SDXL Lightning',
@@ -2823,6 +2943,24 @@ def run_comfy_api_image(job_id, prompt, options=None):
         jobs[job_id] = rec
 
 
+def _krea2_sampler_choice(options):
+    """Resolve (sampler, scheduler) exactly like the graph compiler does.
+
+    Kept in sync so the job record shows the pair that actually ran — the
+    low-step default swap is otherwise invisible from the history.
+    """
+    options = options or {}
+    steps = int_option(options, "steps", 10, 1, 50)
+    sampler, scheduler = krea2_sampler_defaults(steps)
+    requested_sampler = str(options.get("sampler_name") or "").strip()
+    requested_scheduler = str(options.get("scheduler") or "").strip()
+    if requested_sampler in KREA2_SAMPLERS:
+        sampler = requested_sampler
+    if requested_scheduler in KREA2_SCHEDULERS:
+        scheduler = requested_scheduler
+    return sampler, scheduler
+
+
 def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
     started = now_iso()
     options = options or {}
@@ -2840,6 +2978,8 @@ def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
             "steps": int_option(options, "steps", 10, 1, 50),
             "cfg": float_option(options, "cfg", float_option(options, "guidance", 1.0, 0.0, 20.0), 0.0, 20.0),
             "seed": resolve_seed_option(options),
+            "sampler_name": _krea2_sampler_choice(options)[0],
+            "scheduler": _krea2_sampler_choice(options)[1],
             "ref_boost": float_option(options, "ref_boost", 4.0, 0.0, 1000.0),
             "identity_strength": float_option(options, "identity_strength", 1.0, -10.0, 10.0),
             "grounding_px": int_option(options, "grounding_px", 768, 0, 4096),
@@ -3972,6 +4112,14 @@ def detect_native_mlx_ltx_prompt(body):
             'title': spec['title'],
             'benchmark_seconds': spec.get('benchmark_seconds'),
             **({'cfg_scale': float(cfg_scale)} if cfg_scale is not None else {}),
+            **({'denoise': normalize_ltx_denoise_mode(defaults.get('denoise'))}
+               if normalize_ltx_denoise_mode(defaults.get('denoise')) else {}),
+            # NAG inputs. The runner only acts on these for distilled variants,
+            # where cfg=1 makes a CFG negative prompt inert.
+            **({'negative_prompt': _prompt_string(defaults.get('negative_prompt'))}
+               if _prompt_string(defaults.get('negative_prompt')) else {}),
+            **({'nag_scale': float(defaults['nag_scale'])}
+               if _prompt_number(defaults.get('nag_scale')) is not None else {}),
             **({'loras': loras} if loras else {}),
         },
     }
@@ -4490,6 +4638,70 @@ def _resolve_native_ltx_video_path(value):
     return _resolve_native_ltx_image_path(value)
 
 
+# Post-generation grain cleanup for the distilled LTX path.
+#
+# The distilled two-stage pipeline refines the upscaled latent in 3 steps, which
+# leaves a fine high-frequency residue that is re-rolled every frame — it reads
+# as crawling grain. atadenoise is the right tool: it averages each pixel across
+# neighbouring frames ONLY while the pixel stays inside a threshold, so static
+# grain is averaged away while anything that actually moves is left alone (a
+# plain temporal blur, e.g. hqdn3d's temporal terms, would trade the grain for
+# more ghosting). The `strong` tier adds a purely SPATIAL hqdn3d pass — its two
+# temporal terms are pinned to 0 for the same reason.
+LTX_DENOISE_FILTERS = {
+    'light': 'atadenoise=0a=0.02:0b=0.04:1a=0.02:1b=0.04:2a=0.02:2b=0.04:s=9',
+    'strong': 'atadenoise=0a=0.04:0b=0.08:1a=0.04:1b=0.08:2a=0.04:2b=0.08:s=17,hqdn3d=1.5:1.0:0:0',
+}
+
+
+def normalize_ltx_denoise_mode(value):
+    """Accept off/light/strong (plus loose truthy spellings); '' means no pass."""
+    mode = str(value or '').strip().lower()
+    if mode in LTX_DENOISE_FILTERS:
+        return mode
+    if mode in {'1', 'true', 'yes', 'on'}:
+        return 'light'
+    return ''
+
+
+def apply_ltx_denoise_pass(path, mode):
+    """Re-encode `path` in place through the grain filter. Returns a detail dict.
+
+    Failure is non-fatal: the untouched original stays on disk, because a clip
+    with grain beats no clip at all.
+    """
+    mode = normalize_ltx_denoise_mode(mode)
+    if not mode:
+        return None
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        return {'mode': mode, 'applied': False, 'error': 'ffmpeg not found'}
+    target = Path(path)
+    scratch = target.with_name(f'{target.stem}.denoise-tmp{target.suffix or ".mp4"}')
+    cmd = [
+        ffmpeg, '-y', '-loglevel', 'error',
+        '-i', str(target),
+        '-vf', LTX_DENOISE_FILTERS[mode],
+        '-c:v', 'libx264', '-crf', '17', '-preset', 'medium', '-pix_fmt', 'yuv420p',
+        # LTX generates audio alongside the video — keep it bit-exact.
+        '-c:a', 'copy',
+        '-movflags', '+faststart',
+        str(scratch),
+    ]
+    started = time.monotonic()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        if result.returncode != 0 or not scratch.exists() or scratch.stat().st_size < 1000:
+            detail = (result.stderr or result.stdout or 'unknown ffmpeg error').strip()
+            scratch.unlink(missing_ok=True)
+            return {'mode': mode, 'applied': False, 'error': detail[-400:]}
+        os.replace(scratch, target)
+        return {'mode': mode, 'applied': True, 'seconds': round(time.monotonic() - started, 2)}
+    except Exception as exc:
+        scratch.unlink(missing_ok=True)
+        return {'mode': mode, 'applied': False, 'error': str(exc)[-400:]}
+
+
 def _create_native_ltx_static_reference_video(image_path, output_path, frames, frame_rate):
     """Encode a lossless repeated reference sheet for MLX IC-LoRA conditioning."""
     ffmpeg = shutil.which('ffmpeg')
@@ -5006,13 +5218,37 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                 "-o", str(out),
             ])
         else:
+            # A distilled package has a distilled transformer and runs the no-CFG
+            # --distilled two-stage. A dev package (locally converted v1.4, say)
+            # has no distilled transformer, so --distilled would abort at load:
+            # --two-stage is its equivalent — dev model + CFG at half res, upscale,
+            # then distilled-LoRA refine. Slower, and it needs the q8 build.
+            pipeline_flag = "--distilled" if spec.get('video_distilled') else "--two-stage"
             cmd = [
                 "uv", "run", "ltx-2-mlx", "generate",
-                "--distilled",
+                pipeline_flag,
                 "--model", str(model_path),
                 "--gemma", LTX2_MLX_GEMMA,
                 "--prompt", prompt,
             ]
+            # Only the CFG two-stage path has a stage-1 step budget worth tuning;
+            # --distilled reads its step count from the sigma table.
+            stage1_steps = spec.get('video_stage1_steps')
+            if stage1_steps and not spec.get('video_distilled'):
+                cmd.extend(["--stage1-steps", str(int(stage1_steps))])
+            # NAG carries the negative prompt on the distilled path, which runs
+            # cfg=1 and would otherwise ignore it entirely. The dev two-stage
+            # path has real CFG and consumes the negative prompt through that.
+            negative_prompt = _prompt_string(options.get('negative_prompt'))
+            if negative_prompt and spec.get('video_distilled'):
+                nag_scale = float_quality_option(options, 'nag_scale', LTX_NAG_DEFAULTS['scale'])
+                if nag_scale > 1.0:
+                    cmd.extend([
+                        "--negative-prompt", negative_prompt,
+                        "--nag-scale", str(nag_scale),
+                        "--nag-alpha", str(float_quality_option(options, 'nag_alpha', LTX_NAG_DEFAULTS['alpha'])),
+                        "--nag-tau", str(float_quality_option(options, 'nag_tau', LTX_NAG_DEFAULTS['tau'])),
+                    ])
             for item in keyframes:
                 cmd.extend([
                     "--image", str(item['path']), str(item['frame']), str(item['strength']), str(item['crf'])
@@ -5031,6 +5267,12 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             ])
         env = os.environ.copy()
         env.setdefault("LTX2_DIT_EVAL_EVERY", "8")
+        # Per-variant sampling recipe (sigma ramps, ancestral eta). setdefault keeps
+        # an operator-exported value authoritative for one-off experiments.
+        for key, value in (spec.get('runtime_env') or {}).items():
+            env.setdefault(str(key), str(value))
+        if spec.get('runtime_env'):
+            rec['options']['sampling_recipe'] = dict(spec['runtime_env'])
         rec["progress_phase"] = "ltx-2-mlx"
         rec["progress"] = 5
         with jobs_lock:
@@ -5053,6 +5295,13 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                 raise RuntimeError(f"ltx-2-mlx exited {proc.returncode}\nSTDOUT:\n{stdout[-2000:]}\nSTDERR:\n{stderr[-2000:]}")
             if not out.exists() or out.stat().st_size < 1000:
                 raise RuntimeError("ltx-2-mlx finished without a valid output video")
+            # Runs while the output is still marked active, so the E2E sweeper
+            # never seals the pre-filter file out from under the re-encode.
+            denoise_detail = apply_ltx_denoise_pass(out, options.get('denoise'))
+            if denoise_detail:
+                rec['options']['denoise'] = denoise_detail
+                if not denoise_detail.get('applied'):
+                    print(f"[ltx] denoise pass skipped for {job_id}: {denoise_detail.get('error')}", flush=True)
             visible_out = mirror_output_to_comfy_output(out)
         finally:
             mark_output_inactive(out)
@@ -5463,6 +5712,15 @@ def resolve_civitai_url(value):
     return {'versionId': str(version.get('id')), 'fileId': str(file_id or ''), 'model': model, 'version': version}
 
 
+def civitai_version_display_name(version):
+    """Human label for a resolved version — lets a caller name a download in flight."""
+    model_name = str(((version or {}).get('model') or {}).get('name') or '').strip()
+    version_name = str((version or {}).get('name') or '').strip()
+    if model_name and version_name and version_name.lower() not in model_name.lower():
+        return f'{model_name} · {version_name}'
+    return model_name or version_name
+
+
 def validate_civitai_expected_type(version, expected_type=None):
     expected = str(expected_type or '').strip().lower()
     if not expected:
@@ -5693,12 +5951,409 @@ def compact_lora_record(item):
         'triggerWords': trigger_words,
         'hasPreview': bool(lora_preview_source(item['path'], meta)),
         'defaultWeight': 1.0,
+        # Version identity from the Civitai sidecar: what a card labels itself with
+        # and what an update check compares against. Empty for hand-placed files.
+        'versionId': str(version.get('id') or ''),
+        'versionName': str(version.get('name') or '').strip(),
+        # Civitai's /model-versions payload nests `model` WITHOUT an id and carries
+        # the model id on the version itself, so real sidecars only have modelId.
+        'modelId': str(version.get('modelId') or model.get('id') or ''),
     }
 
 
+# ── LoRA data cache (encrypted at rest) ─────────────────────────────────────────
+# Card previews and Civitai version lists are the only LoRA data that comes from the
+# internet, and both used to be re-fetched constantly: the preview route pulled every
+# remote image on every request, and the version list lived in memory alone, so a
+# gateway restart re-asked Civitai about every installed LoRA.
+#
+# On disk entries are AES-256-CBC with the same machine key the outputs use, under
+# hashed filenames — a LoRA collection is as private as the images it makes, so the
+# cache must not name what is installed. In memory they stay plaintext (bounded) so
+# repeat reads skip the key derivation entirely.
+#
+# Preview entries are keyed by the installed file's IDENTITY (id + size + mtime), so
+# an updated or replaced LoRA can never serve its predecessor's image, and entries
+# for LoRAs that are gone are pruned the next time the catalog is read.
+LORA_CACHE_DIR = GATEWAY_STATE_DIR / "lora-cache"
+LORA_PREVIEW_CACHE_DIR = LORA_CACHE_DIR / "previews"
+LORA_VERSION_CACHE_DIR = LORA_CACHE_DIR / "versions"
+LORA_CACHE_MEMORY_LIMIT = int(os.environ.get("ZIMG_LORA_CACHE_MEMORY_BYTES", str(32 * 1024 * 1024)))
+LORA_CACHE_PASS_ENV = "HIVEMIND_LORA_CACHE_PASS"
+_lora_cache_memory = {}
+_lora_cache_memory_bytes = 0
+_lora_cache_lock = threading.Lock()
+
+
+def _lora_cache_recall(key):
+    with _lora_cache_lock:
+        return _lora_cache_memory.get(key)
+
+
+def _lora_cache_remember(key, payload):
+    global _lora_cache_memory_bytes
+    if len(payload) > LORA_CACHE_MEMORY_LIMIT:
+        return
+    with _lora_cache_lock:
+        if key in _lora_cache_memory:
+            return
+        while _lora_cache_memory and _lora_cache_memory_bytes + len(payload) > LORA_CACHE_MEMORY_LIMIT:
+            evicted = next(iter(_lora_cache_memory))
+            _lora_cache_memory_bytes -= len(_lora_cache_memory.pop(evicted))
+        _lora_cache_memory[key] = payload
+        _lora_cache_memory_bytes += len(payload)
+
+
+def _lora_cache_forget(key):
+    global _lora_cache_memory_bytes
+    with _lora_cache_lock:
+        payload = _lora_cache_memory.pop(key, None)
+        if payload is not None:
+            _lora_cache_memory_bytes -= len(payload)
+
+
+def _lora_cache_openssl(args, payload):
+    """Run openssl with the machine key in the CHILD ENV rather than on stdin.
+
+    The output encryption passes its password on stdin, which works because it
+    encrypts file-to-file. Cache entries are in-memory bytes, and staging them
+    through a plaintext temp file would defeat the point of encrypting them, so the
+    payload takes stdin and the password rides in the (short-lived) child's env.
+    """
+    password = output_encryption_password(create=True)
+    if not password:
+        return None
+    env = dict(os.environ)
+    env[LORA_CACHE_PASS_ENV] = password
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/openssl", "enc", *args, "-aes-256-cbc", "-pbkdf2",
+             "-iter", str(OUTPUT_ENCRYPTION_ITER), "-pass", f"env:{LORA_CACHE_PASS_ENV}"],
+            input=payload, capture_output=True, env=env, timeout=60,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    return proc.stdout
+
+
+def lora_cache_store(path, payload):
+    sealed = _lora_cache_openssl(["-salt"], payload)
+    if not sealed:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_bytes(sealed)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
+
+def lora_cache_load(path):
+    try:
+        if not path.is_file():
+            return None
+        sealed = path.read_bytes()
+    except Exception:
+        return None
+    return _lora_cache_openssl(["-d"], sealed)
+
+
+def lora_cache_key(item, extra=""):
+    """Cache identity for an installed LoRA: change the file, change the key."""
+    try:
+        stat = Path(item.get("path") or "").stat()
+        identity = f"{item.get('id')}|{stat.st_size}|{stat.st_mtime_ns}|{extra}"
+    except OSError:
+        return ""
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
+def lora_preview_cache_path(key):
+    return LORA_PREVIEW_CACHE_DIR / f"{key}.enc"
+
+
+def cached_lora_preview(item, source):
+    """(bytes, content_type) for a remote preview already fetched, else None."""
+    key = lora_cache_key(item, source)
+    if not key:
+        return None
+    payload = _lora_cache_recall(key)
+    if payload is None:
+        payload = lora_cache_load(lora_preview_cache_path(key))
+        if payload is None:
+            return None
+        _lora_cache_remember(key, payload)
+    content_type, _, data = payload.partition(b"\n")
+    if not data:
+        return None
+    return data, content_type.decode("utf-8", "replace") or "image/jpeg"
+
+
+def cache_lora_preview(item, source, data, content_type):
+    key = lora_cache_key(item, source)
+    if not key or not data:
+        return
+    payload = f"{content_type or 'image/jpeg'}\n".encode("utf-8") + data
+    _lora_cache_remember(key, payload)
+    lora_cache_store(lora_preview_cache_path(key), payload)
+
+
+def lora_version_cache_path(model_id):
+    name = hashlib.sha256(f"model:{model_id}".encode("utf-8")).hexdigest()[:32]
+    return LORA_VERSION_CACHE_DIR / f"{name}.enc"
+
+
+def cached_model_versions(model_id):
+    payload = lora_cache_load(lora_version_cache_path(model_id))
+    if not payload:
+        return None
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except Exception:
+        return None
+    return record if isinstance(record, dict) and isinstance(record.get("versions"), list) else None
+
+
+def cache_model_versions(model_id, record):
+    try:
+        lora_cache_store(lora_version_cache_path(model_id), json.dumps(record).encode("utf-8"))
+    except Exception:
+        pass
+
+
+def prune_lora_caches(items):
+    """Drop cached data for LoRAs that were deleted, replaced, or updated.
+
+    A replaced file changes its own preview key, so this both removes the orphan and
+    guarantees the next read refetches. Version lists belong to a Civitai model, not
+    to a file, so they survive an update and are dropped only when nothing installed
+    refers to that model any more.
+    """
+    previews, versions = set(), set()
+    for item in items or []:
+        source = lora_preview_source(item.get("path"), item.get("metadata") or {})
+        if str(source).startswith(("http://", "https://")):
+            key = lora_cache_key(item, source)
+            if key:
+                previews.add(f"{key}.enc")
+        model_id = compact_lora_record(item).get("modelId")
+        if model_id:
+            versions.add(lora_version_cache_path(model_id).name)
+    for directory, keep in ((LORA_PREVIEW_CACHE_DIR, previews), (LORA_VERSION_CACHE_DIR, versions)):
+        try:
+            stale = [p for p in directory.glob("*.enc") if p.name not in keep]
+        except Exception:
+            continue
+        for path in stale:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            _lora_cache_forget(path.stem)
+
+
+def civitai_model_versions(model_id, force=False):
+    """Version list for a Civitai model id, cached — update checks are chatty otherwise."""
+    import time
+    key = str(model_id)
+    now = time.time()
+    cached = CIVITAI_MODEL_VERSIONS_CACHE.get(key)
+    if cached and not force and now - float(cached.get('at') or 0) < CIVITAI_MODEL_VERSIONS_TTL:
+        return cached.get('versions') or []
+    if not force:
+        # Encrypted on disk, so a gateway restart does not re-ask Civitai about
+        # every installed LoRA just to redraw the same update badges.
+        stored = cached_model_versions(key)
+        if stored and now - float(stored.get('at') or 0) < CIVITAI_MODEL_VERSIONS_TTL:
+            CIVITAI_MODEL_VERSIONS_CACHE[key] = stored
+            return stored.get('versions') or []
+    model = civitai_json(f'/models/{int(model_id)}')
+    versions = [
+        {'id': str(v.get('id') or ''), 'name': str(v.get('name') or ''), 'baseModel': str(v.get('baseModel') or '')}
+        for v in (model.get('modelVersions') or [])
+        if v.get('id')
+    ]
+    record = {'at': now, 'versions': versions}
+    CIVITAI_MODEL_VERSIONS_CACHE[key] = record
+    cache_model_versions(key, record)
+    return versions
+
+
+_VERSION_TOKEN = re.compile(r'^v?\d+(?:[._-]\d+)*[a-z]?$')
+
+
+def _version_label_tokens(name):
+    """Words of a version name with the version numbers removed.
+
+    "Soft Enhance" -> {soft, enhance}; "Krea 2 v1.0" -> {krea}; "v1.1" -> set().
+    Digits inside a word go too, so "2vector" and "3vector" are one lineage.
+    """
+    words = re.split(r'[^a-z0-9]+', str(name or '').lower())
+    labels = set()
+    for word in words:
+        if not word or _VERSION_TOKEN.match(word):
+            continue
+        stripped = re.sub(r'\d+', '', word)
+        if len(stripped) > 1:  # a lone "v" or stray letter carries no meaning
+            labels.add(stripped)
+    return labels
+
+
+def _version_numbers(name):
+    return [
+        tuple(int(part) for part in re.split(r'[._-]', match) if part.isdigit())
+        for match in re.findall(r'\d+(?:[._-]\d+)*', str(name or ''))
+    ]
+
+
+def same_version_lineage(installed_name, candidate_name):
+    """Whether two version names describe the same thing at different revisions.
+
+    Civitai models publish OPTIONS as versions, not just revisions: "LTX 2.3 -
+    Enhancers" ships "Soft Enhance" and "Crisp Enhance" side by side, and the
+    higher id is simply the other option, not a newer one. Replacing on that is
+    how a Soft install got overwritten with Crisp.
+
+    Heuristic, deliberately conservative: the descriptive words (version numbers
+    stripped) must be the same set, or one must be a subset of the other —
+    "V4.1 Exp, pre" -> "v4.3_EXP" stays an update, "Soft" -> "Crisp" does not.
+    """
+    installed = _version_label_tokens(installed_name)
+    candidate = _version_label_tokens(candidate_name)
+    if not installed or not candidate:
+        return True  # a bare "v1.1" says nothing that contradicts the install
+    return installed <= candidate or candidate <= installed
+
+
+def newer_civitai_version(versions, installed_version_id, base_models=None, installed_name=None):
+    """The newest version of the SAME base model newer than the installed one, or None.
+
+    Civitai returns versions newest-first, but ids are monotonic per model, so the
+    comparison is on the id rather than on list order.
+
+    The base-model filter is what makes this an update rather than a sibling: one
+    Civitai model routinely publishes a version per base (ZImageTurbo, Krea 2, Qwen,
+    Flux…), and the Krea 2 version of a Z-Image LoRA is a different adapter, not a
+    newer one — replacing with it would swap a working file for an incompatible one.
+    """
+    try:
+        installed = int(installed_version_id)
+    except (TypeError, ValueError):
+        return None
+    wanted = [base for base in (base_models or []) if base]
+    newest = None
+    for version in versions or []:
+        try:
+            candidate = int(version.get('id'))
+        except (TypeError, ValueError):
+            continue
+        if candidate <= installed:
+            continue
+        if wanted:
+            candidate_base = version.get('baseModel') or ''
+            # No declared base is not evidence of a match; skip rather than guess.
+            if not candidate_base or not lora_base_matches(candidate_base, wanted):
+                continue
+        # A sibling option is not an upgrade path, however high its id.
+        if installed_name and not same_version_lineage(installed_name, version.get('name')):
+            continue
+        if newest is None or candidate > int(newest['id']):
+            newest = version
+    return newest
+
+
+def civitai_lora_updates(base_models=None, force=False):
+    """Map of installed LoRA id -> newer Civitai version, for the ones that have any.
+
+    Only LoRAs with a Civitai sidecar (model id + version id) can be checked; API
+    failures are skipped per model so one rate limit does not hide every update.
+    """
+    items = local_loras_unfiltered()
+    if base_models:
+        items = [item for item in items if lora_base_matches(item.get('baseModel'), base_models)]
+    out = {}
+    for item in items:
+        record = compact_lora_record(item)
+        model_id, version_id = record.get('modelId'), record.get('versionId')
+        if not model_id or not version_id:
+            continue
+        try:
+            versions = civitai_model_versions(model_id, force=force)
+        except Exception:
+            continue
+        # Prefer the installed file's own base model; fall back to the caller's
+        # filter when the sidecar never recorded one.
+        installed_base = [item.get('baseModel')] if item.get('baseModel') else list(base_models or [])
+        newer = newer_civitai_version(versions, version_id, installed_base, record.get('versionName'))
+        if not newer:
+            continue
+        out[record['id']] = {
+            'currentVersionId': version_id,
+            'currentVersionName': record.get('versionName') or '',
+            'latestVersionId': newer['id'],
+            'latestVersionName': newer.get('name') or '',
+            'latestBaseModel': newer.get('baseModel') or '',
+            'modelId': model_id,
+            'url': f"https://civitai.com/models/{model_id}?modelVersionId={newer['id']}",
+        }
+    return out
+
+
+def resolve_installed_lora_path(lora_id):
+    """Absolute path for an installed-LoRA id, refusing anything outside models/loras."""
+    root = (COMFY / 'models' / 'loras').resolve()
+    candidate = (root / str(lora_id or '')).resolve()
+    if candidate == root or root not in candidate.parents:
+        raise RuntimeError('Refusing to touch a LoRA outside the ComfyUI loras directory')
+    if not candidate.is_file():
+        raise RuntimeError(f'No installed LoRA named {lora_id}')
+    return candidate
+
+
+def replace_installed_lora(old_path, result):
+    """Retire the superseded file once its replacement is on disk.
+
+    Called only after a successful download, so the old LoRA stays usable for the
+    whole transfer. A same-filename update has already overwritten it, in which
+    case there is nothing to remove.
+    """
+    old = Path(old_path).resolve()
+    new = Path((result or {}).get('path') or '').resolve()
+    if not new.is_file() or old == new:
+        return {'removed': '', 'replacedBy': str(new)}
+    root = (COMFY / 'models' / 'loras').resolve()
+    if root not in old.parents:
+        raise RuntimeError('Refusing to remove a LoRA outside the ComfyUI loras directory')
+    for sidecar in metadata_sidecars(old):
+        sidecar.unlink(missing_ok=True)
+    old.unlink(missing_ok=True)
+    # Carry the generation selection over to the replacement instead of silently
+    # dropping the LoRA out of the active set.
+    try:
+        old_id = str(old.relative_to(root))
+        new_id = str(new.relative_to(root))
+        selected = load_selected_loras()
+        if any(x.get('id') == old_id for x in selected):
+            save_selected_loras([
+                {'id': new_id, 'strength': x.get('strength', 1.0)} if x.get('id') == old_id else x
+                for x in selected
+            ])
+    except Exception:
+        pass
+    return {'removed': str(old), 'replacedBy': str(new)}
+
+
 def local_lora_catalog(base_models):
+    items = local_loras_unfiltered()
+    # Opening the panel is the moment the installed set is known, so it is also when
+    # cached data for LoRAs that were deleted or replaced stops being reachable.
+    prune_lora_caches(items)
     matches = [
-        item for item in local_loras_unfiltered()
+        item for item in items
         if lora_base_matches(item.get('baseModel'), base_models)
     ]
     records = [compact_lora_record(item) for item in matches]
@@ -5785,7 +6440,11 @@ def summarize_civitai_item(item):
     return {'id': item.get('id'), 'name': item.get('name'), 'type': item.get('type'), 'nsfw': item.get('nsfw'), 'creator': (item.get('creator') or {}).get('username'), 'stats': item.get('stats') or {}, 'modelVersions': versions}
 
 
-def download_civitai_version(version_id, file_id=None, progress_cb=None, token_override=None):
+class DownloadCancelled(Exception):
+    """Raised inside the transfer loop when a caller asks to cancel a download."""
+
+
+def download_civitai_version(version_id, file_id=None, progress_cb=None, token_override=None, should_cancel=None):
     version = civitai_json(f'/model-versions/{int(version_id)}', token_override=token_override)
     model_type = (version.get('model') or {}).get('type') or 'Model'
     files = version.get('files') or []
@@ -5837,14 +6496,22 @@ def download_civitai_version(version_id, file_id=None, progress_cb=None, token_o
         done = 0
         if progress_cb:
             progress_cb(done, total)
+        cancelled = False
         with tmp.open('wb') as f:
             while True:
+                if should_cancel and should_cancel():
+                    cancelled = True
+                    break
                 chunk = r.read(1024*1024)
                 if not chunk: break
                 f.write(chunk)
                 done += len(chunk)
                 if progress_cb:
                     progress_cb(done, total)
+        if cancelled:
+            # Leave nothing half-written behind: the partial file is the only trace.
+            tmp.unlink(missing_ok=True)
+            raise DownloadCancelled('Download cancelled')
         tmp.rename(dest)
     side = {'downloadedAt': now_iso(), 'modelType': model_type, 'modelVersion': version, 'baseModel': version.get('baseModel'), 'file': chosen}
     lora_sidecar(dest).write_text(json.dumps(side, indent=2))
@@ -5859,9 +6526,35 @@ def public_download_job(job):
     return out
 
 
-def start_civitai_download_job(version_id, file_id=None, token_override=None):
+def cancel_civitai_download_job(job_id):
+    """Flag a running download for cancellation; the transfer loop stops at the next chunk."""
+    with download_jobs_lock:
+        rec = download_jobs.get(job_id)
+        if not rec:
+            return None
+        if rec.get('status') in ('queued', 'running'):
+            rec['cancel_requested'] = True
+            rec['updated_at'] = now_iso()
+            download_jobs[job_id] = rec
+            save_download_jobs_unlocked()
+        return dict(rec)
+
+
+def download_job_cancel_requested(job_id):
+    with download_jobs_lock:
+        return bool((download_jobs.get(job_id) or {}).get('cancel_requested'))
+
+
+def start_civitai_download_job(version_id, file_id=None, token_override=None, name=None, replace_id=None):
     job_id = uuid.uuid4().hex[:12]
     rec = {'id': job_id, 'status': 'queued', 'created_at': now_iso(), 'versionId': str(version_id), 'fileId': str(file_id or ''), 'downloaded_bytes': 0, 'total_bytes': 0}
+    if name:
+        # Carried so a caller can label the download before the file lands.
+        rec['name'] = str(name)
+    replace_path = resolve_installed_lora_path(replace_id) if replace_id else None
+    if replace_path:
+        # Echoed so a reconnecting client knows which card this download updates.
+        rec['replaces'] = str(replace_id)
     with download_jobs_lock:
         download_jobs[job_id] = rec
         save_download_jobs_unlocked()
@@ -5872,10 +6565,21 @@ def start_civitai_download_job(version_id, file_id=None, token_override=None):
     def worker():
         update_download_job(job_id, status='running', started_at=now_iso())
         try:
-            result = download_civitai_version(version_id, file_id, progress_cb=progress, token_override=token_override)
+            result = download_civitai_version(
+                version_id,
+                file_id,
+                progress_cb=progress,
+                token_override=token_override,
+                should_cancel=lambda: download_job_cancel_requested(job_id),
+            )
+            if replace_path:
+                # Only now that the replacement is on disk does the old file go.
+                result = {**result, 'replaced': replace_installed_lora(replace_path, result)}
             with download_jobs_lock:
                 downloaded = download_jobs[job_id].get('total_bytes') or download_jobs[job_id].get('downloaded_bytes', 0)
             update_download_job(job_id, status='success', finished_at=now_iso(), result=result, downloaded_bytes=downloaded)
+        except DownloadCancelled:
+            update_download_job(job_id, status='cancelled', finished_at=now_iso(), error='Download cancelled')
         except Exception as e:
             update_download_job(job_id, status='error', finished_at=now_iso(), error=str(e))
 
@@ -6786,10 +7490,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_text("not found\n", 404, "text/plain")
             try:
                 if source.startswith(('http://', 'https://')):
-                    preview_request = Request(source, headers={'User-Agent': 'HivemindContentStudio/1.0'})
-                    with urlopen(preview_request, timeout=30) as upstream:
-                        data = upstream.read()
-                        ctype = upstream.headers.get('Content-Type', 'image/jpeg').split(';', 1)[0]
+                    # Civitai-hosted card art: fetched once, then served from the
+                    # encrypted cache until this LoRA file changes or goes away.
+                    cached = cached_lora_preview(item, source)
+                    if cached:
+                        data, ctype = cached
+                    else:
+                        preview_request = Request(source, headers={'User-Agent': 'HivemindContentStudio/1.0'})
+                        with urlopen(preview_request, timeout=30) as upstream:
+                            data = upstream.read()
+                            ctype = upstream.headers.get('Content-Type', 'image/jpeg').split(';', 1)[0]
+                        cache_lora_preview(item, source, data, ctype)
                 else:
                     preview_path = Path(source).resolve()
                     lora_root = (COMFY / 'models' / 'loras').resolve()
@@ -6815,6 +7526,16 @@ class Handler(BaseHTTPRequestHandler):
                 base_models = requested_bases or current_base_models()
                 return self.send_json({"baseModels": base_models, "loras": local_lora_catalog(base_models)})
             return self.send_json({"baseModels": current_base_models(), "loras": local_loras(), "selected": load_selected_loras()})
+        if parsed.path == "/api/civitai/lora-updates":
+            requested_bases = []
+            for raw in qs.get('baseModels', []):
+                requested_bases.extend(value.strip() for value in raw.split(',') if value.strip())
+            force = qs.get('refresh', [''])[0] in {'1', 'true', 'yes'}
+            try:
+                updates = civitai_lora_updates(requested_bases or current_base_models(), force=force)
+                return self.send_json({"updates": updates})
+            except Exception as e:
+                return self.send_json({"error": str(e)}, 502)
         if parsed.path == "/api/civitai/base-models":
             force = qs.get('refresh', [''])[0] in {'1', 'true', 'yes'}
             return self.send_json({"baseModels": civitai_base_model_options(force=force), "currentBaseModels": current_base_models()})
@@ -6971,13 +7692,23 @@ class Handler(BaseHTTPRequestHandler):
                 if data.get('url'):
                     resolved = resolve_civitai_url(data.get('url'))
                     validate_civitai_expected_type(resolved.get('version') or {}, data.get('expectedType'))
-                    job = start_civitai_download_job(resolved.get('versionId'), data.get('fileId') or resolved.get('fileId'), token_override=civitai_key)
+                    job = start_civitai_download_job(
+                        resolved.get('versionId'),
+                        data.get('fileId') or resolved.get('fileId'),
+                        token_override=civitai_key,
+                        name=civitai_version_display_name(resolved.get('version') or {}),
+                        replace_id=data.get('replaceId') or data.get('replace_id'),
+                    )
                     job['resolved'] = {'versionId': resolved.get('versionId'), 'fileId': data.get('fileId') or resolved.get('fileId')}
                     return self.send_json(job, 202)
                 job = start_civitai_download_job(data.get('versionId') or data.get('modelVersionId'), data.get('fileId'), token_override=civitai_key)
                 return self.send_json(job, 202)
             except Exception as e:
                 return self.send_json({"error": str(e)}, 502)
+        if parsed.path.startswith("/api/civitai/cancel-download/"):
+            jid = parsed.path.rsplit("/", 1)[-1]
+            rec = cancel_civitai_download_job(jid)
+            return self.send_json(public_download_job(rec) if rec else {"error": "not found"}, 200 if rec else 404)
         if parsed.path.startswith("/comfy/") or parsed.path.startswith("/mobile/"):
             return self.proxy_to_comfy(parsed, "POST")
         if parsed.path not in ["/generate", "/api/generate"]:
@@ -7027,7 +7758,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "prompt required"}, 400)
             options = {}
             if isinstance(data, dict):
-                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'negative_prompt', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'couple_mode', 'couple_shared', 'couple_split', 'couple_direction', 'couple_pair']:
+                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'sampler_name', 'scheduler', 'negative_prompt', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'couple_mode', 'couple_shared', 'couple_split', 'couple_direction', 'couple_pair']:
                     if key in data:
                         options[key] = data.get(key)
                 _normalize_couple_options(options)

@@ -48,8 +48,10 @@ export function Modal({ open = true, onClose, title, size = 'md', children, foot
           </div>
         ) : null}
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        {/* Footer wraps: an action row that outgrows the dialog falls to a second
+            row instead of running off the left edge under justify-end. */}
         {footer ? (
-          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line1 px-5 py-3.5">{footer}</div>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-line1 px-5 py-3.5">{footer}</div>
         ) : null}
       </div>
     </div>,

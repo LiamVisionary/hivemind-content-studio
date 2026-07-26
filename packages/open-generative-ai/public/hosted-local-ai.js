@@ -77,8 +77,12 @@
     }
   }
 
-  async function listLoras(modelId) {
-    const data = await jsonFetch(`/local-ai/loras/${encodeURIComponent(modelId)}`);
+  async function listLoras(modelId, baseModels) {
+    // Video workflows are defined in the Media Studio MCP, not in the registry the
+    // bridge reads, so carry the base models from the catalog we were given.
+    const list = Array.isArray(baseModels) ? baseModels.filter(Boolean) : [];
+    const query = list.length ? `?baseModels=${encodeURIComponent(list.join(','))}` : '';
+    const data = await jsonFetch(`/local-ai/loras/${encodeURIComponent(modelId)}${query}`);
     return {
       ...data,
       loras: (data.loras || []).map((lora) => ({
@@ -99,11 +103,20 @@
       method: 'POST',
       body: JSON.stringify(params || {}),
     }),
-    startCivitaiDownload: (url) => jsonFetch('/local-ai/civitai-download', {
+    startCivitaiDownload: (url, options) => jsonFetch('/local-ai/civitai-download', {
       method: 'POST',
-      body: JSON.stringify({ url }),
+      // replaceId marks an update-and-replace of an installed LoRA.
+      body: JSON.stringify({ url, ...(options?.replaceId ? { replaceId: options.replaceId } : {}) }),
     }),
+    listLoraUpdates: (baseModels) => {
+      const list = Array.isArray(baseModels) ? baseModels.filter(Boolean) : [];
+      const query = list.length ? `?baseModels=${encodeURIComponent(list.join(','))}` : '';
+      return jsonFetch(`/local-ai/lora-updates${query}`);
+    },
     getCivitaiDownloadJob: (jobId) => jsonFetch(`/local-ai/civitai-download/${encodeURIComponent(jobId)}`),
+    cancelCivitaiDownload: (jobId) => jsonFetch(`/local-ai/civitai-download/${encodeURIComponent(jobId)}`, {
+      method: 'DELETE',
+    }),
     downloadModel: async (modelId) => ({ ok: true, id: modelId, source: 'hosted' }),
     downloadAuxiliary: async (auxKey) => ({ ok: true, id: auxKey, source: 'hosted' }),
     deleteModel: async () => ({ ok: false, error: 'Hosted mode keeps shared models managed by the Mac.' }),

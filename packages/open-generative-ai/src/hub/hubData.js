@@ -10,6 +10,7 @@ import { setApiStatus as setApiStatusStore } from '../app/statusStore.js';
 import { decryptMedia } from '../lib/e2eVault.js';
 import { loadStudioSetup } from '../app/promptTarget.js';
 import { updateComposerSection } from '../lib/composerState.js';
+import { basenameOf, resolveGenerationSetup } from '../lib/generationSetupStore.js';
 
 // Prompt fields sealed to the owner vault arrive as "vseal:v1:{envelope}". The
 // server holds no key — decrypt them in-browser for display. Fail-soft so a
@@ -828,12 +829,51 @@ function historySnapshotSignature(prompts, canvasHistory, total, hasMore, format
   ]);
 }
 
+// A background poll only ever re-fetches PAGE 1, but the view may have scrolled
+// far past it. Publishing page 1 as the whole list drops every later page: those
+// cards unmount, their decrypted <img>/<video> state dies (a playing video snaps
+// back to the "Load video" button), and the infinite-scroll sentinel — now sitting
+// near the shortened list's end — immediately re-appends the very pages that were
+// just thrown away. That churn repeated on every 10s tick. Merge instead: page 1
+// refreshes the newest window, everything already loaded past it is kept, and
+// client-discovered provenance survives a refresh that comes back without it.
+function mergeCanvasHistoryPage(existing, page) {
+  if (!page.length) return page; // the collection really is empty now
+  const byId = new Map(existing.map((entry) => [entry.history_id, entry]));
+  const head = page.map((fresh) => {
+    const known = byId.get(fresh.history_id);
+    if (!known) return fresh;
+    return {
+      ...fresh,
+      models: fresh.models?.length ? fresh.models : known.models,
+      seeds: fresh.seeds?.length ? fresh.seeds : known.seeds,
+    };
+  });
+  const headIds = new Set(head.map((entry) => entry.history_id));
+  // History is newest-first, so everything genuinely past page 1 is older than
+  // that page's last row. Cutting on recency rather than on index keeps the later
+  // pages when a new generation shifts the page boundary, while still dropping a
+  // row the server deleted from inside the page-1 window. Rows without a
+  // timestamp are kept — losing one is worse than showing it a poll too long.
+  const oldest = page[page.length - 1].created_at;
+  return head.concat(existing.filter((entry) => (
+    !headIds.has(entry.history_id) && (!oldest || !entry.created_at || entry.created_at <= oldest)
+  )));
+}
+
 export async function loadPrompts({ quiet = false } = {}) {
+  // A quiet poll refreshes the first page in place. An explicit load (first open,
+  // filter change) restarts pagination from scratch.
+  const refresh = quiet && hubState.canvasHistory.length > 0;
   let changed = true;
   try {
-    hubState.canvasPage = 0;
-    hubState.canvasHasMore = true;
-    hubState.canvasLoading = true;
+    if (!refresh) {
+      hubState.canvasPage = 0;
+      hubState.canvasHasMore = true;
+      // Only an explicit load owns the spinner: flipping it during a poll flashes
+      // "Loading more outputs…" and makes a concurrent scroll-to-load a no-op.
+      hubState.canvasLoading = true;
+    }
     const query = new URLSearchParams({
       page: '1',
       page_size: String(hubState.canvasPageSize),
@@ -845,11 +885,21 @@ export async function loadPrompts({ quiet = false } = {}) {
       api(`/api/canvas/history?${query.toString()}`),
     ]);
     const prompts = await Promise.all((promptPayload.prompts || []).map(decryptPromptEntry));
-    const canvasHistory = canvasPayload.history || [];
+    const firstPage = canvasPayload.history || [];
+    const canvasHistory = refresh ? mergeCanvasHistoryPage(hubState.canvasHistory, firstPage) : firstPage;
     const total = Number(canvasPayload.pagination?.total || canvasHistory.length);
-    const hasMore = Boolean(canvasPayload.pagination?.has_more);
-    const formats = canvasPayload.filters?.formats || [];
-    const models = canvasPayload.filters?.models || [];
+    // A refresh never looked past page 1, so it must not rewind the cursor the
+    // infinite scroller already advanced.
+    const page = refresh ? hubState.canvasPage : (canvasPayload.pagination?.page || 1);
+    const hasMore = refresh ? hubState.canvasHasMore : Boolean(canvasPayload.pagination?.has_more);
+    const pageFormats = canvasPayload.filters?.formats || [];
+    const pageModels = canvasPayload.filters?.models || [];
+    // Filter options are per-page (loadMoreCanvasHistory unions them), so a refresh
+    // must union too or the format/model dropdowns shrink under the user.
+    const formats = refresh ? [...new Set([...hubState.canvasFormats, ...pageFormats])].sort() : pageFormats;
+    const models = refresh
+      ? [...new Set([...hubState.canvasModels, ...pageModels])].sort((left, right) => left.localeCompare(right))
+      : pageModels;
     changed = historySnapshotSignature(hubState.prompts, hubState.canvasHistory, hubState.canvasTotal, hubState.canvasHasMore, hubState.canvasFormats, hubState.canvasModels)
       !== historySnapshotSignature(prompts, canvasHistory, total, hasMore, formats, models);
     if (changed) {
@@ -859,12 +909,12 @@ export async function loadPrompts({ quiet = false } = {}) {
       hubState.canvasFormats = formats;
       hubState.canvasModels = models;
     }
-    hubState.canvasPage = canvasPayload.pagination?.page || 1;
+    hubState.canvasPage = page;
     hubState.canvasHasMore = hasMore;
   } catch (error) {
     if (!quiet) toast.error(error.message);
   } finally {
-    hubState.canvasLoading = false;
+    if (!refresh) hubState.canvasLoading = false;
   }
   if (changed) notifyHub();
 }
@@ -921,10 +971,14 @@ export function formatTelemetryDuration(milliseconds) {
 
 export async function loadGenerationTelemetry({ quiet = false } = {}) {
   try {
-    hubState.telemetry = await api('/api/telemetry/generations');
-    notifyHub();
+    const telemetry = await api('/api/telemetry/generations');
+    const changed = JSON.stringify(hubState.telemetry) !== JSON.stringify(telemetry);
+    hubState.telemetry = telemetry;
+    if (changed) notifyHub();
+    return changed;
   } catch (error) {
     if (!quiet) toast.error(error.message);
+    return false;
   }
 }
 
@@ -1098,9 +1152,29 @@ export function findCanvasHistoryIdForOutput(url, basename) {
   return entry ? entry.history_id : null;
 }
 
+// Outputs the studios made themselves (Media Studio video, local ComfyUI image,
+// cloud MUAPI) have no ComfyUI Canvas graph to recover, so asking the Canvas
+// bridge for one only ever answered "Exact Canvas workflow is unavailable for
+// this output". Their real settings were sealed to the owner vault at generation
+// time — the same record drag-to-restore reads. Try that first; the Canvas bridge
+// stays the fallback for genuine Canvas outputs and anything predating the store.
+async function restoreSealedGenerationSetup(entry) {
+  let result = null;
+  try {
+    result = await resolveGenerationSetup({ url: entry.media_url, basename: basenameOf(entry.media_url) });
+  } catch { return false; }
+  if (!result?.context) return false;
+  const section = result.section || (entry.media_type?.startsWith('video/') ? 'video' : 'image');
+  loadStudioSetup(section, { format: 'studio-full-context', section, context: result.context });
+  window.dispatchEvent(new CustomEvent('navigate', { detail: { page: section } }));
+  toast.success(`Settings restored into the ${section === 'video' ? 'Video' : 'Image'} studio.`);
+  return true;
+}
+
 export async function loadCanvasOutputInStudio(historyId) {
   const entry = hubState.canvasHistory.find((item) => item.history_id === historyId);
   if (!entry) return;
+  if (await restoreSealedGenerationSetup(entry)) return;
   try {
     const setup = await inspectCanvasHistoryEntry(historyId);
     if (!setup) throw new Error(hubState.canvasSetups[historyId]?.error || 'Exact setup unavailable');
@@ -1144,6 +1218,17 @@ export async function copyText(value) {
 
 export async function copyCanvasPrompt(historyId) {
   try {
+    // Same gap as loadCanvasOutputInStudio: studio-made outputs have no Canvas
+    // graph, but their prompt is in the vault-sealed capture.
+    const entry = hubState.canvasHistory.find((item) => item.history_id === historyId);
+    if (entry) {
+      const sealed = await resolveGenerationSetup({ url: entry.media_url, basename: basenameOf(entry.media_url) })
+        .catch(() => null);
+      if (sealed?.context?.prompt) {
+        await copyText(sealed.context.prompt);
+        return;
+      }
+    }
     const setup = await inspectCanvasHistoryEntry(historyId);
     if (!setup?.primaryPrompt) throw new Error('This output has no recoverable prompt.');
     await copyText(setup.primaryPrompt);
@@ -1454,11 +1539,16 @@ export function duplicateRun(runId) {
 
 export async function loadRuns() {
   const payload = await api('/api/runs');
+  // Same reasoning as loadPrompts: this is on the 10s poll, so republishing an
+  // identical payload re-renders every hub view for nothing. Returns whether it
+  // actually changed so refreshAll can stay silent on an idle tick.
+  const changed = JSON.stringify(hubState.runs) !== JSON.stringify(payload.runs);
   hubState.runs = payload.runs;
   // Legacy AppShell topbar id — write only if present (retired in the new shell).
   const count = document.getElementById('hub-run-count');
   if (count) count.textContent = hubState.runs.length;
-  notifyHub();
+  if (changed) notifyHub();
+  return changed;
 }
 
 export function runTitle(run) {
@@ -1541,9 +1631,12 @@ export async function refreshAll({ quiet = false } = {}) {
     if (!hubState.catalog || !quiet) hubState.catalog = await api('/api/catalog');
     if (!quiet) hubState.surfaces = await api('/api/surfaces');
     if (!hubState.oauth || !quiet) await loadOAuth();
-    await Promise.all([loadRuns(), loadGenerationTelemetry({ quiet: true })]);
+    const [runsChanged, telemetryChanged] = await Promise.all([loadRuns(), loadGenerationTelemetry({ quiet: true })]);
     setApiOnline(true);
-    notifyHub();
+    // An idle quiet tick must publish nothing at all — loadRuns/loadGenerationTelemetry
+    // already notified if their data moved, and a blanket notify here re-rendered the
+    // whole hub (every History card, every thumbnail) every 10 seconds regardless.
+    if (!quiet || runsChanged || telemetryChanged) notifyHub();
     // Keep the History tab live while it's open — a generation finishing in
     // another view appears without toggling away.
     if (hubState.activeView === 'history') await loadPrompts({ quiet: true });

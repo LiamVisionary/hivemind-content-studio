@@ -4,7 +4,7 @@ import { useMediaSrc } from '../../hooks/hooks.js';
 import { t } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Modal } from '../../ui/Modal.jsx';
-import { Button, cx } from '../../ui/kit.jsx';
+import { ActionButton, Button, cx } from '../../ui/kit.jsx';
 
 export function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReuse, onUpscale }) {
   const src = useMediaSrc(entry.url);
@@ -84,22 +84,32 @@ function MetaRow({ label, value }) {
   );
 }
 
-export function ViewerModal({ url, entry, onClose, onBackToSetup, onRegenerate, onDownload, onNew, onUpscale }) {
+export function ViewerModal({ url, entry, onClose, onBackToSetup, onRegenerate, onDownload, onUpscale, onUseAsVideoFrame, videoFrameBusy }) {
   const src = useMediaSrc(url);
   return (
     <Modal open onClose={onClose} title="Generated image" size="xl"
       footer={
         <>
-          <Button variant="ghost" onClick={onNew}>{t('common.newItem')}</Button>
-          <Button variant="neutral" onClick={onBackToSetup}>{t('common.backToSetup')}</Button>
-          <Button variant="neutral" onClick={onRegenerate}>{t('common.regenerate')}</Button>
+          {/* Going back is a direction, not one of the actions — it leads the row
+              from the left (mr-auto) while everything you can DO stays right. */}
+          <ActionButton variant="neutral" icon="chevronLeft" label={t('common.backToSetup')} className="mr-auto" onClick={onBackToSetup} />
+          <ActionButton variant="neutral" icon="refresh" label={t('common.regenerate')} onClick={onRegenerate} />
           {onUpscale ? (
             <>
-              <Button variant="neutral" icon="wand" onClick={() => onUpscale('fast')}>Upscale</Button>
-              <Button variant="neutral" icon="sparkles" onClick={() => onUpscale('max')}>Upscale Max</Button>
+              <ActionButton variant="neutral" icon="wand" label="Upscale" onClick={() => onUpscale('fast')} />
+              <ActionButton variant="neutral" icon="sparkles" label="Upscale Max" onClick={() => onUpscale('max')} />
             </>
           ) : null}
-          <Button variant="primary" icon="download" onClick={onDownload}>{t('common.download')}</Button>
+          {onUseAsVideoFrame ? (
+            <ActionButton
+              variant="neutral"
+              icon="video"
+              loading={videoFrameBusy}
+              label={videoFrameBusy ? 'Sending…' : 'Use as video starting frame'}
+              onClick={onUseAsVideoFrame}
+            />
+          ) : null}
+          <ActionButton variant="primary" icon="download" label={t('common.download')} onClick={onDownload} />
         </>
       }
     >

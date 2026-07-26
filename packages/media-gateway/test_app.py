@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 BASE = Path(__file__).resolve().parent
 APPLE_SILICON_ENV = {'ZIMG_ACCELERATOR_PROFILE': 'apple-silicon'}
@@ -492,6 +493,309 @@ class ZImageAppTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Expected a Civitai LoRA URL'):
             app.validate_civitai_expected_type({'model': {'type': 'Checkpoint'}}, 'LORA')
 
+    def test_downloads_without_an_expected_type_accept_any_model_and_file_it_by_type(self):
+        # The studio downloader does not pin a type: a checkpoint URL must download
+        # and land in models/checkpoints instead of being rejected as "not a LoRA".
+        app = load_app()
+
+        app.validate_civitai_expected_type({'model': {'type': 'Checkpoint'}}, None)
+        app.validate_civitai_expected_type({'model': {'type': 'VAE'}}, '')
+
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            version = {
+                'id': 321,
+                'baseModel': 'SDXL 1.0',
+                'model': {'type': 'Checkpoint'},
+                'downloadUrl': 'https://example.test/checkpoint.safetensors',
+                'files': [{
+                    'id': 654,
+                    'name': 'checkpoint.safetensors',
+                    'type': 'Model',
+                    'primary': True,
+                    'downloadUrl': 'https://example.test/checkpoint.safetensors',
+                }],
+            }
+
+            class FakeResponse:
+                headers = {'Content-Length': '4'}
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def read(self, n):
+                    if not hasattr(self, 'chunks'):
+                        self.chunks = [b'abcd', b'']
+                    return self.chunks.pop(0)
+
+            with patch.object(app, 'COMFY', tmp_path), patch.object(app, 'civitai_json', return_value=version), patch.object(app, 'urlopen', return_value=FakeResponse()):
+                result = app.download_civitai_version(321, 654)
+
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['modelType'], 'Checkpoint')
+            self.assertEqual(Path(result['directory']).resolve(), (tmp_path / 'models' / 'checkpoints').resolve())
+            self.assertEqual(Path(result['path']).parent.resolve(), (tmp_path / 'models' / 'checkpoints').resolve())
+
+    def test_cancelling_a_download_stops_the_transfer_and_removes_the_partial_file(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            version = {
+                'id': 555,
+                'baseModel': 'SDXL 1.0',
+                'model': {'type': 'LORA', 'name': 'Look'},
+                'downloadUrl': 'https://example.test/model.safetensors',
+                'files': [{
+                    'id': 777,
+                    'name': 'model.safetensors',
+                    'type': 'Model',
+                    'primary': True,
+                    'downloadUrl': 'https://example.test/model.safetensors',
+                }],
+            }
+
+            class FakeResponse:
+                headers = {'Content-Length': '12'}
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def read(self, n):
+                    if not hasattr(self, 'chunks'):
+                        self.chunks = [b'aa', b'bb', b'cc', b'']
+                    return self.chunks.pop(0)
+
+            # Cancel after the first chunk lands, the way a click mid-download does.
+            reads = []
+            def should_cancel():
+                reads.append(1)
+                return len(reads) > 1
+
+            with patch.object(app, 'COMFY', tmp_path), patch.object(app, 'civitai_json', return_value=version), patch.object(app, 'urlopen', return_value=FakeResponse()):
+                with self.assertRaises(app.DownloadCancelled):
+                    app.download_civitai_version(555, 777, should_cancel=should_cancel)
+
+            loras = tmp_path / 'models' / 'loras'
+            self.assertEqual(sorted(p.name for p in loras.iterdir()), [])  # no file, no .part leftover
+
+    def test_cancel_flag_only_applies_to_live_jobs_and_names_come_from_the_version(self):
+        app = load_app()
+        with patch.dict(app.download_jobs, {}, clear=True):
+            app.download_jobs['live'] = {'id': 'live', 'status': 'running'}
+            app.download_jobs['done'] = {'id': 'done', 'status': 'success'}
+            with patch.object(app, 'save_download_jobs_unlocked', lambda: None):
+                self.assertTrue(app.cancel_civitai_download_job('live').get('cancel_requested'))
+                self.assertTrue(app.download_job_cancel_requested('live'))
+                # A finished job is not retroactively cancellable.
+                self.assertNotIn('cancel_requested', app.cancel_civitai_download_job('done'))
+                self.assertFalse(app.download_job_cancel_requested('done'))
+                self.assertIsNone(app.cancel_civitai_download_job('missing'))
+
+        self.assertEqual(
+            app.civitai_version_display_name({'name': 'v2', 'model': {'name': 'Look'}}),
+            'Look · v2',
+        )
+        # No duplicated name when the version label already carries the model name.
+        self.assertEqual(
+            app.civitai_version_display_name({'name': 'Look v2', 'model': {'name': 'Look v2'}}),
+            'Look v2',
+        )
+        self.assertEqual(app.civitai_version_display_name({}), '')
+
+    def test_lora_cards_carry_their_installed_version_identity(self):
+        app = load_app()
+        # Sidecar shape Civitai actually writes: modelId on the version, and a
+        # nested `model` with a name but NO id.
+        record = app.compact_lora_record({
+            'id': 'look.safetensors',
+            'name': 'look.safetensors',
+            'path': '/x/look.safetensors',
+            'baseModel': 'SDXL 1.0',
+            'metadata': {'modelVersion': {'id': 111, 'modelId': 42, 'name': 'v2.0', 'model': {'name': 'Look', 'type': 'LORA'}}},
+        })
+
+        self.assertEqual(record['versionId'], '111')
+        self.assertEqual(record['versionName'], 'v2.0')
+        self.assertEqual(record['modelId'], '42')
+        self.assertEqual(record['displayName'], 'Look')
+        # Older/hand-written sidecars that nest the id instead still resolve.
+        nested = app.compact_lora_record({
+            'id': 'old.safetensors', 'name': 'old.safetensors', 'path': '/x/old.safetensors',
+            'metadata': {'modelVersion': {'id': 7, 'model': {'id': 99, 'name': 'Old'}}},
+        })
+        self.assertEqual(nested['modelId'], '99')
+        # Hand-placed files have no Civitai identity and must not fake one.
+        bare = app.compact_lora_record({'id': 'hand.safetensors', 'name': 'hand.safetensors', 'path': '/x/hand.safetensors', 'metadata': {}})
+        self.assertEqual((bare['versionId'], bare['versionName'], bare['modelId']), ('', '', ''))
+
+    def test_update_detection_compares_version_ids_not_list_order(self):
+        app = load_app()
+        versions = [
+            {'id': '300', 'name': 'v3'},
+            {'id': '100', 'name': 'v1'},
+            {'id': '200', 'name': 'v2'},
+        ]
+
+        self.assertEqual(app.newer_civitai_version(versions, '100')['id'], '300')
+        self.assertEqual(app.newer_civitai_version(versions, '200')['id'], '300')
+        self.assertIsNone(app.newer_civitai_version(versions, '300'))  # newest installed
+        self.assertIsNone(app.newer_civitai_version(versions, '400'))  # ahead of Civitai
+        self.assertIsNone(app.newer_civitai_version(versions, ''))     # unknown install
+        self.assertIsNone(app.newer_civitai_version([], '100'))
+
+    def test_a_newer_version_for_another_base_model_is_not_an_update(self):
+        # Real shape (Civitai model 2173844 / 1862761): one model publishes a version
+        # per base model, so the newest id is often a DIFFERENT adapter. Replacing a
+        # ZImageTurbo LoRA with the Krea 2 version would break the workflow using it.
+        app = load_app()
+        versions = [
+            {'id': '3075498', 'name': 'v1.0 Krea2', 'baseModel': 'Krea 2'},
+            {'id': '2882216', 'name': 'v0.5 Anima', 'baseModel': 'Anima'},
+            {'id': '2683561', 'name': 'v1.0 ZImageBase', 'baseModel': 'ZImageBase'},
+            {'id': '2526600', 'name': 'Z-Image (Asian edition)', 'baseModel': 'ZImageTurbo'},
+            {'id': '2465980', 'name': 'v1.0 Z-Image Turbo', 'baseModel': 'ZImageTurbo'},
+        ]
+
+        # Installed is already the newest ZImageTurbo version: no update.
+        self.assertIsNone(app.newer_civitai_version(versions, '2526600', ['ZImageTurbo']))
+        # The older ZImageTurbo build does have one — and it is the ZImageTurbo build,
+        # not the higher-id Krea 2 one.
+        found = app.newer_civitai_version(versions, '2465980', ['ZImageTurbo'])
+        self.assertEqual(found['id'], '2526600')
+        # ZImageBase must not be treated as ZImageTurbo.
+        self.assertIsNone(app.newer_civitai_version(versions, '2683561', ['ZImageBase']))
+        # A version with no declared base is not assumed to match.
+        self.assertIsNone(app.newer_civitai_version([{'id': '9', 'name': 'x'}], '1', ['ZImageTurbo']))
+        # No base filter at all keeps the old id-only behaviour.
+        self.assertEqual(app.newer_civitai_version(versions, '2526600')['id'], '3075498')
+
+    def test_a_sibling_option_is_not_an_update(self):
+        # Real case (Civitai model 2535622, "LTX 2.3 - Enhancers"): the model ships
+        # "Soft Enhance" and "Crisp Enhance" as separate versions of the SAME base.
+        # The higher id is the other option, not a newer one — offering it as an
+        # update replaced an installed Soft with Crisp.
+        app = load_app()
+        versions = [
+            {'id': '2849716', 'name': 'Crisp Enhance', 'baseModel': 'LTXV 2.3'},
+            {'id': '2849706', 'name': 'Soft Enhance', 'baseModel': 'LTXV 2.3'},
+        ]
+
+        self.assertIsNone(app.newer_civitai_version(versions, '2849706', ['LTXV 2.3'], 'Soft Enhance'))
+        self.assertIsNone(app.newer_civitai_version(versions, '2849716', ['LTXV 2.3'], 'Crisp Enhance'))
+        # A newer build of the SAME option is still an update.
+        with_revision = versions + [{'id': '2900000', 'name': 'Soft Enhance v2', 'baseModel': 'LTXV 2.3'}]
+        found = app.newer_civitai_version(with_revision, '2849706', ['LTXV 2.3'], 'Soft Enhance')
+        self.assertEqual(found['id'], '2900000')
+
+    def test_version_lineage_keeps_real_revisions_and_rejects_options(self):
+        app = load_app()
+
+        # Revisions seen in the installed library — these must keep updating.
+        for installed, candidate in [
+            ('v1.0', 'v1.1'),
+            ('Krea 2 v1.0', 'Krea 2 v1.1'),
+            ('V4.1 Exp, pre', 'v4.3_EXP'),      # descriptive words narrow, still one lineage
+            ('v3', 'v4.3_EXP'),
+            ('2vector', '3vector'),             # digits glued to the label
+            ('small breast-flat chest', 'V2.1'),  # renamed to a bare version
+            ('Krea-2_v1', 'Krea-2_v2'),
+        ]:
+            self.assertTrue(app.same_version_lineage(installed, candidate), f'{installed} -> {candidate}')
+
+        # Options published side by side — never an upgrade path.
+        for installed, candidate in [
+            ('Soft Enhance', 'Crisp Enhance'),
+            ('Crisp Enhance', 'Soft Enhance'),
+            ('SDXL', 'Pony'),
+            ('anime style', 'realistic style'),
+        ]:
+            self.assertFalse(app.same_version_lineage(installed, candidate), f'{installed} -> {candidate}')
+
+    def test_lora_updates_skip_uncheckable_entries_and_survive_api_failures(self):
+        app = load_app()
+        installed = [
+            {'id': 'look.safetensors', 'name': 'look.safetensors', 'path': '/x/look.safetensors', 'baseModel': 'SDXL 1.0',
+             'metadata': {'modelVersion': {'id': 100, 'name': 'v1', 'model': {'id': 42, 'name': 'Look'}}}},
+            {'id': 'hand.safetensors', 'name': 'hand.safetensors', 'path': '/x/hand.safetensors', 'baseModel': 'SDXL 1.0',
+             'metadata': {}},
+            {'id': 'boom.safetensors', 'name': 'boom.safetensors', 'path': '/x/boom.safetensors', 'baseModel': 'SDXL 1.0',
+             'metadata': {'modelVersion': {'id': 1, 'name': 'v1', 'model': {'id': 99, 'name': 'Boom'}}}},
+        ]
+
+        def versions(model_id, force=False):
+            if str(model_id) == '99':
+                raise RuntimeError('Civitai rate limited')
+            return [
+                {'id': '900', 'name': 'v3 Pony', 'baseModel': 'Pony'},  # different base: not an update
+                {'id': '500', 'name': 'v2', 'baseModel': 'SDXL 1.0'},
+            ]
+
+        with patch.object(app, 'local_loras_unfiltered', return_value=installed), \
+             patch.object(app, 'civitai_model_versions', side_effect=versions):
+            updates = app.civitai_lora_updates(['SDXL 1.0'])
+
+        # The rate-limited model is skipped, not fatal; the sidecar-less file cannot be checked.
+        self.assertEqual(list(updates), ['look.safetensors'])
+        entry = updates['look.safetensors']
+        self.assertEqual(entry['latestVersionId'], '500')
+        self.assertEqual(entry['currentVersionId'], '100')
+        self.assertEqual(entry['url'], 'https://civitai.com/models/42?modelVersionId=500')
+
+    def test_replacing_a_lora_removes_the_old_file_only_after_the_new_one_lands(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            loras = tmp_path / 'models' / 'loras'
+            loras.mkdir(parents=True)
+            old = loras / 'look-v1.safetensors'
+            old.write_bytes(b'old')
+            (loras / 'look-v1.safetensors.civitai.json').write_text('{}')
+            new = loras / 'look-v2.safetensors'
+
+            with patch.object(app, 'COMFY', tmp_path):
+                # The replacement is not on disk yet: the old file must survive.
+                app.replace_installed_lora(old, {'path': str(new)})
+                self.assertTrue(old.exists())
+
+                new.write_bytes(b'new')
+                with patch.object(app, 'load_selected_loras', return_value=[{'id': 'look-v1.safetensors', 'strength': 0.7}]), \
+                     patch.object(app, 'save_selected_loras') as save:
+                    outcome = app.replace_installed_lora(old, {'path': str(new)})
+
+            self.assertFalse(old.exists())
+            self.assertFalse((loras / 'look-v1.safetensors.civitai.json').exists())
+            self.assertTrue(new.exists())
+            self.assertEqual(Path(outcome['replacedBy']).name, 'look-v2.safetensors')
+            # The generation selection follows the file instead of silently dropping it.
+            save.assert_called_once_with([{'id': 'look-v2.safetensors', 'strength': 0.7}])
+
+    def test_a_same_filename_update_overwrites_in_place_and_removes_nothing(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            loras = tmp_path / 'models' / 'loras'
+            loras.mkdir(parents=True)
+            same = loras / 'look.safetensors'
+            same.write_bytes(b'new bytes from the update')
+
+            with patch.object(app, 'COMFY', tmp_path):
+                outcome = app.replace_installed_lora(same, {'path': str(same)})
+
+            self.assertEqual(outcome['removed'], '')
+            self.assertTrue(same.exists())
+
+    def test_replace_targets_are_confined_to_the_loras_directory(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            tmp_path = Path(td)
+            (tmp_path / 'models' / 'loras').mkdir(parents=True)
+            (tmp_path / 'models' / 'checkpoints').mkdir(parents=True)
+            outside = tmp_path / 'models' / 'checkpoints' / 'base.safetensors'
+            outside.write_bytes(b'not a lora')
+
+            with patch.object(app, 'COMFY', tmp_path):
+                with self.assertRaisesRegex(RuntimeError, 'outside the ComfyUI loras directory'):
+                    app.resolve_installed_lora_path('../checkpoints/base.safetensors')
+                with self.assertRaisesRegex(RuntimeError, 'No installed LoRA named'):
+                    app.resolve_installed_lora_path('missing.safetensors')
+            self.assertTrue(outside.exists())
+
     def test_civitai_download_url_uses_query_token_not_bearer_redirect_header(self):
         app = load_app()
         with TemporaryDirectory() as td:
@@ -765,6 +1069,83 @@ class ZImageAppTests(unittest.TestCase):
             'scale': 1.0,
             'filePath': str(lora.resolve()),
         }])
+
+    def test_ltx_denoise_mode_is_normalized_and_off_by_default(self):
+        app = load_app()
+
+        self.assertEqual(app.normalize_ltx_denoise_mode('light'), 'light')
+        self.assertEqual(app.normalize_ltx_denoise_mode('STRONG'), 'strong')
+        self.assertEqual(app.normalize_ltx_denoise_mode('on'), 'light')
+        for value in ('', None, 'off', 'false', 'nope', 0):
+            self.assertEqual(app.normalize_ltx_denoise_mode(value), '')
+        # Off means the output file is never touched.
+        self.assertIsNone(app.apply_ltx_denoise_pass('/nonexistent.mp4', ''))
+
+    def test_ltx_denoise_pass_never_fails_a_finished_generation(self):
+        app = load_app()
+
+        with patch.object(app.shutil, 'which', return_value=None):
+            detail = app.apply_ltx_denoise_pass('/nonexistent.mp4', 'light')
+        self.assertEqual(detail, {'mode': 'light', 'applied': False, 'error': 'ffmpeg not found'})
+
+        # A failing ffmpeg leaves the original clip in place and reports, not raises.
+        with TemporaryDirectory() as td:
+            clip = Path(td) / 'clip.mp4'
+            clip.write_bytes(b'x' * 2048)
+            with patch.object(app.shutil, 'which', return_value='/usr/bin/false'), \
+                 patch.object(app.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout='', stderr='boom')):
+                detail = app.apply_ltx_denoise_pass(clip, 'strong')
+            self.assertFalse(detail['applied'])
+            self.assertIn('boom', detail['error'])
+            self.assertEqual(clip.read_bytes(), b'x' * 2048)
+
+    def test_ltx_denoise_filters_stay_motion_safe(self):
+        app = load_app()
+
+        # Both tiers lead with atadenoise (motion-adaptive). Any hqdn3d pass must
+        # keep its two TEMPORAL terms at 0 — a temporal blur here would trade the
+        # grain for exactly the ghosting this is meant to avoid.
+        for mode, spec in app.LTX_DENOISE_FILTERS.items():
+            self.assertTrue(spec.startswith('atadenoise='), mode)
+            for stage in spec.split(','):
+                if stage.startswith('hqdn3d='):
+                    luma_s, chroma_s, luma_t, chroma_t = stage[len('hqdn3d='):].split(':')
+                    self.assertEqual((float(luma_t), float(chroma_t)), (0.0, 0.0), mode)
+                    self.assertGreater(float(luma_s), 0.0)
+                    self.assertGreater(float(chroma_s), 0.0)
+
+    def test_native_mlx_ltx_metadata_carries_the_denoise_choice(self):
+        app = load_app()
+        body = json.dumps({
+            'prompt': {
+                '542': {'class_type': 'PrimitiveFloat', 'inputs': {'value': 24}},
+                '597': {
+                    'class_type': 'VHS_VideoCombine',
+                    'inputs': {
+                        'filename_prefix': 'Eros/native_mlx_ltx__fast-q8-v12',
+                        'frame_rate': ['542', 0],
+                        'save_output': True,
+                    },
+                },
+                '773': {'class_type': 'LoadImage', 'inputs': {'image': 'start.png'}},
+                '809': {'class_type': 'PrimitiveInt', 'inputs': {'value': 576}},
+                '811': {'class_type': 'PrimitiveInt', 'inputs': {'value': 576}},
+                '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
+                '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private prompt'}},
+                '534': {'class_type': 'EmptyLTXVLatentVideo', 'inputs': {'width': ['809', 0], 'height': ['811', 0], 'length': 121}},
+            },
+            'extra_data': {'extra_pnginfo': {'workflow': {'extra': {'nativeMlxLtx': {
+                'enabled': True,
+                'variant': 'fast-q8-v12',
+                'defaults': {'frames': 121, 'denoise': 'strong'},
+            }}}}},
+        }).encode('utf-8')
+
+        with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+            native = app.detect_native_mlx_ltx_prompt(body)
+
+        self.assertIsNotNone(native)
+        self.assertEqual(native['options']['denoise'], 'strong')
 
     def test_native_mlx_ltx_ingredients_metadata_uses_ic_reference_path(self):
         app = load_app()
@@ -1272,12 +1653,69 @@ class ZImageAppTests(unittest.TestCase):
         self.assertTrue(edit_graph['3']['inputs']['enable_convrot'])
         self.assertEqual(edit_graph['5']['class_type'], 'Krea2IdentityOptionalEncode')
         self.assertEqual(edit_graph['9']['class_type'], 'Krea2IdentityOptionalModelPatch')
-        self.assertTrue(edit_graph['9']['inputs']['cache_static_tokens'])
+        # Stale expectation: the cached identity forward was turned OFF by default
+        # on 2026-07-22 (grain regression) — see krea2_identity_workflow.py.
+        self.assertFalse(edit_graph['9']['inputs']['cache_static_tokens'])
         self.assertEqual(edit_graph['7']['inputs']['width'], 1024)
         self.assertEqual(edit_graph['7']['inputs']['height'], 768)
         self.assertEqual(edit_graph['9']['inputs']['ref_boost'], 4.0)
         self.assertEqual(custom_strength_graph['2']['inputs']['lora_name'], 'krea2_identity_edit_v1_2.safetensors')
         self.assertTrue(custom_strength_graph['3']['inputs']['on_the_fly_quantization'])
+
+    def test_krea2_identity_sampler_pair_follows_step_count_and_explicit_overrides(self):
+        app = load_app()
+
+        low_step = app.build_krea2_turbo_identity_prompt(
+            'private prompt', options={'steps': 2}, profile='apple-silicon',
+        )
+        tuned = app.build_krea2_turbo_identity_prompt(
+            'private prompt', options={'steps': 10}, profile='apple-silicon',
+        )
+        override = app.build_krea2_turbo_identity_prompt(
+            'private prompt',
+            options={'steps': 2, 'sampler_name': 'res_2s', 'scheduler': 'karras'},
+            profile='apple-silicon',
+        )
+        garbage = app.build_krea2_turbo_identity_prompt(
+            'private prompt',
+            options={'steps': 10, 'sampler_name': 'not_a_sampler', 'scheduler': 'nope'},
+            profile='apple-silicon',
+        )
+
+        # Low step counts get the schedule that survives 2-3 steps; the tuned
+        # 8-10 step pair is unchanged.
+        self.assertEqual(low_step['7']['inputs']['sampler_name'], 'deis_3m')
+        self.assertEqual(low_step['7']['inputs']['scheduler'], 'bong_tangent')
+        self.assertEqual(tuned['7']['inputs']['sampler_name'], 'euler_ancestral')
+        self.assertEqual(tuned['7']['inputs']['scheduler'], 'beta')
+        self.assertEqual(override['7']['inputs']['sampler_name'], 'res_2s')
+        self.assertEqual(override['7']['inputs']['scheduler'], 'karras')
+        # Unknown names fall back instead of failing inside ComfyUI.
+        self.assertEqual(garbage['7']['inputs']['sampler_name'], 'euler_ancestral')
+        self.assertEqual(garbage['7']['inputs']['scheduler'], 'beta')
+
+    def test_krea2_identity_edit_graph_also_honours_the_sampler_pair(self):
+        app = load_app()
+
+        edit_graph = app.build_krea2_turbo_identity_prompt(
+            'private prompt',
+            image_name='reference.png',
+            options={'steps': 3},
+            profile='apple-silicon',
+        )
+
+        self.assertEqual(edit_graph['10']['inputs']['sampler_name'], 'deis_3m')
+        self.assertEqual(edit_graph['10']['inputs']['scheduler'], 'bong_tangent')
+
+    def test_krea2_identity_job_record_reports_the_sampler_that_ran(self):
+        app = load_app()
+
+        self.assertEqual(app._krea2_sampler_choice({'steps': 2}), ('deis_3m', 'bong_tangent'))
+        self.assertEqual(app._krea2_sampler_choice({'steps': 8}), ('euler_ancestral', 'beta'))
+        self.assertEqual(
+            app._krea2_sampler_choice({'steps': 8, 'sampler_name': 'deis_3m', 'scheduler': 'bong_tangent'}),
+            ('deis_3m', 'bong_tangent'),
+        )
 
     def test_krea2_identity_graph_uses_regular_portable_turbo_without_an_image(self):
         app = load_app()
@@ -2121,3 +2559,164 @@ class WorkflowEnvelopeIndexTests(unittest.TestCase):
         self.assertEqual(records[0]["prompt_id"], "pid-1")
         self.assertEqual(records[0]["filenames"], ["a_00001_.png"])
         self.assertIs(records[0]["workflow"], envelope)
+
+
+    def test_ltx_variant_sampling_recipe_env_is_opt_in_per_variant(self):
+        app = load_app()
+
+        # No variant ships an override today: the author's DMD ramp measured worse
+        # than the built-in table (see the note on dmd-q8-v13). The mechanism stays
+        # so a future recipe is a config line, not a patch.
+        for variant, spec in app.LTX2_MLX_VARIANTS.items():
+            recipe = spec.get('runtime_env') or {}
+            self.assertIsInstance(recipe, dict, variant)
+            for key, value in recipe.items():
+                self.assertTrue(str(key).startswith('LTX2_'), f'{variant}: {key}')
+                if key.endswith('SIGMAS'):
+                    schedule = [float(x) for x in str(value).split(',')]
+                    self.assertLessEqual(schedule[0], 1.0, variant)
+                    self.assertEqual(schedule[-1], 0.0, variant)
+                    self.assertTrue(all(b <= a for a, b in zip(schedule, schedule[1:])), variant)
+
+    def test_every_variant_model_dir_matches_its_declared_pipeline(self):
+        app = load_app()
+
+        # --distilled aborts at load on a package with no distilled transformer,
+        # and --two-stage needs the dev one. The failure surfaces to the studio as
+        # a bare "did not return a job id", so assert the pairing here instead of
+        # discovering it from a redacted error. Only checks variants whose model
+        # directory is present, so this stays useful on a partial install.
+        for variant, spec in app.LTX2_MLX_VARIANTS.items():
+            model_dir = Path(spec['model'])
+            if not model_dir.is_dir():
+                continue
+            names = {p.name for p in model_dir.iterdir()}
+            has_distilled = any(n.startswith('transformer-distilled') for n in names)
+            has_dev = any(n.startswith('transformer-dev') for n in names)
+            if spec.get('video_distilled'):
+                self.assertTrue(
+                    has_distilled,
+                    f'{variant} declares video_distilled but ships no distilled transformer: {sorted(names)}',
+                )
+            else:
+                self.assertTrue(
+                    has_dev,
+                    f'{variant} runs the dev two-stage but ships no dev transformer: {sorted(names)}',
+                )
+
+
+class LoraCacheTests(unittest.TestCase):
+    """The LoRA cache holds data fetched from the internet (Civitai card art and
+    version lists). It must be unreadable at rest, and it must never outlive the
+    installed file it describes — a replaced LoRA showing its predecessor's art, or
+    an uninstalled one lingering on disk, are both failures."""
+
+    def _app(self, root, key='cache-test-key'):
+        app = load_app()
+        app.LORA_CACHE_DIR = root / 'lora-cache'
+        app.LORA_PREVIEW_CACHE_DIR = app.LORA_CACHE_DIR / 'previews'
+        app.LORA_VERSION_CACHE_DIR = app.LORA_CACHE_DIR / 'versions'
+        app.output_encryption_password = lambda create=True: key
+        return app
+
+    def _lora(self, root, name='style.safetensors', body=b'weights', url='https://image.civitai.com/card.jpg'):
+        path = root / name
+        path.write_bytes(body)
+        return {
+            'id': name,
+            'name': name,
+            'path': str(path),
+            'baseModel': 'Krea 2',
+            'metadata': {'previewUrl': url, 'modelVersion': {'id': '9', 'modelId': '42', 'name': 'v1'}},
+        }
+
+    def test_cached_preview_round_trips_and_is_unreadable_on_disk(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root)
+            item = self._lora(root)
+            url = item['metadata']['previewUrl']
+
+            app.cache_lora_preview(item, url, b'\x89PNG-secret-card-art', 'image/png')
+            # Serve from disk, not from the in-process copy.
+            app._lora_cache_memory.clear()
+            app._lora_cache_memory_bytes = 0
+
+            data, ctype = app.cached_lora_preview(item, url)
+            self.assertEqual(data, b'\x89PNG-secret-card-art')
+            self.assertEqual(ctype, 'image/png')
+
+            stored = list(app.LORA_PREVIEW_CACHE_DIR.glob('*.enc'))
+            self.assertEqual(len(stored), 1)
+            blob = stored[0].read_bytes()
+            self.assertNotIn(b'PNG-secret-card-art', blob)
+            self.assertNotIn(b'image/png', blob)
+            # The filename must not name the collection either.
+            self.assertNotIn('style', stored[0].name)
+
+    def test_a_replaced_lora_never_serves_the_old_preview(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root)
+            item = self._lora(root)
+            url = item['metadata']['previewUrl']
+            app.cache_lora_preview(item, url, b'old-art', 'image/png')
+
+            # An update-and-replace keeps the id and rewrites the file.
+            time.sleep(0.01)
+            Path(item['path']).write_bytes(b'different-weights')
+            app._lora_cache_memory.clear()
+            app._lora_cache_memory_bytes = 0
+
+            self.assertIsNone(app.cached_lora_preview(item, url))
+
+    def test_pruning_drops_uninstalled_loras_and_keeps_installed_ones(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root)
+            kept = self._lora(root, 'kept.safetensors')
+            removed = self._lora(root, 'removed.safetensors')
+            app.cache_lora_preview(kept, kept['metadata']['previewUrl'], b'kept-art', 'image/png')
+            app.cache_lora_preview(removed, removed['metadata']['previewUrl'], b'gone-art', 'image/png')
+            app.cache_model_versions('42', {'at': time.time(), 'versions': [{'id': '9'}]})
+            self.assertEqual(len(list(app.LORA_PREVIEW_CACHE_DIR.glob('*.enc'))), 2)
+
+            Path(removed['path']).unlink()
+            app.prune_lora_caches([kept])
+
+            surviving = list(app.LORA_PREVIEW_CACHE_DIR.glob('*.enc'))
+            self.assertEqual([p.name for p in surviving], [f"{app.lora_cache_key(kept, kept['metadata']['previewUrl'])}.enc"])
+            # The version list belongs to the Civitai model, which is still installed.
+            self.assertIsNotNone(app.cached_model_versions('42'))
+
+            app.prune_lora_caches([])
+            self.assertEqual(list(app.LORA_PREVIEW_CACHE_DIR.glob('*.enc')), [])
+            self.assertIsNone(app.cached_model_versions('42'))
+
+    def test_no_machine_key_means_no_cache_rather_than_a_plaintext_one(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root, key=None)
+            item = self._lora(root)
+            url = item['metadata']['previewUrl']
+
+            app.cache_lora_preview(item, url, b'card-art', 'image/png')
+            self.assertFalse(app.LORA_PREVIEW_CACHE_DIR.exists() and list(app.LORA_PREVIEW_CACHE_DIR.glob('*')))
+            app._lora_cache_memory.clear()
+            app._lora_cache_memory_bytes = 0
+            self.assertIsNone(app.cached_lora_preview(item, url))
+
+    def test_version_lists_survive_a_restart_without_asking_civitai_again(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            app = self._app(root)
+            record = {'at': time.time(), 'versions': [{'id': '11', 'name': 'v2', 'baseModel': 'Krea 2'}]}
+            app.cache_model_versions('42', record)
+
+            # A restart: fresh module, empty in-memory cache, same encrypted dir.
+            restarted = self._app(root)
+            calls = []
+            restarted.civitai_json = lambda *a, **k: calls.append(a) or {'modelVersions': []}
+
+            self.assertEqual(restarted.civitai_model_versions('42'), record['versions'])
+            self.assertEqual(calls, [])

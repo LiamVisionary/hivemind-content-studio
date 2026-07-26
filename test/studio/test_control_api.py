@@ -361,7 +361,12 @@ def test_media_studio_video_job_flow_survives_long_generations(tmp_path: Path, m
         },
     )
     assert queued.status_code == 200
-    assert queued.json() == {"ok": True, "job_id": "job-eros-1", "status": "running"}
+    queued_payload = queued.json()
+    # The expected duration rides along so the bar can start moving immediately;
+    # with nothing measured yet it is the default rate scaled by this run's work.
+    estimate = queued_payload.pop("estimate_seconds", None)
+    assert isinstance(estimate, (int, float)) and estimate > 0
+    assert queued_payload == {"ok": True, "job_id": "job-eros-1", "status": "running"}
     # The staged control-api input copy is removed as soon as the job is queued.
     assert not Path(started["image_path"]).exists()
 
@@ -1325,3 +1330,167 @@ def test_simple_plan_forwards_attachment_image_data_to_the_brain(tmp_path: Path,
 
     assert response.status_code == 200
     assert seen["attachments"][0]["data"] == "data:image/jpeg;base64,aGk="
+
+
+def test_opengen_bridge_proxy_forwards_the_query_string(tmp_path: Path, monkeypatch) -> None:
+    """LoRA lookups pass ?baseModels=… for workflows the bridge cannot resolve on
+    its own. Dropping the query turned those into "Unknown local workflow"."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    seen: dict[str, str] = {}
+
+    class _Upstream:
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def fake_urlopen(request, timeout=0):  # noqa: ARG001
+        seen["url"] = request.full_url
+        return _Upstream()
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.urllib.request.urlopen", fake_urlopen)
+
+    response = client.get("/local-ai/loras/ltx23-eros-dmd", params={"baseModels": "LTXV"})
+    assert response.status_code == 200
+    assert seen["url"] == "http://127.0.0.1:8794/local-ai/loras/ltx23-eros-dmd?baseModels=LTXV"
+
+    # No query -> no stray "?" appended.
+    client.get("/local-ai/models")
+    assert seen["url"] == "http://127.0.0.1:8794/local-ai/models"
+
+    # The allowlist is still matched on the path alone, so a query cannot widen it.
+    assert client.get("/local-ai/secrets", params={"baseModels": "LTXV"}).status_code == 404
+
+
+def test_opengen_bridge_proxy_exposes_the_lora_update_and_cancel_routes(tmp_path: Path, monkeypatch) -> None:
+    """The studio calls these same-origin through control_api, not the 8794 bridge
+    directly, so a route missing from the allowlist fails silently in the real app
+    while working fine on the vite dev server."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    seen: dict[str, str] = {}
+
+    class _Upstream:
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def read(self) -> bytes:
+            return b'{"updates": {}}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def fake_urlopen(request, timeout=0):  # noqa: ARG001
+        seen["url"] = request.full_url
+        seen["method"] = request.method
+        return _Upstream()
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.urllib.request.urlopen", fake_urlopen)
+
+    # Update availability, with the workflow's base models carried through.
+    assert client.get("/local-ai/lora-updates", params={"baseModels": "Krea 2"}).status_code == 200
+    assert seen["url"] == "http://127.0.0.1:8794/local-ai/lora-updates?baseModels=Krea%202"
+
+    # Cancelling a download is a DELETE on the job route.
+    assert client.delete("/local-ai/civitai-download/abc123").status_code == 200
+    assert seen["url"] == "http://127.0.0.1:8794/local-ai/civitai-download/abc123"
+    assert seen["method"] == "DELETE"
+
+    # Polling that job still works.
+    assert client.get("/local-ai/civitai-download/abc123").status_code == 200
+    assert seen["method"] == "GET"
+
+    # DELETE cannot reach a path the allowlist never granted.
+    assert client.delete("/local-ai/secrets").status_code == 404
+
+
+def _video_body(**overrides):
+    from hivemind_content_studio.control_api import MediaStudioVideoBody
+
+    return MediaStudioVideoBody(**{"workflow_id": "ltx23-eros-dmd", "aspect_ratio": "16:9", **overrides})
+
+
+def test_video_timing_work_units_scale_with_length_and_resolution() -> None:
+    from hivemind_content_studio.control_api import _video_timing_signature
+
+    four_standard = _video_timing_signature(_video_body(duration_seconds=4, resolution="standard"))
+    eight_standard = _video_timing_signature(_video_body(duration_seconds=8, resolution="standard"))
+    four_high = _video_timing_signature(_video_body(duration_seconds=4, resolution="high"))
+
+    # Length and resolution live in the WORK UNITS, not the key, so all three
+    # runs pool their samples into the same cost profile.
+    assert four_standard[0] == eight_standard[0] == four_high[0]
+    # Twice the frames is ~twice the work (the +1 anchor frame keeps it off exactly 2x).
+    assert 1.9 < eight_standard[2] / four_standard[2] < 2.1
+    # The high tier is ~2.5x the pixels of standard at the same length.
+    assert 2.4 < four_high[2] / four_standard[2] < 2.6
+
+
+def test_video_estimate_scales_a_measured_run_to_a_longer_or_larger_one(tmp_path: Path) -> None:
+    from hivemind_content_studio.control_api import GenerationTimings, _video_timing_signature
+
+    timings = GenerationTimings(tmp_path / "generation-timings.jsonl")
+    sig, workflow, work = _video_timing_signature(_video_body(duration_seconds=4, resolution="standard"))
+    timings.record(sig, workflow, work, 120.0)
+
+    # Same shape -> the measured duration, verbatim.
+    assert timings.estimate(sig, workflow, work) == 120.0
+
+    # Twice the frames, and the 2.5x-pixel tier, scale proportionally off it
+    # instead of collapsing back to a flat constant.
+    _, _, double_work = _video_timing_signature(_video_body(duration_seconds=8, resolution="standard"))
+    assert 228.0 < timings.estimate(sig, workflow, double_work) < 252.0
+    _, _, high_work = _video_timing_signature(_video_body(duration_seconds=4, resolution="high"))
+    assert 288.0 < timings.estimate(sig, workflow, high_work) < 312.0
+
+
+def test_video_estimate_separates_fixed_overhead_once_two_sizes_are_measured(tmp_path: Path) -> None:
+    from hivemind_content_studio.control_api import GenerationTimings, _estimate_seconds_for_work
+
+    timings = GenerationTimings(tmp_path / "generation-timings.jsonl")
+    # 20s of fixed overhead + 2s per work unit.
+    timings.record("sig", "wf", 10.0, 40.0)
+    timings.record("sig", "wf", 50.0, 120.0)
+    assert timings.estimate("sig", "wf", 100.0) == 220.0
+
+    # Noise that inverts the slope must not produce a nonsense (or negative)
+    # estimate — it falls back to scaling off the nearest measured point.
+    assert _estimate_seconds_for_work([(10.0, 120.0), (50.0, 40.0)], 20.0) == 240.0
+
+
+def test_video_estimate_falls_back_to_a_rate_so_first_runs_still_scale(tmp_path: Path) -> None:
+    from hivemind_content_studio.control_api import (
+        _DEFAULT_VIDEO_SECONDS_PER_WORK_UNIT,
+        GenerationTimings,
+        _video_timing_signature,
+    )
+
+    timings = GenerationTimings(tmp_path / "generation-timings.jsonl")
+    sig, workflow, standard = _video_timing_signature(_video_body(duration_seconds=4, resolution="standard"))
+    _, _, high = _video_timing_signature(_video_body(duration_seconds=4, resolution="high"))
+
+    first = timings.estimate(sig, workflow, standard, fallback_rate=_DEFAULT_VIDEO_SECONDS_PER_WORK_UNIT)
+    first_high = timings.estimate(sig, workflow, high, fallback_rate=_DEFAULT_VIDEO_SECONDS_PER_WORK_UNIT)
+    assert 140.0 < first < 160.0
+    assert 2.4 < first_high / first < 2.6
+
+
+def test_video_timings_survive_a_reload_and_drop_pre_work_unit_records(tmp_path: Path) -> None:
+    from hivemind_content_studio.control_api import GenerationTimings
+
+    path = tmp_path / "generation-timings.jsonl"
+    GenerationTimings(path).record("sig", "wf", 30.0, 90.0)
+    # A v1 record: no work units, so it cannot be scaled and is left behind.
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"sig": "sig", "wf": "wf", "seconds": 900.0, "at": 1}) + "\n")
+
+    assert GenerationTimings(path).estimate("sig", "wf", 30.0) == 90.0

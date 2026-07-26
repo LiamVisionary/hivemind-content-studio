@@ -56,6 +56,18 @@ export function Button({
   );
 }
 
+// A Button whose label collapses into a hover hint wherever a pointer can hover,
+// so a crowded action row reads as icons instead of a wall of words. Touch devices
+// keep the label visible — they have no hover to reveal it. The label always
+// reaches assistive tech through aria-label, hidden or not.
+export function ActionButton({ icon, label, className = '', ...rest }) {
+  return (
+    <Button icon={icon} aria-label={label} data-hint={label} className={className} {...rest}>
+      <span className="hive-hint-label">{label}</span>
+    </Button>
+  );
+}
+
 export function IconButton({ icon, label, size = 'md', active = false, className = '', ...rest }) {
   const dims = size === 'sm' ? 'h-ctl-sm w-[28px]' : size === 'lg' ? 'h-ctl-lg w-[44px]' : 'h-ctl-md w-[36px]';
   return (

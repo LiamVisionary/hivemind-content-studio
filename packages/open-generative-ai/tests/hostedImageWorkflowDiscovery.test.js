@@ -60,6 +60,8 @@ test('hosted image models are derived from launchable image workflow entries', (
         supportsImage: true,
         maxReferenceImages: 1,
         aspectRatios: ['1:1', '4:3', '3:4', '16:9', '9:16'],
+        samplers: [],
+        schedulers: [],
         defaultWidth: 768,
         defaultHeight: 1024,
         defaultSteps: 4,

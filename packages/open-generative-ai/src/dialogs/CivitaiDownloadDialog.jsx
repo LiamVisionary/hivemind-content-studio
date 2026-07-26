@@ -1,83 +1,86 @@
-// Civitai LoRA download dialog (React port of components/CivitaiDownloadDialog.js).
+// Civitai download dialog (React port of components/CivitaiDownloadDialog.js).
 // Flow preserved: re-entrancy guard, downloadCivitaiLora(api, url, { onUpdate }),
-// success -> await onComplete(job); error -> message + red bar. The poll loop is
-// tied to an AbortController that fires on unmount, so closing the dialog stops
-// monitoring (the server-side download itself keeps running).
-import { useEffect, useRef, useState } from 'react';
-import { downloadCivitaiLora, formatDownloadBytes } from '../lib/civitaiDownload.js';
+// success -> await onComplete(job); errors surface as a message + red bar.
+//
+// The job itself lives in civitaiDownloadStore, so closing the dialog does not stop
+// progress tracking. This dialog is only the URL entry point now: as soon as the
+// gateway hands back a job id it closes and the pending LoRA card owns the progress
+// bar and the cancel button. Failures that happen *before* the job exists (bad URL,
+// Civitai auth) stay here, because there is no card yet to show them on.
+import { useState } from 'react';
+import {
+  civitaiDownloadPercent,
+  describeCivitaiDownload,
+  getCivitaiDownload,
+  startCivitaiDownload,
+} from '../lib/civitaiDownloadStore.js';
+import { useCivitaiDownloads } from '../hooks/hooks.js';
 import { Button, Field, TextInput, cx } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
 
-export function CivitaiDownloadDialog({ api, onComplete, onClose }) {
+export function CivitaiDownloadDialog({ api, onComplete, onStarted, onClose }) {
   const [url, setUrl] = useState('');
-  const [job, setJob] = useState(null);
-  const [error, setError] = useState(null);
-  const [running, setRunning] = useState(false);
-  const abortRef = useRef(null);
+  // Only the download this dialog started: others may be running in parallel and
+  // are none of its business.
+  const [startedKey, setStartedKey] = useState('');
+  const downloads = useCivitaiDownloads();
+  const download = downloads.find((item) => item.key === startedKey) || null;
 
-  // Abort the polling loop when the dialog unmounts.
-  useEffect(() => () => abortRef.current?.abort(), []);
+  const running = download?.status === 'running';
+  const trimmedUrl = url.trim();
+  const failed = download?.status === 'error';
 
-  const submit = async (event) => {
+  const submit = (event) => {
     event.preventDefault();
-    if (running) return; // re-entrancy guard
-    setRunning(true);
-    setError(null);
-    setJob(null);
-    const controller = new AbortController();
-    abortRef.current = controller;
-    try {
-      const finished = await downloadCivitaiLora(api, url, {
-        onUpdate: setJob,
-        signal: controller.signal,
-      });
-      await onComplete?.(finished);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setRunning(false);
-    }
+    if (running) return; // re-entrancy guard for this dialog's own submit
+    const key = startCivitaiDownload(api, trimmedUrl, {
+      onComplete,
+      onStarted: (job, context) => {
+        // The card takes it from here — get out of the way of the grid it lives in.
+        onStarted?.(job, context);
+        onClose?.();
+      },
+    });
+    setStartedKey(key);
+    // A URL already downloading joins that download instead of starting a second;
+    // it has announced itself long ago, so close on its behalf.
+    if (getCivitaiDownload(key)?.job?.id) onClose?.();
   };
 
-  const percent = Math.max(0, Math.min(100, Number(job?.percent) || 0));
-  const showProgress = running || job || error;
-
-  let statusText = null;
-  if (error) {
-    statusText = error;
-  } else if (job?.status === 'success') {
-    const filename = job.result?.filename || 'LoRA';
-    const base = job.result?.baseModel ? ` · ${job.result.baseModel}` : '';
-    statusText = `${filename} downloaded${base}`;
-  } else if (job?.status === 'error') {
-    statusText = job.error || 'Download failed.';
-  } else if (job) {
-    statusText = job.total_bytes
-      ? `Downloading ${percent}% · ${formatDownloadBytes(job.downloaded_bytes)} / ${formatDownloadBytes(job.total_bytes)}`
-      : 'Preparing download…';
-  } else if (running) {
-    statusText = 'Resolving Civitai URL…';
-  }
+  const percent = civitaiDownloadPercent(download);
+  const showProgress = running || failed;
+  const statusText = showProgress ? describeCivitaiDownload(download) : null;
 
   return (
     <Modal
       open
       onClose={onClose}
-      title="Download LoRA"
+      title="Download from Civitai"
       size="md"
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
-            Cancel
+            {running ? 'Close' : 'Cancel'}
           </Button>
-          <Button variant="primary" type="submit" form="civitai-download-form" loading={running}>
+          <Button
+            variant="primary"
+            type="submit"
+            form="civitai-download-form"
+            loading={running}
+            // Explicit: Button spreads `rest` after its own disabled, so a
+            // loading-only button would still read as clickable.
+            disabled={running}
+          >
             Download
           </Button>
         </>
       }
     >
       <form id="civitai-download-form" onSubmit={submit} className="flex flex-col gap-4">
-        <Field label="Civitai LoRA URL" hint="Paste a civitai.com model or model-version link.">
+        <Field
+          label="Civitai model URL"
+          hint="Any civitai.com model or model-version link — LoRAs, checkpoints, VAEs and the rest are filed by type."
+        >
           <TextInput
             type="url"
             required
@@ -96,21 +99,23 @@ export function CivitaiDownloadDialog({ api, onComplete, onClose }) {
             <div
               role="status"
               aria-live="polite"
-              className={cx('font-mono text-xs', error ? 'text-danger' : 'text-ink2')}
+              className={cx('font-mono text-xs', failed ? 'text-danger' : 'text-ink2')}
             >
               {statusText}
             </div>
             <div className="h-1 w-full overflow-hidden rounded-full bg-bg3">
               <div
-                className={cx(
-                  'h-full rounded-full transition-[width] duration-300',
-                  error ? 'bg-danger' : 'bg-honey',
-                )}
+                className={cx('h-full rounded-full transition-[width] duration-300', failed ? 'bg-danger' : 'bg-honey')}
                 style={{ width: `${percent}%` }}
               />
             </div>
           </div>
         ) : null}
+
+        <p className="text-[11px] leading-relaxed text-ink3">
+          You can close this window — the download keeps running in the background, and its progress
+          and cancel button live on the LoRA card until it finishes.
+        </p>
       </form>
     </Modal>
   );

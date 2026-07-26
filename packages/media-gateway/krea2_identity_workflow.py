@@ -27,6 +27,41 @@ KREA2_TURBO_PORTABLE_MODEL = os.environ.get(
 
 SEED_MAX = 1_000_000_000
 
+# Curated subset of this ComfyUI's KSampler enums — the pairs that are worth
+# offering for Krea 2 Turbo. Anything outside the list falls back to the
+# step-appropriate default rather than erroring out inside Comfy.
+KREA2_SAMPLERS = (
+    "euler",
+    "euler_ancestral",
+    "dpmpp_2m",
+    "dpmpp_2m_sde",
+    "deis",
+    "deis_2m",
+    "deis_3m",
+    "res_2s",
+    "res_2m",
+    "res_3m",
+    "uni_pc",
+    "ddim",
+)
+KREA2_SCHEDULERS = (
+    "beta",
+    "bong_tangent",
+    "simple",
+    "sgm_uniform",
+    "karras",
+    "exponential",
+    "normal",
+    "linear_quadratic",
+    "kl_optimal",
+    "beta57",
+)
+KREA2_DEFAULT_SAMPLER = "euler_ancestral"
+KREA2_DEFAULT_SCHEDULER = "beta"
+KREA2_LOW_STEP_SAMPLER = "deis_3m"
+KREA2_LOW_STEP_SCHEDULER = "bong_tangent"
+KREA2_LOW_STEP_THRESHOLD = 5
+
 
 def resolve_seed_option(options, key="seed"):
     """Resolve a sampler seed; missing, invalid, or negative (-1) means randomize."""
@@ -60,6 +95,25 @@ def _bool_option(options, key, default):
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off", ""}
     return bool(value)
+
+
+def _choice_option(options, key, default, allowed):
+    value = str(options.get(key) or "").strip()
+    return value if value in allowed else default
+
+
+def krea2_sampler_defaults(steps):
+    """Pick the sampler pair that actually works at this step count.
+
+    euler_ancestral/beta is the tuned 8-10 step recipe; below that it falls
+    apart (visible mush at 4 steps). deis_3m/bong_tangent is the low-step
+    schedule the raw-turbo workflow uses to land a usable frame in 2-3 steps,
+    which is where the ~15s runs come from. An explicit sampler_name/scheduler
+    in the request always wins over this.
+    """
+    if steps <= KREA2_LOW_STEP_THRESHOLD:
+        return KREA2_LOW_STEP_SAMPLER, KREA2_LOW_STEP_SCHEDULER
+    return KREA2_DEFAULT_SAMPLER, KREA2_DEFAULT_SCHEDULER
 
 
 def _default_identity_checkpoint_available():
@@ -118,6 +172,9 @@ def build_krea2_turbo_identity_prompt(
     steps = _int_option(options, "steps", 10, 1, 50)
     cfg = _float_option(options, "cfg", _float_option(options, "guidance", 1.0, 0.0, 20.0), 0.0, 20.0)
     seed = resolve_seed_option(options)
+    default_sampler, default_scheduler = krea2_sampler_defaults(steps)
+    sampler_name = _choice_option(options, "sampler_name", default_sampler, KREA2_SAMPLERS)
+    scheduler = _choice_option(options, "scheduler", default_scheduler, KREA2_SCHEDULERS)
     grounding_px = _int_option(options, "grounding_px", 768, 0, 4096)
     ref_boost = _float_option(options, "ref_boost", 4.0, 0.0, 1000.0)
     identity_strength = _float_option(options, "identity_strength", 1.0, -10.0, 10.0)
@@ -190,8 +247,8 @@ def build_krea2_turbo_identity_prompt(
                     "seed": seed,
                     "steps": steps,
                     "cfg": cfg,
-                    "sampler_name": "euler_ancestral",
-                    "scheduler": "beta",
+                    "sampler_name": sampler_name,
+                    "scheduler": scheduler,
                     "denoise": 1.0,
                 },
             },
@@ -250,8 +307,8 @@ def build_krea2_turbo_identity_prompt(
                 "seed": seed,
                 "steps": steps,
                 "cfg": cfg,
-                "sampler_name": "euler_ancestral",
-                "scheduler": "beta",
+                "sampler_name": sampler_name,
+                "scheduler": scheduler,
                 "denoise": 1.0,
             },
         },

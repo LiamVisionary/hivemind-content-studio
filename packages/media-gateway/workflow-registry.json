@@ -59,7 +59,6 @@
       },
       "accepts": [
         "prompt",
-        "negative_prompt",
         "image_path",
         "image_base64",
         "image_url",
@@ -68,6 +67,8 @@
         "steps",
         "cfg",
         "seed",
+        "sampler_name",
+        "scheduler",
         "ref_boost",
         "identity_strength",
         "grounding_px",
@@ -81,6 +82,31 @@
         "cfg": 1.0,
         "seed": -1
       },
+      "samplers": [
+        "euler_ancestral",
+        "deis_3m",
+        "deis_2m",
+        "res_2s",
+        "res_2m",
+        "res_3m",
+        "dpmpp_2m",
+        "dpmpp_2m_sde",
+        "euler",
+        "uni_pc",
+        "ddim"
+      ],
+      "schedulers": [
+        "beta",
+        "bong_tangent",
+        "simple",
+        "sgm_uniform",
+        "karras",
+        "exponential",
+        "normal",
+        "linear_quadratic",
+        "kl_optimal",
+        "beta57"
+      ],
       "aspect_ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"],
       "tags": ["text-to-image", "image-edit", "identity", "turbo", "local"],
       "featured": true
@@ -887,6 +913,34 @@
           "auth_env": ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_READ_WRITE_KEY"]
         }
       ]
+    },
+    {
+      "id": "ltx23-eros-v14-ic-ingredients-lora",
+      "inherits": "ltx23-eros-ic-ingredients-lora",
+      "title": "LTX 2.3 Eros v1.4 IC-LoRA Ingredients",
+      "description": "The Ingredients IC-LoRA reference-sheet workflow on the 10Eros v1.4 fine-tune, converted locally from TenStrip's bf16 with mlx-forge (int8, group 64) because no MLX v1.4 build is published upstream. This is a dev package like the v1 lane, so it keeps the same Comfy dev recipe: dev transformer plus the generic LTX distilled LoRA fused at 0.5 alongside the IC-LoRA. Everything else is inherited from the v1 lane, making this an apples-to-apples fine-tune comparison against it.",
+      "native_mlx": {
+        "variant": "eros-v14-q8-dev-ic",
+        "title": "LTX 2.3 10Eros v1.4 q8 dev + Ingredients IC-LoRA",
+        "marker": "Eros/native_mlx_ltx__eros-v14-q8-dev-ic",
+        "output_subdir": "Eros"
+      }
+    },
+    {
+      "id": "ltx23-eros-dmd-ic-ingredients-lora",
+      "inherits": "ltx23-eros-ic-ingredients-lora",
+      "title": "LTX 2.3 Eros DMD IC-LoRA Ingredients",
+      "description": "The Ingredients IC-LoRA reference-sheet workflow on the 10Eros v1.3 DMD checkpoint. The v1 lane runs the Comfy dev recipe: a dev transformer with the generic LTX distilled LoRA fused at 0.5 alongside the IC-LoRA. A DMD build has the distillation merged into its weights and ships no dev transformer, so this lane clears both and runs ic-lora's plain distilled mode with the Ingredients IC-LoRA as the only adapter. Everything else \u2014 reference assembly, timeline anchors, prompt contract, audio, frame bucket, IC-LoRA strength, generation controls \u2014 is inherited unchanged, so this is an apples-to-apples sibling of the v1 lane.",
+      "native_mlx": {
+        "variant": "eros-dmd-v13-ic",
+        "title": "LTX 2.3 10Eros v1.3 DMD q8 + Ingredients IC-LoRA",
+        "marker": "Eros/native_mlx_ltx__eros-dmd-v13-ic",
+        "output_subdir": "Eros",
+        "ic_lora": {
+          "dev_transformer": "",
+          "distilled_lora": ""
+        }
+      }
     }
   ]
 }

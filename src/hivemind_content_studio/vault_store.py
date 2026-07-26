@@ -33,6 +33,10 @@ IDENTITY_FIELDS = ("salt", "wrapped_mk_pass", "wrapped_mk_recovery", "public_key
 # budgets and drop the rest.
 NAMESPACE_RETENTION: dict[str, dict[str, int]] = {
     "gen-setup": {"max_rows": 300, "max_bytes": 512 * 1024 * 1024},
+    # Named libraries (LoRA groups, saved prompts) are ONE blob each, so these
+    # bounds never evict a user's saved entry — they only stop a buggy or hostile
+    # writer from turning this namespace into another unbounded store.
+    "library": {"max_rows": 16, "max_bytes": 64 * 1024 * 1024},
 }
 
 

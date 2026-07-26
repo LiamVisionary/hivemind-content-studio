@@ -13,6 +13,7 @@ from hivemind_content_studio.media_studio import (
     _token,
     discover_media_studio,
     generate_video,
+    start_video,
     video_dimensions_for_request,
 )
 from hivemind_content_studio.planner import DEFAULT_PROVIDERS
@@ -571,3 +572,37 @@ def test_video_generation_forwards_start_frame_with_ingredient_views(tmp_path: P
     assert captured["width"] == 448
     assert captured["height"] == 768
     assert deleted_inputs == ["uploaded-start.png", "uploaded-front.png", "uploaded-profile.png"]
+
+
+def test_video_generation_forwards_the_grain_cleanup_choice(tmp_path: Path, monkeypatch) -> None:
+    """The denoise choice must reach the MCP verbatim — and only when set."""
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="ltx23-eros-fast",
+    )
+    captured: dict = {}
+
+    class Client:
+        def call_tool(self, name, arguments):
+            captured.clear()
+            captured.update(arguments)
+            return {"content": [{"type": "text", "text": json.dumps({"job": {"id": "job-dn", "status": "running"}})}]}
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+
+    start_video(prompt="a slow push in", duration_seconds=2, denoise="strong")
+    assert captured["denoise"] == "strong"
+
+    start_video(prompt="a slow push in", duration_seconds=2)
+    assert "denoise" not in captured
+
+    # Unknown tiers are dropped rather than forwarded to the runner.
+    start_video(prompt="a slow push in", duration_seconds=2, denoise="nuclear")
+    assert "denoise" not in captured

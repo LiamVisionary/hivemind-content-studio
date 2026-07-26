@@ -1,6 +1,8 @@
 // Shared React hooks bridging the immutable src/lib logic layer.
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { getCivitaiDownloads, subscribeCivitaiDownloads } from '../lib/civitaiDownloadStore.js';
 import { peekResolvedMediaSrc, resolveMediaSrc } from '../lib/e2eMedia.js';
+import { ensureLibraryLoaded, isLibraryLoaded, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
 import { getLang, setLang, t, tf } from '../lib/i18n.js';
 
 // Same-origin API media is served as an E2E envelope (ciphertext JSON). Pointing
@@ -72,6 +74,50 @@ export function useOwnerSession() {
     };
   }, []);
   return unlocked;
+}
+
+// Every Civitai download in flight. Two views need them — a pending card each, and
+// an in-place state on the LoRA card a replace supersedes — so the subscription
+// lives here once.
+export function useCivitaiDownloads() {
+  const [list, setList] = useState(getCivitaiDownloads);
+  useEffect(() => subscribeCivitaiDownloads(setList), []);
+  return list;
+}
+
+// An owner-sealed named library (LoRA groups, saved prompts). Reads the vault
+// blob once per session and re-renders every consumer on save/delete, so the LoRA
+// panel and both studios' prompt menus stay in step. `locked` (no unlocked owner
+// vault) is distinct from an empty library — the UI must say "unlock" rather than
+// "you have none saved", which would read as data loss.
+export function useSavedLibrary(library) {
+  const [state, setState] = useState(() => ({
+    entries: peekLibrary(library),
+    loading: !isLibraryLoaded(library),
+    locked: false,
+  }));
+  const aliveRef = useRef(true);
+
+  // Also used to recover from `locked`: the studio can mount before the owner
+  // unlocks, and the message we show tells them to go and unlock — so opening the
+  // menu again has to actually re-check instead of showing that message forever.
+  const read = useCallback(() => {
+    setState((prev) => ({ ...prev, loading: true }));
+    ensureLibraryLoaded(library)
+      .then(() => { if (aliveRef.current) setState({ entries: peekLibrary(library), loading: false, locked: false }); })
+      .catch((error) => { if (aliveRef.current) setState({ entries: [], loading: false, locked: Boolean(error?.locked) }); });
+  }, [library]);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    const off = subscribeLibrary(() => {
+      if (aliveRef.current) setState((prev) => ({ ...prev, entries: peekLibrary(library) }));
+    });
+    if (!isLibraryLoaded(library)) read();
+    return () => { aliveRef.current = false; off(); };
+  }, [library, read]);
+
+  return { ...state, retry: read };
 }
 
 export function useWindowEvent(name, handler) {

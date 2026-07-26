@@ -69,6 +69,10 @@ test('video workflow discovery recovers after an owner-session startup race', as
             ingredientInputs: { max_images: 12, layout: 'adaptive-pack' },
             id: 'hivemind-media:ltx23-ic-ingredients-lora',
             workflowId: 'ltx23-ic-ingredients-lora',
+            // Null for a model with only one build; set when a workflow declares
+            // a Lite/Standard pair so the picker can collapse them into one row.
+            tierGroup: null,
+            tier: null,
             name: 'LTX 2.3 IC-LoRA Ingredients',
             description: 'Media Studio workflow',
             type: 'video',

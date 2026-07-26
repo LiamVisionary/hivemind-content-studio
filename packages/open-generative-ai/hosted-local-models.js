@@ -78,6 +78,10 @@ function toHostedImageModel(workflow) {
     aspectRatios: Array.isArray(workflow.aspect_ratios) && workflow.aspect_ratios.length
       ? workflow.aspect_ratios
       : DEFAULT_ASPECT_RATIOS,
+    // Sampler/scheduler are opt-in per workflow: only the graphs that actually
+    // read them advertise a list, and the studio only shows the control then.
+    samplers: Array.isArray(workflow.samplers) ? workflow.samplers.map(String) : [],
+    schedulers: Array.isArray(workflow.schedulers) ? workflow.schedulers.map(String) : [],
     defaultWidth: Number(defaults.width || 1024),
     defaultHeight: Number(defaults.height || 1024),
     defaultSteps: Number(defaults.steps || 8),
