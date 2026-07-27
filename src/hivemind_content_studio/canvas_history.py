@@ -237,7 +237,7 @@ class CanvasHistoryStore:
                 continue
             if requested_model and not any(str(value).casefold() == requested_model for value in row_models):
                 continue
-            visible.append(self._public(row, file_format=suffix, provenance=provenance))
+            visible.append(self._public(row, file_format=suffix, provenance=provenance, output_basename=output_name))
 
         total = len(visible)
         start = (bounded_page - 1) * bounded_page_size
@@ -330,7 +330,9 @@ class CanvasHistoryStore:
         return payload if isinstance(payload, dict) else {}
 
     @staticmethod
-    def _public(row: sqlite3.Row, *, file_format: str, provenance: dict[str, Any]) -> dict[str, Any]:
+    def _public(
+        row: sqlite3.Row, *, file_format: str, provenance: dict[str, Any], output_basename: str = "",
+    ) -> dict[str, Any]:
         history_id = str(row["history_id"])
         models = provenance.get("models") if isinstance(provenance.get("models"), list) else []
         seeds = provenance.get("seeds") if isinstance(provenance.get("seeds"), list) else []
@@ -345,6 +347,14 @@ class CanvasHistoryStore:
             **({"models": models} if models else {}),
             **({"seeds": seeds} if seeds else {}),
             **({"time_label": "Imported from Canvas"} if row["timestamp_source"] == "imported" else {}),
+            # The output's BASENAME only — never a path, and never anything derived
+            # from the prompt. History's media_url is keyed by history_id, while the
+            # studios seal a generation's settings under the output filename, so
+            # without this the two key spaces never meet and "Load in Studio" could
+            # only ever fall back to the Canvas bridge (which has no workflow for a
+            # Media Studio output). The owner's browser already knows these names —
+            # it is what our own downloads are called.
+            **({"output_basename": output_basename} if output_basename else {}),
             "media_url": f"/api/canvas/history/{urllib.parse.quote(history_id)}/media",
         }
 

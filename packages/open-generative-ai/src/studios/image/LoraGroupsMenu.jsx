@@ -13,6 +13,8 @@ import { Menu } from '../../ui/Menu.jsx';
 import { LibraryDeleteButton, LibraryStateNote, SaveNameModal } from '../../ui/SavedLibrary.jsx';
 import { Button, cx } from '../../ui/kit.jsx';
 
+const sameName = (left, right) => String(left || '').trim().toLowerCase() === String(right || '').trim().toLowerCase();
+
 function groupSummary(group) {
   const total = group?.loras?.length || 0;
   const muted = (group?.loras || []).filter((lora) => lora.enabled === false).length;
@@ -31,6 +33,10 @@ export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, ba
   const [saveOpen, setSaveOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  // The group this stack came from (loaded or last saved). Pre-filling its name
+  // makes the common edit — load a group, retune a weight, save — an overwrite
+  // rather than a near-duplicate the user then has to clean up.
+  const [activeName, setActiveName] = useState('');
 
   const save = async (name) => {
     setSaving(true);
@@ -39,8 +45,10 @@ export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, ba
         name,
         data: loraGroupFromSelection(getSelection?.() || selection, { baseModelId, baseLabel }),
       });
+      const replaced = entries.some((entry) => sameName(entry.name, name));
+      setActiveName(name);
       setSaveOpen(false);
-      toast.success(`Saved “${name}”.`);
+      toast.success(replaced ? `Updated “${name}”.` : `Saved “${name}”.`);
     } catch (error) {
       toast.error(error.message);
     } finally {
@@ -51,6 +59,7 @@ export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, ba
   const load = (entry) => {
     const { selection: next, missing } = loraSelectionFromGroup(entry.data, loras);
     onLoad(next);
+    setActiveName(entry.name);
     if (missing.length) {
       // Never silently apply a smaller stack than the one that was saved.
       toast(`Loaded “${entry.name}” — ${missing.length} not installed for this model: ${missing.join(', ')}`, { duration: 6000 });
@@ -64,6 +73,8 @@ export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, ba
     setConfirmDelete(null);
     try {
       await deleteLibraryEntry(LIBRARIES.loraGroups, entry.id);
+      // Don't keep aiming the save dialog at a group that no longer exists.
+      if (sameName(entry.name, activeName)) setActiveName('');
       toast(`Deleted “${entry.name}”.`);
     } catch (error) {
       toast.error(error.message);
@@ -140,7 +151,9 @@ export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, ba
         label="Group name"
         placeholder="e.g. Anime portrait stack"
         hint={`${selection.length} LoRA${selection.length === 1 ? '' : 's'} and their weights${baseLabel ? ` · ${baseLabel}` : ''}`}
-        takenNames={entries.map((entry) => entry.name)}
+        initialName={activeName}
+        existingLabel="Or overwrite a saved group"
+        existing={entries.map((entry) => ({ id: entry.id, name: entry.name, hint: groupSummary(entry.data) }))}
         onClose={() => setSaveOpen(false)}
         onSave={save}
       />

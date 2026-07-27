@@ -126,6 +126,15 @@ def test_canvas_history_import_is_owner_only_metadata_only_and_source_preserving
     assert "must-not-persist" not in response.text
     assert str(tmp_path) not in response.text
 
+    # The output BASENAME is exposed to the owner's own browser — and only the
+    # basename. media_url is keyed by history id, while the studios seal a
+    # generation's settings under the output filename, so this is the sole
+    # identifier that lets History find a studio-made output's saved settings
+    # instead of falling back to a Canvas workflow that never existed.
+    assert payload["history"][0]["output_basename"] == "private-output.png"
+    # Still no path, and still no token.
+    assert "/" not in payload["history"][0]["output_basename"]
+
     media_url = payload["history"][0]["media_url"]
     media = client.get(media_url)
     assert media.status_code == 200

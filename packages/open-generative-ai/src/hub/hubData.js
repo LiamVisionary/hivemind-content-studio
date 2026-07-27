@@ -1177,10 +1177,23 @@ export function findCanvasHistoryIdForOutput(url, basename) {
 // this output". Their real settings were sealed to the owner vault at generation
 // time — the same record drag-to-restore reads. Try that first; the Canvas bridge
 // stays the fallback for genuine Canvas outputs and anything predating the store.
+// A History row's media_url is `/api/canvas/history/<id>/media` — keyed by history
+// id, and unrelated to the URL a studio sealed its settings under. The OUTPUT
+// FILENAME is the one identifier both sides share (the studios seal under
+// basenameOf(their url), which is that same file), so it is what makes this lookup
+// able to hit at all. Falling back to the media_url basename only helps rows that
+// predate output_basename.
+function sealedLookupKeys(entry) {
+  return {
+    url: entry.media_url,
+    basename: entry.output_basename || basenameOf(entry.media_url),
+  };
+}
+
 async function restoreSealedGenerationSetup(entry) {
   let result = null;
   try {
-    result = await resolveGenerationSetup({ url: entry.media_url, basename: basenameOf(entry.media_url) });
+    result = await resolveGenerationSetup(sealedLookupKeys(entry));
   } catch { return false; }
   if (!result?.context) return false;
   const section = result.section || (entry.media_type?.startsWith('video/') ? 'video' : 'image');
@@ -1196,7 +1209,17 @@ export async function loadCanvasOutputInStudio(historyId) {
   if (await restoreSealedGenerationSetup(entry)) return;
   try {
     const setup = await inspectCanvasHistoryEntry(historyId);
-    if (!setup) throw new Error(hubState.canvasSetups[historyId]?.error || 'Exact setup unavailable');
+    if (!setup) {
+      // "Exact Canvas workflow is unavailable" is the Canvas bridge's answer, and
+      // it is a confusing thing to show for a Media Studio or cloud output, which
+      // never had a Canvas workflow to begin with. Those outputs are restorable
+      // only from their sealed settings — and if the seal is gone, say so.
+      const bridgeError = hubState.canvasSetups[historyId]?.error || '';
+      if (/exact canvas workflow is unavailable|no loadable exact workflow/i.test(bridgeError)) {
+        throw new Error('No saved settings for this output — it was made outside Canvas, and its recorded setup is no longer available.');
+      }
+      throw new Error(bridgeError || 'Exact setup unavailable');
+    }
     hubState.loadedCanvasSetup = { historyId, entry, setup };
     // Route to the matching STUDIO (Image/Video), not the Planner. Persist the
     // prompt as the studio's draft (read on first mount) AND live-set it into
@@ -1241,7 +1264,7 @@ export async function copyCanvasPrompt(historyId) {
     // graph, but their prompt is in the vault-sealed capture.
     const entry = hubState.canvasHistory.find((item) => item.history_id === historyId);
     if (entry) {
-      const sealed = await resolveGenerationSetup({ url: entry.media_url, basename: basenameOf(entry.media_url) })
+      const sealed = await resolveGenerationSetup(sealedLookupKeys(entry))
         .catch(() => null);
       if (sealed?.context?.prompt) {
         await copyText(sealed.context.prompt);

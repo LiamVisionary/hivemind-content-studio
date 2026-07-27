@@ -140,3 +140,24 @@ test('an explicit load restarts pagination from page 1', async () => {
     assert.equal(hub.hubState.canvasPage, 1);
     assert.equal(hub.hubState.canvasHasMore, true);
 });
+
+test('History looks up a sealed setup by the output filename, not the history-id URL', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const hub = fs.readFileSync(path.join(__dirname, '..', 'src/hub/hubData.js'), 'utf8');
+
+    // A History row's media_url is `/api/canvas/history/<id>/media`, which no studio
+    // ever sealed anything under. The output BASENAME is the only identifier both
+    // sides share — the studios seal under basenameOf(their own url), which is that
+    // same file. Without it "Load in Studio" could only ever reach the Canvas
+    // bridge, which has no workflow for a Media Studio or cloud output.
+    assert.match(hub, /function sealedLookupKeys/);
+    assert.match(hub, /entry\.output_basename \|\| basenameOf\(entry\.media_url\)/);
+
+    // Both entry points must use it, or one of them silently keeps missing.
+    const uses = hub.match(/resolveGenerationSetup\(sealedLookupKeys\(entry\)\)/g) || [];
+    assert.equal(uses.length, 2, 'both Load in Studio and Copy prompt must use the shared keys');
+
+    // And the dead-end message must not blame a Canvas workflow that never existed.
+    assert.match(hub, /it was made outside Canvas/);
+});
