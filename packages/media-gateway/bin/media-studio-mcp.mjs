@@ -303,6 +303,22 @@ function backendToken() {
   }
 }
 
+function requesterPublicKey() {
+  // The requesting client's public key (base64url SPKI), presented with every
+  // gateway call. Remote Comfy lanes seal generated media to this key, and the
+  // gateway scopes history/status for keyed jobs to the same presenter —
+  // possession of the matching decrypt key, not machine locality, grants
+  // access to results. Optional: without it, jobs seal to the owner vault.
+  if (process.env.MEDIA_STUDIO_E2E_PUB) return process.env.MEDIA_STUDIO_E2E_PUB.trim();
+  const pubPath = process.env.MEDIA_STUDIO_E2E_PUB_FILE;
+  if (!pubPath) return '';
+  try {
+    return readFileSync(pubPath, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 function generationUsage() {
   return {
     endpoint: '/api/generate',
@@ -2216,6 +2232,8 @@ async function requestJson(path, { method = 'GET', body, query, timeoutMs = 6000
   const headers = { Accept: 'application/json' };
   const authToken = backendToken();
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  const requesterPub = requesterPublicKey();
+  if (requesterPub) headers['X-E2E-Requester-Pub'] = requesterPub;
   const init = {
     method,
     headers,
@@ -2877,6 +2895,9 @@ Environment:
                                   Public Studio URL for include_urls output links, default ${studioBase}
   MEDIA_STUDIO_TOKEN             Existing backend token override
   MEDIA_STUDIO_TOKEN_FILE        Existing backend token file, default ${tokenPath}
+  MEDIA_STUDIO_E2E_PUB           Requester public key (base64url SPKI) remote-lane
+                                  outputs are sealed to; also scopes job status reads
+  MEDIA_STUDIO_E2E_PUB_FILE      File containing the requester public key
 `);
 }
 

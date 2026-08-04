@@ -3108,3 +3108,459 @@ class CancelGenerationJobTests(unittest.TestCase):
         # The render must die promptly, not run the sleep to completion.
         self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(procs, {})
+
+
+class RemoteComfyLaneTests(unittest.TestCase):
+    """Remote (rented-box) Comfy lanes: authenticated transport, prompt->lane
+    routing with requester-scoped reads, requester-sealed fetch-back, and the
+    post-harvest scrub of the rented instance."""
+
+    SPKI = 'A' * 200  # base64url-shaped requester public key
+    OTHER_SPKI = 'B' * 200
+
+    def _route_state(self, app, tmp):
+        return [
+            patch.object(app, 'COMFY_PROMPT_ROUTES_FILE', Path(tmp) / 'routes.json'),
+            patch.object(app, '_comfy_prompt_routes', {}),
+            patch.object(app, '_comfy_prompt_routes_loaded', True),
+        ]
+
+    def test_lane_remoteness_and_transport_contract(self):
+        app = load_app()
+        lanes = {
+            'default': 'http://127.0.0.1:8188',
+            'rental': 'http://198.51.100.7:8188',
+            'tunnel': 'http://127.0.0.1:8189',
+        }
+        with patch.object(app, 'COMFY_LANES', lanes), \
+             patch.object(app, 'COMFY_REMOTE_LANES', {'tunnel'}), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {}):
+            self.assertFalse(app.comfy_lane_is_remote('default'))
+            self.assertTrue(app.comfy_lane_is_remote('rental'))
+            # SSH-tunneled lanes look local; remoteness is declarable.
+            self.assertTrue(app.comfy_lane_is_remote('tunnel'))
+            self.assertIsNone(app.comfy_lane_transport_error('default'))
+            # Off-host without a token: refused (no authenticated channel).
+            self.assertIn('authenticated', app.comfy_lane_transport_error('rental'))
+            # Declared-remote loopback = tunnel; the tunnel is the auth.
+            self.assertIsNone(app.comfy_lane_transport_error('tunnel'))
+        with patch.object(app, 'COMFY_LANES', lanes), \
+             patch.object(app, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}):
+            self.assertIsNone(app.comfy_lane_transport_error('rental'))
+            request = app.comfy_lane_request('rental', '/history/x')
+            self.assertEqual(request.get_header('Authorization'), 'Bearer lane-secret')
+
+    def test_requester_scoping_of_prompt_routes(self):
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches[0], patches[1], patches[2], \
+                 patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', set()):
+                app.record_comfy_prompt_route('p1', 'default', requester_spki=self.SPKI)
+                route = app.comfy_prompt_route('p1')
+                self.assertEqual(route['requester_fp'], app.requester_fingerprint(self.SPKI))
+                self.assertTrue(app.requester_may_read_prompt(route, self.SPKI))
+                self.assertFalse(app.requester_may_read_prompt(route, self.OTHER_SPKI))
+                self.assertFalse(app.requester_may_read_prompt(route, None))
+                # Legacy submissions (no key presented) stay token-only open.
+                app.record_comfy_prompt_route('p2', 'default')
+                self.assertTrue(app.requester_may_read_prompt(app.comfy_prompt_route('p2'), None))
+                # Routes survive a reload from disk (gateway restart).
+                with patch.object(app, '_comfy_prompt_routes', {}), \
+                     patch.object(app, '_comfy_prompt_routes_loaded', False):
+                    reloaded = app.comfy_prompt_route('p1')
+                    self.assertEqual(reloaded['requester_fp'], route['requester_fp'])
+
+    def test_prompt_input_files_are_pushed_to_the_remote_lane(self):
+        app = load_app()
+        uploads = []
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{}'
+
+        def fake_urlopen(request, timeout=None):
+            uploads.append(request)
+            return FakeResponse()
+
+        with TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / 'input'
+            input_dir.mkdir()
+            (input_dir / 'start.png').write_bytes(b'PNGBYTES')
+            graph = {'70': {'class_type': 'LoadImage', 'inputs': {'image': 'start.png'}},
+                     '71': {'class_type': 'LoadImage', 'inputs': {'image': 'missing.png'}}}
+            body = json.dumps({'prompt': graph}).encode('utf-8')
+            with patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, 'urlopen', side_effect=fake_urlopen):
+                pushed = app.push_prompt_inputs_to_lane(body, 'rental')
+        self.assertEqual(pushed, ['start.png'])
+        self.assertEqual(len(uploads), 1)
+        upload = uploads[0]
+        self.assertEqual(upload.full_url, 'http://rental.test:8188/upload/image')
+        self.assertEqual(upload.get_header('Authorization'), 'Bearer lane-secret')
+        self.assertIn(b'PNGBYTES', upload.data)
+        self.assertIn(b'name="overwrite"', upload.data)
+        self.assertIn(b'filename="start.png"', upload.data)
+
+    def test_remote_harvest_seals_to_requester_key_with_no_plaintext_in_output_dir(self):
+        app = load_app()
+        pid = 'remote-prompt-1'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        fetched = []
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'MP4BYTES'
+
+        def fake_urlopen(request, timeout=None):
+            fetched.append(request.full_url)
+            return FakeResponse()
+
+        sealed = {}
+
+        def fake_seal(spki, source, envelope, media_name):
+            sealed.update(spki=spki, plaintext=Path(source).read_bytes(), media_name=media_name)
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches[0], patches[1], patches[2], \
+                 patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app, '_seal_file_with_helper', side_effect=fake_seal), \
+                 patch.object(app, 'urlopen', side_effect=fake_urlopen):
+                app.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                harvested = app.harvest_remote_comfy_outputs(pid, history)
+
+                logical_name = harvested[0]
+                self.assertTrue(logical_name.startswith('cmf-'))
+                self.assertIn('video_00001_.mp4', logical_name)
+                # Sealed to the REQUESTER's key, from the exact fetched bytes.
+                self.assertEqual(sealed['spki'], self.SPKI)
+                self.assertEqual(sealed['plaintext'], b'MP4BYTES')
+                # Only the envelope exists; no plaintext landed in the shared
+                # output dir, and the private staging file is gone.
+                self.assertEqual([p.name for p in out_dir.iterdir()], [logical_name + '.e2e'])
+                self.assertEqual(list(state_dir.glob('.remote-harvest-*')), [])
+                self.assertEqual(app.comfy_prompt_route(pid)['status'], 'harvested')
+                self.assertIn('/view?', fetched[0])
+                self.assertIn('filename=video_00001_.mp4', fetched[0])
+
+    def test_scrub_deletes_remote_files_and_drops_history(self):
+        app = load_app()
+        pid = 'remote-prompt-2'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        calls = []
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return b'{}'
+
+        def fake_urlopen(request, timeout=None):
+            calls.append((request.get_method(), request.full_url, request.data))
+            return FakeResponse()
+
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches[0], patches[1], patches[2], \
+                 patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, 'urlopen', side_effect=fake_urlopen):
+                app.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI,
+                                              pushed_inputs=['start.png'])
+                result = app.scrub_remote_comfy_prompt(pid, history)
+
+        self.assertTrue(result['files_scrubbed'])
+        self.assertTrue(result['history_dropped'])
+        scrub_calls = [c for c in calls if c[1].endswith('/hivemind/scrub-files')]
+        self.assertEqual(len(scrub_calls), 1)
+        files = json.loads(scrub_calls[0][2].decode('utf-8'))['files']
+        self.assertIn({'type': 'output', 'subfolder': '', 'filename': 'video_00001_.mp4'}, files)
+        self.assertIn({'type': 'input', 'subfolder': '', 'filename': 'start.png'}, files)
+        history_calls = [c for c in calls if c[1].endswith('/history') and c[0] == 'POST']
+        self.assertEqual(len(history_calls), 1)
+        self.assertEqual(json.loads(history_calls[0][2].decode('utf-8')), {'delete': [pid]})
+
+    def test_watcher_harvests_then_scrubs_when_the_remote_prompt_finishes(self):
+        app = load_app()
+        pid = 'remote-prompt-3'
+        entry = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'clip_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload): self._payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return self._payload
+
+        def fake_urlopen(request, timeout=None):
+            url = request.full_url
+            calls.append((request.get_method(), url))
+            if url.endswith(f'/history/{pid}'):
+                return FakeResponse(json.dumps({pid: entry}).encode('utf-8'))
+            if '/view?' in url:
+                return FakeResponse(b'CLIPBYTES')
+            return FakeResponse(b'{}')
+
+        def fake_seal(spki, source, envelope, media_name):
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches[0], patches[1], patches[2], \
+                 patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app, '_seal_file_with_helper', side_effect=fake_seal), \
+                 patch.object(app, '_harvest_comfy_workflow_envelopes', return_value=0), \
+                 patch.object(app, 'urlopen', side_effect=fake_urlopen):
+                app.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                route = app.watch_remote_comfy_prompt(pid, poll_seconds=0.01, timeout_seconds=5)
+
+        self.assertEqual(route['status'], 'harvested')
+        self.assertTrue(route['scrubbed'])
+        self.assertEqual(route['outputs'], [f'cmf-{pid[:8]}-clip_00001_.mp4'])
+        self.assertTrue(any(url.endswith('/hivemind/scrub-files') for _, url in calls))
+
+    def test_synthetic_history_reports_each_remote_phase(self):
+        app = load_app()
+        # In flight: no entry yet, exactly like live Comfy history.
+        self.assertEqual(app.synthetic_comfy_history_for_route('p', {'status': 'submitted'}), {})
+        harvested = app.synthetic_comfy_history_for_route(
+            'p', {'status': 'harvested', 'outputs': ['cmf-p-clip.mp4']})
+        status = harvested['p']['status']
+        self.assertTrue(status['completed'])
+        self.assertEqual(status['status_str'], 'success')
+        images = harvested['p']['outputs']['hivemind_remote']['images']
+        self.assertEqual(images, [{'filename': 'cmf-p-clip.mp4', 'subfolder': '', 'type': 'output'}])
+        errored = app.synthetic_comfy_history_for_route('p', {'status': 'error', 'error': 'boom'})
+        self.assertEqual(errored['p']['status']['status_str'], 'error')
+        self.assertEqual(errored['p']['outputs'], {})
+
+    def test_proxy_scopes_remote_history_to_the_requester_over_http(self):
+        from urllib.request import urlopen as real_urlopen, Request as RealRequest
+        from urllib.error import HTTPError as RealHTTPError
+        app = load_app()
+        pid = 'rp-http-1'
+
+        def get_history(port, headers=None):
+            request = RealRequest(
+                f'http://127.0.0.1:{port}/comfy/api/history/{pid}',
+                headers={'Authorization': 'Bearer test-token', **(headers or {})},
+            )
+            try:
+                with real_urlopen(request, timeout=5) as response:
+                    return response.status, json.loads(response.read().decode('utf-8'))
+            except RealHTTPError as error:
+                return error.code, json.loads(error.read().decode('utf-8') or '{}')
+
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patch.object(app, 'TOKEN', 'test-token'), \
+                 patches[0], patches[1], patches[2], \
+                 patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:1', 'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}):
+                app.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                app.update_comfy_prompt_route(pid, status='harvested', outputs=['cmf-rp-clip.mp4'])
+                server_thread.start()
+                try:
+                    port = server.server_port
+                    # No requester key presented: the prompt does not exist.
+                    status, payload = get_history(port)
+                    self.assertEqual((status, payload), (404, {}))
+                    # Wrong key: same.
+                    status, payload = get_history(port, {'X-E2E-Requester-Pub': self.OTHER_SPKI})
+                    self.assertEqual((status, payload), (404, {}))
+                    # The owning requester reads the harvested result, served
+                    # from the gateway's record (the lane was scrubbed).
+                    status, payload = get_history(port, {'X-E2E-Requester-Pub': self.SPKI})
+                    self.assertEqual(status, 200)
+                    self.assertTrue(payload[pid]['status']['completed'])
+                    images = payload[pid]['outputs']['hivemind_remote']['images']
+                    self.assertEqual(images[0]['filename'], 'cmf-rp-clip.mp4')
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+    def test_proxy_submit_to_unauthenticated_remote_lane_is_refused(self):
+        from urllib.request import urlopen as real_urlopen, Request as RealRequest
+        from urllib.error import HTTPError as RealHTTPError
+        app = load_app()
+        graph = {'1': {'class_type': 'CheckpointLoaderSimple',
+                       'inputs': {'ckpt_name': 'minimax_h3_fl2va.safetensors'}}}
+        body = json.dumps({'prompt': graph}).encode('utf-8')
+
+        def submit(port, headers=None):
+            request = RealRequest(
+                f'http://127.0.0.1:{port}/comfy/api/prompt',
+                data=body,
+                headers={'Authorization': 'Bearer test-token',
+                         'Content-Type': 'application/json', **(headers or {})},
+                method='POST',
+            )
+            try:
+                with real_urlopen(request, timeout=5) as response:
+                    return response.status, json.loads(response.read().decode('utf-8'))
+            except RealHTTPError as error:
+                return error.code, json.loads(error.read().decode('utf-8') or '{}')
+
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patch.object(app, 'TOKEN', 'test-token'), \
+                 patches[0], patches[1], patches[2], \
+                 patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:1', 'rental': 'http://198.51.100.7:8188'}), \
+                 patch.object(app, 'COMFY_LANE_RULES', [('rental', ['minimax'])]), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', set()), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {}), \
+                 patch.object(app, 'vault_public_key_spki', return_value=None):
+                server_thread.start()
+                try:
+                    port = server.server_port
+                    # No authenticated transport for the off-host lane.
+                    status, payload = submit(port)
+                    self.assertEqual(status, 502)
+                    self.assertIn('authenticated', payload['error'])
+                    # With transport but no sealing key anywhere: refused
+                    # before any plaintext could become undeliverable.
+                    with patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}):
+                        status, payload = submit(port)
+                        self.assertEqual(status, 409)
+                        self.assertIn('sealing key', payload['error'])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+    def test_proxy_submit_records_route_and_spawns_watcher_for_remote_lane(self):
+        from urllib.request import urlopen as real_urlopen, Request as RealRequest
+        app = load_app()
+        graph = {'1': {'class_type': 'CheckpointLoaderSimple',
+                       'inputs': {'ckpt_name': 'minimax_h3_fl2va.safetensors'}}}
+        body = json.dumps({'prompt': graph}).encode('utf-8')
+        upstream = []
+        watched = []
+
+        class FakeResponse:
+            status = 200
+            headers = {'Content-Type': 'application/json'}
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({'prompt_id': 'rp-new-1'}).encode('utf-8')
+
+        def fake_upstream_urlopen(request, timeout=None):
+            upstream.append(request)
+            return FakeResponse()
+
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patch.object(app, 'TOKEN', 'test-token'), \
+                 patches[0], patches[1], patches[2], \
+                 patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:1', 'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_LANE_RULES', [('rental', ['minimax'])]), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', set()), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, 'COMFY_INPUT_DIR', Path(tmp) / 'input'), \
+                 patch.object(app, 'watch_remote_comfy_prompt', side_effect=lambda pid, **kw: watched.append(pid)), \
+                 patch.object(app, 'urlopen', side_effect=fake_upstream_urlopen):
+                server_thread.start()
+                try:
+                    request = RealRequest(
+                        f'http://127.0.0.1:{server.server_port}/comfy/api/prompt',
+                        data=body,
+                        headers={'Authorization': 'Bearer test-token',
+                                 'Content-Type': 'application/json',
+                                 'X-E2E-Requester-Pub': self.SPKI},
+                        method='POST',
+                    )
+                    with real_urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode('utf-8'))
+                    self.assertEqual(payload['prompt_id'], 'rp-new-1')
+                    # Routed to the rental lane, with its transport token, and
+                    # without leaking the requester header upstream.
+                    self.assertEqual(upstream[0].full_url, 'http://rental.test:8188/api/prompt')
+                    self.assertEqual(upstream[0].get_header('Authorization'), 'Bearer lane-secret')
+                    self.assertIsNone(upstream[0].get_header('X-e2e-requester-pub'))
+                    route = app.comfy_prompt_route('rp-new-1')
+                    self.assertEqual(route['lane'], 'rental')
+                    self.assertTrue(route['remote'])
+                    self.assertEqual(route['requester_fp'], app.requester_fingerprint(self.SPKI))
+                    for _ in range(100):
+                        if watched:
+                            break
+                        time.sleep(0.02)
+                    self.assertEqual(watched, ['rp-new-1'])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    server_thread.join(timeout=2)
+
+    def test_watcher_does_not_scrub_when_harvest_fails(self):
+        # A flaky fetch-back must never delete the only copy of the outputs.
+        app = load_app()
+        pid = 'remote-prompt-4'
+        entry = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'clip_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+
+        class FakeResponse:
+            def __init__(self, payload): self._payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return self._payload
+
+        def fake_urlopen(request, timeout=None):
+            if request.full_url.endswith(f'/history/{pid}'):
+                return FakeResponse(json.dumps({pid: entry}).encode('utf-8'))
+            return FakeResponse(b'{}')
+
+        scrubs = []
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches[0], patches[1], patches[2], \
+                 patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, '_harvest_comfy_workflow_envelopes', return_value=0), \
+                 patch.object(app, 'harvest_remote_comfy_outputs', side_effect=RuntimeError('view flaked')), \
+                 patch.object(app, 'scrub_remote_comfy_prompt', side_effect=lambda *a, **k: scrubs.append(a)), \
+                 patch.object(app, 'urlopen', side_effect=fake_urlopen):
+                app.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                route = app.watch_remote_comfy_prompt(pid, poll_seconds=0.01, timeout_seconds=5)
+
+        self.assertEqual(route['status'], 'error')
+        self.assertIn('view flaked', route['error'])
+        self.assertEqual(scrubs, [])

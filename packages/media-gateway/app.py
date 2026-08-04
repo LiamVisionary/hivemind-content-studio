@@ -310,8 +310,89 @@ def parse_comfy_lane_rules():
     return rules
 
 
+def parse_comfy_lane_tokens():
+    """Per-lane auth tokens, e.g. COMFY_LANE_TOKENS="h3=abc123,krea=def".
+
+    Sent as `Authorization: Bearer <token>` on every request the gateway makes
+    to that lane (the rented-instance auth proxy in front of :8188 checks it).
+    Kept out of COMFY_LANES so lane URLs never carry credentials into logs."""
+    raw = os.environ.get("COMFY_LANE_TOKENS", "")
+    tokens = {}
+    for part in raw.split(','):
+        part = part.strip()
+        if not part or '=' not in part:
+            continue
+        name, value = part.split('=', 1)
+        name = re.sub(r"[^a-z0-9_-]", "", name.strip().lower())
+        value = value.strip()
+        if name and value:
+            tokens[name] = value
+    return tokens
+
+
+def parse_remote_comfy_lanes():
+    """Lanes whose Comfy runs on a machine that is NOT this gateway host, e.g.
+    COMFY_REMOTE_LANES="h3". Remote lanes get the requester-sealed fetch-back
+    flow (outputs never resolve on local disk). An SSH-tunneled lane LOOKS like
+    loopback, so remoteness must be declarable, not only inferred."""
+    raw = os.environ.get("COMFY_REMOTE_LANES", "")
+    return {re.sub(r"[^a-z0-9_-]", "", part.strip().lower()) for part in raw.split(',') if part.strip()}
+
+
 COMFY_LANES = parse_comfy_lanes()
 COMFY_LANE_RULES = parse_comfy_lane_rules()
+COMFY_LANE_TOKENS = parse_comfy_lane_tokens()
+COMFY_REMOTE_LANES = parse_remote_comfy_lanes()
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def comfy_lane_is_remote(lane):
+    """A lane is remote when declared in COMFY_REMOTE_LANES or when its URL
+    points off-host. Remote means: output files do not exist on this gateway's
+    disk, and results must be fetched back and sealed to the requester."""
+    if lane in COMFY_REMOTE_LANES:
+        return True
+    base = COMFY_LANES.get(lane)
+    if not base:
+        return False
+    host = (urlparse(base).hostname or "").lower()
+    return bool(host) and host not in _LOOPBACK_HOSTS
+
+
+def comfy_lane_token(lane):
+    return COMFY_LANE_TOKENS.get(lane)
+
+
+def comfy_lane_transport_error(lane):
+    """The security contract for remote lanes: reachable only through an
+    authenticated channel. Loopback URLs declared remote are SSH tunnels (the
+    tunnel is the auth). Anything off-host needs a per-lane token for the
+    instance's auth proxy. Returns an error string, or None when acceptable."""
+    if not comfy_lane_is_remote(lane):
+        return None
+    base = COMFY_LANES.get(lane) or ""
+    host = (urlparse(base).hostname or "").lower()
+    if host in _LOOPBACK_HOSTS:
+        return None  # declared-remote loopback = SSH tunnel; the tunnel authenticates
+    if comfy_lane_token(lane):
+        return None
+    return (
+        f"remote Comfy lane '{lane}' has no authenticated transport: front :8188 with the "
+        f"per-instance token proxy and set COMFY_LANE_TOKENS={lane}=<token>, or reach it "
+        f"over an SSH tunnel and declare it in COMFY_REMOTE_LANES"
+    )
+
+
+def comfy_lane_request(lane, path, data=None, method=None, headers=None, content_type=None):
+    """Build a urllib Request to a lane, attaching the lane's auth token."""
+    base = COMFY_LANES.get(lane, COMFY_HTTP_DEFAULT).rstrip('/')
+    all_headers = dict(headers or {})
+    if content_type:
+        all_headers['Content-Type'] = content_type
+    token = comfy_lane_token(lane)
+    if token:
+        all_headers['Authorization'] = f"Bearer {token}"
+    return Request(base + path, data=data, method=method, headers=all_headers)
 EQUIPPED_FILE = GATEWAY_STATE_DIR / "equipped_models.json"
 SELECTED_LORAS_FILE = GATEWAY_STATE_DIR / "selected_loras.json"
 CIVITAI_TOKEN_FILE = Path(
@@ -628,6 +709,35 @@ def vault_identity_json():
         return None
 
 
+def _seal_file_with_helper(spki, source, envelope, media_name):
+    """Seal `source` to the public key `spki`, atomically writing the enc:v1
+    envelope JSON to `envelope`. `media_name` drives the recorded media_type.
+    The caller owns locking and deletion of the plaintext source."""
+    source = Path(source)
+    envelope = Path(envelope)
+    tmp = envelope.with_name(envelope.name + f".{os.getpid()}.tmp")
+    pub_tmp = envelope.with_name(envelope.name + f".{os.getpid()}.pub")
+    try:
+        pub_tmp.write_text(spki, encoding="utf-8")
+        proc = subprocess.run(
+            [E2E_SEAL_PYTHON, E2E_SEAL_HELPER, "--pub", f"@{pub_tmp}", "--in", str(source), "--out", str(tmp)],
+            capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0 or not tmp.exists():
+            raise RuntimeError(f"seal helper exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+        sealed = json.loads(tmp.read_text(encoding="utf-8"))
+        sealed["v"] = 1
+        sealed["media_type"] = mimetypes.guess_type(media_name)[0] or "application/octet-stream"
+        tmp.write_text(json.dumps(sealed), encoding="utf-8")
+        os.replace(tmp, envelope)
+    finally:
+        for leftover in (pub_tmp, tmp):
+            try:
+                leftover.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def seal_output_to_e2e(path):
     """Seal media to the owner vault public key as <name>.e2e; delete plaintext.
 
@@ -643,36 +753,16 @@ def seal_output_to_e2e(path):
         return True
     if not path.exists() or not path.is_file():
         return False
-    tmp = envelope.with_name(envelope.name + f".{os.getpid()}.tmp")
-    pub_tmp = envelope.with_name(envelope.name + f".{os.getpid()}.pub")
     with encryption_lock:
         if envelope.exists() and not path.exists():
             return True
         source_stat = path.stat()
+        _seal_file_with_helper(spki, path, envelope, path.name)
+        os.utime(envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
         try:
-            pub_tmp.write_text(spki, encoding="utf-8")
-            proc = subprocess.run(
-                [E2E_SEAL_PYTHON, E2E_SEAL_HELPER, "--pub", f"@{pub_tmp}", "--in", str(path), "--out", str(tmp)],
-                capture_output=True, text=True, timeout=300,
-            )
-            if proc.returncode != 0 or not tmp.exists():
-                raise RuntimeError(f"seal helper exited {proc.returncode}: {proc.stderr.strip()[:200]}")
-            sealed = json.loads(tmp.read_text(encoding="utf-8"))
-            sealed["v"] = 1
-            sealed["media_type"] = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-            tmp.write_text(json.dumps(sealed), encoding="utf-8")
-            os.replace(tmp, envelope)
-            os.utime(envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-        finally:
-            for leftover in (pub_tmp, tmp):
-                try:
-                    leftover.unlink()
-                except FileNotFoundError:
-                    pass
+            path.unlink()
+        except FileNotFoundError:
+            pass
     return True
 
 
@@ -961,7 +1051,7 @@ def _harvest_comfy_workflow_envelopes():
     added = 0
     for lane, base in COMFY_LANES.items():
         try:
-            with urlopen(f"{base}/history?max_items=128", timeout=10) as r:
+            with urlopen(comfy_lane_request(lane, "/history?max_items=128"), timeout=10) as r:
                 hist = json.load(r)
         except Exception:
             continue
@@ -1010,6 +1100,441 @@ def workflow_index_record_for_filename(name):
     with workflow_index_lock:
         rec = _workflow_index_records.get(name)
         return dict(rec) if isinstance(rec, dict) else None
+
+
+# --- Remote Comfy lanes: prompt routing, requester-sealed fetch-back, scrub ---
+#
+# A remote lane (a rented GPU box) is a dumb executor: the prompt goes out over
+# the lane's authenticated transport, a server-side watcher polls that SAME
+# lane for completion, output bytes come back over the lane's /view and are
+# sealed to the REQUESTING client's public key before anything persists, and
+# the box is then scrubbed (output + staged input files deleted, prompt dropped
+# from its history). Possession of the decrypt key - not machine locality - is
+# what grants access to results: nothing colocated with the gateway can read
+# another requester's outputs, because no plaintext (and no gateway-decryptable
+# form) of a remote result ever lands in a shared directory.
+#
+# Known limit (documented, not fixable here): while the job RUNS, prompt and
+# pixels exist in plaintext on the rented instance. The contract covers
+# everything before submit and after harvest - see packages/gpu-rentals/README.md.
+COMFY_PROMPT_ROUTES_FILE = GATEWAY_STATE_DIR / "comfy-prompt-routes.json"
+COMFY_PROMPT_ROUTES_MAX = 512
+REQUESTER_PUB_HEADER = "X-E2E-Requester-Pub"
+comfy_prompt_routes_lock = threading.Lock()
+_comfy_prompt_routes = {}
+_comfy_prompt_routes_loaded = False
+# base64url DER SPKI; RSA-2048 keys encode to ~392 chars, leave generous room.
+_SPKI_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]{100,4000}$")
+
+
+def normalized_requester_spki(value):
+    value = str(value or "").strip()
+    return value if _SPKI_B64URL_RE.match(value) else None
+
+
+def requester_fingerprint(spki):
+    spki = normalized_requester_spki(spki)
+    if not spki:
+        return None
+    return hashlib.sha256(spki.encode("ascii")).hexdigest()[:32]
+
+
+def _ensure_comfy_prompt_routes_loaded():
+    global _comfy_prompt_routes_loaded
+    with comfy_prompt_routes_lock:
+        if _comfy_prompt_routes_loaded:
+            return
+        _comfy_prompt_routes_loaded = True
+        try:
+            if COMFY_PROMPT_ROUTES_FILE.is_file():
+                data = json.loads(COMFY_PROMPT_ROUTES_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    _comfy_prompt_routes.update({str(k): v for k, v in data.items() if isinstance(v, dict)})
+        except Exception as exc:
+            print(f"[comfy-routes] load failed: {exc}", file=sys.stderr)
+
+
+def _persist_comfy_prompt_routes_locked():
+    try:
+        while len(_comfy_prompt_routes) > COMFY_PROMPT_ROUTES_MAX:
+            _comfy_prompt_routes.pop(next(iter(_comfy_prompt_routes)))
+        COMFY_PROMPT_ROUTES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = COMFY_PROMPT_ROUTES_FILE.with_name(f".{COMFY_PROMPT_ROUTES_FILE.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(_comfy_prompt_routes, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, COMFY_PROMPT_ROUTES_FILE)
+    except Exception as exc:
+        print(f"[comfy-routes] persist failed: {exc}", file=sys.stderr)
+
+
+def record_comfy_prompt_route(prompt_id, lane, requester_spki=None, pushed_inputs=None):
+    """Remember which lane runs a Comfy prompt and who may read it back.
+
+    The requester key is public material (an RSA SPKI) - safe to persist; it is
+    what remote outputs get sealed to and what history reads are scoped by."""
+    prompt_id = str(prompt_id or "")
+    if not prompt_id:
+        return None
+    _ensure_comfy_prompt_routes_loaded()
+    spki = normalized_requester_spki(requester_spki)
+    entry = {
+        "lane": lane,
+        "remote": comfy_lane_is_remote(lane),
+        "status": "submitted",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if spki:
+        entry["requester_spki"] = spki
+        entry["requester_fp"] = requester_fingerprint(spki)
+    if pushed_inputs:
+        entry["pushed_inputs"] = [str(name) for name in pushed_inputs]
+    with comfy_prompt_routes_lock:
+        _comfy_prompt_routes[prompt_id] = entry
+        _persist_comfy_prompt_routes_locked()
+    return dict(entry)
+
+
+def comfy_prompt_route(prompt_id):
+    _ensure_comfy_prompt_routes_loaded()
+    with comfy_prompt_routes_lock:
+        entry = _comfy_prompt_routes.get(str(prompt_id or ""))
+        return dict(entry) if isinstance(entry, dict) else None
+
+
+def update_comfy_prompt_route(prompt_id, **fields):
+    _ensure_comfy_prompt_routes_loaded()
+    with comfy_prompt_routes_lock:
+        entry = _comfy_prompt_routes.get(str(prompt_id or ""))
+        if not isinstance(entry, dict):
+            return None
+        entry.update(fields)
+        _persist_comfy_prompt_routes_locked()
+        return dict(entry)
+
+
+def requester_may_read_prompt(route, presented_spki):
+    """Scope history/status reads to the requester that submitted the prompt.
+
+    Prompts recorded with a requester key require the SAME key on reads; legacy
+    submissions (no key presented) keep today's token-only behavior. The sealed
+    media is safe regardless - this guards status metadata."""
+    if not route or not route.get("requester_fp"):
+        return True
+    presented = normalized_requester_spki(presented_spki)
+    return bool(presented) and requester_fingerprint(presented) == route.get("requester_fp")
+
+
+def sealing_spki_for_route(route):
+    """The key remote outputs are sealed to: the requester's, falling back to
+    the owner vault key for owner-initiated jobs that present none."""
+    return normalized_requester_spki((route or {}).get("requester_spki")) or vault_public_key_spki()
+
+
+def _prompt_input_file_refs(body):
+    """Local Comfy input files a prompt graph references (LoadImage-style
+    string inputs). These are what must be staged onto a remote lane."""
+    refs = []
+    try:
+        prompt = _prompt_nodes_from_body(body)
+    except Exception:
+        return refs
+    seen = set()
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if not isinstance(value, str) or not value.strip():
+                continue
+            name = re.sub(r"\s*\[(?:input|output|temp)\]$", "", value.strip()).replace("\\", "/")
+            if not name or name.startswith(("/", "~")) or ".." in name:
+                continue
+            try:
+                resolved = (COMFY_INPUT_DIR / name).resolve()
+            except OSError:
+                continue
+            if not _is_under(resolved, COMFY_INPUT_DIR) or not resolved.is_file():
+                continue
+            if str(resolved) in seen:
+                continue
+            seen.add(str(resolved))
+            refs.append({"name": name, "path": resolved})
+    return refs
+
+
+def _push_file_to_lane_input(lane, name, path):
+    subfolder, _, filename = str(name).rpartition("/")
+    boundary = uuid.uuid4().hex
+    parts = []
+    fields = [("overwrite", "true"), ("type", "input")]
+    if subfolder:
+        fields.append(("subfolder", subfolder))
+    for field_name, field_value in fields:
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{field_name}"\r\n\r\n{field_value}\r\n'.encode()
+        )
+    parts.append(
+        (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="{filename}"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode()
+        + Path(path).read_bytes()
+        + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode())
+    request = comfy_lane_request(
+        lane, "/upload/image", data=b"".join(parts), method="POST",
+        content_type=f"multipart/form-data; boundary={boundary}",
+    )
+    with urlopen(request, timeout=120):
+        pass
+
+
+def push_prompt_inputs_to_lane(body, lane):
+    """Stage every local input file the graph references onto the remote lane,
+    so image-conditioned workflows (e.g. minimax-h3 image-to-video) run there.
+    Returns the staged names for the post-harvest scrub."""
+    pushed = []
+    for ref in _prompt_input_file_refs(body):
+        _push_file_to_lane_input(lane, ref["name"], ref["path"])
+        pushed.append(ref["name"])
+    return pushed
+
+
+def _comfy_history_output_refs(history):
+    refs = []
+    for node_out in ((history or {}).get("outputs") or {}).values():
+        if not isinstance(node_out, dict):
+            continue
+        for values in node_out.values():
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if isinstance(item, dict) and item.get("filename"):
+                    refs.append({
+                        "filename": str(item.get("filename")),
+                        "subfolder": str(item.get("subfolder") or ""),
+                        "type": str(item.get("type") or "output"),
+                    })
+    return refs
+
+
+def _fetch_lane_history(lane, prompt_id):
+    request = comfy_lane_request(lane, f"/history/{prompt_id}")
+    with urlopen(request, timeout=15) as response:
+        data = json.loads(response.read().decode("utf-8") or "{}")
+    return data.get(str(prompt_id)) if isinstance(data, dict) else None
+
+
+def _fetch_lane_view_bytes(lane, ref):
+    query = urlencode({
+        "filename": ref["filename"],
+        "subfolder": ref.get("subfolder") or "",
+        "type": ref.get("type") or "output",
+    })
+    request = comfy_lane_request(lane, f"/view?{query}")
+    with urlopen(request, timeout=300) as response:
+        return response.read()
+
+
+def remote_output_logical_name(prompt_id, filename):
+    """Remote Comfy instances restart their filename counters per rental, so
+    fetched outputs are namespaced by prompt id - a bare z_image_00001_.png
+    from a rented box must never collide with (or overwrite) a local output."""
+    return f"cmf-{str(prompt_id)[:8]}-{safe_name(Path(str(filename)).name)}"
+
+
+def harvest_remote_comfy_outputs(prompt_id, history):
+    """Fetch a finished remote prompt's outputs and seal each to the requester
+    key BEFORE anything persists. Plaintext bytes only ever touch a 0600
+    staging file inside the gateway's private state dir - never a shared
+    output dir. Returns the logical output names."""
+    route = comfy_prompt_route(prompt_id) or {}
+    spki = sealing_spki_for_route(route)
+    if not spki:
+        raise RuntimeError("no sealing key: the requester presented none and no owner vault exists")
+    lane = route.get("lane") or "default"
+    harvested = []
+    for ref in _comfy_history_output_refs(history):
+        if Path(ref["filename"]).suffix.lower() not in OUTPUT_MEDIA_EXTS:
+            continue
+        data = _fetch_lane_view_bytes(lane, ref)
+        logical_name = remote_output_logical_name(prompt_id, ref["filename"])
+        envelope = e2e_envelope_path_for(COMFY_OUTPUT_DIR / logical_name)
+        COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        GATEWAY_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        staged = GATEWAY_STATE_DIR / f".remote-harvest-{uuid.uuid4().hex}"
+        try:
+            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+            _seal_file_with_helper(spki, staged, envelope, logical_name)
+        finally:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+        harvested.append(logical_name)
+    update_comfy_prompt_route(
+        prompt_id, status="harvested", outputs=harvested,
+        harvested_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return harvested
+
+
+def scrub_remote_comfy_prompt(prompt_id, history=None):
+    """After harvest: delete the prompt's output files AND any inputs we staged
+    from the rented box, then drop the prompt from that lane's history. File
+    deletion uses the provisioned /hivemind/scrub-files route (see
+    packages/gpu-rentals/provisioning/comfyui-hivemind.sh); on lanes without
+    it, history is still dropped and the files die with the instance's
+    ephemeral disk."""
+    route = comfy_prompt_route(prompt_id) or {}
+    lane = route.get("lane") or "default"
+    files = [
+        {"type": ref.get("type") or "output", "subfolder": ref.get("subfolder") or "", "filename": ref["filename"]}
+        for ref in _comfy_history_output_refs(history)
+    ]
+    for name in route.get("pushed_inputs") or []:
+        subfolder, _, filename = str(name).replace("\\", "/").rpartition("/")
+        files.append({"type": "input", "subfolder": subfolder, "filename": filename})
+    files_scrubbed = None
+    if files:
+        try:
+            request = comfy_lane_request(
+                lane, "/hivemind/scrub-files",
+                data=json.dumps({"files": files}).encode("utf-8"),
+                method="POST", content_type="application/json",
+            )
+            with urlopen(request, timeout=30):
+                files_scrubbed = True
+        except Exception as exc:
+            files_scrubbed = False
+            print(
+                f"[remote-comfy] lane '{lane}' file scrub unavailable ({exc}); "
+                "remote files persist until the instance is destroyed",
+                file=sys.stderr,
+            )
+    history_dropped = False
+    try:
+        request = comfy_lane_request(
+            lane, "/history",
+            data=json.dumps({"delete": [str(prompt_id)]}).encode("utf-8"),
+            method="POST", content_type="application/json",
+        )
+        with urlopen(request, timeout=10):
+            history_dropped = True
+    except Exception as exc:
+        print(f"[remote-comfy] could not drop prompt {prompt_id} from lane '{lane}' history: {exc}", file=sys.stderr)
+    update_comfy_prompt_route(
+        prompt_id, scrubbed=bool(history_dropped),
+        files_scrubbed=files_scrubbed, history_dropped=history_dropped,
+    )
+    return {"files_scrubbed": files_scrubbed, "history_dropped": history_dropped}
+
+
+def watch_remote_comfy_prompt(prompt_id, poll_seconds=5, timeout_seconds=7200):
+    """Server-side completion watcher for one remote-lane prompt: poll the
+    OWNING lane, then harvest (requester-sealed) and scrub the box. Running
+    here - not in the client - means results are captured and the rented box
+    cleaned even if the submitting client dies mid-generation."""
+    route = comfy_prompt_route(prompt_id) or {}
+    lane = route.get("lane") or "default"
+    deadline = time.monotonic() + timeout_seconds
+    history = None
+    while True:
+        try:
+            history = _fetch_lane_history(lane, prompt_id)
+        except Exception:
+            history = None
+        if isinstance(history, dict):
+            break
+        if time.monotonic() >= deadline:
+            update_comfy_prompt_route(
+                prompt_id, status="error",
+                error=f"remote prompt did not finish within {timeout_seconds}s",
+            )
+            return comfy_prompt_route(prompt_id)
+        time.sleep(poll_seconds)
+    status = history.get("status") or {}
+    failed = str(status.get("status_str") or "").lower() == "error" or not status.get("completed")
+    # Let the workflow-envelope index record this prompt's sealed workflow
+    # before the history entry disappears from the lane.
+    try:
+        _harvest_comfy_workflow_envelopes()
+    except Exception:
+        pass
+    harvest_error = None
+    if failed:
+        update_comfy_prompt_route(prompt_id, status="error", error=str(status.get("status_str") or "error"))
+    else:
+        try:
+            harvest_remote_comfy_outputs(prompt_id, history)
+        except Exception as exc:
+            harvest_error = exc
+            update_comfy_prompt_route(prompt_id, status="error", error=str(exc))
+    if harvest_error is None:
+        # Scrub only once the sealed envelopes exist locally (or the job
+        # failed and there is nothing to recover): a failed harvest must not
+        # delete the only copy of a paid generation. Un-scrubbed files still
+        # die with the instance's ephemeral disk.
+        try:
+            scrub_remote_comfy_prompt(prompt_id, history)
+        except Exception as exc:
+            print(f"[remote-comfy] scrub failed for {prompt_id}: {exc}", file=sys.stderr)
+    else:
+        print(
+            f"[remote-comfy] harvest failed for {prompt_id}; leaving remote files for instance teardown: {harvest_error}",
+            file=sys.stderr,
+        )
+    return comfy_prompt_route(prompt_id)
+
+
+def synthetic_comfy_history_for_route(prompt_id, route):
+    """History-shaped response for a routed remote prompt, built from the
+    gateway's own route record. The lane's history entry is scrubbed after
+    harvest (by design), and while a job runs the proxy must not leak the
+    lane's live state to non-requesters - so remote history reads are answered
+    from here in every phase. Completion is only reported once the sealed
+    envelopes exist locally, so a client that resolves output URLs on
+    completion always finds them."""
+    status_value = (route or {}).get("status")
+    if status_value == "error":
+        entry = {
+            "status": {
+                "status_str": "error", "completed": True,
+                "messages": [["hivemind_remote_error", {"error": route.get("error") or "remote generation failed"}]],
+            },
+            "outputs": {},
+        }
+    elif status_value == "harvested":
+        images = [
+            {"filename": name, "subfolder": "", "type": "output"}
+            for name in route.get("outputs") or []
+        ]
+        entry = {
+            "status": {"status_str": "success", "completed": True},
+            "outputs": {"hivemind_remote": {"images": images}},
+        }
+    else:
+        # submitted / in flight: history has no entry yet, same as live Comfy.
+        return {}
+    return {str(prompt_id): entry}
+
+
+def respawn_remote_comfy_watchers():
+    """Re-arm watchers for remote prompts that were in flight when the gateway
+    last stopped, so harvest+scrub still happen after a restart."""
+    _ensure_comfy_prompt_routes_loaded()
+    with comfy_prompt_routes_lock:
+        pending = [
+            pid for pid, entry in _comfy_prompt_routes.items()
+            if isinstance(entry, dict) and entry.get("remote") and entry.get("status") == "submitted"
+        ]
+    for pid in pending:
+        threading.Thread(target=watch_remote_comfy_prompt, args=(pid,), daemon=True).start()
+    return pending
 
 
 VAULT_SEALED_SETUP_FORMAT = "hivemind-vault-sealed-setup"
@@ -1286,11 +1811,9 @@ def _delete_prompt_ids_from_comfy(prompt_ids):
     body = json.dumps({"delete": sorted(prompt_ids)}).encode("utf-8")
     for lane, base in COMFY_LANES.items():
         try:
-            request = Request(
-                f"{base}/history",
-                data=body,
-                method="POST",
-                headers={"Content-Type": "application/json"},
+            request = comfy_lane_request(
+                lane, "/history", data=body, method="POST",
+                content_type="application/json",
             )
             with urlopen(request, timeout=10):
                 pass
@@ -1313,19 +1836,23 @@ def interrupt_comfy_prompt(prompt_id):
         return {str(item[1]) for item in (entries or []) if isinstance(item, (list, tuple)) and len(item) > 1}
 
     acknowledged = False
-    for base in dict.fromkeys(COMFY_LANES.values()):
+    seen_bases = set()
+    for lane, base in COMFY_LANES.items():
+        if base in seen_bases:
+            continue
+        seen_bases.add(base)
         try:
-            with urlopen(Request(f"{base}/queue"), timeout=10) as response:
+            with urlopen(comfy_lane_request(lane, "/queue"), timeout=10) as response:
                 state = json.loads(response.read().decode("utf-8") or "{}")
         except Exception:
             continue
         try:
             if pid in entry_ids(state.get("queue_pending")):
                 body = json.dumps({"delete": [pid]}).encode("utf-8")
-                with urlopen(Request(f"{base}/queue", data=body, method="POST", headers={"Content-Type": "application/json"}), timeout=10):
+                with urlopen(comfy_lane_request(lane, "/queue", data=body, method="POST", content_type="application/json"), timeout=10):
                     acknowledged = True
             elif pid in entry_ids(state.get("queue_running")):
-                with urlopen(Request(f"{base}/interrupt", data=b"{}", method="POST", headers={"Content-Type": "application/json"}), timeout=10):
+                with urlopen(comfy_lane_request(lane, "/interrupt", data=b"{}", method="POST", content_type="application/json"), timeout=10):
                     acknowledged = True
         except Exception:
             continue
@@ -7687,8 +8214,28 @@ class Handler(BaseHTTPRequestHandler):
         target_path, query = self.comfy_target(parsed)
         body = self.read_body() if method not in ("GET", "HEAD") else None
         upstream_base = COMFY_HTTP_DEFAULT
+        lane_name = "default"
+        submit_route_meta = None
         if method == "POST" and target_path in {"/api/prompt", "/prompt"} and body:
-            upstream_base = comfy_http_for_prompt_body(body)
+            lane_name = comfy_lane_for_prompt_body(body)
+            upstream_base = COMFY_LANES.get(lane_name, COMFY_HTTP_DEFAULT)
+        if method in ("GET", "HEAD"):
+            history_match = re.match(r"^/(?:api/)?history/([^/?]+)$", target_path)
+            if history_match:
+                pid = unquote(history_match.group(1))
+                route = comfy_prompt_route(pid)
+                if route:
+                    # Scope status to the requester that owns this prompt.
+                    if not requester_may_read_prompt(route, self.headers.get(REQUESTER_PUB_HEADER)):
+                        return self.send_json({}, 404)
+                    if route.get("remote"):
+                        # Remote prompts are answered from the gateway's route
+                        # record in every phase: the lane's live history must
+                        # not stream through this proxy, and after harvest the
+                        # lane entry is scrubbed anyway.
+                        return self.send_json(synthetic_comfy_history_for_route(pid, route))
+                    lane_name = route.get("lane") or "default"
+                    upstream_base = COMFY_LANES.get(lane_name, COMFY_HTTP_DEFAULT)
         url = upstream_base + target_path + (("?" + query) if query else "")
         if method == "POST" and target_path in {"/api/prompt", "/prompt"} and body:
             record_mobile_prompt_lora_trace(body)
@@ -7725,14 +8272,46 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": f"native BigLove route failed before Comfy fallback: {e}"}, 500)
             body = exact_comfy_biglove_prompt_body(body)
             body = exact_comfy_krea2_turbo_pre_lora_prompt_body(body)
+            requester_spki = normalized_requester_spki(self.headers.get(REQUESTER_PUB_HEADER))
+            pushed_inputs = []
+            if comfy_lane_is_remote(lane_name):
+                transport_error = comfy_lane_transport_error(lane_name)
+                if transport_error:
+                    return self.send_json({"error": transport_error}, 502)
+                if not (requester_spki or vault_public_key_spki()):
+                    return self.send_json({
+                        "error": "remote lane requires a sealing key: present "
+                                 f"{REQUESTER_PUB_HEADER} with the job or create the owner vault",
+                    }, 409)
+                try:
+                    pushed_inputs = push_prompt_inputs_to_lane(body, lane_name)
+                except Exception as e:
+                    return self.send_json({"error": f"could not stage inputs on remote lane '{lane_name}': {e}"}, 502)
+            submit_route_meta = {"lane": lane_name, "requester_spki": requester_spki, "pushed_inputs": pushed_inputs}
         # ComfyUI's aiohttp server rejects cross-origin-looking browser requests
         # (403) when forwarded with the wrapper's Origin/Referer. Strip browser
         # origin metadata so this remains a same-machine server-to-server proxy.
-        headers = {k: v for k, v in self.headers.items() if k.lower() not in {"host", "content-length", "authorization", "x-token", "connection", "origin", "referer"}}
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in {"host", "content-length", "authorization", "x-token", "connection", "origin", "referer", REQUESTER_PUB_HEADER.lower()}}
+        lane_auth = comfy_lane_token(lane_name)
+        if lane_auth:
+            headers["Authorization"] = f"Bearer {lane_auth}"
         try:
             req = Request(url, data=body, method=method, headers=headers)
             with urlopen(req, timeout=60) as r:
                 data = r.read()
+                if submit_route_meta is not None and r.status < 400:
+                    try:
+                        submitted_pid = str(json.loads(data.decode("utf-8")).get("prompt_id") or "")
+                    except Exception:
+                        submitted_pid = ""
+                    if submitted_pid:
+                        record_comfy_prompt_route(
+                            submitted_pid, submit_route_meta["lane"],
+                            requester_spki=submit_route_meta["requester_spki"],
+                            pushed_inputs=submit_route_meta["pushed_inputs"],
+                        )
+                        if comfy_lane_is_remote(submit_route_meta["lane"]):
+                            threading.Thread(target=watch_remote_comfy_prompt, args=(submitted_pid,), daemon=True).start()
                 ctype = r.headers.get("Content-Type", mimetypes.guess_type(target_path)[0] or "application/octet-stream")
                 if ("text/html" in ctype or "javascript" in ctype) and data:
                     text = data.decode("utf-8", errors="replace")
@@ -7765,15 +8344,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def proxy_websocket_to_comfy(self, parsed):
         target_path, query = self.comfy_target(parsed)
-        upstream = urlparse(COMFY_HTTP_DEFAULT)
+        # Progress websockets can follow a prompt to its lane: ?lane=<name>
+        # (stripped before forwarding). Unknown lanes fall back to default.
+        ws_qs = parse_qs(query, keep_blank_values=True)
+        lane_values = ws_qs.pop("lane", [])
+        lane_name = (lane_values[0].strip().lower() if lane_values else "") or "default"
+        if lane_name not in COMFY_LANES:
+            lane_name = "default"
+        query = urlencode(ws_qs, doseq=True)
+        upstream = urlparse(COMFY_LANES.get(lane_name, COMFY_HTTP_DEFAULT))
         host = upstream.hostname or "127.0.0.1"
         port = upstream.port or (443 if upstream.scheme == "https" else 80)
         if upstream.scheme == "https":
-            return self.send_text("WebSocket proxy only supports local http ComfyUI\n", 502, "text/plain")
+            # Graceful degrade: no live progress tunnel for TLS lanes - the
+            # client's history polling still observes completion.
+            return self.send_text("WebSocket proxy supports http lanes only; poll history for progress on this lane\n", 502, "text/plain")
         path = target_path + (("?" + query) if query else "")
         try:
             sock = socket.create_connection((host, port), timeout=10)
             lines = [f"GET {path} HTTP/1.1", f"Host: {host}:{port}"]
+            lane_auth = comfy_lane_token(lane_name)
+            if lane_auth:
+                lines.append(f"Authorization: Bearer {lane_auth}")
             skip = {"host", "origin", "referer", "authorization", "x-token", "cookie", "connection"}
             for k, v in self.headers.items():
                 kl = k.lower()
@@ -8295,6 +8887,7 @@ def main():
             print(f"[output-encryption] encrypted {migrated} existing output image(s)", flush=True)
         threading.Thread(target=output_encryption_sweeper, daemon=True).start()
     threading.Thread(target=workflow_index_sweeper, daemon=True).start()
+    respawn_remote_comfy_watchers()
     cleanup_staged_private_inputs_once()
     threading.Thread(target=private_input_sweeper, daemon=True).start()
     with download_jobs_lock:
