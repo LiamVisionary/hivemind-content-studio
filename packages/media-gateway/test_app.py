@@ -3,7 +3,9 @@ import io
 import base64
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -847,7 +849,7 @@ class ZImageAppTests(unittest.TestCase):
                 '597': {
                     'class_type': 'VHS_VideoCombine',
                     'inputs': {
-                        'filename_prefix': 'Eros/native_mlx_ltx__fast-q8-v12',
+                        'filename_prefix': 'Eros/native_mlx_ltx__eros-v14-q8-dmd',
                         'frame_rate': ['542', 0],
                         'save_output': True,
                     },
@@ -866,7 +868,7 @@ class ZImageAppTests(unittest.TestCase):
             native = app.detect_native_mlx_ltx_prompt(body)
 
         self.assertIsNotNone(native)
-        self.assertEqual(native['variant'], 'fast-q8-v12')
+        self.assertEqual(native['variant'], 'eros-v14-q8-dmd')
         self.assertEqual(native['prompt'], 'private video prompt')
         self.assertEqual(native['image_path'], 'source.png')
         self.assertEqual(native['options']['width'], 480)
@@ -882,14 +884,14 @@ class ZImageAppTests(unittest.TestCase):
             model_dir = Path(td) / 'fast-distilled'
             model_dir.mkdir()
             variants = {key: dict(value) for key, value in app.LTX2_MLX_VARIANTS.items()}
-            variants['fast-q8-v12'].update({
+            variants['eros-v14-q8-dmd'].update({
                 'model': str(model_dir),
                 'video_model': str(model_dir),
                 'video_distilled': True,
             })
             body = json.dumps({
                 'prompt': {
-                    '597': {'class_type': 'VHS_VideoCombine', 'inputs': {'filename_prefix': 'Eros/native_mlx_ltx__fast-q8-v12'}},
+                    '597': {'class_type': 'VHS_VideoCombine', 'inputs': {'filename_prefix': 'Eros/native_mlx_ltx__eros-v14-q8-dmd'}},
                     '812': {'class_type': 'PrimitiveInt', 'inputs': {'value': 42}},
                     '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'continue the same shot'}},
                 },
@@ -899,7 +901,7 @@ class ZImageAppTests(unittest.TestCase):
                             'extra': {
                                 'nativeMlxLtx': {
                                     'enabled': True,
-                                    'variant': 'fast-q8-v12',
+                                    'variant': 'eros-v14-q8-dmd',
                                     'defaults': {'frame_rate': 24, 'duration_seconds': 4},
                                     'video': {'path': 'source.mp4', 'mode': 'extend'},
                                 },
@@ -963,6 +965,16 @@ class ZImageAppTests(unittest.TestCase):
         self.assertEqual(native['prompt'], 'private regular ltx prompt')
         self.assertEqual(native['options']['frames'], 25)
         self.assertEqual(native['options']['title'], 'LTX 2.3 regular q8 distilled')
+
+    def test_ltx_snap_render_dimensions_matches_pipeline_grid(self):
+        app = load_app()
+        # Two-stage (generate) renders stage 1 at half res: multiples of 64.
+        self.assertEqual(app._ltx_snap_render_dimensions(928, 928), (896, 896))
+        self.assertEqual(app._ltx_snap_render_dimensions(896, 896), (896, 896))
+        self.assertEqual(app._ltx_snap_render_dimensions(480, 832), (448, 832))
+        # Single-stage keeps the VAE's 32 grid.
+        self.assertEqual(app._ltx_snap_render_dimensions(640, 480, single_stage=True), (640, 480))
+        self.assertEqual(app._ltx_snap_render_dimensions(30, 30), (64, 64))
 
     def test_native_mlx_ltx_metadata_keyframes_are_normalized(self):
         app = load_app()
@@ -1122,7 +1134,7 @@ class ZImageAppTests(unittest.TestCase):
                 '597': {
                     'class_type': 'VHS_VideoCombine',
                     'inputs': {
-                        'filename_prefix': 'Eros/native_mlx_ltx__fast-q8-v12',
+                        'filename_prefix': 'Eros/native_mlx_ltx__eros-v14-q8-dmd',
                         'frame_rate': ['542', 0],
                         'save_output': True,
                     },
@@ -1136,7 +1148,7 @@ class ZImageAppTests(unittest.TestCase):
             },
             'extra_data': {'extra_pnginfo': {'workflow': {'extra': {'nativeMlxLtx': {
                 'enabled': True,
-                'variant': 'fast-q8-v12',
+                'variant': 'eros-v14-q8-dmd',
                 'defaults': {'frames': 121, 'denoise': 'strong'},
             }}}}},
         }).encode('utf-8')
@@ -1242,18 +1254,31 @@ class ZImageAppTests(unittest.TestCase):
         self.assertEqual(fallback_native['reference_image_path'], 'reference-sheet.png')
         self.assertEqual(fallback_native['options']['loras'][0]['scale'], 1.4)
 
-    def test_native_mlx_ltx_eros_ingredients_variant_uses_eros_dev_model(self):
+    def test_ingredients_aliases_fall_back_to_the_regular_dev_lane(self):
+        # The eros dev build (ltx-2.3-10eros-v1-mlx-q8-dev) was retired when the
+        # model set was trimmed to v1.4 DMD / v1.2 DMD / regular, so the
+        # ingredients aliases now resolve to the regular dev IC lane. Asserted
+        # because an alias pointing at a deleted variant fails only at run time,
+        # after the caller has already committed to a generation.
         app = load_app()
 
-        spec = app.LTX2_MLX_VARIANTS['eros-q8-dev-ic']
+        spec = app.LTX2_MLX_VARIANTS['regular-q8-dev-ic']
 
-        self.assertEqual(
-            spec['model'],
-            str(app.MLX_MODELS_ROOT / 'ltx-2.3-10eros-v1-mlx-q8-dev'),
-        )
+        self.assertEqual(spec['model'], str(app.MLX_MODELS_ROOT / 'ltx-2.3-mlx-q8-dev'))
         self.assertFalse(spec['video_distilled'])
-        self.assertEqual(spec['backend_prefix'], 'mlx-ltx-eros')
-        self.assertEqual(app._normalize_ltx_mlx_variant('eros-ingredients'), 'eros-q8-dev-ic')
+        self.assertEqual(app._normalize_ltx_mlx_variant('eros-ingredients'), 'regular-q8-dev-ic')
+
+    def test_no_variant_alias_points_at_a_retired_variant(self):
+        # The whole failure mode this trim could introduce, in one assertion.
+        app = load_app()
+        dangling = {
+            alias: target for alias, target in app.LTX2_MLX_VARIANT_ALIASES.items()
+            if target not in app.LTX2_MLX_VARIANTS
+        }
+        # exact-v1-merged-q8 has been dangling since before the trim; it is
+        # tracked separately rather than silently blessed here.
+        dangling = {a: t for a, t in dangling.items() if t != 'exact-v1-merged-q8'}
+        self.assertEqual(dangling, {})
 
     def test_native_mlx_ltx_runner_uses_ic_lora_with_lossless_reference_video(self):
         app = load_app()
@@ -1458,7 +1483,7 @@ class ZImageAppTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, stdout='ok', stderr='')
 
             variants = {key: dict(value) for key, value in app.LTX2_MLX_VARIANTS.items()}
-            variants['fast-q8-v12']['video_model'] = str(model_dir)
+            variants['eros-v14-q8-dmd']['video_model'] = str(model_dir)
 
             with patch.dict('os.environ', {**APPLE_SILICON_ENV, 'ZIMG_LTX_MLX_FREE_COMFY_BEFORE_RUN': '0'}, clear=False), \
                  patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
@@ -1471,7 +1496,7 @@ class ZImageAppTests(unittest.TestCase):
                  patch.object(app, 'append_history'), \
                  patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path: path):
                 app.run_native_mlx_ltx_video('job-extend', {
-                    'variant': 'fast-q8-v12',
+                    'variant': 'eros-v14-q8-dmd',
                     'operation': 'extend',
                     'prompt': 'continue the same cinematic shot',
                     'video_path': 'source.mp4',
@@ -2720,3 +2745,366 @@ class LoraCacheTests(unittest.TestCase):
 
             self.assertEqual(restarted.civitai_model_versions('42'), record['versions'])
             self.assertEqual(calls, [])
+
+
+class BfsHeadSwapGuideTests(unittest.TestCase):
+    """The guide layout IS the conditioning contract for the BFS head-swap LoRA.
+
+    Its author's node reserves a chroma strip that the model was trained to read.
+    Get the side, the size, or the frame dimensions wrong and the model receives
+    something it has never seen, so these are asserted rather than trusted.
+    """
+
+    def _clip(self, directory, name, width, height):
+        path = Path(directory) / name
+        subprocess.run(
+            ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi',
+             '-i', f'testsrc=size={width}x{height}:rate=8:duration=1',
+             '-pix_fmt', 'yuv420p', str(path)],
+            check=True, timeout=120,
+        )
+        return path
+
+    def _face(self, directory, name, width, height):
+        path = Path(directory) / name
+        subprocess.run(
+            ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi',
+             '-i', f'color=c=red:size={width}x{height}', '-frames:v', '1', str(path)],
+            check=True, timeout=120,
+        )
+        return path
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_guide_keeps_the_frame_size_and_fits_the_footage_beside_the_strip(self):
+        # ReservedRegionFrameComposer keeps the canvas at the source frame size
+        # and fits the footage into what the strip leaves:
+        #   canvas = Image.new("RGBA", (orig_w, orig_h), ...)
+        #   video_x, video_y = region_size_px, (orig_h - fitted_video_h) // 2
+        # Widening the canvas instead gives the LoRA a layout it never saw in
+        # training and it copies the guide through instead of swapping a face.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._clip(tmp, 'src.mp4', 640, 384)
+            face = self._face(tmp, 'face.png', 200, 200)
+            out = Path(tmp) / 'guide.mp4'
+            info = load_app().build_bfs_headswap_guide_video(source, face, out, region_px=128)
+            # Frame size is the source's, NOT source + strip.
+            self.assertEqual((info['width'], info['height']), (640, 384))
+            self.assertEqual(load_app()._probe_video_dimensions(out), (640, 384))
+            # 512x384 of usable width; 640x384 footage fits to 512x307 (aspect kept).
+            self.assertEqual(info['video_width'], 512)
+            self.assertEqual(info['video_height'], 306)
+            self.assertEqual(info['video_x'], 128)
+            self.assertEqual(info['video_y'], (384 - 306) // 2)
+            # The render is the whole canvas, so it is the delivered frame.
+            self.assertEqual((info['content_width'], info['content_height']), (640, 384))
+
+    def test_the_footage_keeps_its_aspect_ratio_inside_the_guide(self):
+        # Stretching it to fill the leftover box would hand the model distorted
+        # motion to track. The node fits; so do we.
+        plan = load_app().plan_bfs_headswap_geometry(1080, 1920, region_px=256)
+        self.assertAlmostEqual(
+            plan['video_width'] / plan['video_height'], 1080 / 1920, places=2,
+        )
+        self.assertLessEqual(plan['video_width'], plan['width'] - plan['region_px'])
+        self.assertLessEqual(plan['video_height'], plan['height'])
+
+    def test_the_v3_trigger_is_required_before_a_render_is_spent(self):
+        # No trigger -> the IC-LoRA never engages and the model reproduces the
+        # guide (green column, face box, untouched footage). That failure looks
+        # like a bug in the compositor and costs a full render to discover, so
+        # it is caught up front instead.
+        app_mod = load_app()
+        self.assertTrue(app_mod.bfs_headswap_prompt_has_trigger(
+            'head_swap: FACE: adult woman, fair skin ACTION: seated, facing camera'))
+        self.assertTrue(app_mod.bfs_headswap_prompt_has_trigger('HEAD_SWAP: FACE: x ACTION: y'))
+        self.assertFalse(app_mod.bfs_headswap_prompt_has_trigger(
+            'a woman sitting on a sofa, cinematic lighting'))
+        self.assertFalse(app_mod.bfs_headswap_prompt_has_trigger(''))
+        # The message has to carry the template, since that is the whole fix.
+        self.assertIn('FACE:', app_mod.BFS_HEADSWAP_PROMPT_HELP)
+        self.assertIn('ACTION:', app_mod.BFS_HEADSWAP_PROMPT_HELP)
+
+    def test_the_bfs_adapter_specifically_must_be_among_the_active_loras(self):
+        # "At least one LoRA" passed with any unrelated LoRA selected, and the
+        # render then came back as a copy of the guide after a full generation.
+        # A muted LoRA is filtered out upstream, so the panel can show the
+        # head-swap LoRA at strength 1 while nothing is actually fused.
+        app_mod = load_app()
+        bfs = {'filePath': '/l/head_swap_v3_rank_adaptive_fro_098.safetensors'}
+        self.assertTrue(app_mod.bfs_headswap_lora_selected(bfs))
+        self.assertTrue(app_mod.bfs_headswap_lora_selected({'name': 'BFS Head-Swap v3'}))
+        self.assertFalse(app_mod.bfs_headswap_lora_selected({'filePath': '/l/LTX2.3_Crisp_Enhance.safetensors'}))
+        self.assertFalse(app_mod.bfs_headswap_lora_selected({}))
+        self.assertFalse(app_mod.bfs_headswap_lora_selected(None))
+
+    def test_the_swap_engine_is_chosen_explicitly_and_defaults_to_bfs(self):
+        # FaceFusion and BFS are different tools, not quality tiers, so the
+        # engine is read from the request rather than guessed. An unknown value
+        # must fall back to BFS instead of silently running nothing.
+        app_mod = load_app()
+        self.assertEqual(app_mod._headswap_backend_name({}), 'bfs')
+        self.assertEqual(app_mod._headswap_backend_name({'head_swap_backend': 'facefusion'}), 'facefusion')
+        self.assertEqual(app_mod._headswap_backend_name({'head_swap_backend': 'FaceFusion'}), 'facefusion')
+        self.assertEqual(app_mod._headswap_backend_name({'head_swap_backend': 'nonsense'}), 'bfs')
+        self.assertEqual(app_mod._headswap_backend_name(None), 'bfs')
+
+    def test_a_strip_that_would_not_fit_is_rejected(self):
+        with self.assertRaises(RuntimeError):
+            load_app().plan_bfs_headswap_geometry(320, 320, region_px=512)
+
+    def test_the_render_is_the_deliverable_so_nothing_crops_it(self):
+        # The author's model card: the generated result does NOT contain the
+        # strip. Sizing the render to the guide canvas and cropping the strip
+        # back off is what stretched the scene and read as a zoom, so the crop
+        # helper is gone — assert it stays gone.
+        self.assertFalse(
+            hasattr(load_app(), 'crop_bfs_headswap_region'),
+            'the head-swap render is already the deliverable; nothing may crop it',
+        )
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_guide_is_resampled_to_the_render_frame_rate(self):
+        # The runtime reads the guide's first N frames at ITS rate, so a guide
+        # left at the source's rate drifts against the render frame for frame.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'src25.mp4'
+            subprocess.run(
+                ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi',
+                 '-i', 'testsrc=size=640x384:rate=25:duration=2',
+                 '-pix_fmt', 'yuv420p', str(path)],
+                check=True, timeout=120,
+            )
+            face = self._face(tmp, 'face.png', 64, 64)
+            guide = Path(tmp) / 'guide.mp4'
+            load_app().build_bfs_headswap_guide_video(path, face, guide, region_px=128, frame_rate=24)
+            rate = subprocess.run(
+                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                 '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', str(guide)],
+                capture_output=True, text=True, check=True, timeout=60,
+            ).stdout.strip()
+            self.assertEqual(rate, '24/1')
+
+    def test_render_dimensions_are_snapped_to_the_latent_grid(self):
+        # The render size comes from the source, which is arbitrary (a phone clip
+        # is 1080 wide), while both axes must sit on the pipeline's grid.
+        plan = load_app().plan_bfs_headswap_geometry(500, 300, region_px=128)
+        self.assertEqual((plan['width'], plan['height']), (512, 320))
+        self.assertEqual(plan['width'] % 64, 0)
+        self.assertEqual(plan['height'] % 64, 0)
+
+    def test_max_dimension_caps_the_render_and_keeps_the_aspect(self):
+        # The speed lever: cost scales with the rendered frame.
+        plan = load_app().plan_bfs_headswap_geometry(768, 1088, region_px=256, max_dimension=768)
+        self.assertEqual((plan['width'], plan['height']), (512, 768))
+        uncapped = load_app().plan_bfs_headswap_geometry(768, 1088, region_px=256)
+        self.assertEqual((uncapped['width'], uncapped['height']), (768, 1088))
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_the_strip_is_snapped_to_a_multiple_of_32(self):
+        # LTX requires both axes divisible by 32, and the strip is the only
+        # dimension we choose — an odd width would make the canvas unrenderable.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._clip(tmp, 'small.mp4', 256, 256)
+            face = self._face(tmp, 'face.png', 200, 200)
+            info = load_app().build_bfs_headswap_guide_video(
+                source, face, Path(tmp) / 'g.mp4', region_px=200)
+            self.assertEqual(info['region_px'], 192)
+            self.assertEqual(info['width'] % 32, 0)
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_reserved_strip_is_chroma_green_on_the_expected_side(self):
+        # Dimensions alone would still pass if the strip flipped sides or the key
+        # colour changed, and either would hand the LoRA conditioning it was never
+        # trained on. Sample actual pixels instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._clip(tmp, 'src.mp4', 640, 384)
+            face = self._face(tmp, 'face.png', 64, 64)
+            out = Path(tmp) / 'guide.mp4'
+            app_mod = load_app()
+            app_mod.build_bfs_headswap_guide_video(source, face, out, region_px=128)
+
+            def sample(x, y):
+                raw = subprocess.run(
+                    ['ffmpeg', '-v', 'error', '-i', str(out), '-frames:v', '1',
+                     '-vf', f'crop=4:4:{x}:{y}', '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-'],
+                    capture_output=True, check=True, timeout=60,
+                ).stdout
+                return raw[0], raw[1], raw[2]
+
+            # Top-left corner sits inside the reserved strip, above the face.
+            r, g, b = sample(0, 0)
+            self.assertGreater(g, 200, f'reserved strip should be chroma green, got rgb({r},{g},{b})')
+            self.assertLess(r, 80)
+            self.assertLess(b, 80)
+            # 640x384 source, 128 strip -> footage fitted to 512x306 at (128, 39).
+            # Its middle must carry picture...
+            r2, g2, b2 = sample(384, 192)
+            self.assertFalse(
+                g2 > 200 and r2 < 80 and b2 < 80,
+                f'fitted footage should carry frame, got rgb({r2},{g2},{b2})',
+            )
+            # ...and the band above it must be chroma, because the node fits the
+            # footage rather than stretching it. Asserting this keeps the layout
+            # honest: stretching to fill would track distorted motion, and
+            # widening the canvas hands the LoRA an unseen layout entirely.
+            r3, g3, b3 = sample(384, 4)
+            self.assertGreater(g3, 200, f'letterbox above the footage should be chroma, got rgb({r3},{g3},{b3})')
+            self.assertLess(r3, 80)
+            self.assertLess(b3, 80)
+
+
+class CancelGenerationJobTests(unittest.TestCase):
+    """The studio Cancel button must actually stop the backend render — an
+    un-interrupted job keeps burning the GPU and makes the next generation run
+    at half speed (the reported 'regen took twice as long' symptom)."""
+
+    def test_cancel_route_terminates_a_native_jobs_live_subprocess(self):
+        app = load_app()
+        proc = subprocess.Popen(['sleep', '30'])
+        jobs = {'native1': {'id': 'native1', 'status': 'running', 'backend': 'ltx23-eros-dmd'}}
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            with patch.object(app, 'TOKEN', 'test-token'), \
+                 patch.object(app, 'jobs', jobs), \
+                 patch.object(app, 'native_job_procs', {'native1': proc}):
+                server_thread.start()
+                request = app.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/job/native1/cancel',
+                    data=b'{}',
+                    headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with app.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode('utf-8'))
+                self.assertEqual(response.status, 200)
+            self.assertTrue(payload['ok'])
+            self.assertTrue(payload['interrupted'])
+            self.assertTrue(jobs['native1']['cancel_requested'])
+            self.assertIsNotNone(proc.wait(timeout=5))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+    def test_cancel_between_native_stages_flags_the_record_as_interrupted(self):
+        # No live subprocess right now (e.g. staging inputs, or between the main
+        # render and a post pass) — the flag alone stops the runner at its next
+        # checkpoint, so that still counts as an interrupt.
+        app = load_app()
+        jobs = {'native2': {'id': 'native2', 'status': 'queued'}}
+        with patch.object(app, 'jobs', jobs), patch.object(app, 'native_job_procs', {}):
+            result = app.cancel_generation_job('native2')
+        self.assertTrue(result['interrupted'])
+        self.assertTrue(jobs['native2']['cancel_requested'])
+
+    def test_cancel_of_a_pending_comfy_prompt_deletes_it_from_the_queue(self):
+        app = load_app()
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self):
+                return self._payload
+
+        def fake_urlopen(request, timeout=None):
+            url = request.full_url
+            calls.append((request.get_method(), url, request.data))
+            if url.endswith('/queue') and request.get_method() == 'GET':
+                return FakeResponse(json.dumps({
+                    'queue_running': [[1, 'running-prompt']],
+                    'queue_pending': [[2, 'pending-prompt']],
+                }).encode('utf-8'))
+            return FakeResponse(b'{}')
+
+        with patch.object(app, 'jobs', {}), patch.object(app, 'native_job_procs', {}), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app, 'urlopen', side_effect=fake_urlopen):
+            result = app.cancel_generation_job('pending-prompt')
+        self.assertTrue(result['interrupted'])
+        deletes = [c for c in calls if c[0] == 'POST' and c[1].endswith('/queue')]
+        self.assertEqual(len(deletes), 1)
+        self.assertEqual(json.loads(deletes[0][2].decode('utf-8')), {'delete': ['pending-prompt']})
+
+    def test_cancel_of_the_executing_comfy_prompt_interrupts_it(self):
+        app = load_app()
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self):
+                return self._payload
+
+        def fake_urlopen(request, timeout=None):
+            url = request.full_url
+            calls.append((request.get_method(), url))
+            if url.endswith('/queue') and request.get_method() == 'GET':
+                return FakeResponse(json.dumps({
+                    'queue_running': [[1, 'running-prompt']],
+                    'queue_pending': [],
+                }).encode('utf-8'))
+            return FakeResponse(b'{}')
+
+        with patch.object(app, 'jobs', {}), patch.object(app, 'native_job_procs', {}), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app, 'urlopen', side_effect=fake_urlopen):
+            result = app.cancel_generation_job('running-prompt')
+        self.assertTrue(result['interrupted'])
+        self.assertIn(('POST', 'http://comfy.test/interrupt'), calls)
+
+    def test_cancel_of_a_finished_or_unknown_job_is_a_noop(self):
+        app = load_app()
+
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self):
+                return json.dumps({'queue_running': [], 'queue_pending': []}).encode('utf-8')
+
+        jobs = {'done1': {'id': 'done1', 'status': 'success'}}
+        with patch.object(app, 'jobs', jobs), patch.object(app, 'native_job_procs', {}), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app, 'urlopen', return_value=FakeResponse()):
+            finished = app.cancel_generation_job('done1')
+            unknown = app.cancel_generation_job('nope')
+        self.assertTrue(finished['ok'])
+        self.assertFalse(finished['interrupted'])
+        self.assertNotIn('cancel_requested', jobs['done1'])
+        self.assertTrue(unknown['ok'])
+        self.assertFalse(unknown['interrupted'])
+
+    def test_native_runner_raises_cancelled_when_flagged_before_the_spawn(self):
+        app = load_app()
+        jobs = {'native3': {'id': 'native3', 'status': 'running', 'cancel_requested': True}}
+        with patch.object(app, 'jobs', jobs), patch.object(app, 'native_job_procs', {}):
+            with self.assertRaises(app.NativeJobCancelled):
+                app._run_native_ltx_subprocess('native3', jobs['native3'], ['sleep', '30'], cwd='.', env=os.environ.copy())
+
+    def test_native_runner_raises_cancelled_when_flagged_mid_render(self):
+        app = load_app()
+        jobs = {'native4': {'id': 'native4', 'status': 'running'}}
+        procs = {}
+
+        def flag_soon():
+            time.sleep(0.5)
+            with app.jobs_lock:
+                jobs['native4']['cancel_requested'] = True
+
+        flagger = app.threading.Thread(target=flag_soon, daemon=True)
+        started = time.monotonic()
+        with patch.object(app, 'jobs', jobs), patch.object(app, 'native_job_procs', procs):
+            flagger.start()
+            with self.assertRaises(app.NativeJobCancelled):
+                app._run_native_ltx_subprocess('native4', jobs['native4'], ['sleep', '30'], cwd='.', env=os.environ.copy())
+        flagger.join(timeout=2)
+        # The render must die promptly, not run the sleep to completion.
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(procs, {})

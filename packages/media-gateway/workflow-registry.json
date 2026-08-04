@@ -941,6 +941,78 @@
           "distilled_lora": ""
         }
       }
+    },
+    {
+      "id": "minimax-h3",
+      "media_type": "video",
+      "title": "MiniMax H3",
+      "description": "MiniMax H3 omni-modal video generation: video and native stereo audio (voice, SFX, music) are denoised jointly in one pass. Text-to-video by default; supply a start image for image-to-video. Runs on an H3-capable CUDA Comfy lane (pruned int8_convrot DiT + Qwen3-VL 32B nvfp4 encoder, ComfyUI >= e377e263 with the Spectrum forecaster node — see packages/gpu-rentals). Native canvas is a 768px short edge at 24 fps, up to ~15s on the 17k+5 frame grid.",
+      "family": "minimax",
+      "builder": "comfy-api",
+      "supports_loras": false,
+      "api_workflow": "workflows/minimax-h3.api.json",
+      "default": false,
+      "frame_grid": {
+        "modulus": 17,
+        "offset": 5
+      },
+      "image_clear": "prune",
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "prompt_contract": {
+        "guidance": "Describe shots, camera moves, and the accompanying audio (dialogue, SFX, music) in one block. H3 has no negative conditioning; state everything affirmatively and put exclusions at the end as plain statements (no text, no watermarks)."
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "seed",
+        "steps"
+      ],
+      "defaults": {
+        "width": 1216,
+        "height": 704,
+        "frame_rate": 24,
+        "duration_seconds": 5,
+        "seed": 42
+      },
+      "slots": {
+        "prompt": {
+          "node": "104",
+          "input": "prompt"
+        },
+        "image_path": {
+          "node": "70",
+          "input": "image"
+        },
+        "width": {
+          "node": "104",
+          "input": "width"
+        },
+        "height": {
+          "node": "104",
+          "input": "height"
+        },
+        "frames": {
+          "node": "104",
+          "input": "length"
+        },
+        "seed": {
+          "node": "15",
+          "input": "noise_seed"
+        },
+        "steps": {
+          "node": "9",
+          "input": "steps"
+        }
+      }
     }
   ]
 }

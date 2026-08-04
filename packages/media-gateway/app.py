@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import cgi
 import base64
 import binascii
 import hashlib
@@ -17,6 +16,9 @@ import sys
 import threading
 import time
 import tempfile
+import email.parser
+import email.policy
+import io
 import uuid
 import zlib
 import shutil
@@ -83,37 +85,12 @@ LTX_NAG_DEFAULTS = {"scale": 11.0, "alpha": 0.25, "tau": 2.5}
 
 MLX_MODELS_ROOT = Path(os.environ.get("MLX_MODELS_ROOT", str(Path.home() / "comfy/mlx-models")))
 LTX2_MLX_VARIANTS = {
-    "fast-q8-v12": {
-        "title": "MLXBits 10Eros v1.2 q8 distilled",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-distilled-subset"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-distilled-subset"),
-        "video_distilled": True,
-        "output_prefix": "mlx_10eros_q8_distilled_mobile",
-        "benchmark_seconds": 193.11,
-    },
     # v1.3 + DMD. Two reasons this exists: upstream v1.3 "substantially reduced
     # ghost anatomy and subtitle artifacts" over v1.2, and the DMD deltas are
     # merged into the base instead of fused as a distilled LoRA at runtime —
     # which the build's own card says avoids the resampling-to-base drift and
     # conditioning loss the LoRA introduces during the stage-2 upscale refine
     # (the step that leaves the crawling grain on the v1.2 route).
-    "dmd-q8-v13": {
-        "title": "MLXBits 10Eros v1.3 DMD q8 distilled",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
-        "video_distilled": True,
-        "output_prefix": "mlx_10eros_v13_dmd_q8_distilled_mobile",
-        "benchmark_seconds": 193.11,
-        # Tried and rejected (2026-07-24): the sigma ramp from the author's own
-        # reference graph (10Eros_10SNodes_I2V_Basic_DMD_V5.json — 9-step first
-        # pass "1.0,0.955,0.893,0.812,0.715,0.603,0.482,0.241,0.121,0" + 3-step
-        # upscale "0.92,0.725,0.421875,0") measured WORSE here than ltx-2-mlx's
-        # built-in table: weaker prompt execution, less spatial detail, slightly
-        # more static-region crawl. Their recipe also samples euler_ancestral,
-        # which this runtime's x0-Euler loop has no faithful equivalent for, so
-        # the ramp alone is only half the recipe. Set LTX2_DISTILLED_SIGMAS /
-        # LTX2_STAGE2_SIGMAS (or a "runtime_env" here) to re-test.
-    },
     # v1.2 + DMD. The control for the adherence question: v1.3-DMD lost prompt
     # steering versus v1.2-fast, but those differ in BOTH the fine-tune (v1.2 ->
     # v1.3) and the distillation (LoRA -> merged DMD). This holds the DMD merge
@@ -147,16 +124,6 @@ LTX2_MLX_VARIANTS = {
         "backend_prefix": "mlx-ltx-regular",
         "output_subdir": "LTX23",
     },
-    "eros-q8-dev-ic": {
-        "title": "LTX 2.3 10Eros v1 q8 dev IC-LoRA",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-mlx-q8-dev"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-mlx-q8-dev"),
-        "video_distilled": False,
-        "output_prefix": "mlx_ltx23_10eros_v1_q8_dev_ic_mobile",
-        "benchmark_seconds": None,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
     # Ingredients IC-LoRA on the v1.3 DMD build. The dev lane above fuses the
     # generic distilled LoRA at 0.5 alongside the IC-LoRA (the Comfy recipe);
     # a DMD build ships no dev transformer because the distillation is already
@@ -172,31 +139,11 @@ LTX2_MLX_VARIANTS = {
     # afterwards, where we merge into already-int8 weights. Comparing this to
     # eros-fast isolates that arithmetic; comparing it to v1.4 Fast isolates the
     # fine-tune. Without it the two variables are tangled.
-    "eros-v12-q8-fast-rebuilt": {
-        "title": "LTX 2.3 10Eros v1.2 q8 distilled (rebuilt, cond-safe)",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-fast-rebuilt"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-fast-rebuilt"),
-        "video_distilled": True,
-        "output_prefix": "mlx_ltx23_10eros_v12_q8_fast_rebuilt_mobile",
-        "benchmark_seconds": 193.11,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
     # v1.4 Fast: eros-fast's recipe on the v1.4 fine-tune. eros-fast merges the
     # *cond-safe* rank-384 distilled LoRA (Frobenius-clipped, built to preserve
     # conditioning) rather than the stock one, which is the likeliest reason it
     # follows prompts better than the Lite build. Same LoRA at the same strength
     # here, so this and eros-fast differ only in base model.
-    "eros-v14-q8-fast": {
-        "title": "LTX 2.3 10Eros v1.4 q8 distilled (cond-safe)",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-fast"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-fast"),
-        "video_distilled": True,
-        "output_prefix": "mlx_ltx23_10eros_v14_q8_fast_mobile",
-        "benchmark_seconds": 193.11,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
     # v1.4 DMD: the build the author actually intends. The v1.4 model card says
     # the release "is also fully designed for use with the DMD lora I attached",
     # so eros-v14-q8-fast above — which merges v1.2's cond-safe rank-384 LoRA —
@@ -220,50 +167,14 @@ LTX2_MLX_VARIANTS = {
     # variant below only so outputs are named for the lane that made them; both
     # point at one model directory. Runs --two-stage (see the runner), so it is
     # slower than the distilled Eros lanes — that is the cost of a dev build.
-    "eros-v14-q8-dev": {
-        "title": "LTX 2.3 10Eros v1.4 q8 dev",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
-        "video_distilled": False,
-        "output_prefix": "mlx_ltx23_10eros_v14_q8_dev_mobile",
-        # Measured 2026-07-25 (768x448/49f, seed 909, one prompt): 30 steps 140.7s
-        # detail 1.868 crawl 0.0023 | 12 steps 76.7s detail 1.872 crawl 0.0018 |
-        # 8 steps 60.4s detail 1.852 crawl 0.0015. Detail is flat within 1% and
-        # crawl mildly improves, so the stock 30 buys nothing here. Raise it if a
-        # prompt ever looks under-converged; the ceiling is quality, not safety.
-        "video_stage1_steps": 12,
-        "benchmark_seconds": 77.0,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
-    "eros-v14-q8-dev-ic": {
-        "title": "LTX 2.3 10Eros v1.4 q8 dev IC-LoRA",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
-        "video_distilled": False,
-        "output_prefix": "mlx_ltx23_10eros_v14_q8_dev_ic_mobile",
-        "benchmark_seconds": None,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
-    "eros-dmd-v13-ic": {
-        "title": "LTX 2.3 10Eros v1.3 DMD q8 IC-LoRA",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
-        "video_distilled": True,
-        "output_prefix": "mlx_ltx23_10eros_v13_dmd_q8_ic_mobile",
-        "benchmark_seconds": None,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
 }
 LTX2_MLX_VARIANT_ALIASES = {
-    "fast": "fast-q8-v12",
-    "q8": "fast-q8-v12",
-    "q8-v12": "fast-q8-v12",
-    "fast-q8": "fast-q8-v12",
-    "fast_q8_v12": "fast-q8-v12",
-    "mlx-bits-v12": "fast-q8-v12",
+    "fast": "eros-v14-q8-dmd",
+    "q8": "eros-v14-q8-dmd",
+    "q8-v12": "eros-v14-q8-dmd",
+    "fast-q8": "eros-v14-q8-dmd",
+    "fast_q8_v12": "eros-v14-q8-dmd",
+    "mlx-bits-v12": "eros-v14-q8-dmd",
     "exact": "exact-v1-merged-q8",
     "exact-v1": "exact-v1-merged-q8",
     "merged": "exact-v1-merged-q8",
@@ -274,9 +185,9 @@ LTX2_MLX_VARIANT_ALIASES = {
     "regular-fast": "regular-q8-distilled",
     "ltx23-regular": "regular-q8-distilled",
     "ltx-2.3-regular": "regular-q8-distilled",
-    "eros-ingredients": "eros-q8-dev-ic",
-    "eros-ic": "eros-q8-dev-ic",
-    "eros-dev-ic": "eros-q8-dev-ic",
+    "eros-ingredients": "regular-q8-dev-ic",
+    "eros-ic": "regular-q8-dev-ic",
+    "eros-dev-ic": "regular-q8-dev-ic",
 }
 HISTORY_FILE = GATEWAY_STATE_DIR / "history.jsonl"
 PREVIEW_CACHE_ROOTS = [
@@ -471,6 +382,9 @@ PRIVATE_INPUT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_MAX_AGE",
 PRIVATE_INPUT_UPLOAD_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_UPLOAD_MAX_AGE", "86400"))
 jobs = {}
 jobs_lock = threading.Lock()
+# Live subprocess handles for native (MLX) generation jobs, so a cancel request
+# can terminate the render instead of letting it burn the GPU to completion.
+native_job_procs = {}
 download_jobs = {}
 download_jobs_lock = threading.Lock()
 encryption_lock = threading.Lock()
@@ -1383,6 +1297,70 @@ def _delete_prompt_ids_from_comfy(prompt_ids):
         except Exception:
             failures.append(lane)
     return failures
+
+
+def interrupt_comfy_prompt(prompt_id):
+    """Best-effort interrupt of one Comfy prompt across every lane: a pending
+    prompt is deleted from the queue, the currently-executing one is interrupted.
+    Returns True when a lane acknowledged either action."""
+    pid = str(prompt_id or "")
+    if not pid:
+        return False
+
+    def entry_ids(entries):
+        # Queue entries are [number, prompt_id, prompt, extra, outputs] tuples;
+        # only the id is read, so prompt redaction does not matter here.
+        return {str(item[1]) for item in (entries or []) if isinstance(item, (list, tuple)) and len(item) > 1}
+
+    acknowledged = False
+    for base in dict.fromkeys(COMFY_LANES.values()):
+        try:
+            with urlopen(Request(f"{base}/queue"), timeout=10) as response:
+                state = json.loads(response.read().decode("utf-8") or "{}")
+        except Exception:
+            continue
+        try:
+            if pid in entry_ids(state.get("queue_pending")):
+                body = json.dumps({"delete": [pid]}).encode("utf-8")
+                with urlopen(Request(f"{base}/queue", data=body, method="POST", headers={"Content-Type": "application/json"}), timeout=10):
+                    acknowledged = True
+            elif pid in entry_ids(state.get("queue_running")):
+                with urlopen(Request(f"{base}/interrupt", data=b"{}", method="POST", headers={"Content-Type": "application/json"}), timeout=10):
+                    acknowledged = True
+        except Exception:
+            continue
+    return acknowledged
+
+
+def cancel_generation_job(jid):
+    """Cancel one generation job wherever it runs. Native (MLX) jobs get their
+    live subprocess terminated plus a cancel flag the runner checks between
+    stages; Comfy-routed jobs (the job id is the Comfy prompt id) are removed
+    from the queue or interrupted mid-execution. Cancelling an unknown or
+    already-finished job is a no-op, not an error, so the studio can always
+    unblock its UI."""
+    jid = str(jid)
+    with jobs_lock:
+        rec = jobs.get(jid)
+        active = rec is not None and rec.get("status") in ("queued", "running")
+        if active:
+            rec["cancel_requested"] = True
+        proc = native_job_procs.get(jid)
+        comfy_prompt_id = str((rec or {}).get("comfy_prompt_id") or "")
+    interrupted = False
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            interrupted = True
+        except Exception:
+            pass
+    if active and not interrupted and not comfy_prompt_id:
+        # A native job between subprocess stages: no live process to kill right
+        # now, but the runner aborts at its next cancel-flag checkpoint.
+        interrupted = True
+    if not interrupted:
+        interrupted = interrupt_comfy_prompt(comfy_prompt_id or jid)
+    return {"ok": True, "id": jid, "known": rec is not None, "interrupted": bool(interrupted)}
 
 
 def delete_output_everywhere(value):
@@ -3677,6 +3655,11 @@ def _native_mlx_ltx_metadata_from_workflow(workflow):
         'video': native.get('video') if isinstance(native.get('video'), dict) else None,
         'ingredient_sheet': (native.get('ingredientSheet') or native.get('ingredient_sheet')) if isinstance(native.get('ingredientSheet') or native.get('ingredient_sheet'), dict) else None,
         'ic_lora': (native.get('icLora') or native.get('ic_lora')) if isinstance(native.get('icLora') or native.get('ic_lora'), dict) else None,
+        # This is an ALLOWLIST: a key absent here is silently dropped no matter
+        # what the MCP emitted. head_swap arrived alongside pipeline='head-swap'
+        # and was discarded here, so the head-swap branch found no face and fell
+        # through to the Comfy graph. Any new pipeline needs its payload listed.
+        'head_swap': (native.get('headSwap') or native.get('head_swap')) if isinstance(native.get('headSwap') or native.get('head_swap'), dict) else None,
     }
 
 
@@ -3922,6 +3905,21 @@ def _ltx_valid_frame_count(value, default=233):
     return max(9, int(round((frames - 1) / 8)) * 8 + 1)
 
 
+def _ltx_snap_render_dimensions(width, height, *, single_stage=False):
+    """Floor a render size to the grid the selected LTX pipeline can honor.
+
+    The two-stage pipelines (distilled generate and the dev --two-stage
+    equivalent) run stage 1 at half resolution, so the ltx-2-mlx runtime floors
+    any dimension that is not a multiple of 64 (928 -> 896) AFTER the job
+    record is written; single-stage paths floor to the VAE's 32. Snapping
+    before the record keeps it, the prepared anchors, and the delivered file
+    on one agreed size.
+    """
+    modulus = 32 if single_stage else 64
+    snap = lambda value: max(modulus, (int(value) // modulus) * modulus)
+    return snap(width), snap(height)
+
+
 def _ltx_extension_output_frames(duration_seconds, frame_rate=24.0):
     try:
         duration = float(duration_seconds)
@@ -3977,6 +3975,62 @@ def detect_native_mlx_ltx_prompt(body):
     if not prompt_text:
         return None
     pipeline = str(meta.get('pipeline') or 'generate').strip().lower()
+    print(f"[ltx-native] pipeline={pipeline!r} keys={sorted(meta)} head_swap={meta.get('head_swap')}", flush=True)
+    if pipeline == 'head-swap':
+        # BFS head swap: the face image rides in a reserved strip composed over
+        # the source footage, so this needs BOTH inputs and neither is optional.
+        head_swap = meta.get('head_swap') if isinstance(meta.get('head_swap'), dict) else {}
+        face_name = _prompt_string(head_swap.get('face_image') or defaults.get('image')) or _first_ltx_image_name(nodes)
+        video_name = _prompt_string(head_swap.get('source_video') or (meta.get('video') or {}).get('path'))
+        if not face_name or not video_name:
+            return None
+        frame_rate = float_quality_option({'frame_rate': head_swap.get('frame_rate', defaults.get('frame_rate', 24))}, 'frame_rate', 24.0)
+        raw_frames = head_swap.get('frames', defaults.get('frames', 121))
+        frames = _ltx_valid_frame_count(raw_frames, 121)
+        seed_value = head_swap.get('seed', defaults.get('seed', 42))
+        seed = int(seed_value) if seed_value is not None else 42
+        return {
+            'variant': variant,
+            'operation': 'head-swap',
+            'prompt': prompt_text,
+            'video_path': video_name,
+            'reference_image_path': face_name,
+            'images': [],
+            'options': {
+                # Width/height are deliberately absent: the render is sized from
+                # the SOURCE video, not from the studio's aspect/resolution picker,
+                # because a head swap re-times existing footage rather than
+                # framing a new shot.
+                'frames': frames,
+                'frame_rate': frame_rate,
+                'seed': seed,
+                'model': str(spec.get('video_model') or spec.get('model') or ''),
+                'title': spec['title'],
+                'benchmark_seconds': spec.get('benchmark_seconds'),
+                'head_swap_region_px': int_option(head_swap, 'region_px', BFS_HEADSWAP_REGION_PX, 32, 2048),
+                # 0 = render at the source's own size. Capping the long side is
+                # the main speed lever, since cost scales with rendered pixels.
+                'head_swap_max_dimension': int_option(head_swap, 'max_dimension', 0, 0, 4096),
+                # 'fast' = half-res generation + upsample + control-aware refine.
+                'head_swap_pipeline': _prompt_string(head_swap.get('pipeline')) or 'single-stage',
+                'head_swap_refine_steps': int_option(head_swap, 'refine_steps', 3, 1, 8),
+                # The author's identity knob: "1.0 -> best motion fidelity;
+                # >1.0 -> stronger identity and hair capture, but may distort".
+                'head_swap_lora_strength': float_quality_option(head_swap, 'lora_strength', 1.0),
+                # Which engine runs the swap. 'bfs' regenerates the frame with
+                # the IC-LoRA; 'facefusion' swaps the face onto the original.
+                'head_swap_backend': _prompt_string(head_swap.get('backend')) or 'bfs',
+                'head_swap_face_enhancer': bool(head_swap.get('face_enhancer')),
+                'reference_strength': float_quality_option(head_swap, 'reference_strength', 1.0),
+                'conditioning_strength': float_quality_option(head_swap, 'conditioning_strength', 1.0),
+                'runtime_timeout_seconds': int_option(head_swap, 'runtime_timeout_seconds', 2400, 60, 14400),
+                # LoRAs belong INSIDE options — that is where the runner reads
+                # them (options.get('loras')). Returning them at the top level
+                # left native_loras empty, so head swap rejected its own request
+                # claiming the BFS LoRA was not selected.
+                'loras': _native_ltx_loras(meta.get('loras') or []),
+            },
+        }
     if pipeline == 'ic-lora':
         ic_lora = meta.get('ic_lora') if isinstance(meta.get('ic_lora'), dict) else {}
         ingredient_sheet = meta.get('ingredient_sheet') if isinstance(meta.get('ingredient_sheet'), dict) else {}
@@ -4721,6 +4775,460 @@ def apply_ltx_denoise_pass(path, mode):
         return {'mode': mode, 'applied': False, 'error': str(exc)[-400:]}
 
 
+# BFS "Best Face Swap" head-swap IC-LoRA (Alissonerdx). Its v3 conditioning is a
+# GUIDE VIDEO, not a plain reference: every frame reserves a strip filled with
+# chroma green holding the replacement face, placed ALONGSIDE the source footage
+# so the new identity stays visible for the whole clip. Reproduced from the
+# author's own ReservedRegionFrameComposer node (ComfyUI-BFSNodes/nodes.py) using
+# the settings baked into workflow_ltx2_head_swap_drag_and_drop_v3.0.json, node 360:
+#   ["left", 256, "all_faces_every_frame", 12, "loop", "auto", 100, 12, 12,
+#    "center", "center", 0, 255, 0]
+# i.e. a 256px strip on the LEFT, face at 100% scale, 12px padding, centred, and
+# present in every frame. Getting the strip side or the chroma colour wrong gives
+# the model conditioning it was never trained on, so these are not free knobs.
+#
+# The strip belongs to the GUIDE ONLY. Per the author's model card: "Even though
+# the guide video used during inference contains the vertical chroma-key side
+# strip, the final generated result does not include that strip." The workflow
+# agrees — its sampler latent is sized from the un-stripped source (GetImageSize
+# -> SolidMask) and nothing is cropped after VAEDecode. So the render is sized to
+# the SOURCE frame, the guide is wider than it, and the output is delivered as-is.
+BFS_HEADSWAP_REGION_PX = 256
+BFS_HEADSWAP_REGION_POSITION = 'left'
+BFS_HEADSWAP_CHROMA = '0x00FF00'
+BFS_HEADSWAP_FACE_PADDING_PX = 12
+# _prepare_face in the same node adds a 16px white border before placement.
+BFS_HEADSWAP_FACE_BORDER_PX = 16
+# Both axes of the render must sit on the pipeline's latent grid. Single-stage
+# needs multiples of 32, the half-res paths (--upsample-only) need 64; snapping
+# to 64 keeps the delivered size identical whichever sampler path is chosen,
+# instead of the runtime silently flooring it to something else.
+BFS_HEADSWAP_DIMENSION_GRID = 64
+# v3's trigger. v1/v2 used a bare "head swap"; v3 is the structured form, and the
+# author's card is explicit that the FACE/ACTION sections carry the identity and
+# motion description the adapter was trained against.
+BFS_HEADSWAP_PROMPT_HELP = (
+    'head-swap prompts need the BFS v3 trigger, or the IC-LoRA does not engage and the '
+    'render just reproduces the guide. Use:\n'
+    '  head_swap: FACE: <apparent gender, ethnicity, skin tone, age range, head shape, hair> '
+    'ACTION: <clothing, body position, movement, hand actions, objects, camera-facing behaviour>'
+)
+
+
+def bfs_headswap_lora_selected(item):
+    """Is this LoRA entry the BFS head-swap adapter?
+
+    Matched on the filename because that is all the runner carries. The author's
+    release is head_swap_v3_rank_adaptive_fro_098.safetensors; earlier versions
+    and renames still read as head-swap.
+    """
+    if not isinstance(item, dict):
+        return False
+    text = f"{item.get('filePath') or ''} {item.get('name') or ''} {item.get('source') or ''}".lower()
+    return 'head_swap' in text or 'head-swap' in text or 'headswap' in text
+
+
+FACEFUSION_DIR = Path(os.environ.get('FACEFUSION_DIR', str(Path.home() / 'comfy/facefusion')))
+HEADSWAP_BACKENDS = ('bfs', 'facefusion')
+
+
+def _headswap_backend_name(options):
+    """Which head-swap engine this job asked for. Unknown values fall back to BFS."""
+    raw = (_prompt_string((options or {}).get('head_swap_backend')) or '').strip().lower()
+    return raw if raw in HEADSWAP_BACKENDS else 'bfs'
+
+
+def facefusion_available():
+    return (FACEFUSION_DIR / 'facefusion.py').is_file() and (FACEFUSION_DIR / '.venv' / 'bin' / 'python').is_file()
+
+
+def run_facefusion_head_swap(job_id, native, options, *, started):
+    """Swap the face onto the ORIGINAL frames with FaceFusion.
+
+    The opposite trade to BFS: this never regenerates the picture, so body,
+    clothing, background and motion stay bit-identical to the source and the
+    whole clip is processed rather than a fixed frame budget — but it replaces
+    only the face region, so hair and head shape stay the source actor's. No
+    prompt, no LoRA, no guide video; none of the LTX preconditions apply.
+    """
+    if not facefusion_available():
+        raise RuntimeError(
+            f'FaceFusion is not installed at {FACEFUSION_DIR}. Clone '
+            'https://github.com/facefusion/facefusion there and create its .venv, '
+            'or point FACEFUSION_DIR at an existing checkout.'
+        )
+    source_video = _resolve_native_ltx_video_path(native.get('video_path'))
+    face_image = _resolve_native_ltx_image_path(native.get('reference_image_path'))
+    allowed = [COMFY_INPUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), OUT_DIR.resolve()]
+    for path, label in ((source_video, 'source video'), (face_image, 'face image')):
+        if not path.exists() or not any(_is_under(path, root) for root in allowed):
+            raise RuntimeError(f'head-swap {label} is outside private Comfy storage or does not exist')
+
+    out_dir = COMFY_OUTPUT_DIR / 'Eros'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f'facefusion_headswap_{job_id}.mp4'
+    rec = {
+        'id': job_id,
+        'prompt': PRIVATE_PROMPT_LABEL,
+        'status': 'running',
+        'backend': 'facefusion',
+        'created_at': started,
+        'outputs': [],
+        'options': {
+            'operation': 'head-swap',
+            'head_swap_backend': 'facefusion',
+            'title': 'FaceFusion head swap',
+            'source_video': source_video.name,
+            'reference_image': face_image.name,
+        },
+        'progress': 5,
+        'progress_phase': 'facefusion',
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    # --processors takes a list; face_enhancer restores detail the 128px swapper
+    # loses, at roughly double the runtime.
+    processors = ['face_swapper']
+    if bool_option(options, 'head_swap_face_enhancer', False):
+        processors.append('face_enhancer')
+    cmd = [
+        str(FACEFUSION_DIR / '.venv' / 'bin' / 'python'), 'facefusion.py', 'headless-run',
+        '--source-paths', str(face_image),
+        '--target-path', str(source_video),
+        '--output-path', str(out),
+        '--processors', *processors,
+        # Apple Silicon has no CUDA; CoreML is what makes this ~10x quicker than
+        # the diffusion path rather than slower.
+        '--execution-providers', 'coreml',
+    ]
+    rec['options']['processors'] = list(processors)
+    t0 = time.monotonic()
+    mark_output_active(out)
+    try:
+        proc = _run_native_ltx_subprocess(
+            job_id, rec, cmd,
+            cwd=str(FACEFUSION_DIR),
+            env=os.environ.copy(),
+            timeout=int_option(options, 'runtime_timeout_seconds', 2400, 60, 14400),
+        )
+        elapsed = round(time.monotonic() - t0, 2)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f'facefusion exited {proc.returncode}\n'
+                f'STDOUT:\n{proc.stdout.strip()[-1500:]}\nSTDERR:\n{proc.stderr.strip()[-1500:]}'
+            )
+        if not out.exists() or out.stat().st_size < 1000:
+            raise RuntimeError('facefusion finished without a valid output video')
+        width, height = _probe_video_dimensions(out)
+        rec['options'].update({'width': width, 'height': height})
+        visible_out = mirror_output_to_comfy_output(out)
+        rec.update({
+            'status': 'success',
+            'finished_at': now_iso(),
+            'outputs': [str(visible_out.resolve())],
+            'elapsed_seconds': elapsed,
+            'progress': 100,
+            'step_progress': 100,
+            'progress_phase': 'done',
+        })
+    except NativeJobCancelled:
+        rec.update({'status': 'cancelled', 'finished_at': now_iso(),
+                    'error': 'Cancelled by the owner', 'progress_phase': 'cancelled'})
+    except Exception as exc:
+        rec.update({'status': 'error', 'finished_at': now_iso(),
+                    'error': str(exc), 'progress_phase': 'error'})
+    finally:
+        mark_output_inactive(out)
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+    return rec
+
+
+def find_bfs_headswap_lora():
+    """Locate the installed BFS head-swap adapter, newest-looking first.
+
+    Matched by name rather than pinned to one filename so a v4 release, or a
+    rename, still resolves.
+    """
+    root = (COMFY / 'models' / 'loras')
+    if not root.is_dir():
+        return None
+    found = [p for p in root.glob('*.safetensors') if bfs_headswap_lora_selected({'filePath': str(p)})]
+    return sorted(found)[-1] if found else None
+
+
+def bfs_headswap_prompt_has_trigger(prompt):
+    """Does this prompt carry the v3 trigger the head-swap IC-LoRA expects?"""
+    text = (_prompt_string(prompt) or '').lower()
+    return 'head_swap:' in text or 'head swap:' in text
+
+
+class _MultipartPart:
+    """One decoded multipart field, shaped like the cgi.FieldStorage item we used."""
+
+    __slots__ = ('name', 'filename', 'value', 'file')
+
+    def __init__(self, name, filename, payload):
+        self.name = name
+        self.filename = filename or ''
+        self.value = payload
+        self.file = io.BytesIO(payload) if filename else None
+
+
+class MultipartForm:
+    """Minimal stand-in for cgi.FieldStorage over a multipart/form-data body.
+
+    The `cgi` module was removed in Python 3.13, and this app is launched with
+    whatever `python3` resolves to — currently Homebrew's 3.14 — so importing it
+    took the whole media gateway down at startup. Only the three operations the
+    upload handler actually used are reimplemented here: `getfirst`, `in`, and
+    item access returning something with `.file` and `.filename`.
+    """
+
+    def __init__(self, body, content_type):
+        header = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode('utf-8', 'replace')
+        message = email.parser.BytesParser(policy=email.policy.default).parsebytes(header + body)
+        self._parts = {}
+        if not message.is_multipart():
+            return
+        for part in message.iter_parts():
+            disposition = part.get('Content-Disposition')
+            if not disposition:
+                continue
+            name = part.get_param('name', header='Content-Disposition')
+            if not name:
+                continue
+            filename = part.get_filename() or ''
+            payload = part.get_payload(decode=True) or b''
+            self._parts.setdefault(str(name), []).append(_MultipartPart(str(name), filename, payload))
+
+    def __contains__(self, key):
+        return key in self._parts
+
+    def __getitem__(self, key):
+        return self._parts[key][0]
+
+    def getfirst(self, key, default=None):
+        items = self._parts.get(key)
+        if not items:
+            return default
+        part = items[0]
+        if part.filename:
+            return default
+        return part.value.decode('utf-8', 'replace')
+
+
+def _probe_video_dimensions(path):
+    """(width, height) of a video's first video stream, or raise."""
+    ffprobe = shutil.which('ffprobe')
+    if not ffprobe:
+        raise RuntimeError('ffprobe is required to measure the source video')
+    payload = subprocess.check_output(
+        [
+            ffprobe, '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height', '-of', 'json', str(path),
+        ],
+        text=True, stderr=subprocess.DEVNULL, timeout=30,
+    )
+    stream = (json.loads(payload or '{}').get('streams') or [{}])[0]
+    width, height = int(stream.get('width') or 0), int(stream.get('height') or 0)
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f'Could not read video dimensions from {Path(path).name}')
+    return width, height
+
+
+def _snap_headswap_dimension(value, grid=BFS_HEADSWAP_DIMENSION_GRID):
+    """Round a pixel dimension to the nearest grid multiple, never below one."""
+    snapped = int(round(float(value) / grid)) * grid
+    return max(grid, snapped)
+
+
+def plan_bfs_headswap_geometry(source_width, source_height, *, region_px=None, max_dimension=0):
+    """Decide the guide layout and render size for a head swap. Pure arithmetic.
+
+    Mirrors ReservedRegionFrameComposer exactly: the canvas KEEPS the source
+    frame size and the footage is fitted into what the strip leaves, centred,
+    with chroma filling the rest::
+
+        canvas = Image.new("RGBA", (orig_w, orig_h), ...)
+        video_x, video_y = region_size_px, (orig_h - fitted_video_h) // 2
+
+    The render is therefore the SAME size as the guide, and the delivered frame
+    is that render untouched. The model was trained to read the fitted, inset
+    footage and draw the swapped scene back out across the WHOLE frame — which
+    is why the author's card says the result carries no strip and his workflow
+    has no crop node. Widening the canvas instead hands the LoRA a layout it has
+    never seen and it just copies the guide through.
+    """
+    region = int(region_px or BFS_HEADSWAP_REGION_PX)
+    region -= region % 32
+    if region < 32:
+        raise RuntimeError('Head-swap face strip must be at least 32px')
+    src_w, src_h = int(source_width), int(source_height)
+    if src_w <= 0 or src_h <= 0:
+        raise RuntimeError('Head-swap source video has no usable dimensions')
+    width, height = float(src_w), float(src_h)
+    cap = int(max_dimension or 0)
+    if cap > 0 and max(width, height) > cap:
+        ratio = cap / max(width, height)
+        width, height = width * ratio, height * ratio
+    frame_w = _snap_headswap_dimension(width)
+    frame_h = _snap_headswap_dimension(height)
+    available_w = frame_w - region
+    if available_w < 64:
+        raise RuntimeError(
+            f'Head-swap strip ({region}px) leaves no room in a {frame_w}px frame'
+        )
+    # Fit the footage into what is left, preserving its aspect (the node's
+    # "fitted_video_*"). Even dimensions keep libx264/yuv420p happy.
+    fit = min(available_w / src_w, frame_h / src_h)
+    video_w = max(2, int(round(src_w * fit)) & ~1)
+    video_h = max(2, int(round(src_h * fit)) & ~1)
+    return {
+        'width': frame_w,
+        'height': frame_h,
+        'region_px': region,
+        'video_width': video_w,
+        'video_height': video_h,
+        'video_x': region if BFS_HEADSWAP_REGION_POSITION == 'left' else 0,
+        'video_y': (frame_h - video_h) // 2,
+        # The render, and so the delivered frame, is the whole canvas.
+        'content_width': frame_w,
+        'content_height': frame_h,
+        'source_width': src_w,
+        'source_height': src_h,
+    }
+
+
+def build_bfs_headswap_guide_video(source_video, face_image, output_path, *, region_px=None, max_dimension=0, frame_rate=None):
+    """Compose the BFS head-swap guide clip: reserved face strip + fitted source.
+
+    Reproduces ReservedRegionFrameComposer — same frame size as the source, the
+    footage fitted into what the strip leaves and centred, chroma everywhere
+    else. The caller renders at ``width`` x ``height`` (the whole canvas) and
+    ships that untouched; see the BFS_HEADSWAP_* notes for why nothing is cropped.
+    """
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise RuntimeError('ffmpeg is required to build the BFS head-swap guide video')
+    src_w, src_h = _probe_video_dimensions(source_video)
+    geometry = plan_bfs_headswap_geometry(src_w, src_h, region_px=region_px, max_dimension=max_dimension)
+    canvas_w, height = geometry['width'], geometry['height']
+    region = geometry['region_px']
+    video_w, video_h = geometry['video_width'], geometry['video_height']
+    video_x, video_y = geometry['video_x'], geometry['video_y']
+    face_w = max(8, region - 2 * BFS_HEADSWAP_FACE_PADDING_PX)
+    face_h = max(8, height - 2 * BFS_HEADSWAP_FACE_PADDING_PX)
+    face_x = BFS_HEADSWAP_FACE_PADDING_PX if BFS_HEADSWAP_REGION_POSITION == 'left' else canvas_w - region + BFS_HEADSWAP_FACE_PADDING_PX
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    filtergraph = (
+        f"color=c={BFS_HEADSWAP_CHROMA}:s={canvas_w}x{height}[bg];"
+        f"[1:v]pad=iw+{2 * BFS_HEADSWAP_FACE_BORDER_PX}:ih+{2 * BFS_HEADSWAP_FACE_BORDER_PX}:"
+        f"{BFS_HEADSWAP_FACE_BORDER_PX}:{BFS_HEADSWAP_FACE_BORDER_PX}:white,"
+        f"scale={face_w}:{face_h}:force_original_aspect_ratio=decrease[face];"
+        f"[bg][face]overlay=x={face_x}:y=(H-h)/2[withface];"
+        # Fitted, not stretched: the node preserves the footage's aspect inside
+        # the leftover width and lets chroma take the slack above and below.
+        f"[0:v]scale={video_w}:{video_h}[content];"
+        f"[withface][content]overlay=x={video_x}:y={video_y}:shortest=1[out]"
+    )
+    cmd = [
+        ffmpeg, '-y', '-loglevel', 'error',
+        '-i', str(source_video),
+        '-loop', '1', '-i', str(face_image),
+        '-filter_complex', filtergraph,
+        '-map', '[out]',
+    ]
+    if frame_rate:
+        # Resample the guide to the RENDER's frame rate. The runtime reads the
+        # first N frames of the guide at its native rate, so a 25fps guide driving
+        # a 24fps render walks reference frame i and output frame i apart by 4%
+        # over the clip — the swapped face lags the motion it is meant to track.
+        cmd.extend(['-r', str(frame_rate)])
+        geometry['frame_rate'] = float(frame_rate)
+    cmd.extend([
+        '-c:v', 'libx264', '-crf', '12', '-preset', 'medium', '-pix_fmt', 'yuv420p',
+        str(output_path),
+    ])
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1000:
+        detail = (result.stderr or result.stdout or 'unknown ffmpeg error').strip()
+        raise RuntimeError(f'Head-swap guide build failed: {detail[-400:]}')
+    return geometry
+
+
+# Lightricks' IC-LoRA Detailer. Published against "LTX-2-19b", which reads like a
+# different base than our 22B — but it targets transformer_blocks 0..47 at hidden
+# dim 4096 and resolves 480/480 modules against the v1.4 transformer, so the two
+# share topology and it fuses cleanly. It carries no .alpha tensors, so the
+# strength passed here is the whole story.
+LTX_DETAILER_LORA = 'LTX2_IC_LoRA_Detailer.safetensors'
+
+
+def apply_ltx_detailer_pass(path, options, *, model_path, prompt, height, width, frames, frame_rate, seed, job_id, rec, env):
+    """Optionally refine `path` in place with the IC-LoRA Detailer.
+
+    This is a genuine second sampling pass, not a filter: the Detailer is an
+    IC-LoRA that conditions on reference video frames, so the first pass's own
+    output is fed back as the conditioning video.
+
+    Returns None the instant no strength is set, which is what keeps an ordinary
+    generation exactly as fast as it was before this existed. Failure is
+    non-fatal for the same reason the denoise pass is — the un-refined clip is
+    still a clip.
+    """
+    try:
+        strength = float(options.get('detailer_strength') or 0)
+    except (TypeError, ValueError):
+        return None
+    if strength <= 0:
+        return None
+    strength = max(0.05, min(1.5, strength))
+
+    lora = (COMFY / 'models' / 'loras' / LTX_DETAILER_LORA)
+    if not lora.is_file():
+        return {'strength': strength, 'applied': False, 'error': f'{LTX_DETAILER_LORA} not installed'}
+
+    target = Path(path)
+    scratch = target.with_name(f'{target.stem}.detailer-tmp{target.suffix or ".mp4"}')
+    cmd = [
+        "uv", "run", "ltx-2-mlx", "ic-lora",
+        "--model", str(model_path),
+        "--gemma", LTX2_MLX_GEMMA,
+        "--prompt", prompt,
+        "--lora", str(lora), str(strength),
+        # The clip we just made is the reference. Strength 1.0 keeps its
+        # structure; the Detailer LoRA is what adds texture on top.
+        "--video-conditioning", str(target), "1.0",
+        "--single-stage",
+        "-H", str(height), "-W", str(width), "-f", str(frames),
+        "--frame-rate", str(frame_rate),
+        "--seed", str(seed),
+        "-o", str(scratch),
+    ]
+    started = time.monotonic()
+    rec["progress_phase"] = "ltx-2-mlx detailer"
+    try:
+        proc = _run_native_ltx_subprocess(
+            job_id, rec, cmd, cwd=str(LTX2_MLX_DIR), env=env,
+            timeout=int_option(options, 'runtime_timeout_seconds', 2400, 60, 14400),
+        )
+        if proc.returncode != 0 or not scratch.exists() or scratch.stat().st_size < 1000:
+            detail = ((proc.stderr or proc.stdout or 'unknown detailer error')).strip()
+            scratch.unlink(missing_ok=True)
+            return {'strength': strength, 'applied': False, 'error': detail[-400:]}
+        os.replace(scratch, target)
+        return {'strength': strength, 'applied': True, 'seconds': round(time.monotonic() - started, 2)}
+    except NativeJobCancelled:
+        scratch.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        scratch.unlink(missing_ok=True)
+        return {'strength': strength, 'applied': False, 'error': str(exc)[-400:]}
+
+
 def _create_native_ltx_static_reference_video(image_path, output_path, frames, frame_rate):
     """Encode a lossless repeated reference sheet for MLX IC-LoRA conditioning."""
     ffmpeg = shutil.which('ffmpeg')
@@ -4950,8 +5458,19 @@ def _update_native_ltx_process_progress(job_id, rec, text):
         jobs[job_id] = rec
 
 
+class NativeJobCancelled(Exception):
+    """The owner cancelled a native generation job; the runner marks it 'cancelled'."""
+
+
+def native_job_cancel_requested(job_id):
+    with jobs_lock:
+        return bool((jobs.get(job_id) or {}).get('cancel_requested'))
+
+
 def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
     """Run ltx-2-mlx while publishing tqdm progress from both output streams."""
+    if native_job_cancel_requested(job_id):
+        raise NativeJobCancelled(f"job {job_id} was cancelled before the render started")
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -4960,12 +5479,22 @@ def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
         stderr=subprocess.PIPE,
         bufsize=0,
     )
+    with jobs_lock:
+        native_job_procs[job_id] = proc
     streams = [stream for stream in (proc.stdout, proc.stderr) if stream is not None]
     output = {proc.stdout: bytearray(), proc.stderr: bytearray()}
     progress_tail = ""
     started = time.monotonic()
     try:
         while streams:
+            if native_job_cancel_requested(job_id):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                raise NativeJobCancelled(f"job {job_id} was cancelled mid-render")
             if time.monotonic() - started > timeout:
                 proc.terminate()
                 try:
@@ -4990,6 +5519,14 @@ def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
         if proc.poll() is None:
             proc.terminate()
         raise
+    finally:
+        with jobs_lock:
+            if native_job_procs.get(job_id) is proc:
+                native_job_procs.pop(job_id, None)
+    # The cancel route may have terminated the process directly, between this
+    # loop's flag checks — report that as a cancellation, not an exit -15 error.
+    if returncode != 0 and native_job_cancel_requested(job_id):
+        raise NativeJobCancelled(f"job {job_id} was cancelled mid-render")
     stdout = bytes(output.get(proc.stdout, b'')).decode('utf-8', errors='replace')
     stderr = bytes(output.get(proc.stderr, b'')).decode('utf-8', errors='replace')
     return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
@@ -5002,9 +5539,25 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
     backend = _ltx_mlx_backend_name(spec, variant)
     options = dict(native.get('options') or {})
     operation = str(native.get('operation') or 'generate').strip().lower()
+    # FaceFusion is a different kind of tool entirely — a per-frame 2D swap onto
+    # the original footage, with no diffusion model, prompt, LoRA or guide. It
+    # therefore branches out before every LTX precondition below, which would
+    # otherwise demand a model and a prompt it has no use for.
+    if operation == 'head-swap' and _headswap_backend_name(options) == 'facefusion':
+        return run_facefusion_head_swap(job_id, native, options, started=started)
     prompt = str(native.get('prompt') or '').strip()
     width = int_quality_option(options, 'width', 480)
     height = int_quality_option(options, 'height', 832)
+    # Only generate and ic-lora pass -H/-W to the CLI; extend inherits the
+    # source clip's size and head-swap re-derives its own from the guide.
+    if operation in ('generate', 'ic-lora'):
+        snapped = _ltx_snap_render_dimensions(
+            width, height,
+            single_stage=operation == 'ic-lora' and bool(options.get('single_stage', True)),
+        )
+        if snapped != (width, height):
+            print(f"[ltx] {job_id} render size {width}x{height} is off the pipeline grid; snapped to {snapped[0]}x{snapped[1]}", flush=True)
+            width, height = snapped
     frames = _ltx_valid_frame_count(options.get('frames', 233), 233)
     if operation == 'ic-lora':
         frames = max(frames, int_option(options, 'target_min_frames', 9, 9, 721))
@@ -5096,7 +5649,51 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
         allowed = [COMFY_INPUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), OUT_DIR.resolve()]
         source_video = None
         reference_image = None
-        if operation == 'extend':
+        # Set only on the head-swap path; the shared post-run block reads it to
+        # check the render came back at the size the guide was planned around.
+        headswap_guide_info = None
+        if operation == 'head-swap':
+            # Needs both halves of the guide: the footage to alter and the face to
+            # put into it. Validate them together so a missing one fails here with
+            # a clear message rather than deep inside the ffmpeg filtergraph.
+            source_video = _resolve_native_ltx_video_path(native.get('video_path'))
+            if not source_video.exists() or not any(_is_under(source_video, root) for root in allowed):
+                raise RuntimeError("head-swap source video is outside private Comfy storage or does not exist")
+            reference_image = _resolve_native_ltx_image_path(native.get('reference_image_path'))
+            if not reference_image.exists() or not any(_is_under(reference_image, root) for root in allowed):
+                raise RuntimeError("head-swap face image is outside private Comfy storage or does not exist")
+            # The BFS adapter is what teaches the model to read the reserved strip
+            # and redraw the scene at full frame — without it the render comes
+            # back as a copy of the guide. It is therefore a property of the
+            # TASK, not a LoRA the operator has to remember to switch on, so the
+            # task supplies it. Requiring it by hand cost several full renders
+            # that looked like a compositor bug.
+            headswap_lora_strength = float_quality_option(options, 'head_swap_lora_strength', 1.0)
+            selected_bfs = [item for item in native_loras if bfs_headswap_lora_selected(item)]
+            if selected_bfs:
+                # Honour the operator's own entry, but the task owns its strength.
+                for item in selected_bfs:
+                    item['scale'] = headswap_lora_strength
+            else:
+                found = find_bfs_headswap_lora()
+                if not found:
+                    raise RuntimeError(
+                        'head-swap needs the BFS head-swap IC-LoRA, and no file matching '
+                        f'"head_swap" was found in {(COMFY / "models" / "loras")}. Install it from '
+                        'https://civitai.com/models/2027766 (BFS - Best Face Swap).'
+                    )
+                native_loras.append({
+                    'name': found.stem,
+                    'filePath': str(found),
+                    'scale': headswap_lora_strength,
+                })
+            if not bfs_headswap_prompt_has_trigger(prompt):
+                # Without its trigger the v3 IC-LoRA has nothing to act on, and
+                # the cheapest thing the model can do is reproduce the guide it
+                # was handed — strip, face box and all. Failing here costs a
+                # second; letting it run costs the whole render.
+                raise RuntimeError(BFS_HEADSWAP_PROMPT_HELP)
+        elif operation == 'extend':
             source_video = _resolve_native_ltx_video_path(native.get('video_path'))
             if not source_video.exists() or not any(_is_under(source_video, root) for root in allowed):
                 raise RuntimeError("input video is outside private Comfy storage or does not exist")
@@ -5191,6 +5788,67 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                     "--stg-scale", str(stg_scale),
                 ])
             cmd.extend(["--seed", str(seed), "-o", str(out)])
+        elif operation == 'head-swap':
+            # BFS v3 conditions on a composed guide, not the raw footage: the face
+            # sits in a reserved chroma strip that stays visible for every frame,
+            # which is what gives it identity that survives the whole clip.
+            guide_path = COMFY_INPUT_DIR / '.ltx-reference' / f'{job_id}-headswap.mp4'
+            guide_info = build_bfs_headswap_guide_video(
+                source_video, reference_image, guide_path,
+                region_px=int_option(options, 'head_swap_region_px', BFS_HEADSWAP_REGION_PX, 32, 2048),
+                max_dimension=int_option(options, 'head_swap_max_dimension', 0, 0, 4096),
+                frame_rate=frame_rate,
+            )
+            headswap_guide_info = guide_info
+            rec['options']['head_swap'] = dict(guide_info)
+            # Everything that decides whether a head swap works, except the
+            # prompt — which stays out of the log on purpose. Diagnosing this
+            # from the guide file alone cost several wrong theories.
+            print(
+                f"[ltx] head-swap {job_id} model={Path(str(model_path)).name}"
+                f" render={guide_info['width']}x{guide_info['height']} frames={frames}"
+                f" video={guide_info['video_width']}x{guide_info['video_height']}"
+                f"@{guide_info['video_x']},{guide_info['video_y']}"
+                f" loras={[(Path(str(i['filePath'])).name, i.get('scale', 1.0)) for i in native_loras]}"
+                f" ref_strength={float_quality_option(options, 'reference_strength', 1.0)}"
+                f" cond_strength={float_quality_option(options, 'conditioning_strength', 1.0)}"
+                f" pipeline={_prompt_string(options.get('head_swap_pipeline')) or 'single-stage'}"
+                f" trigger={bfs_headswap_prompt_has_trigger(prompt)}",
+                flush=True,
+            )
+            # Render the guide's own frame, which is also the source's frame: the
+            # model reads the fitted, inset footage and draws the swapped scene
+            # back across the WHOLE frame, so this render IS the deliverable.
+            # Nothing is cropped — cropping the strip off is what read as a zoom.
+            width, height = guide_info['width'], guide_info['height']
+            cmd = [
+                "uv", "run", "ltx-2-mlx", "ic-lora",
+                "--model", str(model_path),
+                "--gemma", LTX2_MLX_GEMMA,
+                "--prompt", prompt,
+            ]
+            for item in native_loras:
+                cmd.extend(["--lora", str(item['filePath']), str(item.get('scale', 1.0))])
+            cmd.extend([
+                "--video-conditioning", str(guide_path), str(float_quality_option(options, 'reference_strength', 1.0)),
+                "--conditioning-strength", str(float_quality_option(options, 'conditioning_strength', 1.0)),
+            ])
+            # --single-stage tracks the control most tightly and is the default.
+            # The fast path generates at half res with the control applied
+            # throughout, upsamples, then runs a control-aware refine.
+            if _prompt_string(options.get('head_swap_pipeline')) == 'fast':
+                cmd.extend([
+                    "--upsample-only",
+                    "--refine-steps", str(int_option(options, 'head_swap_refine_steps', 3, 1, 8)),
+                ])
+            else:
+                cmd.append("--single-stage")
+            cmd.extend([
+                "-H", str(height), "-W", str(width), "-f", str(frames),
+                "--frame-rate", frame_rate_arg,
+                "--seed", str(seed),
+                "-o", str(out),
+            ])
         elif operation == 'ic-lora':
             reference_video_path = COMFY_INPUT_DIR / '.ltx-reference' / f'{job_id}.mkv'
             _create_native_ltx_static_reference_video(reference_image, reference_video_path, reference_frames, frame_rate)
@@ -5312,10 +5970,41 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             stderr = proc.stderr.strip()
             if proc.returncode != 0:
                 raise RuntimeError(f"ltx-2-mlx exited {proc.returncode}\nSTDOUT:\n{stdout[-2000:]}\nSTDERR:\n{stderr[-2000:]}")
+            # Cancelled between the render finishing and the post passes: stop
+            # here rather than spending more GPU time on a clip nobody wants.
+            if native_job_cancel_requested(job_id):
+                raise NativeJobCancelled(f"job {job_id} was cancelled after the render")
             if not out.exists() or out.stat().st_size < 1000:
                 raise RuntimeError("ltx-2-mlx finished without a valid output video")
-            # Runs while the output is still marked active, so the E2E sweeper
-            # never seals the pre-filter file out from under the re-encode.
+            # A head-swap render is already the deliverable: the reserved strip is
+            # part of the guide the model reads, never part of the frame it draws
+            # (author's model card), so there is nothing to crop off. Verify the
+            # size we asked for is the size we got, and say so loudly if not.
+            if headswap_guide_info:
+                got_w, got_h = _probe_video_dimensions(out)
+                want_w = headswap_guide_info['width']
+                want_h = headswap_guide_info['height']
+                if (got_w, got_h) != (want_w, want_h):
+                    print(
+                        f"[ltx] head-swap {job_id} rendered {got_w}x{got_h}, expected {want_w}x{want_h}",
+                        flush=True,
+                    )
+                rec['options']['head_swap'] = {**headswap_guide_info, 'output_width': got_w, 'output_height': got_h}
+            # Both post-passes run while the output is still marked active, so the
+            # E2E sweeper never seals the intermediate file out from under them.
+            # Detailer first: it resamples the clip, so grain filtering afterwards
+            # judges the texture that actually ships.
+            detailer_detail = apply_ltx_detailer_pass(
+                out, options,
+                model_path=model_path, prompt=prompt,
+                height=height, width=width, frames=frames,
+                frame_rate=frame_rate_arg, seed=seed,
+                job_id=job_id, rec=rec, env=env,
+            )
+            if detailer_detail:
+                rec['options']['detailer'] = detailer_detail
+                if not detailer_detail.get('applied'):
+                    print(f"[ltx] detailer pass skipped for {job_id}: {detailer_detail.get('error')}", flush=True)
             denoise_detail = apply_ltx_denoise_pass(out, options.get('denoise'))
             if denoise_detail:
                 rec['options']['denoise'] = denoise_detail
@@ -5337,6 +6026,8 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             "step_progress": 100,
             "progress_phase": "done",
         })
+    except NativeJobCancelled:
+        rec.update({"status": "cancelled", "finished_at": now_iso(), "error": "Cancelled by the owner", "progress_phase": "cancelled"})
     except Exception as e:
         rec.update({"status": "error", "finished_at": now_iso(), "error": str(e), "progress_phase": "error"})
     finally:
@@ -7337,6 +8028,11 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         if not self.authed(qs):
             return self.send_json({"error": "unauthorized"}, 401)
+        if parsed.path.startswith("/api/job/") and parsed.path.endswith("/cancel"):
+            jid = parsed.path[len("/api/job/"):-len("/cancel")].strip("/")
+            return self.send_json(cancel_generation_job(jid))
+        if parsed.path.startswith("/api/cancel/"):
+            return self.send_json(cancel_generation_job(parsed.path.rsplit("/", 1)[-1]))
         if parsed.path == "/api/delete-output":
             try:
                 data = json.loads((self.read_body() or b"{}").decode("utf-8"))
@@ -7439,15 +8135,11 @@ class Handler(BaseHTTPRequestHandler):
             data = {}
             uploaded_image = None
             if "multipart/form-data" in ctype:
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={
-                        'REQUEST_METHOD': 'POST',
-                        'CONTENT_TYPE': ctype,
-                        'CONTENT_LENGTH': self.headers.get('Content-Length', '0'),
-                    },
-                )
+                try:
+                    content_length = int(self.headers.get('Content-Length') or 0)
+                except (TypeError, ValueError):
+                    content_length = 0
+                form = MultipartForm(self.rfile.read(content_length) if content_length > 0 else b'', ctype)
                 prompt = str(form.getfirst("prompt", "")).strip()
                 for key in ['backend', 'width', 'height', 'steps', 'cfg', 'guidance', 'seed', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px']:
                     if key in form:
