@@ -65,3 +65,24 @@ test('loaded models sort first, then largest', () => {
     ]);
     assert.deepEqual(rows.map((r) => r.id), ['live', 'big', 'small']);
 });
+
+test('a model is preselected when nothing is loaded', () => {
+    // The dialog only auto-selected a model already in RAM. After a page
+    // reload — or a stack restart that killed the server — nothing is loaded,
+    // so nothing was selected, and every action returned silently: "Apply
+    // change does nothing". The fallback is the first model that fits.
+    const models = [
+        { id: 'huge.gguf', name: 'Huge', fit: 'insufficient', estimatedLoadBytes: 9e10 },
+        { id: 'scout.gguf', name: 'Swarm Scout 12B', fit: 'fits', estimatedLoadBytes: 1e10 },
+    ];
+    const pick = (data) => {
+        const live = data.loaded?.[0]?.modelId;
+        if (live) return live;
+        return sortModels(data.models).find((m) => canSelect(m, { unloadOthers: true }))?.id || '';
+    };
+    assert.equal(pick({ models, loaded: [] }), 'scout.gguf');
+    // A model already in RAM still wins — it costs nothing to use.
+    assert.equal(pick({ models, loaded: [{ modelId: 'huge.gguf' }] }), 'huge.gguf');
+    // Nothing usable at all stays empty rather than selecting the unusable.
+    assert.equal(pick({ models: [models[0]], loaded: [] }), '');
+});

@@ -7,6 +7,18 @@
     <meta name="theme-color" content="#0c0c0e" />
     <meta name="description" content="Hivemind Content Studio — a private, unified AI media studio. Image, video, cinema, lip sync, ComfyUI canvas, durable production runs, and local model management in one app." />
     <title>Hivemind Content Studio</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/app-icon-192.png" />
+    <script>
+      // Installable-app shell (adapted from Mix-Studio, GPL-3.0): the worker
+      // caches only the offline page + icons and only intercepts navigations,
+      // so dev servers, the owner gate, APIs and sealed media are unaffected.
+      if ('serviceWorker' in navigator && location.port !== '5273') { // skip the vite dev server
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+        });
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>

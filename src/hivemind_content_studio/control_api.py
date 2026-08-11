@@ -28,7 +28,7 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import yaml
 
@@ -83,6 +83,7 @@ from .private_access import (
     write_private_text,
 )
 from .run_privacy import migrate_private_runs
+from .gpu_rentals import register_gpu_rental_routes
 from .shared_env import apply_shared_hive_env
 from .studio_drafts import StudioRunDraft
 from .studio_state import StudioStateStore
@@ -147,6 +148,22 @@ class PromptHelperGenerateBody(BaseModel):
     idea: str
     targetModel: str = ""
     mediaType: Literal["video", "image"] = "video"
+    # A start image is a different documented task for MiniMax H3 (I2VA vs
+    # T2VA), which opens with an anchor line the model was trained on.
+    hasFirstFrame: bool = False
+    # A last frame turns the same request into FL2VA (with a start frame) or
+    # L2VA (without) — each has its own anchor line.
+    hasLastFrame: bool = False
+    # The clip length the studio is set to, so the written timeline fits inside it.
+    durationSeconds: float | None = None
+    # The start frame itself, as a data URL, for models with a projector: an
+    # I2VA prompt describes the first frame, and describing one it has never
+    # seen is guesswork.
+    imageBase64: str | None = None
+    # Revise an existing prompt instead of writing a new one: the prompt to
+    # change, and what the owner wants different about it.
+    currentPrompt: str | None = None
+    revision: str | None = None
 
 
 class MediaStudioLoraBody(BaseModel):
@@ -165,16 +182,28 @@ class MediaStudioVideoBody(BaseModel):
     workflow_id: str = ""
     reference_description: str = ""
     ingredient_images: list[MediaStudioIngredientImageBody] = []
+    # MiniMax H3 Reference mode: discrete character/subject pictures carried into
+    # the clip in order (reference N is the prompt's <Picture N>). Distinct from
+    # ingredient_images, which LTX composes into one conditioning sheet.
+    reference_images: list[MediaStudioIngredientImageBody] = []
     image_base64: str | None = None
     image_reference: str | None = None
     middle_image_base64: str | None = None
     end_image_base64: str | None = None
     video_base64: str | None = None
     video_reference: str | None = None
+    # Scene chaining (MiniMax H3): the PREVIOUS clip, decrypted in-browser and
+    # sent inline; its last ~22 frames + audio tail seed the new shot.
+    motion_context_base64: str | None = None
     video_mode: Literal["extend"] = "extend"
+    # THE task. Decided once in the studio (src/lib/videoTasks.js) and forwarded
+    # verbatim; nothing downstream re-derives the job from which media arrived.
+    task: Literal["generate", "extend", "head-swap"] = "generate"
     duration_seconds: float = 4
     aspect_ratio: str = ""
-    resolution: Literal["", "standard", "high"] = ""
+    # "max" is the ~1.0MP native-canvas tier (MiniMax H3's trained 768px short
+    # edge); the studio only offers it for minimax-family workflows.
+    resolution: Literal["", "standard", "high", "max"] = ""
     # -1 (or omitted) lets the runner pick a random seed; >= 0 is a fixed seed.
     seed: int | None = None
     # Optional post-generation grain cleanup on the native MLX LTX path.
@@ -185,6 +214,15 @@ class MediaStudioVideoBody(BaseModel):
     negative_prompt: str = ""
     # NAG strength. Omitted uses the runner default; <=1 disables guidance.
     nag_scale: float | None = None
+    head_swap_lora_strength: float | None = None
+    head_swap_backend: str | None = None
+    head_swap_face_enhancer: bool = False
+    # None = leave the workflow's own default alone; only an explicit choice
+    # overrides the registered graph.
+    spectrum: bool | None = None
+    # Sampling-steps override for workflows whose registry maps a steps slot
+    # (MiniMax H3's refinement setting). None keeps the workflow default.
+    steps: int | None = Field(default=None, ge=1, le=100)
     loras: list[MediaStudioLoraBody] = []
 
 
@@ -224,7 +262,18 @@ def _video_timing_signature(body: "MediaStudioVideoBody") -> tuple[str, str, flo
     resolution = (body.resolution or "standard").strip().lower() or "standard"
     lora_n = len([item for item in body.loras if str(getattr(item, "id", "") or "").strip()])
     ingredient_n = len(body.ingredient_images)
-    if body.video_base64 or body.video_reference:
+    task = (getattr(body, "task", None) or "generate").strip().lower()
+    if task == "head-swap":
+        # Read the task, do not re-infer it from the attachments: a head swap
+        # carries a video AND an image, so the attachment test below calls it an
+        # extension. It is a different cost profile entirely (an order of
+        # magnitude slower here), and averaging the two wrecks both estimates.
+        mode = "head-swap"
+    elif body.motion_context_base64:
+        # Scene chaining samples ~22 extra frames plus a context encode — a
+        # different cost profile from a plain generate at the same duration.
+        mode = "chain"
+    elif body.video_base64 or body.video_reference:
         mode = "extend"
     elif body.image_base64 or body.image_reference or body.middle_image_base64 or body.end_image_base64:
         mode = "i2v"
@@ -235,9 +284,12 @@ def _video_timing_signature(body: "MediaStudioVideoBody") -> tuple[str, str, flo
     # The denoise pass is a real re-encode on top of generation, so it belongs in
     # the key — otherwise filtered runs poison the unfiltered estimate.
     denoise = (body.denoise or "off").strip().lower() or "off"
+    # A steps override scales sampling time directly (32 steps is ~2x the work
+    # of 15), so runs with different step counts must not share an estimate.
+    steps = f"|steps={int(body.steps)}" if isinstance(body.steps, int) and body.steps > 0 else ""
     work = frames * _video_frame_megapixels(body.aspect_ratio, resolution)
     return (
-        f"v2|{workflow}|{mode}|loras={lora_n}|ing={ingredient_n}|dn={denoise}",
+        f"v2|{workflow}|{mode}|loras={lora_n}|ing={ingredient_n}|dn={denoise}{steps}",
         workflow,
         round(work, 3),
     )
@@ -755,6 +807,8 @@ def build_control_app(
         if not bool(getattr(request.state, "is_owner", False)):
             raise HTTPException(status_code=401, detail="Owner password required")
 
+    register_gpu_rental_routes(app, require_owner)
+
     def owner_visible(request: Request, value: dict[str, Any]) -> dict[str, Any]:
         return value if bool(getattr(request.state, "is_owner", False)) else machine_run_receipt(value)
 
@@ -841,7 +895,18 @@ def build_control_app(
                 "<head><script>window.__HIVEMIND_STUDIO__=1</script>",
                 1,
             )
-            return HTMLResponse(html)
+            # Never cache the shell. Vite fingerprints every asset, so a browser
+            # holding a stale index.html keeps requesting the OLD hashed bundle
+            # and the UI silently never updates after a rebuild — which looks
+            # exactly like the new feature was never shipped.
+            return HTMLResponse(
+                html,
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         return HTMLResponse(
             "<h1>Hivemind Content Studio</h1><p>The frontend build is missing. "
             "Run <code>npm --prefix packages/open-generative-ai run vite:build</code>.</p>",
@@ -896,6 +961,7 @@ def build_control_app(
             "local-ai/models",
             "local-ai/generate",
             "local-ai/upscale",
+            "local-ai/interpolate",
             "local-ai/prompt-helper",
             "local-ai/civitai-download",
             "local-ai/lora-updates",
@@ -1024,6 +1090,14 @@ def build_control_app(
         except local_llm.LocalLlmError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/prompt-helper/free-comfy", dependencies=[Depends(require_owner)])
+    def prompt_helper_free_comfy() -> dict:
+        try:
+            freed = local_llm.free_comfy_memory()
+        except local_llm.LocalLlmError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {**freed, **local_llm.runtime().snapshot()}
+
     @app.post("/api/prompt-helper/unload", dependencies=[Depends(require_owner)])
     def prompt_helper_unload(body: PromptHelperUnloadBody) -> dict:
         return local_llm.runtime().unload(body.modelId)
@@ -1033,19 +1107,104 @@ def build_control_app(
         idea = body.idea.strip()
         if not idea:
             raise HTTPException(status_code=400, detail="Enter an idea before using the prompt helper")
-        profile = prompt_profiles.profile_for(body.targetModel, media_type=body.mediaType)
+        profile = prompt_profiles.profile_for(
+            body.targetModel, media_type=body.mediaType,
+            first_frame=body.hasFirstFrame, last_frame=body.hasLastFrame,
+        )
+        runtime = local_llm.runtime()
+        warnings: list[str] = []
+        image = (body.imageBase64 or "").strip() or None
+        if image and not runtime.model_sees_images(body.modelId):
+            # Say so rather than quietly writing a prompt about an image the
+            # model was never shown.
+            warnings.append(
+                "This model has no vision projector beside it, so the start frame was not read — "
+                "the opening shot describes the idea, not the image."
+            )
+            image = None
         messages = [
-            {"role": "system", "content": prompt_profiles.system_prompt(profile)},
+            {"role": "system", "content": prompt_profiles.system_prompt(
+                profile, duration_seconds=body.durationSeconds)},
             {"role": "user", "content": idea},
         ]
-        try:
-            prompt = local_llm.runtime().chat(model_id=body.modelId, messages=messages)
-        except local_llm.LocalLlmError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Revising is the same conversation with the current draft in it, so
+        # the format rules, the clip length and the start frame all still
+        # apply — a note like "make it night" must not quietly cost the
+        # <d> tags or push a beat past the end of the clip.
+        revision = (body.revision or "").strip()
+        current = (body.currentPrompt or "").strip()
+        if revision and current:
+            messages += [
+                {"role": "assistant", "content": current},
+                {"role": "user", "content":
+                    f"Change the prompt: {revision}\n\nRewrite it in full, keeping everything else "
+                    "as it is and the format identical."},
+            ]
+        elif revision:
+            raise HTTPException(
+                status_code=400, detail="Write a prompt before asking for changes to it")
+
+        def _write(history: list[dict]) -> str:
+            try:
+                return runtime.chat(model_id=body.modelId, messages=history, image=image)
+            except local_llm.LocalLlmError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        prompt = prompt_profiles.normalize(profile, _write(messages))
+        edited = None
+        if revision and current:
+            # A revision that comes back byte-identical is the model ignoring
+            # the note, and it is indistinguishable on screen from a correct
+            # edit of three words inside twenty lines. Push once, firmly, then
+            # say which of the two happened.
+            edited = prompt_profiles.changed_lines(current, prompt)
+            if edited == 0:
+                harder = messages + [
+                    {"role": "assistant", "content": prompt},
+                    {"role": "user", "content":
+                        f"That is the same prompt — you did not apply the change. Apply it now: "
+                        f"{revision}. Output the full prompt with that change made."},
+                ]
+                second = prompt_profiles.normalize(profile, _write(harder))
+                edited = prompt_profiles.changed_lines(current, second)
+                if edited:
+                    prompt = second
+                else:
+                    warnings.append(
+                        "The model handed back the same prompt — it did not apply that change. "
+                        "Try naming the line to change, or edit the text directly."
+                    )
+        late = prompt_profiles.timeline_overruns(prompt, body.durationSeconds)
+        if late:
+            # One corrective pass. Small models overshoot the clip often enough
+            # that handing back a timeline whose last beat never renders is the
+            # common case, not the edge one — and the fix is mechanical to ask
+            # for but not safe to apply by hand (moving a beat rewrites intent).
+            retry = messages + [
+                {"role": "assistant", "content": prompt},
+                {"role": "user", "content":
+                    f"Shot(s) starting at {', '.join(f'{t:g}s' for t in late)} fall outside the "
+                    f"{body.durationSeconds:g}s clip, so they would never render. Rewrite the whole "
+                    "prompt with the same story compressed to fit, keeping the format identical."},
+            ]
+            second = prompt_profiles.normalize(profile, _write(retry))
+            if not prompt_profiles.timeline_overruns(second, body.durationSeconds):
+                prompt = second
+            else:
+                prompt = second if len(prompt_profiles.timeline_overruns(second, body.durationSeconds)) < len(late) else prompt
+                warnings.append(
+                    f"The timeline still runs past the {body.durationSeconds:g}s clip — trim it or "
+                    "regenerate before using it."
+                )
         return {
             "prompt": prompt,
             "profile": profile,
             "profileLabel": prompt_profiles.profile_label(profile),
+            "warnings": warnings,
+            "sawImage": bool(image),
+            # None for a fresh write; a line count for a revision, so the UI can
+            # show that something happened even when the change is three words.
+            "changedLines": edited,
         }
 
     @app.get("/api/templates")
@@ -1300,14 +1459,16 @@ def build_control_app(
 
     def _staged_media_studio_video_inputs(
         body: MediaStudioVideoBody, request: Request
-    ) -> tuple[Path | None, Path | None, Path | None, Path | None, list[dict[str, Any]]]:
+    ) -> tuple[Path | None, Path | None, Path | None, Path | None, Path | None, list[dict[str, Any]], list[Path]]:
         image: Path | None = None
         middle: Path | None = None
         end: Path | None = None
         video: Path | None = None
+        motion_context: Path | None = None
         ingredient_images: list[dict[str, Any]] = []
+        reference_images: list[Path] = []
         has_private_reference = body.image_reference or body.video_reference or any(
-            item.image_reference for item in body.ingredient_images
+            item.image_reference for item in [*body.ingredient_images, *body.reference_images]
         )
         if has_private_reference and not bool(getattr(request.state, "is_owner", False)):
             raise HTTPException(status_code=403, detail="Private media references require an owner session")
@@ -1325,15 +1486,34 @@ def build_control_app(
                     "image_path": source,
                     "description": item.description.strip()[:1000],
                 })
+            # Reference-mode pictures: order is load-bearing (<Picture N> in the
+            # prompt is the Nth entry), so stage them in the order received.
+            if len(body.reference_images) > 9:
+                raise ValueError("At most 9 reference images are supported")
+            for index, item in enumerate(body.reference_images):
+                if item.image_base64:
+                    reference_images.append(_write_inline_image(item.image_base64, media_studio_input_root))
+                elif item.image_reference:
+                    reference_images.append(stage_media_studio_reference(item.image_reference))
+                else:
+                    raise ValueError(f"Reference image {index + 1} has no image")
+            # Video and image are decoded INDEPENDENTLY. They used to share one
+            # if/elif chain, so a request carrying both — the only kind head swap
+            # can make — silently lost the image and failed downstream claiming
+            # the face was never supplied.
             if body.video_reference:
                 video = stage_media_studio_reference(body.video_reference)
             elif body.video_base64:
                 video = _write_inline_video(body.video_base64, media_studio_input_root)
-            elif body.image_base64:
+            if body.motion_context_base64:
+                if video is not None:
+                    raise ValueError("A motion-context clip seeds a new shot and cannot be combined with a source video")
+                motion_context = _write_inline_video(body.motion_context_base64, media_studio_input_root)
+            if body.image_base64:
                 image = _write_inline_image(body.image_base64, media_studio_input_root)
             elif body.image_reference:
                 image = stage_media_studio_reference(body.image_reference)
-            elif not ingredient_images and not body.prompt.strip():
+            if video is None and image is None and not ingredient_images and not body.prompt.strip():
                 # LTX 2.3 supports text-to-video, so a prompt alone is a valid
                 # request; only reject a truly empty submission.
                 raise ValueError("An image, video, or prompt is required")
@@ -1348,7 +1528,7 @@ def build_control_app(
                     end = _write_inline_image(body.end_image_base64, media_studio_input_root)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        return image, middle, end, video, ingredient_images
+        return image, middle, end, video, motion_context, ingredient_images, reference_images
 
     def _validated_media_studio_loras(body: MediaStudioVideoBody) -> list[dict[str, Any]]:
         loras: list[dict[str, Any]] = []
@@ -1363,9 +1543,14 @@ def build_control_app(
 
     def _unlink_staged_media_studio_sources(
         image: Path | None, middle: Path | None, end: Path | None,
-        video: Path | None, ingredient_images: list[dict[str, Any]]
+        video: Path | None, motion_context: Path | None, ingredient_images: list[dict[str, Any]],
+        reference_images: list[Path] | None = None,
     ) -> None:
-        for source in [image, middle, end, video, *(item["image_path"] for item in ingredient_images)]:
+        for source in [
+            image, middle, end, video, motion_context,
+            *(item["image_path"] for item in ingredient_images),
+            *(reference_images or []),
+        ]:
             if source is not None:
                 with contextlib.suppress(FileNotFoundError):
                     source.unlink()
@@ -1418,7 +1603,8 @@ def build_control_app(
 
     @app.post("/api/media-studio/video", dependencies=[Depends(require_owner_or_control)])
     async def generate_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
-        image, middle, end, video, ingredient_images = _staged_media_studio_video_inputs(body, request)
+        image, middle, end, video, motion_context, ingredient_images, reference_images = (
+            _staged_media_studio_video_inputs(body, request))
         loras = _validated_media_studio_loras(body)
         started = time.perf_counter()
         try:
@@ -1428,10 +1614,13 @@ def build_control_app(
                 middle_image_path=middle,
                 end_image_path=end,
                 video_path=video,
+                motion_context_path=motion_context,
                 video_mode=body.video_mode,
+                task=body.task,
                 prompt=body.prompt.strip(),
                 reference_description=body.reference_description.strip(),
                 ingredient_images=ingredient_images,
+                reference_images=reference_images,
                 duration_seconds=body.duration_seconds,
                 aspect_ratio=body.aspect_ratio,
                 resolution=body.resolution,
@@ -1443,7 +1632,8 @@ def build_control_app(
             detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
             raise HTTPException(status_code=503, detail=detail) from None
         finally:
-            _unlink_staged_media_studio_sources(image, middle, end, video, ingredient_images)
+            _unlink_staged_media_studio_sources(
+                image, middle, end, video, motion_context, ingredient_images, reference_images)
         try:
             response = _finalize_media_studio_video(result, started)
         except RuntimeError as exc:
@@ -1484,6 +1674,10 @@ def build_control_app(
                 uploaded_names=list(entry.get("uploaded_names") or []),
                 output_dir=media_studio_output_root,
             )
+            # A cancel that landed while the finisher was blocked in the thread
+            # is terminal — don't resurrect the entry as done or error.
+            if entry.get("status") == "cancelled":
+                return
             entry.update(status="done", response=_finalize_media_studio_video(result, float(entry.get("started") or time.perf_counter())))
             # Record the real duration so future runs of the same shape get a
             # sharper elapsed/expected estimate.
@@ -1497,11 +1691,13 @@ def build_control_app(
                         duration,
                     )
         except Exception as exc:
-            entry.update(status="error", detail=str(exc) or "Media generation failed")
+            if entry.get("status") != "cancelled":
+                entry.update(status="error", detail=str(exc) or "Media generation failed")
 
     @app.post("/api/media-studio/video/start", dependencies=[Depends(require_owner_or_control)])
     async def start_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
-        image, middle, end, video, ingredient_images = _staged_media_studio_video_inputs(body, request)
+        image, middle, end, video, motion_context, ingredient_images, reference_images = (
+            _staged_media_studio_video_inputs(body, request))
         loras = _validated_media_studio_loras(body)
         started = time.perf_counter()
         try:
@@ -1511,10 +1707,13 @@ def build_control_app(
                 middle_image_path=middle,
                 end_image_path=end,
                 video_path=video,
+                motion_context_path=motion_context,
                 video_mode=body.video_mode,
+                task=body.task,
                 prompt=body.prompt.strip(),
                 reference_description=body.reference_description.strip(),
                 ingredient_images=ingredient_images,
+                reference_images=reference_images,
                 duration_seconds=body.duration_seconds,
                 aspect_ratio=body.aspect_ratio,
                 resolution=body.resolution,
@@ -1523,6 +1722,11 @@ def build_control_app(
                 denoise=body.denoise,
                 negative_prompt=body.negative_prompt,
                 nag_scale=body.nag_scale,
+                head_swap_lora_strength=body.head_swap_lora_strength,
+                head_swap_backend=body.head_swap_backend,
+                head_swap_face_enhancer=body.head_swap_face_enhancer,
+                spectrum=body.spectrum,
+                steps=body.steps,
                 loras=loras,
             )
         except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
@@ -1531,7 +1735,8 @@ def build_control_app(
         finally:
             # start_video uploads the inputs to the gateway before returning,
             # so the staged control-api copies are no longer needed either way.
-            _unlink_staged_media_studio_sources(image, middle, end, video, ingredient_images)
+            _unlink_staged_media_studio_sources(
+                image, middle, end, video, motion_context, ingredient_images, reference_images)
         job_id = str(queued["job_id"])
         _prune_media_studio_video_jobs()
         signature, workflow, work_units = _video_timing_signature(body)
@@ -1565,12 +1770,18 @@ def build_control_app(
                 detail="Unknown media job. If the studio restarted mid-generation, the finished video still appears in History.",
             )
         progress = None
+        steps: dict[str, int] = {}
         if entry["status"] == "running":
             state = None
             with contextlib.suppress(Exception):
                 state = await asyncio.to_thread(run_media_studio_video_check, job_id)
             if state:
                 progress = state.get("progress")
+                if state.get("progress_total"):
+                    steps = {
+                        "progress_step": int(state.get("progress_step") or 0),
+                        "progress_total": int(state["progress_total"]),
+                    }
                 # The background finisher normally lands the job; if its event
                 # loop was lost, adopt the finished (or failed) job right here.
                 if state.get("failed") or state.get("video_url"):
@@ -1587,6 +1798,7 @@ def build_control_app(
             "status": "running",
             "elapsed_seconds": elapsed_seconds,
             **({"progress": progress} if progress is not None else {}),
+            **steps,
             **({"estimate_seconds": entry["estimate_seconds"]} if entry.get("estimate_seconds") else {}),
         }
 

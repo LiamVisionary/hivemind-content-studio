@@ -118,10 +118,17 @@ const translations = {
         'image.generateTooltip': 'Generate AI image from prompt',
         'image.modelTooltip': 'Select AI generation model',
         'image.arTooltip': 'Change aspect ratio',
+        'ar.square': 'Square',
+        'ar.portrait': 'Portrait',
+        'ar.landscape': 'Landscape',
+        'ar.wide': 'Wide',
+        'ar.tall': 'Tall',
+        'ar.cinema': 'Cinema',
         'image.qualityTooltip': 'Set output quality',
         'image.advancedTooltip': 'Show advanced options',
         'image.toolsTooltip': 'Quick starters & prompt enhancer',
         'image.local': 'Local',
+        'image.rented': 'Rented',
         'image.api': '☁ API',
         'image.generatingLocally': 'Generating locally...',
         'image.quickTools': 'Quick Tools',
@@ -172,6 +179,8 @@ const translations = {
         'video.progress.finishing': 'Preparing playback',
         'video.progress.inProgress': 'In progress',
         'video.progress.elapsed': 'Elapsed',
+        // Real sampler counters off the executing backend, not an estimate.
+        'video.progress.step': (step, total) => `Step ${step} of ${total}`,
         'video.pingWhenComplete': 'Ping when complete',
         'video.videoTools': 'Video Tools',
 
@@ -336,10 +345,17 @@ const translations = {
         'image.generateTooltip': '根据提示词生成 AI 图像',
         'image.modelTooltip': '选择 AI 生成模型',
         'image.arTooltip': '更改宽高比',
+        'ar.square': '方形',
+        'ar.portrait': '竖版',
+        'ar.landscape': '横版',
+        'ar.wide': '宽屏',
+        'ar.tall': '竖屏',
+        'ar.cinema': '影院宽幅',
         'image.qualityTooltip': '设置输出质量',
         'image.advancedTooltip': '显示高级选项',
         'image.toolsTooltip': '快速启动器与提示词增强器',
         'image.local': '本地',
+        'image.rented': '租用',
         'image.api': '☁ API',
         'image.generatingLocally': '本地生成中...',
         'image.quickTools': '快速工具',
@@ -390,6 +406,7 @@ const translations = {
         'video.progress.finishing': '正在准备播放',
         'video.progress.inProgress': '进行中',
         'video.progress.elapsed': '已用时间',
+        'video.progress.step': (step, total) => `第 ${step} / ${total} 步`,
         'video.pingWhenComplete': '完成时提示音',
         'video.videoTools': '视频工具',
 
@@ -501,4 +518,17 @@ export function tf(key, ...args) {
     const dict = dictFor(lang);
     const val = dict[key] !== undefined ? dict[key] : (translations.en[key] !== undefined ? translations.en[key] : key);
     return typeof val === 'function' ? val(...args) : val;
+}
+
+// Friendly display name for a "W:H" aspect-ratio string; distinctive shapes get
+// their own name, everything else falls back to orientation.
+const AR_NAME_KEYS = { '1:1': 'ar.square', '16:9': 'ar.wide', '9:16': 'ar.tall', '21:9': 'ar.cinema' };
+
+export function aspectRatioName(ar) {
+    const key = AR_NAME_KEYS[ar];
+    if (key) return t(key);
+    const [w, h] = String(ar).split(':').map(Number);
+    if (!(w > 0) || !(h > 0)) return '';
+    if (w === h) return t('ar.square');
+    return w > h ? t('ar.landscape') : t('ar.portrait');
 }

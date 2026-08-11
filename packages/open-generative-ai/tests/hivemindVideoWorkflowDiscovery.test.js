@@ -66,6 +66,9 @@ test('video workflow discovery recovers after an owner-session startup race', as
             supportsLoras: true,
             compatibleBaseModels: ['LTXV'],
             supportsIngredientImages: true,
+            supportsEndFrame: false,
+            supportsMotionContext: false,
+            supportsReferenceImages: false,
             ingredientInputs: { max_images: 12, layout: 'adaptive-pack' },
             id: 'hivemind-media:ltx23-ic-ingredients-lora',
             workflowId: 'ltx23-ic-ingredients-lora',
@@ -73,10 +76,12 @@ test('video workflow discovery recovers after an owner-session startup race', as
             // a Lite/Standard pair so the picker can collapse them into one row.
             tierGroup: null,
             tier: null,
+            beta: false,
             name: 'LTX 2.3 IC-LoRA Ingredients',
             description: 'Media Studio workflow',
             type: 'video',
             family: 'hivemind-media-studio',
+            workflowFamily: '',
             provider: 'hivemind-media-studio',
             needsImage: true,
             ready: true,
@@ -84,6 +89,9 @@ test('video workflow discovery recovers after an owner-session startup race', as
             aspectRatios: ['16:9'],
             durations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             defaultDuration: 5,
+            // No registered steps default in this fixture; a full-step lane
+            // (e.g. MiniMax H3's 15) enables the refinement presets.
+            defaultSteps: null,
             tags: ['video', 'workflow', 'local'],
         });
         assert.equal(updates.length, 2);

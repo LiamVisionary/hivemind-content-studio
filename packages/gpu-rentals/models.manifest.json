@@ -1,0 +1,177 @@
+{
+  "comment": "Serving set for the CUDA ComfyUI rental image. status: 'local' = exists on Liam's Mac at source_path (upload to R2 once), 'download' = must be fetched fresh (Civitai/HF), 'verify' = present locally but CUDA compatibility or exact workflow wiring unconfirmed.",
+  "r2_bucket": "hivemind-rental-models",
+  "tiers": {
+    "krea2-image": {
+      "min_vram_gb": 24,
+      "artifacts": [
+        {
+          "file": "diffusion_models/Krea2_Turbo_convrot_int8mixed.safetensors",
+          "size_gb": 12,
+          "status": "verify",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/diffusion_models/Krea2_Turbo_convrot_int8mixed.safetensors",
+          "note": "convrot int8mixed is a custom Comfy quant format — confirm the loader node works on CUDA. Fallback: quantize krea2_turbo_bf16.safetensors (24G, local) to fp8_scaled on an NVIDIA box."
+        },
+        {
+          "file": "diffusion_models/Krea2_Turbo_identity_v1_2_convrot_int8mixed.safetensors",
+          "size_gb": 13,
+          "status": "verify",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/diffusion_models/Krea2_Turbo_identity_v1_2_convrot_int8mixed.safetensors",
+          "note": "identity-reference variant used by the krea2_identity workflow"
+        },
+        {
+          "file": "text_encoders/qwen3VL4BAbliteratedComfyui_v10.safetensors",
+          "size_gb": 8.3,
+          "status": "r2",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/text_encoders/qwen3VL4BAbliteratedComfyui_v10.safetensors",
+          "note": "THE Krea2 text encoder (CLIPLoader type 'krea2', native in ComfyUI 0.29). Civitai model 2731465 version 3070870, bf16 file sha E6A3527E5CFC... — boxes pull it from Civitai directly; also local on the Mac. VAE is qwen_image_vae (Krea2 is Qwen-Image family, NOT flux2)."
+        },
+        {
+          "file": "custom_nodes/ComfyUI-INT8-Fast",
+          "size_gb": 0,
+          "status": "github",
+          "note": "REQUIRED for the convrot quants: git clone https://github.com/BobJohnson24/ComfyUI-INT8-Fast (public repo, CUDA-native; local copy is unmodified). Loader node OTUNetLoaderW8A8, model_type 'krea2', enable_convrot=true. CUDA-VALIDATED 2026-07-31 on RTX 5090 (40s cold 1024², 8-step deis)."
+        }
+      ]
+    },
+    "wai-anima-image": {
+      "min_vram_gb": 16,
+      "artifacts": [
+        {
+          "file": "checkpoints/waiANIMA_v10Base10.safetensors",
+          "size_gb": 3.9,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/checkpoints/waiANIMA_v10Base10.safetensors"
+        },
+        {
+          "file": "text_encoders/qwen_3_06b_base.safetensors",
+          "size_gb": 1.1,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/text_encoders/qwen_3_06b_base.safetensors",
+          "note": "native-0.6B encoder path (best adherence per wai-anima A/B)"
+        },
+        {
+          "file": "text_encoders/waiANIMA_v10Base10_txt.safetensors",
+          "size_gb": 1.1,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/text_encoders/waiANIMA_v10Base10_txt.safetensors"
+        },
+        {
+          "file": "text_encoders/qwen35_4b.safetensors",
+          "size_gb": 4.5,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/text_encoders/qwen35_4b.safetensors",
+          "note": "4B shim with Procrustes alignment ON — ship both encoder paths, expose as workflow variants"
+        },
+        {
+          "file": "vae/qwen_image_vae.safetensors",
+          "size_gb": 0.25,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/vae/qwen_image_vae.safetensors"
+        },
+        {
+          "file": "loras/anima-turbo-lora-v0.2.safetensors",
+          "size_gb": 0.15,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/loras/anima-turbo-lora-v0.2.safetensors",
+          "note": "Required by the turbo workflow (strength 0.85, 8 steps cfg 1). In R2 since 2026-07-31. NOTE: the checkpoint loads via UNETLoader from diffusion_models/, encoder via CLIPLoader type 'stable_diffusion', latent via EmptyQwenImageLayeredLatentImage(layers=0). CUDA-VALIDATED 2026-07-31 (8s/image on 5090)."
+        },
+        {
+          "file": "upscale_models/(hires + R-ESRGAN set)",
+          "size_gb": 0.15,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/upscale_models/",
+          "note": "for the wai-anima-native-06b-hires workflow + /api/upscale fast path"
+        }
+      ]
+    },
+    "minimax-h3-video": {
+      "min_vram_gb": 32,
+      "requires": "Blackwell (sm_120) for the nvfp4 TE; ComfyUI >= e377e263 (2026-08-03, native MiniMax H3). Spectrum node: RES multistep 20 steps ~1.42x faster, final 3 steps always native. SYSTEM RAM >= 48GB or run ComfyUI with --disable-smart-memory: smart-memory retention holds TE (15.7G) + DiT (21G) in RAM simultaneously and a 31GB-RAM 5090 box thrashed to death mid-sample (validated the hard way 2026-08-04).",
+      "artifacts": [
+        {
+          "file": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+          "size_gb": 21.0,
+          "status": "r2",
+          "note": "Official H3 template DiT (pruned int8_convrot, loads via plain UNETLoader — convrot support is native in new ComfyUI). Relayed HF Comfy-Org/MiniMax-H3 -> R2 2026-08-04, inline SHA256 e889202c...5d03c47a."
+        },
+        {
+          "file": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "size_gb": 15.7,
+          "status": "r2",
+          "note": "Official template TE pairing (CLIPLoader type 'minimax'). nvfp4 needs Blackwell; the int8_convrot TE variant (27.1GB, on HF) is the fallback for Ada cards — not relayed yet."
+        },
+        {
+          "file": "vae/minimax_h3_video_vae_fp16.safetensors",
+          "size_gb": 5.2,
+          "status": "r2",
+          "note": "Relayed 2026-08-04, SHA256-verified."
+        },
+        {
+          "file": "vae/minimax_h3_audio_vae_fp32.safetensors",
+          "size_gb": 0.6,
+          "status": "r2",
+          "note": "H3 generates video+stereo audio jointly; both VAEs decode from the same packed latent. Relayed 2026-08-04, SHA256-verified."
+        },
+        {
+          "file": "loras/minimax_h3_turbo_4step_ckpt500_pruned_comfyui.safetensors",
+          "size_gb": 0.62,
+          "status": "r2",
+          "note": "BETA minimax-h3-turbo workflow: larryvrh 4-step Turbo distill, drbaph ckpt500 pruned-ComfyUI conversion (HF drbaph/MiniMax-H3-Turbo-Lora-ComfyUI, relayed 2026-08-06). MANDATORY MiniMaxH3SigmaShift video=12 audio=6 (wrong audio shift = broken audio); 8 steps, strength 1.0, res_multistep; no Spectrum at this step count."
+        },
+        {
+          "file": "custom_nodes/ComfyUI-Spectrum-MiniMax-H3",
+          "size_gb": 0,
+          "status": "github",
+          "note": "git clone https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3 — Chebyshev spectral forecasting, ~30-34% sampling time cut on Euler/RES. Node SpectrumApplyMiniMaxH3 on the MODEL edge before guider+scheduler. Do NOT stack with EasyCache. Pinned-contract ComfyUI commit e377e263."
+        }
+      ]
+    },
+    "ltx23-eros-video": {
+      "min_vram_gb": 32,
+      "artifacts": [
+        {
+          "file": "checkpoints/ltx-2.3-22b-dev-fp8.safetensors",
+          "size_gb": 27.1,
+          "status": "r2",
+          "note": "IN R2 ONLY (relayed HF Lightricks/LTX-2.3-fp8 -> r2://hivemind-rental-models 2026-07-29, inline SHA256-verified 28606c5b...d26450); intentionally NOT on the Mac (disk full). Local has just the .metadata.json sidecar."
+        },
+        {
+          "file": "checkpoints/ltx2310eros_v14.safetensors",
+          "size_gb": 27.2,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/checkpoints/ltx2310eros_v14.safetensors",
+          "note": "Civitai version 3109610 file 2989669, SHA256-verified 2026-07-29. v1.4 REQUIRES the author's DMD LoRA (see below) — near-zero anatomy without it."
+        },
+        {
+          "file": "loras/ltx2310eros_v14_dmd_lora.safetensors",
+          "size_gb": 1.6,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/mlx-models/source/eros-dmd-lora/ltx2310eros_v14_dmd_lora.safetensors",
+          "note": "Standalone DMD LoRA (the studio's production path fuses this into the MLX q8 transformer at build time, which is why it isn't in ComfyUI/models/loras). Watch the apply_loras alpha trap."
+        },
+        {
+          "file": "vae/taeltx2_3.safetensors",
+          "size_gb": 0.02,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/vae/taeltx2_3.safetensors",
+          "note": "preview VAE only; full VAE ships inside the checkpoint"
+        },
+        {
+          "file": "text_encoders/gemma_3_12B_it_fp8_scaled.safetensors",
+          "size_gb": 12,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/text_encoders/gemma_3_12B_it_fp8_scaled.safetensors",
+          "note": "LTX-2 text encoder"
+        },
+        {
+          "file": "loras/LTX2.3_Crisp_Enhance.safetensors",
+          "size_gb": 0.7,
+          "status": "local",
+          "source_path": "/Users/liam/comfy/ComfyUI/models/loras/LTX2.3_Crisp_Enhance.safetensors",
+          "note": "optional enhance LoRAs; add more from the loras dir as the catalog grows"
+        }
+      ]
+    }
+  }
+}

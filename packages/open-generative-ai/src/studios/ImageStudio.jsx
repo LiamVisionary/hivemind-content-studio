@@ -23,8 +23,10 @@ import {
 } from '../lib/models.js';
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { LOCAL_MODEL_CATALOG, getLocalModelById } from '../lib/localModels.js';
+import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';
+import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../lib/promptUtils.js';
-import { t } from '../lib/i18n.js';
+import { t, aspectRatioName } from '../lib/i18n.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
 import { imageDownloadName } from '../lib/downloadNames.js';
 import {
@@ -35,9 +37,10 @@ import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
-import { isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
+import { huntLoraIds, isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraHunt, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { localModelSupportsImageInput, localModelSupportsNegativePrompt, negativePromptNeedsGuidance } from '../lib/localImageModelFilter.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
+import { IMAGE_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import {
   isCompletionPingEnabled, setCompletionPingEnabled, subscribeCompletionPing,
   primeCompletionPing, playCompletionPing,
@@ -48,7 +51,7 @@ import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { Icon } from '../ui/icons.jsx';
 import {
-  Button, Card, EmptyState, Field, IconButton, NativeSelect, Pill, ProgressBar,
+  AspectRatioPicker, Button, Card, EmptyState, Field, IconButton, NativeSelect, Pill, ProgressBar,
   SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput, Toggle, cx,
 } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
@@ -63,11 +66,17 @@ import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
 import { computeSmoothProgress, formatElapsed, estimateGenerationSeconds, recordGenerationSeconds } from '../lib/genProgress.js';
 import {
   AUTO_SAMPLER_LOW_STEP_THRESHOLD, IMAGE_PREFERENCES_KEY, STYLE_PRESETS,
-  imageTimingProfile, normalizeImagePreferences,
+  applyStylePreset, imageTimingProfile, normalizeImagePreferences,
 } from './image/imagePrefs.js';
 import { LoraSection } from './image/LoraSection.jsx';
 import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
 import { GalleryCard, ViewerModal } from './image/GalleryAndViewer.jsx';
+import { CompareViewer } from './image/CompareViewer.jsx';
+import { ExpandDialog } from './image/ExpandDialog.jsx';
+import { MaskEditorDialog } from './image/MaskEditorDialog.jsx';
+import { AngleVariationsDialog } from './image/AngleVariationsDialog.jsx';
+import { SequenceEditDialog } from './image/SequenceEditDialog.jsx';
+import { angleDialectForModel, angleLabel, editAnglePrompt } from '../lib/editAngles.js';
 
 // Re-export the pure normalizer — tests and other callers import it from here.
 export { normalizeImagePreferences };
@@ -113,21 +122,26 @@ function fileToDataUrl(file) {
   });
 }
 
-// One mutable state bag per mount — the studio remounts on every navigation
-// (App keys the studio), so this re-runs exactly like the old factory did.
-function createEngine() {
+// One mutable state bag per mount. Studio tabs are just repeated mounts (see
+// src/lib/studioTabs.js), so `boot` decides where this tab's starting state comes
+// from: 'persisted' (the original tab), 'fresh' (a new tab — catalog defaults, no
+// prompt, no LoRAs) or 'clone' (a duplicate, seeded from another tab's snapshot).
+function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   // Reads persisted settings from the warm encrypted composer cache first (tab
   // switches remount this component; the cache survives in-module), then falls back
   // to the localStorage copy of the NON-SENSITIVE settings — which is what makes the
   // model + params restore synchronously on a fresh reload, before the vault cache
   // has hydrated. Prompt text and the negative prompt stay in the encrypted cache.
+  // A 'fresh'/'clone' tab skips this entirely — it must not inherit saved tuning.
   let persistedImagePreferences = null;
-  try {
-    persistedImagePreferences = normalizeImagePreferences(
-      getComposerSection('image').preferences
-        || JSON.parse(localStorage.getItem(IMAGE_PREFERENCES_KEY) || 'null'),
-    );
-  } catch { /* corrupted prefs — boot with defaults */ }
+  if (boot === 'persisted') {
+    try {
+      persistedImagePreferences = normalizeImagePreferences(
+        getComposerSection('image').preferences
+          || JSON.parse(localStorage.getItem(IMAGE_PREFERENCES_KEY) || 'null'),
+      );
+    } catch { /* corrupted prefs — boot with defaults */ }
+  }
 
   // imageMode is DERIVED from actually-attached references (picker onChange,
   // draft hydration, context restore) — never adopted as a bare persisted flag.
@@ -159,7 +173,8 @@ function createEngine() {
     loraSelectionsByModel.set(model, selections);
   });
 
-  return {
+  const engine = {
+    bootSource: boot,
     persistedImagePreferences,
     selectedModel,
     selectedModelName: defaultModel.name,
@@ -169,6 +184,14 @@ function createEngine() {
     uploadedImageUrls: [],
     localImageModels,
     useLocalModel,
+    // Rented source mode: local mechanically (lane rules route by model
+    // server-side); filters the menu to models an attached machine serves.
+    rentedOnly: Boolean(persistedImagePreferences?.rentedOnly && useLocalModel),
+    rentedMachines: [],
+    rentedPending: [],
+    rentedProvisioning: [],
+    rentedIdle: [],
+    rentedBroken: [],
     selectedLocalModel,
     localRuntimeMode,
     negativePrompt: persistedImagePreferences?.negativePrompt || '',
@@ -195,10 +218,18 @@ function createEngine() {
     coupleShared: '',
     coupleA: '',
     coupleB: '',
+    // Character sheet — OFF by default; Klein reference-edit models only. The
+    // gateway builds the per-view prompts, so the composer prompt is optional.
+    characterSheetMode: Boolean(persistedImagePreferences?.characterSheetMode),
+    characterSheetPreset: ['turnaround', 'standard', 'full'].includes(persistedImagePreferences?.characterSheetPreset)
+      ? persistedImagePreferences.characterSheetPreset : 'turnaround',
     availableLoras: [],
     loraCatalogStatus: 'idle',
     loraCatalogMessage: 'LoRAs load automatically for the selected local workflow.',
     loraBaseLabel: 'Choose a local workflow to see compatible LoRAs.',
+    // Base families of the current catalog (from listLoras) — scopes the saved
+    // LoRA groups menu to groups made for this model.
+    loraBaseModels: [],
     loraCatalogRequest: 0,
     promptHelperRequest: 0,
     loraSelectionsByModel,
@@ -232,6 +263,24 @@ function createEngine() {
     // so the toggle re-renders; lib/completionPing.js owns the value.
     pingWhenComplete: isCompletionPingEnabled(),
     viewerUrl: null,
+    // Upscaled entry whose before/after compare overlay is open (null = closed).
+    compareEntry: null,
+    // Entry the Expand (outpaint) dialog is open for, and its in-flight state.
+    expandEntry: null,
+    expandBusy: false,
+    // Entry the Edit-area (inpaint) mask editor is open for, and its state.
+    inpaintEntry: null,
+    inpaintBusy: false,
+    // Angle-variation and sequence-edit dialogs (sequential client-side runs;
+    // the Stop flag is honored between shots, never mid-generation).
+    angleEntry: null,
+    angleBusy: false,
+    angleStop: false,
+    angleProgress: '',
+    sequenceEntry: null,
+    sequenceBusy: false,
+    sequenceStop: false,
+    sequenceProgress: '',
     sendingToVideo: false,
     authOpen: false,
     // Sending a locally-held reference to a cloud model uploads a decrypted copy off
@@ -254,14 +303,30 @@ function createEngine() {
     unloadBusy: false,
     persistTimer: null,
   };
+
+  // A duplicate overlays the source tab's configuration on top of the defaults.
+  // The snapshot was already deep-copied at capture; copying again keeps a tab
+  // duplicated twice from sharing Maps/arrays with its sibling.
+  if (boot === 'clone' && snapshot) Object.assign(engine, cloneTabValue(snapshot));
+  return engine;
 }
 
-export function ImageStudio({ active = true } = {}) {
+export function ImageStudio({ active = true, tabActive = true, seed = null, apiRef = null } = {}) {
   const engineRef = useRef(null);
-  if (!engineRef.current) engineRef.current = createEngine();
+  // The seed is read once, at mount — StudioTabs clears it afterwards, so every
+  // later "am I the original tab?" question reads the captured value.
+  const seedRef = useRef(seed);
+  if (!engineRef.current) engineRef.current = createEngine(seedRef.current || undefined);
   const s = engineRef.current;
   const [, setTick] = useState(0);
   const bump = () => setTick((n) => n + 1);
+
+  // The original tab restores the session (pending jobs, composer draft); new and
+  // duplicated tabs start clean and must not re-claim either.
+  const isPrimaryTab = !seedRef.current;
+  // Front tab of this studio: owns preference persistence and one-shot handoffs.
+  const tabActiveRef = useRef(tabActive);
+  tabActiveRef.current = tabActive;
 
   const rootRef = useRef(null);
   const promptRef = useRef(null);
@@ -274,7 +339,9 @@ export function ImageStudio({ active = true } = {}) {
   const localModelById = (id) => s.localImageModels.find((m) => m.id === id) || getLocalModelById(id);
   // Every local model is always listed; attaching an image never hides
   // text-to-image models — unsupported models simply ignore references.
-  const compatibleLocalModels = () => s.localImageModels;
+  const compatibleLocalModels = () => ((s.rentedOnly && s.rentedMachines?.length)
+    ? s.localImageModels.filter((m) => servedByAnyMachine(s.rentedMachines, m))
+    : s.localImageModels);
   const ensureCompatibleLocalModel = () => {
     const compatible = compatibleLocalModels();
     const selected = compatible.find((model) => model.id === s.selectedLocalModel) || compatible[0] || null;
@@ -313,6 +380,27 @@ export function ImageStudio({ active = true } = {}) {
 
   const currentLoraModel = () => s.useLocalModel ? localModelById(s.selectedLocalModel) : null;
   const currentLoraSelection = () => s.loraSelectionsByModel.get(currentLoraModel()?.id) || [];
+
+  // Strength Hunt rides the krea2 identity lane only (the gateway's sweep
+  // runner is built on that graph family); other backends hide the toggle.
+  const strengthHuntCapable = () =>
+    s.useLocalModel && localModelById(s.selectedLocalModel)?.backend === 'comfy-krea2-turbo-identity-edit';
+  const armedHuntIds = () => (strengthHuntCapable() ? huntLoraIds(currentLoraSelection()) : []);
+
+  // Character Sheet rides the Klein reference-edit lane only (the gateway's
+  // multi-view runner drives the native Klein engine); other models hide it.
+  const characterSheetCapable = () => {
+    if (!s.useLocalModel) return false;
+    const model = localModelById(s.selectedLocalModel);
+    return Boolean(model?.requires?.image)
+      && (model?.family === 'flux-2-klein' || model?.backend === 'comfy-bigloves-klein3-edit');
+  };
+  const characterSheetActive = () => s.characterSheetMode && characterSheetCapable();
+  const CHARACTER_SHEET_PRESETS = [
+    { value: 'turnaround', label: 'Turnaround (4)' },
+    { value: 'standard', label: 'Standard (6)' },
+    { value: 'full', label: 'Full (9)' },
+  ];
 
   /* ---------------- generation progress (smooth time-based ETA) ---------------- */
 
@@ -419,15 +507,20 @@ export function ImageStudio({ active = true } = {}) {
       coupleDirection: s.coupleDirection,
       coupleSplit: s.coupleSplit,
       couplePair: s.couplePair,
+      characterSheetMode: s.characterSheetMode,
+      characterSheetPreset: s.characterSheetPreset,
     });
   };
 
-  const persistImagePreferences = () => {
+  // The live, normalized preference object for THIS tab. Split out of the persist
+  // path because duplicating a tab needs the same value without writing it.
+  const currentImagePreferences = () => {
     snapshotCurrentModelSettings();
-    const preferences = normalizeImagePreferences({
+    return normalizeImagePreferences({
       modelId: s.selectedModel,
       imageMode: s.imageMode,
       useLocalModel: s.useLocalModel,
+      rentedOnly: s.rentedOnly,
       localModelId: s.selectedLocalModel,
       aspectRatio: s.selectedAr,
       resolution: s.selectedResolution,
@@ -448,10 +541,20 @@ export function ImageStudio({ active = true } = {}) {
       coupleDirection: s.coupleDirection,
       coupleSplit: s.coupleSplit,
       couplePair: s.couplePair,
+      characterSheetMode: s.characterSheetMode,
+      characterSheetPreset: s.characterSheetPreset,
       modelSettings: Object.fromEntries(s.modelSettingsById),
       loraSelections: Object.fromEntries(s.loraSelectionsByModel),
     });
+  };
+
+  const persistImagePreferences = () => {
+    const preferences = currentImagePreferences();
     if (!preferences) return;
+    // Only the studio's FRONT tab owns the saved configuration. Background tabs are
+    // independent working copies — letting them write would mean the last tab that
+    // happened to fire an effect decided what a reload restores.
+    if (!tabActiveRef.current) return;
     s.persistedImagePreferences = preferences;
     updateComposerSection('image', { preferences });
     // Non-sensitive settings (everything except the negative-prompt text) ALSO go
@@ -475,6 +578,50 @@ export function ImageStudio({ active = true } = {}) {
       localStorage.setItem(IMAGE_PREFERENCES_KEY, JSON.stringify(settings));
     } catch { /* quota */ }
   };
+  // Rented source mode: track attached machines while mounted (the studio
+  // component stays mounted across navigations, so a one-shot fetch would
+  // freeze the boot-time answer — usually "none", vault still locked). A
+  // 30s poll plus the Machines view's change event keep it current, and the
+  // one-shot handoff opens the studio in Rented mode after "Use in Studio".
+  useEffect(() => {
+    let alive = true;
+    let timer = null;
+    // Rented stays selected even with no machine (the panel then offers to
+    // rent one) — bouncing the user back to Local would hide the feature.
+    const sync = (force) => rentedMachinesState({ force }).then((state) => {
+      if (!alive) return;
+      s.rentedMachines = state.live;
+      s.rentedPending = state.pending;
+      // Split states so the panel can name what is actually wrong: only a
+      // provisioning box is "coming online".
+      s.rentedProvisioning = state.provisioning;
+      s.rentedIdle = state.idle;
+      s.rentedBroken = state.broken;
+      // "Use in Studio" is a one-shot handoff — only the front tab may claim it,
+      // or whichever background tab's poll happened to fire first would swallow it.
+      if (tabActiveRef.current && consumeRentedModeRequest('image')) {
+        s.rentedOnly = true;
+        s.useLocalModel = true;
+      }
+      // Watch a provisioning machine closely so "Ready" lands on its own.
+      const wanted = state.pending.length ? 8000 : 30000;
+      if (timer?.every !== wanted) {
+        if (timer) clearInterval(timer.id);
+        timer = { every: wanted, id: setInterval(() => sync(false), wanted) };
+      }
+      bump();
+    });
+    sync(false);
+    const onChanged = () => sync(true);
+    window.addEventListener(RENTED_CHANGED_EVENT, onChanged);
+    return () => {
+      alive = false;
+      if (timer) clearInterval(timer.id);
+      window.removeEventListener(RENTED_CHANGED_EVENT, onChanged);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const persistRef = useRef(persistImagePreferences);
   persistRef.current = persistImagePreferences;
 
@@ -514,6 +661,9 @@ export function ImageStudio({ active = true } = {}) {
     s.coupleDirection = stored.coupleDirection === 'vertical' ? 'vertical' : 'horizontal';
     s.coupleSplit = stored.coupleSplit ?? s.coupleSplit;
     s.couplePair = stored.couplePair || s.couplePair;
+    s.characterSheetMode = Boolean(stored.characterSheetMode);
+    s.characterSheetPreset = ['turnaround', 'standard', 'full'].includes(stored.characterSheetPreset)
+      ? stored.characterSheetPreset : s.characterSheetPreset;
     if (s.useLocalModel) {
       const modes = fallbackLocalModel?.runtimeModes || localModelById(s.selectedLocalModel)?.runtimeModes || [];
       if (stored.localRuntimeMode && (modes.length === 0 || modes.includes(stored.localRuntimeMode))) {
@@ -556,6 +706,7 @@ export function ImageStudio({ active = true } = {}) {
     const model = currentLoraModel();
     const request = ++s.loraCatalogRequest;
     s.availableLoras = [];
+    s.loraBaseModels = [];
     if (!model) {
       s.loraCatalogStatus = 'unavailable';
       s.loraCatalogMessage = 'Installed LoRAs are available when Local is selected.';
@@ -572,6 +723,7 @@ export function ImageStudio({ active = true } = {}) {
       if (request !== s.loraCatalogRequest) return;
       s.availableLoras = Array.isArray(data?.loras) ? data.loras : [];
       const bases = Array.isArray(data?.baseModels) ? data.baseModels : [];
+      s.loraBaseModels = bases;
       s.loraBaseLabel = data?.supported === false
         ? `${model.name} does not expose an add-on LoRA path.`
         : `${model.name} · ${bases.join(', ') || 'compatible local adapters'}`;
@@ -622,6 +774,13 @@ export function ImageStudio({ active = true } = {}) {
 
   /* ---------------- references ---------------- */
 
+  // Composer drafts (prompt, negative, reference selection) are a single
+  // owner-vault section, so only the front tab writes to it — a background tab
+  // would otherwise overwrite the draft the next reload restores.
+  const updateComposerDraft = (patch) => {
+    if (tabActiveRef.current) updateComposerSection('image', patch);
+  };
+
   // onChange add/update path — mirrors the old picker onSelect side effects.
   const handleReferencesSelected = (urls) => {
     s.uploadedImageUrls = urls.slice();
@@ -641,7 +800,7 @@ export function ImageStudio({ active = true } = {}) {
       void loadLorasForCurrentModel();
     }
     persistImagePreferences();
-    updateComposerSection('image', { references: s.uploadedImageUrls.slice() });
+    updateComposerDraft({ references: s.uploadedImageUrls.slice() });
     bump();
   };
 
@@ -659,7 +818,7 @@ export function ImageStudio({ active = true } = {}) {
       void loadLorasForCurrentModel();
     }
     persistImagePreferences();
-    updateComposerSection('image', { references: [] });
+    updateComposerDraft({ references: [] });
     bump();
   };
 
@@ -673,7 +832,7 @@ export function ImageStudio({ active = true } = {}) {
 
   const setPromptValue = (value) => {
     s.prompt = value;
-    updateComposerSection('image', { prompt: value });
+    updateComposerDraft({ prompt: value });
     bump();
   };
 
@@ -704,10 +863,14 @@ export function ImageStudio({ active = true } = {}) {
     bump();
   };
 
-  const setSource = (nextLocal) => {
-    if (nextLocal === s.useLocalModel) return;
+  const setSource = (nextLocal, nextRented = false) => {
+    if (nextLocal === s.useLocalModel && nextRented === s.rentedOnly) return;
     snapshotCurrentModelSettings();
+    s.rentedOnly = Boolean(nextLocal && nextRented);
     s.useLocalModel = nextLocal;
+    // Entering rented with a model the machine cannot serve leaves a dead
+    // selection; ensureCompatibleLocalModel below re-picks from the filtered
+    // list, which compatibleLocalModels() narrows to served models.
     if (s.useLocalModel) {
       const lm = ensureCompatibleLocalModel();
       s.localRuntimeMode = lm?.defaultRuntimeMode || s.localRuntimeMode || 'one-off';
@@ -742,6 +905,8 @@ export function ImageStudio({ active = true } = {}) {
     customWidth: s.customWidth,
     customHeight: s.customHeight,
     referenceStrength: s.referenceStrength,
+    characterSheetMode: s.characterSheetMode,
+    characterSheetPreset: s.characterSheetPreset,
     loras: currentLoraSelection().map((lora) => ({ ...lora })),
     referenceImages: [...s.uploadedImageUrls],
   });
@@ -776,6 +941,9 @@ export function ImageStudio({ active = true } = {}) {
     s.customWidth = context.customWidth ?? s.customWidth;
     s.customHeight = context.customHeight ?? s.customHeight;
     s.referenceStrength = context.referenceStrength ?? s.referenceStrength;
+    s.characterSheetMode = Boolean(context.characterSheetMode);
+    s.characterSheetPreset = ['turnaround', 'standard', 'full'].includes(context.characterSheetPreset)
+      ? context.characterSheetPreset : s.characterSheetPreset;
 
     // Reference images — restored silently (no upload side effects re-run).
     const maxRefs = s.imageMode ? getMaxImagesForI2IModel(s.selectedModel) : 1;
@@ -808,7 +976,7 @@ export function ImageStudio({ active = true } = {}) {
     void loadLorasForCurrentModel();
 
     s.prompt = context.prompt || '';
-    updateComposerSection('image', { prompt: s.prompt });
+    updateComposerDraft({ prompt: s.prompt });
 
     persistImagePreferences();
     bump();
@@ -884,10 +1052,218 @@ export function ImageStudio({ active = true } = {}) {
         model: `${entry.model || 'Anima'} · upscaled${mode === 'max' ? ' (max)' : ''}`,
         aspect_ratio: entry.aspect_ratio,
         timestamp: new Date().toISOString(),
+        // Pairs this result with what it upscaled so the viewer can offer the
+        // synchronized before/after compare.
+        sourceUrl: entry.url,
       });
       toast.success('Upscaled image added to the gallery.', { id: loadingId });
     } catch (error) {
       toast.error(error?.message || 'Upscale failed', { id: loadingId });
+    }
+  };
+
+  // Canvas expansion rides the krea2 lane; the button appears only when that
+  // lane is installed locally.
+  const krea2LocalModel = () => s.localImageModels.find((m) => m.backend === 'comfy-krea2-turbo-identity-edit') || null;
+
+  const runExpand = async (entry, { width, height, prompt }) => {
+    const model = krea2LocalModel();
+    if (!model || !entry?.url) return;
+    s.expandBusy = true;
+    bump();
+    const loadingId = toast.loading(`Expanding to ${width}×${height} — only the new border is generated…`);
+    try {
+      const src = await resolveMediaSrc(entry.url);
+      const blob = await (await fetch(src)).blob();
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('Could not read the image'));
+        reader.readAsDataURL(blob);
+      });
+      const result = await localAI.generate({
+        model: model.id,
+        prompt: prompt || entry.prompt || '',
+        image_base64: dataUrl,
+        outpaint: { width, height },
+        seed: -1,
+      });
+      if (!result?.url) throw new Error('Expand finished without an image');
+      addToHistory({
+        id: `expand-${entry.id || 'img'}-${Date.now()}`,
+        url: result.url,
+        prompt: prompt || entry.prompt || '',
+        model: `${entry.model || model.name} · expanded`,
+        aspect_ratio: `${width}:${height}`,
+        timestamp: new Date().toISOString(),
+        // Pairs with the source so Compare works on expansions too.
+        sourceUrl: entry.url,
+      });
+      s.expandEntry = null;
+      toast.success('Expanded image added to the gallery.', { id: loadingId });
+    } catch (error) {
+      toast.error(error?.message || 'Expand failed', { id: loadingId });
+    } finally {
+      s.expandBusy = false;
+      bump();
+    }
+  };
+
+  const runInpaint = async (entry, { maskDataUrl, prompt, maskExpand, maskInfluence }) => {
+    const model = krea2LocalModel();
+    if (!model || !entry?.url || !maskDataUrl) return;
+    s.inpaintBusy = true;
+    bump();
+    const loadingId = toast.loading('Editing the painted area — the rest keeps its pixels…');
+    try {
+      const src = await resolveMediaSrc(entry.url);
+      const blob = await (await fetch(src)).blob();
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('Could not read the image'));
+        reader.readAsDataURL(blob);
+      });
+      const result = await localAI.generate({
+        model: model.id,
+        prompt: prompt || '',
+        image_base64: dataUrl,
+        inpaint: { mask_base64: maskDataUrl, mask_expand: maskExpand, mask_influence: maskInfluence },
+        seed: -1,
+      });
+      if (!result?.url) throw new Error('Edit finished without an image');
+      addToHistory({
+        id: `inpaint-${entry.id || 'img'}-${Date.now()}`,
+        url: result.url,
+        prompt: prompt || entry.prompt || '',
+        model: `${entry.model || model.name} · edited area`,
+        aspect_ratio: entry.aspect_ratio,
+        timestamp: new Date().toISOString(),
+        // Pairs with the source so Compare shows exactly what changed.
+        sourceUrl: entry.url,
+      });
+      s.inpaintEntry = null;
+      toast.success('Edited image added to the gallery.', { id: loadingId });
+    } catch (error) {
+      toast.error(error?.message || 'Edit failed', { id: loadingId });
+    } finally {
+      s.inpaintBusy = false;
+      bump();
+    }
+  };
+
+  // First installed edit-capable model that speaks an angle dialect (Klein
+  // preferred by catalog order). Angle + sequence runs both use it.
+  const angleEditModel = () => s.localImageModels.find(
+    (m) => angleDialectForModel(m) && localModelSupportsImageInput(m),
+  ) || null;
+
+  const entryToDataUrl = async (url) => {
+    const src = await resolveMediaSrc(url);
+    const blob = await (await fetch(src)).blob();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error('Could not read the image'));
+      reader.readAsDataURL(blob);
+    });
+  };
+
+  const runAngleVariations = async (entry, { angles, extraPrompt }) => {
+    const model = angleEditModel();
+    if (!model || !entry?.url || !angles?.length) return;
+    s.angleBusy = true;
+    s.angleStop = false;
+    bump();
+    let completed = 0;
+    try {
+      const dataUrl = await entryToDataUrl(entry.url);
+      const dialect = angleDialectForModel(model);
+      for (let i = 0; i < angles.length; i += 1) {
+        if (s.angleStop) break;
+        const angle = angles[i];
+        s.angleProgress = `Shot ${i + 1} of ${angles.length} — ${angleLabel(angle)}`;
+        bump();
+        const result = await localAI.generate({
+          model: model.id,
+          prompt: editAnglePrompt(dialect, angle, extraPrompt),
+          image_base64: dataUrl,
+          seed: -1,
+        });
+        if (!result?.url) throw new Error(`No output for ${angleLabel(angle)}`);
+        addToHistory({
+          id: `angle-${entry.id || 'img'}-${Date.now()}-${i}`,
+          url: result.url,
+          prompt: editAnglePrompt(dialect, angle, extraPrompt),
+          model: `${model.name} · angle: ${angleLabel(angle)}`,
+          aspect_ratio: entry.aspect_ratio,
+          timestamp: new Date().toISOString(),
+          sourceUrl: entry.url,
+        });
+        completed += 1;
+      }
+      s.angleEntry = null;
+      toast.success(s.angleStop && completed < angles.length
+        ? `Stopped after ${completed} of ${angles.length} viewpoints.`
+        : `${completed} viewpoint${completed === 1 ? '' : 's'} added to the gallery.`);
+    } catch (error) {
+      toast.error(error?.message || 'Angle variations failed');
+    } finally {
+      s.angleBusy = false;
+      s.angleProgress = '';
+      bump();
+    }
+  };
+
+  const runEditSequence = async (entry, { prompts }) => {
+    const model = angleEditModel();
+    if (!model || !entry?.url || !Array.isArray(prompts) || prompts.length < 2) return;
+    s.sequenceBusy = true;
+    s.sequenceStop = false;
+    bump();
+    // One random base seed; each step advances it by one (donor behavior) so
+    // the chain is reproducible from the recorded per-step seeds.
+    const baseSeed = Math.floor(Math.random() * 2 ** 31);
+    let sourceUrl = entry.url;
+    let completed = 0;
+    try {
+      let dataUrl = await entryToDataUrl(entry.url);
+      for (let i = 0; i < prompts.length; i += 1) {
+        if (s.sequenceStop) break;
+        s.sequenceProgress = `Step ${i + 1} of ${prompts.length}`;
+        bump();
+        const result = await localAI.generate({
+          model: model.id,
+          prompt: prompts[i],
+          image_base64: dataUrl,
+          seed: baseSeed + i,
+        });
+        if (!result?.url) throw new Error(`Step ${i + 1} finished without an image`);
+        addToHistory({
+          id: `seq-${entry.id || 'img'}-${Date.now()}-${i}`,
+          url: result.url,
+          prompt: prompts[i],
+          model: `${model.name} · step ${i + 1}/${prompts.length}`,
+          aspect_ratio: entry.aspect_ratio,
+          timestamp: new Date().toISOString(),
+          seed: result.seed,
+          // Each step pairs with ITS input, so Compare shows that step's change.
+          sourceUrl,
+        });
+        completed += 1;
+        sourceUrl = result.url;
+        dataUrl = await entryToDataUrl(result.url);
+      }
+      s.sequenceEntry = null;
+      toast.success(s.sequenceStop && completed < prompts.length
+        ? `Stopped after step ${completed} of ${prompts.length}.`
+        : `Sequence finished — ${completed} steps in the gallery.`);
+    } catch (error) {
+      toast.error(error?.message || 'Edit sequence failed');
+    } finally {
+      s.sequenceBusy = false;
+      s.sequenceProgress = '';
+      bump();
     }
   };
 
@@ -1008,6 +1384,20 @@ export function ImageStudio({ active = true } = {}) {
   };
 
   const generate = async () => {
+    // Rented mode is a promise about WHERE this runs. If no live machine
+    // serves the selected model, stop instead of quietly using this Mac.
+    if (s.rentedOnly && !servedByAnyMachine(s.rentedMachines, localModelById(s.selectedLocalModel) || { id: s.selectedLocalModel })) {
+      toast.error(
+        s.rentedBroken?.length
+          ? 'Lost the connection to your rented machine — reconnect it from the Source panel or Machines.'
+          : s.rentedIdle?.length
+            ? 'Your rented machine is not connected to this studio yet — click "Use it here" in the Source panel.'
+            : s.rentedProvisioning?.length
+              ? 'Your rented machine is still coming online — the Machines view shows its progress.'
+              : 'No rented machine is serving this model. Rent one in Machines, or switch the source to Local.',
+      );
+      return;
+    }
     let prompt = s.prompt.trim();
     // Couple mode composes one line per character (optional shared scene
     // first); the backend maps lines to canvas regions.
@@ -1031,8 +1421,14 @@ export function ImageStudio({ active = true } = {}) {
         couple_pair: s.couplePair,
       };
     }
+    // The Style Preset dropdown appends its phrase here — for BOTH the local and
+    // cloud paths — instead of being the dead control it shipped as. Couple mode
+    // keeps its strict line-per-character contract, so presets stand down there.
+    if (!coupleOptions) prompt = applyStylePreset(prompt, s.selectedStyle);
+
     // References are sent only when the selected model can take them.
     const sendingRefs = s.uploadedImageUrls.length > 0 && currentModelSupportsImage();
+    const sheetActive = !coupleOptions && characterSheetActive();
     if (!s.useLocalModel && apiModelRequiresImage(s.selectedModel) && s.uploadedImageUrls.length === 0) {
       toast.error(`${s.selectedModelName} needs a reference image — attach one first.`);
       return;
@@ -1049,10 +1445,21 @@ export function ImageStudio({ active = true } = {}) {
     if (s.useLocalModel) {
       const lm = localModelById(s.selectedLocalModel);
       if (!lm) { toast.error('No local model selected.'); return; }
-      if (lm.requires?.prompt && !prompt) { toast.error('Please enter an edit prompt.'); return; }
+      // A character sheet builds its view prompts server-side — the composer
+      // prompt is an optional style/identity suffix, so it may stay empty.
+      if (lm.requires?.prompt && !prompt && !sheetActive) { toast.error('Please enter an edit prompt.'); return; }
       if (lm.requires?.image && s.uploadedImageUrls.length === 0) {
         toast.error(`${lm.name} requires a reference image.`);
         return;
+      }
+
+      const huntIds = coupleOptions || sheetActive ? [] : armedHuntIds();
+      if (huntIds.length) {
+        toast(`Strength Hunt: sweeping ${huntIds.length === 2 ? 'two LoRAs' : 'one LoRA'} 0 → current — the labeled sheet arrives as the result.`, { icon: '🎯' });
+      }
+      if (sheetActive) {
+        const preset = CHARACTER_SHEET_PRESETS.find((p) => p.value === s.characterSheetPreset);
+        toast(`Character sheet: generating ${preset?.label || s.characterSheetPreset} views of your reference — the labeled sheet arrives as the result.`, { icon: '🧍' });
       }
 
       s.generating = true;
@@ -1069,6 +1476,10 @@ export function ImageStudio({ active = true } = {}) {
         bump();
       });
 
+      // Batch Count was the second dead control: rendered, persisted, never
+      // sent. The gateway runs one image per request, so a batch is N
+      // sequential requests; a Strength Hunt is already its own batch.
+      const batchTotal = (huntIds.length || sheetActive) ? 1 : Math.max(1, Math.min(4, Number(s.batchCount) || 1));
       try {
         // References are ignored (not sent) when the model can't take them.
         const sourceImage = localModelSupportsImageInput(lm) ? (s.uploadedImageUrls[0] || '') : '';
@@ -1076,46 +1487,74 @@ export function ImageStudio({ active = true } = {}) {
         // not something the bridge can read: decrypt it here and send the bytes
         // inline. Sending the bare path made the bridge fail on "Invalid URL".
         const referenceInput = await referenceToLocalImageInput(sourceImage);
-        const res = await localAI.generate({
-          model: s.selectedLocalModel,
-          prompt,
-          // Not sent to workflows that ignore it — the UI says as much, and a field
-          // the user can no longer see must not keep riding along in the payload.
-          negative_prompt: (currentModelSupportsNegativePrompt() && s.negativePrompt) || undefined,
-          aspect_ratio: s.selectedAr,
-          steps: s.steps,
-          guidance_scale: s.guidanceScale,
-          seed: s.seed,
-          runtime_mode: s.localRuntimeMode,
-          width: s.customWidth || undefined,
-          height: s.customHeight || undefined,
-          // Width/height, when set, ARE the resolution and win outright; base_size
-          // only scales the aspect-ratio preset (short side) when they are Auto.
-          base_size: (!s.customWidth && !s.customHeight && s.baseSize) ? s.baseSize : undefined,
-          sampler_name: s.sampler || undefined,
-          scheduler: s.scheduler || undefined,
-          loras: loraGenerationPayload(currentLoraSelection()),
-          ...(coupleOptions || {}),
-          ...referenceInput,
-        });
+        // Models that condition on several references (Klein takes up to 3)
+        // get the rest of the attached refs too, decrypted the same way.
+        const extraReferences = [];
+        if (localModelSupportsImageInput(lm) && (lm.maxReferenceImages || 1) > 1) {
+          for (const ref of s.uploadedImageUrls.slice(1, Math.max(1, lm.maxReferenceImages || 1))) {
+            const input = await referenceToLocalImageInput(ref);
+            const value = input.image_base64 || input.image_url;
+            if (value) extraReferences.push(value);
+          }
+        }
+        let lastUrl = null;
+        for (let shot = 0; shot < batchTotal; shot += 1) {
+          if (batchTotal > 1) {
+            s.localProgress = { active: true, pct: 0, label: `Shot ${shot + 1} of ${batchTotal}` };
+            bump();
+          }
+          const res = await localAI.generate({
+            model: s.selectedLocalModel,
+            prompt,
+            // Not sent to workflows that ignore it — the UI says as much, and a field
+            // the user can no longer see must not keep riding along in the payload.
+            negative_prompt: (currentModelSupportsNegativePrompt() && s.negativePrompt) || undefined,
+            aspect_ratio: s.selectedAr,
+            steps: s.steps,
+            guidance_scale: s.guidanceScale,
+            // Explicit seeds advance per shot so a batch is N different images,
+            // never N copies; -1 stays -1 (the server randomizes each run).
+            seed: (typeof s.seed === 'number' && s.seed >= 0) ? s.seed + shot : s.seed,
+            runtime_mode: s.localRuntimeMode,
+            width: s.customWidth || undefined,
+            height: s.customHeight || undefined,
+            // Width/height, when set, ARE the resolution and win outright; base_size
+            // only scales the aspect-ratio preset (short side) when they are Auto.
+            base_size: (!s.customWidth && !s.customHeight && s.baseSize) ? s.baseSize : undefined,
+            sampler_name: s.sampler || undefined,
+            scheduler: s.scheduler || undefined,
+            loras: loraGenerationPayload(currentLoraSelection()),
+            // Strength Hunt: 1-2 armed LoRA axes → the gateway sweeps them over a
+            // fixed prompt+seed and returns the labeled sheet as the first output.
+            // Couple mode owns the prompt-line contract, so hunts stand down there.
+            ...(huntIds.length && !coupleOptions ? { strength_hunt: { lora_ids: huntIds } } : {}),
+            // Character sheet (Civitai multi-view port): the gateway loops the
+            // preset's views over the same reference(s) + seed and returns the
+            // labeled sheet as the first output.
+            ...(sheetActive ? { character_sheet: { preset: s.characterSheetPreset } } : {}),
+            ...(coupleOptions || {}),
+            ...referenceInput,
+            ...(extraReferences.length ? { images_base64: extraReferences } : {}),
+          });
+          if (!res?.url) throw new Error('No output returned from local generation');
+          if (res.mediaType === 'video') {
+            throw new Error('This model produces video — use the Video studio instead.');
+          }
+          addToHistory({
+            id: `${Date.now()}-${shot}`,
+            url: res.url,
+            prompt,
+            model: `local:${s.selectedLocalModel}${huntIds.length ? ' · strength hunt' : ''}${sheetActive ? ' · character sheet' : ''}`,
+            aspect_ratio: s.selectedAr,
+            seed: res.seed,
+            timestamp: new Date().toISOString(),
+          }, s.lastSubmittedContext);
+          lastUrl = res.url;
+        }
         unsub();
         s.localProgress = { active: false, pct: 0, label: '' };
-
-        if (!res?.url) throw new Error('No output returned from local generation');
-        if (res.mediaType === 'video') {
-          throw new Error('This model produces video — use the Video studio instead.');
-        }
-        addToHistory({
-          id: Date.now().toString(),
-          url: res.url,
-          prompt,
-          model: `local:${s.selectedLocalModel}`,
-          aspect_ratio: s.selectedAr,
-          seed: res.seed,
-          timestamp: new Date().toISOString(),
-        }, s.lastSubmittedContext);
         finishImageProgress(true);
-        viewImage(res.url);
+        viewImage(lastUrl);
       } catch (e) {
         unsub();
         s.localProgress = { active: false, pct: 0, label: '' };
@@ -1261,7 +1700,10 @@ export function ImageStudio({ active = true } = {}) {
     mountedOnceRef.current = true;
 
     // --- Resume any pending image generations from a previous session ---
+    // Only the original tab resumes: every tab shares one pending-job store, so a
+    // second tab polling it would race the first and double the history entry.
     (async () => {
+      if (!isPrimaryTab) return;
       const pending = getPendingJobs('image');
       if (!pending.length) return;
       const apiKey = localStorage.getItem('muapi_key');
@@ -1298,6 +1740,16 @@ export function ImageStudio({ active = true } = {}) {
       s.localImageModels = discovered;
       const localModel = ensureCompatibleLocalModel();
       if (!localModel) return;
+      // A duplicated tab arrives with a fully resolved configuration. Re-applying
+      // the boot defaults below would quietly reset its aspect ratio and tuning to
+      // the model's, which is exactly what "duplicate" must not do. It does need
+      // one refresh though: its LoRA panel loaded against the STATIC catalog, so
+      // its header names the stock workflow until the discovered one lands.
+      if (s.bootSource === 'clone') {
+        if (s.loraOpen) void loadLorasForCurrentModel();
+        bump();
+        return;
+      }
       const savedRuntimeMode = s.persistedImagePreferences?.localRuntimeMode;
       s.localRuntimeMode = localModel.runtimeModes?.includes(savedRuntimeMode)
         ? savedRuntimeMode
@@ -1319,8 +1771,15 @@ export function ImageStudio({ active = true } = {}) {
       console.warn('[Local] Unable to discover runtime image workflows:', error);
     });
 
+    // A duplicate keeps the LoRA panel open on the same selection — load its
+    // catalog, which the boot path above only does for the persisted tab.
+    if (s.bootSource === 'clone' && s.loraOpen) void loadLorasForCurrentModel();
+
     // --- Restore the encrypted composer draft (prompt + reference selection) ---
+    // Hydration is a module-level cache, so every tab may await it; only the
+    // original tab ADOPTS the draft. New/duplicated tabs already know what they are.
     void hydrateComposerState().then(() => {
+      if (!isPrimaryTab) return;
       const saved = getComposerSection('image');
       if (typeof saved.prompt === 'string' && saved.prompt && !s.prompt) {
         setPromptValue(saved.prompt);
@@ -1371,6 +1830,23 @@ export function ImageStudio({ active = true } = {}) {
         persistRef.current();
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Publish this tab's handle for the tab strip: Copy reads a full snapshot of the
+  // engine's configuration, Close asks whether a generation is still running.
+  useEffect(() => {
+    if (!apiRef) return undefined;
+    apiRef.current = {
+      snapshot: () => ({
+        ...snapshotTabFields(s, IMAGE_TAB_FIELDS),
+        // The live prefs, not the last-persisted ones — a background tab stops
+        // persisting, so s.persistedImagePreferences can be stale here.
+        persistedImagePreferences: currentImagePreferences(),
+      }),
+      isBusy: () => Boolean(s.generating),
+    };
+    return () => { apiRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1481,7 +1957,16 @@ export function ImageStudio({ active = true } = {}) {
       model: activeLocalModel,
     })
     : null;
+  // Rented selected with nothing to run on: every setting below is moot,
+  // so the panel collapses to the Source block and its rent/provisioning CTA.
+  const rentedBlocked = Boolean(s.rentedOnly && !s.rentedMachines?.length);
+  // Edit workflows (requires.image) size their canvas from the reference on the
+  // server, so the aspect-ratio and resolution presets would be a lie while a
+  // reference is attached — replace them with the truth instead of offering
+  // controls the output ignores.
+  const referenceDrivesAspect = s.useLocalModel && refCount > 0 && Boolean(activeLocalModel?.requires?.image);
   const coupleOn = coupleActive();
+  const sheetOn = characterSheetActive();
   const viewerEntry = s.viewerUrl ? s.history.find((e) => e.url === s.viewerUrl) : null;
   const enhanced = [s.enhanceBase.trim(), Array.from(s.enhanceTags).join(', ')].filter(Boolean).join(', ');
 
@@ -1503,16 +1988,20 @@ export function ImageStudio({ active = true } = {}) {
         <div className="flex flex-col gap-2">
           <SectionLabel>Source</SectionLabel>
           <Segmented
-            value={s.useLocalModel ? 'local' : 'api'}
-            onChange={(v) => setSource(v === 'local')}
+            value={s.rentedOnly ? 'rented' : s.useLocalModel ? 'local' : 'api'}
+            onChange={(v) => setSource(v !== 'api', v === 'rented')}
             options={[
               { value: 'local', label: t('image.local') },
               { value: 'api', label: t('image.api') },
+              { value: 'rented', label: t('image.rented') },
             ]}
           />
+          {s.rentedOnly ? <RentedSourceStatus engine={s} page="image" /> : null}
         </div>
       ) : null}
 
+      {rentedBlocked ? null : (
+        <>
       <div className="flex flex-col gap-2">
         <SectionLabel>Model</SectionLabel>
         <ModelMenu
@@ -1526,15 +2015,22 @@ export function ImageStudio({ active = true } = {}) {
 
       <div className="flex flex-col gap-3">
         <SectionLabel>Format</SectionLabel>
-        <Field label="Aspect ratio">
-          <NativeSelect
-            title={t('image.arTooltip')}
-            value={s.selectedAr}
-            onChange={(e) => { s.selectedAr = e.target.value; persistImagePreferences(); bump(); }}
-          >
-            {aspectRatios.map((r) => <option key={r} value={r}>{r}</option>)}
-          </NativeSelect>
-        </Field>
+        {referenceDrivesAspect ? (
+          <Field label="Aspect ratio">
+            <div className="rounded-md border border-line1 bg-bg2 px-3 py-2 text-xs leading-relaxed text-ink3">
+              Matches your reference image — the edit keeps its proportions.
+            </div>
+          </Field>
+        ) : (
+          <Field label="Aspect ratio">
+            <AspectRatioPicker
+              options={aspectRatios}
+              value={s.selectedAr}
+              onChange={(v) => { s.selectedAr = v; persistImagePreferences(); bump(); }}
+              nameFor={aspectRatioName}
+            />
+          </Field>
+        )}
         {resolutions.length > 0 ? (
           <Field label="Resolution">
             <NativeSelect
@@ -1546,7 +2042,7 @@ export function ImageStudio({ active = true } = {}) {
             </NativeSelect>
           </Field>
         ) : null}
-        {s.useLocalModel && resolvedDims ? (
+        {s.useLocalModel && resolvedDims && !referenceDrivesAspect ? (
           <Field
             label="Resolution"
             hint={resolvedDims.custom
@@ -1774,6 +2270,30 @@ export function ImageStudio({ active = true } = {}) {
         </div>
       ) : null}
 
+      {characterSheetCapable() ? (
+        <div className="flex flex-col gap-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <SectionLabel>Character sheet</SectionLabel>
+            <Toggle
+              label="Character sheet"
+              checked={s.characterSheetMode}
+              onChange={(v) => { s.characterSheetMode = v; persistImagePreferences(); bump(); }}
+            />
+          </div>
+          <p className="text-xs leading-relaxed text-ink3">
+            Multi-view sheet from your reference: each view is its own edit with a shared seed, composited into one labeled sheet. The prompt box is optional extra styling.
+          </p>
+          {sheetOn ? (
+            <Field label="Views">
+              <Segmented size="sm" value={s.characterSheetPreset}
+                onChange={(v) => { s.characterSheetPreset = v; persistImagePreferences(); bump(); }}
+                options={CHARACTER_SHEET_PRESETS}
+              />
+            </Field>
+          ) : null}
+        </div>
+      ) : null}
+
       {s.useLocalModel ? (
         <LoraSection
           open={s.loraOpen}
@@ -1785,6 +2305,7 @@ export function ImageStudio({ active = true } = {}) {
           }}
           baseLabel={s.loraBaseLabel}
           baseModelId={currentLoraModel()?.id || ''}
+          baseModels={s.loraBaseModels}
           status={s.loraCatalogStatus}
           message={s.loraCatalogMessage}
           loras={s.availableLoras}
@@ -1814,8 +2335,15 @@ export function ImageStudio({ active = true } = {}) {
             persistImagePreferences();
             bump();
           }}
+          onToggleHunt={strengthHuntCapable() ? (lora) => {
+            setCurrentLoraSelection(toggleLoraHunt(currentLoraSelection(), lora.id));
+            persistImagePreferences();
+            bump();
+          } : undefined}
         />
       ) : null}
+        </>
+      )}
     </>
   );
 
@@ -2037,17 +2565,22 @@ export function ImageStudio({ active = true } = {}) {
 
           <div className="min-w-2 flex-1" />
 
-          <Pill tone="neutral" className="hidden font-mono sm:inline-flex" title={t('image.modelTooltip')}>
-            <Icon name={s.useLocalModel ? 'cpu' : 'cloud'} size={12} />
-            {modelLabel}
-          </Pill>
+          {rentedBlocked ? null : (
+            <Pill tone="neutral" className="hidden font-mono sm:inline-flex" title={t('image.modelTooltip')}>
+              <Icon name={s.useLocalModel ? 'cpu' : 'cloud'} size={12} />
+              {modelLabel}
+            </Pill>
+          )}
 
           <Button
             variant="primary"
             size="lg"
             loading={s.generating}
+            disabled={rentedBlocked}
             onClick={generate}
-            title={t('image.generateTooltip')}
+            title={rentedBlocked
+              ? 'Rent a machine (or switch the source to Local) to generate.'
+              : t('image.generateTooltip')}
             className="min-w-[130px]"
           >
             {generateLabel}
@@ -2157,8 +2690,81 @@ export function ImageStudio({ active = true } = {}) {
             downloadImage(s.viewerUrl, imageDownloadName(entry?.model, entry?.id));
           }}
           onUpscale={isLocalAIAvailable() ? (mode) => upscaleEntry(viewerEntry, mode) : undefined}
+          onCompare={viewerEntry?.sourceUrl ? () => { s.compareEntry = viewerEntry; bump(); } : undefined}
+          onExpand={isLocalAIAvailable() && krea2LocalModel() && viewerEntry
+            ? () => { s.expandEntry = viewerEntry; bump(); }
+            : undefined}
+          onInpaint={isLocalAIAvailable() && krea2LocalModel() && viewerEntry
+            ? () => { s.inpaintEntry = viewerEntry; bump(); }
+            : undefined}
+          onAngles={isLocalAIAvailable() && angleEditModel() && viewerEntry
+            ? () => { s.angleEntry = viewerEntry; bump(); }
+            : undefined}
+          onSequence={isLocalAIAvailable() && angleEditModel() && viewerEntry
+            ? () => { s.sequenceEntry = viewerEntry; bump(); }
+            : undefined}
           onUseAsVideoFrame={() => void sendToVideoStartFrame(s.viewerUrl)}
           videoFrameBusy={s.sendingToVideo}
+        />
+      ) : null}
+
+      {s.compareEntry ? (
+        <CompareViewer
+          beforeUrl={s.compareEntry.sourceUrl}
+          afterUrl={s.compareEntry.url}
+          // Expansions, masked edits, angles and steps all pair with a source
+          // now — only actual upscales should say "Upscaled".
+          afterLabel={/upscaled/i.test(s.compareEntry.model || '') ? 'Upscaled' : 'Result'}
+          onClose={() => { s.compareEntry = null; bump(); }}
+        />
+      ) : null}
+
+      {s.expandEntry ? (
+        <ExpandDialog
+          entry={s.expandEntry}
+          busy={s.expandBusy}
+          onClose={() => { s.expandEntry = null; bump(); }}
+          onExpand={(target) => void runExpand(s.expandEntry, target)}
+        />
+      ) : null}
+
+      {s.inpaintEntry ? (
+        <MaskEditorDialog
+          entry={s.inpaintEntry}
+          busy={s.inpaintBusy}
+          onClose={() => { s.inpaintEntry = null; bump(); }}
+          onSubmit={(mask) => void runInpaint(s.inpaintEntry, mask)}
+        />
+      ) : null}
+
+      {s.angleEntry ? (
+        <AngleVariationsDialog
+          entry={s.angleEntry}
+          modelName={angleEditModel()?.name || 'the edit model'}
+          busy={s.angleBusy}
+          progress={s.angleProgress}
+          onClose={() => {
+            // While running, "Cancel" means stop after the current shot.
+            if (s.angleBusy) { s.angleStop = true; }
+            else { s.angleEntry = null; }
+            bump();
+          }}
+          onRun={(config) => void runAngleVariations(s.angleEntry, config)}
+        />
+      ) : null}
+
+      {s.sequenceEntry ? (
+        <SequenceEditDialog
+          entry={s.sequenceEntry}
+          modelName={angleEditModel()?.name || 'the edit model'}
+          busy={s.sequenceBusy}
+          progress={s.sequenceProgress}
+          onClose={() => {
+            if (s.sequenceBusy) { s.sequenceStop = true; }
+            else { s.sequenceEntry = null; }
+            bump();
+          }}
+          onRun={(config) => void runEditSequence(s.sequenceEntry, config)}
         />
       ) : null}
 
@@ -2282,7 +2888,10 @@ function ModelMenuList({ engine: s, hasRefs, close, onSelectLocal, onSelectApi }
 
   if (s.useLocalModel) {
     // Runtime-discovered, launchable local image workflows — never filtered by refs.
-    const filtered = s.localImageModels.filter(matches);
+    const list = (s.rentedOnly && s.rentedMachines?.length)
+      ? s.localImageModels.filter((m) => servedByAnyMachine(s.rentedMachines, m))
+      : s.localImageModels;
+    const filtered = list.filter(matches);
     return (
       <>
         {search}

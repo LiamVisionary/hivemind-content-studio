@@ -515,7 +515,7 @@ function readZImageToken() {
 
 async function generateViaHivemindZImage(params, model, width, height, seed, steps, cfgScale, mainWindow) {
     const token = readZImageToken();
-    if (!token) throw new Error('Hivemind Z-Image token file not found.');
+    if (!token) throw new Error('Hivemind stack token file not found.');
     const send = (data) => mainWindow?.webContents.send('local-ai:progress', data);
     const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` };
     const body = JSON.stringify({
@@ -527,30 +527,30 @@ async function generateViaHivemindZImage(params, model, width, height, seed, ste
         cfg: cfgScale,
         seed,
     });
-    send({ step: 0, totalSteps: steps, status: 'queued', progress: 0, message: 'Queued on Hivemind Z-Image stack' });
+    send({ step: 0, totalSteps: steps, status: 'queued', progress: 0, message: 'Queued on Hivemind stack' });
     const submitted = await localHttpJson(`${HIVEMIND_ZIMAGE_URL}/api/generate`, { method: 'POST', headers, body, timeout: 30000 });
     const jobId = submitted.id;
-    if (!jobId) throw new Error('Hivemind Z-Image did not return a job id.');
+    if (!jobId) throw new Error('Hivemind stack did not return a job id.');
     let lastStatus = 'queued';
     for (let attempt = 0; attempt < 600; attempt++) {
         await new Promise(res => setTimeout(res, attempt === 0 ? 800 : 1500));
         const job = await localHttpJson(`${HIVEMIND_ZIMAGE_URL}/api/job/${jobId}`, { headers, timeout: 30000 });
         lastStatus = job.status || lastStatus;
         const progress = lastStatus === 'running' ? 0.35 : 0.1;
-        send({ step: Math.max(1, Math.floor(progress * steps)), totalSteps: steps, status: lastStatus, progress, message: 'Generating with Hivemind Z-Image stack' });
+        send({ step: Math.max(1, Math.floor(progress * steps)), totalSteps: steps, status: lastStatus, progress, message: 'Generating with Hivemind stack' });
         if (lastStatus === 'success') {
             const imageUrl = job.image_urls && job.image_urls[0];
-            if (!imageUrl) throw new Error('Hivemind Z-Image finished without an image URL.');
+            if (!imageUrl) throw new Error('Hivemind stack finished without an image URL.');
             const absoluteImageUrl = imageUrl.startsWith('http') ? imageUrl : `${HIVEMIND_ZIMAGE_URL}${imageUrl}`;
             const { buffer, contentType } = await localHttpBuffer(absoluteImageUrl, { 'Authorization': `Bearer ${token}` });
             send({ step: steps, totalSteps: steps, status: 'done', progress: 1 });
             return { url: `data:${contentType.split(';')[0]};base64,${buffer.toString('base64')}`, seed };
         }
         if (lastStatus === 'error') {
-            throw new Error(job.error || 'Hivemind Z-Image generation failed.');
+            throw new Error(job.error || 'Hivemind stack generation failed.');
         }
     }
-    throw new Error('Timed out waiting for Hivemind Z-Image generation.');
+    throw new Error('Timed out waiting for Hivemind stack generation.');
 }
 
 async function generate(params, mainWindow) {

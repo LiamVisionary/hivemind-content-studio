@@ -19,17 +19,29 @@ class MediaModel:
     max_reference_images: int | None = 0
     limit_source: str = "provider contract"
     accepts: tuple[str, ...] = ()
+    # Workflow family from the registry (ltx / minimax / ...). Capability
+    # differences follow the family: extend + head swap are LTX-graph
+    # features, so the studio must not offer them for an H3 workflow.
+    family: str = ""
     supports_loras: bool = False
     compatible_base_models: tuple[str, ...] = ()
     ingredient_inputs: dict | None = None
     aspect_ratios: tuple[str, ...] = ()
     default_duration_seconds: float | None = None
+    # The workflow's registered sampling-step default. Lets the studio label its
+    # step presets truthfully ("Standard (15 steps)") and tell a full-step lane
+    # from a distilled one (a turbo build's 4-8 steps must not get a 32-step
+    # "High detail" option bolted on).
+    default_steps: float | None = None
     # Models that ship both a distilled and a full-step build pair up here: same
     # tier_group, different tier. The studio collapses a group into one row with
     # a Lite/Standard switch instead of listing near-identical models twice.
     # Left None for anything that only has one build.
     tier_group: str | None = None
     tier: Literal["lite", "standard"] | None = None
+    # Experimental workflows (preview weights, unfinished training runs) get a
+    # beta badge in the pickers instead of a separate catalog section.
+    beta: bool = False
 
 
 @dataclass(frozen=True)
@@ -40,19 +52,20 @@ class MediaProviderModels:
     models: tuple[MediaModel, ...]
 
 
+# Keyword args from `accepts` on: an earlier field insertion (family) silently
+# shifted these positional entries — supports_loras became family, and the
+# minimax row put its default duration into aspect_ratios, crashing the whole
+# catalog whenever the MCP was unreachable. Keywords make the next field
+# insertion a no-op here.
 BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS: tuple[MediaModel, ...] = (
-    MediaModel("workflow-default", "Workflow default", ("start", "reference"), None, "selected MCP workflow schema", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-fast", "LTX 2.3 Eros Fast", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-dmd", "LTX 2.3 Eros DMD (v1.3)", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-dmd-v12", "LTX 2.3 Eros DMD (v1.2)", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-v12-fast-rebuilt", "LTX 2.3 Eros v1.2 Fast (rebuilt)", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-v14-fast", "LTX 2.3 Eros v1.4 Fast", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-regular-fp8", "LTX 2.3 Regular FP8", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-ic-ingredients-lora", "LTX 2.3 Eros IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "ingredient_images", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-dmd-ic-ingredients-lora", "LTX 2.3 Eros DMD IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "ingredient_images", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-v14-ic-ingredients-lora", "LTX 2.3 Eros v1.4 IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "ingredient_images", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-v14", "LTX 2.3 Eros v1.4", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
-    MediaModel("ltx23-eros-v14-dmd", "LTX 2.3 Eros v1.4 DMD", ("start", "reference"), None, "Media Studio MCP workflow registry", ("image_base64", "video_base64", "video_mode", "loras"), True, ("LTXV",)),
+    MediaModel("workflow-default", "Workflow default", ("start", "reference"), None, "selected MCP workflow schema", accepts=("image_base64", "video_base64", "video_mode", "loras"), family="ltx-2.3", supports_loras=True, compatible_base_models=("LTXV",)),
+    MediaModel("ltx23-eros-dmd-v12", "LTX 2.3 Eros DMD (v1.2)", ("start", "reference"), None, "Media Studio MCP workflow registry", accepts=("image_base64", "video_base64", "video_mode", "loras"), family="ltx-2.3", supports_loras=True, compatible_base_models=("LTXV",)),
+    MediaModel("ltx23-regular-fp8", "LTX 2.3 Regular FP8", ("start", "reference"), None, "Media Studio MCP workflow registry", accepts=("image_base64", "video_base64", "video_mode", "loras"), family="ltx-2.3", supports_loras=True, compatible_base_models=("LTXV",)),
+    MediaModel("ltx23-eros-ic-ingredients-lora", "LTX 2.3 Eros IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", accepts=("image_base64", "ingredient_images", "loras"), family="ltx-2.3", supports_loras=True, compatible_base_models=("LTXV",)),
+    MediaModel("ltx23-eros-dmd-ic-ingredients-lora", "LTX 2.3 Eros DMD IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", accepts=("image_base64", "ingredient_images", "loras"), family="ltx-2.3", supports_loras=True, compatible_base_models=("LTXV",)),
+    MediaModel("ltx23-eros-v14-ic-ingredients-lora", "LTX 2.3 Eros v1.4 IC-LoRA Ingredients", ("start", "reference"), None, "Media Studio MCP workflow registry", accepts=("image_base64", "ingredient_images", "loras"), family="ltx-2.3", supports_loras=True, compatible_base_models=("LTXV",)),
+    MediaModel("ltx23-eros-v14-dmd", "LTX 2.3 Eros v1.4 DMD", ("start", "reference"), None, "Media Studio MCP workflow registry", accepts=("image_base64", "video_base64", "video_mode", "loras"), family="ltx-2.3", supports_loras=True, compatible_base_models=("LTXV",)),
+    MediaModel("minimax-h3", "MiniMax H3", ("start",), None, "Media Studio MCP workflow registry", accepts=("image_base64",), family="minimax", default_duration_seconds=5.0),
 )
 
 
@@ -168,11 +181,14 @@ def _media_studio_video_models(status: dict | None = None) -> tuple[MediaModel, 
             max_reference_images=None,
             limit_source="live Media Studio MCP workflow registry",
             accepts=tuple(str(value) for value in workflow.get("accepts", []) if str(value).strip()),
+            family=str(workflow.get("family") or "").strip(),
             supports_loras=bool(workflow.get("supports_loras")),
             compatible_base_models=tuple(str(value) for value in workflow.get("compatible_base_models", []) if str(value).strip()),
             ingredient_inputs=dict(workflow.get("ingredient_inputs")) if isinstance(workflow.get("ingredient_inputs"), dict) else None,
             aspect_ratios=tuple(str(value) for value in workflow.get("aspect_ratios", []) if str(value).strip()),
             default_duration_seconds=float(defaults["duration_seconds"]) if defaults.get("duration_seconds") is not None else None,
+            default_steps=float(defaults["steps"]) if defaults.get("steps") is not None else None,
+            beta=bool(workflow.get("beta")),
         )
     return tuple(models.values())
 

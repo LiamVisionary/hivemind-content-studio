@@ -9,7 +9,9 @@
       "builder": "image-backend",
       "backend": "",
       "supports_loras": true,
-      "compatible_base_models": ["ZImageTurbo"],
+      "compatible_base_models": [
+        "ZImageTurbo"
+      ],
       "default": true,
       "requires": {
         "prompt": true,
@@ -32,8 +34,18 @@
         "cfg": 1.0,
         "seed": -1
       },
-      "aspect_ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"],
-      "tags": ["text-to-image", "turbo", "local"],
+      "aspect_ratios": [
+        "1:1",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16"
+      ],
+      "tags": [
+        "text-to-image",
+        "turbo",
+        "local"
+      ],
       "featured": true
     },
     {
@@ -45,7 +57,9 @@
       "builder": "image-backend",
       "backend": "comfy-krea2-turbo-identity-edit",
       "supports_loras": true,
-      "compatible_base_models": ["Krea 2"],
+      "compatible_base_models": [
+        "Krea 2"
+      ],
       "prompt_helper": {
         "profile": "swarm_krea2_photo_json",
         "label": "Krea photo prompt",
@@ -107,8 +121,20 @@
         "kl_optimal",
         "beta57"
       ],
-      "aspect_ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"],
-      "tags": ["text-to-image", "image-edit", "identity", "turbo", "local"],
+      "aspect_ratios": [
+        "1:1",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16"
+      ],
+      "tags": [
+        "text-to-image",
+        "image-edit",
+        "identity",
+        "turbo",
+        "local"
+      ],
       "featured": true
     },
     {
@@ -120,7 +146,9 @@
       "builder": "image-backend",
       "backend": "comfy-bigloves-klein3-edit",
       "supports_loras": true,
-      "compatible_base_models": ["Flux.2 Klein 9B"],
+      "compatible_base_models": [
+        "Flux.2 Klein 9B"
+      ],
       "default": false,
       "requires": {
         "prompt": true,
@@ -130,7 +158,9 @@
         "prompt",
         "negative_prompt",
         "image_path",
+        "image_paths",
         "image_base64",
+        "images_base64",
         "image_url",
         "width",
         "height",
@@ -139,7 +169,7 @@
         "seed",
         "loras"
       ],
-      "max_reference_images": 1,
+      "max_reference_images": 3,
       "defaults": {
         "width": 1024,
         "height": 1024,
@@ -147,8 +177,18 @@
         "guidance": 3.5,
         "seed": -1
       },
-      "aspect_ratios": ["1:1", "4:3", "3:4", "16:9", "9:16"],
-      "tags": ["image-edit", "mlx", "local"],
+      "aspect_ratios": [
+        "1:1",
+        "4:3",
+        "3:4",
+        "16:9",
+        "9:16"
+      ],
+      "tags": [
+        "image-edit",
+        "mlx",
+        "local"
+      ],
       "featured": true
     },
     {
@@ -159,7 +199,9 @@
       "family": "ltx-2.3",
       "builder": "comfy-api",
       "supports_loras": true,
-      "compatible_base_models": ["LTXV"],
+      "compatible_base_models": [
+        "LTXV"
+      ],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-regular-anchor/ltx23-regular-anchor.user-image-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Regular FP8 Mobile.json",
       "default": false,
@@ -172,10 +214,25 @@
       },
       "lora_injection": {
         "class_type": "LTX2LoraLoaderAdvanced",
-        "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+        "targets": [
+          {
+            "node": "719",
+            "input": "model"
+          },
+          {
+            "node": "722",
+            "input": "model"
+          }
+        ],
         "name_input": "lora_name",
         "strength_input": "strength_model",
-        "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1}
+        "static_inputs": {
+          "video": 1,
+          "video_to_audio": 0,
+          "audio": 0,
+          "audio_to_video": 0,
+          "other": 1
+        }
       },
       "requires": {
         "prompt": false,
@@ -223,7 +280,7 @@
         "width": 480,
         "height": 832,
         "frame_rate": 24,
-        "seed": 42
+        "seed": -1
       },
       "slots": {
         "prompt": {
@@ -282,7 +339,9 @@
       "family": "ltx-2.3",
       "builder": "comfy-api",
       "supports_loras": true,
-      "compatible_base_models": ["LTXV"],
+      "compatible_base_models": [
+        "LTXV"
+      ],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-transition-lora/ltx23-transition-lora.user-image-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Transition LoRA Mobile.json",
       "default": false,
@@ -295,10 +354,25 @@
       },
       "lora_injection": {
         "class_type": "LTX2LoraLoaderAdvanced",
-        "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+        "targets": [
+          {
+            "node": "719",
+            "input": "model"
+          },
+          {
+            "node": "722",
+            "input": "model"
+          }
+        ],
         "name_input": "lora_name",
         "strength_input": "strength_model",
-        "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1}
+        "static_inputs": {
+          "video": 1,
+          "video_to_audio": 0,
+          "audio": 0,
+          "audio_to_video": 0,
+          "other": 1
+        }
       },
       "transition_lora": {
         "enabled": true,
@@ -354,7 +428,7 @@
         "width": 480,
         "height": 832,
         "frame_rate": 24,
-        "seed": 42,
+        "seed": -1,
         "cfg": 4.0,
         "guidance": 1.0,
         "transition_lora": true,
@@ -427,7 +501,9 @@
       "family": "ltx-2.3",
       "builder": "comfy-api",
       "supports_loras": true,
-      "compatible_base_models": ["LTXV"],
+      "compatible_base_models": [
+        "LTXV"
+      ],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-better-motion-lora/ltx23-better-motion-lora.user-image-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Better Motion LoRA Mobile.json",
       "default": false,
@@ -447,10 +523,25 @@
       },
       "lora_injection": {
         "class_type": "LTX2LoraLoaderAdvanced",
-        "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+        "targets": [
+          {
+            "node": "719",
+            "input": "model"
+          },
+          {
+            "node": "722",
+            "input": "model"
+          }
+        ],
         "name_input": "lora_name",
         "strength_input": "strength_model",
-        "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1}
+        "static_inputs": {
+          "video": 1,
+          "video_to_audio": 0,
+          "audio": 0,
+          "audio_to_video": 0,
+          "other": 1
+        }
       },
       "requires": {
         "prompt": false,
@@ -489,7 +580,7 @@
         "width": 480,
         "height": 832,
         "frame_rate": 24,
-        "seed": 42
+        "seed": -1
       },
       "slots": {
         "prompt": {
@@ -558,7 +649,9 @@
       "family": "ltx-2.3",
       "builder": "comfy-api",
       "supports_loras": true,
-      "compatible_base_models": ["LTXV"],
+      "compatible_base_models": [
+        "LTXV"
+      ],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-ic-dual-character-lora/ltx23-ic-dual-character-lora.user-image-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 IC Dual Character LoRA Mobile.json",
       "default": false,
@@ -578,10 +671,25 @@
       },
       "lora_injection": {
         "class_type": "LTX2LoraLoaderAdvanced",
-        "targets": [{"node": "719", "input": "model"}, {"node": "722", "input": "model"}],
+        "targets": [
+          {
+            "node": "719",
+            "input": "model"
+          },
+          {
+            "node": "722",
+            "input": "model"
+          }
+        ],
         "name_input": "lora_name",
         "strength_input": "strength_model",
-        "static_inputs": {"video": 1, "video_to_audio": 0, "audio": 0, "audio_to_video": 0, "other": 1}
+        "static_inputs": {
+          "video": 1,
+          "video_to_audio": 0,
+          "audio": 0,
+          "audio_to_video": 0,
+          "other": 1
+        }
       },
       "requires": {
         "prompt": false,
@@ -621,7 +729,7 @@
         "height": 576,
         "duration_seconds": 10,
         "frame_rate": 24,
-        "seed": 42,
+        "seed": -1,
         "cfg": 1.0
       },
       "slots": {
@@ -691,7 +799,9 @@
       "family": "ltx-2.3",
       "builder": "comfy-api",
       "supports_loras": true,
-      "compatible_base_models": ["LTXV"],
+      "compatible_base_models": [
+        "LTXV"
+      ],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/huggingface/ltx23-ic-ingredients-lora/ltx23-ic-ingredients-lora.user-reference-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 IC LoRA Ingredients Mobile.json",
       "default": false,
@@ -729,7 +839,12 @@
       },
       "lora_injection": {
         "class_type": "LoraLoaderModelOnly",
-        "targets": [{"node": "5011", "input": "model"}],
+        "targets": [
+          {
+            "node": "5011",
+            "input": "model"
+          }
+        ],
         "name_input": "lora_name",
         "strength_input": "strength_model"
       },
@@ -739,28 +854,28 @@
         "target_heading": "### Target Description",
         "reference_description_param": "reference_description"
       },
-    "ingredient_inputs": {
-      "max_images": 12,
-      "layout": "adaptive-pack",
-      "conditioning_only": true,
-      "preserve_aspect_ratio": true,
-      "render_labels": false
-    },
-    "timeline_anchor_preparation": {
-      "mode": "generative-outpaint",
-      "preserve_source_aspect_ratio": true,
-      "preserve_source_pixels": true,
-      "apple": "native-preflight",
-      "windows_cuda": "embedded-comfy-graph",
-      "cache": true
-    },
-    "aspect_ratios": [
-      "16:9",
-      "9:16",
-      "4:3",
-      "3:4",
-      "1:1"
-    ],
+      "ingredient_inputs": {
+        "max_images": 12,
+        "layout": "adaptive-pack",
+        "conditioning_only": true,
+        "preserve_aspect_ratio": true,
+        "render_labels": false
+      },
+      "timeline_anchor_preparation": {
+        "mode": "generative-outpaint",
+        "preserve_source_aspect_ratio": true,
+        "preserve_source_pixels": true,
+        "apple": "native-preflight",
+        "windows_cuda": "embedded-comfy-graph",
+        "cache": true
+      },
+      "aspect_ratios": [
+        "16:9",
+        "9:16",
+        "4:3",
+        "3:4",
+        "1:1"
+      ],
       "requires": {
         "prompt": true,
         "image": true
@@ -789,7 +904,7 @@
         "duration_seconds": 5,
         "frames": 121,
         "frame_rate": 24,
-        "seed": 42,
+        "seed": -1,
         "cfg": 1.0,
         "ingredients_lora_strength": 1.4,
         "reference_strength": 1.0
@@ -855,7 +970,12 @@
           "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients/resolve/main/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
           "required": true,
           "gated": true,
-          "auth_env": ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_READ_WRITE_KEY"]
+          "auth_env": [
+            "HF_TOKEN",
+            "HUGGING_FACE_HUB_TOKEN",
+            "HUGGINGFACE_TOKEN",
+            "HUGGINGFACE_READ_WRITE_KEY"
+          ]
         }
       ]
     },
@@ -881,8 +1001,12 @@
           }
         },
         "editor_widgets": {
-          "3940": ["ltx/10Eros_v1-fp8mixed_learned.safetensors"],
-          "4010": ["ltx/10Eros_v1-fp8mixed_learned.safetensors"]
+          "3940": [
+            "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+          ],
+          "4010": [
+            "ltx/10Eros_v1-fp8mixed_learned.safetensors"
+          ]
         }
       },
       "model_dependencies": [
@@ -910,7 +1034,12 @@
           "url": "https://huggingface.co/Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients/resolve/main/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
           "required": true,
           "gated": true,
-          "auth_env": ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACE_READ_WRITE_KEY"]
+          "auth_env": [
+            "HF_TOKEN",
+            "HUGGING_FACE_HUB_TOKEN",
+            "HUGGINGFACE_TOKEN",
+            "HUGGINGFACE_READ_WRITE_KEY"
+          ]
         }
       ]
     },
@@ -930,7 +1059,7 @@
       "id": "ltx23-eros-dmd-ic-ingredients-lora",
       "inherits": "ltx23-eros-ic-ingredients-lora",
       "title": "LTX 2.3 Eros DMD IC-LoRA Ingredients",
-      "description": "The Ingredients IC-LoRA reference-sheet workflow on the 10Eros v1.3 DMD checkpoint. The v1 lane runs the Comfy dev recipe: a dev transformer with the generic LTX distilled LoRA fused at 0.5 alongside the IC-LoRA. A DMD build has the distillation merged into its weights and ships no dev transformer, so this lane clears both and runs ic-lora's plain distilled mode with the Ingredients IC-LoRA as the only adapter. Everything else \u2014 reference assembly, timeline anchors, prompt contract, audio, frame bucket, IC-LoRA strength, generation controls \u2014 is inherited unchanged, so this is an apples-to-apples sibling of the v1 lane.",
+      "description": "The Ingredients IC-LoRA reference-sheet workflow on the 10Eros v1.3 DMD checkpoint. The v1 lane runs the Comfy dev recipe: a dev transformer with the generic LTX distilled LoRA fused at 0.5 alongside the IC-LoRA. A DMD build has the distillation merged into its weights and ships no dev transformer, so this lane clears both and runs ic-lora's plain distilled mode with the Ingredients IC-LoRA as the only adapter. Everything else — reference assembly, timeline anchors, prompt contract, audio, frame bucket, IC-LoRA strength, generation controls — is inherited unchanged, so this is an apples-to-apples sibling of the v1 lane.",
       "native_mlx": {
         "variant": "eros-dmd-v13-ic",
         "title": "LTX 2.3 10Eros v1.3 DMD q8 + Ingredients IC-LoRA",
@@ -939,6 +1068,249 @@
         "ic_lora": {
           "dev_transformer": "",
           "distilled_lora": ""
+        }
+      }
+    },
+    {
+      "id": "ltx23-eros-v14-comfy",
+      "media_type": "video",
+      "title": "10Eros v1.4 · Comfy lane",
+      "description": "LTX 2.3 10Eros v1.4 with the author's DMD LoRA on the Comfy-graph path (8 steps, cfg 1, joint audio+video latent, and the mp4 carries the generated audio). References the exact files the GPU-rental video tier provisions (ltx2310eros_v14 + DMD LoRA + Gemma 3 12B fp8), so the same workflow runs on the local Comfy lane or routes to an attached rented machine via the gateway's lane rules with requester-sealed fetch-back. CUDA-validated 2026-07-31 (48s per 4s clip @768x512 on an RTX 5090).",
+      "family": "ltx",
+      "builder": "comfy-api",
+      "supports_loras": false,
+      "api_workflow": "workflows/ltx23-eros-v14.api.json",
+      "default": false,
+      "frame_grid": {
+        "modulus": 8,
+        "offset": 1
+      },
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "prompt_contract": {
+        "guidance": "Scene-script prompting: describe the subject, action, camera, and lighting affirmatively in one block. v1.4 is base-aligned and NEEDS the DMD LoRA baked into this graph; do not disable it."
+      },
+      "accepts": [
+        "prompt",
+        "negative_prompt",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "seed",
+        "steps"
+      ],
+      "defaults": {
+        "width": 768,
+        "height": 512,
+        "frame_rate": 25,
+        "duration_seconds": 4,
+        "seed": -1,
+        "steps": 8
+      },
+      "slots": {
+        "prompt": {
+          "node": "4",
+          "input": "text"
+        },
+        "negative_prompt": {
+          "node": "5",
+          "input": "text"
+        },
+        "width": {
+          "node": "7",
+          "input": "width"
+        },
+        "height": {
+          "node": "7",
+          "input": "height"
+        },
+        "frames": [
+          {
+            "node": "7",
+            "input": "length"
+          },
+          {
+            "node": "9",
+            "input": "frames_number"
+          }
+        ],
+        "seed": {
+          "node": "13",
+          "input": "noise_seed"
+        },
+        "steps": {
+          "node": "11",
+          "input": "steps"
+        }
+      }
+    },
+    {
+      "id": "minimax-h3-turbo",
+      "inherits": "minimax-h3",
+      "title": "MiniMax H3 Turbo",
+      "beta": true,
+      "description": "MiniMax H3 with larryvrh's experimental 4-step Turbo distill LoRA (drbaph ckpt500 pruned-ComfyUI conversion): the same joint video+stereo-audio generation at 6 sampling steps with Spectrum forecasting, benchmarked on a rented RTX 5090 at 68s for a 5s 960x544 clip against 98s for MiniMax H3 — about 30% faster end to end, and 21s of sampling against 49s. Preview-quality weights from an in-progress training run: keep MiniMax H3 as the quality tier and A/B anything that matters. Runs on the SAME rented machine as MiniMax H3 with no re-provisioning — the tier ships both the full DiT and this LoRA.",
+      "api_workflow": "workflows/minimax-h3-turbo.api.json",
+      "defaults": {
+        "steps": 6
+      }
+    },
+    {
+      "id": "minimax-h3-reference",
+      "inherits": "minimax-h3",
+      "title": "MiniMax H3 Reference",
+      "beta": true,
+      "description": "MiniMax H3 conditioned on up to nine reference pictures instead of a start/end frame — the model's Reference mode. Subjects, clothing, environments and styles are carried across from the references; the prompt follows MiniMax's full-reference format (subject_definitions, retention_analysis, <Subject N>/<Picture N> labels). Same weights and same rented lane as MiniMax H3, so no re-provisioning.",
+      "api_workflow": "workflows/minimax-h3-reference.api.json",
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "accepts": [
+        "prompt",
+        "reference_images",
+        "motion_context_path",
+        "motion_context_base64",
+        "motion_context_url",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "seed",
+        "steps",
+        "spectrum"
+      ],
+      "reference_image_slots": [
+        {
+          "node": "120",
+          "input": "image"
+        },
+        {
+          "node": "121",
+          "input": "image"
+        },
+        {
+          "node": "122",
+          "input": "image"
+        },
+        {
+          "node": "123",
+          "input": "image"
+        },
+        {
+          "node": "124",
+          "input": "image"
+        },
+        {
+          "node": "125",
+          "input": "image"
+        },
+        {
+          "node": "126",
+          "input": "image"
+        },
+        {
+          "node": "127",
+          "input": "image"
+        },
+        {
+          "node": "128",
+          "input": "image"
+        }
+      ],
+      "prompt_contract": {
+        "guidance": "Reference mode uses MiniMax's full-reference rewrite format (ref_en): six sections in order — subject_definitions (label every reference as <Subject N> / <Picture N>), summary, retention_analysis (fully_preserved | partially_preserved | attribute_transfer | weak_reference per label), detailed_description (shots, <d>[English] …</d> speech, (S1) ids), overall_soundscape, non_diegetic_music. Reference pictures are supplied in order, so <Picture 1> is the first image sent."
+      }
+    },
+    {
+      "id": "minimax-h3",
+      "media_type": "video",
+      "title": "MiniMax H3",
+      "description": "MiniMax H3 omni-modal video generation: video and native stereo audio (voice, SFX, music) are denoised jointly in one pass. Text-to-video by default; supply a start image for image-to-video. Runs on an H3-capable CUDA Comfy lane (pruned int8_convrot DiT + Qwen3-VL 32B nvfp4 encoder, ComfyUI >= e377e263 with the Spectrum forecaster node — see packages/gpu-rentals). Native canvas is a 768px short edge at 24 fps, up to ~15s on the 17k+5 frame grid. Spectrum forecasting is on by default and can be switched off per generation: it predicts about half the transformer steps instead of computing them, which roughly halves sampling time but softens fine detail.",
+      "family": "minimax",
+      "builder": "comfy-api",
+      "supports_loras": false,
+      "api_workflow": "workflows/minimax-h3.api.json",
+      "default": false,
+      "frame_grid": {
+        "modulus": 17,
+        "offset": 5
+      },
+      "image_clear": "prune",
+      "requires": {
+        "prompt": true,
+        "image": false
+      },
+      "prompt_contract": {
+        "guidance": "H3 was trained on the structured rewrite its authors' pipeline emits (docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md), so the format is part of the interface. Send three fields in order, blank-line separated: 'integrated_multimodal_description:' (open with one style/composition sentence, then numbered shots — '[Shot 1]' with no timestamp, later shots '[Shot N] At MM:SS.mmm,'; stable speaker ids (S1),(S2); speech in <d>[English] the exact words</d>, marked <cutoff> if still running at the end; camera moves as prose naming move, distance and speed), 'overall_soundscape:' (1-4 sentences of ambience and action sound, never dialogue), 'non_diegetic_music:' (1-3 sentences or N/A). With a start image, open with the anchor line 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.' H3 has no negative conditioning: state everything affirmatively."
+      },
+      "accepts": [
+        "prompt",
+        "image_path",
+        "image_base64",
+        "image_url",
+        "end_image_url",
+        "end_image_base64",
+        "end_image_path",
+        "motion_context_path",
+        "motion_context_base64",
+        "motion_context_url",
+        "width",
+        "height",
+        "duration_seconds",
+        "frames",
+        "seed",
+        "steps",
+        "spectrum"
+      ],
+      "defaults": {
+        "width": 1216,
+        "height": 704,
+        "frame_rate": 24,
+        "duration_seconds": 5,
+        "seed": -1,
+        "steps": 15,
+        "spectrum": true
+      },
+      "slots": {
+        "prompt": {
+          "node": "104",
+          "input": "prompt"
+        },
+        "image_path": {
+          "node": "70",
+          "input": "image"
+        },
+        "width": {
+          "node": "104",
+          "input": "width"
+        },
+        "height": {
+          "node": "104",
+          "input": "height"
+        },
+        "frames": {
+          "node": "104",
+          "input": "length"
+        },
+        "seed": {
+          "node": "15",
+          "input": "noise_seed"
+        },
+        "steps": {
+          "node": "9",
+          "input": "steps"
+        },
+        "spectrum": {
+          "node": "30",
+          "input": "enabled"
+        },
+        "end_image_path": {
+          "node": "71",
+          "input": "image"
         }
       }
     }

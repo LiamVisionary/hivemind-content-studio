@@ -597,3 +597,161 @@ def build_krea2_turbo_outpaint_prompt(
     }
     graph["12"]["inputs"]["images"] = ["18", 0]
     return {"graph": graph, "output": ["18", 0], "geometry": geometry}
+
+
+# ---------------------------------------------------------------------------
+# Soft inpaint (Mix-Studio port). Krea2 is a flow/DiT model: VAEEncodeForInpaint's
+# grey erase makes it reproduce flat grey, so the intact source is VAE-encoded and
+# only the NOISE is masked; denoise controls how strongly the area changes. The
+# grown mask gives the model a small creative collar (shadows, texture blending),
+# and ImageCompositeMasked pastes the untouched source back everywhere else.
+# Every node here is core ComfyUI — no custom packs required.
+
+MASK_EXPAND_DEFAULT = 14
+MASK_INFLUENCE_DEFAULT = 78
+
+
+def mask_expand_pixels(value):
+    """Creative collar around the painted mask, clamped like the donor (6-32px)."""
+    try:
+        pixels = int(round(float(value)))
+    except (TypeError, ValueError):
+        pixels = MASK_EXPAND_DEFAULT
+    return max(6, min(32, pixels))
+
+
+def mask_influence_denoise(value):
+    """Mask influence percent (25-100, default 78) mapped to sampler denoise."""
+    try:
+        percent = int(round(float(value)))
+    except (TypeError, ValueError):
+        percent = MASK_INFLUENCE_DEFAULT
+    return round(max(25, min(100, percent)) / 100.0, 2)
+
+
+def localized_edit_prompt(prompt):
+    """Fixed preservation clause appended to every masked edit (donor wording)."""
+    request = str(prompt or "").strip()
+    context = (
+        "Localized edit only. Preserve the exact surrounding scene, camera perspective, "
+        "depth, lighting direction, shadows, reflections, material texture, and color "
+        "balance. Seamlessly integrate the requested change with the adjacent pixels."
+    )
+    return f"{request}. {context}" if request else context
+
+
+def build_krea2_turbo_inpaint_prompt(
+    prompt,
+    image_name,
+    mask_name,
+    options=None,
+    profile="apple-silicon",
+    filename_prefix="krea2_inpaint",
+):
+    """Masked edit graph: white-on-black mask PNG selects the area to change."""
+    options = options or {}
+    steps = _int_option(options, "steps", 10, 1, 50)
+    cfg = _float_option(options, "cfg", _float_option(options, "guidance", 1.0, 0.0, 20.0), 0.0, 20.0)
+    seed = resolve_seed_option(options)
+    default_sampler, default_scheduler = krea2_sampler_defaults(steps)
+    sampler_name = _choice_option(options, "sampler_name", default_sampler, KREA2_SAMPLERS)
+    scheduler = _choice_option(options, "scheduler", default_scheduler, KREA2_SCHEDULERS)
+    extra_loras = _lora_entries(options)
+
+    if profile == "apple-silicon":
+        model_nodes = {
+            "1": {
+                "class_type": "MultiLoRAStackToPreLora",
+                "inputs": {"lora_stack": json.dumps(extra_loras, separators=(",", ":"))},
+            },
+            "2": {
+                "class_type": "OTUNetLoaderW8A8",
+                "inputs": {
+                    "unet_name": KREA2_TURBO_PRE_LORA_SOURCE_MODEL,
+                    "weight_dtype": "default",
+                    "model_type": "krea2",
+                    "on_the_fly_quantization": True,
+                    "enable_convrot": True,
+                    "lora_mode": "None",
+                    "pre_lora": ["1", 0],
+                },
+            },
+        }
+    else:
+        model_nodes = {
+            "2": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": KREA2_TURBO_PORTABLE_MODEL, "weight_dtype": "default"},
+            },
+        }
+
+    graph = {
+        **model_nodes,
+        "3": {
+            "class_type": "CLIPLoader",
+            "inputs": {
+                "clip_name": "qwen3vl_4b_bf16.safetensors",
+                "type": "krea2",
+                "device": "default",
+            },
+        },
+        "4": {
+            "class_type": "TextEncodeKrea2",
+            "inputs": {"clip": ["3", 0], "prompt": localized_edit_prompt(prompt)},
+        },
+        "5": {"class_type": "TextEncodeKrea2", "inputs": {"clip": ["3", 0], "prompt": ""}},
+        "8": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
+        "src": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "mask_load": {"class_type": "LoadImage", "inputs": {"image": mask_name}},
+        "mask_chan": {
+            "class_type": "ImageToMask",
+            "inputs": {"image": ["mask_load", 0], "channel": "red"},
+        },
+        "mask_grow": {
+            "class_type": "GrowMask",
+            "inputs": {
+                "mask": ["mask_chan", 0],
+                "expand": mask_expand_pixels(options.get("mask_expand")),
+                "tapered_corners": True,
+            },
+        },
+        "encode": {"class_type": "VAEEncode", "inputs": {"pixels": ["src", 0], "vae": ["8", 0]}},
+        "inpaint_latent": {
+            "class_type": "SetLatentNoiseMask",
+            "inputs": {"samples": ["encode", 0], "mask": ["mask_grow", 0]},
+        },
+        "7": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["2", 0],
+                "positive": ["4", 0],
+                "negative": ["5", 0],
+                "latent_image": ["inpaint_latent", 0],
+                "seed": seed,
+                "steps": steps,
+                "cfg": cfg,
+                "sampler_name": sampler_name,
+                "scheduler": scheduler,
+                "denoise": mask_influence_denoise(options.get("mask_influence")),
+            },
+        },
+        "9": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["8", 0]}},
+        "composite": {
+            "class_type": "ImageCompositeMasked",
+            "inputs": {
+                "destination": ["src", 0],
+                "source": ["9", 0],
+                "x": 0,
+                "y": 0,
+                "resize_source": True,
+                "mask": ["mask_grow", 0],
+            },
+        },
+        "10": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["composite", 0], "filename_prefix": filename_prefix},
+        },
+    }
+    if profile != "apple-silicon" and extra_loras:
+        graph["7"]["inputs"]["model"] = _append_portable_lora_nodes(graph, ["2", 0], extra_loras)
+    return graph

@@ -28,6 +28,7 @@ export const NAV_SECTIONS = [
       { page: 'models', icon: 'database', label: () => (zh() ? '模型' : 'Models') },
       { page: 'telemetry', icon: 'pulse', label: () => (zh() ? '遥测' : 'Telemetry') },
       { page: 'providers', icon: 'plug', label: () => (zh() ? '服务商' : 'Providers') },
+      { page: 'machines', icon: 'cpu', label: () => (zh() ? 'GPU 机器' : 'Machines') },
       { page: 'mcp-cli', icon: 'terminal', label: () => t('nav.mcpcli') },
     ],
   },
@@ -46,6 +47,7 @@ export const HUB_PAGES = {
   history: 'history',
   telemetry: 'telemetry',
   providers: 'providers',
+  machines: 'machines',
 };
 
 export function isKnownPage(page) {

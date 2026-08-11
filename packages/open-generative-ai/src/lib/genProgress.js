@@ -119,3 +119,25 @@ export function recordGenerationSeconds(key, work, seconds) {
     localStorage.setItem(TIMINGS_KEY, JSON.stringify(all));
   } catch { /* quota — timings are best-effort */ }
 }
+
+// Fold Spectrum's two passes back into the steps the user actually chose.
+//
+// MiniMax H3 runs with Spectrum's offline smoothing replay, which samples the
+// schedule TWICE (a capture pass, then a replay pass) and reports progress
+// across both — comfyui_spectrum_h3/sampling.py sets `total_work = steps * 2`.
+// So Standard (15 steps) counted to 30 on screen and High detail (32) to 64,
+// flatly contradicting the Refinement control that had just promised 15 or 32.
+// Only an EXACT doubling is folded; any other total is passed through, so a
+// workflow that genuinely runs a different count still reports the truth.
+export function normalizeSamplerSteps(step, stepTotal, requestedSteps) {
+  const total = Number(stepTotal) || 0;
+  const current = Math.max(0, Number(step) || 0);
+  const asked = Number(requestedSteps) || 0;
+  if (total <= 0) return null;
+  if (asked > 0 && total === asked * 2) {
+    // Round up so the first tick of a pass reads as being in that step, and
+    // clamp so the replay pass cannot run the label past the total.
+    return { step: Math.min(asked, Math.ceil(current / 2)), total: asked };
+  }
+  return { step: current, total };
+}

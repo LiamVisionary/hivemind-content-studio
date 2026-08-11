@@ -53,6 +53,7 @@ export function LoraSection({
   onToggleOpen,
   baseLabel,
   baseModelId,
+  baseModels,
   status,
   message,
   loras,
@@ -66,8 +67,12 @@ export function LoraSection({
   onUpdateLora,
   onLoadGroup,
   getSelection,
+  // Strength Hunt (Mix-Studio port): present only when the selected model's
+  // backend supports the sweep — the toggle marks a LoRA as a hunt axis.
+  onToggleHunt,
 }) {
   const mutedCount = selection.filter((lora) => lora.enabled === false).length;
+  const huntedCount = selection.filter((lora) => lora.hunt).length;
   // Several downloads run at once: each plain one gets its own card up front, and
   // each replace draws on the card it supersedes.
   const downloads = useCivitaiDownloads();
@@ -130,7 +135,10 @@ export function LoraSection({
                   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
                 }}
                 className={cx(
-                  'grid cursor-pointer grid-cols-[36px_minmax(0,1fr)_64px_28px] items-center gap-2 rounded-md border p-1.5 transition-colors',
+                  'grid cursor-pointer items-center gap-2 rounded-md border p-1.5 transition-colors',
+                  onToggleHunt
+                    ? 'grid-cols-[36px_minmax(0,1fr)_64px_28px_28px]'
+                    : 'grid-cols-[36px_minmax(0,1fr)_64px_28px]',
                   enabled
                     ? 'border-honey/30 bg-honey-tint hover:border-honey/50'
                     : 'border-line1 bg-bg2 opacity-55 hover:opacity-80',
@@ -157,6 +165,25 @@ export function LoraSection({
                   onChange={(e) => onSetStrength(lora.id, e.target.value)}
                   onBlur={(e) => onCommitStrength(lora.id, e.target.value)}
                 />
+                {onToggleHunt ? (
+                  <button
+                    type="button"
+                    title={lora.hunt
+                      ? `Strength Hunt armed for ${label} — Generate sweeps it 0 → ${lora.strength ?? 1}`
+                      : `Strength Hunt: sweep ${label} from 0 to its current weight in one run (up to 2 LoRAs)`}
+                    aria-label={`Toggle Strength Hunt for ${label}`}
+                    aria-pressed={Boolean(lora.hunt)}
+                    className={cx(
+                      'grid h-7 w-7 place-items-center rounded-sm transition-colors',
+                      lora.hunt
+                        ? 'bg-honey text-bg0'
+                        : 'border border-line1 bg-bg2 text-ink3 hover:border-honey/50 hover:text-honey',
+                    )}
+                    onClick={(e) => { e.stopPropagation(); onToggleHunt(lora); }}
+                  >
+                    <Icon name="grid" size={13} />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   title={`Unload ${label}`}
@@ -172,6 +199,12 @@ export function LoraSection({
           {mutedCount > 0 ? (
             <p className="text-[10px] text-ink3">
               {mutedCount} muted — click a row to bring it back.
+            </p>
+          ) : null}
+          {onToggleHunt && huntedCount > 0 ? (
+            <p className="text-[10px] text-honey">
+              Strength Hunt armed ({huntedCount}/2): Generate runs the sweep with a fixed
+              prompt and seed, and adds a labeled comparison sheet to the results.
             </p>
           ) : null}
         </div>
@@ -200,6 +233,7 @@ export function LoraSection({
             loras={loras}
             baseModelId={baseModelId}
             baseLabel={baseLabel}
+            baseModels={baseModels}
             onLoad={onLoadGroup}
           />
         ) : null}

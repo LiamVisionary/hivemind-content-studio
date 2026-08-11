@@ -20,6 +20,7 @@ import { ModelsView } from './views/ModelsView.jsx';
 import { RunsView } from './views/RunsView.jsx';
 import { HistoryView } from './views/HistoryView.jsx';
 import { TelemetryView } from './views/TelemetryView.jsx';
+import { GpuMachinesView } from './views/GpuMachinesView.jsx';
 import { ProvidersView } from './views/ProvidersView.jsx';
 
 export function HubLayer({ visible, view }) {
@@ -51,6 +52,7 @@ export function HubLayer({ visible, view }) {
       <HistoryView active={current === 'history'} />
       <TelemetryView active={current === 'telemetry'} />
       <ProvidersView active={current === 'providers'} />
+      <GpuMachinesView active={current === 'machines'} />
     </div>
   );
 }

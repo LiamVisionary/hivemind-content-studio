@@ -88,7 +88,7 @@ function MetaRow({ label, value }) {
   );
 }
 
-export function ViewerModal({ url, entry, onClose, onBackToSetup, onRegenerate, onDownload, onUpscale, onUseAsVideoFrame, videoFrameBusy }) {
+export function ViewerModal({ url, entry, onClose, onBackToSetup, onRegenerate, onDownload, onUpscale, onCompare, onExpand, onInpaint, onAngles, onSequence, onUseAsVideoFrame, videoFrameBusy }) {
   const src = useMediaSrc(url);
   return (
     <Modal open onClose={onClose} title="Generated image" size="xl"
@@ -103,6 +103,25 @@ export function ViewerModal({ url, entry, onClose, onBackToSetup, onRegenerate, 
               <ActionButton variant="neutral" icon="wand" label="Upscale" onClick={() => onUpscale('fast')} />
               <ActionButton variant="neutral" icon="sparkles" label="Upscale Max" onClick={() => onUpscale('max')} />
             </>
+          ) : null}
+          {/* Only upscaled entries know their source, so Compare appears only there. */}
+          {onCompare ? (
+            <ActionButton variant="neutral" icon="eye" label="Compare" onClick={onCompare} />
+          ) : null}
+          {/* Canvas expansion — present only when the local krea2 lane exists. */}
+          {onExpand ? (
+            <ActionButton variant="neutral" icon="external" label="Expand" onClick={onExpand} />
+          ) : null}
+          {/* Masked edit — same gate as Expand (krea2 soft-inpaint lane). */}
+          {onInpaint ? (
+            <ActionButton variant="neutral" icon="layers" label="Edit area" onClick={onInpaint} />
+          ) : null}
+          {/* Viewpoint variants + staged edit chains — Klein/Qwen edit lanes. */}
+          {onAngles ? (
+            <ActionButton variant="neutral" icon="camera" label="Angles" onClick={onAngles} />
+          ) : null}
+          {onSequence ? (
+            <ActionButton variant="neutral" icon="stack" label="Steps" onClick={onSequence} />
           ) : null}
           {onUseAsVideoFrame ? (
             <ActionButton

@@ -1,0 +1,221 @@
+{
+  "comment": "MiniMax H3 text/image-to-video+audio, API format. Expanded from the official Comfy-Org video_minimax_h3 template (t2v/i2v share one graph: node 70 LoadImage -> first_frame is pruned by the MCP builder when no anchor image is supplied; image_clear=prune in the registry entry). MODEL edge chain: UNETLoader(6) -> PathchSageAttentionKJ(31, upstream class name really is typo'd; ~1.8x sampling) -> SpectrumApplyMiniMaxH3(30, conservative preset; do NOT stack EasyCache on top) -> scheduler+guider. 15 steps = community-validated quality parity with 20. Validated 2026-08-04 on a Vast 5090: 5s/124f @ 960x544 sampled in 83s (5.55 s/step). The executing Comfy lane needs ComfyUI >= e377e263, ComfyUI-Spectrum-MiniMax-H3, comfyui-kjnodes + pip sageattention (see packages/gpu-rentals/provisioning). Length is frames on the 17k+5 grid at 24 fps (124 = ~5s); the node snaps up internally. Node 30 runs the Spectrum degree-1 preset that ships as v0.1.8's own default (degree 1, warmup_steps 1, bootstrap_first_forecast true, tail_actual_steps 1) \u2014 the author measured 45% lower sampler time against Spectrum-off on H3 with no visible quality loss, because H3 (unlike WAN) tolerates a degree-1 forecast. We shipped the older degree-4 conservative preset until 2026-08-08, and when upstream flipped the bootstrap default to true our degree=4 graph started failing validate() with 'bootstrap_first_forecast requires degree == 1'; that was patched by setting the flag false, i.e. by opting OUT of the very feature. Every optional input here stays explicit \u2014 never inherit a Spectrum default \u2014 but keep them a self-consistent preset: validate() rejects bootstrap with degree != 1 or warmup_steps > 1, and the three trajectory modes (offline_smoothing_replay / anchor_residual_feedback / selective_rollback_correction) are mutually exclusive. offline_smoothing_replay is on and audio_blend_weight is 0.0 per upstream's v0.2.1 finding that a single pass at video=0.5/audio=0 reproduced degraded speech and stuttering \u2014 this graph's output is joint video+audio, so audio quality outranks the extra capture pass. Upstream itself says this preset 'prioritizes throughput' and is not established as universally quality-safe: re-listen after changing it. history_storage MUST be vram: measured 2026-08-07 on a 5090, same seed and shape (124f @ 960x544, 15 steps, warm), system_ram made Spectrum's forecast steps grow 13.6s -> 23.0s as its latent history shuttled over PCIe, so sampling took 133s and the whole prompt 301s; on vram the same run samples in 33s for a 183s prompt. Spectrum earns its place only on vram \u2014 with it off entirely, sampling is 44s. Watch VRAM if max_history or clip length grows: the history now lives on a card the H3 stack already fills. Sampler is euler, not res_multistep: measured on a 5090 at the same seed and shape, sampling 49s vs 64s and the frames are comparable (res_multistep is also the setting reported to cause artifacts and damaged audio with the H3 turbo LoRA). A KJNodes VRAM_Debug free once sat between the sampler and the decoders on the theory that the resident DiT was starving the VAE; measured on a rented 5090 it was a REGRESSION of 6-48s per job, because freeing models makes the NEXT job re-load and re-init them. Measured floor for this shape (124f @ 960x544, warm): ~40s of model init + text encode + video/audio VAE decode + mux, with sampling on top \u2014 so a 15-step clip is ~98s and even 4-step turbo is ~65s. VAEDecodeTiled cannot help: H3's packed latents make it fail with 'to() received an invalid combination of arguments - got (NestedTensor)'.",
+  "prompt": {
+    "6": {
+      "class_type": "UNETLoader",
+      "inputs": {
+        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    "13": {
+      "class_type": "CLIPLoader",
+      "inputs": {
+        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    "11": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      }
+    },
+    "24": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    "31": {
+      "class_type": "PathchSageAttentionKJ",
+      "inputs": {
+        "model": [
+          "6",
+          0
+        ],
+        "sage_attention": "auto"
+      }
+    },
+    "30": {
+      "class_type": "SpectrumApplyMiniMaxH3",
+      "inputs": {
+        "model": [
+          "31",
+          0
+        ],
+        "enabled": true,
+        "blend_weight": 0.5,
+        "degree": 1,
+        "ridge_lambda": 0.1,
+        "window_size": 2.0,
+        "flex_window": 0.75,
+        "warmup_steps": 1,
+        "tail_actual_steps": 1,
+        "max_history": 8,
+        "debug": false,
+        "history_storage": "vram",
+        "bootstrap_first_forecast": true,
+        "offline_smoothing_replay": true,
+        "anchor_residual_feedback": false,
+        "selective_rollback_correction": false,
+        "audio_blend_weight": 0.0
+      }
+    },
+    "70": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "104": {
+      "class_type": "MiniMaxH3ImageToVideo",
+      "inputs": {
+        "clip": [
+          "13",
+          0
+        ],
+        "vae": [
+          "11",
+          0
+        ],
+        "prompt": "",
+        "width": 1216,
+        "height": 704,
+        "length": 124,
+        "first_frame": [
+          "70",
+          0
+        ],
+        "last_frame": [
+          "71",
+          0
+        ]
+      }
+    },
+    "9": {
+      "class_type": "BasicScheduler",
+      "inputs": {
+        "model": [
+          "30",
+          0
+        ],
+        "scheduler": "simple",
+        "steps": 15,
+        "denoise": 1.0
+      }
+    },
+    "17": {
+      "class_type": "KSamplerSelect",
+      "inputs": {
+        "sampler_name": "euler"
+      }
+    },
+    "15": {
+      "class_type": "RandomNoise",
+      "inputs": {
+        "noise_seed": 42
+      }
+    },
+    "16": {
+      "class_type": "BasicGuider",
+      "inputs": {
+        "model": [
+          "30",
+          0
+        ],
+        "conditioning": [
+          "104",
+          0
+        ]
+      }
+    },
+    "14": {
+      "class_type": "SamplerCustomAdvanced",
+      "inputs": {
+        "noise": [
+          "15",
+          0
+        ],
+        "guider": [
+          "16",
+          0
+        ],
+        "sampler": [
+          "17",
+          0
+        ],
+        "sigmas": [
+          "9",
+          0
+        ],
+        "latent_image": [
+          "104",
+          1
+        ]
+      }
+    },
+    "10": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "14",
+          0
+        ],
+        "vae": [
+          "11",
+          0
+        ]
+      }
+    },
+    "23": {
+      "class_type": "VAEDecodeAudio",
+      "inputs": {
+        "samples": [
+          "14",
+          0
+        ],
+        "vae": [
+          "24",
+          0
+        ]
+      }
+    },
+    "91": {
+      "class_type": "CreateVideo",
+      "inputs": {
+        "images": [
+          "10",
+          0
+        ],
+        "audio": [
+          "23",
+          0
+        ],
+        "fps": 24
+      }
+    },
+    "92": {
+      "class_type": "SaveVideo",
+      "inputs": {
+        "video": [
+          "91",
+          0
+        ],
+        "filename_prefix": "video/minimax_h3",
+        "format": "mp4",
+        "codec": "h264"
+      }
+    },
+    "71": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "End frame (optional)"
+      }
+    }
+  }
+}

@@ -1,0 +1,323 @@
+{
+  "comment": "MiniMax H3 reference mode. Conditions on up to nine reference pictures through MiniMaxH3ReferenceToVideo's autogrow ref_images inputs rather than a first/last frame. Same weights and lane as minimax-h3; prompts follow the ref_en guide's subject_definitions / retention_analysis format.",
+  "prompt": {
+    "6": {
+      "class_type": "UNETLoader",
+      "inputs": {
+        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    "13": {
+      "class_type": "CLIPLoader",
+      "inputs": {
+        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    "11": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      }
+    },
+    "24": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    "31": {
+      "class_type": "PathchSageAttentionKJ",
+      "inputs": {
+        "model": [
+          "6",
+          0
+        ],
+        "sage_attention": "auto"
+      }
+    },
+    "30": {
+      "class_type": "SpectrumApplyMiniMaxH3",
+      "inputs": {
+        "model": [
+          "31",
+          0
+        ],
+        "enabled": true,
+        "blend_weight": 0.5,
+        "degree": 1,
+        "ridge_lambda": 0.1,
+        "window_size": 2.0,
+        "flex_window": 0.75,
+        "warmup_steps": 1,
+        "tail_actual_steps": 1,
+        "max_history": 8,
+        "debug": false,
+        "history_storage": "vram",
+        "bootstrap_first_forecast": true,
+        "offline_smoothing_replay": true,
+        "anchor_residual_feedback": false,
+        "selective_rollback_correction": false,
+        "audio_blend_weight": 0.0
+      }
+    },
+    "104": {
+      "class_type": "MiniMaxH3ReferenceToVideo",
+      "inputs": {
+        "clip": [
+          "13",
+          0
+        ],
+        "vae": [
+          "11",
+          0
+        ],
+        "audio_vae": [
+          "24",
+          0
+        ],
+        "prompt": "",
+        "width": 1216,
+        "height": 704,
+        "length": 124,
+        "ref_image_size": "match",
+        "ref_images.ref_image_1": [
+          "120",
+          0
+        ],
+        "ref_images.ref_image_2": [
+          "121",
+          0
+        ],
+        "ref_images.ref_image_3": [
+          "122",
+          0
+        ],
+        "ref_images.ref_image_4": [
+          "123",
+          0
+        ],
+        "ref_images.ref_image_5": [
+          "124",
+          0
+        ],
+        "ref_images.ref_image_6": [
+          "125",
+          0
+        ],
+        "ref_images.ref_image_7": [
+          "126",
+          0
+        ],
+        "ref_images.ref_image_8": [
+          "127",
+          0
+        ],
+        "ref_images.ref_image_9": [
+          "128",
+          0
+        ]
+      },
+      "_meta": {
+        "title": "MiniMax H3 reference conditioning"
+      }
+    },
+    "9": {
+      "class_type": "BasicScheduler",
+      "inputs": {
+        "model": [
+          "30",
+          0
+        ],
+        "scheduler": "simple",
+        "steps": 15,
+        "denoise": 1.0
+      }
+    },
+    "17": {
+      "class_type": "KSamplerSelect",
+      "inputs": {
+        "sampler_name": "euler"
+      }
+    },
+    "15": {
+      "class_type": "RandomNoise",
+      "inputs": {
+        "noise_seed": 42
+      }
+    },
+    "16": {
+      "class_type": "BasicGuider",
+      "inputs": {
+        "model": [
+          "30",
+          0
+        ],
+        "conditioning": [
+          "104",
+          0
+        ]
+      }
+    },
+    "14": {
+      "class_type": "SamplerCustomAdvanced",
+      "inputs": {
+        "noise": [
+          "15",
+          0
+        ],
+        "guider": [
+          "16",
+          0
+        ],
+        "sampler": [
+          "17",
+          0
+        ],
+        "sigmas": [
+          "9",
+          0
+        ],
+        "latent_image": [
+          "104",
+          1
+        ]
+      }
+    },
+    "10": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "14",
+          0
+        ],
+        "vae": [
+          "11",
+          0
+        ]
+      }
+    },
+    "23": {
+      "class_type": "VAEDecodeAudio",
+      "inputs": {
+        "samples": [
+          "14",
+          0
+        ],
+        "vae": [
+          "24",
+          0
+        ]
+      }
+    },
+    "91": {
+      "class_type": "CreateVideo",
+      "inputs": {
+        "images": [
+          "10",
+          0
+        ],
+        "audio": [
+          "23",
+          0
+        ],
+        "fps": 24
+      }
+    },
+    "92": {
+      "class_type": "SaveVideo",
+      "inputs": {
+        "video": [
+          "91",
+          0
+        ],
+        "filename_prefix": "video/minimax_h3",
+        "format": "mp4",
+        "codec": "h264"
+      }
+    },
+    "120": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "Reference picture 1"
+      }
+    },
+    "121": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "Reference picture 2"
+      }
+    },
+    "122": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "Reference picture 3"
+      }
+    },
+    "123": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "Reference picture 4"
+      }
+    },
+    "124": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "Reference picture 5"
+      }
+    },
+    "125": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "Reference picture 6"
+      }
+    },
+    "126": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "Reference picture 7"
+      }
+    },
+    "127": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "Reference picture 8"
+      }
+    },
+    "128": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      },
+      "_meta": {
+        "title": "Reference picture 9"
+      }
+    }
+  }
+}

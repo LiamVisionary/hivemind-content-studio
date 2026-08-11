@@ -88,7 +88,15 @@ def test_video_loras_have_native_mlx_and_comfy_graph_parity():
     assert "mergeNativeWorkflowLoras(nativeSpec.loras, settings.loras)" in source
 
     registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    checked = 0
     for workflow in (item for item in _resolved_registry_workflows(registry) if item["media_type"] == "video"):
+        if not workflow.get("supports_loras"):
+            # Non-LTX families (e.g. minimax-h3) have no LoRA lane; the parity
+            # contract below is specifically about LTXV LoRA injection.
+            assert "lora_injection" not in workflow
+            assert "loras" not in workflow.get("accepts", [])
+            continue
+        checked += 1
         assert workflow["supports_loras"] is True
         assert workflow["compatible_base_models"] == ["LTXV"]
         assert "loras" in workflow["accepts"]
@@ -96,6 +104,172 @@ def test_video_loras_have_native_mlx_and_comfy_graph_parity():
         graph = json.loads(Path(workflow["api_workflow"]).read_text(encoding="utf-8"))["prompt"]
         sources = [graph[target["node"]]["inputs"][target["input"]] for target in injection["targets"]]
         assert all(source_ref == sources[0] for source_ref in sources)
+    assert checked, "no LoRA-capable video workflows resolved — registry parse regressed"
+
+
+def test_minimax_h3_registry_entry_matches_its_comfy_graph():
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflow = next(
+        item for item in _resolved_registry_workflows(registry) if item["id"] == "minimax-h3"
+    )
+    assert workflow["media_type"] == "video"
+    assert workflow["builder"] == "comfy-api"
+    # Comfy lanes reject an empty LoadImage filename, so prompt-only requests
+    # must prune the anchor loader instead of blanking it.
+    assert workflow["image_clear"] == "prune"
+    # H3's frame lattice: length must land on 17k+5 (the LTX 8k+1 snap in the
+    # builder would silently misreport what renders).
+    assert workflow["frame_grid"] == {"modulus": 17, "offset": 5}
+    assert "negative_prompt" not in workflow["accepts"], "H3 has no negative conditioning lane"
+
+    graph_path = Path(workflow["api_workflow"])
+    if not graph_path.is_absolute():
+        graph_path = ROOT / "packages" / "media-gateway" / graph_path
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))["prompt"]
+
+    # Every declared slot must target a real node input in the graph.
+    for name, slot in workflow["slots"].items():
+        assert slot["node"] in graph, f"slot {name} targets missing node {slot['node']}"
+        assert slot["input"] in graph[slot["node"]]["inputs"], (
+            f"slot {name} targets missing input {slot['input']}"
+        )
+
+    # The accelerator chain must sit on the MODEL edge feeding both the
+    # scheduler and the guider: UNETLoader -> SageAttention patch -> Spectrum.
+    spectrum = [nid for nid, node in graph.items() if node["class_type"] == "SpectrumApplyMiniMaxH3"]
+    assert len(spectrum) == 1
+    sage = graph[spectrum[0]]["inputs"]["model"][0]
+    # Upstream KJNodes really does register the class with this typo.
+    assert graph[sage]["class_type"] == "PathchSageAttentionKJ"
+    assert graph[sage]["inputs"]["model"][0] == "6"
+    assert graph["6"]["class_type"] == "UNETLoader"
+    for consumer in ("9", "16"):
+        assert graph[consumer]["inputs"]["model"] == [spectrum[0], 0]
+
+    # Spectrum's optional inputs must be pinned, never inherited: upstream
+    # dc6e1b3 flipped bootstrap_first_forecast's default to true and every H3
+    # job on a box provisioned after it died in the node's validate(). This
+    # mirrors that validate() so a future retune cannot reintroduce the clash.
+    tuning = graph[spectrum[0]]["inputs"]
+    assert "bootstrap_first_forecast" in tuning, "leaving it to the upstream default breaks H3"
+    # validate() on the pinned node rejects a preset that mixes the one-point
+    # bootstrap with a higher-order fit; on v0.1.8 that is a hard raise, and it
+    # is what took every rental H3 job down on 2026-08-07.
+    if tuning["bootstrap_first_forecast"]:
+        assert tuning["degree"] == 1
+        assert tuning["warmup_steps"] <= 1
+    # max_history must clear the fit's minimum point count for its degree.
+    assert tuning["max_history"] >= tuning["degree"] + 1
+    # v0.2.x: the trajectory modes are mutually exclusive, and every one of them
+    # must be stated — inheriting a Spectrum default is what broke H3 once.
+    modes = ("offline_smoothing_replay", "anchor_residual_feedback", "selective_rollback_correction")
+    assert all(mode in tuning for mode in modes)
+    assert sum(bool(tuning[mode]) for mode in modes) <= 1
+    # Joint video+audio output: upstream validated that leaving audio to the
+    # video blend reproduced degraded speech and stuttering.
+    assert tuning["audio_blend_weight"] == 0.0
+    assert tuning["offline_smoothing_replay"] is True
+    # Measured 2026-08-07 on a 5090: keeping the forecaster's latent history in
+    # system RAM shuttles it over PCIe every forecast step and takes sampling
+    # from 33s to 133s — worse than running with no forecaster at all.
+    assert tuning["history_storage"] == "vram"
+
+    # No model-freeing node between sampler and decode. Benchmarked on a rented
+    # 5090 (2026-08-08): unloading after sampling costs the NEXT job its model
+    # load and convrot re-init — 110-152s per clip against 104s without it.
+    assert not [n for n in graph.values() if n["class_type"] == "VRAM_Debug"], (
+        "freeing models after sampling is a measured regression, not an optimisation"
+    )
+    for decoder in ("10", "23"):
+        assert graph[decoder]["inputs"]["samples"] == ["14", 0]
+
+    # euler, not res_multistep: 49s vs 64s sampling at the same seed and shape,
+    # comparable frames, and res_multistep is the reported artifact source with
+    # the H3 turbo LoRA.
+    assert graph["17"]["inputs"]["sampler_name"] == "euler"
+
+    # The Spectrum forecaster is user-switchable per generation: it is an
+    # APPROXIMATION (measured 2026-08-08: 50s vs 105s sampling, at visibly
+    # softer fine detail), so the slot must reach the node's own enable input
+    # and both H3 graphs must put the forecaster on the same node id for the
+    # inherited turbo entry to reuse the slot.
+    assert "spectrum" in workflow["accepts"]
+    assert workflow["slots"]["spectrum"] == {"node": spectrum[0], "input": "enabled"}
+    assert workflow["defaults"]["spectrum"] is True
+
+    # t2v prune contract: the anchor image loader feeds only the optional
+    # first_frame input, so deleting it leaves a valid text-to-video graph.
+    image_node = workflow["slots"]["image_path"]["node"]
+    consumers = [
+        (nid, key)
+        for nid, node in graph.items()
+        for key, value in node["inputs"].items()
+        if isinstance(value, list) and value and str(value[0]) == image_node
+    ]
+    assert consumers == [("104", "first_frame")]
+
+
+def test_minimax_h3_turbo_inherits_and_bakes_the_distill_contract():
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflow = next(
+        item for item in _resolved_registry_workflows(registry) if item["id"] == "minimax-h3-turbo"
+    )
+    # Experimental preview weights: surfaced as a beta badge, never the default.
+    assert workflow["beta"] is True
+    assert workflow["default"] is False
+    # Inherited contract from minimax-h3.
+    assert workflow["builder"] == "comfy-api"
+    assert workflow["frame_grid"] == {"modulus": 17, "offset": 5}
+    assert workflow["image_clear"] == "prune"
+    assert workflow["defaults"]["steps"] == 6
+    assert "negative_prompt" not in workflow["accepts"]
+
+    graph_path = Path(workflow["api_workflow"])
+    if not graph_path.is_absolute():
+        graph_path = ROOT / "packages" / "media-gateway" / graph_path
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))["prompt"]
+
+    # MODEL chain: UNETLoader -> UPSTREAM's turbo LoRA loader -> SageAttention
+    # -> the MANDATORY dual sigma shift -> Spectrum, feeding scheduler+guider.
+    spectrum = graph["9"]["inputs"]["model"][0]
+    assert graph[spectrum]["class_type"] == "SpectrumApplyMiniMaxH3"
+    assert graph["16"]["inputs"]["model"] == [spectrum, 0]
+    shift = graph[spectrum]["inputs"]["model"][0]
+    assert graph[shift]["class_type"] == "MiniMaxH3SigmaShift"
+    assert graph[shift]["inputs"]["shift_video"] == 12.0
+    assert graph[shift]["inputs"]["shift_audio"] == 6.0
+    sage = graph[shift]["inputs"]["model"][0]
+    assert graph[sage]["class_type"] == "PathchSageAttentionKJ"
+    lora = graph[sage]["inputs"]["model"][0]
+    # ComfyUI's plain loader CANNOT apply this LoRA to our pruned int8-convrot
+    # base: the 51 AdaLN pairs have nowhere to go, which is why we used to ship
+    # a conversion with them stripped out. Upstream's loader re-injects the time
+    # conditioning instead, so the full weights apply.
+    assert graph[lora]["class_type"] == "MiniMaxH3TurboLoRA", (
+        "a plain LoRA loader silently drops this LoRA's AdaLN adapters"
+    )
+    assert graph[lora]["inputs"]["lora_name"] == "minimax_h3_turbo_v4_step600_ema.safetensors"
+    assert graph[lora]["inputs"]["strength"] == 1.0
+    # Merging rounds the delta away on a quantized base — ours is int8-convrot.
+    assert graph[lora]["inputs"]["low_vram"] is False
+    assert graph[lora]["inputs"]["model"][0] == "6"
+    # NOT upstream's sampler: measured, it bypasses Spectrum's hooks and turns
+    # every step into a real eval (61s of sampling against 30s).
+    assert graph["17"]["class_type"] == "KSamplerSelect"
+    assert graph["17"]["inputs"]["sampler_name"] == "euler"
+    assert graph["9"]["inputs"]["steps"] == 6
+    # The inherited spectrum slot must land on THIS graph's forecaster too.
+    assert workflow["slots"]["spectrum"] == {"node": spectrum, "input": "enabled"}
+
+    # The two H3 workflows must stay DISTINCT: the quality tier carries no LoRA.
+    quality = json.loads((ROOT / "packages/media-gateway/workflows/minimax-h3.api.json").read_text())["prompt"]
+    assert not [n for n in quality.values() if "Lora" in n["class_type"] or "TurboLoRA" in n["class_type"]], (
+        "the full-weight workflow must never gain the turbo LoRA"
+    )
+    assert quality["9"]["inputs"]["steps"] == 15
+    # Slots inherited from minimax-h3 must still target real inputs here.
+    for name, slot in workflow["slots"].items():
+        assert slot["node"] in graph and slot["input"] in graph[slot["node"]]["inputs"], name
 
 
 def _free_port():
@@ -285,7 +459,7 @@ def test_machine_private_job_receipt_never_returns_media_urls_even_when_requeste
         assert forbidden not in body
 
 
-@pytest.mark.parametrize("workflow_id", ["ltx23-regular-fp8", "ltx23-eros-fast"])
+@pytest.mark.parametrize("workflow_id", ["ltx23-regular-fp8", "ltx23-eros-v14-dmd"])
 def test_video_mcp_compiles_shared_keyframes_into_comfy_cuda_graph(tmp_path, workflow_id):
     api_workflow = tmp_path / "ltx-api.json"
     api_workflow.write_text(json.dumps(_ltx_api_workflow()), encoding="utf-8")
@@ -293,7 +467,7 @@ def test_video_mcp_compiles_shared_keyframes_into_comfy_cuda_graph(tmp_path, wor
     mobile_dir.mkdir()
     mobile_workflow = {"nodes": [], "extra": {}}
     for name in (
-        "LTX 2.3 Eros MLX Fast q8 v1.2 Mobile.json",
+        "LTX 2.3 Eros MLX v1.4 DMD Mobile.json",
         "LTX 2.3 Eros MLX Exact v1 Merged q8 Mobile.json",
         "LTX 2.3 Regular FP8 Mobile.json",
     ):
@@ -1045,3 +1219,492 @@ def test_ltx_ingredients_mcp_builds_prompt_contract_and_native_metadata(tmp_path
     assert square_graph["811"]["inputs"]["value"] == 576
     with Image.open(comfy_input / square_graph["2004"]["inputs"]["image"]) as square_sheet:
         assert square_sheet.size == (576, 576)
+
+
+def test_ltx_eros_v14_comfy_registry_entry_matches_its_graph():
+    """The rented-ready eros v1.4 Comfy variant: same files the GPU-rental
+    video tier provisions, multi-target frames slot (video+audio latents)."""
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflow = next(
+        item for item in _resolved_registry_workflows(registry) if item["id"] == "ltx23-eros-v14-comfy"
+    )
+    assert workflow["media_type"] == "video"
+    assert workflow["builder"] == "comfy-api"
+    # LTX frame lattice is 8k+1.
+    assert workflow["frame_grid"] == {"modulus": 8, "offset": 1}
+
+    graph_path = Path(workflow["api_workflow"])
+    if not graph_path.is_absolute():
+        graph_path = ROOT / "packages" / "media-gateway" / graph_path
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))["prompt"]
+
+    def _assert_slot(name, slot):
+        assert slot["node"] in graph, f"slot {name} targets missing node {slot['node']}"
+        assert slot["input"] in graph[slot["node"]]["inputs"], (
+            f"slot {name} targets missing input {slot['input']}"
+        )
+
+    for name, slot in workflow["slots"].items():
+        for target in (slot if isinstance(slot, list) else [slot]):
+            _assert_slot(name, target)
+
+    # Frames fan out to BOTH latents — a single-target slot here silently
+    # desyncs audio length from video length.
+    frames = workflow["slots"]["frames"]
+    assert isinstance(frames, list) and len(frames) == 2
+    assert {(t["node"], t["input"]) for t in frames} == {("7", "length"), ("9", "frames_number")}
+
+    # Rental-provisioning parity: every model file the graph references is in
+    # the video tier's serving set (same basenames the box downloads from R2).
+    from hivemind_content_studio import gpu_rentals
+    tier_files = {key.rsplit("/", 1)[-1] for key, _ in gpu_rentals.TIERS["video"]["models"]}
+    graph_files = {
+        value for node in graph.values() for value in node["inputs"].values()
+        if isinstance(value, str) and value.endswith(".safetensors")
+    }
+    assert graph_files <= tier_files, f"graph references files the video tier does not provision: {graph_files - tier_files}"
+
+    # The DMD LoRA is mandatory for v1.4 anatomy — assert it sits on the MODEL
+    # edge into the sampler.
+    sampler_model = graph["13"]["inputs"]["model"][0]
+    assert graph[sampler_model]["class_type"] == "LoraLoaderModelOnly"
+    assert graph[sampler_model]["inputs"]["lora_name"] == "ltx2310eros_v14_dmd_lora.safetensors"
+    assert graph[sampler_model]["inputs"]["strength_model"] == 1.0
+
+    # The sampled audio has to reach the muxer. Paying for a joint AV sample
+    # and then decoding only the picture half saves nothing and ships a silent
+    # clip, which is exactly what this graph did until 2026-08-10 — the
+    # separator's audio output was wired to nothing.
+    audio_decode = graph["16"]["inputs"]["audio"][0]
+    assert graph[audio_decode]["class_type"] == "LTXVAudioVAEDecode"
+    audio_latent = graph[audio_decode]["inputs"]["samples"]
+    assert audio_latent == ["14", 1], "audio decode must take LTXVSeparateAVLatent's audio output"
+    assert graph[audio_latent[0]]["class_type"] == "LTXVSeparateAVLatent"
+    # ...decoded by the AUDIO vae, not the picture one.
+    audio_vae = graph[audio_decode]["inputs"]["audio_vae"][0]
+    assert graph[audio_vae]["class_type"] == "LTXVAudioVAELoader"
+
+
+@pytest.mark.parametrize("workflow_id", ["minimax-h3", "minimax-h3-turbo"])
+@pytest.mark.parametrize("spectrum", [True, False])
+def test_spectrum_toggle_reaches_the_graph(tmp_path, workflow_id, spectrum):
+    """The user-facing Fast-sampling switch must actually disable the node.
+
+    Verified by capturing the graph the MCP POSTs, not by timing: on a small
+    clip the forecaster's saving is inside the noise, so a wall-clock check
+    cannot tell a working toggle from a dropped one.
+    """
+    registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflows = _resolved_registry_workflows(registry_src)
+    workflow = next(item for item in workflows if item["id"] == workflow_id)
+    graph_path = ROOT / "packages" / "media-gateway" / workflow["api_workflow"]
+
+    registry = tmp_path / "workflow-registry.json"
+    entry = json.loads(json.dumps(workflow))
+    entry["api_workflow"] = str(graph_path)
+    registry.write_text(json.dumps({"workflows": [entry]}), encoding="utf-8")
+
+    captures = []
+
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if "prompt" in body:
+                captures.append(body["prompt"])
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"prompt_id": "p-1"}).encode())
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    threading.Thread(target=backend.serve_forever, daemon=True).start()
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "0",
+        "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(registry),
+        "COMFY_INPUT_DIR": str(tmp_path / "input"),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "media_generate_video", "arguments": {
+                    "workflow_id": workflow_id,
+                    "prompt": "a lighthouse at night",
+                    "spectrum": spectrum,
+                    "wait": False,
+                }},
+            }).encode(),
+            headers={"authorization": "Bearer test-token", "content-type": "application/json",
+                     "accept": "application/json, text/event-stream"},
+            method="POST",
+        )
+        with urlopen(request, timeout=20) as response:
+            response.read()
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+
+    assert captures, "the MCP posted no graph"
+    graph = captures[0]
+    node = next(n for n in graph.values() if n["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert node["inputs"]["enabled"] is spectrum
+
+
+def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False):
+    """Run the real MCP against a capture backend and return the posted graph.
+
+    The MCP is a separate node process with its own registry loading, staging
+    and pruning; only a real submission proves what a workflow actually sends.
+    """
+    registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflow = next(item for item in _resolved_registry_workflows(registry_src) if item["id"] == workflow_id)
+    entry = json.loads(json.dumps(workflow))
+    entry["api_workflow"] = str(ROOT / "packages" / "media-gateway" / workflow["api_workflow"])
+    registry = tmp_path / "workflow-registry.json"
+    registry.write_text(json.dumps({"workflows": [entry]}), encoding="utf-8")
+
+    captures = []
+
+    class BackendHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if "prompt" in body:
+                captures.append(body["prompt"])
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"prompt_id": "p-1"}).encode())
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args):
+            pass
+
+    backend = ThreadingHTTPServer(("127.0.0.1", 0), BackendHandler)
+    threading.Thread(target=backend.serve_forever, daemon=True).start()
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_MCP_BACKEND_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_MCP_STUDIO_URL": f"http://127.0.0.1:{backend.server_port}",
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "0",
+        "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(registry),
+        "COMFY_INPUT_DIR": str(tmp_path / "input"),
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "media_generate_video",
+                           "arguments": {"workflow_id": workflow_id, "wait": False, **arguments}},
+            }).encode(),
+            headers={"authorization": "Bearer test-token", "content-type": "application/json",
+                     "accept": "application/json, text/event-stream"},
+            method="POST",
+        )
+        with urlopen(request, timeout=25) as response:
+            reply = response.read().decode("utf-8", "replace")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        backend.shutdown()
+        backend.server_close()
+    if expect_refusal:
+        # The MCP's own error text, so a refusal is distinguishable from the
+        # harness simply never seeing a graph.
+        assert not captures, "the MCP submitted a graph it should have refused"
+        return reply
+    assert captures, "the MCP posted no graph"
+    return captures[0]
+
+
+# A 1x1 PNG: enough for staging, nothing to decode.
+_TINY_PNG = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP8"
+    "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+@pytest.mark.parametrize("start,end,expect_first,expect_last", [
+    (False, False, False, False),   # T2VA
+    (True, False, True, False),     # I2VA
+    (True, True, True, True),       # FL2VA
+    (False, True, False, True),     # L2VA
+])
+def test_minimax_h3_maps_all_four_frame_modes(tmp_path, start, end, expect_first, expect_last):
+    """The checkpoint we serve is the fl2va (first-AND-last) build and
+    MiniMaxH3ImageToVideo takes an optional last_frame, so all four documented
+    modes are one graph input apart. An unused loader must be PRUNED, not left
+    with an empty filename: a real Comfy lane rejects that at submit.
+    """
+    arguments = {"prompt": "a courier waits on a platform"}
+    if start:
+        arguments["image_base64"] = _TINY_PNG
+    if end:
+        arguments["end_image_base64"] = _TINY_PNG
+
+    graph = _capture_video_graph(tmp_path, "minimax-h3", arguments)
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert ("first_frame" in node["inputs"]) is expect_first
+    assert ("last_frame" in node["inputs"]) is expect_last
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadImage"]
+    assert len(loaders) == int(expect_first) + int(expect_last)
+    assert all(n["inputs"]["image"] for n in loaders), "a staged loader must carry a filename"
+
+
+def test_video_workflows_roll_a_fresh_seed_when_the_caller_omits_one(tmp_path):
+    """An omitted seed must vary per submission, and -1 must mean the same.
+
+    Every video workflow used to default to a literal 42, so an agent calling
+    media_generate_video without a seed got one clip forever. On a remote lane
+    it also tripped ComfyUI's result cache, which returns a path the privacy
+    sweeper has already deleted — the bare `HTTP Error 404` seen 2026-08-09.
+    The Video Studio rolls its own seed client-side, so only agent callers
+    ever saw it.
+    """
+    def seed_of(arguments):
+        graph = _capture_video_graph(tmp_path, "minimax-h3", arguments)
+        return graph["15"]["inputs"]["noise_seed"]
+
+    omitted = [seed_of({"prompt": "a kite over a harbour"}) for _ in range(3)]
+    assert all(isinstance(value, int) and value >= 0 for value in omitted)
+    assert len(set(omitted)) > 1, f"omitted seed did not vary across runs: {omitted}"
+
+    explicit_random = [seed_of({"prompt": "a kite over a harbour", "seed": -1}) for _ in range(3)]
+    assert all(value >= 0 for value in explicit_random), "-1 must resolve, never reach the graph"
+    assert len(set(explicit_random)) > 1, f"-1 did not roll a fresh seed: {explicit_random}"
+
+    # A caller who names a seed still gets exactly that seed.
+    assert seed_of({"prompt": "a kite over a harbour", "seed": 4242}) == 4242
+
+
+def test_minimax_h3_reference_mode_fills_slots_in_order_and_prunes_the_rest(tmp_path):
+    """Reference mode conditions through MiniMaxH3ReferenceToVideo's AUTOGROW
+    inputs, which serialise as ref_images.ref_image_N. Order is load-bearing:
+    the prompt names them <Picture 1>..<Picture N> by the same index, and an
+    unfilled slot must take its autogrow key with it when pruned.
+    """
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "a courier in the style of these references",
+        "reference_images": [{"image_base64": _TINY_PNG}, {"image_base64": _TINY_PNG}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    keys = sorted(k for k in node["inputs"] if k.startswith("ref_images."))
+    assert keys == ["ref_images.ref_image_1", "ref_images.ref_image_2"]
+    # Combo, not a pixel size — an int here fails validation at submit.
+    assert node["inputs"]["ref_image_size"] == "match"
+    # Reference mode renders audio too, so the audio VAE has to be wired.
+    assert isinstance(node["inputs"]["audio_vae"], list)
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadImage"]
+    assert len(loaders) == 2, "the seven unused reference loaders must be pruned"
+    assert all(n["inputs"]["image"] for n in loaders)
+
+
+def test_reference_mode_refuses_a_request_with_no_references(tmp_path):
+    """Every reference loader pruned would leave the node with nothing to
+    condition on — a graph that only fails once it reaches the GPU."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference", {"prompt": "no references at all"}, expect_refusal=True)
+    assert "requires at least one reference image" in reply
+
+
+def test_reference_mode_refuses_more_references_than_it_has_slots(tmp_path):
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "reference_images": [{"image_base64": _TINY_PNG}] * 10},
+        expect_refusal=True)
+    assert "at most 9 reference images" in reply or "Too big" in reply or "max" in reply
+
+
+def _tiny_video_data_url(tmp_path, *, with_audio=True, size="96x64", frames=30):
+    path = tmp_path / f"context-{'voiced' if with_audio else 'mute'}.mp4"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", f"color=c=gray:s={size}:r=24",
+    ]
+    if with_audio:
+        # 32 kHz on purpose: that is the rate H3 itself emits.
+        cmd += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=32000"]
+    cmd += ["-frames:v", str(frames), "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    cmd += ["-c:a", "aac", "-shortest"] if with_audio else ["-an"]
+    cmd += [str(path)]
+    subprocess.run(cmd, check=True)
+    return "data:video/mp4;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+@pytest.mark.parametrize("workflow_id", ["minimax-h3", "minimax-h3-turbo"])
+def test_minimax_h3_motion_context_grafts_chain_nodes(tmp_path, workflow_id):
+    """Scene chaining: the previous clip's tail frames AND audio must reach the
+    MiniMaxH3MotionContext node, the guider must consume the context-modified
+    conditioning, the trim node must remove the re-rendered context head before
+    mux, Spectrum must be forced off (it mispredicts the pinned rows), and the
+    canvas must match the context clip (a latent cannot be resized)."""
+    graph = _capture_video_graph(tmp_path, workflow_id, {
+        "prompt": "the scene continues from the previous shot",
+        "motion_context_base64": _tiny_video_data_url(tmp_path),
+        "duration_seconds": 5,
+    })
+
+    load = next((k, n) for k, n in graph.items() if n["class_type"] == "LoadVideo")
+    comps = next((k, n) for k, n in graph.items() if n["class_type"] == "GetVideoComponents")
+    context = next((k, n) for k, n in graph.items() if n["class_type"] == "MiniMaxH3MotionContext")
+    trim = next((k, n) for k, n in graph.items() if n["class_type"] == "MiniMaxH3MotionContextTrim")
+    create = next(n for n in graph.values() if n["class_type"] == "CreateVideo")
+
+    # Staged clip lands in the Comfy input dir under the private prefix, so the
+    # input sweeper expires it and remote lanes ship it via the existing push.
+    assert load[1]["inputs"]["file"].startswith("mcp_video_")
+    assert (tmp_path / "input" / load[1]["inputs"]["file"]).is_file()
+    assert comps[1]["inputs"]["video"] == [load[0], 0]
+
+    assert context[1]["inputs"]["conditioning"] == ["104", 0]
+    assert context[1]["inputs"]["vae"] == graph["104"]["inputs"]["vae"]
+    assert context[1]["inputs"]["latent"] == ["104", 1]
+    assert context[1]["inputs"]["context_length"] == "22"
+    assert context[1]["inputs"]["audio_context_length"] == 22
+    assert context[1]["inputs"]["context_frames"] == [comps[0], 0]
+    # Two wires that stop every join from restarting the room tone: the
+    # successor clip must HEAR the predecessor's tail.
+    assert context[1]["inputs"]["context_audio"] == [comps[0], 1]
+    assert context[1]["inputs"]["audio_vae"] == graph["23"]["inputs"]["vae"]
+
+    # The guider consumes the context-modified conditioning.
+    assert graph["16"]["inputs"]["conditioning"] == [context[0], 0]
+    # The sampler still samples the source latent.
+    assert graph["14"]["inputs"]["latent_image"] == ["104", 1]
+
+    # Post-decode trim removes the re-rendered context head from BOTH streams.
+    assert trim[1]["inputs"]["images"] == ["10", 0]
+    assert trim[1]["inputs"]["audio"] == ["23", 0]
+    assert trim[1]["inputs"]["trim_frames"] == [context[0], 1]
+    assert trim[1]["inputs"]["fps"] == 24
+    assert trim[1]["inputs"]["match_tail"] is True
+    assert create["inputs"]["images"] == [trim[0], 0]
+    assert create["inputs"]["audio"] == [trim[0], 1]
+
+    # Spectrum forced off on a chained graph even though the default is on.
+    assert graph["30"]["inputs"]["enabled"] is False
+
+    # 5s asked + 22 context frames = 142ish -> NEAREST lattice point 141, so
+    # the delivered clip (141-22=119 frames) stays within a frame of the ask.
+    assert graph["104"]["inputs"]["length"] == 141
+
+    # Canvas locked to the context clip, not the aspect-tier default.
+    assert graph["104"]["inputs"]["width"] == 96
+    assert graph["104"]["inputs"]["height"] == 64
+
+    # No start-frame anchor: the chain seed provides the opening frames.
+    assert not [n for n in graph.values() if n["class_type"] == "LoadImage"]
+
+
+def test_minimax_h3_motion_context_without_audio_skips_the_audio_wires(tmp_path):
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "continue the silent scene",
+        "motion_context_base64": _tiny_video_data_url(tmp_path, with_audio=False),
+        "duration_seconds": 5,
+    })
+    context = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3MotionContext")
+    assert "context_audio" not in context["inputs"]
+    assert "audio_vae" not in context["inputs"]
+    assert context["inputs"]["audio_context_length"] == 0
+    assert "context_frames" in context["inputs"]
+
+
+def test_minimax_h3_motion_context_refuses_a_start_frame(tmp_path):
+    """A first-frame pin at frame 0 and a context head both claim the opening
+    frames; H3 renders contradictions as unions, so refuse the combination."""
+    reply = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "x",
+        "motion_context_base64": _tiny_video_data_url(tmp_path),
+        "image_base64": _TINY_PNG,
+    }, expect_refusal=True)
+    assert "replaces the start frame" in reply
+
+
+def test_minimax_h3_reference_mode_supports_motion_context(tmp_path):
+    """Motion Context v0.2.0 keeps the reference list and adds the continuation
+    audio to it, so chaining and reference conditioning compose."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "the referenced courier keeps walking",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "motion_context_base64": _tiny_video_data_url(tmp_path),
+    })
+    context = next((k, n) for k, n in graph.items() if n["class_type"] == "MiniMaxH3MotionContext")
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert context[1]["inputs"]["conditioning"] == ["104", 0]
+    assert graph["16"]["inputs"]["conditioning"] == [context[0], 0]
+    assert "ref_images.ref_image_1" in node["inputs"]
+    assert graph["30"]["inputs"]["enabled"] is False
+
+
+def test_minimax_h3_motion_context_is_declared_on_every_h3_tier():
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    for workflow_id in ("minimax-h3", "minimax-h3-turbo", "minimax-h3-reference"):
+        workflow = next(
+            item for item in _resolved_registry_workflows(registry) if item["id"] == workflow_id
+        )
+        for field in ("motion_context_path", "motion_context_base64", "motion_context_url"):
+            assert field in workflow["accepts"], f"{workflow_id} must accept {field}"
+        # video_* stays LTX-only: it flips extend/head-swap behavior stack-wide.
+        assert not any(str(f).startswith("video_") for f in workflow["accepts"])

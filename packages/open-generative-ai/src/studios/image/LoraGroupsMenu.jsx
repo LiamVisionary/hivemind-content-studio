@@ -5,7 +5,7 @@
 import { useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useSavedLibrary } from '../../hooks/hooks.js';
-import { loraGroupFromSelection, loraSelectionFromGroup } from '../../lib/loraSelection.js';
+import { loraGroupFromSelection, loraGroupMatchesBase, loraSelectionFromGroup } from '../../lib/loraSelection.js';
 import { LIBRARIES, deleteLibraryEntry, saveLibraryEntry } from '../../lib/savedLibraryStore.js';
 import { Icon } from '../../ui/icons.jsx';
 import { ConfirmModal } from '../../ui/Modal.jsx';
@@ -28,22 +28,28 @@ function groupSummary(group) {
 // is what actually gets SAVED: editing a weight only re-renders on commit, and
 // clicking "Save group" is itself what commits it — so the rendered prop can still
 // be one edit behind at the moment of the click. Read the live selection instead.
-export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, baseLabel, onLoad }) {
+export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, baseLabel, baseModels, onLoad }) {
   const { entries, loading, locked, retry } = useSavedLibrary(LIBRARIES.loraGroups);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  // Groups from other models stay reachable but out of the way — the library is
+  // shared across both studios, so an LTX stack must not crowd a Klein session.
+  const [showOther, setShowOther] = useState(false);
   // The group this stack came from (loaded or last saved). Pre-filling its name
   // makes the common edit — load a group, retune a weight, save — an overwrite
   // rather than a near-duplicate the user then has to clean up.
   const [activeName, setActiveName] = useState('');
+
+  const matching = entries.filter((entry) => loraGroupMatchesBase(entry.data, { baseModelId, baseModels }));
+  const other = entries.filter((entry) => !loraGroupMatchesBase(entry.data, { baseModelId, baseModels }));
 
   const save = async (name) => {
     setSaving(true);
     try {
       await saveLibraryEntry(LIBRARIES.loraGroups, {
         name,
-        data: loraGroupFromSelection(getSelection?.() || selection, { baseModelId, baseLabel }),
+        data: loraGroupFromSelection(getSelection?.() || selection, { baseModelId, baseLabel, baseModels }),
       });
       const replaced = entries.some((entry) => sameName(entry.name, name));
       setActiveName(name);
@@ -96,41 +102,60 @@ export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, ba
             className={cx(open && 'border-honey/50 text-honey')}
           >
             Groups
-            {entries.length ? <span className="font-mono text-[10px] text-ink3">{entries.length}</span> : null}
+            {matching.length ? <span className="font-mono text-[10px] text-ink3">{matching.length}</span> : null}
           </Button>
         )}
       >
-        {(close) => (
-          <>
-            <LibraryStateNote
-              loading={loading}
-              locked={locked}
-              empty={!entries.length}
-              emptyHint="No saved groups yet. Load the LoRAs you want, tune their weights, then use Save group."
-            />
-            {entries.length ? (
+        {(close) => {
+          const row = (entry, dimmed) => (
+            <div
+              key={entry.id}
+              className={cx('flex items-center gap-1 rounded-md px-1 transition-colors hover:bg-bg2', dimmed && 'opacity-70 hover:opacity-100')}
+            >
+              <button
+                type="button"
+                onClick={() => { load(entry); close(); }}
+                title={`Load ${entry.name}`}
+                className="min-w-0 flex-1 px-1.5 py-1.5 text-left"
+              >
+                <div className="truncate text-[13px] font-medium text-ink1">{entry.name}</div>
+                <div className="truncate text-[10px] text-ink3">{groupSummary(entry.data)}</div>
+              </button>
+              <LibraryDeleteButton label={`Delete ${entry.name}`} onClick={() => { setConfirmDelete(entry); close(); }} />
+            </div>
+          );
+          return (
+            <>
+              <LibraryStateNote
+                loading={loading}
+                locked={locked}
+                empty={!entries.length}
+                emptyHint="No saved groups yet. Load the LoRAs you want, tune their weights, then use Save group."
+              />
+              {entries.length && !matching.length ? (
+                <p className="px-2.5 py-2 text-xs leading-relaxed text-ink3">No saved groups for this model yet.</p>
+              ) : null}
               <div className="max-h-72 overflow-y-auto">
-                {entries.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex items-center gap-1 rounded-md px-1 transition-colors hover:bg-bg2"
-                  >
+                {matching.map((entry) => row(entry, false))}
+                {other.length ? (
+                  <>
                     <button
                       type="button"
-                      onClick={() => { load(entry); close(); }}
-                      title={`Load ${entry.name}`}
-                      className="min-w-0 flex-1 px-1.5 py-1.5 text-left"
+                      aria-expanded={showOther}
+                      onClick={() => setShowOther((current) => !current)}
+                      title="Groups saved for other models — their LoRAs may not be installed here"
+                      className="flex w-full items-center gap-1 px-2.5 py-1.5 text-left text-[10px] font-semibold uppercase tracking-[0.06em] text-ink3 transition-colors hover:text-ink2"
                     >
-                      <div className="truncate text-[13px] font-medium text-ink1">{entry.name}</div>
-                      <div className="truncate text-[10px] text-ink3">{groupSummary(entry.data)}</div>
+                      <Icon name="chevronDown" size={11} className={cx('transition-transform duration-150', showOther && 'rotate-180')} />
+                      Other models ({other.length})
                     </button>
-                    <LibraryDeleteButton label={`Delete ${entry.name}`} onClick={() => { setConfirmDelete(entry); close(); }} />
-                  </div>
-                ))}
+                    {showOther ? other.map((entry) => row(entry, true)) : null}
+                  </>
+                ) : null}
               </div>
-            ) : null}
-          </>
-        )}
+            </>
+          );
+        }}
       </Menu>
 
       <Button

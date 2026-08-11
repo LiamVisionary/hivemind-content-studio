@@ -90,6 +90,20 @@ export function getHivemindVideoModelById(id) {
     return hiveVideoModels.find((model) => model.id === id) || null;
 }
 
+// The reference-mode sibling for a model: the workflow in the same registry
+// family that accepts reference_images (minimax-h3-reference for the H3 tiers).
+// A model that itself takes references is its own sibling. Null when the family
+// has no reference lane — the composer hides the character-reference control.
+export function referenceWorkflowForHivemindModel(id) {
+    const model = getHivemindVideoModelById(id);
+    if (!model) return null;
+    if (model.supportsReferenceImages) return model;
+    const family = String(model.workflowFamily || '').toLowerCase();
+    if (!family) return null;
+    return hiveVideoModels.find((entry) => entry.supportsReferenceImages
+        && String(entry.workflowFamily || '').toLowerCase() === family) || null;
+}
+
 export function mapHivemindWorkflowModels(catalog) {
     const provider = workflowProvider(catalog);
     if (!provider?.models?.length) return [];
@@ -103,6 +117,19 @@ export function mapHivemindWorkflowModels(catalog) {
                 supportsLoras: Boolean(workflow.supports_loras),
                 compatibleBaseModels: Array.isArray(workflow.compatible_base_models) ? workflow.compatible_base_models : [],
                 supportsIngredientImages: accepts.includes('ingredient_images'),
+                // The H3 checkpoint is the fl2va build and its node takes an
+                // optional last_frame, so a workflow declaring end_image_* can
+                // end on a supplied frame (FL2VA), or start from one (L2VA).
+                supportsEndFrame: accepts.includes('end_image_base64') || accepts.includes('end_image_path'),
+                // Scene chaining (MiniMax H3 Motion Context): a finished clip
+                // can seed the next shot's opening frames + room tone. Distinct
+                // from supportsVideoInput on purpose — video_* means the LTX
+                // extend/head-swap lane and flips that UI.
+                supportsMotionContext: accepts.includes('motion_context_base64'),
+                // MiniMax H3 Reference mode: discrete character/subject pictures
+                // (up to 9, order-preserving) instead of a start frame. Distinct
+                // from ingredient_images, which LTX stitches into one sheet.
+                supportsReferenceImages: accepts.includes('reference_images'),
                 ingredientInputs: workflow.ingredient_inputs && typeof workflow.ingredient_inputs === 'object'
                     ? workflow.ingredient_inputs
                     : null,
@@ -114,10 +141,14 @@ export function mapHivemindWorkflowModels(catalog) {
         // tierGroup; the picker collapses them into one row with a switch.
         tierGroup: workflow.tier_group || null,
         tier: workflow.tier || null,
+        beta: Boolean(workflow.beta),
         name: workflow.label || workflow.id,
         description: `${provider.label || 'Media Studio'} workflow`,
         type: 'video',
         family: 'hivemind-media-studio',
+        // Registry family (ltx-2.3 / ltx / minimax): drives which controls
+        // apply. `family` above is the display/provider grouping.
+        workflowFamily: String(workflow.family || ''),
         provider: 'hivemind-media-studio',
         needsImage: !Array.isArray(workflow.accepts) || !workflow.accepts.some((field) => String(field).startsWith('video_')),
         ready: Boolean(provider.available),
@@ -125,8 +156,18 @@ export function mapHivemindWorkflowModels(catalog) {
         aspectRatios: Array.isArray(workflow.aspect_ratios) && workflow.aspect_ratios.length
             ? workflow.aspect_ratios
             : ['16:9', '9:16', '1:1', '4:3', '3:4'],
-        durations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        // MiniMax H3 runs its 17k+5 frame grid out to ~15s and holds a scene
+        // together for the whole span, so its ceiling is 15; everything else
+        // keeps the 10s list. Past 15s H3 visibly loses subject identity
+        // (hair/wardrobe morphs), which is why the studio does not offer more.
+        durations: String(workflow.family || '').toLowerCase().startsWith('minimax')
+            ? Array.from({ length: 15 }, (_, second) => second + 1)
+            : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         defaultDuration: Number(workflow.default_duration_seconds) || 4,
+        // Registered sampling-step default — distinguishes a full-step lane
+        // (H3's 15) from a distilled turbo build (4-8), and labels the studio's
+        // step presets truthfully.
+        defaultSteps: Number(workflow.default_steps) > 0 ? Number(workflow.default_steps) : null,
         tags: ['video', 'workflow', 'local'],
     }));
 }
@@ -361,7 +402,12 @@ export async function generateHivemindVideo(params) {
     const videoSource = params.video || params.video_url;
     const videoBase64 = params.video_base64 || await mediaSourceToDataUrl(videoSource, 'video');
     const imageSource = params.image || params.image_url;
-    const imageBase64 = videoBase64
+    // Derived from the TASK, not from "is there a video". This line used to read
+    // `videoBase64 ? null : …`, which discarded the face image before the request
+    // body was even assembled — so head swap always reached the server with no
+    // face and failed claiming one was never supplied.
+    const videoExcludesImage = Boolean(videoBase64) && (params.task || 'generate') !== 'head-swap';
+    const imageBase64 = videoExcludesImage
         ? null
         : (params.image_base64 || await mediaSourceToDataUrl(imageSource, 'image'));
     // LTX 2.3 first/middle/end keyframes. Like the start frame, a saved reference
@@ -375,10 +421,23 @@ export async function generateHivemindVideo(params) {
     const endBase64 = (videoBase64 || !endSource)
         ? null
         : (params.end_image_base64 || await mediaSourceToDataUrl(endSource, 'image'));
+    // Scene chaining (MiniMax H3): the previous clip is a sealed OUTPUT, so it
+    // is decrypted in-browser like any reference and re-sent inline. It rides
+    // its own field — video_base64 means the LTX extend/head-swap lane.
+    const motionContextSource = params.motionContext || params.motion_context_url;
+    const motionContextBase64 = params.motion_context_base64
+        || await mediaSourceToDataUrl(motionContextSource, 'video');
     const ingredientImages = await ingredientImagesToRequest(params.ingredientImages);
+    // MiniMax H3 Reference mode: discrete pictures, order-preserving (<Picture N>
+    // is the Nth entry). Sealed refs decrypt in-browser and re-send inline, same
+    // as every other reference — the server holds no key to stage a path.
+    const referenceImages = await Promise.all((Array.isArray(params.referenceImages) ? params.referenceImages : [])
+        .filter(Boolean)
+        .map(async (source) => ({ image_base64: await mediaSourceToDataUrl(source, 'image') })));
     // LTX 2.3 supports text-to-video: a prompt alone is enough. Only a completely
     // empty request (no prompt and no media) is rejected.
-    if (!videoBase64 && !imageBase64 && !ingredientImages.length && !String(params.prompt || '').trim()) {
+    if (!videoBase64 && !imageBase64 && !ingredientImages.length && !referenceImages.length
+        && !String(params.prompt || '').trim()) {
         throw new Error('Enter a prompt, or add a start image or source video.');
     }
     const rawWorkflowId = params.workflow_id || workflowIdFromHivemindModelId(params.model);
@@ -394,11 +453,16 @@ export async function generateHivemindVideo(params) {
             ? { reference_description: String(params.referenceDescription).trim() }
             : {}),
         ...(ingredientImages.length ? { ingredient_images: ingredientImages } : {}),
-        ...(videoBase64
-            ? { video_base64: videoBase64, video_mode: 'extend' }
-            : imageBase64
-                ? { image_base64: imageBase64 }
-                : {}),
+        ...(referenceImages.length ? { reference_images: referenceImages } : {}),
+        // `task` was decided once in videoTasks.js and is forwarded verbatim.
+        // This layer attaches whatever media it was handed and states the task;
+        // it does NOT re-infer the job from which media are present, which is the
+        // mistake that made every attached video mean "extend".
+        task: params.task || 'generate',
+        ...(videoBase64 ? { video_base64: videoBase64 } : {}),
+        ...(imageBase64 ? { image_base64: imageBase64 } : {}),
+        ...(motionContextBase64 ? { motion_context_base64: motionContextBase64 } : {}),
+        ...(params.video_mode ? { video_mode: params.video_mode } : {}),
         ...(middleBase64 ? { middle_image_base64: middleBase64 } : {}),
         ...(endBase64 ? { end_image_base64: endBase64 } : {}),
         duration_seconds: params.duration || params.duration_seconds || 4,
@@ -414,6 +478,19 @@ export async function generateHivemindVideo(params) {
         // cfg=1 where a CFG negative prompt has no effect.
         ...(String(params.negative_prompt || '').trim() ? { negative_prompt: String(params.negative_prompt).trim() } : {}),
         ...(Number.isFinite(Number(params.nag_scale)) ? { nag_scale: Number(params.nag_scale) } : {}),
+        // The BFS adapter is attached by the head-swap task server-side; this is
+        // the operator's one knob on it.
+        ...(Number.isFinite(Number(params.head_swap_lora_strength))
+            ? { head_swap_lora_strength: Number(params.head_swap_lora_strength) } : {}),
+        ...(params.head_swap_backend ? { head_swap_backend: String(params.head_swap_backend) } : {}),
+        ...(params.head_swap_face_enhancer ? { head_swap_face_enhancer: true } : {}),
+        // Tri-state: only send an explicit choice, so leaving the toggle alone
+        // keeps whatever the registered workflow ships with.
+        ...(typeof params.spectrum === 'boolean' ? { spectrum: params.spectrum } : {}),
+        // Sampling-steps override (H3 refinement). Omitted = workflow default.
+        ...(Number.isFinite(Number(params.steps)) && Number(params.steps) > 0
+            ? { steps: Math.round(Number(params.steps)) }
+            : {}),
         ...(Array.isArray(params.loras) && params.loras.length ? { loras: params.loras } : {}),
     });
     const postJson = async (path) => {
@@ -523,6 +600,12 @@ export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds 
                     progress: typeof payload.progress === 'number' ? payload.progress : null,
                     estimateSeconds: estimate,
                     elapsedSeconds: Number(payload.elapsed_seconds) || null,
+                    // Present only when the backend reports real sampler
+                    // counters (a rented lane does); absent on paths where the
+                    // bar is still a time estimate, so the label never implies
+                    // a precision we do not have.
+                    step: Number(payload.progress_step) || null,
+                    stepTotal: Number(payload.progress_total) || null,
                 });
             }
             continue;

@@ -17,10 +17,40 @@ test('both pickers dismiss from a region that includes their trigger', () => {
         // The dismissable ref lands on the outer wrapper (which holds the trigger),
         // not on the floating panel: with it on the panel, the trigger's pointerdown
         // dismissed and its click re-opened, so the panel never closed from there.
-        assert.match(source, /const rootRef = useDismissable\(panelOpen, \(\) => setPanelOpen\(false\)\)/, `${file} names the dismissable region rootRef`);
+        // It suspends while a full-size preview is up, or closing the preview
+        // (scrim/Escape) would also tear down the panel underneath it.
+        assert.match(source, /const rootRef = useDismissable\(panelOpen && !preview\w+, \(\) => setPanelOpen\(false\)\)/, `${file} names the dismissable region rootRef`);
         assert.match(source, /ref=\{rootRef\}/, `${file} attaches it to the wrapper`);
         assert.doesNotMatch(source, /ref=\{panelRef\}/, `${file} no longer scopes dismissal to the panel alone`);
     }
+});
+
+test('a set frame or attached chip opens a full-size preview when pressed', () => {
+    // Shared preview modal: full-resolution source resolved the same E2E-aware
+    // way as Thumb (never the cached thumbnail).
+    const upload = read('src/studios/UploadPicker.jsx');
+    assert.match(upload, /export function ReferencePreview\(\{ url, name, onClose \}\)/);
+    assert.match(upload, /onPreview=\{\(\) => setPreviewUrl\(url\)\}/, 'chip thumbnails open the preview');
+
+    const frames = read('src/studios/video/FrameSlotsPicker.jsx');
+    assert.match(frames, /onClick=\{\(\) => setPreviewSlotKey\(slot\.key\)\}/, 'set slot thumbnails open the preview');
+    // Keyed by slot, not URL, so clearing the frame mid-view closes the preview.
+    assert.match(frames, /\{previewSlot\?\.url \? \(/);
+});
+
+test('armed character references dim the frames picker instead of hiding it', () => {
+    const studio = read('src/studios/VideoStudio.jsx');
+    // Hiding the picker stranded an already-set start frame: nothing on screen
+    // could change it or add the end frame until the references were cleared.
+    assert.doesNotMatch(studio, /refsArmed \? null/);
+    assert.match(studio, /inactiveNote=\{refsArmed/);
+    assert.match(studio, /ignored=\{refsArmed\}/, 'the plain start-frame picker dims its chip too');
+
+    const frames = read('src/studios/video/FrameSlotsPicker.jsx');
+    assert.match(frames, /inactiveNote = ''/);
+    // The note reaches both the trigger tooltip and the open panel.
+    assert.match(frames, /inactiveNote \? ` — \$\{inactiveNote\}` : ''/);
+    assert.match(frames, /\{inactiveNote \? \(/);
 });
 
 test('tapping the selected reference clears it instead of re-selecting', () => {
@@ -35,13 +65,32 @@ test('tapping the selected reference clears it instead of re-selecting', () => {
     assert.match(frames, /assign\(activeKey, inActiveSlot \? null : entry\.uploadedUrl\)/);
 });
 
-test('single-mode picks can keep the panel open for models with more frame slots', () => {
+test('end-frame models get the combined slots picker, never twin icon buttons', () => {
     const upload = read('src/studios/UploadPicker.jsx');
     assert.match(upload, /keepOpenOnSelect = false/);
     assert.match(upload, /if \(!keepOpenOnSelect\) setPanelOpen\(false\)/);
 
+    // FLF models (H3 FL2VA, remote first/last) render ONE FrameSlotsPicker with
+    // Start/End rows — two compact single-image pickers side by side read as
+    // identical unlabeled icon buttons.
     const studio = read('src/studios/VideoStudio.jsx');
-    assert.match(studio, /keepOpenOnSelect=\{endFrameVisible\}/);
+    assert.match(studio, /endFrameVisible \? \(/);
+    assert.match(studio, /\{ key: 'end', label: zh\(\) \? '结束帧（可选）' : 'End \(optional\)', url: s\.setup\.endImageUrl \}/);
+    assert.doesNotMatch(studio, /keepOpenOnSelect=\{endFrameVisible\}/);
+});
+
+test('character references ride their own picker and route to the reference workflow', () => {
+    const studio = read('src/studios/VideoStudio.jsx');
+    // The control shows whenever the family has a reference lane…
+    assert.match(studio, /referenceWorkflowForHivemindModel\(s\.setup\.modelId\)/);
+    assert.match(studio, /maxImages=\{9\}/);
+    // …and attached refs reroute the submission to that workflow.
+    assert.match(studio, /if \(plan\.sendReferenceImages\) \{/);
+    assert.match(studio, /localParams\.referenceImages = \(setup\.referenceImageUrls \|\| \[\]\)\.filter\(Boolean\)/);
+
+    // The plan is the single decision point: refs replace the start frame.
+    const tasks = read('src/lib/videoTasks.js');
+    assert.match(tasks, /sendImage: !setup\?\.videoUrl && !sendMotionContext && !sendReferenceImages/);
 });
 
 test('a start-frame pick that switches to a keyframe model opens that picker', () => {

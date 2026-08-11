@@ -246,6 +246,51 @@ export function Segmented({ options, value, onChange, size = 'md', className = '
   );
 }
 
+// Card-grid replacement for an aspect-ratio <select>: each option renders a
+// proportion-true shape preview plus its "W:H" label. `nameFor` optionally maps
+// a ratio to a friendly name shown above the label (kept a prop so the kit
+// stays i18n-free).
+export function AspectRatioPicker({ options, value, onChange, nameFor, disabled = false, className = '' }) {
+  return (
+    <div role="radiogroup" className={cx('grid grid-cols-3 gap-1.5', disabled && 'opacity-40', className)}>
+      {options.map((ar) => {
+        const on = ar === value;
+        const [w, h] = String(ar).split(':').map(Number);
+        const valid = w > 0 && h > 0;
+        const scale = valid ? 18 / Math.max(w, h) : 18;
+        const shapeW = valid ? Math.max(7, Math.round(w * scale)) : 18;
+        const shapeH = valid ? Math.max(7, Math.round(h * scale)) : 18;
+        const name = nameFor ? nameFor(ar) : null;
+        return (
+          <button
+            key={ar}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            disabled={disabled}
+            onClick={() => onChange(ar)}
+            className={cx(
+              'flex flex-col items-center gap-1 rounded-md border px-1 pb-1.5 pt-2 transition-colors duration-150',
+              on ? 'border-honey/70 bg-honey/10' : 'border-line1 bg-bg2 hover:border-line2',
+            )}
+          >
+            <span className="flex h-[20px] items-center justify-center">
+              <span
+                className={cx('rounded-[3px] border', on ? 'border-honey bg-honey/30' : 'border-line2 bg-bg3')}
+                style={{ width: shapeW, height: shapeH }}
+              />
+            </span>
+            {name ? (
+              <span className={cx('text-[11px] font-medium leading-none', on ? 'text-ink1' : 'text-ink2')}>{name}</span>
+            ) : null}
+            <span className={cx('font-mono text-[10px] leading-none', on ? 'text-ink2' : 'text-ink3')}>{ar}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Toggle({ checked, onChange, label, disabled = false }) {
   return (
     <button

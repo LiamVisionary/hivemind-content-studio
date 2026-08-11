@@ -606,9 +606,13 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
     try {
       const job = await requestJson(`${ZIMAGE_URL}/api/job/${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${token}` } });
       if (job.status === 'success' && job.image_urls?.[0]) {
-        const imgUrl = job.image_urls[0].startsWith('http') ? job.image_urls[0] : `${ZIMAGE_URL}${job.image_urls[0]}`;
-        const img = await requestBuffer(imgUrl, { Authorization: `Bearer ${token}` });
-        job.url = `data:${String(img.contentType).split(';')[0]};base64,${img.buffer.toString('base64')}`;
+        // The gateway lists every output here — including .mp4 (RIFE
+        // interpolation). The content type says which kind came back.
+        const mediaUrl = job.image_urls[0].startsWith('http') ? job.image_urls[0] : `${ZIMAGE_URL}${job.image_urls[0]}`;
+        const media = await requestBuffer(mediaUrl, { Authorization: `Bearer ${token}` });
+        const contentType = String(media.contentType).split(';')[0];
+        job.url = `data:${contentType};base64,${media.buffer.toString('base64')}`;
+        job.mediaType = contentType.startsWith('video/') ? 'video' : 'image';
       }
       return sendJson(res, 200, job);
     } catch (e) { return sendJson(res, 502, { status: 'error', error: e.message }); }
@@ -652,6 +656,68 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         if (body.couple_split != null) payload.couple_split = Number(body.couple_split);
         if (body.couple_pair) payload.couple_pair = String(body.couple_pair);
       }
+      // Strength Hunt (Mix-Studio port): 1-2 LoRA ids whose strength the gateway
+      // sweeps in one job. Only meaningful on backends whose runner supports it;
+      // the gateway validates the ids against the submitted LoRA selection.
+      if (body.strength_hunt && Array.isArray(body.strength_hunt.lora_ids) && body.strength_hunt.lora_ids.length) {
+        payload.strength_hunt = { lora_ids: body.strength_hunt.lora_ids.slice(0, 2).map(String) };
+      }
+      // Character Sheet (Civitai multi-view port): a preset name or explicit
+      // view ids; the gateway validates against its view registry and runs
+      // one Klein edit per view before compositing the labeled sheet.
+      if (body.character_sheet && typeof body.character_sheet === 'object') {
+        const sheet = {};
+        if (body.character_sheet.preset) sheet.preset = String(body.character_sheet.preset);
+        if (Array.isArray(body.character_sheet.views) && body.character_sheet.views.length) {
+          sheet.views = body.character_sheet.views.slice(0, 12).map(String);
+        }
+        if (sheet.preset || sheet.views) payload.character_sheet = sheet;
+      }
+      // Canvas expansion (Mix-Studio port): centered pixel-preserving outpaint
+      // to an explicit target canvas. Needs the source image alongside it.
+      if (body.outpaint && Number(body.outpaint.width) > 0 && Number(body.outpaint.height) > 0) {
+        payload.outpaint = {
+          width: Math.round(Number(body.outpaint.width)),
+          height: Math.round(Number(body.outpaint.height)),
+          ...(Number(body.outpaint.feathering) >= 0 ? { feathering: Math.round(Number(body.outpaint.feathering)) } : {}),
+        };
+      }
+      // Masked edit (soft inpaint): the browser paints a white-on-black mask
+      // and sends it as a data URL alongside the source image.
+      if (body.inpaint && typeof body.inpaint.mask_base64 === 'string' && body.inpaint.mask_base64) {
+        payload.inpaint = {
+          mask_base64: body.inpaint.mask_base64,
+          ...(body.inpaint.mask_expand != null ? { mask_expand: Math.round(Number(body.inpaint.mask_expand)) } : {}),
+          ...(body.inpaint.mask_influence != null ? { mask_influence: Math.round(Number(body.inpaint.mask_influence)) } : {}),
+        };
+      }
+      // Additional references (Klein conditions on up to 3 images total):
+      // data URLs pass through; an absolute http(s) entry is fetched here the
+      // same way the primary image_url is. Sealed reference paths must arrive
+      // already decrypted as data URLs — this host holds no vault key.
+      if (Array.isArray(body.images_base64) && body.images_base64.length) {
+        const extras = [];
+        for (const entry of body.images_base64.slice(0, 3)) {
+          const value = String(entry || '').trim();
+          if (!value) continue;
+          if (value.startsWith('data:')) {
+            extras.push(value);
+          } else if (/^https?:\/\//i.test(value)) {
+            const source = await requestBuffer(value);
+            if (/hivemind\.e2e/i.test(String(source.contentType))) {
+              return sendJson(res, 400, {
+                error: 'A reference in images_base64 is end-to-end encrypted — decrypt it in the browser and send a data URL.',
+              });
+            }
+            extras.push(`data:${String(source.contentType).split(';')[0]};base64,${source.buffer.toString('base64')}`);
+          } else {
+            return sendJson(res, 400, {
+              error: 'images_base64 entries must be data URLs (or absolute http(s) URLs) — this host cannot read a sealed reference path.',
+            });
+          }
+        }
+        if (extras.length) payload.images_base64 = extras;
+      }
       if (body.image_base64) {
         payload.image_base64 = body.image_base64;
       } else if (body.image_url) {
@@ -677,6 +743,26 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(payload),
+      });
+      return sendJson(res, 202, submitted);
+    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+  }
+  if (pathname === '/local-ai/interpolate' && req.method === 'POST') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });
+    try {
+      // Whole clips ride as base64 — the default JSON cap would reject them.
+      const body = JSON.parse((await readBody(req, 512 * 1024 * 1024)).toString('utf8') || '{}');
+      if (!body.video_base64) return sendJson(res, 400, { error: 'video_base64 is required' });
+      const payload = {
+        video_base64: body.video_base64,
+        factor: Number(body.factor) === 4 ? 4 : 2,
+      };
+      const submitted = await requestJson(`${ZIMAGE_URL}/api/interpolate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+        timeout: 180000,
       });
       return sendJson(res, 202, submitted);
     } catch (e) { return sendJson(res, 502, { error: e.message }); }

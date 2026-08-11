@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import urllib.error
 from pathlib import Path
@@ -8,6 +9,7 @@ import pytest
 
 from hivemind_content_studio.media_studio import (
     MediaStudioDescriptor,
+    _comfy_history_error,
     _private_video_url,
     _reachable,
     _token,
@@ -153,6 +155,129 @@ def test_private_output_lookup_uses_server_auth_without_returning_it_through_mcp
     assert requests[0].get_header("Authorization") == "Bearer server-private-token"
 
 
+def test_remote_lane_failure_reason_is_read_from_the_private_history() -> None:
+    # MCP receipts are machine-redacted and remote prompts have no /api/job
+    # record, so this history read is the only thing standing between the user
+    # and "Media Studio reported a failed generation" (2026-08-07).
+    history = {
+        "prompt-1": {
+            "status": {
+                "status_str": "error",
+                "completed": True,
+                "messages": [[
+                    "hivemind_remote_error",
+                    {"error": "SpectrumApplyMiniMaxH3 (node 30) failed — ValueError: bootstrap_first_forecast requires degree == 1"},
+                ]],
+            },
+            "outputs": {},
+        }
+    }
+    assert "bootstrap_first_forecast" in _comfy_history_error(history)
+
+
+def _descriptor_for_check() -> MediaStudioDescriptor:
+    return MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key="TEST_MEDIA_STUDIO_TOKEN",
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="minimax-h3",
+    )
+
+
+def test_in_flight_remote_job_takes_status_and_progress_from_the_private_record(monkeypatch) -> None:
+    # The MCP answers 404 for a remote prompt's whole life and its receipts are
+    # machine-redacted (no progress field survives), so without the gateway's
+    # own job record the studio sees neither state nor progress.
+    from hivemind_content_studio import media_studio
+
+    monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor: object())
+    monkeypatch.setattr(media_studio, "_result_json", lambda _call: {"ok": False, "error": "MediaStudioError", "status": 404})
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor: type("C", (), {"call_tool": lambda *a, **k: None})())
+    monkeypatch.setattr(
+        media_studio, "_private_json",
+        lambda descriptor, path: {"id": "p1", "status": "running", "progress": 0.45, "backend": "comfy-remote"},
+    )
+
+    state = media_studio.check_video("p1")
+    assert state["status"] == "running"
+    assert state["progress"] == 0.45
+    assert state["failed"] is False
+
+
+def test_step_counters_surface_only_when_the_backend_measures_them(monkeypatch) -> None:
+    from hivemind_content_studio import media_studio
+
+    monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor: type("C", (), {"call_tool": lambda *a, **k: None})())
+    monkeypatch.setattr(media_studio, "_result_json", lambda _call: {"ok": False, "status": 404})
+
+    monkeypatch.setattr(
+        media_studio, "_private_json",
+        lambda descriptor, path: {"status": "running", "progress": 0.36, "progress_step": 6, "progress_total": 15},
+    )
+    measured = media_studio.check_video("p3")
+    assert (measured["progress_step"], measured["progress_total"]) == (6, 15)
+
+    # A backend without counters must not invent them: the label would imply a
+    # precision the time-based bar does not have.
+    monkeypatch.setattr(media_studio, "_private_json", lambda descriptor, path: {"status": "running"})
+    assert "progress_step" not in media_studio.check_video("p4")
+
+
+def test_finished_remote_job_resolves_the_sealed_output_url(monkeypatch) -> None:
+    from hivemind_content_studio import media_studio
+
+    monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor: type("C", (), {"call_tool": lambda *a, **k: None})())
+    monkeypatch.setattr(media_studio, "_result_json", lambda _call: {"ok": False, "error": "MediaStudioError", "status": 404})
+    monkeypatch.setattr(
+        media_studio, "_private_json",
+        lambda descriptor, path: {
+            "id": "p2", "status": "success",
+            "image_urls": ["/image/cmf-p2-clip.mp4"],
+        },
+    )
+
+    state = media_studio.check_video("p2")
+    assert state["status"] == "success"
+    # Resolved against the studio's own gateway origin, so the finisher can
+    # download the sealed envelope instead of spinning to the poll limit.
+    assert state["video_url"] == "http://127.0.0.1:8788/image/cmf-p2-clip.mp4"
+
+
+def test_native_execution_errors_surface_the_node_but_not_its_inputs() -> None:
+    history = {
+        "prompt-2": {
+            "status": {
+                "status_str": "error",
+                "messages": [[
+                    "execution_error",
+                    {
+                        "node_id": "6",
+                        "node_type": "UNETLoader",
+                        "exception_type": "FileNotFoundError",
+                        "exception_message": "model is missing",
+                        "current_inputs": {"prompt": ["a private prompt the customer typed"]},
+                    },
+                ]],
+            },
+        }
+    }
+    message = _comfy_history_error(history)
+    assert message == "UNETLoader node 6 failed — model is missing"
+    assert "private prompt" not in message
+
+
+def test_a_successful_history_reports_no_error() -> None:
+    assert _comfy_history_error({"p": {"status": {"status_str": "success", "messages": []}}}) == ""
+    assert _comfy_history_error({}) == ""
+
+
 def test_private_output_lookup_supports_comfy_video_history(monkeypatch) -> None:
     descriptor = MediaStudioDescriptor(
         app_id="test",
@@ -256,7 +381,7 @@ def test_video_generation_removes_uploaded_reference_and_qa_frame(tmp_path: Path
         "hivemind_content_studio.media_studio._delete_uploaded_image",
         lambda _descriptor, name: deleted_inputs.append(name),
     )
-    monkeypatch.setattr("hivemind_content_studio.media_studio._video_dimensions", lambda _path: (768, 768))
+    monkeypatch.setattr("hivemind_content_studio.media_studio._video_dimensions", lambda _path, **_kwargs: (768, 768))
 
     result = generate_video(
         image_path=image,
@@ -299,7 +424,7 @@ def test_video_generation_surfaces_private_backend_error_and_removes_upload(tmp_
     monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
     monkeypatch.setattr("hivemind_content_studio.media_studio._upload_image", lambda *_args: "uploaded-start.png")
     monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
-    monkeypatch.setattr("hivemind_content_studio.media_studio._video_dimensions", lambda _path: (768, 448))
+    monkeypatch.setattr("hivemind_content_studio.media_studio._video_dimensions", lambda _path, **_kwargs: (768, 448))
     monkeypatch.setattr("hivemind_content_studio.media_studio.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(
         "hivemind_content_studio.media_studio._private_json",
@@ -468,6 +593,37 @@ def test_video_dimensions_support_a_high_resolution_tier() -> None:
         assert abs((width / height) - (nominal_w / nominal_h)) / (nominal_w / nominal_h) <= 0.05
 
 
+def test_video_dimensions_support_the_max_native_tier() -> None:
+    # "max" is MiniMax H3's native canvas (~1.0MP, 768px short edge at 16:9) —
+    # the community-measured quality knee. Nothing above ~1.05MP is offered
+    # because H3 grows less coherent past 1MP.
+    assert video_dimensions_for_request(aspect_ratio="16:9", resolution="max") == (1344, 768)
+    assert video_dimensions_for_request(aspect_ratio="9:16", resolution="Max") == (768, 1344)
+    for aspect, (width, height) in {
+        "16:9": (1344, 768), "9:16": (768, 1344), "4:3": (1152, 864),
+        "3:4": (864, 1152), "1:1": (1024, 1024),
+    }.items():
+        assert video_dimensions_for_request(aspect_ratio=aspect, resolution="max") == (width, height)
+        assert width % 32 == 0 and height % 32 == 0
+        assert width * height <= 1_050_000, "the max tier must stay at H3's ~1MP stability ceiling"
+        nominal_w, nominal_h = (int(part) for part in aspect.split(":"))
+        assert abs((width / height) - (nominal_w / nominal_h)) / (nominal_w / nominal_h) <= 0.05
+
+
+def test_matched_aspect_video_dimensions_snap_to_the_two_stage_grid(tmp_path: Path) -> None:
+    # No fixed aspect: dimensions derive from the source frame. The two-stage
+    # LTX pipelines floor anything not divisible by 64 (928 -> 896), so the
+    # derived request must already sit on that grid.
+    from PIL import Image
+
+    source = tmp_path / "anchor.png"
+    Image.new("RGB", (1024, 1024)).save(source)
+    assert video_dimensions_for_request(image=source, resolution="high") == (896, 896)
+    for resolution in ("", "high", "max"):
+        width, height = video_dimensions_for_request(image=source, resolution=resolution)
+        assert width % 64 == 0 and height % 64 == 0
+
+
 def test_video_generation_forwards_high_resolution_dimensions(tmp_path: Path, monkeypatch) -> None:
     descriptor = MediaStudioDescriptor(
         app_id="test",
@@ -606,3 +762,140 @@ def test_video_generation_forwards_the_grain_cleanup_choice(tmp_path: Path, monk
     # Unknown tiers are dropped rather than forwarded to the runner.
     start_video(prompt="a slow push in", duration_seconds=2, denoise="nuclear")
     assert "denoise" not in captured
+
+
+def test_spectrum_toggle_is_tri_state_towards_the_mcp(monkeypatch) -> None:
+    """Only an explicit choice may override the registered graph.
+
+    Spectrum trades fidelity for speed (measured: 50s vs 105s sampling, softer
+    detail), so it is user-switchable — but a caller that says nothing must get
+    whatever the workflow ships with, not a value this layer invented."""
+    from hivemind_content_studio import media_studio
+
+    sent: list[dict] = []
+
+    class Client:
+        def call_tool(self, name, arguments):
+            sent.append(arguments)
+            return {"content": [{"type": "text", "text": json.dumps({"id": "job-1"})}]}
+
+    monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor: Client())
+    monkeypatch.setattr(media_studio, "_upload_image", lambda *a, **k: "ref.png")
+
+    for choice in (None, True, False):
+        sent.clear()
+        with contextlib.suppress(Exception):
+            media_studio.start_video(prompt="a lighthouse", spectrum=choice, duration_seconds=5)
+        if not sent:
+            continue
+        if choice is None:
+            assert "spectrum" not in sent[0], "silence must not override the workflow default"
+        else:
+            assert sent[0]["spectrum"] is choice
+
+
+def test_steps_override_rides_the_params_record_to_the_mcp(monkeypatch) -> None:
+    """The refinement setting (MiniMax H3 32-step preset) travels as
+    params.steps — the MCP's registry-slot channel — and silence keeps the
+    workflow's registered step count."""
+    from hivemind_content_studio import media_studio
+
+    sent: list[dict] = []
+
+    class Client:
+        def call_tool(self, name, arguments):
+            sent.append(arguments)
+            return {"content": [{"type": "text", "text": json.dumps({"id": "job-1"})}]}
+
+    monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor: Client())
+    monkeypatch.setattr(media_studio, "_upload_image", lambda *a, **k: "ref.png")
+
+    for choice, expected in ((None, None), (32, {"steps": 32}), (0, None)):
+        sent.clear()
+        with contextlib.suppress(Exception):
+            media_studio.start_video(prompt="a lighthouse", steps=choice, duration_seconds=5)
+        if not sent:
+            continue
+        if expected is None:
+            assert "params" not in sent[0], "no override must mean no params record"
+        else:
+            assert sent[0]["params"] == expected
+
+
+def test_start_video_uploads_and_forwards_the_motion_context_clip(tmp_path: Path, monkeypatch) -> None:
+    """Scene chaining: the previous clip uploads like any video input, but its
+    gateway name travels as motion_context_path — never video_path, which would
+    flip the LTX extension lane."""
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="minimax-h3",
+    )
+    clip = tmp_path / "shot-1.mp4"
+    clip.write_bytes(b"previous-clip")
+    captured: dict = {}
+    uploads: list[str] = []
+
+    class Client:
+        def call_tool(self, name, arguments):
+            captured.update(arguments)
+            assert name == descriptor.tool
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({"job": {"id": "job-chain", "status": "queued"}}),
+                }],
+            }
+
+    def fake_upload_video(_descriptor, video):
+        uploads.append(str(video))
+        return "media-studio-input-chain.mp4"
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._upload_video", fake_upload_video)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+
+    started = start_video(
+        motion_context_path=clip,
+        prompt="the scene continues from the previous shot",
+        duration_seconds=5,
+    )
+
+    assert uploads == [str(clip)]
+    assert captured["motion_context_path"] == "media-studio-input-chain.mp4"
+    assert "video_path" not in captured
+    assert "video_mode" not in captured
+    assert started["job_id"] == "job-chain"
+    assert "media-studio-input-chain.mp4" in started["uploaded_names"]
+
+
+def test_start_video_refuses_motion_context_plus_source_video(tmp_path: Path, monkeypatch) -> None:
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="minimax-h3",
+    )
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    clip = tmp_path / "shot-1.mp4"
+    clip.write_bytes(b"previous-clip")
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source-video")
+    with pytest.raises(ValueError, match="cannot be combined"):
+        start_video(
+            motion_context_path=clip,
+            video_path=source,
+            prompt="x",
+            duration_seconds=2,
+        )

@@ -27,6 +27,21 @@ test('the save dialog can target an existing entry instead of retyping its name'
     assert.doesNotMatch(body, /onSave/);
 });
 
+test('the groups menu scopes the list to the current base model', () => {
+    const menu = read('src/studios/image/LoraGroupsMenu.jsx');
+    // Partition by the shared base matcher (loraSelection.test.js proves its verdicts).
+    assert.match(menu, /matching = entries\.filter\(\(entry\) => loraGroupMatchesBase\(entry\.data, \{ baseModelId, baseModels \}\)\)/);
+    assert.match(menu, /other = entries\.filter\(\(entry\) => !loraGroupMatchesBase\(/);
+    // Other-model groups stay reachable behind a toggle, never listed as if they fit.
+    assert.match(menu, /Other models \(\{other\.length\}\)/);
+    assert.match(menu, /\{showOther \? other\.map\(\(entry\) => row\(entry, true\)\) : null\}/);
+    // Saving records the family so new groups scope by family, not just model id.
+    assert.match(menu, /loraGroupFromSelection\(getSelection\?\.\(\) \|\| selection, \{ baseModelId, baseLabel, baseModels \}\)/);
+    // Both studios feed the matcher their base families.
+    assert.match(read('src/studios/ImageStudio.jsx'), /baseModels=\{s\.loraBaseModels\}/);
+    assert.match(read('src/studios/VideoStudio.jsx'), /baseModels=\{loraModel\.compatibleBaseModels \|\| \[\]\}/);
+});
+
 test('the LoRA group saver lists the saved groups and pre-aims at the loaded one', () => {
     const menu = read('src/studios/image/LoraGroupsMenu.jsx');
     assert.match(menu, /existing=\{entries\.map\(\(entry\) => \(\{ id: entry\.id, name: entry\.name, hint: groupSummary\(entry\.data\) \}\)\)\}/);

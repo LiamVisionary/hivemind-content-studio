@@ -27,8 +27,10 @@ export default defineConfig({
             // Dev-only: forward studio API calls to the local control API so
             // the hub views work on the vite dev server. Machine-allowed
             // routes respond without an owner session; owner-gated routes 401.
+            // OPENGEN_API_PROXY points the same proxy at a fixture/mock API for
+            // owner-gate-free UI verification; unset, nothing changes.
             '/api': {
-                target: 'http://127.0.0.1:8765',
+                target: process.env.OPENGEN_API_PROXY || 'http://127.0.0.1:8765',
                 changeOrigin: true,
             },
             // Local-AI bridge straight to the loopback hosted-server (8794),

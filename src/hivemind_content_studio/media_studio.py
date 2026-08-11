@@ -44,6 +44,25 @@ _VIDEO_ASPECT_DIMENSIONS_HIGH = {
     "1:1": (896, 896),
 }
 
+# The max tier targets ~1.0MP — MiniMax H3's trained canvas (768px short edge at
+# 16:9). Capped here on purpose: community testing puts H3's quality knee at
+# 0.8-1.0MP and reports the model getting less coherent above it, so no bucket
+# goes past ~1.05MP. Divisible by 32 like the other tiers.
+_VIDEO_ASPECT_DIMENSIONS_MAX = {
+    "16:9": (1344, 768),
+    "9:16": (768, 1344),
+    "4:3": (1152, 864),
+    "3:4": (864, 1152),
+    "1:1": (1024, 1024),
+}
+
+# Pixel budgets + long-side caps per tier for start-frame-matched dimensions.
+_VIDEO_TIER_AREAS = {
+    "standard": (768 * 448, 1024),
+    "high": (1216 * 704, 1216),
+    "max": (1344 * 768, 1344),
+}
+
 
 @dataclass(frozen=True)
 class MediaStudioDescriptor:
@@ -136,10 +155,16 @@ def start_video(
     middle_image_path: str | Path | None = None,
     end_image_path: str | Path | None = None,
     video_path: str | Path | None = None,
+    motion_context_path: str | Path | None = None,
     video_mode: str = "extend",
+    task: str = "generate",
     prompt: str,
     reference_description: str = "",
     ingredient_images: list[dict[str, Any]] | None = None,
+    # MiniMax H3 Reference mode: discrete pictures carried into the clip, in
+    # order — reference N is the prompt's <Picture N>. Distinct from
+    # ingredient_images, which LTX stitches into one conditioning sheet.
+    reference_images: list[str | Path] | None = None,
     duration_seconds: float = 4,
     aspect_ratio: str = "",
     resolution: str = "",
@@ -148,6 +173,11 @@ def start_video(
     denoise: str = "",
     negative_prompt: str = "",
     nag_scale: float | None = None,
+    head_swap_lora_strength: float | None = None,
+    head_swap_backend: str | None = None,
+    head_swap_face_enhancer: bool = False,
+    spectrum: bool | None = None,
+    steps: int | None = None,
     loras: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate + upload the inputs and enqueue the generation, returning as
@@ -165,6 +195,7 @@ def start_video(
     if str(workflow_id or "").strip().lower() == "workflow-default":
         workflow_id = None
     video = Path(video_path).expanduser().resolve() if video_path else None
+    motion_context = Path(motion_context_path).expanduser().resolve() if motion_context_path else None
     image = Path(image_path).expanduser().resolve() if image_path else None
     # First/middle/end keyframes only apply to image-driven generation, never to
     # video extension (which continues an existing clip rather than anchoring one).
@@ -179,8 +210,18 @@ def start_video(
     ]
     if len(ingredients) > 12:
         raise ValueError("At most 12 ingredient reference images are supported")
+    references = [Path(str(item)).expanduser().resolve() for item in (reference_images or [])]
+    if len(references) > 9:
+        raise ValueError("At most 9 reference images are supported")
+    for reference in references:
+        if not reference.is_file():
+            raise FileNotFoundError(f"Reference image not found: {reference}")
     if video is not None and not video.is_file():
         raise FileNotFoundError(f"Input video not found: {video}")
+    if motion_context is not None and not motion_context.is_file():
+        raise FileNotFoundError(f"Motion-context clip not found: {motion_context}")
+    if motion_context is not None and video is not None:
+        raise ValueError("A motion-context clip seeds a new shot and cannot be combined with a source video")
     if image is not None and not image.is_file():
         raise FileNotFoundError(f"Input image not found: {image}")
     if middle is not None and not middle.is_file():
@@ -192,21 +233,33 @@ def start_video(
         raise FileNotFoundError(f"Ingredient reference not found: {missing_ingredient}")
     if video is None and image is None and not ingredients and not prompt.strip():
         raise FileNotFoundError("An input image, source video, ingredient reference, or prompt is required")
-    if video is not None and video_mode != "extend":
+    head_swap = task == "head-swap"
+    if video is not None and not head_swap and video_mode != "extend":
         raise ValueError("video_mode must be extend")
+    if head_swap and (video is None or image is None):
+        raise FileNotFoundError("Head swap needs both a source video and a face image")
     uploaded_names: list[str] = []
     try:
-        uploaded_name = _upload_video(descriptor, video) if video is not None else (
-            _upload_image(descriptor, image) if image is not None else ""
-        )
-        if uploaded_name:
-            uploaded_names.append(uploaded_name)
+        # Upload each medium under its own name. These used to share one variable,
+        # so a request carrying BOTH (head swap) uploaded only the video and then
+        # passed the video's filename as image_path.
+        uploaded_video_name = _upload_video(descriptor, video) if video is not None else ""
+        if uploaded_video_name:
+            uploaded_names.append(uploaded_video_name)
+        uploaded_motion_context_name = _upload_video(descriptor, motion_context) if motion_context is not None else ""
+        if uploaded_motion_context_name:
+            uploaded_names.append(uploaded_motion_context_name)
+        uploaded_image_name = _upload_image(descriptor, image) if image is not None else ""
+        if uploaded_image_name:
+            uploaded_names.append(uploaded_image_name)
         middle_name = _upload_image(descriptor, middle) if middle is not None else ""
         if middle_name:
             uploaded_names.append(middle_name)
         end_name = _upload_image(descriptor, end) if end is not None else ""
         if end_name:
             uploaded_names.append(end_name)
+        reference_names = [_upload_image(descriptor, reference) for reference in references]
+        uploaded_names.extend(name for name in reference_names if name)
         uploaded_ingredients = []
         for item in ingredients:
             name = _upload_image(descriptor, item["image_path"])
@@ -218,11 +271,17 @@ def start_video(
         client = _client(descriptor)
         arguments: dict[str, Any] = {
             **({"workflow_id": workflow_id or descriptor.workflow_id} if workflow_id or descriptor.workflow_id else {}),
-            **({"video_path": uploaded_name, "video_mode": video_mode} if video is not None else {}),
+            **({"video_path": uploaded_video_name} if video is not None else {}),
+            **({"motion_context_path": uploaded_motion_context_name} if motion_context is not None else {}),
+            **({"video_mode": video_mode} if video is not None and not head_swap else {}),
+            **({"task": task} if task != "generate" else {}),
+            **({"head_swap": True} if head_swap else {}),
             **({"ingredient_images": uploaded_ingredients} if uploaded_ingredients else {}),
-            **({"image_path": uploaded_name} if image is not None else {}),
+            **({"image_path": uploaded_image_name} if image is not None else {}),
             **({"middle_image_path": middle_name} if middle_name else {}),
             **({"end_image_path": end_name} if end_name else {}),
+            **({"reference_images": [{"image_path": name} for name in reference_names]}
+               if reference_names else {}),
             # Forward a concrete seed so each run differs; a missing/-1 seed makes the
             # runner fall back to its FIXED default (42), which is why "every video
             # looked the same". Callers send a fresh random seed for random mode.
@@ -231,6 +290,18 @@ def start_video(
             **({"denoise": denoise} if denoise in {"light", "strong"} else {}),
         **({"negative_prompt": negative_prompt.strip()} if negative_prompt.strip() else {}),
         **({"nag_scale": float(nag_scale)} if nag_scale is not None else {}),
+        # The BFS adapter itself is supplied by the head-swap task server-side;
+        # this is the only part of it a caller sets.
+        **({"head_swap_lora_strength": float(head_swap_lora_strength)}
+           if head_swap and head_swap_lora_strength is not None else {}),
+        **({"head_swap_backend": str(head_swap_backend)} if head_swap and head_swap_backend else {}),
+        **({"head_swap_face_enhancer": True} if head_swap and head_swap_face_enhancer else {}),
+        # Tri-state on purpose: None leaves the workflow's own default alone,
+        # so only an explicit user choice overrides the registered graph.
+        **({"spectrum": bool(spectrum)} if spectrum is not None else {}),
+        # Sampling steps override, forwarded through the MCP's registry-slot
+        # params record. None keeps the workflow's registered default.
+        **({"params": {"steps": int(steps)}} if isinstance(steps, int) and steps > 0 else {}),
             "frames": frames,
             "frame_rate": frame_rate,
             "duration_seconds": duration,
@@ -301,6 +372,17 @@ def _looks_like_e2e_envelope(path: Path) -> bool:
     return bool(payload.get("wrapped_dek")) and bool(payload.get("ciphertext"))
 
 
+def _job_step_counts(payload: Any) -> tuple[int | None, int | None]:
+    candidates = (payload, payload.get("job"), payload.get("result")) if isinstance(payload, dict) else ()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        step, total = candidate.get("progress_step"), candidate.get("progress_total")
+        if isinstance(step, int) and isinstance(total, int) and total > 0:
+            return max(0, min(step, total)), total
+    return None, None
+
+
 def _job_progress(payload: Any) -> float | None:
     candidates = (payload, payload.get("job"), payload.get("result")) if isinstance(payload, dict) else ()
     for candidate in candidates:
@@ -309,30 +391,61 @@ def _job_progress(payload: Any) -> float | None:
     return None
 
 
+_TERMINAL_STATUS_RE = re.compile(r"\b(success|succeeded|complete|completed|error|failed|cancelled|canceled|running|queued)\b")
+
+
 def check_video(job_id: str) -> dict[str, Any]:
     """One non-blocking status poll for a started job."""
     descriptor = _required_descriptor()
     client = _client(descriptor)
     payload = _result_json(client.call_tool(descriptor.job_tool, {"id": job_id, "include_urls": True}))
+
+    cached: dict[str, Any] = {}
+
+    def private_job() -> dict[str, Any]:
+        """The gateway's own record, over the trusted channel. MCP receipts are
+        machine-redacted (no progress, no error, no URLs), and for a prompt on a
+        remote lane the MCP has nothing at all until the job ends — it answers
+        404 for the entire generation. This is what the studio actually runs on."""
+        if not cached:
+            with contextlib.suppress(Exception):
+                cached.update(_private_json(descriptor, f"/api/job/{quote(job_id, safe='')}") or {})
+        return cached
+
     status = _generation_status(payload)
+    if not _TERMINAL_STATUS_RE.search(status):
+        # e.g. the MCP's '404' for an in-flight remote prompt.
+        status = _generation_status(private_job()) or status
     failed = bool(re.search(r"\b(error|failed|cancelled|canceled)\b", status))
     error = ""
     if failed:
-        error = _generation_error(payload)
+        error = _generation_error(payload) or _generation_error(private_job())
         if not error:
             with contextlib.suppress(Exception):
-                error = _generation_error(_private_json(descriptor, f"/api/job/{quote(job_id, safe='')}"))
+                error = _comfy_history_error(
+                    _private_json(descriptor, f"/comfy/api/history/{quote(job_id, safe='')}")
+                )
     video_url = _first_video_url(payload)
     if not video_url and re.search(r"\b(success|succeeded|complete|completed)\b", status):
         with contextlib.suppress(Exception):
             video_url = _private_video_url(descriptor, job_id)
-    return {
+    progress = _job_progress(payload)
+    if progress is None:
+        progress = _job_progress(private_job())
+    state = {
         "status": status or "running",
         "failed": failed,
         "error": error,
         "video_url": video_url,
-        "progress": _job_progress(payload),
+        "progress": progress,
     }
+    # Step counters when the backend has them: a bar that says "step 6 of 15"
+    # is legible in a way a percentage alone is not, especially across the
+    # long tail after the last step where the bar stops moving.
+    step, total = _job_step_counts(private_job())
+    if step is not None and total:
+        state["progress_step"], state["progress_total"] = step, total
+    return state
 
 
 def finish_video(
@@ -391,11 +504,11 @@ def finish_video(
 
 
 def cancel_video(job_id: str) -> bool:
-    """Best-effort request to stop a running backend video job. There is no MCP
-    cancel tool and native MLX runs cannot be interrupted mid-step, so this asks the
-    studio backend directly and reports whether it acknowledged. Returns False when
-    no backend interrupt is available — the caller still resets the UI so a stuck or
-    finished job unblocks the studio either way."""
+    """Best-effort request to stop a running backend video job. The gateway's
+    cancel route terminates a native MLX render's subprocess and interrupts /
+    dequeues Comfy-routed prompts; it reports back whether anything was actually
+    interrupted. Returns False when no backend interrupt happened — the caller
+    still resets the UI so a stuck or finished job unblocks the studio either way."""
     descriptor = discover_media_studio()
     if descriptor is None:
         return False
@@ -408,8 +521,15 @@ def cancel_video(job_id: str) -> bool:
         try:
             request = urllib.request.Request(f"{base}{path}", data=b"{}", method="POST", headers=headers)
             with urllib.request.urlopen(request, timeout=10) as response:
-                if 200 <= int(getattr(response, "status", 200)) < 300:
+                if not 200 <= int(getattr(response, "status", 200)) < 300:
+                    continue
+                try:
+                    payload = json.loads(response.read().decode("utf-8") or "{}")
+                except Exception:
                     return True
+                # Older gateways answer with a bare 200; only a reply that
+                # explicitly says nothing was interrupted counts as False.
+                return bool(payload.get("interrupted", True)) if isinstance(payload, dict) else True
         except Exception:
             continue
     return False
@@ -421,35 +541,51 @@ def generate_video(
     middle_image_path: str | Path | None = None,
     end_image_path: str | Path | None = None,
     video_path: str | Path | None = None,
+    motion_context_path: str | Path | None = None,
     video_mode: str = "extend",
+    task: str = "generate",
     prompt: str,
     reference_description: str = "",
     ingredient_images: list[dict[str, Any]] | None = None,
+    reference_images: list[str | Path] | None = None,
     duration_seconds: float = 4,
     aspect_ratio: str = "",
     resolution: str = "",
     workflow_id: str | None = None,
     loras: list[dict[str, Any]] | None = None,
+    head_swap_lora_strength: float | None = None,
+    head_swap_backend: str | None = None,
+    head_swap_face_enhancer: bool = False,
     output_dir: str | Path | None = None,
     poll_interval_seconds: float = 6,
     # 45 minutes at the default interval — high-resolution LTX runs regularly
     # exceed the old 9-minute budget (a 13-minute job hit the cap live).
     max_polls: int = 450,
+    spectrum: bool | None = None,
+    steps: int | None = None,
 ) -> dict[str, Any]:
     started = start_video(
+        task=task,
         image_path=image_path,
         middle_image_path=middle_image_path,
         end_image_path=end_image_path,
         video_path=video_path,
+        motion_context_path=motion_context_path,
         video_mode=video_mode,
         prompt=prompt,
         reference_description=reference_description,
         ingredient_images=ingredient_images,
+        reference_images=reference_images,
         duration_seconds=duration_seconds,
         aspect_ratio=aspect_ratio,
         resolution=resolution,
         workflow_id=workflow_id,
         loras=loras,
+        head_swap_lora_strength=head_swap_lora_strength,
+        head_swap_backend=head_swap_backend,
+        head_swap_face_enhancer=head_swap_face_enhancer,
+        spectrum=spectrum,
+        steps=steps,
     )
     return finish_video(
         started["job_id"],
@@ -580,22 +716,25 @@ def _upload_input(descriptor: MediaStudioDescriptor, media: Path, label: str) ->
     return name
 
 
-def _video_dimensions(image: Path, high: bool = False) -> tuple[int, int]:
+def _video_dimensions(image: Path, tier: str = "standard") -> tuple[int, int]:
     # Derive LTX-valid output dimensions that preserve the source image's exact
     # aspect ratio (so a start frame is never cropped to a fixed tier). Targets the
     # same pixel budget as the aspect tiers so render time stays comparable.
     with Image.open(image) as opened:
         width, height = opened.size
     ratio = width / max(1, height)
-    target_area = (1216 * 704) if high else (768 * 448)
-    max_dim = 1216 if high else 1024
+    target_area, max_dim = _VIDEO_TIER_AREAS.get(tier, _VIDEO_TIER_AREAS["standard"])
     target_width = math.sqrt(target_area * ratio)
     target_height = target_width / ratio
     if max(target_width, target_height) > max_dim:
         scale = max_dim / max(target_width, target_height)
         target_width *= scale
         target_height *= scale
-    snap = lambda value: max(256, min(max_dim, round(value / 32) * 32))
+    # Multiples of 64, not 32: the two-stage LTX pipelines generate stage 1 at
+    # half resolution, so a 32-aligned request such as 928 is silently floored
+    # to 896 by the runtime after the job is recorded. Snapping to 64 keeps the
+    # requested size equal to what actually renders.
+    snap = lambda value: max(256, min(max_dim, round(value / 64) * 64))
     return snap(target_width), snap(target_height)
 
 
@@ -605,17 +744,18 @@ def video_dimensions_for_request(
     aspect_ratio: str = "",
     resolution: str = "",
 ) -> tuple[int, int] | None:
-    tier = (
-        _VIDEO_ASPECT_DIMENSIONS_HIGH
-        if str(resolution or "").strip().lower() == "high"
-        else _VIDEO_ASPECT_DIMENSIONS
-    )
+    tier_name = str(resolution or "").strip().lower()
+    if tier_name not in _VIDEO_TIER_AREAS:
+        tier_name = "standard"
+    tier = {
+        "high": _VIDEO_ASPECT_DIMENSIONS_HIGH,
+        "max": _VIDEO_ASPECT_DIMENSIONS_MAX,
+    }.get(tier_name, _VIDEO_ASPECT_DIMENSIONS)
     selected = tier.get(str(aspect_ratio or "").strip())
     if selected:
         return selected
     # No fixed aspect requested: match the source frame's aspect ratio exactly.
-    high = str(resolution or "").strip().lower() == "high"
-    return _video_dimensions(image, high=high) if image is not None else None
+    return _video_dimensions(image, tier=tier_name) if image is not None else None
 
 
 def _result_json(result: dict[str, Any]) -> dict[str, Any]:
@@ -649,6 +789,43 @@ def _generation_status(payload: Any) -> str:
         value = source.get("status") or source.get("state")
         if value:
             return str(value).lower()
+    return ""
+
+
+def _comfy_history_error(payload: Any) -> str:
+    """The failure reason a Comfy-shaped history carries in status.messages.
+
+    MCP receipts are machine-redacted (machineOperationReceipt keeps only an
+    allow-list, and a failure reason is not on it), so a remote-lane failure
+    reaches this process as a bare status with no text. Read it the same way
+    output URLs are read: over the trusted server-side channel. Only the
+    gateway's already-sanitised hivemind_remote_error and the node identity
+    from a native execution_error are taken — never current_inputs, which
+    carries the prompt."""
+    record = payload if isinstance(payload, dict) else {}
+    if not isinstance(record.get("status"), dict):
+        record = next((value for value in record.values() if isinstance(value, dict)), {})
+    for message in (record.get("status") or {}).get("messages") or []:
+        if not (isinstance(message, (list, tuple)) and len(message) >= 2):
+            continue
+        kind, detail = message[0], message[1]
+        if not isinstance(detail, dict):
+            continue
+        if kind == "hivemind_remote_error":
+            text = str(detail.get("error") or "").strip()
+            if text:
+                return text[:400]
+        if kind == "execution_error":
+            where = " ".join(
+                part for part in (
+                    str(detail.get("node_type") or "").strip(),
+                    f"node {detail.get('node_id')}" if detail.get("node_id") else "",
+                ) if part
+            )
+            reason = " ".join(
+                str(detail.get("exception_message") or detail.get("exception_type") or "failed").split()
+            )
+            return (f"{where} failed — {reason}" if where else reason)[:400]
     return ""
 
 

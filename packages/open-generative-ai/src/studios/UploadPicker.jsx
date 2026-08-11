@@ -50,6 +50,7 @@ import {
   saveUpload,
 } from '../lib/uploadHistory.js';
 import { useDismissable } from '../ui/Menu.jsx';
+import { Modal } from '../ui/Modal.jsx';
 import { Icon } from '../ui/icons.jsx';
 import { Button, SectionLabel, Spinner, cx } from '../ui/kit.jsx';
 
@@ -63,7 +64,23 @@ export function Thumb({ src, alt = '', className = '' }) {
   return <img src={resolved} alt={alt} className={cx('h-full w-full object-cover', className)} />;
 }
 
-function AttachedChip({ url, name, thumbnail, onRemove, disabled, ignored, className = '' }) {
+// Full-size view of an attached reference/frame. Resolves E2E-sealed sources
+// the same way Thumb does, but at the original resolution (never the cached
+// thumbnail). Shared with FrameSlotsPicker.
+export function ReferencePreview({ url, name, onClose }) {
+  const resolved = useMediaSrc(url);
+  return (
+    <Modal open onClose={onClose} title={name || 'Reference'} size="xl">
+      {resolved ? (
+        <img src={resolved} alt={name || 'Reference'} className="mx-auto max-h-[70vh] w-full rounded-md object-contain" />
+      ) : (
+        <div className="grid h-56 w-full animate-pulse place-items-center rounded-md bg-bg3" aria-label="Decrypting" />
+      )}
+    </Modal>
+  );
+}
+
+function AttachedChip({ url, name, thumbnail, onRemove, onPreview, disabled, ignored, className = '' }) {
   return (
     <span
       className={cx(
@@ -73,9 +90,19 @@ function AttachedChip({ url, name, thumbnail, onRemove, disabled, ignored, class
       )}
       title={name || url}
     >
-      <span className="h-9 w-9 shrink-0 overflow-hidden border-r border-line1 bg-bg3">
+      <button
+        type="button"
+        onClick={onPreview}
+        disabled={disabled}
+        aria-label="View full size"
+        title="View full size"
+        className="group/preview relative h-9 w-9 shrink-0 overflow-hidden border-r border-line1 bg-bg3"
+      >
         <Thumb src={thumbnail || url} alt={name || 'Reference'} />
-      </span>
+        <span className="pointer-events-none absolute inset-0 grid place-items-center opacity-0 transition-opacity group-hover/preview:bg-black/40 group-hover/preview:opacity-100">
+          <Icon name="eye" size={12} className="text-white" />
+        </span>
+      </button>
       {name ? <span className="max-w-[96px] truncate text-[11px] text-ink2">{name}</span> : null}
       <button
         type="button"
@@ -113,12 +140,16 @@ export function UploadPicker({
   // Past uploads saved server-side (sealed) so they reappear even when the
   // browser's composer state is empty. Merged (deduped) into the displayed grid.
   const [serverRefs, setServerRefs] = useState([]);
+  // Full-size preview of an attached chip's image.
+  const [previewUrl, setPreviewUrl] = useState(null);
   const fileInputRef = useRef(null);
   const pendingFilesRef = useRef(null);
   // The dismissable region wraps the TRIGGER as well as the panel: with it on the
   // panel alone, clicking the open trigger dismissed on pointerdown and the click
   // re-opened it, so the panel could never be closed from its own button.
-  const rootRef = useDismissable(panelOpen, () => setPanelOpen(false));
+  // Suspended while a preview is up so closing the preview (scrim click or
+  // Escape) doesn't also tear down the panel underneath it.
+  const rootRef = useDismissable(panelOpen && !previewUrl, () => setPanelOpen(false));
 
   useEffect(() => {
     let alive = true;
@@ -271,19 +302,20 @@ export function UploadPicker({
   const historyByUrl = new Map(mergedHistory.map((entry) => [entry.uploadedUrl, entry]));
   const count = values.length;
   const canAddMore = count < maxImages;
+  const triggerLabel = label || (isMulti ? `Add up to ${maxImages} images` : 'Reference image');
+  // The tooltip/aria-label must carry the picker's role (label prop) — a compact
+  // picker renders no visible text, so this is its only name. Two compact pickers
+  // side by side (start/end frame) otherwise both announce "Reference image".
   const triggerTitle =
     count === 0
-      ? isMulti
-        ? `Add up to ${maxImages} images`
-        : 'Reference image'
+      ? triggerLabel
       : count > 1
         ? canAddMore
           ? `${count} of ${maxImages} images selected — click to manage`
           : `${count} images selected`
         : isMulti && canAddMore
           ? `1 image selected — click to add more (up to ${maxImages})`
-          : 'Reference image';
-  const triggerLabel = label || (isMulti ? `Add up to ${maxImages} images` : 'Reference image');
+          : triggerLabel;
 
   return (
     <div
@@ -317,6 +349,7 @@ export function UploadPicker({
             name={entry?.name}
             thumbnail={entry?.thumbnail}
             onRemove={() => removeValue(url)}
+            onPreview={() => setPreviewUrl(url)}
             disabled={disabled}
             ignored={ignored}
             className={chipClassName}
@@ -447,6 +480,14 @@ export function UploadPicker({
             </div>
           ) : null}
         </div>
+      ) : null}
+
+      {previewUrl ? (
+        <ReferencePreview
+          url={previewUrl}
+          name={historyByUrl.get(previewUrl)?.name}
+          onClose={() => setPreviewUrl(null)}
+        />
       ) : null}
 
       {authOpen ? (

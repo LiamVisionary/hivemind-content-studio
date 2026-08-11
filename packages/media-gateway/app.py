@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import cgi
 import base64
 import binascii
 import hashlib
@@ -17,6 +16,9 @@ import sys
 import threading
 import time
 import tempfile
+import email.parser
+import email.policy
+import io
 import uuid
 import zlib
 import shutil
@@ -83,37 +85,12 @@ LTX_NAG_DEFAULTS = {"scale": 11.0, "alpha": 0.25, "tau": 2.5}
 
 MLX_MODELS_ROOT = Path(os.environ.get("MLX_MODELS_ROOT", str(Path.home() / "comfy/mlx-models")))
 LTX2_MLX_VARIANTS = {
-    "fast-q8-v12": {
-        "title": "MLXBits 10Eros v1.2 q8 distilled",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-distilled-subset"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-distilled-subset"),
-        "video_distilled": True,
-        "output_prefix": "mlx_10eros_q8_distilled_mobile",
-        "benchmark_seconds": 193.11,
-    },
     # v1.3 + DMD. Two reasons this exists: upstream v1.3 "substantially reduced
     # ghost anatomy and subtitle artifacts" over v1.2, and the DMD deltas are
     # merged into the base instead of fused as a distilled LoRA at runtime —
     # which the build's own card says avoids the resampling-to-base drift and
     # conditioning loss the LoRA introduces during the stage-2 upscale refine
     # (the step that leaves the crawling grain on the v1.2 route).
-    "dmd-q8-v13": {
-        "title": "MLXBits 10Eros v1.3 DMD q8 distilled",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
-        "video_distilled": True,
-        "output_prefix": "mlx_10eros_v13_dmd_q8_distilled_mobile",
-        "benchmark_seconds": 193.11,
-        # Tried and rejected (2026-07-24): the sigma ramp from the author's own
-        # reference graph (10Eros_10SNodes_I2V_Basic_DMD_V5.json — 9-step first
-        # pass "1.0,0.955,0.893,0.812,0.715,0.603,0.482,0.241,0.121,0" + 3-step
-        # upscale "0.92,0.725,0.421875,0") measured WORSE here than ltx-2-mlx's
-        # built-in table: weaker prompt execution, less spatial detail, slightly
-        # more static-region crawl. Their recipe also samples euler_ancestral,
-        # which this runtime's x0-Euler loop has no faithful equivalent for, so
-        # the ramp alone is only half the recipe. Set LTX2_DISTILLED_SIGMAS /
-        # LTX2_STAGE2_SIGMAS (or a "runtime_env" here) to re-test.
-    },
     # v1.2 + DMD. The control for the adherence question: v1.3-DMD lost prompt
     # steering versus v1.2-fast, but those differ in BOTH the fine-tune (v1.2 ->
     # v1.3) and the distillation (LoRA -> merged DMD). This holds the DMD merge
@@ -147,16 +124,6 @@ LTX2_MLX_VARIANTS = {
         "backend_prefix": "mlx-ltx-regular",
         "output_subdir": "LTX23",
     },
-    "eros-q8-dev-ic": {
-        "title": "LTX 2.3 10Eros v1 q8 dev IC-LoRA",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-mlx-q8-dev"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1-mlx-q8-dev"),
-        "video_distilled": False,
-        "output_prefix": "mlx_ltx23_10eros_v1_q8_dev_ic_mobile",
-        "benchmark_seconds": None,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
     # Ingredients IC-LoRA on the v1.3 DMD build. The dev lane above fuses the
     # generic distilled LoRA at 0.5 alongside the IC-LoRA (the Comfy recipe);
     # a DMD build ships no dev transformer because the distillation is already
@@ -172,31 +139,11 @@ LTX2_MLX_VARIANTS = {
     # afterwards, where we merge into already-int8 weights. Comparing this to
     # eros-fast isolates that arithmetic; comparing it to v1.4 Fast isolates the
     # fine-tune. Without it the two variables are tangled.
-    "eros-v12-q8-fast-rebuilt": {
-        "title": "LTX 2.3 10Eros v1.2 q8 distilled (rebuilt, cond-safe)",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-fast-rebuilt"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.2-mlx-q8-fast-rebuilt"),
-        "video_distilled": True,
-        "output_prefix": "mlx_ltx23_10eros_v12_q8_fast_rebuilt_mobile",
-        "benchmark_seconds": 193.11,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
     # v1.4 Fast: eros-fast's recipe on the v1.4 fine-tune. eros-fast merges the
     # *cond-safe* rank-384 distilled LoRA (Frobenius-clipped, built to preserve
     # conditioning) rather than the stock one, which is the likeliest reason it
     # follows prompts better than the Lite build. Same LoRA at the same strength
     # here, so this and eros-fast differ only in base model.
-    "eros-v14-q8-fast": {
-        "title": "LTX 2.3 10Eros v1.4 q8 distilled (cond-safe)",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-fast"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-fast"),
-        "video_distilled": True,
-        "output_prefix": "mlx_ltx23_10eros_v14_q8_fast_mobile",
-        "benchmark_seconds": 193.11,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
     # v1.4 DMD: the build the author actually intends. The v1.4 model card says
     # the release "is also fully designed for use with the DMD lora I attached",
     # so eros-v14-q8-fast above — which merges v1.2's cond-safe rank-384 LoRA —
@@ -220,63 +167,22 @@ LTX2_MLX_VARIANTS = {
     # variant below only so outputs are named for the lane that made them; both
     # point at one model directory. Runs --two-stage (see the runner), so it is
     # slower than the distilled Eros lanes — that is the cost of a dev build.
-    "eros-v14-q8-dev": {
-        "title": "LTX 2.3 10Eros v1.4 q8 dev",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
-        "video_distilled": False,
-        "output_prefix": "mlx_ltx23_10eros_v14_q8_dev_mobile",
-        # Measured 2026-07-25 (768x448/49f, seed 909, one prompt): 30 steps 140.7s
-        # detail 1.868 crawl 0.0023 | 12 steps 76.7s detail 1.872 crawl 0.0018 |
-        # 8 steps 60.4s detail 1.852 crawl 0.0015. Detail is flat within 1% and
-        # crawl mildly improves, so the stock 30 buys nothing here. Raise it if a
-        # prompt ever looks under-converged; the ceiling is quality, not safety.
-        "video_stage1_steps": 12,
-        "benchmark_seconds": 77.0,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
-    "eros-v14-q8-dev-ic": {
-        "title": "LTX 2.3 10Eros v1.4 q8 dev IC-LoRA",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.4-mlx-q8-dev"),
-        "video_distilled": False,
-        "output_prefix": "mlx_ltx23_10eros_v14_q8_dev_ic_mobile",
-        "benchmark_seconds": None,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
-    "eros-dmd-v13-ic": {
-        "title": "LTX 2.3 10Eros v1.3 DMD q8 IC-LoRA",
-        "model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
-        "video_model": str(MLX_MODELS_ROOT / "ltx-2.3-10eros-v1.3-dmd-mlx-q8"),
-        "video_distilled": True,
-        "output_prefix": "mlx_ltx23_10eros_v13_dmd_q8_ic_mobile",
-        "benchmark_seconds": None,
-        "backend_prefix": "mlx-ltx-eros",
-        "output_subdir": "Eros",
-    },
 }
 LTX2_MLX_VARIANT_ALIASES = {
-    "fast": "fast-q8-v12",
-    "q8": "fast-q8-v12",
-    "q8-v12": "fast-q8-v12",
-    "fast-q8": "fast-q8-v12",
-    "fast_q8_v12": "fast-q8-v12",
-    "mlx-bits-v12": "fast-q8-v12",
-    "exact": "exact-v1-merged-q8",
-    "exact-v1": "exact-v1-merged-q8",
-    "merged": "exact-v1-merged-q8",
-    "merged-q8": "exact-v1-merged-q8",
-    "exact_v1_merged_q8": "exact-v1-merged-q8",
+    "fast": "eros-v14-q8-dmd",
+    "q8": "eros-v14-q8-dmd",
+    "q8-v12": "eros-v14-q8-dmd",
+    "fast-q8": "eros-v14-q8-dmd",
+    "fast_q8_v12": "eros-v14-q8-dmd",
+    "mlx-bits-v12": "eros-v14-q8-dmd",
     "regular": "regular-q8-distilled",
     "regular-q8": "regular-q8-distilled",
     "regular-fast": "regular-q8-distilled",
     "ltx23-regular": "regular-q8-distilled",
     "ltx-2.3-regular": "regular-q8-distilled",
-    "eros-ingredients": "eros-q8-dev-ic",
-    "eros-ic": "eros-q8-dev-ic",
-    "eros-dev-ic": "eros-q8-dev-ic",
+    "eros-ingredients": "regular-q8-dev-ic",
+    "eros-ic": "regular-q8-dev-ic",
+    "eros-dev-ic": "regular-q8-dev-ic",
 }
 HISTORY_FILE = GATEWAY_STATE_DIR / "history.jsonl"
 PREVIEW_CACHE_ROOTS = [
@@ -315,8 +221,19 @@ from krea2_identity_workflow import (
     KREA2_TURBO_PRE_LORA_SOURCE_MODEL,
     build_krea2_turbo_outpaint_prompt,
     build_krea2_turbo_identity_prompt as compile_krea2_turbo_identity_prompt,
+    build_krea2_turbo_inpaint_prompt as compile_krea2_turbo_inpaint_prompt,
     krea2_sampler_defaults,
     resolve_seed_option,
+)
+from strength_hunt import (
+    build_strength_hunt_plan,
+    merge_strength_hunt_graphs,
+    strength_hunt_output_index,
+)
+from klein_character_sheet import (
+    character_sheet_grid,
+    character_sheet_view_prompt,
+    resolve_character_sheet_views,
 )
 
 try:
@@ -399,8 +316,175 @@ def parse_comfy_lane_rules():
     return rules
 
 
+def parse_comfy_lane_tokens():
+    """Per-lane auth tokens, e.g. COMFY_LANE_TOKENS="h3=abc123,krea=def".
+
+    Sent as `Authorization: Bearer <token>` on every request the gateway makes
+    to that lane (the rented-instance auth proxy in front of :8188 checks it).
+    Kept out of COMFY_LANES so lane URLs never carry credentials into logs."""
+    raw = os.environ.get("COMFY_LANE_TOKENS", "")
+    tokens = {}
+    for part in raw.split(','):
+        part = part.strip()
+        if not part or '=' not in part:
+            continue
+        name, value = part.split('=', 1)
+        name = re.sub(r"[^a-z0-9_-]", "", name.strip().lower())
+        value = value.strip()
+        if name and value:
+            tokens[name] = value
+    return tokens
+
+
+def parse_remote_comfy_lanes():
+    """Lanes whose Comfy runs on a machine that is NOT this gateway host, e.g.
+    COMFY_REMOTE_LANES="h3". Remote lanes get the requester-sealed fetch-back
+    flow (outputs never resolve on local disk). An SSH-tunneled lane LOOKS like
+    loopback, so remoteness must be declarable, not only inferred."""
+    raw = os.environ.get("COMFY_REMOTE_LANES", "")
+    return {re.sub(r"[^a-z0-9_-]", "", part.strip().lower()) for part in raw.split(',') if part.strip()}
+
+
 COMFY_LANES = parse_comfy_lanes()
 COMFY_LANE_RULES = parse_comfy_lane_rules()
+COMFY_LANE_TOKENS = parse_comfy_lane_tokens()
+COMFY_REMOTE_LANES = parse_remote_comfy_lanes()
+
+# Rented machines attach and detach while this process runs. Their lanes used to
+# arrive only through the launcher's env overlay, which meant every attach had to
+# RESTART THE WHOLE STACK to take effect — killing in-flight generations to add a
+# routing rule. The attachment registry is read live instead: gpu_rentals writes
+# the file, the next request here picks it up. The env overlay is still written,
+# but only so an attachment survives a restart, never to cause one.
+RENTAL_LANES_FILE = MEDIA_STATE_ROOT / "rental-lanes.json"
+_rental_lanes_lock = threading.Lock()
+_rental_lanes_state = {"mtime": None, "lanes": {}}
+
+
+def _read_rental_attachments():
+    try:
+        stamp = RENTAL_LANES_FILE.stat().st_mtime_ns
+    except OSError:
+        return {}
+    with _rental_lanes_lock:
+        if _rental_lanes_state["mtime"] == stamp:
+            return _rental_lanes_state["lanes"]
+        try:
+            data = json.loads(RENTAL_LANES_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[comfy-lanes] rental attachment registry unreadable: {exc}", file=sys.stderr)
+            return _rental_lanes_state["lanes"]
+        lanes = {}
+        # Highest priority first: lane rules are first-match, so this ordering
+        # is what makes "run generations on THAT machine" work when two
+        # attached machines serve the same models. gpu_rentals writes the file
+        # in this order too; sorting here means a hand-edited or older
+        # registry still routes deterministically.
+        entries = sorted(
+            (e for e in (data or {}).values() if isinstance(e, dict)),
+            key=lambda e: -(e.get("priority") or 0),
+        )
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            lane = re.sub(r"[^a-z0-9_-]", "", str(entry.get("lane") or "").strip().lower())
+            port = entry.get("local_port")
+            if not lane or not isinstance(port, int):
+                continue
+            lanes[lane] = {
+                "url": f"http://127.0.0.1:{port}",
+                "needles": [str(n).strip().lower() for n in entry.get("needles") or [] if str(n).strip()],
+            }
+        _rental_lanes_state.update(mtime=stamp, lanes=lanes)
+        return lanes
+
+
+def refresh_comfy_lanes():
+    """Fold the live rental attachments into the lane maps, in place.
+
+    In place so the ~15 module-level read sites (routing, the proxy, the queue
+    sweepers) keep seeing one source of truth without threading a config object
+    through all of them. Cheap: one stat() unless the registry actually changed.
+
+    Scoped to the lanes this function itself added: it adds and retires rental
+    entries and touches nothing else, so env-configured lanes (and anything a
+    test or operator injects) survive a refresh untouched."""
+    rentals = _read_rental_attachments()
+    previous = set(_rental_lanes_state.get("applied") or ())
+    current = set(rentals)
+
+    for lane in previous - current:
+        COMFY_LANES.pop(lane, None)
+        COMFY_REMOTE_LANES.discard(lane)
+    for lane, spec in rentals.items():
+        COMFY_LANES[lane] = spec["url"]
+        COMFY_REMOTE_LANES.add(lane)
+
+    retired = previous - current
+    if retired or current:
+        kept = [rule for rule in COMFY_LANE_RULES if rule[0] not in previous | current]
+        # Rental rules go FIRST, matching what the stack launcher does when it
+        # builds COMFY_LANE_RULES at boot. Appending them instead made an
+        # attach a no-op for any model a local lane also claims: routing is
+        # first-match, so the local `ltx` lane kept every LTX generation on
+        # this machine and the rented video box sat idle. That failed loudly
+        # only because the local lane lacks the eros checkpoint; on a workload
+        # both lanes can serve it would have silently ignored the rental the
+        # user is paying for.
+        rented = [(lane, spec["needles"]) for lane, spec in rentals.items() if spec["needles"]]
+        COMFY_LANE_RULES[:] = rented + kept
+    _rental_lanes_state["applied"] = current
+    return COMFY_LANES
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def comfy_lane_is_remote(lane):
+    """A lane is remote when declared in COMFY_REMOTE_LANES or when its URL
+    points off-host. Remote means: output files do not exist on this gateway's
+    disk, and results must be fetched back and sealed to the requester."""
+    if lane in COMFY_REMOTE_LANES:
+        return True
+    base = COMFY_LANES.get(lane)
+    if not base:
+        return False
+    host = (urlparse(base).hostname or "").lower()
+    return bool(host) and host not in _LOOPBACK_HOSTS
+
+
+def comfy_lane_token(lane):
+    return COMFY_LANE_TOKENS.get(lane)
+
+
+def comfy_lane_transport_error(lane):
+    """The security contract for remote lanes: reachable only through an
+    authenticated channel. Loopback URLs declared remote are SSH tunnels (the
+    tunnel is the auth). Anything off-host needs a per-lane token for the
+    instance's auth proxy. Returns an error string, or None when acceptable."""
+    if not comfy_lane_is_remote(lane):
+        return None
+    base = COMFY_LANES.get(lane) or ""
+    host = (urlparse(base).hostname or "").lower()
+    if host in _LOOPBACK_HOSTS:
+        return None  # declared-remote loopback = SSH tunnel; the tunnel authenticates
+    if comfy_lane_token(lane):
+        return None
+    return (
+        f"remote Comfy lane '{lane}' has no authenticated transport: front :8188 with the "
+        f"per-instance token proxy and set COMFY_LANE_TOKENS={lane}=<token>, or reach it "
+        f"over an SSH tunnel and declare it in COMFY_REMOTE_LANES"
+    )
+
+
+def comfy_lane_request(lane, path, data=None, method=None, headers=None, content_type=None):
+    """Build a urllib Request to a lane, attaching the lane's auth token."""
+    base = COMFY_LANES.get(lane, COMFY_HTTP_DEFAULT).rstrip('/')
+    all_headers = dict(headers or {})
+    if content_type:
+        all_headers['Content-Type'] = content_type
+    token = comfy_lane_token(lane)
+    if token:
+        all_headers['Authorization'] = f"Bearer {token}"
+    return Request(base + path, data=data, method=method, headers=all_headers)
 EQUIPPED_FILE = GATEWAY_STATE_DIR / "equipped_models.json"
 SELECTED_LORAS_FILE = GATEWAY_STATE_DIR / "selected_loras.json"
 CIVITAI_TOKEN_FILE = Path(
@@ -471,6 +555,9 @@ PRIVATE_INPUT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_MAX_AGE",
 PRIVATE_INPUT_UPLOAD_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_UPLOAD_MAX_AGE", "86400"))
 jobs = {}
 jobs_lock = threading.Lock()
+# Live subprocess handles for native (MLX) generation jobs, so a cancel request
+# can terminate the render instead of letting it burn the GPU to completion.
+native_job_procs = {}
 download_jobs = {}
 download_jobs_lock = threading.Lock()
 encryption_lock = threading.Lock()
@@ -714,6 +801,35 @@ def vault_identity_json():
         return None
 
 
+def _seal_file_with_helper(spki, source, envelope, media_name):
+    """Seal `source` to the public key `spki`, atomically writing the enc:v1
+    envelope JSON to `envelope`. `media_name` drives the recorded media_type.
+    The caller owns locking and deletion of the plaintext source."""
+    source = Path(source)
+    envelope = Path(envelope)
+    tmp = envelope.with_name(envelope.name + f".{os.getpid()}.tmp")
+    pub_tmp = envelope.with_name(envelope.name + f".{os.getpid()}.pub")
+    try:
+        pub_tmp.write_text(spki, encoding="utf-8")
+        proc = subprocess.run(
+            [E2E_SEAL_PYTHON, E2E_SEAL_HELPER, "--pub", f"@{pub_tmp}", "--in", str(source), "--out", str(tmp)],
+            capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0 or not tmp.exists():
+            raise RuntimeError(f"seal helper exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+        sealed = json.loads(tmp.read_text(encoding="utf-8"))
+        sealed["v"] = 1
+        sealed["media_type"] = mimetypes.guess_type(media_name)[0] or "application/octet-stream"
+        tmp.write_text(json.dumps(sealed), encoding="utf-8")
+        os.replace(tmp, envelope)
+    finally:
+        for leftover in (pub_tmp, tmp):
+            try:
+                leftover.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def seal_output_to_e2e(path):
     """Seal media to the owner vault public key as <name>.e2e; delete plaintext.
 
@@ -729,36 +845,16 @@ def seal_output_to_e2e(path):
         return True
     if not path.exists() or not path.is_file():
         return False
-    tmp = envelope.with_name(envelope.name + f".{os.getpid()}.tmp")
-    pub_tmp = envelope.with_name(envelope.name + f".{os.getpid()}.pub")
     with encryption_lock:
         if envelope.exists() and not path.exists():
             return True
         source_stat = path.stat()
+        _seal_file_with_helper(spki, path, envelope, path.name)
+        os.utime(envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
         try:
-            pub_tmp.write_text(spki, encoding="utf-8")
-            proc = subprocess.run(
-                [E2E_SEAL_PYTHON, E2E_SEAL_HELPER, "--pub", f"@{pub_tmp}", "--in", str(path), "--out", str(tmp)],
-                capture_output=True, text=True, timeout=300,
-            )
-            if proc.returncode != 0 or not tmp.exists():
-                raise RuntimeError(f"seal helper exited {proc.returncode}: {proc.stderr.strip()[:200]}")
-            sealed = json.loads(tmp.read_text(encoding="utf-8"))
-            sealed["v"] = 1
-            sealed["media_type"] = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-            tmp.write_text(json.dumps(sealed), encoding="utf-8")
-            os.replace(tmp, envelope)
-            os.utime(envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-        finally:
-            for leftover in (pub_tmp, tmp):
-                try:
-                    leftover.unlink()
-                except FileNotFoundError:
-                    pass
+            path.unlink()
+        except FileNotFoundError:
+            pass
     return True
 
 
@@ -1047,7 +1143,7 @@ def _harvest_comfy_workflow_envelopes():
     added = 0
     for lane, base in COMFY_LANES.items():
         try:
-            with urlopen(f"{base}/history?max_items=128", timeout=10) as r:
+            with urlopen(comfy_lane_request(lane, "/history?max_items=128"), timeout=10) as r:
                 hist = json.load(r)
         except Exception:
             continue
@@ -1096,6 +1192,580 @@ def workflow_index_record_for_filename(name):
     with workflow_index_lock:
         rec = _workflow_index_records.get(name)
         return dict(rec) if isinstance(rec, dict) else None
+
+
+# --- Remote Comfy lanes: prompt routing, requester-sealed fetch-back, scrub ---
+#
+# A remote lane (a rented GPU box) is a dumb executor: the prompt goes out over
+# the lane's authenticated transport, a server-side watcher polls that SAME
+# lane for completion, output bytes come back over the lane's /view and are
+# sealed to the REQUESTING client's public key before anything persists, and
+# the box is then scrubbed (output + staged input files deleted, prompt dropped
+# from its history). Possession of the decrypt key - not machine locality - is
+# what grants access to results: nothing colocated with the gateway can read
+# another requester's outputs, because no plaintext (and no gateway-decryptable
+# form) of a remote result ever lands in a shared directory.
+#
+# Known limit (documented, not fixable here): while the job RUNS, prompt and
+# pixels exist in plaintext on the rented instance. The contract covers
+# everything before submit and after harvest - see packages/gpu-rentals/README.md.
+COMFY_PROMPT_ROUTES_FILE = GATEWAY_STATE_DIR / "comfy-prompt-routes.json"
+COMFY_PROMPT_ROUTES_MAX = 512
+REQUESTER_PUB_HEADER = "X-E2E-Requester-Pub"
+comfy_prompt_routes_lock = threading.Lock()
+_comfy_prompt_routes = {}
+_comfy_prompt_routes_loaded = False
+# base64url DER SPKI; RSA-2048 keys encode to ~392 chars, leave generous room.
+_SPKI_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]{100,4000}$")
+
+
+def normalized_requester_spki(value):
+    value = str(value or "").strip()
+    return value if _SPKI_B64URL_RE.match(value) else None
+
+
+def requester_fingerprint(spki):
+    spki = normalized_requester_spki(spki)
+    if not spki:
+        return None
+    return hashlib.sha256(spki.encode("ascii")).hexdigest()[:32]
+
+
+def _ensure_comfy_prompt_routes_loaded():
+    global _comfy_prompt_routes_loaded
+    with comfy_prompt_routes_lock:
+        if _comfy_prompt_routes_loaded:
+            return
+        _comfy_prompt_routes_loaded = True
+        try:
+            if COMFY_PROMPT_ROUTES_FILE.is_file():
+                data = json.loads(COMFY_PROMPT_ROUTES_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    _comfy_prompt_routes.update({str(k): v for k, v in data.items() if isinstance(v, dict)})
+        except Exception as exc:
+            print(f"[comfy-routes] load failed: {exc}", file=sys.stderr)
+
+
+def _persist_comfy_prompt_routes_locked():
+    try:
+        while len(_comfy_prompt_routes) > COMFY_PROMPT_ROUTES_MAX:
+            _comfy_prompt_routes.pop(next(iter(_comfy_prompt_routes)))
+        COMFY_PROMPT_ROUTES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = COMFY_PROMPT_ROUTES_FILE.with_name(f".{COMFY_PROMPT_ROUTES_FILE.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(_comfy_prompt_routes, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, COMFY_PROMPT_ROUTES_FILE)
+    except Exception as exc:
+        print(f"[comfy-routes] persist failed: {exc}", file=sys.stderr)
+
+
+def record_comfy_prompt_route(prompt_id, lane, requester_spki=None, pushed_inputs=None):
+    """Remember which lane runs a Comfy prompt and who may read it back.
+
+    The requester key is public material (an RSA SPKI) - safe to persist; it is
+    what remote outputs get sealed to and what history reads are scoped by."""
+    prompt_id = str(prompt_id or "")
+    if not prompt_id:
+        return None
+    _ensure_comfy_prompt_routes_loaded()
+    spki = normalized_requester_spki(requester_spki)
+    entry = {
+        "lane": lane,
+        "remote": comfy_lane_is_remote(lane),
+        "status": "submitted",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if spki:
+        entry["requester_spki"] = spki
+        entry["requester_fp"] = requester_fingerprint(spki)
+    if pushed_inputs:
+        entry["pushed_inputs"] = [str(name) for name in pushed_inputs]
+    with comfy_prompt_routes_lock:
+        _comfy_prompt_routes[prompt_id] = entry
+        _persist_comfy_prompt_routes_locked()
+    return dict(entry)
+
+
+def comfy_prompt_route(prompt_id):
+    _ensure_comfy_prompt_routes_loaded()
+    with comfy_prompt_routes_lock:
+        entry = _comfy_prompt_routes.get(str(prompt_id or ""))
+        return dict(entry) if isinstance(entry, dict) else None
+
+
+def update_comfy_prompt_route(prompt_id, **fields):
+    _ensure_comfy_prompt_routes_loaded()
+    with comfy_prompt_routes_lock:
+        entry = _comfy_prompt_routes.get(str(prompt_id or ""))
+        if not isinstance(entry, dict):
+            return None
+        entry.update(fields)
+        _persist_comfy_prompt_routes_locked()
+        return dict(entry)
+
+
+def requester_may_read_prompt(route, presented_spki):
+    """Scope history/status reads to the requester that submitted the prompt.
+
+    Prompts recorded with a requester key require the SAME key on reads; legacy
+    submissions (no key presented) keep today's token-only behavior. The sealed
+    media is safe regardless - this guards status metadata."""
+    if not route or not route.get("requester_fp"):
+        return True
+    presented = normalized_requester_spki(presented_spki)
+    return bool(presented) and requester_fingerprint(presented) == route.get("requester_fp")
+
+
+def sealing_spki_for_route(route):
+    """The key remote outputs are sealed to: the requester's, falling back to
+    the owner vault key for owner-initiated jobs that present none."""
+    return normalized_requester_spki((route or {}).get("requester_spki")) or vault_public_key_spki()
+
+
+def _prompt_input_file_refs(body):
+    """Local Comfy input files a prompt graph references (LoadImage-style
+    string inputs). These are what must be staged onto a remote lane."""
+    refs = []
+    try:
+        prompt = _prompt_nodes_from_body(body)
+    except Exception:
+        return refs
+    seen = set()
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") or {}
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if not isinstance(value, str) or not value.strip():
+                continue
+            name = re.sub(r"\s*\[(?:input|output|temp)\]$", "", value.strip()).replace("\\", "/")
+            if not name or name.startswith(("/", "~")) or ".." in name:
+                continue
+            try:
+                resolved = (COMFY_INPUT_DIR / name).resolve()
+            except OSError:
+                continue
+            if not _is_under(resolved, COMFY_INPUT_DIR) or not resolved.is_file():
+                continue
+            if str(resolved) in seen:
+                continue
+            seen.add(str(resolved))
+            refs.append({"name": name, "path": resolved})
+    return refs
+
+
+def _push_file_to_lane_input(lane, name, path):
+    subfolder, _, filename = str(name).rpartition("/")
+    boundary = uuid.uuid4().hex
+    parts = []
+    fields = [("overwrite", "true"), ("type", "input")]
+    if subfolder:
+        fields.append(("subfolder", subfolder))
+    for field_name, field_value in fields:
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{field_name}"\r\n\r\n{field_value}\r\n'.encode()
+        )
+    parts.append(
+        (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="{filename}"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode()
+        + Path(path).read_bytes()
+        + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode())
+    request = comfy_lane_request(
+        lane, "/upload/image", data=b"".join(parts), method="POST",
+        content_type=f"multipart/form-data; boundary={boundary}",
+    )
+    with urlopen(request, timeout=120):
+        pass
+
+
+def push_prompt_inputs_to_lane(body, lane):
+    """Stage every local input file the graph references onto the remote lane,
+    so image-conditioned workflows (e.g. minimax-h3 image-to-video) run there.
+    Returns the staged names for the post-harvest scrub."""
+    pushed = []
+    for ref in _prompt_input_file_refs(body):
+        _push_file_to_lane_input(lane, ref["name"], ref["path"])
+        pushed.append(ref["name"])
+    return pushed
+
+
+def _comfy_history_output_refs(history):
+    refs = []
+    for node_out in ((history or {}).get("outputs") or {}).values():
+        if not isinstance(node_out, dict):
+            continue
+        for values in node_out.values():
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if isinstance(item, dict) and item.get("filename"):
+                    refs.append({
+                        "filename": str(item.get("filename")),
+                        "subfolder": str(item.get("subfolder") or ""),
+                        "type": str(item.get("type") or "output"),
+                    })
+    return refs
+
+
+def _fetch_lane_history(lane, prompt_id):
+    request = comfy_lane_request(lane, f"/history/{prompt_id}")
+    with urlopen(request, timeout=15) as response:
+        data = json.loads(response.read().decode("utf-8") or "{}")
+    return data.get(str(prompt_id)) if isinstance(data, dict) else None
+
+
+def _fetch_lane_view_bytes(lane, ref):
+    query = urlencode({
+        "filename": ref["filename"],
+        "subfolder": ref.get("subfolder") or "",
+        "type": ref.get("type") or "output",
+    })
+    request = comfy_lane_request(lane, f"/view?{query}")
+    with urlopen(request, timeout=300) as response:
+        return response.read()
+
+
+def remote_output_logical_name(prompt_id, filename):
+    """Remote Comfy instances restart their filename counters per rental, so
+    fetched outputs are namespaced by prompt id - a bare z_image_00001_.png
+    from a rented box must never collide with (or overwrite) a local output."""
+    return f"cmf-{str(prompt_id)[:8]}-{safe_name(Path(str(filename)).name)}"
+
+
+def harvest_remote_comfy_outputs(prompt_id, history):
+    """Fetch a finished remote prompt's outputs and seal each to the requester
+    key BEFORE anything persists. Plaintext bytes only ever touch a 0600
+    staging file inside the gateway's private state dir - never a shared
+    output dir. Returns the logical output names."""
+    route = comfy_prompt_route(prompt_id) or {}
+    spki = sealing_spki_for_route(route)
+    if not spki:
+        raise RuntimeError("no sealing key: the requester presented none and no owner vault exists")
+    lane = route.get("lane") or "default"
+    harvested = []
+    for ref in _comfy_history_output_refs(history):
+        if Path(ref["filename"]).suffix.lower() not in OUTPUT_MEDIA_EXTS:
+            continue
+        data = _fetch_lane_view_bytes(lane, ref)
+        logical_name = remote_output_logical_name(prompt_id, ref["filename"])
+        envelope = e2e_envelope_path_for(COMFY_OUTPUT_DIR / logical_name)
+        COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        GATEWAY_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        staged = GATEWAY_STATE_DIR / f".remote-harvest-{uuid.uuid4().hex}"
+        try:
+            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+            _seal_file_with_helper(spki, staged, envelope, logical_name)
+        finally:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+        harvested.append(logical_name)
+    update_comfy_prompt_route(
+        prompt_id, status="harvested", outputs=harvested,
+        harvested_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return harvested
+
+
+def scrub_remote_comfy_prompt(prompt_id, history=None, inputs_only=False):
+    """After harvest: delete the prompt's output files AND any inputs we staged
+    from the rented box, then drop the prompt from that lane's history. File
+    deletion uses the provisioned /hivemind/scrub-files route (installed by
+    gpu_rentals provisioning, and by
+    packages/gpu-rentals/provisioning/comfyui-hivemind.sh for template boots);
+    on a lane without it, history is still dropped and the files die with the
+    instance's ephemeral disk.
+
+    inputs_only covers the harvest-failed case: the output is the only copy of
+    a paid generation and must survive, but the customer's staged reference
+    image has no such claim on the box and goes now."""
+    route = comfy_prompt_route(prompt_id) or {}
+    lane = route.get("lane") or "default"
+    files = [] if inputs_only else [
+        {"type": ref.get("type") or "output", "subfolder": ref.get("subfolder") or "", "filename": ref["filename"]}
+        for ref in _comfy_history_output_refs(history)
+    ]
+    for name in route.get("pushed_inputs") or []:
+        subfolder, _, filename = str(name).replace("\\", "/").rpartition("/")
+        files.append({"type": "input", "subfolder": subfolder, "filename": filename})
+    files_scrubbed = None
+    if files:
+        try:
+            request = comfy_lane_request(
+                lane, "/hivemind/scrub-files",
+                data=json.dumps({"files": files}).encode("utf-8"),
+                method="POST", content_type="application/json",
+            )
+            with urlopen(request, timeout=30):
+                files_scrubbed = True
+        except Exception as exc:
+            files_scrubbed = False
+            print(
+                f"[remote-comfy] lane '{lane}' file scrub unavailable ({exc}); "
+                "remote files persist until the instance is destroyed",
+                file=sys.stderr,
+            )
+    if inputs_only:
+        # Leave the history entry: it names the output files, and it is the
+        # only record of them once this watcher exits.
+        update_comfy_prompt_route(prompt_id, inputs_scrubbed=files_scrubbed)
+        return {"files_scrubbed": files_scrubbed, "history_dropped": False}
+    history_dropped = False
+    try:
+        request = comfy_lane_request(
+            lane, "/history",
+            data=json.dumps({"delete": [str(prompt_id)]}).encode("utf-8"),
+            method="POST", content_type="application/json",
+        )
+        with urlopen(request, timeout=10):
+            history_dropped = True
+    except Exception as exc:
+        print(f"[remote-comfy] could not drop prompt {prompt_id} from lane '{lane}' history: {exc}", file=sys.stderr)
+    update_comfy_prompt_route(
+        prompt_id, scrubbed=bool(history_dropped),
+        files_scrubbed=files_scrubbed, history_dropped=history_dropped,
+    )
+    return {"files_scrubbed": files_scrubbed, "history_dropped": history_dropped}
+
+
+# Two or more path segments: enough to catch /workspace/ComfyUI/... without
+# rewriting ordinary prose that happens to contain a slash.
+_REMOTE_ABSOLUTE_PATH_RE = re.compile(r"(?:/[\w.@+-]+){2,}/?")
+
+
+def _sanitized_remote_error_text(value):
+    text = " ".join(str(value or "").split())
+    text = _REMOTE_ABSOLUTE_PATH_RE.sub(
+        lambda match: os.path.basename(match.group(0).rstrip("/")) or "…", text
+    )
+    return text[:400]
+
+
+def remote_comfy_failure_message(history):
+    """Why a remote prompt failed, in the words of the node that raised.
+
+    Comfy reports a failure as an execution_error message carrying the node id,
+    its class and the exception. Only those fields are lifted: the SAME payload
+    also carries current_inputs (the prompt text) and a traceback of the rented
+    box's filesystem, and neither may cross back to us. Absolute paths in the
+    exception are reduced to basenames, so 'cannot open /workspace/models/x.pt'
+    still names the file without mapping the box. Without this the route (and
+    every layer above it) recorded the literal string 'error', which is how a
+    one-line node validation failure became a 20-minute SSH dig."""
+    status = (history or {}).get("status") or {}
+    for message in status.get("messages") or []:
+        if not (isinstance(message, (list, tuple)) and len(message) >= 2):
+            continue
+        kind, payload = message[0], message[1]
+        if str(kind) != "execution_error" or not isinstance(payload, dict):
+            continue
+        node_type = str(payload.get("node_type") or "").strip()
+        node_id = str(payload.get("node_id") or "").strip()
+        exception = _sanitized_remote_error_text(payload.get("exception_message"))
+        # Exception types arrive fully qualified from some nodes.
+        exception_type = str(payload.get("exception_type") or "").strip().rsplit(".", 1)[-1]
+        detail = exception or exception_type or "failed"
+        if exception and exception_type and exception_type.lower() not in exception.lower():
+            detail = f"{exception_type}: {exception}"
+        where = f"{node_type} (node {node_id})" if node_type and node_id else node_type
+        if not where and node_id:
+            where = f"node {node_id}"
+        return f"{where} failed — {detail}" if where else detail
+    return _sanitized_remote_error_text(status.get("status_str")) or "remote generation failed"
+
+
+REMOTE_SAMPLER_PROGRESS_SHARE = 0.9
+
+
+def _record_lane_progress(prompt_id, lane):
+    """Pull the lane's real sampler counters into this prompt's route record.
+
+    A remote lane's /history entry appears only once, at the very end, so
+    without this the studio has nothing but a time estimate for the whole
+    generation. The rented box exposes /hivemind/progress (hivemind_privacy);
+    a lane that predates it simply keeps the estimate. Counters only - the
+    payload carries node ids and step numbers, never graph inputs."""
+    try:
+        request = comfy_lane_request(lane, "/hivemind/progress")
+        with urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or str(payload.get("prompt_id") or "") != str(prompt_id):
+        # Counters from a neighbouring prompt say nothing about this one.
+        return None
+    try:
+        value, maximum = float(payload.get("value") or 0), float(payload.get("max") or 0)
+    except (TypeError, ValueError):
+        return None
+    if maximum <= 0:
+        return None
+    # Sampling is the measurable phase, not the whole job: VAE decode, audio
+    # decode, muxing and the sealed fetch-back follow it and report nothing.
+    # Measured on a 5s H3 clip, that tail runs ~75s against ~40s of sampling,
+    # so reporting the sampler's own 10/10 as 1.0 would park the bar at "done"
+    # for longer than it took to sample. Scale into the share sampling actually
+    # owns and let the client's time-based smoothing carry the remainder.
+    progress = max(0.0, min(1.0, value / maximum)) * REMOTE_SAMPLER_PROGRESS_SHARE
+    # Deliberately NOT touching status: respawn_remote_comfy_watchers re-arms
+    # on status == "submitted", so a progress update that promoted the prompt
+    # to "running" would orphan it across a gateway restart.
+    update_comfy_prompt_route(
+        prompt_id, progress=progress,
+        progress_step=int(value), progress_total=int(maximum),
+    )
+    return progress
+
+
+def watch_remote_comfy_prompt(prompt_id, poll_seconds=5, timeout_seconds=7200):
+    """Server-side completion watcher for one remote-lane prompt: poll the
+    OWNING lane, then harvest (requester-sealed) and scrub the box. Running
+    here - not in the client - means results are captured and the rented box
+    cleaned even if the submitting client dies mid-generation."""
+    route = comfy_prompt_route(prompt_id) or {}
+    lane = route.get("lane") or "default"
+    deadline = time.monotonic() + timeout_seconds
+    history = None
+    while True:
+        try:
+            history = _fetch_lane_history(lane, prompt_id)
+        except Exception:
+            history = None
+        if isinstance(history, dict):
+            break
+        _record_lane_progress(prompt_id, lane)
+        if time.monotonic() >= deadline:
+            update_comfy_prompt_route(
+                prompt_id, status="error",
+                error=f"remote prompt did not finish within {timeout_seconds}s",
+            )
+            return comfy_prompt_route(prompt_id)
+        time.sleep(poll_seconds)
+    status = history.get("status") or {}
+    failed = str(status.get("status_str") or "").lower() == "error" or not status.get("completed")
+    # Let the workflow-envelope index record this prompt's sealed workflow
+    # before the history entry disappears from the lane.
+    try:
+        _harvest_comfy_workflow_envelopes()
+    except Exception:
+        pass
+    harvest_error = None
+    if failed:
+        update_comfy_prompt_route(prompt_id, status="error", error=remote_comfy_failure_message(history))
+    else:
+        try:
+            harvest_remote_comfy_outputs(prompt_id, history)
+        except Exception as exc:
+            harvest_error = exc
+            update_comfy_prompt_route(prompt_id, status="error", error=str(exc))
+    if harvest_error is None:
+        # Scrub only once the sealed envelopes exist locally (or the job
+        # failed and there is nothing to recover): a failed harvest must not
+        # delete the only copy of a paid generation. Un-scrubbed files still
+        # die with the instance's ephemeral disk.
+        try:
+            scrub_remote_comfy_prompt(prompt_id, history)
+        except Exception as exc:
+            print(f"[remote-comfy] scrub failed for {prompt_id}: {exc}", file=sys.stderr)
+    else:
+        # The outputs stay (they are the only copy), but the staged reference
+        # image is ours to remove and has no recovery value.
+        try:
+            scrub_remote_comfy_prompt(prompt_id, history, inputs_only=True)
+        except Exception as exc:
+            print(f"[remote-comfy] input scrub failed for {prompt_id}: {exc}", file=sys.stderr)
+        print(
+            f"[remote-comfy] harvest failed for {prompt_id}; leaving remote outputs for instance teardown: {harvest_error}",
+            file=sys.stderr,
+        )
+    return comfy_prompt_route(prompt_id)
+
+
+def remote_comfy_job_record(prompt_id):
+    """A routed remote prompt in /api/job shape, or None if it is not one.
+
+    The studio polls this over its trusted server-side channel, so it is the
+    one place a remote generation can report real progress (the lane's sampler
+    counters) and, on completion, the sealed output it should fetch. Names the
+    output under /image/, which serves the requester-sealed envelope - never a
+    /comfy/view path, which only exists for plaintext local files."""
+    route = comfy_prompt_route(prompt_id)
+    if not route or not route.get("remote"):
+        return None
+    status = route.get("status")
+    outputs = [str(name) for name in route.get("outputs") or []]
+    record = {
+        "id": str(prompt_id),
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "backend": "comfy-remote",
+        "status": {"submitted": "running", "harvested": "success"}.get(status, status or "running"),
+        "created_at": route.get("created_at"),
+        "lane": route.get("lane"),
+    }
+    if isinstance(route.get("progress"), (int, float)):
+        record["progress"] = float(route["progress"])
+        record["progress_step"] = route.get("progress_step")
+        record["progress_total"] = route.get("progress_total")
+    if route.get("error"):
+        record["error"] = str(route["error"])
+    if outputs:
+        record["outputs"] = [{"filename": name, "subfolder": "", "type": "output"} for name in outputs]
+        record["image_urls"] = [f"/image/{name}" for name in outputs]
+    return record
+
+
+def synthetic_comfy_history_for_route(prompt_id, route):
+    """History-shaped response for a routed remote prompt, built from the
+    gateway's own route record. The lane's history entry is scrubbed after
+    harvest (by design), and while a job runs the proxy must not leak the
+    lane's live state to non-requesters - so remote history reads are answered
+    from here in every phase. Completion is only reported once the sealed
+    envelopes exist locally, so a client that resolves output URLs on
+    completion always finds them."""
+    status_value = (route or {}).get("status")
+    if status_value == "error":
+        entry = {
+            "status": {
+                "status_str": "error", "completed": True,
+                "messages": [["hivemind_remote_error", {"error": route.get("error") or "remote generation failed"}]],
+            },
+            "outputs": {},
+        }
+    elif status_value == "harvested":
+        images = [
+            {"filename": name, "subfolder": "", "type": "output"}
+            for name in route.get("outputs") or []
+        ]
+        entry = {
+            "status": {"status_str": "success", "completed": True},
+            "outputs": {"hivemind_remote": {"images": images}},
+        }
+    else:
+        # submitted / in flight: history has no entry yet, same as live Comfy.
+        return {}
+    return {str(prompt_id): entry}
+
+
+def respawn_remote_comfy_watchers():
+    """Re-arm watchers for remote prompts that were in flight when the gateway
+    last stopped, so harvest+scrub still happen after a restart."""
+    _ensure_comfy_prompt_routes_loaded()
+    with comfy_prompt_routes_lock:
+        pending = [
+            pid for pid, entry in _comfy_prompt_routes.items()
+            if isinstance(entry, dict) and entry.get("remote") and entry.get("status") == "submitted"
+        ]
+    for pid in pending:
+        threading.Thread(target=watch_remote_comfy_prompt, args=(pid,), daemon=True).start()
+    return pending
 
 
 VAULT_SEALED_SETUP_FORMAT = "hivemind-vault-sealed-setup"
@@ -1372,17 +2042,83 @@ def _delete_prompt_ids_from_comfy(prompt_ids):
     body = json.dumps({"delete": sorted(prompt_ids)}).encode("utf-8")
     for lane, base in COMFY_LANES.items():
         try:
-            request = Request(
-                f"{base}/history",
-                data=body,
-                method="POST",
-                headers={"Content-Type": "application/json"},
+            request = comfy_lane_request(
+                lane, "/history", data=body, method="POST",
+                content_type="application/json",
             )
             with urlopen(request, timeout=10):
                 pass
         except Exception:
             failures.append(lane)
     return failures
+
+
+def interrupt_comfy_prompt(prompt_id):
+    """Best-effort interrupt of one Comfy prompt across every lane: a pending
+    prompt is deleted from the queue, the currently-executing one is interrupted.
+    Returns True when a lane acknowledged either action."""
+    pid = str(prompt_id or "")
+    if not pid:
+        return False
+
+    def entry_ids(entries):
+        # Queue entries are [number, prompt_id, prompt, extra, outputs] tuples;
+        # only the id is read, so prompt redaction does not matter here.
+        return {str(item[1]) for item in (entries or []) if isinstance(item, (list, tuple)) and len(item) > 1}
+
+    acknowledged = False
+    seen_bases = set()
+    for lane, base in COMFY_LANES.items():
+        if base in seen_bases:
+            continue
+        seen_bases.add(base)
+        try:
+            with urlopen(comfy_lane_request(lane, "/queue"), timeout=10) as response:
+                state = json.loads(response.read().decode("utf-8") or "{}")
+        except Exception:
+            continue
+        try:
+            if pid in entry_ids(state.get("queue_pending")):
+                body = json.dumps({"delete": [pid]}).encode("utf-8")
+                with urlopen(comfy_lane_request(lane, "/queue", data=body, method="POST", content_type="application/json"), timeout=10):
+                    acknowledged = True
+            elif pid in entry_ids(state.get("queue_running")):
+                with urlopen(comfy_lane_request(lane, "/interrupt", data=b"{}", method="POST", content_type="application/json"), timeout=10):
+                    acknowledged = True
+        except Exception:
+            continue
+    return acknowledged
+
+
+def cancel_generation_job(jid):
+    """Cancel one generation job wherever it runs. Native (MLX) jobs get their
+    live subprocess terminated plus a cancel flag the runner checks between
+    stages; Comfy-routed jobs (the job id is the Comfy prompt id) are removed
+    from the queue or interrupted mid-execution. Cancelling an unknown or
+    already-finished job is a no-op, not an error, so the studio can always
+    unblock its UI."""
+    jid = str(jid)
+    with jobs_lock:
+        rec = jobs.get(jid)
+        active = rec is not None and rec.get("status") in ("queued", "running")
+        if active:
+            rec["cancel_requested"] = True
+        proc = native_job_procs.get(jid)
+        comfy_prompt_id = str((rec or {}).get("comfy_prompt_id") or "")
+    interrupted = False
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            interrupted = True
+        except Exception:
+            pass
+    if active and not interrupted and not comfy_prompt_id:
+        # A native job between subprocess stages: no live process to kill right
+        # now, but the runner aborts at its next cancel-flag checkpoint.
+        interrupted = True
+    if not interrupted:
+        interrupted = interrupt_comfy_prompt(comfy_prompt_id or jid)
+    return {"ok": True, "id": jid, "known": rec is not None, "interrupted": bool(interrupted)}
 
 
 def delete_output_everywhere(value):
@@ -1941,6 +2677,31 @@ def snap_biglove_klein3_resolution(width, height):
     return bucket_w, bucket_h
 
 
+def _reshape_dims_to_image_aspect(image_path, width, height, *, multiple=32):
+    """Reshape a width×height pixel budget to a source image's aspect ratio.
+
+    An edit rescales the reference onto the output canvas, so a canvas whose
+    aspect differs from the source distorts it — the fixed 1024x1536 bucket
+    stretched square references vertically. Keep the caller's pixel budget,
+    adopt the source aspect (clamped to 3:1 either way so a degenerate strip
+    cannot blow up one dimension), and stay on the sampling grid. When the
+    source cannot be read the caller's dims pass through unchanged.
+    """
+    dims = _image_dimensions(image_path) if image_path else None
+    if not dims or dims[0] <= 0 or dims[1] <= 0:
+        return width, height
+    try:
+        budget = max(1, int(width)) * max(1, int(height))
+    except Exception:
+        return width, height
+    aspect = max(1.0 / 3.0, min(3.0, dims[0] / dims[1]))
+    new_width = (budget * aspect) ** 0.5
+    return (
+        _round_to_multiple(new_width, multiple=multiple),
+        _round_to_multiple(new_width / aspect, multiple=multiple),
+    )
+
+
 def comfy_lane_for_prompt_body(body):
     """Pick a configured Comfy lane from graph class/model names only.
 
@@ -1948,6 +2709,9 @@ def comfy_lane_for_prompt_body(body):
     "anima=anima,qwen35,qwen3.5;sdxl=sdxl,pony". Prompt text is intentionally
     ignored; only class names and model-ish input values are inspected.
     """
+    # Pick up a machine attached since this process started, so routing a
+    # generation to a fresh rental needs no restart.
+    refresh_comfy_lanes()
     prompt = _prompt_nodes_from_body(body)
     haystack = []
     for node in prompt.values():
@@ -2407,6 +3171,11 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
         comfy_input = (COMFY_INPUT_DIR / input_name).resolve()
         if comfy_input != image_path:
             comfy_input.write_bytes(image_path.read_bytes())
+        # Node 4b resizes with crop:'disabled', which stretches anything the
+        # canvas doesn't match — keep the requested pixel budget but adopt the
+        # source image's aspect so the edit never distorts it.
+        width, height = _reshape_dims_to_image_aspect(comfy_input, width, height, multiple=16)
+        rec["options"].update({"width": width, "height": height})
         filename_prefix = f"biglove_klein3_comfy_edit_{job_id}"
         api_prompt = {
             '1': {'class_type':'UNETLoader','inputs':{'unet_name':'BigLoveKlein3_bf16.safetensors','weight_dtype':'default'}},
@@ -3094,6 +3863,601 @@ def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
         jobs[job_id] = rec
 
 
+def _compose_labeled_sheet(sheet_path, rows, cols, square, tiles, header_lines, tag="sheet"):
+    """Compose a labeled tile sheet from staged plaintext tiles via the venv
+    python (PIL lives there, like media_seal.py). Returns the sheet path or
+    None — a missing sheet degrades the job, it does not fail it."""
+    if not tiles:
+        return None
+    sheet_path = Path(sheet_path)
+    manifest = {
+        "output": str(sheet_path),
+        "rows": rows,
+        "cols": cols,
+        "square": square,
+        "header_lines": header_lines,
+        "tiles": tiles,
+    }
+    composer = Path(__file__).resolve().parent / "bin" / "compose-strength-hunt-sheet.py"
+    try:
+        proc = subprocess.run(
+            [E2E_SEAL_PYTHON, str(composer)],
+            input=json.dumps(manifest),
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
+        if proc.returncode == 0 and sheet_path.exists():
+            return sheet_path
+        print(f"[{tag}] sheet composer failed: {proc.stderr[-1000:]}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[{tag}] sheet composer error: {exc}", file=sys.stderr)
+    return None
+
+
+def _strength_hunt_compose_sheet(job_id, plan, tiles, header_lines):
+    return _compose_labeled_sheet(
+        COMFY_OUTPUT_DIR / f"strhunt_{job_id}_sheet.png",
+        plan["rows"],
+        plan["cols"],
+        plan["rows"] == 1 and len(tiles) > 4,
+        tiles,
+        header_lines,
+        tag="strength-hunt",
+    )
+
+
+def run_comfy_krea2_strength_hunt(job_id, prompt, image_path=None, options=None, hunt=None):
+    """Sweep 1-2 LoRA strengths over a FIXED prompt+seed (Mix-Studio's Strength
+    Hunt, translated). Portable/CUDA profiles pack every variant into ONE merged
+    ComfyUI prompt (shared loaders run once); apple-silicon submits variants
+    sequentially because its LoRA stack is baked into the quantized loader
+    (MultiLoRAStackToPreLora) — a merged graph would load N model instances.
+    Outputs: labeled comparison sheet first, then every variant, all sealed."""
+    started = now_iso()
+    options = options or {}
+    hunt = hunt or {}
+    normalized = {
+        "width": int_option(options, "width", 1024, 64, 4096),
+        "height": int_option(options, "height", 1024, 64, 4096),
+        "steps": int_option(options, "steps", 10, 1, 50),
+        "cfg": float_option(options, "cfg", float_option(options, "guidance", 1.0, 0.0, 20.0), 0.0, 20.0),
+        # One resolve up front: every variant must share the exact same seed.
+        "seed": resolve_seed_option(options),
+        "sampler_name": _krea2_sampler_choice(options)[0],
+        "scheduler": _krea2_sampler_choice(options)[1],
+        "ref_boost": float_option(options, "ref_boost", 4.0, 0.0, 1000.0),
+        "identity_strength": float_option(options, "identity_strength", 1.0, -10.0, 10.0),
+        "grounding_px": int_option(options, "grounding_px", 768, 0, 4096),
+        "cache_static_tokens": bool_option(options, "cache_static_tokens", True),
+        "loras": [
+            {
+                "id": str(item.get("id") or ""),
+                "strength": float_option(item, "strength", 1.0, LORA_STRENGTH_MIN, LORA_STRENGTH_MAX),
+            }
+            for item in (options.get("loras") or [])
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ],
+    }
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "comfy-krea2-strength-hunt",
+        "created_at": started,
+        "outputs": [],
+        "mode": "identity-edit" if image_path else "text-to-image",
+        "options": normalized,
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    staging_dir = None
+    try:
+        plan = build_strength_hunt_plan(normalized["loras"], hunt.get("lora_ids") or [])
+        profile = accelerator_profile()
+        if profile == "apple-silicon" and len(plan["variants"]) > 36:
+            raise RuntimeError(
+                f"{len(plan['variants'])} variants would each requantize the Krea2 loader on apple-silicon; "
+                "lower the swept strengths to 36 variants or run on a CUDA lane"
+            )
+        rec["strength_hunt"] = {
+            "axes": [{"id": axis["id"], "values": axis["values"]} for axis in plan["axes"]],
+            "rows": plan["rows"],
+            "cols": plan["cols"],
+            "variants": len(plan["variants"]),
+            "merged": profile != "apple-silicon",
+        }
+        with jobs_lock:
+            jobs[job_id] = rec
+
+        input_name = None
+        if image_path:
+            image_path = Path(image_path).expanduser().resolve()
+            allowed = [OUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), COMFY_INPUT_DIR.resolve()]
+            if not any(str(image_path).startswith(str(root)) for root in allowed) or not image_path.exists():
+                raise RuntimeError("input image is outside private image storage or does not exist")
+            COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+            input_name = safe_name(image_path.name)
+            comfy_input = (COMFY_INPUT_DIR / input_name).resolve()
+            if comfy_input != image_path:
+                comfy_input.write_bytes(image_path.read_bytes())
+
+        t0 = time.monotonic()
+        graphs = []
+        for variant in plan["variants"]:
+            variant_options = dict(normalized, loras=variant["loras"])
+            graphs.append(build_krea2_turbo_identity_prompt(
+                prompt,
+                image_name=input_name,
+                options=variant_options,
+                # The filename index is the ordering contract: completion maps
+                # arrival order back to grid position through this marker.
+                filename_prefix=f"strhunt_{job_id}_strength_hunt_{variant['index']:03d}",
+            ))
+
+        def submit_and_wait(api_prompt, label, poll_loops):
+            body = json.dumps({"prompt": api_prompt, "client_id": f"media-strhunt-{job_id}"}).encode("utf-8")
+            req = Request(f"{COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
+            try:
+                queued = json.loads(urlopen(req, timeout=30).read().decode("utf-8"))
+            except HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"ComfyUI rejected strength hunt graph ({label}): {detail[:4000]}") from exc
+            prompt_id = queued.get("prompt_id")
+            if not prompt_id:
+                raise RuntimeError(f"ComfyUI did not return prompt_id: {queued}")
+            for _ in range(poll_loops):
+                time.sleep(2)
+                try:
+                    payload = urlopen(f"{COMFY_HTTP_DEFAULT}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                    data = json.loads(payload or "{}")
+                    if prompt_id in data:
+                        history = data[prompt_id]
+                        status = history.get("status") or {}
+                        if status.get("status_str") != "success" or not status.get("completed"):
+                            raise RuntimeError(f"strength hunt {label} failed: {status}")
+                        return history
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+            raise RuntimeError(f"strength hunt {label} timed out waiting for prompt {prompt_id}")
+
+        histories = []
+        if profile == "apple-silicon":
+            for i, graph in enumerate(graphs):
+                histories.append(submit_and_wait(graph, f"variant {i + 1}/{len(graphs)}", 450))
+                rec["strength_hunt"]["completed"] = i + 1
+                with jobs_lock:
+                    jobs[job_id] = rec
+        else:
+            merged = merge_strength_hunt_graphs(graphs)
+            histories.append(submit_and_wait(merged, f"merged x{len(graphs)}", 450 + 60 * len(graphs)))
+
+        # Collect ordered outputs; capture plaintext bytes NOW — the privacy
+        # sweeper may seal (or the E2E sweeper envelope) them at any moment,
+        # and .e2e envelopes are unreadable server-side by design.
+        indexed = {}
+        for history in histories:
+            for node_out in (history.get("outputs") or {}).values():
+                for image in node_out.get("images") or []:
+                    name = safe_name(image.get("filename") or "")
+                    index = strength_hunt_output_index(name)
+                    if index is None:
+                        continue
+                    subfolder = image.get("subfolder") or ""
+                    typ = image.get("type") or "output"
+                    root = COMFY_OUTPUT_DIR if typ == "output" else COMFY_INPUT_DIR
+                    path = (root / subfolder / name).resolve()
+                    if existing_output_path(path):
+                        indexed[index] = path
+        if not indexed:
+            raise RuntimeError("strength hunt completed without any variant outputs")
+
+        staging_dir = Path(tempfile.mkdtemp(prefix=f"strhunt-{job_id}-"))
+        tiles = []
+        axis_label = {axis["id"]: Path(axis["id"]).stem for axis in plan["axes"]}
+        for variant in plan["variants"]:
+            path = indexed.get(variant["index"])
+            if path is None:
+                continue
+            label = " · ".join(
+                f"{axis_label[axis_id]} {value}" for axis_id, value in variant["coords"].items()
+            )
+            try:
+                data, _mime = decrypt_output_bytes(logical_path_for_encrypted(path))
+            except Exception:
+                continue  # sealed to .e2e before we got here — skip its tile
+            staged = staging_dir / f"tile_{variant['index']:03d}.png"
+            staged.write_bytes(data)
+            tiles.append({"path": str(staged), "label": label, "index": variant["index"]})
+
+        axis_text = " x ".join(
+            f"{axis_label[axis['id']]} (MAX {axis['values'][-1]})" for axis in plan["axes"]
+        )
+        header_lines = [
+            f"STRENGTH HUNT · SEED {normalized['seed']} · CFG {normalized['cfg']} · STEPS {normalized['steps']}",
+            f"AXIS {axis_text} · {len(plan['variants'])} variants",
+            (prompt or "")[:200],
+        ]
+        sheet_path = _strength_hunt_compose_sheet(job_id, plan, tiles, header_lines)
+
+        ordered_outputs = [str(indexed[index]) for index in sorted(indexed)]
+        final_outputs = ([str(sheet_path)] if sheet_path else []) + ordered_outputs
+        rec["strength_hunt"]["sheet"] = bool(sheet_path)
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": encrypt_outputs(final_outputs),
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as exc:
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(exc)})
+    finally:
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
+def run_comfy_krea2_outpaint(job_id, prompt, image_path, options=None, outpaint=None):
+    """User-facing canvas expansion (Mix-Studio port): the source keeps its
+    pixels, centered on a larger canvas whose missing border is sampled by the
+    shared pixel-preserving Krea2 outpaint graph (the same one the LTX anchor
+    pipeline trusts), then the source is composited back over the result."""
+    started = now_iso()
+    options = options or {}
+    outpaint = outpaint or {}
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "comfy-krea2-outpaint",
+        "created_at": started,
+        "outputs": [],
+        "mode": "outpaint",
+        "options": {
+            "width": int_option(outpaint, "width", 0, 64, 4096),
+            "height": int_option(outpaint, "height", 0, 64, 4096),
+            "steps": int_option(options, "steps", 10, 1, 50),
+            "seed": resolve_seed_option(options),
+            "feathering": int_option(outpaint, "feathering", 48, 0, 256),
+        },
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    try:
+        if not image_path:
+            raise RuntimeError("outpaint requires a source image")
+        image_path = Path(image_path).expanduser().resolve()
+        allowed = [OUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), COMFY_INPUT_DIR.resolve()]
+        if not any(str(image_path).startswith(str(root)) for root in allowed) or not image_path.exists():
+            raise RuntimeError("input image is outside private image storage or does not exist")
+        dimensions = _image_dimensions(image_path)
+        if not dimensions:
+            raise RuntimeError("could not read the source image dimensions")
+        source_width, source_height = dimensions
+        COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+        input_name = safe_name(image_path.name)
+        comfy_input = (COMFY_INPUT_DIR / input_name).resolve()
+        if comfy_input != image_path:
+            comfy_input.write_bytes(image_path.read_bytes())
+
+        t0 = time.monotonic()
+        compiled = build_krea2_turbo_outpaint_prompt(
+            prompt or "",
+            input_name,
+            source_width=source_width,
+            source_height=source_height,
+            options={
+                "width": rec["options"]["width"],
+                "height": rec["options"]["height"],
+                "seed": rec["options"]["seed"],
+                "steps": rec["options"]["steps"],
+                "cfg": 1.0,
+                "ref_boost": 4.0,
+                "identity_strength": 1.0,
+                "grounding_px": 768,
+                "feathering": rec["options"]["feathering"],
+            },
+            profile=accelerator_profile(),
+            filename_prefix=f"krea2_outpaint_{job_id}",
+            identity_checkpoint_available=(
+                COMFY / "models" / "diffusion_models" / KREA2_IDENTITY_CONVROT_MODEL
+            ).is_file(),
+        )
+        geometry = compiled["geometry"]
+        rec["geometry"] = geometry
+        if geometry["mode"] != "outpaint":
+            raise RuntimeError(
+                "that target does not grow the canvas — it only resizes; use Upscale for more pixels "
+                f"(source {source_width}x{source_height}, target {geometry['target_width']}x{geometry['target_height']})"
+            )
+
+        body = json.dumps({"prompt": compiled["graph"], "client_id": f"media-outpaint-{job_id}"}).encode("utf-8")
+        req = Request(f"{COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
+        try:
+            queued = json.loads(urlopen(req, timeout=30).read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"ComfyUI rejected the outpaint graph: {detail[:4000]}") from exc
+        prompt_id = queued.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI did not return prompt_id: {queued}")
+        rec["comfy_prompt_id"] = prompt_id
+        with jobs_lock:
+            jobs[job_id] = rec
+
+        history = None
+        for _ in range(450):
+            time.sleep(2)
+            try:
+                payload = urlopen(f"{COMFY_HTTP_DEFAULT}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                data = json.loads(payload or "{}")
+                if prompt_id in data:
+                    history = data[prompt_id]
+                    break
+            except Exception:
+                pass
+        if history is None:
+            raise RuntimeError(f"outpaint timed out waiting for prompt {prompt_id}")
+        status = history.get("status") or {}
+        if status.get("status_str") != "success" or not status.get("completed"):
+            raise RuntimeError(f"outpaint failed: {status}")
+
+        outputs = []
+        for node_out in (history.get("outputs") or {}).values():
+            for image in node_out.get("images") or []:
+                name = safe_name(image.get("filename") or "")
+                subfolder = image.get("subfolder") or ""
+                typ = image.get("type") or "output"
+                root = COMFY_OUTPUT_DIR if typ == "output" else COMFY_INPUT_DIR
+                path = (root / subfolder / name).resolve()
+                if existing_output_path(path):
+                    outputs.append(str(path))
+        if not outputs:
+            raise RuntimeError("outpaint completed without an output image")
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": encrypt_outputs(outputs),
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as exc:
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(exc)})
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
+def run_comfy_krea2_inpaint(job_id, prompt, image_path, mask_path, options=None):
+    """Masked edit (Mix-Studio soft-inpaint port): the white-on-black mask PNG
+    selects what changes. Flow-model-safe wiring — VAEEncode + SetLatentNoiseMask,
+    never VAEEncodeForInpaint — and the untouched source is composited back
+    outside the grown mask. Core ComfyUI nodes only."""
+    started = now_iso()
+    options = options or {}
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "comfy-krea2-inpaint",
+        "created_at": started,
+        "outputs": [],
+        "mode": "inpaint",
+        "options": {
+            "steps": int_option(options, "steps", 10, 1, 50),
+            "seed": resolve_seed_option(options),
+            "mask_expand": int_option(options, "mask_expand", 14, 6, 32),
+            "mask_influence": int_option(options, "mask_influence", 78, 25, 100),
+            "loras": [
+                {
+                    "id": str(item.get("id") or ""),
+                    "strength": float_option(item, "strength", 1.0, LORA_STRENGTH_MIN, LORA_STRENGTH_MAX),
+                }
+                for item in (options.get("loras") or [])
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ],
+        },
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    try:
+        staged = {}
+        for label, source in (("source", image_path), ("mask", mask_path)):
+            if not source:
+                raise RuntimeError(f"inpaint requires a {label} image")
+            source = Path(source).expanduser().resolve()
+            allowed = [OUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), COMFY_INPUT_DIR.resolve()]
+            if not any(str(source).startswith(str(root)) for root in allowed) or not source.exists():
+                raise RuntimeError(f"{label} image is outside private image storage or does not exist")
+            COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+            name = safe_name(source.name)
+            comfy_input = (COMFY_INPUT_DIR / name).resolve()
+            if comfy_input != source:
+                comfy_input.write_bytes(source.read_bytes())
+            staged[label] = name
+
+        t0 = time.monotonic()
+        api_prompt = compile_krea2_turbo_inpaint_prompt(
+            prompt,
+            staged["source"],
+            staged["mask"],
+            options=dict(rec["options"], sampler_name=options.get("sampler_name"), scheduler=options.get("scheduler")),
+            profile=accelerator_profile(),
+            filename_prefix=f"krea2_inpaint_{job_id}",
+        )
+        body = json.dumps({"prompt": api_prompt, "client_id": f"media-inpaint-{job_id}"}).encode("utf-8")
+        req = Request(f"{COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
+        try:
+            queued = json.loads(urlopen(req, timeout=30).read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"ComfyUI rejected the inpaint graph: {detail[:4000]}") from exc
+        prompt_id = queued.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI did not return prompt_id: {queued}")
+        rec["comfy_prompt_id"] = prompt_id
+        with jobs_lock:
+            jobs[job_id] = rec
+
+        history = None
+        for _ in range(450):
+            time.sleep(2)
+            try:
+                payload = urlopen(f"{COMFY_HTTP_DEFAULT}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                data = json.loads(payload or "{}")
+                if prompt_id in data:
+                    history = data[prompt_id]
+                    break
+            except Exception:
+                pass
+        if history is None:
+            raise RuntimeError(f"inpaint timed out waiting for prompt {prompt_id}")
+        status = history.get("status") or {}
+        if status.get("status_str") != "success" or not status.get("completed"):
+            raise RuntimeError(f"inpaint failed: {status}")
+
+        outputs = []
+        for node_out in (history.get("outputs") or {}).values():
+            for image in node_out.get("images") or []:
+                name = safe_name(image.get("filename") or "")
+                subfolder = image.get("subfolder") or ""
+                typ = image.get("type") or "output"
+                root = COMFY_OUTPUT_DIR if typ == "output" else COMFY_INPUT_DIR
+                path = (root / subfolder / name).resolve()
+                if existing_output_path(path):
+                    outputs.append(str(path))
+        if not outputs:
+            raise RuntimeError("inpaint completed without an output image")
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": encrypt_outputs(outputs),
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as exc:
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(exc)})
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
+# Interpolation uploads carry whole clips as base64; the JSON cap that guards
+# every other route would reject anything past ~18MB of video.
+INTERPOLATE_MAX_BODY_BYTES = int(os.environ.get("MEDIA_GATEWAY_INTERPOLATE_MAX_BODY_BYTES", str(512 * 1024 * 1024)))
+VIDEO_INLINE_MIMES = {
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+    "video/quicktime": ".mov",
+}
+
+
+def stage_inline_video_base64(value):
+    """Stage a browser-decrypted clip (data URL or raw base64) for processing."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    encoded = value.strip()
+    extension = ".mp4"
+    if encoded.startswith("data:"):
+        match = re.match(r"^data:(video/[a-zA-Z0-9.+-]+);base64,(.*)$", encoded, flags=re.DOTALL)
+        if not match:
+            raise ValueError("video_base64 must be raw base64 or a video data URL")
+        mime, encoded = match.groups()
+        extension = VIDEO_INLINE_MIMES.get(mime.lower(), ".mp4")
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("video_base64 is not valid base64") from exc
+    if not payload:
+        raise ValueError("video_base64 decoded to an empty clip")
+    if len(payload) > 400 * 1024 * 1024:
+        raise ValueError("decoded inline video exceeds 400MB")
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    target = OUT_DIR / f".rife-inline-{uuid.uuid4().hex[:16]}{extension}"
+    target.write_bytes(payload)
+    return target
+
+
+def run_video_interpolation(job_id, video_path, options=None):
+    """Proper RIFE frame interpolation (Practical-RIFE 4.25, Apple-MLX port —
+    vendor/rife-mlx) as a post-process on a finished clip: 2x or 4x the frame
+    rate, original audio remuxed untouched (duration is unchanged, only frames
+    are inserted BETWEEN existing ones). Runs under the repo venv (MLX), so it
+    works for clips from ANY lane — native MLX, local Comfy, or fetched-back
+    rentals — and, like upscale, the input arrives already-decrypted from the
+    browser, so this never needs the vault key."""
+    started = now_iso()
+    options = options or {}
+    factor = 4 if int_option(options, "factor", 2, 2, 4) >= 4 else 2
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "rife-interpolation",
+        "created_at": started,
+        "outputs": [],
+        "mode": f"{factor}x",
+        "options": {"factor": factor},
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    video_path = Path(video_path)
+    output = None
+    try:
+        if not video_path.is_file():
+            raise RuntimeError("interpolation input clip is missing")
+        # Pyramid scale 0.5 keeps memory sane on very large frames (upstream's
+        # 4K guidance); everything at or below ~1.5K stays full-scale.
+        scale = "1.0"
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0", str(video_path)],
+                text=True, capture_output=True, timeout=30,
+            )
+            dims = [int(v) for v in (probe.stdout or "").strip().split(",") if v.strip().isdigit()]
+            if len(dims) == 2 and min(dims) >= 1536:
+                scale = "0.5"
+        except Exception:
+            pass
+
+        COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        output = COMFY_OUTPUT_DIR / f"rife_{job_id}_{factor}x.mp4"
+        t0 = time.monotonic()
+        proc = subprocess.run(
+            [
+                E2E_SEAL_PYTHON, "-m", "rife_mlx.pipeline_mlx",
+                "-i", str(video_path),
+                "-o", str(output),
+                "--multi", str(factor),
+                "-s", scale,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=int_option(options, "runtime_timeout_seconds", 1800, 120, 7200),
+        )
+        if proc.returncode != 0 or not output.is_file() or output.stat().st_size < 1000:
+            detail = (proc.stderr or proc.stdout or "unknown rife-mlx error").strip()
+            raise RuntimeError(f"RIFE interpolation failed: {detail[-1500:]}")
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": encrypt_outputs([str(output)]),
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as exc:
+        if output is not None:
+            output.unlink(missing_ok=True)
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(exc)})
+    finally:
+        video_path.unlink(missing_ok=True)
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
 def run_comfy_upscale(job_id, image_path, options=None):
     """Upscale an existing image. mode='fast' = R-ESRGAN 4x+ Anime6B only
     (~seconds); mode='max' = R-ESRGAN then a tiled Anima diffusion refine pass
@@ -3543,17 +4907,19 @@ def _round_to_multiple(value, multiple=64):
 
 
 def _cap_native_mx_dimensions(width, height):
-    """Keep warmed MXFP8 edits in the fast path while preserving aspect.
+    """Optionally cap warmed MXFP8 edit sizes to a draft-speed envelope.
 
-    The Comfy graph may resolve linked scale nodes to 1MP+ portrait sizes. That
-    is faithful but blows up the native sidecar from the old ~sub-10s envelope to
-    ~20s. Default cap is the measured sub-10 2-step envelope on this Mac
-    (448x672 = 301056 px). Set ZIMAGE_NATIVE_MX_MAX_PIXELS=0 to disable.
+    This used to default to 448x672 = 301056 px (the measured sub-10s 2-step
+    envelope on this Mac), which silently rendered every BigLove Klein edit at
+    ~0.3MP — visibly blurry — regardless of the requested resolution. The cap
+    is now off by default so edits run at the model's trained ~1.5MP bucket
+    (~20s). Set ZIMAGE_NATIVE_MX_MAX_PIXELS to a positive pixel count
+    (e.g. 301056) to restore the draft-speed cap.
     """
     try:
-        max_pixels = int(os.environ.get('ZIMAGE_NATIVE_MX_MAX_PIXELS', str(448 * 672)))
+        max_pixels = int(os.environ.get('ZIMAGE_NATIVE_MX_MAX_PIXELS', '0'))
     except Exception:
-        max_pixels = 448 * 672
+        max_pixels = 0
     try:
         width = int(width)
         height = int(height)
@@ -3677,6 +5043,11 @@ def _native_mlx_ltx_metadata_from_workflow(workflow):
         'video': native.get('video') if isinstance(native.get('video'), dict) else None,
         'ingredient_sheet': (native.get('ingredientSheet') or native.get('ingredient_sheet')) if isinstance(native.get('ingredientSheet') or native.get('ingredient_sheet'), dict) else None,
         'ic_lora': (native.get('icLora') or native.get('ic_lora')) if isinstance(native.get('icLora') or native.get('ic_lora'), dict) else None,
+        # This is an ALLOWLIST: a key absent here is silently dropped no matter
+        # what the MCP emitted. head_swap arrived alongside pipeline='head-swap'
+        # and was discarded here, so the head-swap branch found no face and fell
+        # through to the Comfy graph. Any new pipeline needs its payload listed.
+        'head_swap': (native.get('headSwap') or native.get('head_swap')) if isinstance(native.get('headSwap') or native.get('head_swap'), dict) else None,
     }
 
 
@@ -3922,6 +5293,21 @@ def _ltx_valid_frame_count(value, default=233):
     return max(9, int(round((frames - 1) / 8)) * 8 + 1)
 
 
+def _ltx_snap_render_dimensions(width, height, *, single_stage=False):
+    """Floor a render size to the grid the selected LTX pipeline can honor.
+
+    The two-stage pipelines (distilled generate and the dev --two-stage
+    equivalent) run stage 1 at half resolution, so the ltx-2-mlx runtime floors
+    any dimension that is not a multiple of 64 (928 -> 896) AFTER the job
+    record is written; single-stage paths floor to the VAE's 32. Snapping
+    before the record keeps it, the prepared anchors, and the delivered file
+    on one agreed size.
+    """
+    modulus = 32 if single_stage else 64
+    snap = lambda value: max(modulus, (int(value) // modulus) * modulus)
+    return snap(width), snap(height)
+
+
 def _ltx_extension_output_frames(duration_seconds, frame_rate=24.0):
     try:
         duration = float(duration_seconds)
@@ -3977,6 +5363,62 @@ def detect_native_mlx_ltx_prompt(body):
     if not prompt_text:
         return None
     pipeline = str(meta.get('pipeline') or 'generate').strip().lower()
+    print(f"[ltx-native] pipeline={pipeline!r} keys={sorted(meta)} head_swap={meta.get('head_swap')}", flush=True)
+    if pipeline == 'head-swap':
+        # BFS head swap: the face image rides in a reserved strip composed over
+        # the source footage, so this needs BOTH inputs and neither is optional.
+        head_swap = meta.get('head_swap') if isinstance(meta.get('head_swap'), dict) else {}
+        face_name = _prompt_string(head_swap.get('face_image') or defaults.get('image')) or _first_ltx_image_name(nodes)
+        video_name = _prompt_string(head_swap.get('source_video') or (meta.get('video') or {}).get('path'))
+        if not face_name or not video_name:
+            return None
+        frame_rate = float_quality_option({'frame_rate': head_swap.get('frame_rate', defaults.get('frame_rate', 24))}, 'frame_rate', 24.0)
+        raw_frames = head_swap.get('frames', defaults.get('frames', 121))
+        frames = _ltx_valid_frame_count(raw_frames, 121)
+        seed_value = head_swap.get('seed', defaults.get('seed', 42))
+        seed = int(seed_value) if seed_value is not None else 42
+        return {
+            'variant': variant,
+            'operation': 'head-swap',
+            'prompt': prompt_text,
+            'video_path': video_name,
+            'reference_image_path': face_name,
+            'images': [],
+            'options': {
+                # Width/height are deliberately absent: the render is sized from
+                # the SOURCE video, not from the studio's aspect/resolution picker,
+                # because a head swap re-times existing footage rather than
+                # framing a new shot.
+                'frames': frames,
+                'frame_rate': frame_rate,
+                'seed': seed,
+                'model': str(spec.get('video_model') or spec.get('model') or ''),
+                'title': spec['title'],
+                'benchmark_seconds': spec.get('benchmark_seconds'),
+                'head_swap_region_px': int_option(head_swap, 'region_px', BFS_HEADSWAP_REGION_PX, 32, 2048),
+                # 0 = render at the source's own size. Capping the long side is
+                # the main speed lever, since cost scales with rendered pixels.
+                'head_swap_max_dimension': int_option(head_swap, 'max_dimension', 0, 0, 4096),
+                # 'fast' = half-res generation + upsample + control-aware refine.
+                'head_swap_pipeline': _prompt_string(head_swap.get('pipeline')) or 'single-stage',
+                'head_swap_refine_steps': int_option(head_swap, 'refine_steps', 3, 1, 8),
+                # The author's identity knob: "1.0 -> best motion fidelity;
+                # >1.0 -> stronger identity and hair capture, but may distort".
+                'head_swap_lora_strength': float_quality_option(head_swap, 'lora_strength', 1.0),
+                # Which engine runs the swap. 'bfs' regenerates the frame with
+                # the IC-LoRA; 'facefusion' swaps the face onto the original.
+                'head_swap_backend': _prompt_string(head_swap.get('backend')) or 'bfs',
+                'head_swap_face_enhancer': bool(head_swap.get('face_enhancer')),
+                'reference_strength': float_quality_option(head_swap, 'reference_strength', 1.0),
+                'conditioning_strength': float_quality_option(head_swap, 'conditioning_strength', 1.0),
+                'runtime_timeout_seconds': int_option(head_swap, 'runtime_timeout_seconds', 2400, 60, 14400),
+                # LoRAs belong INSIDE options — that is where the runner reads
+                # them (options.get('loras')). Returning them at the top level
+                # left native_loras empty, so head swap rejected its own request
+                # claiming the BFS LoRA was not selected.
+                'loras': _native_ltx_loras(meta.get('loras') or []),
+            },
+        }
     if pipeline == 'ic-lora':
         ic_lora = meta.get('ic_lora') if isinstance(meta.get('ic_lora'), dict) else {}
         ingredient_sheet = meta.get('ingredient_sheet') if isinstance(meta.get('ingredient_sheet'), dict) else {}
@@ -4303,8 +5745,8 @@ def _mobile_prompt_workflow_from_body(body):
     return None
 
 
-def _comfy_history_prompt_tuple(job_id, workflow=None):
-    extra = {'backend': 'mlx-mxfp8-bigloves-klein3-edit'}
+def _comfy_history_prompt_tuple(job_id, workflow=None, backend='mlx-mxfp8-bigloves-klein3-edit'):
+    extra = {'backend': backend}
     if workflow:
         extra['extra_pnginfo'] = {'workflow': scrub_workflow_prompt_text(workflow)}
     return [0, job_id, {}, extra, []]
@@ -4458,118 +5900,406 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
         for ref_path in reference_images:
             if not any(str(ref_path).startswith(str(root)) for root in allowed) or not ref_path.exists():
                 raise RuntimeError("input image is outside private image storage or does not exist")
-        # BigLoveKlein3 MXFP8 is exposed to flux-2-swift-mlx as the local Klein9B transformer.
-        # The MXFP8 file is pre-dequantized with Comfy's exact E8M0 blocked-scale layout
-        # so the Swift MLX path can load it cleanly through its bf16 loader.
-        # The Swift pipeline uses Flux2's correct I2I conditioning path instead of mflux's
-        # image-latent/noise-injection edit shim, which was producing fuzzy/noisy copies.
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        if use_swift_flux2_server():
-            t0 = time.monotonic()
-            payload_data = {
-                "prompt": prompt,
-                "imagePath": str(reference_images[0]),
-                "outputPath": str(out),
-                "width": width,
-                "height": height,
-                "steps": steps,
-                "guidance": guidance,
-                "seed": seed,
-                "jobId": job_id,
-            }
-            if len(reference_images) > 1:
-                payload_data["imagePaths"] = [str(p) for p in reference_images]
-            if native_loras:
-                payload_data["loras"] = native_loras
-            payload = json.dumps(payload_data).encode("utf-8")
-            req = Request(
-                SWIFT_FLUX2_SERVER_URL.rstrip("/") + "/generate",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            try:
-                progress_stop = threading.Event()
-                progress_thread = threading.Thread(
-                    target=poll_swift_flux2_progress,
-                    args=(job_id, steps, progress_stop),
-                    daemon=True,
-                )
-                progress_thread.start()
-                try:
-                    with urlopen(req, timeout=1200) as resp:
-                        server_rec = json.loads(resp.read().decode("utf-8") or "{}")
-                finally:
-                    progress_stop.set()
-                    progress_thread.join(timeout=1)
-            except Exception as server_error:
-                # Keep the single app route reliable: if the warm server is not
-                # up yet, fall back to the CLI path below instead of failing the
-                # user's generation request.
-                server_rec = {"ok": False, "error": f"warm server unavailable: {server_error}"}
-            elapsed = round(time.monotonic() - t0, 2)
-            if server_rec.get("ok") and out.exists() and out.stat().st_size >= 1000:
-                embed_workflow_text_chunk(out, workflow)
-                visible_out = mirror_output_to_comfy_output(out)
-                rec.update({
-                    "status": "success",
-                    "finished_at": now_iso(),
-                    "outputs": [str(visible_out.resolve())],
-                    "elapsed_seconds": elapsed,
-                    "runner_stdout": f"Swift Flux2 persistent server: {server_rec.get('elapsedSeconds')}s",
-                    "runner_stderr": "",
-                    "current_step": steps,
-                    "total_steps": steps,
-                    "progress": 100,
-                    "step_progress": 100,
-                    "progress_phase": "done",
-                })
-                append_history(rec)
-                with jobs_lock:
-                    jobs[job_id] = rec
-                return
-            rec["warm_server_fallback"] = json_safe_text(server_rec.get("error") or "missing output")
-            if native_loras:
-                raise RuntimeError(f"Swift Flux2 persistent server is required for native LoRA edits: {rec['warm_server_fallback']}")
-        cmd = [
-            str(SWIFT_FLUX2_BIN),
-            'i2i',
+        # Size the canvas from the reference image, not the fixed portrait
+        # bucket — the bucket kept its ~1.5MP budget but stretched every
+        # non-2:3 source. Same budget, source aspect, then the speed cap.
+        width, height = _cap_native_mx_dimensions(
+            *_reshape_dims_to_image_aspect(reference_images[0], bucket_width, bucket_height)
+        )
+        rec["options"].update({"width": width, "height": height})
+        with jobs_lock:
+            jobs[job_id] = rec
+        result = _klein3_native_edit_once(
             prompt,
-            '--images', *[str(p) for p in reference_images],
-            '--model', 'klein-9b',
-            '--transformer-quant', 'bf16',
-            '--text-quant', '8bit',
-            '--vae-variant', 'standard',
-            '--steps', str(steps),
-            '--guidance', str(guidance),
-            '--seed', str(seed),
-            '--width', str(width),
-            '--height', str(height),
-            '--output', str(out),
-        ]
-        env = os.environ.copy()
-        env.setdefault('MLX_METAL_PATH', str(SWIFT_MLX_METALLIB))
-        t0 = time.monotonic()
-        proc = subprocess.run(cmd, cwd=str(SWIFT_FLUX2_BIN.parent), text=True, capture_output=True, timeout=1200, env=env)
-        elapsed = round(time.monotonic() - t0, 2)
-        stdout = proc.stdout.strip()
-        stderr = proc.stderr.strip()
-        if proc.returncode != 0:
-            raise RuntimeError(f"MLX runner exited {proc.returncode}\nSTDOUT:\n{stdout[-2000:]}\nSTDERR:\n{stderr[-2000:]}")
-        if not out.exists() or out.stat().st_size < 1000:
-            raise RuntimeError("MLX runner finished without a valid output image")
+            reference_images,
+            out,
+            width=width,
+            height=height,
+            steps=steps,
+            guidance=guidance,
+            seed=seed,
+            native_loras=native_loras,
+            server_job_id=job_id,
+            poll_job_id=job_id,
+        )
+        if result.get("warm_fallback"):
+            rec["warm_server_fallback"] = result["warm_fallback"]
         embed_workflow_text_chunk(out, workflow)
         visible_out = mirror_output_to_comfy_output(out)
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
             "outputs": [str(visible_out.resolve())],
-            "elapsed_seconds": elapsed,
-            "runner_stdout": json_safe_text(stdout),
-            "runner_stderr": json_safe_text(stderr),
+            "elapsed_seconds": result["elapsed"],
+            "runner_stdout": result["stdout"],
+            "runner_stderr": result["stderr"],
+            "current_step": steps,
+            "total_steps": steps,
+            "progress": 100,
+            "step_progress": 100,
+            "progress_phase": "done",
         })
     except Exception as e:
+        fallback_note = getattr(e, "warm_fallback", None)
+        if fallback_note:
+            rec["warm_server_fallback"] = fallback_note
         rec.update({"status": "error", "finished_at": now_iso(), "error": str(e)})
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
+def _klein3_native_edit_once(prompt, reference_images, out, *, width, height, steps,
+                             guidance, seed, native_loras=None, server_job_id=None,
+                             poll_job_id=None):
+    """One native Klein 9B edit: warm Swift server first, CLI fallback.
+
+    BigLoveKlein3 MXFP8 is exposed to flux-2-swift-mlx as the local Klein9B transformer.
+    The MXFP8 file is pre-dequantized with Comfy's exact E8M0 blocked-scale layout
+    so the Swift MLX path can load it cleanly through its bf16 loader.
+    The Swift pipeline uses Flux2's correct I2I conditioning path instead of mflux's
+    image-latent/noise-injection edit shim, which was producing fuzzy/noisy copies.
+
+    `server_job_id` names the run on the warm server's progress endpoint;
+    `poll_job_id` (when set) mirrors that progress into jobs[poll_job_id] via
+    poll_swift_flux2_progress. Returns {"elapsed", "stdout", "stderr",
+    "warm_fallback"}; raises RuntimeError on failure (with .warm_fallback set
+    when the warm server had already been tried)."""
+    out = Path(out)
+    warm_fallback = None
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    if use_swift_flux2_server():
+        t0 = time.monotonic()
+        payload_data = {
+            "prompt": prompt,
+            "imagePath": str(reference_images[0]),
+            "outputPath": str(out),
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "guidance": guidance,
+            "seed": seed,
+            "jobId": server_job_id or out.stem,
+        }
+        if len(reference_images) > 1:
+            payload_data["imagePaths"] = [str(p) for p in reference_images]
+        if native_loras:
+            payload_data["loras"] = native_loras
+        payload = json.dumps(payload_data).encode("utf-8")
+        req = Request(
+            SWIFT_FLUX2_SERVER_URL.rstrip("/") + "/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            progress_stop = threading.Event()
+            progress_thread = None
+            if poll_job_id:
+                progress_thread = threading.Thread(
+                    target=poll_swift_flux2_progress,
+                    args=(poll_job_id, steps, progress_stop),
+                    daemon=True,
+                )
+                progress_thread.start()
+            try:
+                with urlopen(req, timeout=1200) as resp:
+                    server_rec = json.loads(resp.read().decode("utf-8") or "{}")
+            finally:
+                progress_stop.set()
+                if progress_thread is not None:
+                    progress_thread.join(timeout=1)
+        except Exception as server_error:
+            # Keep the single app route reliable: if the warm server is not
+            # up yet, fall back to the CLI path below instead of failing the
+            # user's generation request.
+            server_rec = {"ok": False, "error": f"warm server unavailable: {server_error}"}
+        elapsed = round(time.monotonic() - t0, 2)
+        if server_rec.get("ok") and out.exists() and out.stat().st_size >= 1000:
+            return {
+                "elapsed": elapsed,
+                "stdout": f"Swift Flux2 persistent server: {server_rec.get('elapsedSeconds')}s",
+                "stderr": "",
+                "warm_fallback": None,
+            }
+        warm_fallback = json_safe_text(server_rec.get("error") or "missing output")
+        if native_loras:
+            error = RuntimeError(f"Swift Flux2 persistent server is required for native LoRA edits: {warm_fallback}")
+            error.warm_fallback = warm_fallback
+            raise error
+    cmd = [
+        str(SWIFT_FLUX2_BIN),
+        'i2i',
+        prompt,
+        # Swift ArgumentParser array options take ONE value per flag:
+        # --images a --images b. A single flag followed by several paths
+        # makes every path after the first an unexpected argument.
+        *[arg for p in reference_images for arg in ('--images', str(p))],
+        '--model', 'klein-9b',
+        '--transformer-quant', 'bf16',
+        '--text-quant', '8bit',
+        '--vae-variant', 'standard',
+        '--steps', str(steps),
+        '--guidance', str(guidance),
+        '--seed', str(seed),
+        '--width', str(width),
+        '--height', str(height),
+        '--output', str(out),
+    ]
+    env = os.environ.copy()
+    env.setdefault('MLX_METAL_PATH', str(SWIFT_MLX_METALLIB))
+    t0 = time.monotonic()
+    proc = subprocess.run(cmd, cwd=str(SWIFT_FLUX2_BIN.parent), text=True, capture_output=True, timeout=1200, env=env)
+    elapsed = round(time.monotonic() - t0, 2)
+    stdout = proc.stdout.strip()
+    stderr = proc.stderr.strip()
+    try:
+        if proc.returncode != 0:
+            raise RuntimeError(f"MLX runner exited {proc.returncode}\nSTDOUT:\n{stdout[-2000:]}\nSTDERR:\n{stderr[-2000:]}")
+        if not out.exists() or out.stat().st_size < 1000:
+            raise RuntimeError("MLX runner finished without a valid output image")
+    except RuntimeError as error:
+        if warm_fallback:
+            error.warm_fallback = warm_fallback
+        raise
+    return {
+        "elapsed": elapsed,
+        "stdout": json_safe_text(stdout),
+        "stderr": json_safe_text(stderr),
+        "warm_fallback": warm_fallback,
+    }
+
+
+KLEIN_CHARACTER_SHEET_BACKEND = "mlx-klein3-character-sheet"
+
+
+def _poll_klein_sheet_view_progress(job_id, server_job_id, view_index, view_count, steps, stop_event):
+    """Mirror one view's warm-server denoise progress into the sheet job as a
+    fraction of the whole sheet, so the studio's ETA bar stays monotonic
+    instead of sawtoothing 0-100 once per view."""
+    url = SWIFT_FLUX2_SERVER_URL.rstrip("/") + "/progress/" + str(server_job_id)
+    while not stop_event.is_set():
+        try:
+            with urlopen(url, timeout=2) as resp:
+                progress_rec = json.loads(resp.read().decode("utf-8") or "{}")
+            current = int(progress_rec.get("currentStep") or 0)
+            total = int(progress_rec.get("totalSteps") or steps or 1)
+            view_fraction = min(1.0, current / max(1, total))
+            overall = int(round(((view_index + view_fraction) / max(1, view_count)) * 100))
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job and job.get("status") == "running":
+                    job.update({
+                        "current_step": view_index * steps + current,
+                        "total_steps": steps * view_count,
+                        "progress": max(0, min(100, overall)),
+                        "step_progress": int(progress_rec.get("currentStepPercent") or (100 if current > 0 else 0)),
+                        "progress_phase": f"view {view_index + 1}/{view_count}",
+                    })
+                    jobs[job_id] = job
+        except Exception:
+            pass
+        stop_event.wait(0.25)
+
+
+def queue_klein_character_sheet(prompt, reference_images, options, views, preset=None):
+    options = dict(options or {})
+    if reference_images:
+        options['image_paths'] = [str(Path(p)) for p in reference_images]
+    job_id = uuid.uuid4().hex[:12]
+    with jobs_lock:
+        jobs[job_id] = {
+            "id": job_id,
+            "prompt": PRIVATE_PROMPT_LABEL,
+            "comfy_prompt": _comfy_history_prompt_tuple(job_id, backend=KLEIN_CHARACTER_SHEET_BACKEND),
+            "status": "queued",
+            "created_at": now_iso(),
+            "backend": KLEIN_CHARACTER_SHEET_BACKEND,
+            "mode": "character-sheet",
+            "options": {
+                **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths'}},
+                **({'reference_images': len(reference_images)} if len(reference_images) > 1 else {}),
+                **({'lora_count': len(options.get('loras') or [])} if options.get('loras') else {}),
+            },
+            "character_sheet": {
+                **({'preset': preset} if preset else {}),
+                "views": [view["id"] for view in views],
+                "labels": [view["label"] for view in views],
+                "total": len(views),
+                "completed": 0,
+            },
+        }
+    t = threading.Thread(
+        target=run_klein_character_sheet,
+        args=(job_id, prompt, reference_images, options, views, preset),
+        daemon=True,
+    )
+    t.start()
+    return job_id
+
+
+def run_klein_character_sheet(job_id, prompt, reference_images, options=None, views=None, preset=None):
+    """The Civitai multi-view recipe on the studio's native Klein edit lane:
+    every view is one white-background edit of the SAME reference(s) with the
+    SAME seed (identity holds across tiles, like Strength Hunt's fixed seed),
+    then a labeled sheet leads the outputs so single-url clients get the sheet
+    and History keeps the individual views."""
+    started = now_iso()
+    options = options or {}
+    views = views or []
+    requested_width = int_quality_option(options, 'requested_width', int_quality_option(options, 'width', 1024))
+    requested_height = int_quality_option(options, 'requested_height', int_quality_option(options, 'height', 1536))
+    # Every tile shares one canvas — the trained portrait bucket. Reshaping to
+    # the reference aspect (the single-edit behavior) would make ragged grids
+    # from square or landscape references.
+    bucket_width, bucket_height = snap_biglove_klein3_resolution(requested_width, requested_height)
+    width, height = _cap_native_mx_dimensions(bucket_width, bucket_height)
+    steps = normalize_biglove_klein3_steps(options.get('steps', 4))
+    guidance = float_quality_option(options, 'guidance', 1.0)
+    seed = resolve_seed_option(options)
+    native_loras = _dedupe_lora_requests(options.get('loras') or [])
+    view_count = len(views)
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "comfy_prompt": _comfy_history_prompt_tuple(job_id, backend=KLEIN_CHARACTER_SHEET_BACKEND),
+        "status": "running",
+        "backend": KLEIN_CHARACTER_SHEET_BACKEND,
+        "mode": "character-sheet",
+        "created_at": started,
+        "outputs": [],
+        "options": {
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "guidance": guidance,
+            "seed": seed,
+            "requested_width": requested_width,
+            "requested_height": requested_height,
+            **({'reference_images': len(reference_images)} if len(reference_images) > 1 else {}),
+            **({'lora_count': len(native_loras)} if native_loras else {}),
+        },
+        "character_sheet": {
+            **({'preset': preset} if preset else {}),
+            "views": [view["id"] for view in views],
+            "labels": [view["label"] for view in views],
+            "total": view_count,
+            "completed": 0,
+        },
+        "current_step": 0,
+        "total_steps": steps * max(1, view_count),
+        "progress": 0,
+        "step_progress": 0,
+        "progress_phase": "queued",
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    staging_dir = None
+    view_outputs = []
+    try:
+        if not views:
+            raise RuntimeError("character sheet needs at least one view")
+        if not supports_native_mlx_biglove_route():
+            raise RuntimeError(f"native MLX BigLove route is not available for accelerator profile {accelerator_profile()}")
+        if not SWIFT_FLUX2_BIN.exists():
+            raise RuntimeError(f"Swift Flux2 MLX runner not found: {SWIFT_FLUX2_BIN}")
+        if not SWIFT_MLX_METALLIB.exists():
+            raise RuntimeError(f"Swift Flux2 MLX metallib not found: {SWIFT_MLX_METALLIB}")
+        allowed = [OUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), (Path.home() / ".comfy-private.noindex/input").resolve()]
+        resolved_refs = []
+        for ref_path in reference_images:
+            ref_path = Path(ref_path).resolve()
+            if not any(str(ref_path).startswith(str(root)) for root in allowed) or not ref_path.exists():
+                raise RuntimeError("input image is outside private image storage or does not exist")
+            resolved_refs.append(ref_path)
+        staging_dir = Path(tempfile.mkdtemp(prefix=f"charsheet-{job_id}-"))
+        t0 = time.monotonic()
+        tiles = []
+        for index, view in enumerate(views):
+            view_prompt = character_sheet_view_prompt(view, prompt)
+            out = OUT_DIR / f"charsheet_{job_id}_{index:02d}_{view['id']}.png"
+            server_job_id = f"{job_id}-v{index:02d}"
+            progress_stop = threading.Event()
+            progress_thread = None
+            if use_swift_flux2_server():
+                progress_thread = threading.Thread(
+                    target=_poll_klein_sheet_view_progress,
+                    args=(job_id, server_job_id, index, view_count, steps, progress_stop),
+                    daemon=True,
+                )
+                progress_thread.start()
+            try:
+                _klein3_native_edit_once(
+                    view_prompt,
+                    resolved_refs,
+                    out,
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    guidance=guidance,
+                    seed=seed,
+                    native_loras=native_loras,
+                    server_job_id=server_job_id,
+                )
+            finally:
+                progress_stop.set()
+                if progress_thread is not None:
+                    progress_thread.join(timeout=1)
+            # Capture plaintext bytes NOW — the privacy/E2E sweepers may seal
+            # the file at any moment, and .e2e envelopes are unreadable
+            # server-side by design.
+            data, _mime = decrypt_output_bytes(out)
+            staged = staging_dir / f"tile_{index:02d}.png"
+            staged.write_bytes(data)
+            tiles.append({"path": str(staged), "label": view["label"], "index": index})
+            visible_out = mirror_output_to_comfy_output(out)
+            view_outputs.append(str(visible_out.resolve()))
+            with jobs_lock:
+                job = jobs.get(job_id) or rec
+                job["character_sheet"]["completed"] = index + 1
+                job.update({
+                    "current_step": (index + 1) * steps,
+                    "progress": int(round(((index + 1) / view_count) * 100)),
+                    "step_progress": 100,
+                    "progress_phase": f"view {index + 1}/{view_count} done",
+                })
+                jobs[job_id] = job
+                rec = job
+        grid = character_sheet_grid(len(tiles))
+        header_lines = [
+            f"CHARACTER SHEET · SEED {seed} · STEPS {steps} · GUIDANCE {guidance}",
+            f"{view_count} views · " + " / ".join(view["label"] for view in views),
+            (prompt or "")[:200],
+        ]
+        sheet_path = _compose_labeled_sheet(
+            OUT_DIR / f"charsheet_{job_id}_sheet.png",
+            grid["rows"],
+            grid["cols"],
+            grid["square"],
+            tiles,
+            header_lines,
+            tag="character-sheet",
+        )
+        sheet_outputs = []
+        if sheet_path is not None:
+            sheet_outputs = [str(mirror_output_to_comfy_output(sheet_path).resolve())]
+        rec["character_sheet"]["sheet"] = bool(sheet_outputs)
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": sheet_outputs + view_outputs,
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+            "progress": 100,
+            "step_progress": 100,
+            "progress_phase": "done",
+        })
+    except Exception as e:
+        # Keep the views that did finish — they are already mirrored, and a
+        # partial turnaround is still useful.
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(e), "outputs": view_outputs})
+    finally:
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
     append_history(rec)
     with jobs_lock:
         jobs[job_id] = rec
@@ -4719,6 +6449,460 @@ def apply_ltx_denoise_pass(path, mode):
     except Exception as exc:
         scratch.unlink(missing_ok=True)
         return {'mode': mode, 'applied': False, 'error': str(exc)[-400:]}
+
+
+# BFS "Best Face Swap" head-swap IC-LoRA (Alissonerdx). Its v3 conditioning is a
+# GUIDE VIDEO, not a plain reference: every frame reserves a strip filled with
+# chroma green holding the replacement face, placed ALONGSIDE the source footage
+# so the new identity stays visible for the whole clip. Reproduced from the
+# author's own ReservedRegionFrameComposer node (ComfyUI-BFSNodes/nodes.py) using
+# the settings baked into workflow_ltx2_head_swap_drag_and_drop_v3.0.json, node 360:
+#   ["left", 256, "all_faces_every_frame", 12, "loop", "auto", 100, 12, 12,
+#    "center", "center", 0, 255, 0]
+# i.e. a 256px strip on the LEFT, face at 100% scale, 12px padding, centred, and
+# present in every frame. Getting the strip side or the chroma colour wrong gives
+# the model conditioning it was never trained on, so these are not free knobs.
+#
+# The strip belongs to the GUIDE ONLY. Per the author's model card: "Even though
+# the guide video used during inference contains the vertical chroma-key side
+# strip, the final generated result does not include that strip." The workflow
+# agrees — its sampler latent is sized from the un-stripped source (GetImageSize
+# -> SolidMask) and nothing is cropped after VAEDecode. So the render is sized to
+# the SOURCE frame, the guide is wider than it, and the output is delivered as-is.
+BFS_HEADSWAP_REGION_PX = 256
+BFS_HEADSWAP_REGION_POSITION = 'left'
+BFS_HEADSWAP_CHROMA = '0x00FF00'
+BFS_HEADSWAP_FACE_PADDING_PX = 12
+# _prepare_face in the same node adds a 16px white border before placement.
+BFS_HEADSWAP_FACE_BORDER_PX = 16
+# Both axes of the render must sit on the pipeline's latent grid. Single-stage
+# needs multiples of 32, the half-res paths (--upsample-only) need 64; snapping
+# to 64 keeps the delivered size identical whichever sampler path is chosen,
+# instead of the runtime silently flooring it to something else.
+BFS_HEADSWAP_DIMENSION_GRID = 64
+# v3's trigger. v1/v2 used a bare "head swap"; v3 is the structured form, and the
+# author's card is explicit that the FACE/ACTION sections carry the identity and
+# motion description the adapter was trained against.
+BFS_HEADSWAP_PROMPT_HELP = (
+    'head-swap prompts need the BFS v3 trigger, or the IC-LoRA does not engage and the '
+    'render just reproduces the guide. Use:\n'
+    '  head_swap: FACE: <apparent gender, ethnicity, skin tone, age range, head shape, hair> '
+    'ACTION: <clothing, body position, movement, hand actions, objects, camera-facing behaviour>'
+)
+
+
+def bfs_headswap_lora_selected(item):
+    """Is this LoRA entry the BFS head-swap adapter?
+
+    Matched on the filename because that is all the runner carries. The author's
+    release is head_swap_v3_rank_adaptive_fro_098.safetensors; earlier versions
+    and renames still read as head-swap.
+    """
+    if not isinstance(item, dict):
+        return False
+    text = f"{item.get('filePath') or ''} {item.get('name') or ''} {item.get('source') or ''}".lower()
+    return 'head_swap' in text or 'head-swap' in text or 'headswap' in text
+
+
+FACEFUSION_DIR = Path(os.environ.get('FACEFUSION_DIR', str(Path.home() / 'comfy/facefusion')))
+HEADSWAP_BACKENDS = ('bfs', 'facefusion')
+
+
+def _headswap_backend_name(options):
+    """Which head-swap engine this job asked for. Unknown values fall back to BFS."""
+    raw = (_prompt_string((options or {}).get('head_swap_backend')) or '').strip().lower()
+    return raw if raw in HEADSWAP_BACKENDS else 'bfs'
+
+
+def facefusion_available():
+    return (FACEFUSION_DIR / 'facefusion.py').is_file() and (FACEFUSION_DIR / '.venv' / 'bin' / 'python').is_file()
+
+
+def run_facefusion_head_swap(job_id, native, options, *, started):
+    """Swap the face onto the ORIGINAL frames with FaceFusion.
+
+    The opposite trade to BFS: this never regenerates the picture, so body,
+    clothing, background and motion stay bit-identical to the source and the
+    whole clip is processed rather than a fixed frame budget — but it replaces
+    only the face region, so hair and head shape stay the source actor's. No
+    prompt, no LoRA, no guide video; none of the LTX preconditions apply.
+    """
+    if not facefusion_available():
+        raise RuntimeError(
+            f'FaceFusion is not installed at {FACEFUSION_DIR}. Clone '
+            'https://github.com/facefusion/facefusion there and create its .venv, '
+            'or point FACEFUSION_DIR at an existing checkout.'
+        )
+    source_video = _resolve_native_ltx_video_path(native.get('video_path'))
+    face_image = _resolve_native_ltx_image_path(native.get('reference_image_path'))
+    allowed = [COMFY_INPUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), OUT_DIR.resolve()]
+    for path, label in ((source_video, 'source video'), (face_image, 'face image')):
+        if not path.exists() or not any(_is_under(path, root) for root in allowed):
+            raise RuntimeError(f'head-swap {label} is outside private Comfy storage or does not exist')
+
+    out_dir = COMFY_OUTPUT_DIR / 'Eros'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f'facefusion_headswap_{job_id}.mp4'
+    rec = {
+        'id': job_id,
+        'prompt': PRIVATE_PROMPT_LABEL,
+        'status': 'running',
+        'backend': 'facefusion',
+        'created_at': started,
+        'outputs': [],
+        'options': {
+            'operation': 'head-swap',
+            'head_swap_backend': 'facefusion',
+            'title': 'FaceFusion head swap',
+            'source_video': source_video.name,
+            'reference_image': face_image.name,
+        },
+        'progress': 5,
+        'progress_phase': 'facefusion',
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    # --processors takes a list; face_enhancer restores detail the 128px swapper
+    # loses, at roughly double the runtime.
+    processors = ['face_swapper']
+    if bool_option(options, 'head_swap_face_enhancer', False):
+        processors.append('face_enhancer')
+    cmd = [
+        str(FACEFUSION_DIR / '.venv' / 'bin' / 'python'), 'facefusion.py', 'headless-run',
+        '--source-paths', str(face_image),
+        '--target-path', str(source_video),
+        '--output-path', str(out),
+        '--processors', *processors,
+        # Apple Silicon has no CUDA; CoreML is what makes this ~10x quicker than
+        # the diffusion path rather than slower.
+        '--execution-providers', 'coreml',
+    ]
+    rec['options']['processors'] = list(processors)
+    t0 = time.monotonic()
+    mark_output_active(out)
+    try:
+        proc = _run_native_ltx_subprocess(
+            job_id, rec, cmd,
+            cwd=str(FACEFUSION_DIR),
+            env=os.environ.copy(),
+            timeout=int_option(options, 'runtime_timeout_seconds', 2400, 60, 14400),
+        )
+        elapsed = round(time.monotonic() - t0, 2)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f'facefusion exited {proc.returncode}\n'
+                f'STDOUT:\n{proc.stdout.strip()[-1500:]}\nSTDERR:\n{proc.stderr.strip()[-1500:]}'
+            )
+        if not out.exists() or out.stat().st_size < 1000:
+            raise RuntimeError('facefusion finished without a valid output video')
+        width, height = _probe_video_dimensions(out)
+        rec['options'].update({'width': width, 'height': height})
+        visible_out = mirror_output_to_comfy_output(out)
+        rec.update({
+            'status': 'success',
+            'finished_at': now_iso(),
+            'outputs': [str(visible_out.resolve())],
+            'elapsed_seconds': elapsed,
+            'progress': 100,
+            'step_progress': 100,
+            'progress_phase': 'done',
+        })
+    except NativeJobCancelled:
+        rec.update({'status': 'cancelled', 'finished_at': now_iso(),
+                    'error': 'Cancelled by the owner', 'progress_phase': 'cancelled'})
+    except Exception as exc:
+        rec.update({'status': 'error', 'finished_at': now_iso(),
+                    'error': str(exc), 'progress_phase': 'error'})
+    finally:
+        mark_output_inactive(out)
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+    return rec
+
+
+def find_bfs_headswap_lora():
+    """Locate the installed BFS head-swap adapter, newest-looking first.
+
+    Matched by name rather than pinned to one filename so a v4 release, or a
+    rename, still resolves.
+    """
+    root = (COMFY / 'models' / 'loras')
+    if not root.is_dir():
+        return None
+    found = [p for p in root.glob('*.safetensors') if bfs_headswap_lora_selected({'filePath': str(p)})]
+    return sorted(found)[-1] if found else None
+
+
+def bfs_headswap_prompt_has_trigger(prompt):
+    """Does this prompt carry the v3 trigger the head-swap IC-LoRA expects?"""
+    text = (_prompt_string(prompt) or '').lower()
+    return 'head_swap:' in text or 'head swap:' in text
+
+
+class _MultipartPart:
+    """One decoded multipart field, shaped like the cgi.FieldStorage item we used."""
+
+    __slots__ = ('name', 'filename', 'value', 'file')
+
+    def __init__(self, name, filename, payload):
+        self.name = name
+        self.filename = filename or ''
+        self.value = payload
+        self.file = io.BytesIO(payload) if filename else None
+
+
+class MultipartForm:
+    """Minimal stand-in for cgi.FieldStorage over a multipart/form-data body.
+
+    The `cgi` module was removed in Python 3.13, and this app is launched with
+    whatever `python3` resolves to — currently Homebrew's 3.14 — so importing it
+    took the whole media gateway down at startup. Only the three operations the
+    upload handler actually used are reimplemented here: `getfirst`, `in`, and
+    item access returning something with `.file` and `.filename`.
+    """
+
+    def __init__(self, body, content_type):
+        header = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode('utf-8', 'replace')
+        message = email.parser.BytesParser(policy=email.policy.default).parsebytes(header + body)
+        self._parts = {}
+        if not message.is_multipart():
+            return
+        for part in message.iter_parts():
+            disposition = part.get('Content-Disposition')
+            if not disposition:
+                continue
+            name = part.get_param('name', header='Content-Disposition')
+            if not name:
+                continue
+            filename = part.get_filename() or ''
+            payload = part.get_payload(decode=True) or b''
+            self._parts.setdefault(str(name), []).append(_MultipartPart(str(name), filename, payload))
+
+    def __contains__(self, key):
+        return key in self._parts
+
+    def __getitem__(self, key):
+        return self._parts[key][0]
+
+    def getfirst(self, key, default=None):
+        items = self._parts.get(key)
+        if not items:
+            return default
+        part = items[0]
+        if part.filename:
+            return default
+        return part.value.decode('utf-8', 'replace')
+
+
+def _probe_video_dimensions(path):
+    """(width, height) of a video's first video stream, or raise."""
+    ffprobe = shutil.which('ffprobe')
+    if not ffprobe:
+        raise RuntimeError('ffprobe is required to measure the source video')
+    payload = subprocess.check_output(
+        [
+            ffprobe, '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height', '-of', 'json', str(path),
+        ],
+        text=True, stderr=subprocess.DEVNULL, timeout=30,
+    )
+    stream = (json.loads(payload or '{}').get('streams') or [{}])[0]
+    width, height = int(stream.get('width') or 0), int(stream.get('height') or 0)
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f'Could not read video dimensions from {Path(path).name}')
+    return width, height
+
+
+def _snap_headswap_dimension(value, grid=BFS_HEADSWAP_DIMENSION_GRID):
+    """Round a pixel dimension to the nearest grid multiple, never below one."""
+    snapped = int(round(float(value) / grid)) * grid
+    return max(grid, snapped)
+
+
+def plan_bfs_headswap_geometry(source_width, source_height, *, region_px=None, max_dimension=0):
+    """Decide the guide layout and render size for a head swap. Pure arithmetic.
+
+    Mirrors ReservedRegionFrameComposer exactly: the canvas KEEPS the source
+    frame size and the footage is fitted into what the strip leaves, centred,
+    with chroma filling the rest::
+
+        canvas = Image.new("RGBA", (orig_w, orig_h), ...)
+        video_x, video_y = region_size_px, (orig_h - fitted_video_h) // 2
+
+    The render is therefore the SAME size as the guide, and the delivered frame
+    is that render untouched. The model was trained to read the fitted, inset
+    footage and draw the swapped scene back out across the WHOLE frame — which
+    is why the author's card says the result carries no strip and his workflow
+    has no crop node. Widening the canvas instead hands the LoRA a layout it has
+    never seen and it just copies the guide through.
+    """
+    region = int(region_px or BFS_HEADSWAP_REGION_PX)
+    region -= region % 32
+    if region < 32:
+        raise RuntimeError('Head-swap face strip must be at least 32px')
+    src_w, src_h = int(source_width), int(source_height)
+    if src_w <= 0 or src_h <= 0:
+        raise RuntimeError('Head-swap source video has no usable dimensions')
+    width, height = float(src_w), float(src_h)
+    cap = int(max_dimension or 0)
+    if cap > 0 and max(width, height) > cap:
+        ratio = cap / max(width, height)
+        width, height = width * ratio, height * ratio
+    frame_w = _snap_headswap_dimension(width)
+    frame_h = _snap_headswap_dimension(height)
+    available_w = frame_w - region
+    if available_w < 64:
+        raise RuntimeError(
+            f'Head-swap strip ({region}px) leaves no room in a {frame_w}px frame'
+        )
+    # Fit the footage into what is left, preserving its aspect (the node's
+    # "fitted_video_*"). Even dimensions keep libx264/yuv420p happy.
+    fit = min(available_w / src_w, frame_h / src_h)
+    video_w = max(2, int(round(src_w * fit)) & ~1)
+    video_h = max(2, int(round(src_h * fit)) & ~1)
+    return {
+        'width': frame_w,
+        'height': frame_h,
+        'region_px': region,
+        'video_width': video_w,
+        'video_height': video_h,
+        'video_x': region if BFS_HEADSWAP_REGION_POSITION == 'left' else 0,
+        'video_y': (frame_h - video_h) // 2,
+        # The render, and so the delivered frame, is the whole canvas.
+        'content_width': frame_w,
+        'content_height': frame_h,
+        'source_width': src_w,
+        'source_height': src_h,
+    }
+
+
+def build_bfs_headswap_guide_video(source_video, face_image, output_path, *, region_px=None, max_dimension=0, frame_rate=None):
+    """Compose the BFS head-swap guide clip: reserved face strip + fitted source.
+
+    Reproduces ReservedRegionFrameComposer — same frame size as the source, the
+    footage fitted into what the strip leaves and centred, chroma everywhere
+    else. The caller renders at ``width`` x ``height`` (the whole canvas) and
+    ships that untouched; see the BFS_HEADSWAP_* notes for why nothing is cropped.
+    """
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise RuntimeError('ffmpeg is required to build the BFS head-swap guide video')
+    src_w, src_h = _probe_video_dimensions(source_video)
+    geometry = plan_bfs_headswap_geometry(src_w, src_h, region_px=region_px, max_dimension=max_dimension)
+    canvas_w, height = geometry['width'], geometry['height']
+    region = geometry['region_px']
+    video_w, video_h = geometry['video_width'], geometry['video_height']
+    video_x, video_y = geometry['video_x'], geometry['video_y']
+    face_w = max(8, region - 2 * BFS_HEADSWAP_FACE_PADDING_PX)
+    face_h = max(8, height - 2 * BFS_HEADSWAP_FACE_PADDING_PX)
+    face_x = BFS_HEADSWAP_FACE_PADDING_PX if BFS_HEADSWAP_REGION_POSITION == 'left' else canvas_w - region + BFS_HEADSWAP_FACE_PADDING_PX
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    filtergraph = (
+        f"color=c={BFS_HEADSWAP_CHROMA}:s={canvas_w}x{height}[bg];"
+        f"[1:v]pad=iw+{2 * BFS_HEADSWAP_FACE_BORDER_PX}:ih+{2 * BFS_HEADSWAP_FACE_BORDER_PX}:"
+        f"{BFS_HEADSWAP_FACE_BORDER_PX}:{BFS_HEADSWAP_FACE_BORDER_PX}:white,"
+        f"scale={face_w}:{face_h}:force_original_aspect_ratio=decrease[face];"
+        f"[bg][face]overlay=x={face_x}:y=(H-h)/2[withface];"
+        # Fitted, not stretched: the node preserves the footage's aspect inside
+        # the leftover width and lets chroma take the slack above and below.
+        f"[0:v]scale={video_w}:{video_h}[content];"
+        f"[withface][content]overlay=x={video_x}:y={video_y}:shortest=1[out]"
+    )
+    cmd = [
+        ffmpeg, '-y', '-loglevel', 'error',
+        '-i', str(source_video),
+        '-loop', '1', '-i', str(face_image),
+        '-filter_complex', filtergraph,
+        '-map', '[out]',
+    ]
+    if frame_rate:
+        # Resample the guide to the RENDER's frame rate. The runtime reads the
+        # first N frames of the guide at its native rate, so a 25fps guide driving
+        # a 24fps render walks reference frame i and output frame i apart by 4%
+        # over the clip — the swapped face lags the motion it is meant to track.
+        cmd.extend(['-r', str(frame_rate)])
+        geometry['frame_rate'] = float(frame_rate)
+    cmd.extend([
+        '-c:v', 'libx264', '-crf', '12', '-preset', 'medium', '-pix_fmt', 'yuv420p',
+        str(output_path),
+    ])
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 1000:
+        detail = (result.stderr or result.stdout or 'unknown ffmpeg error').strip()
+        raise RuntimeError(f'Head-swap guide build failed: {detail[-400:]}')
+    return geometry
+
+
+# Lightricks' IC-LoRA Detailer. Published against "LTX-2-19b", which reads like a
+# different base than our 22B — but it targets transformer_blocks 0..47 at hidden
+# dim 4096 and resolves 480/480 modules against the v1.4 transformer, so the two
+# share topology and it fuses cleanly. It carries no .alpha tensors, so the
+# strength passed here is the whole story.
+LTX_DETAILER_LORA = 'LTX2_IC_LoRA_Detailer.safetensors'
+
+
+def apply_ltx_detailer_pass(path, options, *, model_path, prompt, height, width, frames, frame_rate, seed, job_id, rec, env):
+    """Optionally refine `path` in place with the IC-LoRA Detailer.
+
+    This is a genuine second sampling pass, not a filter: the Detailer is an
+    IC-LoRA that conditions on reference video frames, so the first pass's own
+    output is fed back as the conditioning video.
+
+    Returns None the instant no strength is set, which is what keeps an ordinary
+    generation exactly as fast as it was before this existed. Failure is
+    non-fatal for the same reason the denoise pass is — the un-refined clip is
+    still a clip.
+    """
+    try:
+        strength = float(options.get('detailer_strength') or 0)
+    except (TypeError, ValueError):
+        return None
+    if strength <= 0:
+        return None
+    strength = max(0.05, min(1.5, strength))
+
+    lora = (COMFY / 'models' / 'loras' / LTX_DETAILER_LORA)
+    if not lora.is_file():
+        return {'strength': strength, 'applied': False, 'error': f'{LTX_DETAILER_LORA} not installed'}
+
+    target = Path(path)
+    scratch = target.with_name(f'{target.stem}.detailer-tmp{target.suffix or ".mp4"}')
+    cmd = [
+        "uv", "run", "ltx-2-mlx", "ic-lora",
+        "--model", str(model_path),
+        "--gemma", LTX2_MLX_GEMMA,
+        "--prompt", prompt,
+        "--lora", str(lora), str(strength),
+        # The clip we just made is the reference. Strength 1.0 keeps its
+        # structure; the Detailer LoRA is what adds texture on top.
+        "--video-conditioning", str(target), "1.0",
+        "--single-stage",
+        "-H", str(height), "-W", str(width), "-f", str(frames),
+        "--frame-rate", str(frame_rate),
+        "--seed", str(seed),
+        "-o", str(scratch),
+    ]
+    started = time.monotonic()
+    rec["progress_phase"] = "ltx-2-mlx detailer"
+    try:
+        proc = _run_native_ltx_subprocess(
+            job_id, rec, cmd, cwd=str(LTX2_MLX_DIR), env=env,
+            timeout=int_option(options, 'runtime_timeout_seconds', 2400, 60, 14400),
+        )
+        if proc.returncode != 0 or not scratch.exists() or scratch.stat().st_size < 1000:
+            detail = ((proc.stderr or proc.stdout or 'unknown detailer error')).strip()
+            scratch.unlink(missing_ok=True)
+            return {'strength': strength, 'applied': False, 'error': detail[-400:]}
+        os.replace(scratch, target)
+        return {'strength': strength, 'applied': True, 'seconds': round(time.monotonic() - started, 2)}
+    except NativeJobCancelled:
+        scratch.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        scratch.unlink(missing_ok=True)
+        return {'strength': strength, 'applied': False, 'error': str(exc)[-400:]}
 
 
 def _create_native_ltx_static_reference_video(image_path, output_path, frames, frame_rate):
@@ -4950,8 +7134,19 @@ def _update_native_ltx_process_progress(job_id, rec, text):
         jobs[job_id] = rec
 
 
+class NativeJobCancelled(Exception):
+    """The owner cancelled a native generation job; the runner marks it 'cancelled'."""
+
+
+def native_job_cancel_requested(job_id):
+    with jobs_lock:
+        return bool((jobs.get(job_id) or {}).get('cancel_requested'))
+
+
 def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
     """Run ltx-2-mlx while publishing tqdm progress from both output streams."""
+    if native_job_cancel_requested(job_id):
+        raise NativeJobCancelled(f"job {job_id} was cancelled before the render started")
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
@@ -4960,12 +7155,22 @@ def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
         stderr=subprocess.PIPE,
         bufsize=0,
     )
+    with jobs_lock:
+        native_job_procs[job_id] = proc
     streams = [stream for stream in (proc.stdout, proc.stderr) if stream is not None]
     output = {proc.stdout: bytearray(), proc.stderr: bytearray()}
     progress_tail = ""
     started = time.monotonic()
     try:
         while streams:
+            if native_job_cancel_requested(job_id):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                raise NativeJobCancelled(f"job {job_id} was cancelled mid-render")
             if time.monotonic() - started > timeout:
                 proc.terminate()
                 try:
@@ -4990,6 +7195,14 @@ def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
         if proc.poll() is None:
             proc.terminate()
         raise
+    finally:
+        with jobs_lock:
+            if native_job_procs.get(job_id) is proc:
+                native_job_procs.pop(job_id, None)
+    # The cancel route may have terminated the process directly, between this
+    # loop's flag checks — report that as a cancellation, not an exit -15 error.
+    if returncode != 0 and native_job_cancel_requested(job_id):
+        raise NativeJobCancelled(f"job {job_id} was cancelled mid-render")
     stdout = bytes(output.get(proc.stdout, b'')).decode('utf-8', errors='replace')
     stderr = bytes(output.get(proc.stderr, b'')).decode('utf-8', errors='replace')
     return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
@@ -5002,9 +7215,25 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
     backend = _ltx_mlx_backend_name(spec, variant)
     options = dict(native.get('options') or {})
     operation = str(native.get('operation') or 'generate').strip().lower()
+    # FaceFusion is a different kind of tool entirely — a per-frame 2D swap onto
+    # the original footage, with no diffusion model, prompt, LoRA or guide. It
+    # therefore branches out before every LTX precondition below, which would
+    # otherwise demand a model and a prompt it has no use for.
+    if operation == 'head-swap' and _headswap_backend_name(options) == 'facefusion':
+        return run_facefusion_head_swap(job_id, native, options, started=started)
     prompt = str(native.get('prompt') or '').strip()
     width = int_quality_option(options, 'width', 480)
     height = int_quality_option(options, 'height', 832)
+    # Only generate and ic-lora pass -H/-W to the CLI; extend inherits the
+    # source clip's size and head-swap re-derives its own from the guide.
+    if operation in ('generate', 'ic-lora'):
+        snapped = _ltx_snap_render_dimensions(
+            width, height,
+            single_stage=operation == 'ic-lora' and bool(options.get('single_stage', True)),
+        )
+        if snapped != (width, height):
+            print(f"[ltx] {job_id} render size {width}x{height} is off the pipeline grid; snapped to {snapped[0]}x{snapped[1]}", flush=True)
+            width, height = snapped
     frames = _ltx_valid_frame_count(options.get('frames', 233), 233)
     if operation == 'ic-lora':
         frames = max(frames, int_option(options, 'target_min_frames', 9, 9, 721))
@@ -5096,7 +7325,51 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
         allowed = [COMFY_INPUT_DIR.resolve(), COMFY_OUTPUT_DIR.resolve(), OUT_DIR.resolve()]
         source_video = None
         reference_image = None
-        if operation == 'extend':
+        # Set only on the head-swap path; the shared post-run block reads it to
+        # check the render came back at the size the guide was planned around.
+        headswap_guide_info = None
+        if operation == 'head-swap':
+            # Needs both halves of the guide: the footage to alter and the face to
+            # put into it. Validate them together so a missing one fails here with
+            # a clear message rather than deep inside the ffmpeg filtergraph.
+            source_video = _resolve_native_ltx_video_path(native.get('video_path'))
+            if not source_video.exists() or not any(_is_under(source_video, root) for root in allowed):
+                raise RuntimeError("head-swap source video is outside private Comfy storage or does not exist")
+            reference_image = _resolve_native_ltx_image_path(native.get('reference_image_path'))
+            if not reference_image.exists() or not any(_is_under(reference_image, root) for root in allowed):
+                raise RuntimeError("head-swap face image is outside private Comfy storage or does not exist")
+            # The BFS adapter is what teaches the model to read the reserved strip
+            # and redraw the scene at full frame — without it the render comes
+            # back as a copy of the guide. It is therefore a property of the
+            # TASK, not a LoRA the operator has to remember to switch on, so the
+            # task supplies it. Requiring it by hand cost several full renders
+            # that looked like a compositor bug.
+            headswap_lora_strength = float_quality_option(options, 'head_swap_lora_strength', 1.0)
+            selected_bfs = [item for item in native_loras if bfs_headswap_lora_selected(item)]
+            if selected_bfs:
+                # Honour the operator's own entry, but the task owns its strength.
+                for item in selected_bfs:
+                    item['scale'] = headswap_lora_strength
+            else:
+                found = find_bfs_headswap_lora()
+                if not found:
+                    raise RuntimeError(
+                        'head-swap needs the BFS head-swap IC-LoRA, and no file matching '
+                        f'"head_swap" was found in {(COMFY / "models" / "loras")}. Install it from '
+                        'https://civitai.com/models/2027766 (BFS - Best Face Swap).'
+                    )
+                native_loras.append({
+                    'name': found.stem,
+                    'filePath': str(found),
+                    'scale': headswap_lora_strength,
+                })
+            if not bfs_headswap_prompt_has_trigger(prompt):
+                # Without its trigger the v3 IC-LoRA has nothing to act on, and
+                # the cheapest thing the model can do is reproduce the guide it
+                # was handed — strip, face box and all. Failing here costs a
+                # second; letting it run costs the whole render.
+                raise RuntimeError(BFS_HEADSWAP_PROMPT_HELP)
+        elif operation == 'extend':
             source_video = _resolve_native_ltx_video_path(native.get('video_path'))
             if not source_video.exists() or not any(_is_under(source_video, root) for root in allowed):
                 raise RuntimeError("input video is outside private Comfy storage or does not exist")
@@ -5191,6 +7464,67 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                     "--stg-scale", str(stg_scale),
                 ])
             cmd.extend(["--seed", str(seed), "-o", str(out)])
+        elif operation == 'head-swap':
+            # BFS v3 conditions on a composed guide, not the raw footage: the face
+            # sits in a reserved chroma strip that stays visible for every frame,
+            # which is what gives it identity that survives the whole clip.
+            guide_path = COMFY_INPUT_DIR / '.ltx-reference' / f'{job_id}-headswap.mp4'
+            guide_info = build_bfs_headswap_guide_video(
+                source_video, reference_image, guide_path,
+                region_px=int_option(options, 'head_swap_region_px', BFS_HEADSWAP_REGION_PX, 32, 2048),
+                max_dimension=int_option(options, 'head_swap_max_dimension', 0, 0, 4096),
+                frame_rate=frame_rate,
+            )
+            headswap_guide_info = guide_info
+            rec['options']['head_swap'] = dict(guide_info)
+            # Everything that decides whether a head swap works, except the
+            # prompt — which stays out of the log on purpose. Diagnosing this
+            # from the guide file alone cost several wrong theories.
+            print(
+                f"[ltx] head-swap {job_id} model={Path(str(model_path)).name}"
+                f" render={guide_info['width']}x{guide_info['height']} frames={frames}"
+                f" video={guide_info['video_width']}x{guide_info['video_height']}"
+                f"@{guide_info['video_x']},{guide_info['video_y']}"
+                f" loras={[(Path(str(i['filePath'])).name, i.get('scale', 1.0)) for i in native_loras]}"
+                f" ref_strength={float_quality_option(options, 'reference_strength', 1.0)}"
+                f" cond_strength={float_quality_option(options, 'conditioning_strength', 1.0)}"
+                f" pipeline={_prompt_string(options.get('head_swap_pipeline')) or 'single-stage'}"
+                f" trigger={bfs_headswap_prompt_has_trigger(prompt)}",
+                flush=True,
+            )
+            # Render the guide's own frame, which is also the source's frame: the
+            # model reads the fitted, inset footage and draws the swapped scene
+            # back across the WHOLE frame, so this render IS the deliverable.
+            # Nothing is cropped — cropping the strip off is what read as a zoom.
+            width, height = guide_info['width'], guide_info['height']
+            cmd = [
+                "uv", "run", "ltx-2-mlx", "ic-lora",
+                "--model", str(model_path),
+                "--gemma", LTX2_MLX_GEMMA,
+                "--prompt", prompt,
+            ]
+            for item in native_loras:
+                cmd.extend(["--lora", str(item['filePath']), str(item.get('scale', 1.0))])
+            cmd.extend([
+                "--video-conditioning", str(guide_path), str(float_quality_option(options, 'reference_strength', 1.0)),
+                "--conditioning-strength", str(float_quality_option(options, 'conditioning_strength', 1.0)),
+            ])
+            # --single-stage tracks the control most tightly and is the default.
+            # The fast path generates at half res with the control applied
+            # throughout, upsamples, then runs a control-aware refine.
+            if _prompt_string(options.get('head_swap_pipeline')) == 'fast':
+                cmd.extend([
+                    "--upsample-only",
+                    "--refine-steps", str(int_option(options, 'head_swap_refine_steps', 3, 1, 8)),
+                ])
+            else:
+                cmd.append("--single-stage")
+            cmd.extend([
+                "-H", str(height), "-W", str(width), "-f", str(frames),
+                "--frame-rate", frame_rate_arg,
+                "--seed", str(seed),
+                "-o", str(out),
+            ])
         elif operation == 'ic-lora':
             reference_video_path = COMFY_INPUT_DIR / '.ltx-reference' / f'{job_id}.mkv'
             _create_native_ltx_static_reference_video(reference_image, reference_video_path, reference_frames, frame_rate)
@@ -5312,10 +7646,41 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             stderr = proc.stderr.strip()
             if proc.returncode != 0:
                 raise RuntimeError(f"ltx-2-mlx exited {proc.returncode}\nSTDOUT:\n{stdout[-2000:]}\nSTDERR:\n{stderr[-2000:]}")
+            # Cancelled between the render finishing and the post passes: stop
+            # here rather than spending more GPU time on a clip nobody wants.
+            if native_job_cancel_requested(job_id):
+                raise NativeJobCancelled(f"job {job_id} was cancelled after the render")
             if not out.exists() or out.stat().st_size < 1000:
                 raise RuntimeError("ltx-2-mlx finished without a valid output video")
-            # Runs while the output is still marked active, so the E2E sweeper
-            # never seals the pre-filter file out from under the re-encode.
+            # A head-swap render is already the deliverable: the reserved strip is
+            # part of the guide the model reads, never part of the frame it draws
+            # (author's model card), so there is nothing to crop off. Verify the
+            # size we asked for is the size we got, and say so loudly if not.
+            if headswap_guide_info:
+                got_w, got_h = _probe_video_dimensions(out)
+                want_w = headswap_guide_info['width']
+                want_h = headswap_guide_info['height']
+                if (got_w, got_h) != (want_w, want_h):
+                    print(
+                        f"[ltx] head-swap {job_id} rendered {got_w}x{got_h}, expected {want_w}x{want_h}",
+                        flush=True,
+                    )
+                rec['options']['head_swap'] = {**headswap_guide_info, 'output_width': got_w, 'output_height': got_h}
+            # Both post-passes run while the output is still marked active, so the
+            # E2E sweeper never seals the intermediate file out from under them.
+            # Detailer first: it resamples the clip, so grain filtering afterwards
+            # judges the texture that actually ships.
+            detailer_detail = apply_ltx_detailer_pass(
+                out, options,
+                model_path=model_path, prompt=prompt,
+                height=height, width=width, frames=frames,
+                frame_rate=frame_rate_arg, seed=seed,
+                job_id=job_id, rec=rec, env=env,
+            )
+            if detailer_detail:
+                rec['options']['detailer'] = detailer_detail
+                if not detailer_detail.get('applied'):
+                    print(f"[ltx] detailer pass skipped for {job_id}: {detailer_detail.get('error')}", flush=True)
             denoise_detail = apply_ltx_denoise_pass(out, options.get('denoise'))
             if denoise_detail:
                 rec['options']['denoise'] = denoise_detail
@@ -5337,6 +7702,8 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
             "step_progress": 100,
             "progress_phase": "done",
         })
+    except NativeJobCancelled:
+        rec.update({"status": "cancelled", "finished_at": now_iso(), "error": "Cancelled by the owner", "progress_phase": "cancelled"})
     except Exception as e:
         rec.update({"status": "error", "finished_at": now_iso(), "error": str(e), "progress_phase": "error"})
     finally:
@@ -6946,9 +9313,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def read_body(self):
+    def read_body(self, max_bytes=None):
         n = int(self.headers.get("Content-Length", "0") or 0)
-        if n > MAX_JSON_BODY_BYTES:
+        if n > (max_bytes or MAX_JSON_BODY_BYTES):
             raise ValueError("request body too large")
         return self.rfile.read(n) if n else b""
 
@@ -6996,8 +9363,28 @@ class Handler(BaseHTTPRequestHandler):
         target_path, query = self.comfy_target(parsed)
         body = self.read_body() if method not in ("GET", "HEAD") else None
         upstream_base = COMFY_HTTP_DEFAULT
+        lane_name = "default"
+        submit_route_meta = None
         if method == "POST" and target_path in {"/api/prompt", "/prompt"} and body:
-            upstream_base = comfy_http_for_prompt_body(body)
+            lane_name = comfy_lane_for_prompt_body(body)
+            upstream_base = COMFY_LANES.get(lane_name, COMFY_HTTP_DEFAULT)
+        if method in ("GET", "HEAD"):
+            history_match = re.match(r"^/(?:api/)?history/([^/?]+)$", target_path)
+            if history_match:
+                pid = unquote(history_match.group(1))
+                route = comfy_prompt_route(pid)
+                if route:
+                    # Scope status to the requester that owns this prompt.
+                    if not requester_may_read_prompt(route, self.headers.get(REQUESTER_PUB_HEADER)):
+                        return self.send_json({}, 404)
+                    if route.get("remote"):
+                        # Remote prompts are answered from the gateway's route
+                        # record in every phase: the lane's live history must
+                        # not stream through this proxy, and after harvest the
+                        # lane entry is scrubbed anyway.
+                        return self.send_json(synthetic_comfy_history_for_route(pid, route))
+                    lane_name = route.get("lane") or "default"
+                    upstream_base = COMFY_LANES.get(lane_name, COMFY_HTTP_DEFAULT)
         url = upstream_base + target_path + (("?" + query) if query else "")
         if method == "POST" and target_path in {"/api/prompt", "/prompt"} and body:
             record_mobile_prompt_lora_trace(body)
@@ -7034,14 +9421,46 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": f"native BigLove route failed before Comfy fallback: {e}"}, 500)
             body = exact_comfy_biglove_prompt_body(body)
             body = exact_comfy_krea2_turbo_pre_lora_prompt_body(body)
+            requester_spki = normalized_requester_spki(self.headers.get(REQUESTER_PUB_HEADER))
+            pushed_inputs = []
+            if comfy_lane_is_remote(lane_name):
+                transport_error = comfy_lane_transport_error(lane_name)
+                if transport_error:
+                    return self.send_json({"error": transport_error}, 502)
+                if not (requester_spki or vault_public_key_spki()):
+                    return self.send_json({
+                        "error": "remote lane requires a sealing key: present "
+                                 f"{REQUESTER_PUB_HEADER} with the job or create the owner vault",
+                    }, 409)
+                try:
+                    pushed_inputs = push_prompt_inputs_to_lane(body, lane_name)
+                except Exception as e:
+                    return self.send_json({"error": f"could not stage inputs on remote lane '{lane_name}': {e}"}, 502)
+            submit_route_meta = {"lane": lane_name, "requester_spki": requester_spki, "pushed_inputs": pushed_inputs}
         # ComfyUI's aiohttp server rejects cross-origin-looking browser requests
         # (403) when forwarded with the wrapper's Origin/Referer. Strip browser
         # origin metadata so this remains a same-machine server-to-server proxy.
-        headers = {k: v for k, v in self.headers.items() if k.lower() not in {"host", "content-length", "authorization", "x-token", "connection", "origin", "referer"}}
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in {"host", "content-length", "authorization", "x-token", "connection", "origin", "referer", REQUESTER_PUB_HEADER.lower()}}
+        lane_auth = comfy_lane_token(lane_name)
+        if lane_auth:
+            headers["Authorization"] = f"Bearer {lane_auth}"
         try:
             req = Request(url, data=body, method=method, headers=headers)
             with urlopen(req, timeout=60) as r:
                 data = r.read()
+                if submit_route_meta is not None and r.status < 400:
+                    try:
+                        submitted_pid = str(json.loads(data.decode("utf-8")).get("prompt_id") or "")
+                    except Exception:
+                        submitted_pid = ""
+                    if submitted_pid:
+                        record_comfy_prompt_route(
+                            submitted_pid, submit_route_meta["lane"],
+                            requester_spki=submit_route_meta["requester_spki"],
+                            pushed_inputs=submit_route_meta["pushed_inputs"],
+                        )
+                        if comfy_lane_is_remote(submit_route_meta["lane"]):
+                            threading.Thread(target=watch_remote_comfy_prompt, args=(submitted_pid,), daemon=True).start()
                 ctype = r.headers.get("Content-Type", mimetypes.guess_type(target_path)[0] or "application/octet-stream")
                 if ("text/html" in ctype or "javascript" in ctype) and data:
                     text = data.decode("utf-8", errors="replace")
@@ -7074,15 +9493,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def proxy_websocket_to_comfy(self, parsed):
         target_path, query = self.comfy_target(parsed)
-        upstream = urlparse(COMFY_HTTP_DEFAULT)
+        # Progress websockets can follow a prompt to its lane: ?lane=<name>
+        # (stripped before forwarding). Unknown lanes fall back to default.
+        ws_qs = parse_qs(query, keep_blank_values=True)
+        lane_values = ws_qs.pop("lane", [])
+        lane_name = (lane_values[0].strip().lower() if lane_values else "") or "default"
+        if lane_name not in COMFY_LANES:
+            lane_name = "default"
+        query = urlencode(ws_qs, doseq=True)
+        upstream = urlparse(COMFY_LANES.get(lane_name, COMFY_HTTP_DEFAULT))
         host = upstream.hostname or "127.0.0.1"
         port = upstream.port or (443 if upstream.scheme == "https" else 80)
         if upstream.scheme == "https":
-            return self.send_text("WebSocket proxy only supports local http ComfyUI\n", 502, "text/plain")
+            # Graceful degrade: no live progress tunnel for TLS lanes - the
+            # client's history polling still observes completion.
+            return self.send_text("WebSocket proxy supports http lanes only; poll history for progress on this lane\n", 502, "text/plain")
         path = target_path + (("?" + query) if query else "")
         try:
             sock = socket.create_connection((host, port), timeout=10)
             lines = [f"GET {path} HTTP/1.1", f"Host: {host}:{port}"]
+            lane_auth = comfy_lane_token(lane_name)
+            if lane_auth:
+                lines.append(f"Authorization: Bearer {lane_auth}")
             skip = {"host", "origin", "referer", "authorization", "x-token", "cookie", "connection"}
             for k, v in self.headers.items():
                 kl = k.lower()
@@ -7168,6 +9600,8 @@ class Handler(BaseHTTPRequestHandler):
             })
         if not self.authed(qs):
             return self.send_text("Unauthorized. Add ?token=... or Authorization: Bearer ***", 401, "text/plain")
+        # One stat() per request; picks up an attach/detach without a restart.
+        refresh_comfy_lanes()
         if parsed.path == "/workflow-key":
             # Deprecated: old builds exposed a backend-derived workflow metadata
             # key. ComfyUI Mobile now uses a user-only browser unlock key kept
@@ -7312,7 +9746,15 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/job/"):
             jid = parsed.path.rsplit("/", 1)[-1]
             rec = self.find_job(jid)
-            return self.send_json(public_record(rec) if rec else {"error": "not found"}, 200 if rec else 404)
+            if rec:
+                return self.send_json(public_record(rec), 200)
+            # A prompt routed to a remote lane has no local wrapper job, so this
+            # used to 404 for its whole life - which is exactly how a finished
+            # remote generation left the studio spinning: the trusted
+            # server-side channel had no record to report completion (or
+            # progress) from. Serve the route record in job shape instead.
+            routed = remote_comfy_job_record(jid)
+            return self.send_json(routed or {"error": "not found"}, 200 if routed else 404)
         if parsed.path.startswith("/job/"):
             jid = parsed.path.rsplit("/", 1)[-1]
             rec = self.find_job(jid)
@@ -7337,6 +9779,13 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         if not self.authed(qs):
             return self.send_json({"error": "unauthorized"}, 401)
+        # One stat() per request; picks up an attach/detach without a restart.
+        refresh_comfy_lanes()
+        if parsed.path.startswith("/api/job/") and parsed.path.endswith("/cancel"):
+            jid = parsed.path[len("/api/job/"):-len("/cancel")].strip("/")
+            return self.send_json(cancel_generation_job(jid))
+        if parsed.path.startswith("/api/cancel/"):
+            return self.send_json(cancel_generation_job(parsed.path.rsplit("/", 1)[-1]))
         if parsed.path == "/api/delete-output":
             try:
                 data = json.loads((self.read_body() or b"{}").decode("utf-8"))
@@ -7354,6 +9803,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "deleted": delete_private_input(data.get("filename"))})
             except (json.JSONDecodeError, ValueError) as exc:
                 return self.send_json({"error": str(exc)}, 400)
+        if parsed.path == "/api/interpolate":
+            try:
+                data = json.loads((self.read_body(max_bytes=INTERPOLATE_MAX_BODY_BYTES) or b"{}").decode("utf-8"))
+                staged = stage_inline_video_base64(data.get("video_base64"))
+                if staged is None:
+                    return self.send_json({"error": "video_base64 is required"}, 400)
+                factor = 4 if str(data.get("factor")) == "4" else 2
+                job_id = uuid.uuid4().hex[:12]
+                with jobs_lock:
+                    jobs[job_id] = {"id": job_id, "prompt": PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": now_iso(), "backend": "rife-interpolation", "mode": f"{factor}x", "options": {"factor": factor}}
+                t = threading.Thread(target=run_video_interpolation, args=(job_id, staged, {"factor": factor}), daemon=True)
+                t.start()
+                return self.send_json({
+                    "id": job_id,
+                    "status": "queued",
+                    "backend": "rife-interpolation",
+                    "mode": f"{factor}x",
+                    "job_url": f"/api/job/{job_id}",
+                    "page_url": f"/job/{job_id}",
+                    "history_url": "/api/history",
+                }, 202)
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 400)
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, 500)
         if parsed.path == "/api/upscale":
             try:
                 data = json.loads((self.read_body() or b"{}").decode("utf-8"))
@@ -7439,15 +9913,11 @@ class Handler(BaseHTTPRequestHandler):
             data = {}
             uploaded_image = None
             if "multipart/form-data" in ctype:
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={
-                        'REQUEST_METHOD': 'POST',
-                        'CONTENT_TYPE': ctype,
-                        'CONTENT_LENGTH': self.headers.get('Content-Length', '0'),
-                    },
-                )
+                try:
+                    content_length = int(self.headers.get('Content-Length') or 0)
+                except (TypeError, ValueError):
+                    content_length = 0
+                form = MultipartForm(self.rfile.read(content_length) if content_length > 0 else b'', ctype)
                 prompt = str(form.getfirst("prompt", "")).strip()
                 for key in ['backend', 'width', 'height', 'steps', 'cfg', 'guidance', 'seed', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px']:
                     if key in form:
@@ -7475,7 +9945,10 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     data = parse_qs(body.decode("utf-8"))
                     prompt = str(data.get("prompt", [""])[0]).strip()
-            if not prompt:
+            wants_character_sheet = isinstance(data, dict) and isinstance(data.get('character_sheet'), dict)
+            if not prompt and not wants_character_sheet:
+                # A character sheet works from the reference alone — its view
+                # prompts are built server-side; the user prompt is optional.
                 return self.send_json({"error": "prompt required"}, 400)
             options = {}
             if isinstance(data, dict):
@@ -7484,6 +9957,19 @@ class Handler(BaseHTTPRequestHandler):
                         options[key] = data.get(key)
                 _normalize_couple_options(options)
             backend = str(data.get('backend', '') if isinstance(data, dict) else '')
+            if wants_character_sheet:
+                # The Klein edit branch is the only lane that honors
+                # character_sheet; it is reached by naming a Klein backend
+                # (image_path/image_paths references are collected there) or by
+                # sending an inline image with no other backend claim. Fail
+                # loudly instead of letting the request fall through to a lane
+                # that would silently ignore the key.
+                klein_reachable = (
+                    backend in {'mlx-bigloves-klein3-edit', 'mlx-mxfp8-bigloves-klein3-edit'}
+                    or (uploaded_image is not None and backend != 'comfy-api-image' and backend not in KREA2_IDENTITY_BACKENDS)
+                )
+                if not klein_reachable:
+                    return self.send_json({"error": "character sheet runs on the Klein edit backend and requires a reference image (image_base64 or image_path)"}, 400)
             if backend == 'comfy-api-image':
                 options['workflow_file'] = str(data.get('workflow_file', '') if isinstance(data, dict) else '')
                 if isinstance(data, dict) and isinstance(data.get('loras'), list):
@@ -7521,6 +10007,106 @@ class Handler(BaseHTTPRequestHandler):
                         uploaded_image = Path(maybe_image).expanduser()
                         if not uploaded_image.is_absolute():
                             uploaded_image = COMFY_INPUT_DIR / maybe_image
+                # Masked edit (soft inpaint): a white-on-black mask PNG rides
+                # along as mask_base64; only the painted area (plus a small
+                # grown collar) changes, the rest is composited back untouched.
+                inpaint_req = data.get('inpaint') if isinstance(data, dict) else None
+                if isinstance(inpaint_req, dict) and inpaint_req.get('mask_base64'):
+                    if uploaded_image is None:
+                        return self.send_json({"error": "inpaint requires a source image"}, 400)
+                    try:
+                        mask_path = stage_inline_image_base64(inpaint_req.get('mask_base64'))
+                    except ValueError as exc:
+                        return self.send_json({"error": f"inpaint mask: {exc}"}, 400)
+                    for key in ('mask_expand', 'mask_influence'):
+                        if inpaint_req.get(key) is not None:
+                            options[key] = inpaint_req.get(key)
+                    job_id = uuid.uuid4().hex[:12]
+                    with jobs_lock:
+                        jobs[job_id] = {
+                            "id": job_id,
+                            "prompt": PRIVATE_PROMPT_LABEL,
+                            "status": "queued",
+                            "created_at": now_iso(),
+                            "backend": "comfy-krea2-inpaint",
+                            "mode": "inpaint",
+                            "options": {k: v for k, v in options.items() if k != 'negative_prompt'},
+                        }
+                    t = threading.Thread(
+                        target=run_comfy_krea2_inpaint,
+                        args=(job_id, prompt, uploaded_image, mask_path, options),
+                        daemon=True,
+                    )
+                    t.start()
+                    return self.send_json({
+                        "id": job_id,
+                        "status": "queued",
+                        "backend": "comfy-krea2-inpaint",
+                        "job_url": f"/api/job/{job_id}",
+                        "page_url": f"/job/{job_id}",
+                        "history_url": "/api/history",
+                    }, 202)
+                # Canvas expansion: pixel-preserving centered outpaint on the
+                # same lane (Mix-Studio port; the LTX anchor pipeline's graph).
+                outpaint_req = data.get('outpaint') if isinstance(data, dict) else None
+                if isinstance(outpaint_req, dict) and outpaint_req.get('width') and outpaint_req.get('height'):
+                    if uploaded_image is None:
+                        return self.send_json({"error": "outpaint requires a source image"}, 400)
+                    job_id = uuid.uuid4().hex[:12]
+                    with jobs_lock:
+                        jobs[job_id] = {
+                            "id": job_id,
+                            "prompt": PRIVATE_PROMPT_LABEL,
+                            "status": "queued",
+                            "created_at": now_iso(),
+                            "backend": "comfy-krea2-outpaint",
+                            "mode": "outpaint",
+                            "options": {k: v for k, v in options.items() if k != 'negative_prompt'},
+                        }
+                    t = threading.Thread(
+                        target=run_comfy_krea2_outpaint,
+                        args=(job_id, prompt, uploaded_image, options, outpaint_req),
+                        daemon=True,
+                    )
+                    t.start()
+                    return self.send_json({
+                        "id": job_id,
+                        "status": "queued",
+                        "backend": "comfy-krea2-outpaint",
+                        "job_url": f"/api/job/{job_id}",
+                        "page_url": f"/job/{job_id}",
+                        "history_url": "/api/history",
+                    }, 202)
+                # Strength Hunt: same lane, but sweeps 1-2 selected LoRA
+                # strengths across a fixed prompt+seed and adds a labeled
+                # comparison sheet (see strength_hunt.py).
+                hunt = data.get('strength_hunt') if isinstance(data, dict) else None
+                if isinstance(hunt, dict) and hunt.get('lora_ids'):
+                    job_id = uuid.uuid4().hex[:12]
+                    with jobs_lock:
+                        jobs[job_id] = {
+                            "id": job_id,
+                            "prompt": PRIVATE_PROMPT_LABEL,
+                            "status": "queued",
+                            "created_at": now_iso(),
+                            "backend": "comfy-krea2-strength-hunt",
+                            "mode": "identity-edit" if uploaded_image else "text-to-image",
+                            "options": {k: v for k, v in options.items() if k != 'negative_prompt'},
+                        }
+                    t = threading.Thread(
+                        target=run_comfy_krea2_strength_hunt,
+                        args=(job_id, prompt, uploaded_image, options, hunt),
+                        daemon=True,
+                    )
+                    t.start()
+                    return self.send_json({
+                        "id": job_id,
+                        "status": "queued",
+                        "backend": "comfy-krea2-strength-hunt",
+                        "job_url": f"/api/job/{job_id}",
+                        "page_url": f"/job/{job_id}",
+                        "history_url": "/api/history",
+                    }, 202)
                 job_id = uuid.uuid4().hex[:12]
                 with jobs_lock:
                     jobs[job_id] = {
@@ -7551,13 +10137,68 @@ class Handler(BaseHTTPRequestHandler):
                 native_loras = _native_loras_from_generation_request(data, ['Flux.2 Klein 9B'])
                 if native_loras:
                     options['loras'] = native_loras
-                if uploaded_image is None:
-                    maybe_image = str(data.get('image_path', '') if isinstance(data, dict) else '')
-                    if not maybe_image:
-                        return self.send_json({"error": "image required for BigLoveKlein3 edit"}, 400)
-                    uploaded_image = Path(maybe_image)
-                    if not uploaded_image.is_absolute():
-                        uploaded_image = COMFY_INPUT_DIR / maybe_image
+                # Collect every reference the caller sent — Klein conditions on
+                # up to 3 images (identity across views, character sheets).
+                # Order: inline/multipart image first, then image_path, then
+                # the images_base64 / image_paths lists.
+                reference_images = [uploaded_image] if uploaded_image is not None else []
+                if isinstance(data, dict):
+                    maybe_image = str(data.get('image_path', '') or '')
+                    if maybe_image:
+                        p = Path(maybe_image).expanduser()
+                        if not p.is_absolute():
+                            p = COMFY_INPUT_DIR / maybe_image
+                        reference_images.append(p)
+                    extra_b64 = data.get('images_base64')
+                    if isinstance(extra_b64, list):
+                        for value in extra_b64:
+                            staged = stage_inline_image_base64(value)
+                            if staged is not None:
+                                reference_images.append(staged)
+                    extra_paths = data.get('image_paths')
+                    if isinstance(extra_paths, list):
+                        for value in extra_paths:
+                            text = str(value or '').strip()
+                            if not text:
+                                continue
+                            p = Path(text).expanduser()
+                            if not p.is_absolute():
+                                p = COMFY_INPUT_DIR / text
+                            reference_images.append(p)
+                seen_refs = set()
+                deduped_refs = []
+                for p in reference_images:
+                    resolved_ref = str(Path(p).resolve())
+                    if resolved_ref not in seen_refs:
+                        seen_refs.add(resolved_ref)
+                        deduped_refs.append(Path(resolved_ref))
+                reference_images = deduped_refs[:3]
+                if not reference_images:
+                    return self.send_json({"error": "image required for BigLoveKlein3 edit"}, 400)
+                uploaded_image = reference_images[0]
+                if len(reference_images) > 1:
+                    options['image_paths'] = [str(p) for p in reference_images]
+                # Character sheet: N per-view edits of the same reference(s) on
+                # the native Klein lane, composited into one labeled sheet.
+                if wants_character_sheet:
+                    sheet_req = data.get('character_sheet')
+                    try:
+                        sheet_views = resolve_character_sheet_views(sheet_req)
+                    except ValueError as exc:
+                        return self.send_json({"error": str(exc)}, 400)
+                    if not supports_native_mlx_biglove_route():
+                        return self.send_json({"error": f"character sheet needs the native MLX Klein route (accelerator profile {accelerator_profile()})"}, 400)
+                    sheet_preset = str(sheet_req.get('preset') or '').strip().lower() or None
+                    job_id = queue_klein_character_sheet(prompt, reference_images, options, sheet_views, preset=sheet_preset)
+                    return self.send_json({
+                        "id": job_id,
+                        "status": "queued",
+                        "backend": KLEIN_CHARACTER_SHEET_BACKEND,
+                        "mode": "character-sheet",
+                        "job_url": f"/api/job/{job_id}",
+                        "page_url": f"/job/{job_id}",
+                        "history_url": "/api/history",
+                    }, 202)
                 if supports_native_mlx_biglove_route():
                     job_id = queue_native_mlx_biglove_job(prompt, uploaded_image, options)
                     return self.send_json({"id": job_id, "status": "queued", "backend": "mlx-mxfp8-bigloves-klein3-edit", "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
@@ -7603,6 +10244,7 @@ def main():
             print(f"[output-encryption] encrypted {migrated} existing output image(s)", flush=True)
         threading.Thread(target=output_encryption_sweeper, daemon=True).start()
     threading.Thread(target=workflow_index_sweeper, daemon=True).start()
+    respawn_remote_comfy_watchers()
     cleanup_staged_private_inputs_once()
     threading.Thread(target=private_input_sweeper, daemon=True).start()
     with download_jobs_lock:

@@ -38,6 +38,29 @@ export function toggleLoraEnabled(selection, id) {
     ));
 }
 
+// Strength Hunt axes (Mix-Studio port): flag up to two LoRAs whose strength the
+// backend sweeps 0 → current in one job. The flag rides on the selection so it
+// persists per model like mute state; a third toggle-on is refused, not queued.
+export const MAX_HUNT_LORAS = 2;
+
+export function toggleLoraHunt(selection, id) {
+    const list = Array.isArray(selection) ? selection : [];
+    const hunted = list.filter(item => item.hunt).length;
+    return list.map(item => {
+        if (item.id !== id) return item;
+        if (item.hunt) return { ...item, hunt: false };
+        return hunted >= MAX_HUNT_LORAS ? item : { ...item, hunt: true };
+    });
+}
+
+// The 1-2 sweep axes for a generation: hunted, enabled, non-zero strength.
+export function huntLoraIds(selection) {
+    return (Array.isArray(selection) ? selection : [])
+        .filter(item => item.hunt && isLoraEnabled(item) && Number(item.strength) !== 0)
+        .map(item => item.id)
+        .slice(0, MAX_HUNT_LORAS);
+}
+
 export function updateLoraStrength(selection, id, value) {
     return (Array.isArray(selection) ? selection : []).map(item => (
         item.id === id
@@ -145,10 +168,11 @@ export function mergeLoraUpdates(loras, updates) {
 // group is re-resolved against the live catalog when it is loaded, and the saved
 // snapshot is used only to NAME adapters that are no longer installed.
 
-export function loraGroupFromSelection(selection, { baseModelId = '', baseLabel = '' } = {}) {
+export function loraGroupFromSelection(selection, { baseModelId = '', baseLabel = '', baseModels = [] } = {}) {
     return {
         baseModelId: String(baseModelId || ''),
         baseLabel: String(baseLabel || ''),
+        baseModels: (Array.isArray(baseModels) ? baseModels : []).map(name => String(name || '')).filter(Boolean),
         loras: (Array.isArray(selection) ? selection : []).map(item => ({
             id: item.id,
             name: String(item.name || item.id),
@@ -157,6 +181,23 @@ export function loraGroupFromSelection(selection, { baseModelId = '', baseLabel 
             enabled: isLoraEnabled(item),
         })),
     };
+}
+
+// Whether a saved group belongs to the model currently selected. Adapters are
+// per base family, so a group saved on LTX 2.3 is noise under a Klein model.
+// Prefer the recorded family lists (loose spelling match, same as updates);
+// groups saved before `baseModels` existed carry only the model id, which still
+// pins them to the exact model they were saved on. A group with no recorded
+// base matches nothing — the menu files it under "Other models" over guessing.
+export function loraGroupMatchesBase(group, { baseModelId = '', baseModels = [] } = {}) {
+    const savedFamilies = (Array.isArray(group?.baseModels) ? group.baseModels : []).filter(Boolean);
+    const currentFamilies = (Array.isArray(baseModels) ? baseModels : []).filter(Boolean);
+    if (savedFamilies.length && currentFamilies.length) {
+        return savedFamilies.some(saved => currentFamilies.some(current => sameBaseFamily(saved, current)));
+    }
+    const savedId = normalizeBase(group?.baseModelId);
+    const currentId = normalizeBase(baseModelId);
+    return Boolean(savedId && currentId && savedId === currentId);
 }
 
 // Returns { selection, missing }. `missing` names the adapters the group refers

@@ -5,6 +5,31 @@
 export const IMAGE_PREFERENCES_KEY = 'image_generation_preferences';
 export const STYLE_PRESETS = ['None', 'Photorealistic', 'Anime', 'Cinematic', 'Oil Painting', 'Watercolor', 'Digital Art', 'Concept Art', 'Cyberpunk'];
 
+// What each preset actually appends to the prompt. The control rendered for
+// months while generate() never read it — these phrases close that gap.
+// Kept to compact comma phrases (not sentences) so they compose with any prompt.
+export const STYLE_PRESET_PHRASES = {
+    'Photorealistic': 'photorealistic, natural light, detailed skin texture, sharp focus',
+    'Anime': 'anime style, clean line art, cel shading, vibrant colors',
+    'Cinematic': 'cinematic composition, dramatic lighting, film grain, anamorphic look',
+    'Oil Painting': 'oil painting, visible brushstrokes, canvas texture, rich impasto',
+    'Watercolor': 'watercolor painting, soft washes, bleeding pigment, paper texture',
+    'Digital Art': 'digital art, polished rendering, high detail illustration',
+    'Concept Art': 'concept art, painterly rendering, atmospheric perspective, production design',
+    'Cyberpunk': 'cyberpunk aesthetic, neon glow, rain-slick streets, high-tech low-life',
+};
+
+// Append the preset phrase unless the prompt already carries it (idempotent —
+// same contract as the camera-motion composer). 'None'/unknown return as-is.
+export function applyStylePreset(prompt, styleName) {
+    const base = String(prompt || '').trim();
+    const phrase = STYLE_PRESET_PHRASES[String(styleName || '').trim()];
+    if (!phrase) return base;
+    if (base.toLowerCase().includes(phrase.toLowerCase())) return base;
+    if (!base) return phrase;
+    return `${base}${/[,.!?;:]$/.test(base) ? ' ' : ', '}${phrase}`;
+}
+
 export function normalizeImagePreferences(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const stringValue = (candidate) => typeof candidate === 'string' ? candidate.trim() : '';
@@ -58,6 +83,8 @@ export function normalizeImagePreferences(value) {
                 coupleDirection: entry.coupleDirection === 'vertical' ? 'vertical' : 'horizontal',
                 coupleSplit: numberValue(entry.coupleSplit, 50, 10, 90, true),
                 couplePair: ['girls', 'mixed', 'boys'].includes(entry.couplePair) ? entry.couplePair : 'girls',
+                characterSheetMode: Boolean(entry.characterSheetMode),
+                characterSheetPreset: ['turnaround', 'standard', 'full'].includes(entry.characterSheetPreset) ? entry.characterSheetPreset : 'turnaround',
             };
         });
     }
@@ -66,6 +93,7 @@ export function normalizeImagePreferences(value) {
         modelId,
         imageMode: Boolean(value.imageMode),
         useLocalModel: Boolean(value.useLocalModel),
+        rentedOnly: Boolean(value.rentedOnly),
         localModelId: stringValue(value.localModelId),
         aspectRatio: stringValue(value.aspectRatio),
         resolution: stringValue(value.resolution),
@@ -88,6 +116,8 @@ export function normalizeImagePreferences(value) {
         coupleDirection: value.coupleDirection === 'vertical' ? 'vertical' : 'horizontal',
         coupleSplit: numberValue(value.coupleSplit, 50, 10, 90, true),
         couplePair: ['girls', 'mixed', 'boys'].includes(value.couplePair) ? value.couplePair : 'girls',
+        characterSheetMode: Boolean(value.characterSheetMode),
+        characterSheetPreset: ['turnaround', 'standard', 'full'].includes(value.characterSheetPreset) ? value.characterSheetPreset : 'turnaround',
         modelSettings,
         loraSelections,
     };

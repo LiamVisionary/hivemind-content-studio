@@ -285,6 +285,19 @@ PY
 	    comfy_lane_rules="ltx=ltx,ltxv,ltxav,ltx23,eros,10eros;$comfy_lane_rules"
 	  fi
 
+	  # Attached GPU rentals overlay (written by the studio's /api/gpu-rentals
+	  # attach flow; see src/hivemind_content_studio/gpu_rentals.py). Rental
+	  # lane rules are PREPENDED so an attached machine wins over local lanes
+	  # for the models it serves. Tunnel URLs are loopback (SSH is the auth).
+	  RENTAL_LANES_ENV="$MEDIA_STATE_ROOT/rental-lanes.env"
+	  RENTAL_COMFY_LANES=""; RENTAL_COMFY_LANE_RULES=""; RENTAL_COMFY_REMOTE_LANES=""
+	  if [ -f "$RENTAL_LANES_ENV" ]; then
+	    . "$RENTAL_LANES_ENV"
+	    if [ -n "${RENTAL_COMFY_LANES:-}" ]; then comfy_lanes="$comfy_lanes,$RENTAL_COMFY_LANES"; fi
+	    if [ -n "${RENTAL_COMFY_LANE_RULES:-}" ]; then comfy_lane_rules="$RENTAL_COMFY_LANE_RULES;$comfy_lane_rules"; fi
+	    log "rental lanes overlay active: ${RENTAL_COMFY_REMOTE_LANES:-none}"
+	  fi
+
   cd "$COMFY" || return 1
   ZIMG_ACCELERATOR_PROFILE="$ZIMG_ACCELERATOR_PROFILE" \
   HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
@@ -431,6 +444,7 @@ PY
   SWIFT_FLUX2_SERVER_URL="http://127.0.0.1:$FLUX2_SERVER_PORT" \
 	  COMFY_LANES="$comfy_lanes" \
 	  COMFY_LANE_RULES="$comfy_lane_rules" \
+	  COMFY_REMOTE_LANES="${RENTAL_COMFY_REMOTE_LANES:-}" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   hive-env-run -- python3 app.py \
@@ -571,7 +585,7 @@ PY
 }
 
 stop_children() {
-  log "stopping Z-Image stack children"
+  log "stopping studio stack children"
   for pid in "${children[@]:-}"; do
     kill "$pid" 2>/dev/null || true
   done

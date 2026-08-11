@@ -209,6 +209,37 @@ test('a saved LoRA group keeps identity and tuning, and re-resolves against the 
     assert.equal(restored[1].enabled, false, 'a muted LoRA must come back muted');
 });
 
+test('a saved group only matches the base family it was made for', async () => {
+    const { loraGroupFromSelection, loraGroupMatchesBase } = await import('../src/lib/loraSelection.js');
+
+    // The reported bug: an LTX 2.3 group offered under a Klein model.
+    const ltxGroup = loraGroupFromSelection([{ id: 'crisp.safetensors' }], {
+        baseModelId: 'ltx-2.3-distilled', baseLabel: 'LTXV 2.3', baseModels: ['LTXV 2.3'],
+    });
+    assert.deepEqual(ltxGroup.baseModels, ['LTXV 2.3']);
+    assert.equal(loraGroupMatchesBase(ltxGroup, { baseModelId: 'bigloveklein', baseModels: ['Flux.1 Klein'] }), false);
+    assert.equal(loraGroupMatchesBase(ltxGroup, { baseModelId: 'ltx-2.3-distilled', baseModels: ['LTXV 2.3'] }), true);
+
+    // Family match is what carries a group to a SIBLING checkpoint of the same base.
+    assert.equal(loraGroupMatchesBase(ltxGroup, { baseModelId: 'some-other-ltx-build', baseModels: ['LTXV 2.3'] }), true);
+    // Same loose spelling rule as update matching ("Flux.1 D" / "Flux.1 Dev").
+    const kleinGroup = loraGroupFromSelection([], { baseModelId: 'bigloveklein', baseModels: ['Flux.1 Klein'] });
+    assert.equal(loraGroupMatchesBase(kleinGroup, { baseModelId: 'klein-4b', baseModels: ['Flux.1 Klein 9B'] }), true);
+
+    // Catalog families not loaded yet → fall back to the exact model id.
+    assert.equal(loraGroupMatchesBase(ltxGroup, { baseModelId: 'ltx-2.3-distilled', baseModels: [] }), true);
+    assert.equal(loraGroupMatchesBase(ltxGroup, { baseModelId: 'bigloveklein', baseModels: [] }), false);
+
+    // Groups saved before baseModels existed carry only the model id.
+    const legacy = { baseModelId: 'bigloveklein', baseLabel: 'BigLove Klein', loras: [] };
+    assert.equal(loraGroupMatchesBase(legacy, { baseModelId: 'bigloveklein', baseModels: ['Flux.1 Klein'] }), true);
+    assert.equal(loraGroupMatchesBase(legacy, { baseModelId: 'ltx-2.3-distilled', baseModels: ['LTXV 2.3'] }), false);
+
+    // No recorded base at all: match nothing rather than guess.
+    assert.equal(loraGroupMatchesBase({ loras: [] }, { baseModelId: 'bigloveklein', baseModels: ['Flux.1 Klein'] }), false);
+    assert.equal(loraGroupMatchesBase(null, { baseModelId: 'bigloveklein', baseModels: ['Flux.1 Klein'] }), false);
+});
+
 test('a group naming LoRAs that are not installed reports them instead of silently shrinking', async () => {
     const { loraSelectionFromGroup } = await import('../src/lib/loraSelection.js');
 

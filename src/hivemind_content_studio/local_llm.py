@@ -43,12 +43,61 @@ from typing import Any
 # Where to look for GGUF weights. LM Studio's own directory is the default
 # because that is where this machine keeps them; HIVEMIND_LLM_MODEL_ROOTS adds
 # more (os.pathsep-separated) without editing code.
-DEFAULT_MODEL_ROOTS = (Path.home() / ".lmstudio" / "models",)
+DEFAULT_MODEL_ROOTS = (
+    Path.home() / ".lmstudio" / "models",
+    # The studio ships its own small instruct model with the local-AI runtime.
+    # Leaving this root out meant the picker's only offers were 18-36GB loads
+    # while a 2.4GB Qwen3-4B sat inside the app's own data directory.
+    Path.home() / "Library" / "Application Support" / "open-generative-ai" / "local-ai" / "models",
+)
 
 _LLAMA_SERVER_CANDIDATES = (
     "/opt/homebrew/bin/llama-server",
     "/usr/local/bin/llama-server",
+    # Hand-built checkouts, tried only when a packaged binary cannot parse a
+    # model's vision projector. Newer projector types land in llama.cpp well
+    # before they reach Homebrew: measured 2026-08-09, Homebrew's b9430
+    # rejects Swarm Scout's "gemma4uv" projector that the b9553 build loads.
+    str(Path.home() / "src/llama.cpp-b9553/build/bin/llama-server"),
+    str(Path.home() / "src/llama.cpp/build/bin/llama-server"),
 )
+
+
+def free_comfy_memory(timeout: float = 20.0) -> dict[str, Any]:
+    """Ask the local ComfyUI to drop its models, and report what that freed.
+
+    On a unified-memory Mac ComfyUI is the helper's real competitor: it can sit
+    on tens of GB of diffusion weights long after a generation finished, and
+    the picker's answer was "this model does not fit" with no way to act on it.
+    ComfyUI's own /free does the unload without touching the queue, the loaded
+    workflow, or cached node results.
+    """
+    base = (os.environ.get("COMFY_HTTP_DEFAULT") or os.environ.get("COMFY_HTTP")
+            or "http://127.0.0.1:8188").rstrip("/")
+    before = _available_memory_bytes()
+    request = urllib.request.Request(
+        f"{base}/free",
+        data=json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response.read()
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise LocalLlmError(f"Could not reach ComfyUI at {base}: {exc}") from None
+    # Freeing is asynchronous on Comfy's side; a moment's wait makes the
+    # reported number the one the user will actually see in the picker.
+    time.sleep(1.5)
+    after = _available_memory_bytes()
+    return {"freedBytes": max(0, after - before), "availableBytes": after}
+
+
+def _llama_binaries() -> list[str]:
+    """Every runnable llama-server, best-known first."""
+    override = os.environ.get("HIVEMIND_LLAMA_SERVER", "").strip()
+    candidates = ([override] if override else []) + list(_LLAMA_SERVER_CANDIDATES)
+    return [c for c in candidates if Path(c).is_file() and os.access(c, os.X_OK)]
 
 # 8k is plenty for "turn an idea into a prompt" and keeps the KV cache small
 # enough that a big model still fits beside a loaded diffusion model.
@@ -90,6 +139,19 @@ class LocalLlmModel:
 
 
 @dataclass
+class UnavailableModel:
+    """A GGUF on disk the helper cannot offer, and why.
+
+    Reported rather than dropped: "my model is missing from the list" is a
+    question the picker should answer itself.
+    """
+
+    id: str
+    path: str
+    reason: str
+
+
+@dataclass
 class LoadedModel:
     """A llama-server this process started and is responsible for killing."""
 
@@ -101,6 +163,8 @@ class LoadedModel:
     estimated_bytes: int
     context_tokens: int
     stderr: deque
+    # Started with a projector, so an image sent to it is actually read.
+    vision: bool = False
 
 
 class LocalLlmError(RuntimeError):
@@ -269,36 +333,82 @@ def _quantization_hint(name: str) -> str:
     return match.group(1).upper() if match else ""
 
 
-def discover_models(measurements: dict[str, int] | None = None) -> list[LocalLlmModel]:
-    """Every runnable GGUF under the configured roots.
+def _projector_for(model_path: Path) -> Path | None:
+    """The multimodal projector shipped beside a model, if any.
+
+    Discovery skips mmproj files because they are not loadable on their own —
+    but that is exactly what makes them invisible here, and without one the
+    helper writes about a reference image it has never seen."""
+    try:
+        candidates = sorted(
+            path for path in model_path.parent.glob("*.gguf")
+            if path.name.lower().startswith("mmproj") and path.is_file()
+        )
+    except OSError:
+        return None
+    return candidates[0] if candidates else None
+
+
+def scan_models(
+    measurements: dict[str, int] | None = None,
+) -> tuple[list[LocalLlmModel], list[UnavailableModel]]:
+    """Every GGUF under the configured roots, split into runnable and not.
 
     Vision projectors (mmproj) and the 2nd..Nth shard of a split model are
-    skipped: neither is something the user can load on its own.
+    skipped silently: neither is something the user can load on its own, and
+    neither is a model they think they have.
+
+    Everything else that cannot be run is REPORTED rather than dropped. A model
+    directory is mostly symlinks into build dirs that come and go, and a
+    vanished one used to be invisible twice over — first it crashed the whole
+    scan (one dead link blanked the entire picker), then, once that was caught,
+    it silently disappeared from a list the user reads as "what I have".
 
     ``measurements`` maps model id to resident bytes observed on a previous
     load; those replace the size-based guess where present.
     """
     measurements = measurements or {}
     found: list[LocalLlmModel] = []
+    missing: list[UnavailableModel] = []
     for root in _model_roots():
         for path in sorted(root.rglob("*.gguf")):
             name = path.name
             if name.lower().startswith("mmproj"):
                 continue
-            size_bytes = path.stat().st_size
+            try:
+                size_bytes = path.stat().st_size
+            except OSError:
+                missing.append(UnavailableModel(
+                    id=str(path.relative_to(root)),
+                    path=str(path),
+                    reason=("broken link — its target is gone" if path.is_symlink()
+                            else "file cannot be read"),
+                ))
+                continue
             shard = _SHARD_RE.match(name)
             if shard:
                 if shard.group("index") != "00001":
                     continue
                 # Charge the whole split model, not just its first piece.
-                size_bytes = sum(
-                    sibling.stat().st_size
-                    for sibling in path.parent.glob(f"{shard.group('stem')}-*-of-{shard.group('total')}.gguf")
-                )
+                size_bytes = 0
+                for sibling in path.parent.glob(f"{shard.group('stem')}-*-of-{shard.group('total')}.gguf"):
+                    with contextlib.suppress(OSError):
+                        size_bytes += sibling.stat().st_size
             meta = _read_gguf_metadata(path)
             architecture = meta.get("general.architecture") or ""
             max_context = meta.get(f"{architecture}.context_length") if architecture else 0
             model_id = str(path.relative_to(root))
+            if not architecture:
+                # Not every .gguf is a language model: the local-AI runtime
+                # keeps a quantized DIFFUSION model in the same directory, and
+                # its header carries no architecture at all. llama-server
+                # cannot serve one, so offering it would only produce a load
+                # that fails a minute later.
+                missing.append(UnavailableModel(
+                    id=model_id, path=str(path),
+                    reason="no readable model architecture — not a text model",
+                ))
+                continue
             found.append(
                 LocalLlmModel(
                     id=model_id,
@@ -312,7 +422,12 @@ def discover_models(measurements: dict[str, int] | None = None) -> list[LocalLlm
                     measured=model_id in measurements,
                 )
             )
-    return found
+    return found, missing
+
+
+def discover_models(measurements: dict[str, int] | None = None) -> list[LocalLlmModel]:
+    """The runnable models only — the common case."""
+    return scan_models(measurements)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +489,8 @@ class LocalLlmRuntime:
         self._context_tokens = context_tokens
         self._lmstudio_url = lmstudio_url.rstrip("/")
         self._loaded: dict[str, LoadedModel] = {}
+        # projector path -> the llama-server build that could actually parse it.
+        self._projector_binary: dict[str, str] = {}
         self._lock = threading.RLock()
         self._state_path = state_path
         self._measurements = self._read_measurements()
@@ -416,10 +533,8 @@ class LocalLlmRuntime:
         found = shutil.which("llama-server")
         if found:
             return found
-        for candidate in _LLAMA_SERVER_CANDIDATES:
-            if Path(candidate).is_file() and os.access(candidate, os.X_OK):
-                return candidate
-        return ""
+        binaries = _llama_binaries()
+        return binaries[0] if binaries else ""
 
     @property
     def available(self) -> bool:
@@ -455,7 +570,8 @@ class LocalLlmRuntime:
         available = _available_memory_bytes()
         external = _lmstudio_loaded_models(self._lmstudio_url)
         models = []
-        for model in discover_models(self._measurements):
+        runnable, unavailable = scan_models(self._measurements)
+        for model in runnable:
             need = model.estimated_load_bytes + SAFETY_MARGIN_BYTES
             if model.id in loaded_ids:
                 fit = "loaded"
@@ -475,6 +591,10 @@ class LocalLlmRuntime:
                     "maxContext": model.max_context,
                     "estimatedLoadBytes": model.estimated_load_bytes,
                     "fit": fit,
+                    # Ships a projector, so it can look at a start frame. Once
+                    # loaded the running server's answer replaces the guess.
+                    "vision": (self._loaded[model.id].vision if model.id in loaded_ids
+                               else _projector_for(Path(model.path)) is not None),
                 }
             )
         return {
@@ -486,11 +606,32 @@ class LocalLlmRuntime:
             "reclaimableBytes": reclaimable,
             "safetyMarginBytes": SAFETY_MARGIN_BYTES,
             "models": models,
+            # What is on disk but cannot be offered, so "where did my model go"
+            # is answered in the picker instead of over the shoulder.
+            "unavailable": [
+                {"id": entry.id, "path": entry.path, "reason": entry.reason}
+                for entry in unavailable
+            ],
             "loaded": loaded,
             "external": external,
         }
 
     # -- lifecycle ---------------------------------------------------------
+
+    def model_sees_images(self, model_id: str) -> bool:
+        """Whether an image sent to this model is actually read.
+
+        Authoritative once loaded: a projector file sitting beside a model is
+        only a promise, and it is broken whenever the running llama-server
+        cannot parse that projector type."""
+        with self._lock:
+            entry = self._loaded.get(model_id)
+        if entry is not None:
+            return entry.vision
+        try:
+            return _projector_for(Path(self._model_by_id(model_id).path)) is not None
+        except LocalLlmError:
+            return False
 
     def _model_by_id(self, model_id: str) -> LocalLlmModel:
         for model in discover_models(self._measurements):
@@ -518,57 +659,96 @@ class LocalLlmRuntime:
                     f"{available / 1024**3:.1f} GB is available. Unload another model first."
                 )
 
-            port = _free_port()
-            api_key = secrets.token_urlsafe(32)
-            command = [
-                self._binary,
-                "--model", model.path,
-                "--host", "127.0.0.1",
-                "--port", str(port),
-                "--ctx-size", str(self._context_tokens),
-                "--n-gpu-layers", "999",
-                "--alias", model_id,
-                "--api-key", api_key,
-                "--no-webui",
-            ]
-            ring: deque = deque(maxlen=_STDERR_RING_LINES)
-            try:
-                process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,
-                )
-            except OSError as exc:
-                raise LocalLlmError(f"Could not start llama-server: {exc}") from exc
-            threading.Thread(target=_drain, args=(process.stderr, ring), daemon=True).start()
+        # Vision is a bonus, never a precondition. A projector the available
+        # llama-server cannot parse used to take the whole load down with
+        # "unknown projector type: gemma4uv" — Scout's projector needs b9553
+        # and Homebrew ships b9430 — so each capable binary is tried with the
+        # projector, and the last attempt always drops it.
+        projector = _projector_for(Path(model.path))
+        attempts: list[tuple[str, Path | None]] = []
+        if projector is not None:
+            binaries = _llama_binaries()
+            # A binary already proven against this projector goes first, so the
+            # ~2s rejection is paid once per session rather than on every load.
+            known = self._projector_binary.get(str(projector))
+            if known in binaries:
+                binaries = [known] + [b for b in binaries if b != known]
+            attempts += [(binary, projector) for binary in binaries]
+        attempts.append((self._binary, None))
 
-            entry = LoadedModel(
-                model_id=model_id,
-                port=port,
-                process=process,
-                api_key=api_key,
-                started_at=time.time(),
-                estimated_bytes=model.estimated_load_bytes,
-                context_tokens=self._context_tokens,
-                stderr=ring,
-            )
-            self._loaded[model_id] = entry
-
-        try:
-            self._await_health(entry)
-        except LocalLlmError:
+        last_error: LocalLlmError | None = None
+        for binary, mmproj in attempts:
             with self._lock:
-                self._unload_locked(model_id)
-            raise
+                entry = self._spawn_locked(model_id, model, binary, mmproj)
+            try:
+                self._await_health(entry)
+            except LocalLlmError as exc:
+                last_error = exc
+                with self._lock:
+                    self._unload_locked(model_id)
+                continue
 
-        # Replace the size-based guess with what this model actually costs, so
-        # every later fit decision for it is measured rather than estimated.
-        resident = _resident_bytes(process.pid)
-        if resident:
-            entry.estimated_bytes = resident
-            self._record_measurement(model_id, resident)
-        return self.snapshot()
+            # Replace the size-based guess with what this model actually costs,
+            # so every later fit decision for it is measured, not estimated.
+            if mmproj is not None:
+                self._projector_binary[str(mmproj)] = binary
+            resident = _resident_bytes(entry.process.pid)
+            if resident:
+                entry.estimated_bytes = resident
+                self._record_measurement(model_id, resident)
+            return self.snapshot()
+
+        raise last_error or LocalLlmError(f"Could not start llama-server for {model_id}.")
+
+    def _spawn_locked(
+        self, model_id: str, model: LocalLlmModel, binary: str, projector: Path | None,
+    ) -> LoadedModel:
+        port = _free_port()
+        api_key = secrets.token_urlsafe(32)
+        command = [
+            binary,
+            "--model", model.path,
+            "--host", "127.0.0.1",
+            "--port", str(port),
+            "--ctx-size", str(self._context_tokens),
+            "--n-gpu-layers", "999",
+            "--alias", model_id,
+            "--api-key", api_key,
+            "--no-webui",
+            # Reasoning fine-tunes (swarm-sovereign-12b measured) burn the
+            # entire max_tokens budget on reasoning_content and return an
+            # empty prompt; the helper only ever wants the direct answer.
+            "--reasoning", "off",
+        ]
+        if projector is not None:
+            # llama-server only auto-detects a projector for -hf downloads,
+            # and we load by path.
+            command += ["--mmproj", str(projector)]
+        ring: deque = deque(maxlen=_STDERR_RING_LINES)
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise LocalLlmError(f"Could not start llama-server: {exc}") from exc
+        threading.Thread(target=_drain, args=(process.stderr, ring), daemon=True).start()
+
+        entry = LoadedModel(
+            model_id=model_id,
+            port=port,
+            process=process,
+            api_key=api_key,
+            started_at=time.time(),
+            estimated_bytes=model.estimated_load_bytes,
+            context_tokens=self._context_tokens,
+            stderr=ring,
+            vision=projector is not None,
+        )
+        self._loaded[model_id] = entry
+        return entry
 
     def _await_health(self, entry: LoadedModel) -> None:
         deadline = time.time() + LOAD_TIMEOUT_SECONDS
@@ -627,12 +807,24 @@ class LocalLlmRuntime:
         # exactly that during bring-up.
         max_tokens: int = 2048,
         timeout: float = 180.0,
+        image: str | None = None,
     ) -> str:
         with self._lock:
             self._reap()
             entry = self._loaded.get(model_id)
         if entry is None:
             raise LocalLlmError(f"{model_id} is not loaded. Load it first.")
+        if image:
+            # Attach to the LAST user turn, so a corrective follow-up does not
+            # re-send the image and double the vision cost.
+            messages = [dict(message) for message in messages]
+            for message in reversed(messages):
+                if message.get("role") == "user":
+                    message["content"] = [
+                        {"type": "text", "text": message.get("content") or ""},
+                        {"type": "image_url", "image_url": {"url": image}},
+                    ]
+                    break
         body = json.dumps(
             {
                 "model": model_id,

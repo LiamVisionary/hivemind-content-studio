@@ -713,7 +713,7 @@ export function generationProgressPct(card) {
 /* Navigation (hubApp.js:781-800)                                     */
 /* ------------------------------------------------------------------ */
 
-export const HUB_VIEWS = ['create', 'canvas', 'models', 'runs', 'history', 'telemetry', 'providers'];
+export const HUB_VIEWS = ['create', 'canvas', 'models', 'runs', 'history', 'telemetry', 'providers', 'machines'];
 // View name → AppShell page id ('create' renders on the 'planner' page).
 const hubPageForView = (view) => (view === 'create' ? 'planner' : view);
 

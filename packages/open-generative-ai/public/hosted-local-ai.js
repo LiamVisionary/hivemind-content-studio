@@ -44,7 +44,7 @@
       last = await jsonFetch(`/local-ai/job/${encodeURIComponent(jobId)}`);
       const status = last.status || 'running';
       const progress = status === 'success' ? 1 : status === 'running' ? 0.35 : 0.1;
-      emitProgress({ status, progress, message: status === 'success' ? 'Done' : 'Generating on hosted Z-Image stack' });
+      emitProgress({ status, progress, message: status === 'success' ? 'Done' : 'Generating on hosted Open Generative AI' });
       if (status === 'success') {
         if (!last.url) throw new Error('Generation finished without an image');
         return { url: last.url, seed: last.seed };
@@ -74,6 +74,33 @@
         return { url: last.url, seed: last.seed };
       }
       if (status === 'error') throw new Error(last.error || 'Upscale failed');
+    }
+  }
+
+  // Proper RIFE frame interpolation (2x/4x) on a finished clip; the decrypted
+  // bytes ride up as base64 and the smoothed clip rides back inlined, so the
+  // sealed store stays the only copy at rest.
+  async function interpolate(params) {
+    emitProgress({ status: 'queued', progress: 0, message: 'Interpolating frames (RIFE)' });
+    const submitted = await jsonFetch('/local-ai/interpolate', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    });
+    const jobId = submitted.id;
+    if (!jobId) throw new Error('No job id returned by the interpolator');
+
+    let last = null;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, last ? 2000 : 1000));
+      last = await jsonFetch(`/local-ai/job/${encodeURIComponent(jobId)}`);
+      const status = last.status || 'running';
+      const progress = status === 'success' ? 1 : status === 'running' ? 0.4 : 0.1;
+      emitProgress({ status, progress, message: status === 'success' ? 'Interpolated' : 'Interpolating frames (RIFE)' });
+      if (status === 'success') {
+        if (!last.url) throw new Error('Interpolation finished without a clip');
+        return { url: last.url, mediaType: last.mediaType || 'video' };
+      }
+      if (status === 'error') throw new Error(last.error || 'Interpolation failed');
     }
   }
 
@@ -154,6 +181,7 @@
     deleteModel: async () => ({ ok: false, error: 'Hosted mode keeps shared models managed by the Mac.' }),
     generate,
     upscale,
+    interpolate,
     cancelGeneration: async () => ({ ok: true }),
     wan2gp: {
       getConfig: async () => ({ url: '' }),

@@ -395,6 +395,60 @@ def test_media_studio_video_job_flow_survives_long_generations(tmp_path: Path, m
     assert media.content == b"mock-video"
 
 
+def test_media_studio_video_cancel_interrupts_the_backend_and_stays_cancelled(tmp_path: Path, monkeypatch) -> None:
+    """Cancel must forward a real interrupt to the gateway and stay terminal:
+    before the gateway grew a cancel route, the render kept burning the GPU and
+    the next generation ran at half speed behind it."""
+    import threading
+
+    cancel_calls: list[str] = []
+    finish_gate = threading.Event()
+
+    def fake_start(**kwargs):
+        return {"job_id": "job-cancel-1", "uploaded_names": [], "provider": "Media Studio"}
+
+    def fake_finish(job_id, *, uploaded_names=None, output_dir=None, **_):
+        # Simulate the finisher blocked polling the gateway until the cancelled
+        # backend job surfaces as a failure.
+        finish_gate.wait(timeout=5)
+        raise RuntimeError("Media Studio job failed: cancelled")
+
+    def fake_cancel(job_id):
+        cancel_calls.append(job_id)
+        return True
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", fake_start)
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_finish", fake_finish)
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_cancel", fake_cancel)
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    queued = client.post(
+        "/api/media-studio/video/start",
+        json={"prompt": "slow push in", "workflow_id": "ltx23-eros-fast", "duration_seconds": 2},
+    )
+    assert queued.status_code == 200
+    assert queued.json()["job_id"] == "job-cancel-1"
+
+    cancelled = client.post("/api/media-studio/video/job/job-cancel-1/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {"ok": True, "status": "cancelled", "known": True, "interrupted": True}
+    assert cancel_calls == ["job-cancel-1"]
+
+    # Let the blocked finisher finish failing; it must not overwrite the
+    # cancelled state with an error (or a done) afterwards.
+    finish_gate.set()
+    payload: dict = {}
+    for _ in range(100):
+        payload = client.get("/api/media-studio/video/job/job-cancel-1").json()
+        time.sleep(0.02)
+        if payload.get("status") == "cancelled":
+            break
+    assert payload["status"] == "cancelled"
+    assert payload["ok"] is False
+    time.sleep(0.1)
+    assert client.get("/api/media-studio/video/job/job-cancel-1").json()["status"] == "cancelled"
+
+
 def test_simple_catalog_serves_cached_payload_instead_of_reprobing(tmp_path: Path, monkeypatch) -> None:
     calls = {"count": 0}
 
@@ -1478,6 +1532,40 @@ def test_video_timing_work_units_scale_with_length_and_resolution() -> None:
     assert 2.4 < four_high[2] / four_standard[2] < 2.6
 
 
+def test_steps_override_and_max_tier_shape_the_timing_signature() -> None:
+    from hivemind_content_studio.control_api import _video_timing_signature
+
+    default_steps = _video_timing_signature(_video_body(duration_seconds=4, resolution="high"))
+    refined = _video_timing_signature(_video_body(duration_seconds=4, resolution="high", steps=32))
+    # 32 steps is ~2x the sampling work of the workflow default, so refined runs
+    # must not pool their timings with default ones.
+    assert refined[0] != default_steps[0]
+    assert "steps=32" in refined[0]
+
+    # The max (native ~1.0MP) tier carries more work units than high (~0.86MP),
+    # in pixel proportion, through the same signature key.
+    four_high = _video_timing_signature(_video_body(duration_seconds=4, resolution="high"))
+    four_max = _video_timing_signature(_video_body(duration_seconds=4, resolution="max"))
+    assert four_high[0] == four_max[0]
+    assert 1.1 < four_max[2] / four_high[2] < 1.3
+
+
+def test_head_swap_gets_its_own_cost_profile_not_the_extend_one() -> None:
+    from hivemind_content_studio.control_api import _video_timing_signature
+
+    # A head swap attaches BOTH a video and an image, so anything that infers the
+    # mode from the attachments files it under "extend". Measured on this machine
+    # a head swap runs ~17 min against ~30-40s for a plain extension, so pooling
+    # them makes the progress bar wrong for both. The task is stated; read it.
+    head_swap = _video_timing_signature(
+        _video_body(task="head-swap", video_base64="x", image_base64="y")
+    )
+    extend = _video_timing_signature(_video_body(task="extend", video_base64="x"))
+
+    assert "head-swap" in head_swap[0]
+    assert head_swap[0] != extend[0]
+
+
 def test_video_estimate_scales_a_measured_run_to_a_longer_or_larger_one(tmp_path: Path) -> None:
     from hivemind_content_studio.control_api import GenerationTimings, _video_timing_signature
 
@@ -1537,3 +1625,194 @@ def test_video_timings_survive_a_reload_and_drop_pre_work_unit_records(tmp_path:
         handle.write(json.dumps({"sig": "sig", "wf": "wf", "seconds": 900.0, "at": 1}) + "\n")
 
     assert GenerationTimings(path).estimate("sig", "wf", 30.0) == 90.0
+
+
+def test_studio_shell_is_never_cached(tmp_path: Path, monkeypatch) -> None:
+    """A cached index.html pins the browser to the previous hashed bundle.
+
+    Vite fingerprints assets, so the shell is the only document that must always
+    revalidate; without this a rebuilt UI silently never reaches the user.
+    """
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    response = client.get("/")
+
+    assert response.status_code in (200, 503)
+    if response.status_code == 200:
+        assert "no-store" in response.headers.get("cache-control", "")
+
+
+def test_video_task_survives_every_hop_unchanged(tmp_path: Path, monkeypatch) -> None:
+    """`task` is decided once in the studio; no server layer may reinterpret it.
+
+    The head-swap bug was eight copies of "a video is attached, so this is an
+    extension" spread across the client, this API, media_studio and the MCP.
+    Each fix only moved the failure to the next copy. This pins the contract:
+    whatever task arrives is exactly what reaches the MCP arguments.
+    """
+    from hivemind_content_studio import media_studio
+
+    seen: dict[str, object] = {}
+
+    def fake_client(_descriptor):
+        class _C:
+            def call_tool(self, _name, arguments):
+                seen.update(arguments)
+                return {"job_id": "j1"}
+        return _C()
+
+    monkeypatch.setattr(media_studio, "_client", fake_client)
+    monkeypatch.setattr(media_studio, "_upload_video", lambda *_a, **_k: "src.mp4")
+    monkeypatch.setattr(media_studio, "_upload_image", lambda *_a, **_k: "face.png")
+
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"\x00" * 2048)
+    face = tmp_path / "face.png"
+    face.write_bytes(b"\x00" * 2048)
+
+    media_studio.start_video(
+        task="head-swap",
+        video_path=video,
+        image_path=face,
+        prompt="head_swap: FACE: x ACTION: y",
+    )
+
+    assert seen.get("task") == "head-swap"
+    assert seen.get("head_swap") is True
+    # An extension mode here is what made the runner take the extend branch.
+    assert "video_mode" not in seen
+    # Both media must survive, under their OWN names — these once shared one
+    # variable, so image_path received the video's filename.
+    assert seen.get("video_path") == "src.mp4"
+    assert seen.get("image_path") == "face.png"
+
+
+def test_media_studio_video_start_stages_and_forwards_the_motion_context_clip(tmp_path: Path, monkeypatch) -> None:
+    """Scene chaining: the previous clip arrives inline (decrypted in-browser),
+    is staged like any inline video, forwarded as motion_context_path — never
+    video_path, which flips the LTX extension lane — and the staged copy is
+    removed as soon as the job is queued."""
+    started: dict = {}
+
+    def fake_start(**kwargs):
+        started.update(kwargs)
+        assert Path(kwargs["motion_context_path"]).is_file()
+        return {"job_id": "job-chain-1", "uploaded_names": ["chain-input.mp4"], "provider": "Media Studio"}
+
+    def fake_finish(job_id, *, uploaded_names=None, output_dir=None, **_):
+        # Terminate the route's background finisher immediately: the TestClient
+        # portal waits for it on teardown, and an unstubbed finisher polls a
+        # gateway that does not exist here.
+        return {"job_id": job_id, "provider": "Media Studio", "gateway_output": "chain-out.mp4.e2e"}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", fake_start)
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_finish", fake_finish)
+    client, _, _ = _client(tmp_path, monkeypatch)
+    encoded = base64.b64encode(b"previous-clip-bytes").decode("ascii")
+
+    queued = client.post(
+        "/api/media-studio/video/start",
+        json={
+            "prompt": "the scene continues from the previous shot",
+            "workflow_id": "minimax-h3",
+            "motion_context_base64": f"data:video/mp4;base64,{encoded}",
+            "duration_seconds": 5,
+            "resolution": "high",
+        },
+    )
+    assert queued.status_code == 200
+    assert queued.json()["job_id"] == "job-chain-1"
+    assert started["video_path"] is None
+    assert str(started["motion_context_path"]).endswith(".mp4")
+    # The staged control-api copy is gone once the gateway owns the upload.
+    assert not Path(started["motion_context_path"]).exists()
+
+
+def test_media_studio_video_start_stages_ordered_reference_images(tmp_path: Path, monkeypatch) -> None:
+    """MiniMax H3 Reference mode: character pictures arrive inline (decrypted
+    in-browser), are staged in order — <Picture N> in the prompt is the Nth
+    entry — forwarded as reference_images paths, and unstaged once queued."""
+    started: dict = {}
+
+    def fake_start(**kwargs):
+        started.update(kwargs)
+        # Read while staged: the route unlinks the copies right after queueing.
+        started["staged_bytes"] = [Path(item).read_bytes() for item in kwargs["reference_images"]]
+        return {"job_id": "job-ref-1", "uploaded_names": ["ref-1.png"], "provider": "Media Studio"}
+
+    def fake_finish(job_id, *, uploaded_names=None, output_dir=None, **_):
+        return {"job_id": job_id, "provider": "Media Studio", "gateway_output": "ref-out.mp4.e2e"}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", fake_start)
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_finish", fake_finish)
+    client, _, _ = _client(tmp_path, monkeypatch)
+    first = base64.b64encode(b"character-sheet-bytes").decode("ascii")
+    second = base64.b64encode(b"second-view-bytes").decode("ascii")
+
+    queued = client.post(
+        "/api/media-studio/video/start",
+        json={
+            "prompt": "subject_definitions:\n<Subject 1>: the courier in <Picture 1>",
+            "workflow_id": "minimax-h3-reference",
+            "reference_images": [
+                {"image_base64": f"data:image/png;base64,{first}"},
+                {"image_base64": f"data:image/png;base64,{second}"},
+            ],
+            "duration_seconds": 5,
+        },
+    )
+    assert queued.status_code == 200
+    assert queued.json()["job_id"] == "job-ref-1"
+    assert started["image_path"] is None
+    assert len(started["reference_images"]) == 2
+    # Order preserved: the first attached picture stays <Picture 1>.
+    assert started["staged_bytes"] == [b"character-sheet-bytes", b"second-view-bytes"]
+    # The staged control-api copies are gone once the gateway owns the uploads.
+    assert all(not Path(item).exists() for item in started["reference_images"])
+
+    refused = client.post(
+        "/api/media-studio/video/start",
+        json={
+            "prompt": "too many",
+            "workflow_id": "minimax-h3-reference",
+            "reference_images": [
+                {"image_base64": f"data:image/png;base64,{first}"} for _ in range(10)
+            ],
+        },
+    )
+    assert refused.status_code == 400
+    assert "At most 9" in refused.json()["detail"]
+
+
+def test_media_studio_video_start_refuses_motion_context_plus_source_video(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_start",
+        lambda **_: pytest.fail("a contradictory request must never reach the gateway"),
+    )
+    client, _, _ = _client(tmp_path, monkeypatch)
+    encoded = base64.b64encode(b"clip-bytes").decode("ascii")
+    response = client.post(
+        "/api/media-studio/video/start",
+        json={
+            "prompt": "x",
+            "motion_context_base64": f"data:video/mp4;base64,{encoded}",
+            "video_base64": f"data:video/mp4;base64,{encoded}",
+        },
+    )
+    assert response.status_code == 400
+    assert "cannot be combined" in response.json()["detail"]
+
+
+def test_video_timing_signature_separates_chain_mode() -> None:
+    """A chained run samples ~22 extra frames plus a context encode; averaging
+    it with plain generates would skew both estimates."""
+    from hivemind_content_studio.control_api import _video_timing_signature
+
+    encoded = base64.b64encode(b"clip").decode("ascii")
+    plain = _video_timing_signature(_video_body(workflow_id="minimax-h3", duration_seconds=5))
+    chained = _video_timing_signature(_video_body(
+        workflow_id="minimax-h3", duration_seconds=5,
+        motion_context_base64=f"data:video/mp4;base64,{encoded}",
+    ))
+    assert plain[0] != chained[0]
+    assert "chain" in chained[0]

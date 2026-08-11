@@ -21,6 +21,7 @@ import {
   isHivemindStudioEnabled,
   isHivemindVideoModelId,
 } from '../../lib/hivemindStudio.js';
+import { videoRequestPlan } from '../../lib/videoTasks.js';
 import {
   getLocalModelById,
   isWan2gpModelId,
@@ -73,12 +74,22 @@ export const adaptHivemindToVideoEntry = (m) => ({
   workflowId: m.workflowId,
   tierGroup: m.tierGroup || null,
   tier: m.tier || null,
+  beta: Boolean(m.beta),
   supportsVideoInput: Boolean(m.supportsVideoInput),
   supportsLoras: Boolean(m.supportsLoras),
   compatibleBaseModels: Array.isArray(m.compatibleBaseModels) ? m.compatibleBaseModels : [],
   supportsIngredientImages: Boolean(m.supportsIngredientImages),
   ingredientInputs: m.ingredientInputs && typeof m.ingredientInputs === 'object' ? m.ingredientInputs : null,
   videoModes: m.videoModes || [],
+  // Capability fields the panel's per-model gates read (supportsSpectrum,
+  // supportsQualitySteps, endFrameVisible, family-scoped controls). The panel
+  // resolves the CATALOG entry, so dropping these here silently disabled
+  // every accepts-driven control for local workflows.
+  accepts: Array.isArray(m.accepts) ? m.accepts : [],
+  supportsEndFrame: Boolean(m.supportsEndFrame),
+  supportsMotionContext: Boolean(m.supportsMotionContext),
+  workflowFamily: String(m.workflowFamily || ''),
+  defaultSteps: Number(m.defaultSteps) > 0 ? Number(m.defaultSteps) : null,
   inputs: {
     prompt: { type: 'string', name: 'prompt', title: 'Prompt' },
     aspect_ratio: { type: 'string', name: 'aspect_ratio', enum: m.aspectRatios || ['1:1', '16:9', '9:16'], default: (m.aspectRatios || ['1:1'])[0] },
@@ -91,6 +102,7 @@ export const adaptHivemindToVideoEntry = (m) => ({
 /* ------------------------------------------------------------------ */
 
 export { activeTierFor, groupModelTiers, tierPairFor } from '../../lib/modelTiers.js';
+export { activeVideoTask, headSwapReadiness, isLtxFamilyModel, isMinimaxFamilyModel, slotLabelsFor, videoRequestPlan, videoTasksFor } from '../../lib/videoTasks.js';
 
 export function getAdvancedVideoInputs(model) {
   return Object.entries(model?.inputs || {})
@@ -180,6 +192,7 @@ export function normalizeVideoPreferences(value) {
   return {
     modelId,
     localMode: typeof value.localMode === 'boolean' ? value.localMode : null,
+    rentedOnly: typeof value.rentedOnly === 'boolean' ? value.rentedOnly : null,
     aspectRatio: stringValue(value.aspectRatio),
     duration: Number.isFinite(duration) && duration > 0 ? duration : null,
     resolution: stringValue(value.resolution),
@@ -192,7 +205,40 @@ export function normalizeVideoPreferences(value) {
     // negative prompt itself deliberately does not — it lives in the encrypted
     // composer with the positive prompt.
     nagScale: (typeof value.nagScale === 'number' && Number.isFinite(value.nagScale)) ? value.nagScale : null,
+    // IC-LoRA Detailer strength. 0 means the gateway skips the pass entirely, so
+    // this defaulting to 0 is what keeps an ordinary generation unchanged.
+    videoTask: ['generate', 'extend', 'head-swap'].includes(value.videoTask) ? value.videoTask : 'generate',
+    // Which head-swap engine, and its knobs. Settings, so they persist.
+    headSwapBackend: value.headSwapBackend === 'facefusion' ? 'facefusion' : 'bfs',
+    headSwapFaceEnhancer: typeof value.headSwapFaceEnhancer === 'boolean' ? value.headSwapFaceEnhancer : false,
+    // null = use whatever the selected workflow ships with; true/false is an
+    // explicit user override of the forecaster.
+    spectrum: typeof value.spectrum === 'boolean' ? value.spectrum : null,
+    // Sampling-steps override (H3 refinement). null = workflow default. Only
+    // sent for models whose registry maps a steps slot, so a stale value from
+    // another model cannot leak into a graph without one.
+    steps: (typeof value.steps === 'number' && Number.isFinite(value.steps) && value.steps >= 1 && value.steps <= 100)
+        ? Math.round(value.steps)
+        : null,
+    // Head-swap identity strength. A setting, so it persists like the rest.
+    headSwapLoraStrength: (typeof value.headSwapLoraStrength === 'number' && Number.isFinite(value.headSwapLoraStrength))
+        ? Math.min(1.5, Math.max(0.5, value.headSwapLoraStrength))
+        : 1,
+    detailerStrength: (typeof value.detailerStrength === 'number' && Number.isFinite(value.detailerStrength) && value.detailerStrength > 0)
+        ? Math.min(1.5, value.detailerStrength)
+        : 0,
     seed: (typeof value.seed === 'number' && Number.isFinite(value.seed) && value.seed >= 0) ? Math.floor(value.seed) : -1,
+    // Scene chaining: an OPAQUE same-origin pointer to the sealed clip being
+    // continued — no plaintext content — so an in-progress chain survives a
+    // reload. Foreign/absolute URLs are dropped on principle.
+    motionContextUrl: (() => {
+      const url = stringValue(value.motionContextUrl);
+      return url.startsWith('/') && url.length <= 512 ? url : '';
+    })(),
+    motionContextIndex: (typeof value.motionContextIndex === 'number'
+        && Number.isFinite(value.motionContextIndex) && value.motionContextIndex >= 1)
+        ? Math.floor(value.motionContextIndex)
+        : null,
     advancedValues,
     loraSelections,
     ingredientSelections,
@@ -252,6 +298,8 @@ export function normalizeVideoGenerationProgress(value) {
 // Smoothed, MONOTONIC progress for the generation bar — now shared with the image
 // studio; re-exported so existing videoLogic importers keep working.
 export { computeSmoothProgress } from '../../lib/genProgress.js';
+
+export { normalizeSamplerSteps } from '../../lib/genProgress.js';
 
 export function classifyVideoGenerationStage(status) {
   const value = String(status || '').toLowerCase();
@@ -330,7 +378,11 @@ export function buildCatalogs(hivemindI2V) {
 export const modelsFor = (s, c) => (s.v2vMode ? v2vModels : (s.imageMode ? c.allI2V : c.allT2V));
 export const currentModel = (s, c) => modelsFor(s, c).find((m) => m.id === s.modelId);
 export const isMotionControlV2V = (s, c) => s.v2vMode && !!currentModel(s, c)?.imageField;
-export const isHivemindVideoInputMode = (s) => isHivemindVideoModelId(s.modelId) && Boolean(s.videoUrl);
+// "This run extends an uploaded clip." Derived from the plan rather than
+// re-tested here, so there is exactly one definition of what an extension is.
+export const isHivemindVideoInputMode = (s) => isHivemindVideoModelId(s.modelId)
+    && Boolean(s.videoUrl)
+    && videoRequestPlan(s).videoMode === 'extend';
 
 export const aspectRatiosFor = (s, id) => {
   const hive = getHivemindVideoModelById(id);
@@ -354,7 +406,15 @@ export const resolutionsFor = (s, id) => {
   // at 16:9, roughly a third of what LTX 2.3 workflows in the wild generate at,
   // and LTX anatomy degrades sharply below its trained resolution. High (0.86 MP)
   // lands near that mark. Standard stays available for quick drafts.
-  if (getHivemindVideoModelById(id)) return ['High', 'Standard'];
+  const hive = getHivemindVideoModelById(id);
+  if (hive) {
+    // MiniMax H3 additionally gets Max (~1.0MP): the model's trained canvas
+    // (768px short edge at 16:9) and its measured quality knee. Nothing above
+    // 1MP is offered — H3 grows less coherent past it.
+    return String(hive.workflowFamily || '').toLowerCase().startsWith('minimax')
+      ? ['High', 'Standard', 'Max']
+      : ['High', 'Standard'];
+  }
   if (getLocalModelById(id)) return [];
   return s.imageMode ? getResolutionsForI2VModel(id) : getResolutionsForVideoModel(id);
 };
@@ -383,6 +443,8 @@ export function buildInitialSetup(c) {
     localMode: isHivemindStudioEnabled() && isLocalAIAvailable()
       ? true
       : isLocalVideoModel(defaultModel.id),
+    // Rented is opt-in: a boot with no saved preference runs on this machine.
+    rentedOnly: false,
     imageMode: false,
     v2vMode: false,
     ar: defaultModel.inputs?.aspect_ratio?.default || '16:9',
@@ -396,11 +458,16 @@ export function buildInitialSetup(c) {
     seed: -1,
     imageUrl: null,
     endImageUrl: null,
+    // MiniMax H3 Reference mode: character/subject pictures (up to 9, ordered).
+    referenceImageUrls: [],
     ltxMiddleUrl: null,
     ltxEndUrl: null,
     matchStartFrameAr: true,
     // Post-generation grain cleanup: '' (off), 'light', 'strong'.
     denoise: '',
+    // Sampling-steps override for workflows with a steps slot (H3 refinement).
+    // null = the workflow's registered default.
+    steps: null,
     videoUrl: null,
     videoName: null,
     prompt: '',
@@ -451,6 +518,15 @@ export function deriveControlVisibility(s, c) {
 export function deriveExtendBanner(s, c) {
   if (s.v2vMode) return '';
   const model = currentModel(s, c);
+  if (videoRequestPlan(s).sendMotionContext) {
+    // The airlock guidance is part of the interface: cutting straight to a new
+    // setup makes the model render the old and new staging as a UNION, and a
+    // held frame with no business renders as a literal freeze.
+    const shot = Number(s.motionContextIndex) > 0 ? Number(s.motionContextIndex) : 1;
+    return zh()
+      ? `正在接续第 ${shot} 段的结尾（拼接处约 1 秒会重渲染并自动裁掉）。开场先保持上一镜头的构图约 2 秒，给角色一点小动作（呼吸、转视线），再切到新画面。`
+      : `Continuing shot ${shot} — the new clip picks up exactly where it ended (≈1s is re-rendered for the join, then trimmed off). Open by holding the previous framing for ~2s with small business (a breath, an eyeline), then cut to the new setup.`;
+  }
   if (isHivemindVideoInputMode(s)) {
     return zh()
       ? '正在延长已上传的 LTX 镜头；时长控制追加多少新画面'
@@ -494,6 +570,9 @@ export function derivePromptUi(s, c) {
   if (isHivemindVideoInputMode(s)) {
     return { placeholder: zh() ? '描述镜头应如何延续' : 'Describe how the shot should continue', disabled: false };
   }
+  if (videoRequestPlan(s).sendMotionContext) {
+    return { placeholder: zh() ? '描述下一个镜头' : 'Describe the next shot', disabled: false };
+  }
   if (model?.requiresRequestId) {
     return { placeholder: zh() ? '可选：描述视频如何继续…' : 'Optional: describe how to continue the video...', disabled: false };
   }
@@ -522,7 +601,8 @@ export function startFrameSelectedTransition(prev, url, c) {
     const currentT2V = c.allT2V.find((m) => m.id === s.modelId);
     const sibling = currentT2V?.family ? c.allI2V.find((m) => m.family === currentT2V.family) : null;
     const target = sibling || c.allI2V[0];
-    s = applyModelDefaults({ ...s, imageMode: true, modelId: target.id, modelName: target.name }, c);
+    s = applyModelDefaults({ ...s, imageMode: true, modelId: target.id, modelName: target.name,
+    modelFamily: target.workflowFamily || '' }, c);
     modelChanged = true;
   }
   return { setup: s, matchAspect: true, modelChanged };
@@ -566,10 +646,13 @@ export function clearVideoUploadTransition(prev, c) {
 export function videoUploadedTransition(prev, { url, name, useHivemind, preferredHive }, c) {
   let s = { ...prev, videoUrl: url, videoName: name };
   if (useHivemind) {
+    const keepFace = videoRequestPlan(s).keepImageOnVideoUpload;
     s = {
       ...s,
-      imageUrl: null,
+      ...(keepFace ? {} : { imageUrl: null }),
       endImageUrl: null,
+      // A source video means extend/head-swap — reference mode never combines.
+      referenceImageUrls: [],
       v2vMode: false,
       imageMode: true,
       modelId: preferredHive.id,
@@ -590,14 +673,14 @@ export function selectV2VModelTransition(prev, m, c) {
   let s = { ...prev, v2vMode: true, imageMode: false };
   // Single-input v2v (watermark remover etc.) — drop any image
   if (!m.imageField) s = { ...s, imageUrl: null };
-  s = { ...s, modelId: m.id, modelName: m.name };
+  s = { ...s, modelId: m.id, modelName: m.name, modelFamily: m.workflowFamily || '' };
   return applyModelDefaults(s, c);
 }
 
 export function selectRegularModelTransition(prev, m, c) {
   let s = prev;
   if (s.v2vMode) s = { ...s, v2vMode: false, videoUrl: null, videoName: null };
-  s = { ...s, modelId: m.id, modelName: m.name };
+  s = { ...s, modelId: m.id, modelName: m.name, modelFamily: m.workflowFamily || '' };
   return applyModelDefaults(s, c);
 }
 
@@ -605,7 +688,8 @@ export function selectRegularModelTransition(prev, m, c) {
 export function selectHivemindWorkflowTransition(prev, target, c) {
   let s = prev;
   if (s.v2vMode) s = { ...s, v2vMode: false, videoUrl: null, videoName: null };
-  s = { ...s, imageMode: true, localMode: true, modelId: target.id, modelName: target.name };
+  s = { ...s, imageMode: true, localMode: true, modelId: target.id, modelName: target.name,
+    modelFamily: target.workflowFamily || '' };
   return applyModelDefaults(s, c);
 }
 
@@ -616,6 +700,7 @@ export function newPromptTransition(prev, c) {
     prompt: '',
     imageUrl: null,
     endImageUrl: null,
+    referenceImageUrls: [],
     ltxMiddleUrl: null,
     ltxEndUrl: null,
     matchStartFrameAr: true,
@@ -660,7 +745,9 @@ export function applyRestoredPreferences(prev, preferences, c) {
     imageMode: !v2vModel && Boolean(i2vModel),
     modelId: target.id,
     modelName: target.name,
+    modelFamily: target.workflowFamily || '',
     localMode: preferences.localMode ?? isLocalVideoModel(target.id),
+    rentedOnly: Boolean(preferences.rentedOnly && (preferences.localMode ?? isLocalVideoModel(target.id))),
   };
   s = applyModelDefaults(s, c);
   const matchingDuration = durationsFor(s, s.modelId)
@@ -678,6 +765,14 @@ export function applyRestoredPreferences(prev, preferences, c) {
   if (typeof preferences.matchStartFrameAr === 'boolean') s.matchStartFrameAr = preferences.matchStartFrameAr;
   if (['light', 'strong', ''].includes(preferences.denoise)) s.denoise = preferences.denoise;
   if (typeof preferences.seed === 'number') s.seed = preferences.seed;
+  if (typeof preferences.steps === 'number') s.steps = preferences.steps;
+  // An in-progress scene chain survives reload: the pointer is opaque and the
+  // clip stays sealed. videoRequestPlan re-gates it, so a stale value on a
+  // non-chaining model is inert.
+  if (typeof preferences.motionContextUrl === 'string' && preferences.motionContextUrl) {
+    s.motionContextUrl = preferences.motionContextUrl;
+    s.motionContextIndex = preferences.motionContextIndex || 1;
+  }
   s.advancedValues = getRestoredAdvancedVideoValues(target, preferences.advancedValues);
   return s;
 }
@@ -693,10 +788,19 @@ export function applyGenerationContext(prev, context, c) {
     ...s0,
     modelId: context.model,
     modelName: context.modelName || model.name,
+    // Family drives every family-scoped gate (task strip, frame slots, scene
+    // chaining). Inheriting it from `prev` left LTX-only controls showing on a
+    // restored H3 setup and vice versa.
+    modelFamily: String(model.workflowFamily || ''),
     imageUrl: context.imageUrl || null,
     endImageUrl: context.endImageUrl || null,
+    referenceImageUrls: Array.isArray(context.referenceImageUrls)
+      ? context.referenceImageUrls.filter(Boolean)
+      : [],
     videoUrl: context.videoUrl || null,
     videoName: context.videoName || null,
+    motionContextUrl: context.motionContextUrl || null,
+    motionContextIndex: Number(context.motionContextIndex) > 0 ? Number(context.motionContextIndex) : null,
     prompt: context.prompt || '',
   };
   s = applyModelDefaults(s, c);
@@ -735,7 +839,8 @@ export function currentIngredientModel(s, c) {
 // start-frame picker): a Hivemind local workflow, image-driven rather than a video
 // extension, and not an ingredient-sheet model.
 export function frameSlotsVisible(s, c) {
-  return isHivemindVideoModelId(s.modelId) && !s.videoUrl && !currentIngredientModel(s, c);
+  if (currentIngredientModel(s, c)) return false;
+  return videoRequestPlan(s).showFrameSlots;
 }
 
 // The references the next generation actually conditions on (old 1336-1341).
@@ -760,3 +865,20 @@ export const redactPrivateHistoryEntry = (entry) => (
     ? { ...entry, prompt: '', prompt_private: true }
     : entry
 );
+
+
+// Spectrum forecasting is a per-workflow capability: the registry lists it in
+// `accepts` only for graphs that actually carry the node, so the toggle appears
+// exactly where it does something.
+export function supportsSpectrum(model) {
+  return Array.isArray(model?.accepts) && model.accepts.includes('spectrum');
+}
+
+// The refinement (sampling steps) control: needs a registry-mapped steps slot
+// AND a full-step lane. A distilled turbo build registers 4-8 steps, where a
+// 32-step "high detail" override would fight the distillation (community
+// consensus: past ~8 steps a turbo LoRA over-sharpens), so it gets no control.
+export function supportsQualitySteps(model) {
+  return Array.isArray(model?.accepts) && model.accepts.includes('steps')
+    && Number(model?.defaultSteps) >= 10;
+}

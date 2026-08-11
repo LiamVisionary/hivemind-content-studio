@@ -15,6 +15,12 @@ import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
 import { Spinner } from '../ui/kit.jsx';
 import { HUB_PAGES, isKnownPage } from './navConfig.jsx';
 import { Shell } from './Shell.jsx';
+import { StudioTabs } from './StudioTabs.jsx';
+
+// Studios that open in tabs. Each tab is a separate mount of the same studio, so
+// tabs behave exactly like pages already do: independent settings, and a background
+// tab's generation keeps running.
+const TABBED_STUDIOS = new Set(['image', 'video']);
 
 const STUDIO_LOADERS = {
   image: () => import('../studios/ImageStudio.jsx').then((m) => m.ImageStudio),
@@ -141,7 +147,9 @@ export function App() {
           const visible = p === page && !isHub;
           return (
             <div key={p} className={visible ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-              <Comp active={visible} />
+              {TABBED_STUDIOS.has(p)
+                ? <StudioTabs Studio={Comp} active={visible} />
+                : <Comp active={visible} />}
             </div>
           );
         })}

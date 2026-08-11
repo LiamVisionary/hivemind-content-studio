@@ -83,7 +83,7 @@ const ltxErosVariants = {
       height: 832,
       frames: 233,
       frame_rate: 24,
-      seed: 42,
+      seed: -1,
     },
   },
   // v1.2 + DMD: same DMD merge as v1.3 above, held at the v1.2 fine-tune so the
@@ -94,7 +94,7 @@ const ltxErosVariants = {
     marker: 'Eros/native_mlx_ltx__eros-v12-q8-fast-rebuilt',
     mobileWorkflow: 'LTX 2.3 Eros MLX v1.2 q8 Rebuilt Mobile.json',
     benchmarkSeconds: 193.11,
-    defaults: { prompt: defaultLtxErosPrompt, width: 480, height: 832, frames: 121, frame_rate: 24, seed: 42 },
+    defaults: { prompt: defaultLtxErosPrompt, width: 480, height: 832, frames: 121, frame_rate: 24, seed: -1 },
   },
   // v1.4 Fast: the eros-fast recipe (cond-safe distilled LoRA) on v1.4.
   'eros-v14-q8-fast': {
@@ -108,7 +108,7 @@ const ltxErosVariants = {
       height: 832,
       frames: 121,
       frame_rate: 24,
-      seed: 42,
+      seed: -1,
     },
   },
   // v1.4 DMD: v1.4 merged with the DMD LoRA the author attaches to that release
@@ -125,7 +125,7 @@ const ltxErosVariants = {
       height: 832,
       frames: 121,
       frame_rate: 24,
-      seed: 42,
+      seed: -1,
     },
   },
   // v1.4 dev package, converted locally. Runs the CFG two-stage dev pipeline.
@@ -140,7 +140,7 @@ const ltxErosVariants = {
       height: 832,
       frames: 121,
       frame_rate: 24,
-      seed: 42,
+      seed: -1,
     },
   },
   'dmd-q8-v12': {
@@ -154,7 +154,7 @@ const ltxErosVariants = {
       height: 832,
       frames: 233,
       frame_rate: 24,
-      seed: 42,
+      seed: -1,
     },
   },
   'fast-q8-v12': {
@@ -169,7 +169,7 @@ const ltxErosVariants = {
       height: 832,
       frames: 233,
       frame_rate: 24,
-      seed: 42,
+      seed: -1,
     },
   },
   'exact-v1-merged-q8': {
@@ -184,7 +184,7 @@ const ltxErosVariants = {
       height: 832,
       frames: 233,
       frame_rate: 24,
-      seed: 42,
+      seed: -1,
     },
   },
 };
@@ -201,98 +201,12 @@ const ltxErosVariantAliases = {
 };
 
 const builtInVideoWorkflowRegistry = {
-  'ltx23-eros-fast': {
-    id: 'ltx23-eros-fast',
-    media_type: 'video',
-    title: 'LTX 2.3 Eros Fast',
-    description: 'Image-to-video workflow using the fast MLXBits 10Eros v1.2 q8 distilled route on Apple Silicon, with normal ComfyUI fallback elsewhere.',
-    family: 'ltx-2.3',
-    builder: 'ltx-eros',
-    variant: 'fast-q8-v12',
-    supports_loras: true,
-    compatible_base_models: ['LTXV'],
-    lora_injection: {
-      class_type: 'LTX2LoraLoaderAdvanced',
-      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
-      name_input: 'lora_name',
-      strength_input: 'strength_model',
-      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
-    },
-    default: true,
-    requires: { prompt: false, image: false },
-    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
-  },
-  'ltx23-eros-dmd': {
-    id: 'ltx23-eros-dmd',
-    media_type: 'video',
-    title: 'LTX 2.3 Eros DMD (v1.3)',
-    description: 'Image-to-video on the 10Eros v1.3 DMD-merged q8 distilled route. Same speed as Eros Fast; the DMD merge avoids the distilled-LoRA refine drift that leaves crawling grain on the v1.2 route.',
-    family: 'ltx-2.3',
-    builder: 'ltx-eros',
-    variant: 'dmd-q8-v13',
-    supports_loras: true,
-    compatible_base_models: ['LTXV'],
-    lora_injection: {
-      class_type: 'LTX2LoraLoaderAdvanced',
-      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
-      name_input: 'lora_name',
-      strength_input: 'strength_model',
-      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
-    },
-    default: false,
-    requires: { prompt: false, image: false },
-    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
-  },
-  'ltx23-eros-v12-fast-rebuilt': {
-    id: 'ltx23-eros-v12-fast-rebuilt',
-    media_type: 'video',
-    title: 'LTX 2.3 Eros v1.2 Fast (rebuilt)',
-    description: 'Eros Fast rebuilt locally: same v1.2 base, same cond-safe distilled LoRA at 1.0, but merged into the int8 weights rather than merged in bf16 then quantized. A control — matching Eros Fast means the local merge path is sound, so a v1.4 gap is the fine-tune; falling short of it means the merge arithmetic is the weak link.',
-    family: 'ltx-2.3',
-    builder: 'ltx-eros',
-    variant: 'eros-v12-q8-fast-rebuilt',
-    supports_loras: true,
-    compatible_base_models: ['LTXV'],
-    lora_injection: {
-      class_type: 'LTX2LoraLoaderAdvanced',
-      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
-      name_input: 'lora_name',
-      strength_input: 'strength_model',
-      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
-    },
-    default: false,
-    requires: { prompt: false, image: false },
-    accepts: ['prompt', 'negative_prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
-  },
-  'ltx23-eros-v14-fast': {
-    id: 'ltx23-eros-v14-fast',
-    media_type: 'video',
-    title: 'LTX 2.3 Eros v1.4 Fast',
-    description: 'The v1.4 fine-tune built with the exact recipe behind Eros Fast: the cond-safe rank-384 distilled LoRA merged at 1.0, same 8-step distilled route. Pair it against Eros Fast to isolate the fine-tune, since everything else about the two lanes matches.',
-    family: 'ltx-2.3',
-    builder: 'ltx-eros',
-    variant: 'eros-v14-q8-fast',
-    supports_loras: true,
-    compatible_base_models: ['LTXV'],
-    lora_injection: {
-      class_type: 'LTX2LoraLoaderAdvanced',
-      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
-      name_input: 'lora_name',
-      strength_input: 'strength_model',
-      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
-    },
-    default: false,
-    requires: { prompt: false, image: false },
-    accepts: ['prompt', 'negative_prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
-  },
   // The Lite half of the v1.4 pair, and the build the model's author intends:
   // the v1.4 card says the release is "fully designed for use with the DMD lora
   // I attached". DMD is a few-step distillation, so this runs the fast no-CFG
   // distilled route while ltx23-eros-v14 runs the slow two-stage dev one.
   'ltx23-eros-v14-dmd': {
     id: 'ltx23-eros-v14-dmd',
-    tier_group: 'ltx23-eros-v14',
-    tier: 'lite',
     media_type: 'video',
     title: 'LTX 2.3 Eros v1.4 DMD',
     description: "v1.4 merged with the DMD LoRA its author ships alongside it and says the model is fully designed for. Runs the fast 8-step distilled route. Note that v1.4 is a base-aligned fine-tune with deliberately near-zero anatomy of its own — the author's guidance is to add LoRAs for that, and to prompt it as a scene script rather than reusing v1.2-style prompts.",
@@ -310,30 +224,7 @@ const builtInVideoWorkflowRegistry = {
     },
     default: false,
     requires: { prompt: false, image: false },
-    accepts: ['prompt', 'negative_prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
-  },
-  'ltx23-eros-v14': {
-    id: 'ltx23-eros-v14',
-    tier_group: 'ltx23-eros-v14',
-    tier: 'standard',
-    media_type: 'video',
-    title: 'LTX 2.3 Eros v1.4',
-    description: 'Image-to-video on the 10Eros v1.4 fine-tune, converted locally from TenStrip bf16 because no MLX v1.4 is published. v1.4 ships no distilled transformer, so this runs the dev two-stage pipeline with CFG rather than the no-CFG distilled route the other Eros lanes use — expect noticeably longer generations in exchange for the newer fine-tune.',
-    family: 'ltx-2.3',
-    builder: 'ltx-eros',
-    variant: 'eros-v14-q8-dev',
-    supports_loras: true,
-    compatible_base_models: ['LTXV'],
-    lora_injection: {
-      class_type: 'LTX2LoraLoaderAdvanced',
-      targets: [{ node: '719', input: 'model' }, { node: '722', input: 'model' }],
-      name_input: 'lora_name',
-      strength_input: 'strength_model',
-      static_inputs: { video: 1, video_to_audio: 0, audio: 0, audio_to_video: 0, other: 1 },
-    },
-    default: false,
-    requires: { prompt: false, image: false },
-    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
+    accepts: ['prompt', 'negative_prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'detailer_strength', 'loras'],
   },
   'ltx23-eros-dmd-v12': {
     id: 'ltx23-eros-dmd-v12',
@@ -354,18 +245,17 @@ const builtInVideoWorkflowRegistry = {
     },
     default: false,
     requires: { prompt: false, image: false },
-    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'loras'],
+    accepts: ['prompt', 'image_path', 'image_base64', 'image_url', 'video_path', 'video_base64', 'video_url', 'video_mode', 'duration_seconds', 'width', 'height', 'frames', 'frame_rate', 'seed', 'denoise', 'detailer_strength', 'loras'],
   },
 };
 
 const workflowAliases = {
-  default: 'ltx23-eros-fast',
-  video: 'ltx23-eros-fast',
-  fast: 'ltx23-eros-fast',
-  ltx: 'ltx23-eros-fast',
-  'ltx-eros': 'ltx23-eros-fast',
-  'ltx23-eros': 'ltx23-eros-fast',
-  exact: 'ltx23-eros-exact',
+  default: 'ltx23-eros-v14-dmd',
+  video: 'ltx23-eros-v14-dmd',
+  fast: 'ltx23-eros-v14-dmd',
+  ltx: 'ltx23-eros-v14-dmd',
+  'ltx-eros': 'ltx23-eros-v14-dmd',
+  'ltx23-eros': 'ltx23-eros-v14-dmd',
   fastregular: 'ltx23-regular-fp8',
   'fast-regular': 'ltx23-regular-fp8',
   'regular-fast': 'ltx23-regular-fp8',
@@ -377,11 +267,6 @@ const workflowAliases = {
   'eros-ingredients': 'ltx23-eros-ic-ingredients-lora',
   'eros-ic-ingredients': 'ltx23-eros-ic-ingredients-lora',
   'ltx23-eros-ingredients': 'ltx23-eros-ic-ingredients-lora',
-  'eros-v14': 'ltx23-eros-v14',
-  'eros-v14-fast': 'ltx23-eros-v14-fast',
-  'v12-rebuilt': 'ltx23-eros-v12-fast-rebuilt',
-  'v14-fast': 'ltx23-eros-v14-fast',
-  v14: 'ltx23-eros-v14',
   'eros-v14-ingredients': 'ltx23-eros-v14-ic-ingredients-lora',
   'eros-v14-ic-ingredients': 'ltx23-eros-v14-ic-ingredients-lora',
   'eros-dmd-v12': 'ltx23-eros-dmd-v12',
@@ -392,6 +277,9 @@ const workflowAliases = {
   'eros-dmd-ingredients': 'ltx23-eros-dmd-ic-ingredients-lora',
   'eros-dmd-ic-ingredients': 'ltx23-eros-dmd-ic-ingredients-lora',
   'ltx23-eros-dmd-ingredients': 'ltx23-eros-dmd-ic-ingredients-lora',
+  minimax: 'minimax-h3',
+  h3: 'minimax-h3',
+  'minimax-video': 'minimax-h3',
 };
 
 function token() {
@@ -409,6 +297,22 @@ function backendToken() {
   if (process.env.ZIMG_TOKEN) return process.env.ZIMG_TOKEN.trim();
   try {
     return readFileSync(backendTokenPath, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+function requesterPublicKey() {
+  // The requesting client's public key (base64url SPKI), presented with every
+  // gateway call. Remote Comfy lanes seal generated media to this key, and the
+  // gateway scopes history/status for keyed jobs to the same presenter —
+  // possession of the matching decrypt key, not machine locality, grants
+  // access to results. Optional: without it, jobs seal to the owner vault.
+  if (process.env.MEDIA_STUDIO_E2E_PUB) return process.env.MEDIA_STUDIO_E2E_PUB.trim();
+  const pubPath = process.env.MEDIA_STUDIO_E2E_PUB_FILE;
+  if (!pubPath) return '';
+  try {
+    return readFileSync(pubPath, 'utf8').trim();
   } catch {
     return '';
   }
@@ -517,6 +421,7 @@ function publicWorkflow(workflow) {
     compatible_base_models: Array.isArray(workflow.compatible_base_models) ? workflow.compatible_base_models : [],
     ...(workflow.max_reference_images ? { max_reference_images: workflow.max_reference_images } : {}),
     defaults: publicWorkflowDefaults(workflow.id),
+    ...(workflow.beta ? { beta: true } : {}),
     ...(workflow.prompt_helper ? { prompt_helper: workflow.prompt_helper } : {}),
     ...(workflow.prompt_contract ? { prompt_contract: workflow.prompt_contract } : {}),
     ...(workflow.ingredient_inputs ? { ingredient_inputs: workflow.ingredient_inputs } : {}),
@@ -648,6 +553,31 @@ function positiveInt(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER }
   return Math.max(min, Math.min(max, Math.round(parsed)));
 }
 
+// Seeds are the one setting whose default must NOT be a number. Every video
+// workflow shipped `seed: 42`, so an agent that called media_generate_video
+// without naming a seed got the same clip back forever — and on a remote lane
+// it got worse than that: an identical graph replays out of ComfyUI's cache in
+// milliseconds and hands back a path the privacy sweeper has already deleted,
+// surfacing as a bare `HTTP Error 404`. The Video Studio has always rolled its
+// own seed client-side (see VideoStudio.jsx), which is exactly why this stayed
+// invisible: only agent callers ever saw the frozen default.
+//
+// -1 is the documented "roll me one" value, matching the image workflows and
+// the gateway's own native-runner check. It cannot simply be left in the
+// defaults, because positiveInt(-1, …, {min: 0}) clamps it to a fixed 0.
+const RANDOM_SEED_MAX = 1_000_000_000;
+
+function resolveSeed(...candidates) {
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null || candidate === '') continue;
+    const parsed = Number(candidate);
+    if (!Number.isFinite(parsed)) continue;
+    if (parsed < 0) break;  // an explicit -1 asks for randomness; stop falling back
+    return Math.min(RANDOM_SEED_MAX, Math.round(parsed));
+  }
+  return Math.floor(Math.random() * RANDOM_SEED_MAX);
+}
+
 function positiveFloat(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -660,6 +590,23 @@ function normalizeLtxDenoiseMode(value) {
   if (mode === 'light' || mode === 'strong') return mode;
   if (['1', 'true', 'yes', 'on'].includes(mode)) return 'light';
   return '';
+}
+
+// Strength for the optional IC-LoRA Detailer second pass. 0 (the default) means
+// the gateway returns before doing any work, so a plain generation is unaffected.
+// THE task, read once. Mirrors src/lib/videoTasks.js in the studio: the client
+// decides the job and says so, and nothing here re-infers it from which media
+// arrived. head_swap is still accepted so an older client keeps working.
+function videoTaskFrom(args) {
+  const raw = String(args?.task ?? args?.params?.task ?? '').trim().toLowerCase();
+  if (['generate', 'extend', 'head-swap'].includes(raw)) return raw;
+  return (args?.head_swap ?? args?.params?.head_swap) ? 'head-swap' : 'generate';
+}
+
+function normalizeLtxDetailerStrength(value) {
+  const strength = Number(value);
+  if (!Number.isFinite(strength) || strength <= 0) return 0;
+  return Math.min(1.5, Math.max(0.05, strength));
 }
 
 function safeCopyName(path) {
@@ -853,6 +800,19 @@ async function videoSourceFromArgs(args = {}) {
   return args.video_path ?? args.params?.video_path;
 }
 
+// The motion-context clip (scene chaining) travels under its own arg names so
+// it can never be confused with video_* — that trio means "extend/head-swap
+// THIS footage" and flips LTX-only behavior all over the stack.
+async function motionContextSourceFromArgs(args = {}) {
+  const params = args.params && typeof args.params === 'object' ? args.params : {};
+  const staged = await stageInlineVideoFromArgs({
+    video_base64: args.motion_context_base64 ?? params.motion_context_base64,
+    video_url: args.motion_context_url ?? params.motion_context_url,
+  });
+  if (staged) return staged;
+  return args.motion_context_path ?? params.motion_context_path;
+}
+
 async function imageSourceFromPrefixedArgs(args = {}, prefix) {
   const source = {
     image_base64: args[`${prefix}_image_base64`],
@@ -1038,6 +998,25 @@ function stagedVideoHasAudio(videoName) {
   return String(result.stdout || '').trim() !== '';
 }
 
+function stagedVideoDimensions(videoName) {
+  const value = String(videoName || '').trim();
+  if (!value) return null;
+  const path = isAbsolute(value) ? resolve(value) : resolve(comfyInputDir, value);
+  const result = spawnSync(process.env.FFPROBE || 'ffprobe', [
+    '-v', 'error',
+    '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height',
+    '-of', 'csv=s=x:p=0',
+    path,
+  ], { encoding: 'utf8', timeout: 15000 });
+  if (result.error || result.status !== 0) return null;
+  const match = String(result.stdout || '').trim().match(/^(\d+)x(\d+)/);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
 function apiPromptNode(prompt, id) {
   const node = prompt?.[String(id)];
   if (!node || typeof node !== 'object') throw new Error(`LTX Eros API workflow is missing node ${id}`);
@@ -1062,6 +1041,16 @@ function normalizeSlot(slot) {
 }
 
 function setMappedApiInput(prompt, slot, value) {
+  // Multi-target slot: an array of slot DESCRIPTORS (objects or pairs) fans
+  // one value out to several node inputs (e.g. LTX AV graphs need the frame
+  // count on both the video latent and the audio latent). Legacy ["node",
+  // "input"] pairs — string OR numeric node ids — contain scalars, so the
+  // every() check routes them to normalizeSlot unchanged.
+  if (Array.isArray(slot) && slot.length
+      && slot.every((t) => Array.isArray(t) || (t && typeof t === 'object'))) {
+    for (const target of slot) setMappedApiInput(prompt, target, value);
+    return;
+  }
   const normalized = normalizeSlot(slot);
   if (!normalized || value === undefined || value === null || value === '') return;
   setApiInput(prompt, normalized.node, normalized.input, value);
@@ -1097,6 +1086,36 @@ function normalizedLtxFrameCount(value, fallback = 233) {
   const requested = Number.isFinite(numeric) ? Math.round(numeric) : fallback;
   const clamped = Math.max(9, Math.min(721, requested));
   return Math.max(9, Math.round((clamped - 1) / 8) * 8 + 1);
+}
+
+// Registry entries whose model uses a different frame lattice than LTX declare
+// frame_grid: {modulus, offset} (e.g. MiniMax H3 is 17k+5). Snap UP so the
+// recorded frame count matches what the model actually renders.
+function normalizedGridFrameCount(workflow, value) {
+  const grid = workflow?.frame_grid;
+  const modulus = Math.round(Number(grid?.modulus));
+  if (!Number.isFinite(modulus) || modulus <= 0) return undefined;
+  const offset = ((Math.round(Number(grid?.offset ?? 1)) % modulus) + modulus) % modulus;
+  const numeric = Number(value);
+  const floor = offset > 0 ? offset : modulus;
+  const raw = Math.max(floor, Number.isFinite(numeric) ? Math.round(numeric) : floor);
+  return raw + ((((offset - (raw % modulus)) % modulus) + modulus) % modulus);
+}
+
+// Chained runs snap to the NEAREST lattice point instead of up: the sampled
+// count already carries the +context_length head that gets trimmed off, so
+// snapping up would hand back clips up to modulus-1 frames longer than asked
+// while nearest stays within half a step of the requested duration.
+function nearestGridFrameCount(workflow, value) {
+  const snappedUp = normalizedGridFrameCount(workflow, value);
+  if (snappedUp === undefined) return undefined;
+  const modulus = Math.round(Number(workflow.frame_grid.modulus));
+  const offset = ((Math.round(Number(workflow.frame_grid.offset ?? 1)) % modulus) + modulus) % modulus;
+  const floor = offset > 0 ? offset : modulus;
+  const snappedDown = snappedUp - modulus;
+  const numeric = Math.round(Number(value) || 0);
+  if (snappedDown < floor) return snappedUp;
+  return (numeric - snappedDown) < (snappedUp - numeric) ? snappedDown : snappedUp;
 }
 
 function videoFrameCount(args, settings, defaults = {}) {
@@ -1267,6 +1286,12 @@ function promptNodesByClass(promptGraph, classType) {
 
 function compileLtxImageAnchors(promptGraph, keyframes) {
   if (!Array.isArray(keyframes) || keyframes.length === 0) return;
+  // LTX anchors only. A graph with none of the LTX conditioning nodes has
+  // nothing to attach them to, and this used to strand a spare LoadImage in it
+  // — H3 declares end_image_* for its own last_frame input, which is enough to
+  // produce keyframes here, and the orphan node then failed validation.
+  const anchorHosts = ['LTXVImgToVideoInplaceKJ', 'LTXVAddGuide', 'LTXVImgToVideoConditionOnly'];
+  if (!anchorHosts.some((cls) => promptNodesByClass(promptGraph, cls).length)) return;
   const nextId = nextPromptNodeId(promptGraph);
   const existingLoad = promptNodesByClass(promptGraph, 'LoadImage')[0];
   const imageRefs = [];
@@ -1666,6 +1691,93 @@ function compileLtxVideoExtension(promptGraph, settings) {
   };
 }
 
+// Scene chaining for MiniMax H3 (NikoDemon80/ComfyUI-H3-Motion-Context): pin
+// the tail of a previous clip at the head of this render so motion AND room
+// tone continue across the cut. The context node sits between the H3
+// conditioning source and the guider; its trim_frames output drives a
+// post-decode trim that removes the re-rendered context head, so the delivered
+// clip starts where the previous one ended.
+const H3_MOTION_CONTEXT_FRAMES = 22;
+
+function compileH3MotionContextChain(promptGraph, settings) {
+  const source = promptNodesByClass(promptGraph, 'MiniMaxH3ImageToVideo')[0]
+    || promptNodesByClass(promptGraph, 'MiniMaxH3ReferenceToVideo')[0];
+  const videoDecode = promptNodesByClass(promptGraph, 'VAEDecode')[0];
+  const audioDecode = promptNodesByClass(promptGraph, 'VAEDecodeAudio')[0];
+  const createVideo = promptNodesByClass(promptGraph, 'CreateVideo')[0];
+  if (!source || !videoDecode || !createVideo) {
+    throw new Error('selected workflow does not expose the MiniMax H3 conditioning, decode, and mux nodes required for scene chaining');
+  }
+  const [sourceId, sourceNode] = source;
+  const sampler = promptNodesByClass(promptGraph, 'SamplerCustomAdvanced')[0];
+  const latentRef = Array.isArray(sampler?.[1]?.inputs?.latent_image)
+    ? sampler[1].inputs.latent_image
+    : [sourceId, 1];
+  const hasAudio = Boolean(audioDecode) && settings.motionContextHasAudio !== false;
+  // Spectrum forecasts transformer steps from history; on a chained graph it
+  // mispredicts the pinned context rows (upstream keeps it off in every
+  // chained example), so chaining overrides even an explicit spectrum=true.
+  for (const [, node] of promptNodesByClass(promptGraph, 'SpectrumApplyMiniMaxH3')) {
+    node.inputs.enabled = false;
+  }
+  settings.spectrum = false;
+  const nextId = nextPromptNodeId(promptGraph);
+  const loadId = nextId();
+  const componentsId = nextId();
+  const contextId = nextId();
+  const trimId = nextId();
+  promptGraph[loadId] = {
+    class_type: 'LoadVideo',
+    inputs: { file: settings.motionContextName },
+  };
+  promptGraph[componentsId] = {
+    class_type: 'GetVideoComponents',
+    inputs: { video: [loadId, 0] },
+  };
+  promptGraph[contextId] = {
+    class_type: 'MiniMaxH3MotionContext',
+    inputs: {
+      conditioning: [sourceId, 0],
+      vae: sourceNode.inputs.vae,
+      latent: latentRef,
+      context_length: String(H3_MOTION_CONTEXT_FRAMES),
+      // The successor clip literally hears its predecessor's tail. Without
+      // the audio wires every join restarts the room tone from silence.
+      audio_context_length: hasAudio ? H3_MOTION_CONTEXT_FRAMES : 0,
+      context_frames: [componentsId, 0],
+      ...(hasAudio ? {
+        context_audio: [componentsId, 1],
+        audio_vae: audioDecode[1].inputs.vae,
+      } : {}),
+    },
+  };
+  // Repoint every consumer of the source conditioning (the guider) at the
+  // context node — except the context node itself, which reads the original.
+  for (const [nodeId, node] of Object.entries(promptGraph)) {
+    if (nodeId === contextId || !node?.inputs) continue;
+    for (const [key, value] of Object.entries(node.inputs)) {
+      if (Array.isArray(value) && String(value[0]) === String(sourceId) && Number(value[1]) === 0) {
+        node.inputs[key] = [contextId, 0];
+      }
+    }
+  }
+  const fps = Number(createVideo[1].inputs?.fps);
+  promptGraph[trimId] = {
+    class_type: 'MiniMaxH3MotionContextTrim',
+    inputs: {
+      images: [videoDecode[0], 0],
+      trim_frames: [contextId, 1],
+      ...(audioDecode ? { audio: [audioDecode[0], 0] } : {}),
+      fps: Number.isFinite(fps) && fps > 0 ? fps : 24,
+      // H3 rounds its audio grid up ~8ms past the picture per clip; matching
+      // the tail keeps that error from stacking across a chain.
+      match_tail: true,
+    },
+  };
+  createVideo[1].inputs.images = [trimId, 0];
+  if (audioDecode) createVideo[1].inputs.audio = [trimId, 1];
+}
+
 function editorNode(workflow, id) {
   return (workflow?.nodes || []).find((node) => String(node?.id) === String(id));
 }
@@ -1705,10 +1817,32 @@ function updateLtxErosEditorWorkflow(workflow, spec, settings) {
       frame_rate: settings.frameRate,
       seed: settings.seed,
       ...(settings.denoise ? { denoise: settings.denoise } : {}),
+      ...(settings.detailerStrength ? { detailer_strength: settings.detailerStrength } : {}),
     },
     keyframes: Array.isArray(settings.keyframes) ? settings.keyframes : [],
     ...(Array.isArray(settings.loras) && settings.loras.length ? { loras: settings.loras.map((item) => ({ name: item.id, strength: item.strength })) } : {}),
-    ...(settings.videoName ? { video: {
+    // THIS is the live native spec. The other builder (updateLtxEditorWorkflow)
+    // only runs when a per-variant Mobile.json exists on disk, and none do — so
+    // anything added there is dead code. Head swap has to be emitted here.
+    ...(settings.headSwap && settings.videoName && settings.imageName
+      ? {
+        pipeline: 'head-swap',
+        head_swap: {
+          source_video: settings.videoName,
+          face_image: settings.imageName,
+          region_px: settings.headSwapRegionPx,
+          max_dimension: settings.headSwapMaxDimension,
+          pipeline: settings.headSwapPipeline,
+          lora_strength: settings.headSwapLoraStrength,
+          backend: settings.headSwapBackend,
+          face_enhancer: settings.headSwapFaceEnhancer,
+          frames: settings.frames,
+          frame_rate: settings.frameRate,
+          seed: settings.seed,
+        },
+      }
+      : {}),
+    ...((settings.videoName && !settings.headSwap) ? { video: {
       mode: 'extend',
       path: settings.videoName,
       ...(!settings.sourceHasAudio ? { source_has_audio: false } : {}),
@@ -1742,7 +1876,10 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
   // LTX 2.3 image is optional (requires.image is false): with no start frame,
   // generate text-to-video instead of forcing a default anchor. Only stage an
   // anchor when the caller actually supplies one — never fall back to defaults.image.
-  const erosImageSource = videoName ? null : await imageSourceFromArgs(args, {});
+  // Head swap is the one job needing both media; every other video job treats an
+  // attached clip as the sole input.
+  const wantsHeadSwap = videoTaskFrom(args) === 'head-swap';
+  const erosImageSource = (videoName && !wantsHeadSwap) ? null : await imageSourceFromArgs(args, {});
   const imageName = erosImageSource ? stageLtxErosImage(erosImageSource) : null;
   const frameRate = positiveFloat(args.frame_rate ?? args.params?.frame_rate, defaults.frame_rate, { min: 1, max: 120 });
   const durationSeconds = positiveFloat(args.duration_seconds ?? args.params?.duration_seconds, defaults.duration_seconds || 4, { min: 1 / 24, max: 30 });
@@ -1759,10 +1896,16 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
     frames: positiveInt(args.frames, defaults.frames, { min: 9, max: 721 }),
     frameRate,
     extensionFrames: normalizedLtxExtensionFrames(durationSeconds, frameRate),
-    seed: positiveInt(args.seed, defaults.seed, { min: 0, max: 1_000_000_000 }),
+    seed: resolveSeed(args.seed, defaults.seed),
     // Optional post-generation grain cleanup ('', 'light', 'strong'); the
     // gateway owns the filter itself, this only carries the choice through.
     denoise: normalizeLtxDenoiseMode(args.denoise ?? args.params?.denoise ?? defaults.denoise),
+    // Optional IC-LoRA Detailer refinement pass; 0 = off, and off costs nothing.
+    detailerStrength: normalizeLtxDetailerStrength(args.detailer_strength ?? args.params?.detailer_strength ?? defaults.detailer_strength),
+    // BFS head swap: replace the face in the supplied video with the supplied
+    // image. Needs both inputs; the meta builder enforces that.
+    headSwap: videoTaskFrom(args) === 'head-swap',
+    headSwapRegionPx: positiveInt(args.head_swap_region_px ?? args.params?.head_swap_region_px, 256, { min: 32, max: 2048 }),
     loras: normalizeWorkflowLoras(args, workflow),
   };
   settings.keyframes = videoName ? [] : await normalizeVideoKeyframes(args, settings, defaults);
@@ -1912,10 +2055,61 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   }
   if (rawVideo) {
     settings.videoName = stageLtxVideo(rawVideo);
+    settings.headSwap = videoTaskFrom(args) === 'head-swap';
     settings.videoMode = String(args.video_mode ?? args.params?.video_mode ?? 'extend').trim().toLowerCase();
-    if (settings.videoMode !== 'extend') throw new Error('video_mode must be extend');
+    if (!settings.headSwap && settings.videoMode !== 'extend') throw new Error('video_mode must be extend');
     settings.sourceHasAudio = stagedVideoHasAudio(settings.videoName);
     settings.audioMode = settings.sourceHasAudio ? 'extend' : 'generate';
+    if (settings.headSwap) {
+      // Stage the face here rather than in the graph-slot pass below: that pass
+      // only runs when the workflow declares an image_path slot, and head swap
+      // does not use the Comfy graph at all — it needs the filename on the
+      // native spec. Without this settings.imageName stayed empty, the native
+      // builder emitted no defaults.image, the gateway could not find a face and
+      // fell back to the Comfy graph, which failed validation.
+      const faceSource = await imageSourceFromArgs(args, {});
+      if (!faceSource) throw new Error('head swap requires a face image');
+      settings.imageName = stageLtxErosImage(faceSource);
+      settings.headSwapRegionPx = positiveInt(
+        args.head_swap_region_px ?? args.params?.head_swap_region_px, 256, { min: 32, max: 2048 },
+      );
+      // The render is sized from the source clip, so these are the only levers
+      // on how long a head swap takes.
+      settings.headSwapMaxDimension = positiveInt(
+        args.head_swap_max_dimension ?? args.params?.head_swap_max_dimension, 0, { min: 0, max: 4096 },
+      );
+      settings.headSwapPipeline = String(
+        args.head_swap_pipeline ?? args.params?.head_swap_pipeline ?? 'single-stage',
+      ).trim().toLowerCase() === 'fast' ? 'fast' : 'single-stage';
+      // The author's identity knob. The BFS adapter itself is supplied by the
+      // task server-side, so this is the only part of it the caller sets.
+      const rawLoraStrength = Number(args.head_swap_lora_strength ?? args.params?.head_swap_lora_strength);
+      settings.headSwapLoraStrength = Number.isFinite(rawLoraStrength)
+        ? Math.min(2, Math.max(0.1, rawLoraStrength))
+        : 1.0;
+      // Which engine performs the swap. They are different tools, not tiers:
+      // bfs regenerates the frame, facefusion swaps onto the original.
+      settings.headSwapBackend = String(
+        args.head_swap_backend ?? args.params?.head_swap_backend ?? 'bfs',
+      ).trim().toLowerCase() === 'facefusion' ? 'facefusion' : 'bfs';
+      settings.headSwapFaceEnhancer = Boolean(args.head_swap_face_enhancer ?? args.params?.head_swap_face_enhancer);
+    }
+  }
+
+  const rawMotionContext = await motionContextSourceFromArgs(args);
+  if (rawMotionContext && !(workflow.accepts || []).some((field) => String(field).startsWith('motion_context_'))) {
+    throw new Error(`workflow ${workflow.id} does not support motion-context scene chaining`);
+  }
+  if (rawMotionContext && settings.videoName) {
+    throw new Error('motion_context_* cannot be combined with video_* — the context clip seeds a NEW shot, it is not footage to extend');
+  }
+  if (rawMotionContext) {
+    settings.motionContextName = stageLtxVideo(rawMotionContext);
+    settings.motionContextHasAudio = stagedVideoHasAudio(settings.motionContextName);
+    // A latent cannot be resized, so a chained clip must render on the context
+    // clip's exact canvas no matter which aspect tier the caller sent.
+    const contextDims = stagedVideoDimensions(settings.motionContextName);
+    if (contextDims) settings.motionContextDimensions = contextDims;
   }
 
   let timelineImageName;
@@ -1926,10 +2120,10 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   // Image optional (requires.image is false unless declared): only an actual
   // ingredient sheet or a caller-supplied start frame becomes the anchor — no
   // default.image fallback, so a prompt-only request stays text-to-video.
-  const rawImage = settings.videoName
+  const rawImage = (settings.videoName && !settings.headSwap)
     ? undefined
     : (ingredientSheet?.imageName || await imageSourceFromArgs(args, {}));
-  if (!settings.videoName && slots.image_path) {
+  if ((!settings.videoName || settings.headSwap) && slots.image_path) {
     if (rawImage !== undefined) {
       settings.imageName = stageLtxErosImage(rawImage);
       setMappedApiInput(promptGraph, slots.image_path, settings.imageName);
@@ -1938,8 +2132,88 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
       // (setMappedApiInput skips empty writes, so use setApiInput directly) so a
       // prompt-only request stays text-to-video instead of anchoring on a missing image.
       const imageSlot = normalizeSlot(slots.image_path);
-      if (imageSlot) setApiInput(promptGraph, imageSlot.node, imageSlot.input, '');
+      if (imageSlot && workflow.image_clear === 'prune') {
+        // Real Comfy lanes validate LoadImage filenames at submit, so an empty
+        // value is rejected there (only the native-MLX intercept tolerates it).
+        // Drop the loader and every link to it; the downstream input must be
+        // optional (e.g. MiniMaxH3ImageToVideo.first_frame).
+        delete promptGraph[imageSlot.node];
+        for (const node of Object.values(promptGraph)) {
+          if (!node?.inputs) continue;
+          for (const [key, value] of Object.entries(node.inputs)) {
+            if (Array.isArray(value) && String(value[0]) === String(imageSlot.node)) {
+              delete node.inputs[key];
+            }
+          }
+        }
+      } else if (imageSlot) {
+        setApiInput(promptGraph, imageSlot.node, imageSlot.input, '');
+      }
     }
+  }
+  // End frame. The H3 checkpoint we ship is the fl2va (first-AND-last) build
+  // and MiniMaxH3ImageToVideo takes an optional last_frame, so supplying one
+  // turns a T2VA/I2VA run into FL2VA (or L2VA with no start frame). Pruned the
+  // same way as the start frame when absent: a real Comfy lane rejects an
+  // empty LoadImage filename at submit.
+  if (slots.end_image_path) {
+    const rawEnd = await imageSourceFromPrefixedArgs(args, 'end');
+    if (rawEnd !== undefined) {
+      settings.endImageName = stageLtxErosImage(rawEnd);
+      setMappedApiInput(promptGraph, slots.end_image_path, settings.endImageName);
+    } else {
+      const endSlot = normalizeSlot(slots.end_image_path);
+      if (endSlot && workflow.image_clear === 'prune') {
+        delete promptGraph[endSlot.node];
+        for (const node of Object.values(promptGraph)) {
+          if (!node?.inputs) continue;
+          for (const [key, value] of Object.entries(node.inputs)) {
+            if (Array.isArray(value) && String(value[0]) === String(endSlot.node)) {
+              delete node.inputs[key];
+            }
+          }
+        }
+      } else if (endSlot) {
+        setApiInput(promptGraph, endSlot.node, endSlot.input, '');
+      }
+    }
+  }
+  // Reference mode: N discrete pictures, each into its own loader. Order is
+  // load-bearing — the prompt names them <Picture 1>..<Picture N> by the same
+  // index — and every unfilled slot is pruned, which drops its autogrow
+  // ref_images.ref_image_N key along with the node.
+  if (Array.isArray(workflow.reference_image_slots) && workflow.reference_image_slots.length) {
+    const supplied = Array.isArray(args.reference_images) ? args.reference_images : [];
+    if (supplied.length > workflow.reference_image_slots.length) {
+      throw new Error(
+        `workflow ${workflow.id} accepts at most ${workflow.reference_image_slots.length} reference images`,
+      );
+    }
+    const staged = [];
+    for (const [index, slot] of workflow.reference_image_slots.entries()) {
+      const entry = supplied[index];
+      const source = entry ? await imageSourceFromArgs(entry, {}) : undefined;
+      if (source !== undefined) {
+        staged.push(stageLtxErosImage(source));
+        setMappedApiInput(promptGraph, slot, staged[staged.length - 1]);
+        continue;
+      }
+      const normalized = normalizeSlot(slot);
+      if (!normalized) continue;
+      delete promptGraph[normalized.node];
+      for (const node of Object.values(promptGraph)) {
+        if (!node?.inputs) continue;
+        for (const [key, value] of Object.entries(node.inputs)) {
+          if (Array.isArray(value) && String(value[0]) === String(normalized.node)) {
+            delete node.inputs[key];
+          }
+        }
+      }
+    }
+    if (!staged.length) {
+      throw new Error(`workflow ${workflow.id} requires at least one reference image`);
+    }
+    settings.referenceImageNames = staged;
   }
   if (timelineImageName) settings.timelineImageName = timelineImageName;
   if (ingredientSheet) {
@@ -1967,8 +2241,17 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     steps: slots.steps,
     cfg: slots.cfg,
     guidance: slots.guidance,
+    // Boolean toggle: argOrDefault returns false unchanged and
+    // setMappedApiInput only skips undefined/null/'', so `false` reaches the
+    // graph and actually disables the node.
+    spectrum: slots.spectrum,
   })) {
-    const value = argOrDefault(args, defaults, key);
+    // The seed slot never inherits a literal default: an omitted (or -1) seed
+    // is a request for a fresh one, not for the workflow's baked-in number.
+    // Workflows without a seed slot are left exactly as they were.
+    const value = key === 'seed' && slot !== undefined
+      ? resolveSeed(argOrDefault(args, defaults, key))
+      : argOrDefault(args, defaults, key);
     if (value !== undefined) {
       settings[key] = value;
       setMappedApiInput(promptGraph, slot, value);
@@ -1983,8 +2266,41 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   const explicitFrames = args.frames ?? args.params?.frames;
   const explicitDuration = args.duration_seconds ?? args.params?.duration_seconds;
   if (slots.frames && explicitFrames === undefined && explicitDuration !== undefined) {
-    settings.frames = normalizedLtxFrameCount(Math.round(settings.durationSeconds * settings.frameRate) + 1);
+    const durationFrames = Math.round(settings.durationSeconds * settings.frameRate);
+    settings.frames = normalizedGridFrameCount(workflow, durationFrames)
+      ?? normalizedLtxFrameCount(durationFrames + 1);
     setMappedApiInput(promptGraph, slots.frames, settings.frames);
+  }
+  if (settings.motionContextName) {
+    if (settings.imageName) {
+      throw new Error('motion-context chaining replaces the start frame — the context clip provides the opening frames (an end_image_* target is still allowed)');
+    }
+    if (settings.motionContextDimensions && slots.width && slots.height) {
+      settings.width = settings.motionContextDimensions.width;
+      settings.height = settings.motionContextDimensions.height;
+      setMappedApiInput(promptGraph, slots.width, settings.width);
+      setMappedApiInput(promptGraph, slots.height, settings.height);
+    }
+    if (slots.frames) {
+      // The context head is re-rendered and trimmed, so sample asked+context
+      // frames. NEAREST lattice point (not up) keeps the delivered length
+      // within half a grid step of the request.
+      const baseFrames = Number.isFinite(Number(settings.frames)) && Number(settings.frames) > 0
+        ? Math.round(Number(settings.frames))
+        : Math.round(settings.durationSeconds * settings.frameRate);
+      const sampledFrames = Math.max(
+        normalizedGridFrameCount(workflow, H3_MOTION_CONTEXT_FRAMES + 1) ?? 0,
+        nearestGridFrameCount(workflow, baseFrames + H3_MOTION_CONTEXT_FRAMES)
+          ?? (baseFrames + H3_MOTION_CONTEXT_FRAMES),
+      );
+      settings.frames = sampledFrames;
+      setMappedApiInput(promptGraph, slots.frames, settings.frames);
+      settings.motionContext = {
+        context_frames: H3_MOTION_CONTEXT_FRAMES,
+        sampled_frames: sampledFrames,
+        output_frames: Math.max(0, sampledFrames - H3_MOTION_CONTEXT_FRAMES),
+      };
+    }
   }
   settings.extensionFrames = normalizedLtxExtensionFrames(settings.durationSeconds, settings.frameRate);
   const usesIngredientConditioning = workflow.prompt_contract?.type === 'ltx23-ingredients';
@@ -2033,6 +2349,7 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     compileLtxIcTimelineAnchors(promptGraph, compiledKeyframes);
   }
   else compileLtxImageAnchors(promptGraph, settings.keyframes);
+  if (settings.motionContextName) compileH3MotionContextChain(promptGraph, settings);
   injectWorkflowLoras(promptGraph, settings.loras, workflow.lora_injection);
 
   const extraPngInfo = {};
@@ -2049,7 +2366,24 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
       ...existingNative,
       enabled: nativeSpec.enabled !== false,
       variant: nativeSpec.variant || existingNative.variant,
-      ...(nativeSpec.pipeline || existingNative.pipeline ? { pipeline: nativeSpec.pipeline || existingNative.pipeline } : {}),
+      // Head swap is a per-request mode, not a separate workflow: it overrides
+      // whatever pipeline the workflow normally declares, and only when the two
+      // inputs it needs (source footage + a face) are both present.
+      ...(settings.headSwap && settings.videoName && settings.imageName
+        ? {
+          pipeline: 'head-swap',
+          head_swap: {
+            source_video: settings.videoName,
+            face_image: settings.imageName,
+            region_px: settings.headSwapRegionPx,
+            max_dimension: settings.headSwapMaxDimension,
+            pipeline: settings.headSwapPipeline,
+            frames: videoFrameCount(args, settings, defaults),
+            frame_rate: Number(settings.frame_rate ?? defaults.frame_rate ?? 24),
+            ...(settings.seed !== undefined ? { seed: settings.seed } : {}),
+          },
+        }
+        : (nativeSpec.pipeline || existingNative.pipeline ? { pipeline: nativeSpec.pipeline || existingNative.pipeline } : {})),
       defaults: {
         ...(existingNative.defaults && typeof existingNative.defaults === 'object' ? existingNative.defaults : {}),
         ...(settings.imageName ? { image: settings.imageName } : {}),
@@ -2195,6 +2529,8 @@ async function requestJson(path, { method = 'GET', body, query, timeoutMs = 6000
   const headers = { Accept: 'application/json' };
   const authToken = backendToken();
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  const requesterPub = requesterPublicKey();
+  if (requesterPub) headers['X-E2E-Requester-Pub'] = requesterPub;
   const init = {
     method,
     headers,
@@ -2213,7 +2549,10 @@ async function requestJson(path, { method = 'GET', body, query, timeoutMs = 6000
     data = { text };
   }
   if (!response.ok) {
-    const message = data?.error || data?.message || text || `HTTP ${response.status}`;
+    // Stringify object errors: a structured {error:{...}} body used to surface as
+    // the literal "[object Object]", hiding the only useful diagnostic.
+    const raw = data?.error ?? data?.message ?? text ?? `HTTP ${response.status}`;
+    const message = typeof raw === 'string' ? raw : JSON.stringify(raw);
     const err = new Error(message);
     err.status = response.status;
     err.response = data;
@@ -2362,6 +2701,31 @@ async function getComfyHistoryIfPresent(promptId) {
   }
 }
 
+// A failed prompt's reason lives in status.messages, not in any top-level
+// field, so a job record built without this reads back as a bare 'error' and
+// the studio can only say "reported a failed generation". Remote lanes send
+// hivemind_remote_error (the gateway already sanitised it); a local Comfy
+// sends the native execution_error, from which only the node identity and the
+// exception are taken — never current_inputs (prompt text) or the traceback.
+function comfyHistoryErrorMessage(status) {
+  for (const message of status?.messages || []) {
+    if (!Array.isArray(message) || message.length < 2) continue;
+    const [kind, payload] = message;
+    if (kind === 'hivemind_remote_error') {
+      const text = String(payload?.error || '').trim();
+      if (text) return text.slice(0, 400);
+    }
+    if (kind === 'execution_error' && payload && typeof payload === 'object') {
+      const where = [payload.node_type, payload.node_id ? `node ${payload.node_id}` : '']
+        .filter(Boolean).join(' ');
+      const detail = String(payload.exception_message || payload.exception_type || 'failed')
+        .replace(/\s+/g, ' ').trim();
+      return `${where ? `${where} failed — ` : ''}${detail}`.slice(0, 400);
+    }
+  }
+  return '';
+}
+
 function comfyHistoryToJob(promptId, history, { includeUrls = false } = {}) {
   if (!history) return null;
   const status = history?.status || {};
@@ -2381,13 +2745,16 @@ function comfyHistoryToJob(promptId, history, { includeUrls = false } = {}) {
     const query = authToken ? `?token=${encodeURIComponent(authToken)}` : '';
     return `/image/${encodeURIComponent(basename(String(item.filename)))}` + query;
   });
+  const jobStatus = completed ? (statusText.includes('error') ? 'error' : 'success') : 'running';
+  const error = jobStatus === 'error' ? comfyHistoryErrorMessage(status) : '';
   return normalizeRecord({
     id: promptId,
-    status: completed ? (statusText.includes('error') ? 'error' : 'success') : 'running',
+    status: jobStatus,
     backend: 'comfy-ltx-eros-video',
     comfy_status: status,
     outputs,
     image_urls: imageUrls,
+    ...(error ? { error } : {}),
   }, { includeUrls });
 }
 
@@ -2532,6 +2899,8 @@ function buildServer() {
       image_path: z.string().optional().describe('Existing local image path or Comfy input filename for edit backends.'),
       image_base64: z.string().optional().describe('Inline source image as raw base64 or data:image/...;base64,... data URL. Wins over image_path.'),
       image_url: z.string().optional().describe('Optional HTTP(S) source image fetched by Media Studio. Ignored when image_base64 is supplied.'),
+      image_paths: z.array(z.string()).max(3).optional().describe('Additional reference images as local paths or Comfy input filenames for multi-reference edit backends (BigLove Klein conditions on up to 3 references total, e.g. for character sheets).'),
+      images_base64: z.array(z.string()).max(3).optional().describe('Additional inline reference images (raw base64 or data URLs) for multi-reference edit backends. Combined with image_path/image_base64, the first 3 unique references are used.'),
       loras: z.array(z.object({
         id: z.string(),
         strength: z.number().optional(),
@@ -2584,6 +2953,7 @@ function buildServer() {
         image_url: z.string().optional(),
         description: z.string().max(1000).optional(),
       })).min(1).max(12).optional().describe('Ingredients IC-LoRA only: independent conditioning references composed server-side into one black, unlabeled, contain-only sheet. These images never become timeline anchors.'),
+      spectrum: z.boolean().optional().describe('Spectrum forecasting: predicts about half the sampling steps instead of computing them — roughly half the sampling time, softer fine detail. Defaults to the workflow setting.'),
       negative_prompt: z.string().max(2000).optional().describe('Optional negative video prompt mapped through the registered workflow when supported.'),
       nag_scale: z.number().min(0).max(30).optional().describe('Normalized Attention Guidance scale for the local distilled LTX lanes. Those run cfg=1, where a negative prompt is otherwise ignored; NAG applies it inside cross-attention for ~8% more time. Omit for the default (11), pass <=1 to disable.'),
       image_path: z.string().optional().describe('Absolute local image path or existing Comfy input filename. Absolute paths are copied into the private Comfy input folder before queueing if the workflow needs Comfy access.'),
@@ -2593,6 +2963,9 @@ function buildServer() {
       video_base64: z.string().optional().describe('Inline source video as raw base64 or data:video/...;base64,... data URL. Wins over video_path.'),
       video_url: z.string().optional().describe('Optional HTTP(S) source video fetched by Media Studio. Ignored when video_base64 is supplied.'),
       video_mode: z.enum(['extend']).default('extend').describe('How LTX uses the source video. Extend preserves the source clip and generates a seamless continuation.'),
+      motion_context_path: z.string().optional().describe('MiniMax H3 scene chaining: path or existing Comfy input filename of the PREVIOUS clip. Its last 22 frames (and audio tail) seed this generation so motion and room tone continue across the cut; the re-rendered context head is trimmed off the delivered clip. The new clip renders on the context clip\'s canvas, Spectrum is forced off, and the start frame is replaced by the chain (end_image_* still works).'),
+      motion_context_base64: z.string().optional().describe('Inline motion-context clip as raw base64 or data:video/...;base64,... data URL. Wins over motion_context_path.'),
+      motion_context_url: z.string().optional().describe('Optional HTTP(S) motion-context clip fetched by Media Studio. Ignored when motion_context_base64 is supplied.'),
       middle_image_path: z.string().optional(),
       middle_image_base64: z.string().optional(),
       middle_image_url: z.string().optional(),
@@ -2609,6 +2982,14 @@ function buildServer() {
         role: z.enum(['start', 'middle', 'end']).optional(),
         strength: z.number().min(0).max(1).optional(),
       })).max(20).optional().describe('Arbitrary image anchors. Later anchors targeting the same normalized frame win.'),
+      reference_images: z.array(z.object({
+        image_path: z.string().optional(),
+        image_base64: z.string().optional(),
+        image_url: z.string().optional(),
+      })).max(9).optional().describe(
+        'MiniMax H3 Reference mode: up to nine reference pictures, in order. '
+        + 'Reference N is the prompt\'s <Picture N>.',
+      ),
       loras: z.array(z.object({
         id: z.string().min(1),
         strength: z.number().min(-10).max(10).optional(),
@@ -2619,8 +3000,19 @@ function buildServer() {
       frames: z.number().int().min(9).max(721).optional(),
       frame_rate: z.number().min(1).max(120).optional(),
       duration_seconds: z.number().min(1 / 24).max(30).optional().describe('For video input, seconds of new footage to append. For image input, requested output duration.'),
-      seed: z.number().int().min(0).max(1000000000).optional(),
+      // -1 asks for a fresh random seed, same as omitting it; the floor was 0,
+      // which rejected the one value the tool description tells callers to send.
+      seed: z.number().int().min(-1).max(1000000000).optional()
+        .describe('Omit or pass -1 for a fresh random seed; >= 0 locks it. A locked seed on a remote lane replays ComfyUI\'s cache and returns a file the privacy sweeper has already deleted.'),
       denoise: z.enum(['', 'light', 'strong']).optional().describe('Post-generation grain cleanup for the native MLX LTX path. Motion-adaptive temporal averaging (atadenoise); "strong" adds a spatial-only pass. Default off.'),
+      head_swap: z.boolean().optional().describe('Replace the face in the source video with the supplied image, using the BFS head-swap IC-LoRA. Requires BOTH a source video and a face image, plus the BFS LoRA selected. Prompt format: "head_swap: FACE: [new face] ACTION: [action from the original video]".'),
+      head_swap_region_px: z.number().min(32).max(2048).optional().describe('Width of the reserved face strip in the head-swap guide frame (default 256, matching the model author\'s workflow).'),
+      head_swap_max_dimension: z.number().int().min(0).max(4096).optional().describe('Cap the head-swap render\'s long side, preserving aspect (0 = render at the source clip\'s own size). A head swap is rendered at the source resolution, so this is the main lever on how long it takes; the author recommends around 768.'),
+      head_swap_lora_strength: z.number().min(0.1).max(2).optional().describe('Strength of the BFS head-swap IC-LoRA, which the head-swap task supplies automatically (default 1.0). Per the model author: 1.0 gives the best motion fidelity; above 1.0 captures identity and hair more strongly but can distort.'),
+      head_swap_backend: z.enum(['bfs', 'facefusion']).optional().describe('Which engine performs the head swap. "bfs" (default) regenerates every frame with the BFS IC-LoRA, so it can change hair and head shape but reinvents the scene. "facefusion" swaps the face region onto the ORIGINAL frames, so body, clothing, background and motion stay identical and it runs roughly 10x quicker, but hair and head shape stay the source actor\'s.'),
+      head_swap_face_enhancer: z.boolean().optional().describe('FaceFusion only: run the face enhancer after the swap to restore detail the 128px swapper loses. Roughly doubles the runtime.'),
+      head_swap_pipeline: z.enum(['single-stage', 'fast']).optional().describe('Head-swap sampler path. "single-stage" (default) generates at full resolution with the guide applied throughout and tracks it most tightly. "fast" generates at half resolution, upsamples, then runs a control-aware refine — substantially quicker, slightly looser on the guide.'),
+      detailer_strength: z.number().min(0).max(1.5).optional().describe("Strength for Lightricks' IC-LoRA Detailer, run as an optional second sampling pass over the generated clip to add fine texture. 0 (default) skips the pass entirely and costs nothing; 0.6 is the commonly reported value."),
       wait: z.boolean().default(false).describe('Poll until native wrapper success/error, or until Comfy fallback appears in history.'),
       timeout_s: z.number().min(1).max(7200).default(5400),
       include_urls: z.boolean().default(false).describe('Include token-bearing absolute Studio URLs in wrapper-native results.'),
@@ -2657,6 +3049,7 @@ function buildServer() {
         video: settings.videoName,
         video_mode: settings.videoMode,
         audio_mode: settings.audioMode,
+        ...(settings.motionContext ? { motion_context: settings.motionContext } : {}),
         extension_frames: settings.extensionFrames,
         extension_output_frames: settings.extensionFrames,
         extension_latent_frames: settings.videoName ? Math.ceil(settings.extensionFrames / 8) : null,
@@ -2845,6 +3238,9 @@ Environment:
                                   Public Studio URL for include_urls output links, default ${studioBase}
   MEDIA_STUDIO_TOKEN             Existing backend token override
   MEDIA_STUDIO_TOKEN_FILE        Existing backend token file, default ${tokenPath}
+  MEDIA_STUDIO_E2E_PUB           Requester public key (base64url SPKI) remote-lane
+                                  outputs are sealed to; also scopes job status reads
+  MEDIA_STUDIO_E2E_PUB_FILE      File containing the requester public key
 `);
 }
 

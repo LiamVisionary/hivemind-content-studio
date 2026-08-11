@@ -193,6 +193,14 @@ class LocalInferenceClient {
         return window.localAI.upscale(params);
     }
 
+    // RIFE frame interpolation (2x/4x) on a finished clip — hosted bridge only.
+    async interpolate(params) {
+        if (!isLocalAIAvailable() || typeof window.localAI.interpolate !== 'function') {
+            throw new Error('Frame interpolation is available through Unified Studio.');
+        }
+        return window.localAI.interpolate(params);
+    }
+
     async warmIdeogram4() {
         if (!isLocalAIAvailable()) throw new Error('Local AI only available in the desktop app.');
         return window.localAI.warmIdeogram4();

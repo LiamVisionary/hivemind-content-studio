@@ -390,3 +390,142 @@
 - Decision: passed
 - Reason: Focused and complete regressions, syntax, production build, live served OpenGen asset checks, and diff checks passed.
 - Note: OpenGen 27/27; UI contract 21/21; Studio 185/185; live CSS contains the upper progress anchor and live JavaScript contains the audio unlock path. Real speaker playback and screenshot QA were unavailable in this runtime.
+## 2026-08-10T20:04:56.727587+00:00 - triage
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Selected backbone: local-project:hivemind-content-studio
+- Note: Target studio stays backbone; Mix-Studio is the donor. Feature gap matrix in progress via parallel exploration.
+
+### Candidates
+- BlackMixture/Mix-Studio
+  - Decision: selected-donor
+  - Reason: pinned by user; GPL-3.0 (commercial use permitted, copyleft on distribution); cloned to candidate cache and audited (REVIEW: only vendored minified lottie eval findings)
+  - Path: `server.js,lib/,public/app.js`
+## 2026-08-10T20:04:56.768235+00:00 - shared-brain
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: shared-brain
+- Decision: inspected
+- Note: hive-brain answer 'Mix-Studio BlackMixture ComfyUI workspace assimilation prior research' --scope full-vault returned no prior Mix-Studio context (only comfy-cli refs + this skill).
+## 2026-08-10T20:12:38.092472+00:00 - audit
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Decision: inspected
+- Note: Full donor-module dissection complete via Explore agent; line refs recorded in agent report.
+## 2026-08-10T20:13:46.279224+00:00 - local-search
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: inspected
+- Note: Full have/partial/missing catalog via Explore agent over frontend, gateway, MCP, control API.
+## 2026-08-10T20:43:46.042037+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer L28757-29003) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js+manifest.webmanifest+offline.html+pwa.js => packages/open-generative-ai/public/ + index.html, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (buildStrengthHuntSheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py
+- Verification: Wrote ASSIMILATION.mix-studio.json with 9 entries and custom_code_assessment=balanced.
+## 2026-08-10T20:43:46.144126+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: failed
+- Reason: ASSIMILATION.mix-studio.json: Entry 6 target_path does not exist: /Users/liam/comfy/hivemind-content-studio/packages/open-generative-ai/public/ + index.html
+## 2026-08-10T20:44:03.322725+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer L28757-29003) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js => packages/open-generative-ai/public/service-worker.js, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (buildStrengthHuntSheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py
+- Verification: Wrote ASSIMILATION.mix-studio.json with 9 entries and custom_code_assessment=balanced.
+## 2026-08-10T20:44:03.429111+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 9 concrete reuse entries, 6 substantive
+## 2026-08-10T20:44:03.502709+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: Manifest verified. Gates: gateway 148/148 unittest OK (incl. new strength-hunt dispatch test + 17 module tests); frontend 285 tests, 280 pass, only the 5 documented pre-existing hivemindStudioReferences fails; vite build OK; browser-verified on vite dev 5273: camera-motion apply/replace, compare viewer reveal+zoom sync, PWA assets served. Deferred to live lanes: strength-hunt end-to-end on Comfy (route inert until gateway restart), SW install flow on 8765.
+## 2026-08-10T21:13:50.625549+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer L28757-29003) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js => packages/open-generative-ai/public/service-worker.js, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (buildStrengthHuntSheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py, BlackMixture/Mix-Studio:server.js (strengthHunt lora flag UX) => packages/open-generative-ai/src/lib/loraSelection.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan math) => packages/open-generative-ai/src/lib/expandGeometry.js, BlackMixture/Mix-Studio:lib/edit-outpaint-workflows.js (expand UX) => packages/open-generative-ai/src/studios/image/ExpandDialog.jsx, BlackMixture/Mix-Studio:test/strength-hunt.test.js (selection semantics) => packages/open-generative-ai/tests/imageStyleAndHunt.test.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan tests) => packages/open-generative-ai/tests/expandGeometry.test.js
+- Verification: Wrote ASSIMILATION.mix-studio.json with 14 entries and custom_code_assessment=balanced.
+## 2026-08-10T21:13:50.711741+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 14 concrete reuse entries, 9 substantive
+## 2026-08-10T21:13:50.760484+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Decision: adapted_code
+- Note: Phase 2 slice landed: Strength Hunt UI (LoRA hunt-axis toggle + generate wiring + bridge passthrough), Style Preset dead control fixed (idempotent phrase composer), Batch Count dead control fixed (sequential batch, seed+shot), outpaint route (run_comfy_krea2_outpaint on the LTX-anchor builder) + Expand dialog with donor plan math. RIFE + chained-clip join deferred (need node installs / live lanes).
+## 2026-08-10T21:14:01.760694+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: Phase 2 gates: gateway 167/167 (incl. outpaint dispatch test), frontend 296 tests / 291 pass (same 5 pre-existing), vite build OK, hosted-server parses. Browser-verified on vite dev 5273 against the REAL /local-ai bridge: Krea 2 model selected from live catalog, hunt toggle arms with hint (stubbed LoRA catalog), Expand dialog reads real pixels (640x640) and computes 21:9 -> 1488x640. Not submitted live: hunt/outpaint generation (gateway restart still pending, deliberately not run).
+## 2026-08-10T22:03:23.822909+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Decision: adapted_code
+- Note: Soft-inpaint shipped end-to-end. Bonus robustness: defensive setPointerCapture in MaskEditorDialog + CompareViewer. Verified: 8 builder tests + dispatch test (gateway 177/177), brush paints at natural res in browser (47k px stroke), export = white-on-black PNG. Live Comfy run pending stack restart, as with hunt/outpaint.
+## 2026-08-10T22:03:23.983040+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js => packages/open-generative-ai/public/service-worker.js, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (sheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py, BlackMixture/Mix-Studio:server.js (strengthHunt flag UX) => packages/open-generative-ai/src/lib/loraSelection.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan math) => packages/open-generative-ai/src/lib/expandGeometry.js, BlackMixture/Mix-Studio:lib/edit-outpaint-workflows.js (expand UX) => packages/open-generative-ai/src/studios/image/ExpandDialog.jsx, BlackMixture/Mix-Studio:test/strength-hunt.test.js (selection) => packages/open-generative-ai/tests/imageStyleAndHunt.test.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan tests) => packages/open-generative-ai/tests/expandGeometry.test.js, BlackMixture/Mix-Studio:lib/regional-workflows.js (buildKrea2InpaintGraph) => packages/media-gateway/krea2_identity_workflow.py, BlackMixture/Mix-Studio:lib/edit-mask.js => packages/media-gateway/krea2_identity_workflow.py, BlackMixture/Mix-Studio:public/app.js (mask brush canvas) => packages/open-generative-ai/src/studios/image/MaskEditorDialog.jsx, BlackMixture/Mix-Studio:test/edit-mask.test.js => packages/media-gateway/test_krea2_inpaint.py
+- Verification: Wrote ASSIMILATION.mix-studio.json with 18 entries and custom_code_assessment=balanced.
+## 2026-08-10T22:03:24.141874+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 18 concrete reuse entries, 12 substantive
+## 2026-08-10T22:48:19.503854+00:00 - implementation
+
+- Request: Add a character sheet generator to the image studios' reference-edit models (Klein family), assimilating the Civitai 'Flux2 Klein Multi-view Character Generation' v2.0 workflow
+- Source: pinned-source
+- Decision: adapted_recipe
+- Reason: Donor is a 446-node ComfyUI graph across eight custom-node packs; only its load-bearing recipe (white-background per-view Klein edit prompts, shared seed, labeled composite sheet) was assimilated, onto the studio's existing native MLX Klein edit lane. Pose-guided mode not portable (pose assets live on RunningHub, not in the file); donor LoRAs (bfs_head_v1, f2k_consis) not imported — the LoRA panel covers that.
+- Assimilated: civitai.red/models/2401955 v2.0 (lrzjason) prompt/view recipe => packages/media-gateway/klein_character_sheet.py; multi-view runner => packages/media-gateway/app.py (run_klein_character_sheet, character_sheet dispatch, _klein3_native_edit_once extraction); UI mode => packages/open-generative-ai/src/studios/ImageStudio.jsx (+ hosted-server.js passthrough, imagePrefs/studioTabs persistence)
+- Verification: gateway pytest 189/189; frontend 299 tests / 294 pass (the 5 documented pre-existing hivemindStudioReferences fails); vite build OK; browser-verified on vite dev 5373 (Klein-gated section, preset picker, empty-prompt submit, payload capture, history tag); live turnaround E2E submitted to the restarted gateway.
+## 2026-08-10T23:40:53.903315+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: pinned-source
+- Decision: adapted_code
+- Note: LIVE E2E verified: one real angle render (BigLove Klein 3, front-right eye-level medium shot) ran through the real bridge from the dev UI, landed in the gallery labeled and source-paired, Compare opened on the pair. Compare after-label generalized to Result for non-upscale pairs.
+## 2026-08-10T23:40:53.945457+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: Gates after angle/sequence slice: frontend 304 tests / 299 pass (same 5 pre-existing), 5 new editAnglesAndSequence tests, dist rebuilt. Gateway untouched this slice (still 177/177).
+## 2026-08-10T23:41:17.148960+00:00 - assimilation-manifest
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: BlackMixture/Mix-Studio:public/camera-motion.js => packages/open-generative-ai/src/lib/cameraMotion.js, BlackMixture/Mix-Studio:test/camera-motion.test.js => packages/open-generative-ai/tests/cameraMotion.test.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/lib/compareMath.js, BlackMixture/Mix-Studio:public/app.js (compare viewer) => packages/open-generative-ai/src/studios/image/CompareViewer.jsx, BlackMixture/Mix-Studio:test/compare-ui.test.js => packages/open-generative-ai/tests/compareMath.test.js, BlackMixture/Mix-Studio:public/service-worker.js => packages/open-generative-ai/public/service-worker.js, BlackMixture/Mix-Studio:lib/strength-hunt.js => packages/media-gateway/strength_hunt.py, BlackMixture/Mix-Studio:lib/strength-hunt.js (sheet) => packages/media-gateway/bin/compose-strength-hunt-sheet.py, BlackMixture/Mix-Studio:test/strength-hunt.test.js => packages/media-gateway/test_strength_hunt.py, BlackMixture/Mix-Studio:server.js (strengthHunt flag UX) => packages/open-generative-ai/src/lib/loraSelection.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan math) => packages/open-generative-ai/src/lib/expandGeometry.js, BlackMixture/Mix-Studio:lib/edit-outpaint-workflows.js (expand UX) => packages/open-generative-ai/src/studios/image/ExpandDialog.jsx, BlackMixture/Mix-Studio:test/strength-hunt.test.js (selection) => packages/open-generative-ai/tests/imageStyleAndHunt.test.js, BlackMixture/Mix-Studio:lib/krea2-outpaint.js (plan tests) => packages/open-generative-ai/tests/expandGeometry.test.js, BlackMixture/Mix-Studio:lib/regional-workflows.js (buildKrea2InpaintGraph) => packages/media-gateway/krea2_identity_workflow.py, BlackMixture/Mix-Studio:lib/edit-mask.js => packages/media-gateway/krea2_identity_workflow.py, BlackMixture/Mix-Studio:public/app.js (mask brush canvas) => packages/open-generative-ai/src/studios/image/MaskEditorDialog.jsx, BlackMixture/Mix-Studio:test/edit-mask.test.js => packages/media-gateway/test_krea2_inpaint.py, BlackMixture/Mix-Studio:lib/edit-angle.js => packages/open-generative-ai/src/lib/editAngles.js, BlackMixture/Mix-Studio:lib/edit-sequence.js => packages/open-generative-ai/src/lib/editSequence.js, BlackMixture/Mix-Studio:server.js (camera variation + sequence UX) => packages/open-generative-ai/src/studios/image/AngleVariationsDialog.jsx, BlackMixture/Mix-Studio:test/edit-mask.test.js (dialect semantics) => packages/open-generative-ai/tests/editAnglesAndSequence.test.js
+- Verification: Wrote ASSIMILATION.mix-studio.json with 22 entries and custom_code_assessment=balanced.
+## 2026-08-10T23:41:17.231110+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 22 concrete reuse entries, 15 substantive
