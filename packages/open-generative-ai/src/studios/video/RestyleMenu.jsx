@@ -3,7 +3,7 @@
 // from Mix-Studio's Style Transfer presets; strongest with reference media,
 // but the phrase steers any H3 generation.
 import { H3_RESTYLE_PRESETS } from '../../lib/h3RestylePresets.js';
-import { zh } from './videoLogic.jsx';
+import { zh } from './videoLogic.js';
 import { ChipButton, Menu } from '../../ui/Menu.jsx';
 import { cx } from '../../ui/kit.jsx';
 

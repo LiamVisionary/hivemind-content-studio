@@ -1,4 +1,4 @@
-// Camera rig control — React redesign of components/CameraControls.js.
+// Camera rig control — React redesign of the retired vanilla studio.
 //
 // The old wheel-picker (scroll-to-center columns, blurred inactive options, no
 // keyboard access) is replaced by elegant labelled list pickers that surface the

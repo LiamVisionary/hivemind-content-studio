@@ -1,4 +1,4 @@
-// Civitai download dialog (React port of components/CivitaiDownloadDialog.js).
+// Civitai download dialog (React port of the retired vanilla studio).
 // Flow preserved: re-entrancy guard, downloadCivitaiLora(api, url, { onUpdate }),
 // success -> await onComplete(job); errors surface as a message + red bar.
 //

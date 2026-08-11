@@ -98,12 +98,17 @@ test('outside studio mode the composer state stays in localStorage and never cal
 
 test('image studio wires the encrypted composer draft into prompt, references, and preferences', async () => {
     const fs = require('node:fs');
-    const source = fs.readFileSync(require.resolve('../src/components/ImageStudio.js'), 'utf8');
-    assert.match(source, /hydrateComposerState\(\)\.then/);
-    assert.match(source, /updateComposerSection\('image', \{ prompt: textarea\.value \}\)/);
-    assert.match(source, /updateComposerSection\('image', \{ references: uploadedImageUrls\.slice\(\) \}\)/);
-    assert.match(source, /updateComposerSection\('image', \{ references: \[\] \}\)/);
+    const source = fs.readFileSync(require.resolve('../src/studios/ImageStudio.jsx'), 'utf8');
+    assert.match(source, /hydrateComposerState\(\)/);
+    // Prompt, reference selection and preferences all reach the encrypted
+    // composer, so a draft restores whole rather than in pieces.
+    assert.match(source, /updateComposerDraft\(\{ prompt/);
+    assert.match(source, /updateComposerDraft\(\{ references: s\.uploadedImageUrls\.slice\(\) \}\)/);
+    assert.match(source, /updateComposerDraft\(\{ references: \[\] \}\)/, 'clearing references clears the draft too');
     assert.match(source, /updateComposerSection\('image', \{ preferences \}\)/);
+    // Only the front tab writes the shared draft — a background tab would
+    // otherwise overwrite what the next reload restores.
+    assert.match(source, /if \(tabActiveRef\.current\) updateComposerSection\('image', patch\)/);
     const uploads = fs.readFileSync(require.resolve('../src/lib/uploadHistory.js'), 'utf8');
     assert.match(uploads, /isHivemindStudioEnabled\(\)/);
     assert.match(uploads, /setComposerUploads/);

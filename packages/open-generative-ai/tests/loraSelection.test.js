@@ -63,10 +63,13 @@ test('The muted flag survives a persistence round-trip in both studios', async (
     const image = normalizeImagePreferences({ modelId: 'krea', loraSelections: { 'local:krea': selections } });
     assert.deepEqual(image.loraSelections['local:krea'].map((l) => l.enabled), [true, false]);
 
-    // videoLogic.jsx cannot be imported by node:test (JSX), so assert its
-    // normalizer carries the same flag through the saved selection shape.
-    const videoLogic = fs.readFileSync(path.join(__dirname, '../src/studios/video/videoLogic.jsx'), 'utf8');
-    assert.match(videoLogic, /enabled: selection\.enabled !== false/);
+    // The video normalizer used to be unreachable from node:test (it lived in a
+    // .jsx file), so this was a source regex; now it is the real round-trip.
+    const { normalizeVideoPreferences } = await import('../src/lib/videoPreferences.js');
+    const video = normalizeVideoPreferences({ modelId: 'hivemind-media:ltx23-eros-fast', loraSelections: { ltx: selections } });
+    assert.deepEqual(video.loraSelections.ltx.map((l) => l.enabled), [true, false]);
+    assert.deepEqual(video.loraSelections.ltx.map((l) => l.strength), [1, 0.5],
+        'a muted LoRA keeps its weight for when it is unmuted');
 });
 
 test('an update-and-replace keeps the slot, weight and mute state under the new id', async () => {

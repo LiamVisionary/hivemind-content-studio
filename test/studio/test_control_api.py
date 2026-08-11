@@ -1925,3 +1925,150 @@ def test_video_timing_signature_separates_chain_mode() -> None:
     ))
     assert plain[0] != chained[0]
     assert "chain" in chained[0]
+
+
+def _reference_store(tmp_path: Path) -> Path:
+    return tmp_path / "uploads" / "media-studio-references"
+
+
+def test_reference_upload_builds_a_sealed_poster_so_a_thumbnail_is_not_the_whole_asset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A tile used to cost the browser the entire sealed reference — 62 MB for a
+    screen recording. The poster is built while the plaintext is still here,
+    because once sealed this host can never read the reference again."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    buffer = io.BytesIO()
+    Image.new("RGB", (1600, 1200), "red").save(buffer, format="PNG")
+    source = buffer.getvalue()
+
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": ("wide.png", source, "image/png")},
+    )
+    assert upload.status_code == 200
+    poster_url = upload.json()["poster_url"]
+    assert poster_url and poster_url.endswith(".poster.jpg")
+
+    fetched = client.get(poster_url)
+    assert fetched.status_code == 200
+    # The whole point: a fraction of the reference's size.
+    assert 0 < len(fetched.content) < len(source) // 4
+
+    # And it is sealed exactly like the reference — no plaintext left behind.
+    store = _reference_store(tmp_path)
+    plaintext = [path.name for path in store.iterdir() if path.suffix in {".jpg", ".png"}]
+    assert plaintext == [], f"unsealed files left in the store: {plaintext}"
+
+
+def test_a_poster_is_never_listed_as_a_reference_of_its_own(tmp_path: Path, monkeypatch) -> None:
+    """It is a thumbnail, not something the user can condition a generation on."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 64), "blue").save(buffer, format="PNG")
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": ("only.png", buffer.getvalue(), "image/png")},
+    )
+    assert upload.status_code == 200
+
+    listed = client.get("/api/media-studio/references").json()["references"]
+    assert len(listed) == 1, [entry["name"] for entry in listed]
+    entry = listed[0]
+    assert not entry["name"].endswith(".poster.jpg")
+    # …and it is attached to the reference it belongs to.
+    assert entry["poster_url"] == upload.json()["poster_url"]
+
+
+def test_a_voice_clip_gets_no_poster(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": ("voice.m4a", b"\x00\x00\x00\x20ftypM4A ", "audio/mp4")},
+    )
+    assert upload.status_code == 200
+    assert upload.json()["poster_url"] is None
+    assert client.get("/api/media-studio/references").json()["references"][0]["poster_url"] is None
+
+
+def test_the_browser_can_backfill_a_poster_for_a_reference_sealed_before_posters(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """This host cannot build one for those: it has no vault key, so it cannot
+    read them. The browser decrypts the clip to show it anyway, so it sends the
+    frame it decoded back."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 64), "green").save(buffer, format="PNG")
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": ("legacy.png", buffer.getvalue(), "image/png")},
+    )
+    reference_name = Path(upload.json()["url"]).name
+
+    # Simulate the pre-poster state by removing what the upload just built.
+    store = _reference_store(tmp_path)
+    for path in list(store.iterdir()):
+        if ".poster.jpg" in path.name:
+            path.unlink()
+    assert client.get("/api/media-studio/references").json()["references"][0]["poster_url"] is None
+
+    jpeg = io.BytesIO()
+    Image.new("RGB", (320, 180), "orange").save(jpeg, format="JPEG")
+    backfill = client.post(
+        f"/api/media-studio/references/{reference_name}/poster",
+        files={"file": ("poster.jpg", jpeg.getvalue(), "image/jpeg")},
+    )
+    assert backfill.status_code == 200
+    assert backfill.json()["existed"] is False
+    assert client.get("/api/media-studio/references").json()["references"][0]["poster_url"]
+
+    # A second backfill is a no-op rather than an overwrite.
+    again = client.post(
+        f"/api/media-studio/references/{reference_name}/poster",
+        files={"file": ("poster.jpg", jpeg.getvalue(), "image/jpeg")},
+    )
+    assert again.status_code == 200 and again.json()["existed"] is True
+
+
+def test_the_poster_route_refuses_anything_that_is_not_a_jpeg(tmp_path: Path, monkeypatch) -> None:
+    """It writes a caller-named file into the reference store, so it must not
+    become a way to park arbitrary bytes there."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), "red").save(buffer, format="PNG")
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": ("ref.png", buffer.getvalue(), "image/png")},
+    )
+    reference_name = Path(upload.json()["url"]).name
+    for path in list(_reference_store(tmp_path).iterdir()):
+        if ".poster.jpg" in path.name:
+            path.unlink()
+
+    refused = client.post(
+        f"/api/media-studio/references/{reference_name}/poster",
+        files={"file": ("poster.jpg", b"#!/bin/sh\necho not a jpeg\n", "image/jpeg")},
+    )
+    assert refused.status_code == 415
+
+    missing = client.post(
+        "/api/media-studio/references/reference-does-not-exist.png/poster",
+        files={"file": ("poster.jpg", b"\xff\xd8\xff\xdb", "image/jpeg")},
+    )
+    assert missing.status_code == 404
+
+
+def test_deleting_a_reference_takes_its_poster_with_it(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 64), "purple").save(buffer, format="PNG")
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": ("doomed.png", buffer.getvalue(), "image/png")},
+    )
+    reference_name = Path(upload.json()["url"]).name
+    assert client.delete(f"/api/media-studio/references/{reference_name}").status_code == 200
+    # An orphaned poster would linger forever: nothing else knows whose it was.
+    assert client.get("/api/media-studio/references").json()["references"] == []
+    assert list(_reference_store(tmp_path).iterdir()) == []

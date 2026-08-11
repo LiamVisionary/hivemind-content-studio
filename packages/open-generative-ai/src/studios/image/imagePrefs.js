@@ -1,6 +1,7 @@
-// Image studio preferences — moved VERBATIM from src/components/ImageStudio.js
+// Image studio preferences — the one definition, imported by ImageStudio.jsx
 // (normalizeImagePreferences + STYLE_PRESETS). Pure module: no DOM, no React.
-// Tests and other callers import normalizeImagePreferences via src/studios/ImageStudio.jsx.
+// Tests import normalizeImagePreferences from HERE, so what they exercise is
+// what the studio runs.
 
 export const IMAGE_PREFERENCES_KEY = 'image_generation_preferences';
 export const STYLE_PRESETS = ['None', 'Photorealistic', 'Anime', 'Cinematic', 'Oil Painting', 'Watercolor', 'Digital Art', 'Concept Art', 'Cyberpunk'];
@@ -85,6 +86,9 @@ export function normalizeImagePreferences(value) {
                 couplePair: ['girls', 'mixed', 'boys'].includes(entry.couplePair) ? entry.couplePair : 'girls',
                 characterSheetMode: Boolean(entry.characterSheetMode),
                 characterSheetPreset: ['turnaround', 'standard', 'full'].includes(entry.characterSheetPreset) ? entry.characterSheetPreset : 'turnaround',
+                // Only the toggle. The region boxes carry prompt text, which
+                // belongs in the encrypted composer, never in localStorage.
+                regionMode: Boolean(entry.regionMode),
             };
         });
     }
@@ -118,6 +122,7 @@ export function normalizeImagePreferences(value) {
         couplePair: ['girls', 'mixed', 'boys'].includes(value.couplePair) ? value.couplePair : 'girls',
         characterSheetMode: Boolean(value.characterSheetMode),
         characterSheetPreset: ['turnaround', 'standard', 'full'].includes(value.characterSheetPreset) ? value.characterSheetPreset : 'turnaround',
+        regionMode: Boolean(value.regionMode),
         modelSettings,
         loraSelections,
     };

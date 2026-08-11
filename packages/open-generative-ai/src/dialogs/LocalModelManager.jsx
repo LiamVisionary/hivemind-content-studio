@@ -1,4 +1,4 @@
-// Local model manager panel (React port of components/LocalModelManager.js).
+// Local model manager panel (React port of the retired vanilla studio).
 // Embedded by SettingsModal (its only consumer, matching the old factory usage).
 // All localAI flows preserved: binary install, aux downloads (__llm__/__vae__),
 // wan2gp config probe, per-model download/delete with progress subscriptions

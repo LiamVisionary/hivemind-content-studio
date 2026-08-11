@@ -48,7 +48,7 @@ from .canvas_history import (
 from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brain, plan_with_local_brain
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
 from .lanes import LANE_MATRIX
-from . import local_llm, prompt_profiles
+from . import local_llm, media_posters, prompt_profiles
 from .manifest import load_manifest, write_manifest
 from .machine_privacy import machine_operation_receipt, machine_run_receipt
 from .media_catalog import media_catalog
@@ -1056,6 +1056,8 @@ def build_control_app(
             "local-ai/upscale",
             "local-ai/interpolate",
             "local-ai/episode",
+            "local-ai/smart-mask",
+            "local-ai/ltx-director",
             "local-ai/prompt-helper",
             "local-ai/civitai-download",
             "local-ai/lora-updates",
@@ -2096,6 +2098,43 @@ def build_control_app(
             if output is not None:
                 output.unlink(missing_ok=True)
 
+    def _reference_kind_for_suffix(suffix: str) -> str:
+        """image / video / audio from the stored extension. The listing route
+        classifies the same way; both read the same MIME tables."""
+        value = str(suffix).lower()
+        if value in set(_INLINE_VIDEO_SUFFIXES.values()):
+            return "video"
+        if value in set(_INLINE_AUDIO_SUFFIXES.values()):
+            return "audio"
+        return "image"
+
+    def _build_reference_poster(reference: Path, *, kind: str) -> Path | None:
+        # Never let a thumbnail failure fail an upload: the reference is the
+        # point, the poster is a nicety, and the browser can still decode one.
+        try:
+            return media_posters.build_reference_poster(reference, kind=kind)
+        except Exception:
+            return None
+
+    def _seal_reference_poster(poster: Path, spki: str | None) -> None:
+        if not poster.is_file():
+            return
+        if spki:
+            seal_private_media_e2e(poster, spki, media_type=media_posters.POSTER_MEDIA_TYPE)
+        else:
+            _encrypt_private_media(poster, cipher, scope="media-studio-reference")
+
+    def _remove_reference_poster(poster: Path) -> None:
+        for candidate in (poster, e2e_media_sidecar(poster), _private_media_sidecar(poster)):
+            with contextlib.suppress(FileNotFoundError, OSError):
+                candidate.unlink()
+
+    def _reference_poster_url(reference: Path) -> str | None:
+        poster = media_posters.poster_path_for(reference)
+        if not (_private_media_exists(poster) or e2e_media_exists(poster)):
+            return None
+        return f"/api/media-studio/references/{urllib.parse.quote(poster.name)}"
+
     @app.post("/api/media-studio/references", dependencies=[Depends(require_owner)])
     async def upload_media_studio_reference(file: UploadFile = File(...)) -> dict:
         content_type = str(file.content_type or "").split(";", 1)[0].strip().lower()
@@ -2122,6 +2161,11 @@ def build_control_app(
         name = f"reference-{secrets.token_hex(16)}{suffix}"
         reference = (media_studio_reference_root / name).resolve()
         reference.write_bytes(body)
+        # Build the thumbnail NOW, while the plaintext is still here. Once sealed
+        # the host can never read this file again, so this is the only moment a
+        # poster can be made server-side — and without one, drawing a 32px tile
+        # costs the browser the whole asset.
+        poster = _build_reference_poster(reference, kind=_reference_kind_for_suffix(suffix))
         # Seal to the owner vault (client-only E2E) so this host holds no decrypt
         # key. Reuse is client-side: the browser decrypts and re-sends base64 (the
         # server can no longer stage a sealed reference). Legacy Keychain .zenc is
@@ -2133,16 +2177,65 @@ def build_control_app(
                 seal_private_media_e2e(reference, spki, media_type=media_type)
             else:
                 _encrypt_private_media(reference, cipher, scope="media-studio-reference")
+            # The poster is sealed the same way, so the privacy contract is
+            # unchanged: the host keeps no readable copy of either.
+            if poster is not None:
+                _seal_reference_poster(poster, spki)
         except Exception as exc:
             with contextlib.suppress(FileNotFoundError):
                 reference.unlink()
             with contextlib.suppress(FileNotFoundError):
                 e2e_media_sidecar(reference).unlink()
+            if poster is not None:
+                _remove_reference_poster(poster)
             raise HTTPException(status_code=503, detail="Reference image could not be secured") from exc
         if not (_private_media_exists(reference) or e2e_media_exists(reference)):
             raise HTTPException(status_code=503, detail="Reference image could not be secured")
         url = f"/api/media-studio/references/{urllib.parse.quote(name)}"
-        return {"ok": True, "url": url, "encrypted_at_rest": True}
+        return {
+            "ok": True,
+            "url": url,
+            "encrypted_at_rest": True,
+            "poster_url": _reference_poster_url(reference),
+        }
+
+    @app.post("/api/media-studio/references/{filename}/poster", dependencies=[Depends(require_owner)])
+    async def upload_media_studio_reference_poster(filename: str, file: UploadFile = File(...)) -> dict:
+        """Browser-supplied poster for a reference sealed before posters existed.
+
+        The host cannot build one itself for those — it has no vault key, so it
+        cannot read them. The browser already decrypts the clip to display it,
+        so it is the only party that can, and it sends back the one frame it
+        decoded. Sealed here like any other reference; still owner-gated, still
+        never readable by this host afterwards.
+        """
+        name = Path(filename).name
+        reference = (media_studio_reference_root / name).resolve()
+        root = media_studio_reference_root.resolve()
+        if name != filename or not reference.is_relative_to(root) or media_posters.is_poster_name(name):
+            raise HTTPException(status_code=404, detail="Reference not found")
+        if not (_private_media_exists(reference) or e2e_media_exists(reference)):
+            raise HTTPException(status_code=404, detail="Reference not found")
+        poster = media_posters.poster_path_for(reference)
+        if _private_media_exists(poster) or e2e_media_exists(poster):
+            return {"ok": True, "poster_url": _reference_poster_url(reference), "existed": True}
+        body = await file.read(media_posters.MAX_POSTER_BYTES + 1)
+        await file.close()
+        if not body:
+            raise HTTPException(status_code=400, detail="Poster is empty")
+        if len(body) > media_posters.MAX_POSTER_BYTES:
+            raise HTTPException(status_code=413, detail="Poster is too large to be a thumbnail")
+        # A poster is a JPEG and nothing else — this route must not become a way
+        # to park arbitrary bytes in the reference store under a chosen name.
+        if not body.startswith(b"\xff\xd8\xff"):
+            raise HTTPException(status_code=415, detail="Poster must be a JPEG")
+        poster.write_bytes(body)
+        try:
+            _seal_reference_poster(poster, _vault_public_key())
+        except Exception as exc:
+            _remove_reference_poster(poster)
+            raise HTTPException(status_code=503, detail="Poster could not be secured") from exc
+        return {"ok": True, "poster_url": _reference_poster_url(reference), "existed": False}
 
     @app.get("/api/media-studio/references/{filename}", dependencies=[Depends(require_owner)])
     def media_studio_reference(filename: str, request: Request) -> Response:
@@ -2173,10 +2266,13 @@ def build_control_app(
         if name != filename or not reference.is_relative_to(root):
             raise HTTPException(status_code=404, detail="Reference image not found")
         removed = False
-        for candidate in (reference, _private_media_sidecar(reference)):
+        for candidate in (reference, _private_media_sidecar(reference), e2e_media_sidecar(reference)):
             if candidate.is_file():
                 candidate.unlink()
                 removed = True
+        # The poster goes with it — an orphan would linger in the store forever,
+        # since nothing else knows the reference it belonged to is gone.
+        _remove_reference_poster(media_posters.poster_path_for(reference))
         if not removed:
             raise HTTPException(status_code=404, detail="Reference image not found")
         return {"ok": True}
@@ -2189,6 +2285,10 @@ def build_control_app(
         # which the browser decrypts for display — this host never decrypts them.
         root = media_studio_reference_root
         newest: dict[str, float] = {}
+        # Posters live beside their reference and are NOT references themselves —
+        # listing one would offer the user a thumbnail as if it were a picture
+        # they could condition on. Indexed by stem so each attaches to its owner.
+        posters: dict[str, str] = {}
         if root.is_dir():
             for path in root.iterdir():
                 if not path.is_file():
@@ -2199,6 +2299,10 @@ def build_control_app(
                         base = base[: -len(suffix)]
                         break
                 if not base.startswith("reference-"):
+                    continue
+                owner_stem = media_posters.poster_owner_stem(base)
+                if owner_stem is not None:
+                    posters[owner_stem] = base
                     continue
                 try:
                     mtime = path.stat().st_mtime
@@ -2214,6 +2318,10 @@ def build_control_app(
                 return "audio"
             return "image"
 
+        def poster_url_for(base: str) -> str | None:
+            poster = posters.get(Path(base).stem)
+            return f"/api/media-studio/references/{urllib.parse.quote(poster)}" if poster else None
+
         references = [
             {
                 "name": base,
@@ -2222,6 +2330,11 @@ def build_control_app(
                 # Pickers filter on this: a saved voice clip has no business in
                 # the picture grid, and its thumbnail would never resolve.
                 "kind": reference_kind(base),
+                # A few KB to draw a tile with, instead of the whole sealed
+                # asset. None for references sealed before posters existed (the
+                # host cannot read those) and for voice clips (nothing to show);
+                # the browser falls back to decrypting, and backfills a poster.
+                "poster_url": poster_url_for(base),
             }
             for base, mtime in sorted(newest.items(), key=lambda item: item[1], reverse=True)
         ]

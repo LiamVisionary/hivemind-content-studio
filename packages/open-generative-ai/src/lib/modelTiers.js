@@ -5,7 +5,7 @@
 // collapse into one row that carries both tiers, so the user picks the model
 // first and the speed/quality trade second.
 //
-// Pure helpers live here rather than in videoLogic.jsx so they stay importable
+// Pure helpers live here rather than in videoLogic.js so they stay importable
 // from the node:test suite, which cannot load JSX.
 
 /** Collapse Lite/Standard builds of the same model into a single picker row.

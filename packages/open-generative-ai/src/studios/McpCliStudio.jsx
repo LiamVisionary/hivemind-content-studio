@@ -1,4 +1,4 @@
-// MCP & agent access page (React port of components/McpCliStudio.js).
+// MCP & agent access page (React port of the retired vanilla studio).
 // Documents THIS studio's own MCP endpoint and API surfaces — display-only, no
 // fetches. Load-bearing runtime logic preserved: the port-8789 sniff (Tailscale
 // HTTPS proxy serves /mcp same-origin; otherwise the MCP HTTP server is local

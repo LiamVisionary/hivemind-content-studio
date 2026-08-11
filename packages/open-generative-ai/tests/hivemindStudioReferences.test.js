@@ -48,6 +48,9 @@ test('Media Studio uploads a reference to the encrypted same-origin cache', asyn
         assert.deepEqual(result, {
             url: '/api/media-studio/references/reference-a.png',
             path: '/api/media-studio/references/reference-a.png',
+            // No poster in this response, so the thumbnail falls back to the
+            // reference itself — the pre-poster behaviour.
+            posterUrl: null,
             thumbnail: '/api/media-studio/references/reference-a.png',
             encryptedAtRest: true,
         });

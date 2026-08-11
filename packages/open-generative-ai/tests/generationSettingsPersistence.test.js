@@ -2,7 +2,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 test('lip sync preferences retain input mode, model, and resolution', async () => {
-    const { normalizeLipSyncPreferences } = await import('../src/components/LipSyncStudio.js');
+    // The SHIPPED normalizer. This used to import the retired vanilla studio's
+    // copy, which meant the rule the app actually runs was never exercised.
+    const { normalizeLipSyncPreferences } = await import('../src/lib/studioPreferences.js');
 
     assert.deepEqual(normalizeLipSyncPreferences({
         inputMode: 'video',
@@ -17,7 +19,7 @@ test('lip sync preferences retain input mode, model, and resolution', async () =
 });
 
 test('cinema preferences retain valid camera-generation settings and discard stale options', async () => {
-    const { normalizeCinemaPreferences } = await import('../src/components/CinemaStudio.js');
+    const { normalizeCinemaPreferences } = await import('../src/lib/studioPreferences.js');
     const { CAMERA_MAP, LENS_MAP } = await import('../src/lib/promptUtils.js');
     const camera = Object.keys(CAMERA_MAP)[1];
     const lens = Object.keys(LENS_MAP)[1];

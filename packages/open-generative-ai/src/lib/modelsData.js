@@ -2701,6 +2701,125 @@ export const t2vModels = [
     "provider": "bytedance",
     "provider_name": "ByteDance"
   },
+  // ── Seedance 2.5 ──────────────────────────────────────────────────────────
+  // Added by hand 2026-08-11 from the live MUAPI catalog (GET /api/v1/models
+  // and /api/v1/models/<name>), which is ahead of models_dump.json. Early-access
+  // preview build: up to 30 SECONDS in a single generation — the only cloud
+  // model here that reaches the full 30 — at 480p or 720p. 1080p/4K exist as
+  // separate upstream endpoints but the preview does not serve them, so they
+  // are not listed.
+  //
+  // Upstream declares `duration` as a 4-30 RANGE, not an enum, and
+  // getDurationsForModel only reads enums (a range collapses to the default
+  // alone). So the ladder below is ours; any integer in 4-30 is legal at the
+  // API. 480p is a separate endpoint rather than a resolution input — half the
+  // price, for drafts.
+  //
+  // PRICING IS PER SECOND AND THIS TIER IS EXPENSIVE. Confirmed against
+  // /api/v1/models/<name>/estimate-cost on 2026-08-11: 720p is $1.70 per 5s, so
+  // a 30s clip is $10.20; 480p is $0.85 per 5s, so $5.10 for the same 30s. The
+  // studio shows no cost anywhere, so the duration ladder is the only place a
+  // user sees the difference between a $1.70 job and a $10.20 one.
+  //
+  // `family` pairs a t2v entry with its i2v sibling: attaching a start frame
+  // switches to the model sharing this family (videoLogic.startFrameTransition),
+  // and falls back to the FIRST i2v model in the catalog when nothing matches.
+  // So 480p carries its own family — otherwise adding a start frame on the
+  // cheap tier would silently land on the 720p one at twice the price.
+  {
+    "id": "seedance-2.5-text-to-video",
+    "name": "Seedance 2.5",
+    "endpoint": "seedance-2.5-text-to-video",
+    "family": "seedance-2.5",
+    "inputs": {
+      "prompt": {
+        "type": "string",
+        "title": "Prompt",
+        "name": "prompt",
+        "description": "Text prompt describing the video scene and motion."
+      },
+      "aspect_ratio": {
+        "enum": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "4:3",
+          "3:4",
+          "21:9",
+          "9:21"
+        ],
+        "title": "Aspect Ratio",
+        "name": "aspect_ratio",
+        "type": "string",
+        "description": "Aspect ratio of the output video.",
+        "default": "16:9"
+      },
+      "duration": {
+        "enum": [
+          5,
+          10,
+          15,
+          20,
+          25,
+          30
+        ],
+        "title": "Duration",
+        "name": "duration",
+        "type": "int",
+        "description": "The duration of the generated video in seconds.",
+        "default": 5
+      }
+    },
+    "provider": "bytedance",
+    "provider_name": "ByteDance"
+  },
+  {
+    "id": "seedance-2.5-text-to-video-480p",
+    "name": "Seedance 2.5 480p",
+    "endpoint": "seedance-2.5-text-to-video-480p",
+    "family": "seedance-2.5-480p",
+    "inputs": {
+      "prompt": {
+        "type": "string",
+        "title": "Prompt",
+        "name": "prompt",
+        "description": "Text prompt describing the video scene and motion."
+      },
+      "aspect_ratio": {
+        "enum": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "4:3",
+          "3:4",
+          "21:9",
+          "9:21"
+        ],
+        "title": "Aspect Ratio",
+        "name": "aspect_ratio",
+        "type": "string",
+        "description": "Aspect ratio of the output video.",
+        "default": "16:9"
+      },
+      "duration": {
+        "enum": [
+          5,
+          10,
+          15,
+          20,
+          25,
+          30
+        ],
+        "title": "Duration",
+        "name": "duration",
+        "type": "int",
+        "description": "The duration of the generated video in seconds.",
+        "default": 5
+      }
+    },
+    "provider": "bytedance",
+    "provider_name": "ByteDance"
+  },
   {
     "id": "kling-v2.1-master-t2v",
     "name": "Kling v2.1 Master",
@@ -9770,6 +9889,107 @@ export const i2vModels = [
           "basic"
         ],
         "default": "basic"
+      }
+    },
+    "provider": "bytedance",
+    "provider_name": "ByteDance"
+  },
+  // Seedance 2.5 image-to-video — see the note on the t2v entries above: live
+  // MUAPI catalog, 4-30s (ladder is ours, the API takes any int in range),
+  // 480p as a separate half-price endpoint. One image, not a reference list.
+  {
+    "id": "seedance-2.5-image-to-video",
+    "name": "Seedance 2.5 I2V",
+    "endpoint": "seedance-2.5-image-to-video",
+    "family": "seedance-2.5",
+    "imageField": "image_url",
+    "hasPrompt": true,
+    "inputs": {
+      "prompt": {
+        "type": "string",
+        "title": "Prompt",
+        "name": "prompt",
+        "description": "Text prompt describing the desired motion and style."
+      },
+      "aspect_ratio": {
+        "type": "string",
+        "title": "Aspect Ratio",
+        "name": "aspect_ratio",
+        "description": "Aspect ratio of the output video.",
+        "enum": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "4:3",
+          "3:4",
+          "21:9",
+          "9:21"
+        ],
+        "default": "16:9"
+      },
+      "duration": {
+        "type": "int",
+        "title": "Duration",
+        "name": "duration",
+        "description": "The duration of the generated video in seconds.",
+        "enum": [
+          5,
+          10,
+          15,
+          20,
+          25,
+          30
+        ],
+        "default": 5
+      }
+    },
+    "provider": "bytedance",
+    "provider_name": "ByteDance"
+  },
+  {
+    "id": "seedance-2.5-image-to-video-480p",
+    "name": "Seedance 2.5 I2V 480p",
+    "endpoint": "seedance-2.5-image-to-video-480p",
+    "family": "seedance-2.5-480p",
+    "imageField": "image_url",
+    "hasPrompt": true,
+    "inputs": {
+      "prompt": {
+        "type": "string",
+        "title": "Prompt",
+        "name": "prompt",
+        "description": "Text prompt describing the desired motion and style."
+      },
+      "aspect_ratio": {
+        "type": "string",
+        "title": "Aspect Ratio",
+        "name": "aspect_ratio",
+        "description": "Aspect ratio of the output video.",
+        "enum": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "4:3",
+          "3:4",
+          "21:9",
+          "9:21"
+        ],
+        "default": "16:9"
+      },
+      "duration": {
+        "type": "int",
+        "title": "Duration",
+        "name": "duration",
+        "description": "The duration of the generated video in seconds.",
+        "enum": [
+          5,
+          10,
+          15,
+          20,
+          25,
+          30
+        ],
+        "default": 5
       }
     },
     "provider": "bytedance",

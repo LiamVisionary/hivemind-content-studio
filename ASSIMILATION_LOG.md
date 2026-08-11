@@ -571,3 +571,51 @@
 - Source: verify-assimilation-manifest
 - Decision: passed
 - Reason: ASSIMILATION.mix-studio.json: 26 concrete reuse entries, 19 substantive
+## 2026-08-11T20:45:35.421725+00:00 - reuse
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio lib/edit-mask.js buildSam3MaskGraph
+- Decision: assimilate
+- Reason: SAM3 smart-select closes the last Phase-2 item: name or tap an object instead of painting the mask by hand.
+- Assimilated: packages/media-gateway/smart_mask.py (translated_code from lib/edit-mask.js buildSam3MaskGraph + normalizeMaskPoints); /api/smart-mask route; Smart select mode in MaskEditorDialog.jsx
+- Not assimilated: Donor's SaveImage sink (our masks leave via PreviewImage — SaveImage output would be sealed by the privacy sweeper and clutter History); donor's comfy-env install path
+- Verification: 8 unit/route tests (test_smart_mask.py); LIVE on this Mac through the real bridge: text 'blue ball' -> mask bbox x300-440 y120-260 in 4.1s, tap (0.25,0.50) -> x60-200 y90-300 in 2.1s, each selecting the correct distinct object; no mask left in temp or history.jsonl
+## 2026-08-11T20:45:53.998003+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 28 concrete reuse entries, 21 substantive
+## 2026-08-11T21:48:33.983276+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio
+- Query: `regional multi-box prompting (Phase 3)`
+- Decision: assimilate
+- Note: Scope: the language half of regional prompting only; the per-region LoRA/reference graph is deferred until Krea2RegionalMultiLoRAV3 exists on this stack.
+- Reason: Checked /object_info on the live ComfyUI (2494 nodes): Ideogram4PromptBuilderKJ IS installed but Krea2RegionalMultiLoRAV3 is NOT, so the donor's regional graph cannot run on this stack. Their own code comment says the regional node only masks LoRA/reference deltas and that spatial LANGUAGE in the caption is what pins placement for description-only regions — so the half that does the real work needs no node at all and applies to every image model we serve, local or cloud.
+- Assimilated: lib/regional-workflows.js normalizeRegions/positionPhrase/elementDesc -> src/lib/regionPrompt.js; region-box editor over the same normalized model -> src/studios/image/RegionBoxEditor.jsx; 9 behavioural tests -> tests/regionPrompt.test.js
+- Not assimilated: buildRegionalT2IGraph / buildKrea2InpaintGraph / addRegionalPrompting (need Krea2RegionalMultiLoRAV3, absent); per-region LoRA and reference-image masking; region colors as caption palette (donor warns it paints literal swatches)
+- Verification: Frontend 398 tests: 393 pass, 5 fail = the long-standing hivemindStudioReferences.test.js baseline. vite build clean. Live browser check on vite dev :5673 with a page-context fetch stub: two boxes drawn (top-left + bottom-right), the outgoing /api/v1/nano-banana payload carried 'a detective in a long coat, positioned in the top left of the frame. a ramen cart, positioned in the bottom right of the frame' appended to the scene prompt; the request was stubbed so nothing left the machine.
+- Note: Composer made idempotent: a restored generation hands back both its composed prompt and its boxes, so re-composing must not say everything twice.
+- Note: Found and fixed a real race while testing: a tap fast enough to land pointerdown+pointerup in one React batch created no region, because endDrag read the draft from state before the re-render. Draft now lives on the drag ref.
+- Note: Region text is prompt content, so it is session-only (never localStorage) and rides in the sealed per-generation context; only the on/off toggle persists.
+## 2026-08-11T21:49:30.794887+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 30 concrete reuse entries, 22 substantive
+## 2026-08-11T22:06:39.651675+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio
+- Query: `LTX Director (Extend/Keyframes/Timeline)`
+- Decision: assimilate
+- Reason: User asked for the LTXDirector node to be installed. Traced it from the donor's dependency-installer to WhatDreamsCost/WhatDreamsCost-ComfyUI pinned at d6495f50926ab245a0b96f76ef6b89de40d19f6e (GPL-3.0). Installed as a pinned fork with security deltas; ported the timeline normalization half, which needs no weights.
+- Assimilated: lib/ltx-director-workflows.js L1-330 -> packages/media-gateway/ltx_director_timeline.py (+18 tests); node pack installed at ~/comfy/ComfyUI/custom_nodes/WhatDreamsCost-ComfyUI pinned d6495f5
+- Not assimilated: buildLtxDirectorGraph (L332+) — deferred: the LTX 2.3 22B base checkpoint is NOT on this machine, so the graph cannot be run or verified; their extensionSource {itemId,videoId} library form (we have no plaintext media library)
+- Verification: All 9 pack nodes registered live after a restart at an idle queue (object_info 2494 -> 2503, LTXDirector/LTXDirectorGuide/LTXDirectorCropGuides all present). Gateway suite 247 passed / 11 skipped. Fork security deltas probed live: arbitrary read of /etc/passwd and ../ traversal both 404, legitimate input-dir read 200 with correct body, upload traversal confined to the input dir (no file escaped), open_folder 403.
+- Note: AUDIT FINDING: at the pinned revision load_video_ui.py registers two unauthenticated routes with no path sanitization — GET /video_ui_custom_view is an arbitrary file read (web.FileResponse of the raw query param) and POST /video_ui_upload_chunk an arbitrary write. The pack's own newer upload route sanitizes correctly, so this is drift. Both confined by the fork; /ltx_director_check_file and /ltx_director_get_audio likewise, and /ltx_director_open_folder (host GUI side effect) is now 403.
+- Note: ComfyUI's loader checks NODE_CLASS_MAPPINGS before comfy_entrypoint and returns early, so the pack's half-finished V3 entrypoint (which lists LTXDirectorGuide without a GET_SCHEMA, and omits LTXDirectorCropGuides) is never called and cannot break the load.
+- Note: BLOCKED ON WEIGHTS: ComfyUI lists only waiANIMA_v10Base10.safetensors as a checkpoint. The IC-LoRA ingredients 0.9, the 384 distilled LoRA and the spatial upscaler are all present, but ltx-2.3-22b-dev-fp8.safetensors is not — only its Civitai sidecars. Our LTX lane runs through MLX, not a ComfyUI checkpoint.

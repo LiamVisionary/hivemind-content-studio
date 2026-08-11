@@ -1,4 +1,4 @@
-// Video Studio — React port of src/components/VideoStudio.js (3285 lines, vanilla).
+// Video Studio — React port of the retired vanilla studio (git history: src/components/VideoStudio.js).
 // T2V / I2V / V2V / local Hivemind LTX workflows / Wan2GP, model+parameter
 // selection, LTX Ingredients reference sheets, LoRA management, job-based
 // generation with resume, results canvas, and history.
@@ -6,7 +6,7 @@
 // Port rules honored here:
 // - All src/lib modules are consumed unchanged (source of truth).
 // - The imperative state cascades (mode switches, model defaults, restore) live
-//   in ./video/videoLogic.jsx as pure transitions over an immutable `setup`
+//   in ./video/videoLogic.js as pure transitions over an immutable `setup`
 //   object; this component wires them to the UI and lib. Labels render FROM state
 //   (the old getElementById sync layer is gone).
 // - alert() -> toast.error() / an inline danger callout, with identical abort
@@ -95,10 +95,12 @@ import { IngredientsPanel } from './video/IngredientsPanel.jsx';
 import {
   VIDEO_PREFERENCES_KEY, zh,
   buildCatalogs, buildInitialSetup, adaptHivemindToVideoEntry, isLocalVideoModel, v2vModels,
-  currentModel, currentIngredientModel, frameSlotsVisible, activeIngredientSheetItems, ingredientSelectionSignature,
+  currentModel, generationModelsFor,
+  currentIngredientModel, frameSlotsVisible, activeIngredientSheetItems, ingredientSelectionSignature,
   getIngredientsWorkflow,
   isMotionControlV2V, isHivemindVideoInputMode,
-  activeVideoTask, headSwapReadiness, isLtxFamilyModel, isMinimaxFamilyModel, slotLabelsFor, videoRequestPlan, videoTasksFor,
+  activeVideoTask, headSwapReadiness, isLtxFamilyModel, isMinimaxFamilyModel, slotLabelsFor,
+  sourceVideoSwitchCost, videoRequestPlan, videoTasksFor,
   aspectRatiosFor, durationsFor, resolutionsFor, modesFor, qualitiesFor, effectNamesFor,
   deriveControlVisibility, deriveExtendBanner, derivePromptUi,
   applyRestoredPreferences, applyGenerationContext,
@@ -111,7 +113,7 @@ import {
   computeSmoothProgress, supportsSpectrum, supportsQualitySteps,
   closestVideoAspectRatio, imageDimensions, redactPrivateHistoryEntry,
   groupModelTiers, activeTierFor, tierPairFor,
-} from './video/videoLogic.jsx';
+} from './video/videoLogic.js';
 
 // Re-export the spec-listed pure helpers so tests/other callers keep importing
 // them from a video studio module.
@@ -120,7 +122,7 @@ export {
   normalizeVideoIngredientSelections, normalizeSelectedVideoIngredientSheet,
   normalizeVideoGenerationProgress, classifyVideoGenerationStage, formatVideoGenerationElapsed,
   closestVideoAspectRatio,
-} from './video/videoLogic.jsx';
+} from './video/videoLogic.js';
 
 /* ---------------- media leaves (E2E-transparent) ---------------- */
 
@@ -616,14 +618,68 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     return { preferredHive, useHivemind: Boolean(preferredHive && isHivemindStudioEnabled()) };
   };
 
+  // One control, two ways a clip can be attached: the LTX extension graph holds
+  // it as setup.videoUrl, and a chain-capable workflow (H3) holds it as the
+  // armed motion context. Clearing has to know which, or the button offers to
+  // clear something it did not attach.
+  const attachedClipUrl = () => s.setup.videoUrl
+    || (chainCapableEntryFor(s.setup.modelId) ? s.setup.motionContextUrl : null)
+    || null;
+
   const onVideoRefClick = () => {
     if (s.setup.videoUrl) commit(clearVideoUploadTransition(s.setup, s.catalogs));
+    else if (attachedClipUrl()) clearMotionContext();
     else videoFileInputRef.current?.click();
+  };
+
+  // Spells out both consequences and lets you back out. A native confirm is
+  // deliberate here: this fires from a file-input change handler, and a modal
+  // that resolves asynchronously would let the upload start before the answer.
+  const confirmSourceVideoSwitch = (cost) => {
+    const lines = [];
+    if (cost.switchesModel) {
+      lines.push(zh()
+        ? `${cost.fromModel} 无法延长视频，将切换到 ${cost.toModel}。`
+        : `${cost.fromModel} cannot extend or edit a clip, so this switches to ${cost.toModel}.`);
+    }
+    if (cost.droppedReferences) {
+      lines.push(zh()
+        ? `已添加的 ${cost.droppedReferences} 个参考会被移除（源视频与参考模式不能同时使用）。`
+        : `Your ${cost.droppedReferences} attached reference${cost.droppedReferences === 1 ? '' : 's'} will be removed — a source clip and reference mode cannot be used together.`);
+    }
+    lines.push(zh() ? '继续吗？' : 'Continue?');
+    return window.confirm(lines.join('\n\n'));
   };
 
   const handleVideoFile = async (file) => {
     if (!file) return;
     const { preferredHive, useHivemind } = resolveVideoHive();
+    // The selected workflow may continue a clip on its OWN terms rather than
+    // through the LTX extension graph: MiniMax H3 does it with Motion Context,
+    // seeding the next shot's opening frames and room tone. Where that is on
+    // offer, take it — it keeps the model you chose and your references (the
+    // registry accepts both), instead of moving you somewhere else to do it.
+    const chainEntry = chainCapableEntryFor(s.setup.modelId);
+    if (chainEntry) {
+      s.videoUploading = true;
+      bump();
+      try {
+        const upload = await uploadFileToHivemindStudio(file);
+        continueSceneFrom(upload.url, s.setup.modelId);
+      } catch (err) {
+        console.error('[VideoStudio] Clip upload failed:', err);
+        toast.error(`${zh() ? '视频上传失败' : 'Video upload failed'}: ${err.message}`);
+      } finally {
+        s.videoUploading = false;
+        bump();
+      }
+      return;
+    }
+    // Otherwise attaching a clip moves you to the LTX extension graph and
+    // clears reference mode. Ask before doing either, and ask BEFORE the
+    // upload so declining costs nothing.
+    const cost = sourceVideoSwitchCost({ setup: s.setup, target: useHivemind ? preferredHive : null });
+    if (cost && !confirmSourceVideoSwitch(cost)) return;
     if (!useHivemind && !localStorage.getItem('muapi_key')) {
       s.authRetry = () => videoFileInputRef.current?.click();
       s.authOpen = true;
@@ -2234,7 +2290,6 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   const advancedInputs = getAdvancedVideoInputs(model);
   const loraModel = currentVideoLoraModel();
   const ingredientModel = currentIngredientModel(s.setup, s.catalogs);
-  const modelIsLocal = isLocalVideoModel(s.setup.modelId);
   const hasSourceToggle = isLocalAIAvailable();
 
   const arOptions = aspectRatiosFor(s.setup, s.setup.modelId);
@@ -2934,11 +2989,11 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             onChange={(e) => { void handleVideoFile(e.target.files?.[0]); e.target.value = ''; }}
           />
           <IconButton
-            icon={s.setup.videoUrl ? 'film' : 'video'}
-            label={s.setup.videoUrl
+            icon={attachedClipUrl() ? 'film' : 'video'}
+            label={attachedClipUrl()
               ? `${s.setup.videoName || slotLabels.video} — ${zh() ? '点击清除' : 'click to clear'}`
               : `${zh() ? '上传' : 'Upload'} ${slotLabels.video}${slotLabels.videoHint ? ` — ${slotLabels.videoHint}` : ''}`}
-            active={Boolean(s.setup.videoUrl)}
+            active={Boolean(attachedClipUrl())}
             className="border border-line1"
             onClick={onVideoRefClick}
           />
@@ -2947,6 +3002,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
           <SavedPromptsMenu
             section="video"
             prompt={s.setup.prompt}
+            modelSource={s.setup}
             capture={() => captureGenerationContext(s.setup.prompt)}
             onLoadPrompt={({ prompt }) => { setPrompt(prompt); focusPrompt(); }}
             onLoadContext={(context) => restoreGenerationContext(context)}
@@ -2982,16 +3038,8 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             onClick={() => { s.promptHelperOpen = true; bump(); }}
           />
 
-          <Pill tone={s.setup.videoUrl ? 'honey' : 'neutral'} className="hidden sm:inline-flex">{modeLabel}</Pill>
-
+          {/* Mode and model read out in the left panel — no duplicate badges here. */}
           <div className="min-w-2 flex-1" />
-
-          {rentedBlocked ? null : (
-            <Pill tone="neutral" className="hidden font-mono sm:inline-flex" title={s.setup.modelName}>
-              <Icon name={modelIsLocal ? 'cpu' : 'cloud'} size={12} />
-              {s.setup.modelName}
-            </Pill>
-          )}
 
           <Button
             variant="primary"
@@ -3371,7 +3419,7 @@ function VideoModelMenuList({ engine: s, hasSourceToggle, close, onSelectRegular
 
   // Regular generation models — t2v prepends hivemind workflows (old line 2082).
   const generationModels = groupModelTiers(
-    (s.setup.imageMode ? s.catalogs.allI2V : [...s.catalogs.hivemindI2V, ...s.catalogs.allT2V])
+    generationModelsFor(s.setup, s.catalogs)
       .filter((m) => !hasSourceToggle || isLocalVideoModel(m.id) === s.setup.localMode)
       .filter((m) => !(s.setup.rentedOnly && s.rentedMachines?.length) || servedByAnyMachine(s.rentedMachines, m))
       .filter(matches),

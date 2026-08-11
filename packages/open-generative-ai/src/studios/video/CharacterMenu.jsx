@@ -10,7 +10,7 @@ import {
   groupH3Characters,
   searchH3Characters,
 } from '../../lib/h3Characters.js';
-import { zh } from './videoLogic.jsx';
+import { zh } from './videoLogic.js';
 import { ChipButton, Menu, MenuHeading } from '../../ui/Menu.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { cx } from '../../ui/kit.jsx';

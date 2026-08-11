@@ -1,4 +1,4 @@
-// Image Studio — React port of src/components/ImageStudio.js (2513 lines, vanilla).
+// Image Studio — React port of the retired vanilla studio (git history: src/components/ImageStudio.js).
 // Unified image generation: cloud (muapi) + local inference, couple mode, LoRA,
 // references, pending-job resume, E2E-encrypted history/composer state.
 //
@@ -39,6 +39,7 @@ import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudR
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { huntLoraIds, isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraHunt, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { localModelSupportsImageInput, localModelSupportsNegativePrompt, negativePromptNeedsGuidance } from '../lib/localImageModelFilter.js';
+import { composeRegionalPrompt, hasActiveRegions } from '../lib/regionPrompt.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
 import { IMAGE_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import {
@@ -57,6 +58,7 @@ import {
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { StudioLayout } from '../ui/kit.jsx';
 
+import { RegionBoxEditor } from './image/RegionBoxEditor.jsx';
 import { UploadPicker } from './UploadPicker.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
@@ -224,6 +226,11 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     coupleShared: '',
     coupleA: '',
     coupleB: '',
+    // Region boxes — OFF by default. Only the toggle persists: the box
+    // descriptions are prompt text, so they stay session-only like couple mode's
+    // character fields.
+    regionMode: Boolean(persistedImagePreferences?.regionMode),
+    regions: [],
     // Character sheet — OFF by default; Klein reference-edit models only. The
     // gateway builds the per-view prompts, so the composer prompt is optional.
     characterSheetMode: Boolean(persistedImagePreferences?.characterSheetMode),
@@ -381,6 +388,14 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
 
   const coupleCapableModel = () => s.useLocalModel && Boolean(localModelById(s.selectedLocalModel)?.coupleCapable);
   const coupleActive = () => s.coupleMode && coupleCapableModel();
+  // Regions need no node and no capability flag — they only rewrite the prompt.
+  // Couple mode wins when both are on, so this asks the same question generate() does.
+  const regionsActive = () => s.regionMode && !coupleActive() && hasActiveRegions(s.regions);
+  // The frame the boxes are drawn on should match what will be generated.
+  const selectedArNumber = () => {
+    const [w, h] = String(s.selectedAr || '1:1').split(':').map(Number);
+    return w > 0 && h > 0 ? w / h : 1;
+  };
 
   const currentPromptHelper = () => s.useLocalModel ? localModelById(s.selectedLocalModel)?.promptHelper : null;
 
@@ -515,6 +530,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       couplePair: s.couplePair,
       characterSheetMode: s.characterSheetMode,
       characterSheetPreset: s.characterSheetPreset,
+      regionMode: s.regionMode,
     });
   };
 
@@ -549,6 +565,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       couplePair: s.couplePair,
       characterSheetMode: s.characterSheetMode,
       characterSheetPreset: s.characterSheetPreset,
+      regionMode: s.regionMode,
       modelSettings: Object.fromEntries(s.modelSettingsById),
       loraSelections: Object.fromEntries(s.loraSelectionsByModel),
     });
@@ -670,6 +687,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
     s.characterSheetMode = Boolean(stored.characterSheetMode);
     s.characterSheetPreset = ['turnaround', 'standard', 'full'].includes(stored.characterSheetPreset)
       ? stored.characterSheetPreset : s.characterSheetPreset;
+    s.regionMode = Boolean(stored.regionMode);
     if (s.useLocalModel) {
       const modes = fallbackLocalModel?.runtimeModes || localModelById(s.selectedLocalModel)?.runtimeModes || [];
       if (stored.localRuntimeMode && (modes.length === 0 || modes.includes(stored.localRuntimeMode))) {
@@ -939,6 +957,11 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
     referenceStrength: s.referenceStrength,
     characterSheetMode: s.characterSheetMode,
     characterSheetPreset: s.characterSheetPreset,
+    // The boxes, not just the sentences they produced — restoring a generation
+    // should give back an editable layout. This context is sealed to the owner
+    // vault, which is the one place region text is allowed to be written down.
+    regionMode: s.regionMode,
+    regions: s.regions.map((region) => ({ ...region })),
     loras: currentLoraSelection().map((lora) => ({ ...lora })),
     referenceImages: [...s.uploadedImageUrls],
   });
@@ -1003,6 +1026,9 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         s.selectedResolution = resolutions[0];
       }
     }
+
+    s.regionMode = Boolean(context.regionMode);
+    s.regions = Array.isArray(context.regions) ? context.regions.map((region) => ({ ...region })) : [];
 
     updatePromptHelperVisibility();
     void loadLorasForCurrentModel();
@@ -1144,6 +1170,24 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       s.expandBusy = false;
       bump();
     }
+  };
+
+  // SAM3 smart-select: name an object ("the jacket") or tap it, and get its
+  // silhouette back as a mask the dialog paints into its canvas. The image is
+  // sealed at rest, so it is decrypted here and sent inline — same round trip
+  // as the inpaint itself, and the mask comes back inline rather than becoming
+  // an output, so a selection is never written down.
+  const smartSelectMask = async (entry, { prompt, points } = {}) => {
+    if (!entry?.url) throw new Error('No image to select from');
+    const src = await resolveMediaSrc(entry.url);
+    const blob = await (await fetch(src)).blob();
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error('Could not read the image'));
+      reader.readAsDataURL(blob);
+    });
+    return localAI.smartMask({ image_base64: dataUrl, prompt: prompt || '', points: points || undefined });
   };
 
   const runInpaint = async (entry, { maskDataUrl, prompt, maskExpand, maskInfluence }) => {
@@ -1458,6 +1502,10 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         couple_pair: s.couplePair,
       };
     }
+    // Region boxes turn into placement sentences appended to the scene prompt.
+    // This is pure text, so it rides along on every model, local or cloud —
+    // except couple mode, which owns a strict line-per-character contract.
+    if (!coupleOptions && regionsActive()) prompt = composeRegionalPrompt(prompt, s.regions);
     // The Style Preset dropdown appends its phrase here — for BOTH the local and
     // cloud paths — instead of being the dead control it shipped as. Couple mode
     // keeps its strict line-per-character contract, so presets stand down there.
@@ -2260,6 +2308,36 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         </div>
       ) : null}
 
+      <div className="flex flex-col gap-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <SectionLabel>Region boxes</SectionLabel>
+          <Toggle
+            label="Region boxes"
+            checked={s.regionMode}
+            onChange={(v) => { s.regionMode = v; persistImagePreferences(); bump(); }}
+          />
+        </div>
+        <p className="text-xs leading-relaxed text-ink3">
+          Say what goes where: each box becomes a placement sentence appended to your prompt. Works with
+          every model — no extra nodes. Box text stays in this session only.
+        </p>
+        {s.regionMode ? (
+          <>
+            {coupleActive() ? (
+              <p className="text-xs leading-relaxed text-warn">
+                Couple mode owns the prompt while it is on, so regions stand down.
+              </p>
+            ) : null}
+            <RegionBoxEditor
+              regions={s.regions}
+              aspect={selectedArNumber()}
+              disabled={coupleActive()}
+              onChange={(next) => { s.regions = next; bump(); }}
+            />
+          </>
+        ) : null}
+      </div>
+
       {coupleCapableModel() ? (
         <div className="flex flex-col gap-2.5">
           <div className="flex items-center justify-between gap-2">
@@ -2634,14 +2712,8 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
             />
           ) : null}
 
+          {/* The model reads out in the left panel — no duplicate badge here. */}
           <div className="min-w-2 flex-1" />
-
-          {rentedBlocked ? null : (
-            <Pill tone="neutral" className="hidden font-mono sm:inline-flex" title={t('image.modelTooltip')}>
-              <Icon name={s.useLocalModel ? 'cpu' : 'cloud'} size={12} />
-              {modelLabel}
-            </Pill>
-          )}
 
           <Button
             variant="primary"
@@ -2805,6 +2877,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           busy={s.inpaintBusy}
           onClose={() => { s.inpaintEntry = null; bump(); }}
           onSubmit={(mask) => void runInpaint(s.inpaintEntry, mask)}
+          onSmartSelect={isLocalAIAvailable() ? (request) => smartSelectMask(s.inpaintEntry, request) : undefined}
         />
       ) : null}
 

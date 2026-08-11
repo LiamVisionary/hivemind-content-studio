@@ -8,7 +8,7 @@ import { useRef } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Button, Pill, SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
-import { zh } from './videoLogic.jsx';
+import { zh } from './videoLogic.js';
 
 function RefImage({ url, alt, className }) {
   const src = useMediaSrc(url);

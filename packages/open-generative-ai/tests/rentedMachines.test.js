@@ -132,7 +132,7 @@ test('the Source choice survives a reload in BOTH studios', async () => {
 
 test('the video boot state names its Source instead of leaving it undefined', async () => {
   const fs = await import('node:fs');
-  const logic = fs.readFileSync(new URL('../src/studios/video/videoLogic.jsx', import.meta.url), 'utf8');
+  const logic = fs.readFileSync(new URL('../src/studios/video/videoLogic.js', import.meta.url), 'utf8');
 
   // A first run must say "not rented" out loud: an absent key normalizes to null,
   // which is what made a never-written rentedOnly indistinguishable from a real

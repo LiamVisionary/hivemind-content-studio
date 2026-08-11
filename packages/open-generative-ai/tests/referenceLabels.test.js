@@ -167,3 +167,24 @@ test('the tag button covers a second clip without touching the first', async () 
     assert.equal((twice.match(/<Video 1>:/g) || []).length, 1);
     assert.equal((twice.match(/<Video 2>:/g) || []).length, 1);
 });
+
+// Three unrelated reasons a dropped file cannot be attached, told apart.
+// They used to collapse into one "Not usable as a reference: <name>", so a clip
+// the server had refused with a perfectly clear explanation ("too large; max
+// 100 MB") came back unexplained — and a full row read as a broken file.
+test('a rejected drop reports WHICH failure it was', async () => {
+    const { referenceDropBlock } = await import('../src/lib/h3References.js');
+
+    assert.equal(referenceDropBlock({ kind: null }), 'unsupported');
+    assert.equal(referenceDropBlock({ kind: 'videos', taken: 3, limit: 3 }), 'full');
+    assert.equal(referenceDropBlock({ kind: 'videos', taken: 2, limit: 3 }), null);
+    // A row whose limit the graph did not wire holds nothing at all.
+    assert.equal(referenceDropBlock({ kind: 'audios', taken: 0, limit: 0 }), 'full');
+
+    // And a server refusal is neither: it carries its own message, which the
+    // drop handler must pass through rather than replace.
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const menu = fs.readFileSync(path.join(__dirname, '../src/studios/video/ReferencesMenu.jsx'), 'utf8');
+    assert.match(menu, /reason: `\$\{err\?\.message/);
+});

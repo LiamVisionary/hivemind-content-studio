@@ -50,8 +50,15 @@ Verdicts from a full sweep of both codebases (2026-08-10; see ASSIMILATION_LOG.m
 >
 > **Phase 2 closed out 2026-08-11** (verified by inspection, not recall): the H3 reference-mode
 > UI shipped (`ReferencesMenu.jsx` — 9 images / 3 videos / 3 audio clips, kinds mixing freely),
-> so the only Phase-2 item left undone is **SAM3 smart-select**, which needs the
-> `pozzettiandrea/comfyui-sam3` custom node installed and pinned per lane.
+> and **SAM3 smart-select landed 2026-08-11**, which closes Phase 2 entirely.
+> SAM3 runs LOCALLY on this Mac: `PozzettiAndrea/ComfyUI-SAM3` pinned at
+> `de0ff5d`, installed WITHOUT its comfy-env/pixi installer (our own V3
+> `comfy_entrypoint`) and with three MPS-unimplemented `torch._assert_async`
+> calls asserted on CPU copies. No dependency changes — the pack vendors its own
+> SAM3 rather than using `transformers.models.sam3`. Donor's `buildSam3MaskGraph`
+> is translated in `packages/media-gateway/smart_mask.py`; the mask leaves via
+> PreviewImage (SaveImage output would be sealed by the sweeper), returns inline,
+> and is never written to history. Live: text 4.1s, tap 2.1s, correct silhouettes.
 >
 > Chaining also went well past the donor after a run of real-use bug reports: the pinned frames
 > carry motion but NOT the scene (live-proven on the rental), so `armChainPrompt` keeps the
@@ -91,12 +98,24 @@ Verdicts from a full sweep of both codebases (2026-08-10; see ASSIMILATION_LOG.m
   frame swap, restyle presets (live action/anime/cinematic-3D/cel-3D/max-detail), Match-video-aspect.
 
 ### Phase 3 — new model families / custom-node-heavy (LATER, per-lane installs must be pinned)
-- **Regional multi-box prompting**: `lib/regional-workflows.js` (liftable) + region-box canvas UI.
-  Nodes: `Ideogram4PromptBuilderKJ` (bboxes from OUTPUT SLOT 2 — the JSON-string `elements_data` is the
-  only box source that survives API-format validation) + `Krea2RegionalMultiLoRAV3` (Fedor pack;
-  NB donor hand-patched KJNodes `ideogram4_nodes.py` — verify upstream before pinning). Keep their
-  `positionPhrase()` centroid→language trick and NEVER send region colors as `palette` (paints swatches).
-  Our couple-mode (2 regions, H/V split) stays as the simple path.
+- ~~**Regional multi-box prompting**~~ — **language half LANDED 2026-08-11**, graph half deferred.
+  Node audit against the live ComfyUI (`/object_info`, 2494 nodes): `Ideogram4PromptBuilderKJ` **is**
+  installed (and already carries `elements_data` + the slot-2 `bboxes` output the donor describes), but
+  `Krea2RegionalMultiLoRAV3` (Fedor pack) is **not**, so their regional graph cannot run here at all.
+  Their own comment is the way through: the regional node only masks LoRA/reference deltas, so for
+  description-only regions it is the spatial LANGUAGE in the caption that pins placement. That half is
+  pure text — it needs no node and therefore works on **every** image model we serve, local or cloud.
+  Shipped: `src/lib/regionPrompt.js` (their `normalizeRegions`/`positionPhrase`/`elementDesc`, made
+  idempotent so a restored generation does not re-append its own sentences) +
+  `src/studios/image/RegionBoxEditor.jsx` (drag/click to place, drag to move, corner to resize, one row
+  per region showing the exact phrase it contributes) + 9 tests. Region text is prompt content, so it is
+  session-only and rides in the sealed per-generation context; only the toggle persists.
+  Still to do if the Fedor pack ever lands: `addRegionalPrompting` / `buildRegionalT2IGraph` /
+  `buildKrea2InpaintGraph`, i.e. per-region LoRA and reference-image masking. Their two traps stand —
+  bboxes must come from the prompt builder's slot 2 (raw dict arrays fail API-format validation), and
+  region colors must NEVER go out as `palette` (Krea2 paints literal swatches). Donor hand-patched
+  KJNodes `ideogram4_nodes.py`; verify upstream before pinning.
+  Our couple-mode (2 regions, H/V split) stays as the simple path; regions stand down while it is on.
 - **Depth guidance**: Depth Anything V3 Large → Krea 2 Control LoRA (opt-in Create guidance).
 - **Wan Animate 2**: `lib/wan-animate2-workflow.js` (standalone; 81 frames, 6 steps, lcm, shift 5,
   `WanAnimate2Cache{cpu,int8}`; weights: wan_animate_2_int8_convrot + lightx2v rank64 + umt5_xxl fp8 +
@@ -104,9 +123,31 @@ Verdicts from a full sweep of both codebases (2026-08-10; see ASSIMILATION_LOG.m
 - **SCAIL 2 motion transfer**: chunked (81f, 5/13-overlap) SAM3 track → `WanSCAILToVideo`; embedded in
   donor server.js, NOT cleanly liftable — port the *plan* (`lib/video-workflows.js` L26–34, 545–620) and
   rebuild graphs our way.
-- **LTX Director** (Extend/Keyframes/Timeline): normalization half of `lib/ltx-director-workflows.js`
-  (L1–330) is a pure timeline validator worth lifting even before the `LTXDirector` node lands; one data
-  model for all three modes; 20s render window; local_prompts `' | '`-joined; frames forced to 8n+1.
+- **LTX Director** (Extend/Keyframes/Timeline) — **node INSTALLED + timeline model LANDED 2026-08-11;
+  graph builder BLOCKED ON WEIGHTS.**
+  Node pack: `WhatDreamsCost/WhatDreamsCost-ComfyUI` (GPL-3.0) pinned `d6495f50926ab245a0b96f76ef6b89de40d19f6e`,
+  installed at `~/comfy/ComfyUI/custom_nodes/WhatDreamsCost-ComfyUI`. All 9 nodes register
+  (`object_info` 2494 → 2503). No pip installs needed — `av`/`cv2`/`PIL`/`aiohttp` were already in the
+  ComfyUI venv — and no CUDA-only ops, so it is MPS-clean.
+  **Installed as a pinned fork with security deltas** (`_hivemind_paths.py` documents them + rollback):
+  at this revision `load_video_ui.py` registers two unauthenticated routes with NO path sanitization —
+  `GET /video_ui_custom_view` is an arbitrary file read (`web.FileResponse` of the raw query param) and
+  `POST /video_ui_upload_chunk` an arbitrary write. Their own newer upload route sanitizes correctly, so
+  this is drift, not design. Both confined to ComfyUI's media dirs, likewise `/ltx_director_check_file`
+  and `/ltx_director_get_audio`; `/ltx_director_open_folder` (opened Finder on the host) now 403s.
+  Loader note: ComfyUI checks `NODE_CLASS_MAPPINGS` *before* `comfy_entrypoint` and returns early, so the
+  pack's half-finished V3 entrypoint — it lists `LTXDirectorGuide`, which has no `GET_SCHEMA`, and omits
+  `LTXDirectorCropGuides` — is never called and cannot break the load.
+  Shipped: `packages/media-gateway/ltx_director_timeline.py` + 18 tests — one validated model for all
+  three modes; 24 fps grid; 20s render window; `local_prompts` `' | '`-joined; `segment_lengths` that
+  partition the window (gaps absorbed by the preceding prompt, never left as holes); output frames forced
+  to 8n+1; window re-basing that advances media trims. Added `director_missing_assets()` so a missing file
+  is named up front instead of failing mid-sample. Their `extensionSource {itemId, videoId}` form points
+  into a plaintext media library we do not have, so only the input-file form is accepted.
+  **Remaining:** `buildLtxDirectorGraph` (L332+) and the multi-track UI. Blocked because the LTX 2.3 22B
+  base checkpoint is not on this machine — ComfyUI lists only `waiANIMA_v10Base10.safetensors`. The IC-LoRA
+  ingredients 0.9, the 384 distilled LoRA and the spatial upscaler ARE present; our LTX lane runs through
+  MLX rather than a ComfyUI checkpoint, which is why the gap exists.
 
 ### Phase 4 — library/ops, needs privacy-aware redesign (their design assumes plaintext server storage)
 - Library search / folders / user groups / trash-with-recovery / ZIP export: rebuild client-side over

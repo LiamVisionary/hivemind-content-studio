@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCivitaiDownloads, subscribeCivitaiDownloads } from '../lib/civitaiDownloadStore.js';
 import { getRentalLoras, refreshRentalLoras, subscribeRentalLoras } from '../lib/rentalLoras.js';
 import { peekResolvedMediaSrc, resolveMediaSrc } from '../lib/e2eMedia.js';
+import { captureVideoPoster, peekVideoPoster } from '../lib/videoPoster.js';
 import { ensureLibraryLoaded, isLibraryLoaded, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
 import { getLang, setLang, t, tf } from '../lib/i18n.js';
 
@@ -73,6 +74,42 @@ export function useMediaSrc(url) {
     };
   }, [url]);
   return src;
+}
+
+// A video's first frame, as a data URL, for thumbnails. Decrypts the clip like
+// useMediaSrc does, then decodes ONE frame from it — a <video> pointed at a blob
+// paints nothing until it has decoded something, which is why sealed clips
+// showed up as identical placeholder icons.
+//
+// Returns { poster, resolved, pending }: `poster` when a frame was decoded,
+// `resolved` so the caller can still mount a real <video> if it prefers, and
+// `pending` to tell "still working" apart from "this clip cannot be decoded".
+export function useVideoPoster(url) {
+  const resolved = useMediaSrc(url);
+  const [poster, setPoster] = useState(() => peekVideoPoster(resolved));
+  const [pending, setPending] = useState(false);
+  useEffect(() => {
+    if (!resolved) {
+      setPoster(null);
+      setPending(false);
+      return undefined;
+    }
+    const cached = peekVideoPoster(resolved);
+    if (cached !== null) {
+      setPoster(cached);
+      setPending(false);
+      return undefined;
+    }
+    let alive = true;
+    setPending(true);
+    captureVideoPoster(resolved).then((value) => {
+      if (!alive) return;
+      setPoster(value);
+      setPending(false);
+    });
+    return () => { alive = false; };
+  }, [resolved]);
+  return { poster, resolved, pending };
 }
 
 // i18n — language switch keeps its page-reload behavior (setLang default), so no

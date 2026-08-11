@@ -1,9 +1,11 @@
-// Pure logic for the Video Studio React port.
-// The helper functions here are copied VERBATIM from src/components/VideoStudio.js
-// (the old vanilla factory, which stays on disk untouched) — they are the
-// spec-listed pure helpers plus the state-transition rules rewritten as pure
-// functions over an immutable `setup` object so React renders labels from state
-// instead of the old getElementById sync layer.
+// Model resolution and setup-state transitions for the Video Studio.
+//
+// The state-transition rules are pure functions over an immutable `setup`
+// object, so React renders labels from state instead of the old vanilla
+// studio's getElementById sync layer. The pure rules that need no JSX live in
+// src/lib (videoPreferences, videoTasks, modelTiers, genProgress) and are
+// re-exported here, so the node:test suite can exercise them and studio code
+// still has one import site.
 import {
   t2vModels,
   i2vModels,
@@ -21,7 +23,7 @@ import {
   isHivemindStudioEnabled,
   isHivemindVideoModelId,
 } from '../../lib/hivemindStudio.js';
-import { videoRequestPlan } from '../../lib/videoTasks.js';
+import { isMinimaxFamilyModel, videoRequestPlan } from '../../lib/videoTasks.js';
 import {
   getLocalModelById,
   isWan2gpModelId,
@@ -34,24 +36,32 @@ import { getLang, t } from '../../lib/i18n.js';
 
 export const zh = () => getLang() === 'zh-CN';
 
-export const VIDEO_PREFERENCES_KEY = 'video_generation_preferences';
+// Persisted settings, advanced-input reading, and the pure geometry/format
+// helpers now live in lib/videoPreferences.js so the node:test suite can reach
+// them; re-exported here so studio code keeps one import site.
+//
+// The two this module CALLS are imported as well: `export … from` forwards a
+// name to importers without binding it locally, so re-exporting alone left the
+// transitions below calling an undefined function — a break neither the node
+// suite nor the build catches, because neither evaluates a transition.
+import { getDefaultAdvancedVideoValues, getRestoredAdvancedVideoValues } from '../../lib/videoPreferences.js';
 
-const VIDEO_ADVANCED_EXCLUDED_INPUTS = new Set([
-  'prompt',
-  'aspect_ratio',
-  'duration',
-  'resolution',
-  'quality',
-  'mode',
-  'name',
-  'request_id',
-  'images_list',
-  'video_files',
-  'image_url',
-  'video_url',
-  'last_image',
-  'audio',
-]);
+export {
+  VIDEO_PREFERENCES_KEY,
+  getAdvancedVideoInputs,
+  getDefaultAdvancedVideoValues,
+  getAdvancedVideoPayload,
+  getRestoredAdvancedVideoValues,
+  normalizeVideoPreferences,
+  normalizeVideoIngredientSelections,
+  normalizeSelectedVideoIngredientSheet,
+  normalizeVideoGenerationProgress,
+  classifyVideoGenerationStage,
+  formatVideoGenerationElapsed,
+  clampVideoDropdownMaxHeight,
+  clampVideoDropdownViewportLeft,
+  closestVideoAspectRatio,
+} from '../../lib/videoPreferences.js';
 
 /* ------------------------------------------------------------------ */
 /* Catalog adapters (verbatim)                                         */
@@ -67,29 +77,18 @@ export const adaptLocalToVideoEntry = (m) => ({
   },
 });
 
+// A registry model IS the catalog entry — everything carries through by spread,
+// and only the `inputs` schema shim is synthesized (cloud catalog entries, which
+// share every downstream code path, describe themselves that way).
+//
+// This used to enumerate the fields it copied, and that enumeration was a second
+// place capabilities had to be declared: the panel resolves the CATALOG entry, so
+// any field the adapter forgot read as undefined and its control silently
+// disappeared for local workflows only. Spreading means adding a capability to
+// the registry mapper is the whole job.
 export const adaptHivemindToVideoEntry = (m) => ({
-  id: m.id,
-  name: m.name,
+  ...m,
   provider: 'hivemind-media-studio',
-  workflowId: m.workflowId,
-  tierGroup: m.tierGroup || null,
-  tier: m.tier || null,
-  beta: Boolean(m.beta),
-  supportsVideoInput: Boolean(m.supportsVideoInput),
-  supportsLoras: Boolean(m.supportsLoras),
-  compatibleBaseModels: Array.isArray(m.compatibleBaseModels) ? m.compatibleBaseModels : [],
-  supportsIngredientImages: Boolean(m.supportsIngredientImages),
-  ingredientInputs: m.ingredientInputs && typeof m.ingredientInputs === 'object' ? m.ingredientInputs : null,
-  videoModes: m.videoModes || [],
-  // Capability fields the panel's per-model gates read (supportsSpectrum,
-  // supportsQualitySteps, endFrameVisible, family-scoped controls). The panel
-  // resolves the CATALOG entry, so dropping these here silently disabled
-  // every accepts-driven control for local workflows.
-  accepts: Array.isArray(m.accepts) ? m.accepts : [],
-  supportsEndFrame: Boolean(m.supportsEndFrame),
-  supportsMotionContext: Boolean(m.supportsMotionContext),
-  workflowFamily: String(m.workflowFamily || ''),
-  defaultSteps: Number(m.defaultSteps) > 0 ? Number(m.defaultSteps) : null,
   inputs: {
     prompt: { type: 'string', name: 'prompt', title: 'Prompt' },
     aspect_ratio: { type: 'string', name: 'aspect_ratio', enum: m.aspectRatios || ['1:1', '16:9', '9:16'], default: (m.aspectRatios || ['1:1'])[0] },
@@ -102,246 +101,14 @@ export const adaptHivemindToVideoEntry = (m) => ({
 /* ------------------------------------------------------------------ */
 
 export { activeTierFor, groupModelTiers, tierPairFor } from '../../lib/modelTiers.js';
-export { activeVideoTask, headSwapReadiness, isLtxFamilyModel, isMinimaxFamilyModel, slotLabelsFor, videoRequestPlan, videoTasksFor } from '../../lib/videoTasks.js';
+export {
+  activeVideoTask, headSwapReadiness, isLtxFamilyModel, isMinimaxFamilyModel, slotLabelsFor,
+  sourceVideoSwitchCost, videoRequestPlan, videoTasksFor,
+} from '../../lib/videoTasks.js';
 
-export function getAdvancedVideoInputs(model) {
-  return Object.entries(model?.inputs || {})
-    .filter(([name, input]) => {
-      if (VIDEO_ADVANCED_EXCLUDED_INPUTS.has(name) || !input || typeof input !== 'object') return false;
-      return ['boolean', 'string', 'int', 'float', 'number'].includes(input.type);
-    })
-    .map(([name, input]) => ({ name, ...input }));
-}
-
-export function getDefaultAdvancedVideoValues(model) {
-  return Object.fromEntries(getAdvancedVideoInputs(model).map((input) => {
-    if (Object.prototype.hasOwnProperty.call(input, 'default')) return [input.name, input.default];
-    if (input.type === 'boolean') return [input.name, false];
-    if (Array.isArray(input.enum) && input.enum.length > 0) return [input.name, input.enum[0]];
-    if (['int', 'float', 'number'].includes(input.type)) return [input.name, input.minValue ?? 0];
-    return [input.name, ''];
-  }));
-}
-
-export function getAdvancedVideoPayload(model, values) {
-  return Object.fromEntries(getAdvancedVideoInputs(model)
-    .filter((input) => Object.prototype.hasOwnProperty.call(values || {}, input.name))
-    .map((input) => [input.name, values[input.name]]));
-}
-
-export function getRestoredAdvancedVideoValues(model, values) {
-  const defaults = getDefaultAdvancedVideoValues(model);
-  if (!values || typeof values !== 'object' || Array.isArray(values)) return defaults;
-  return Object.fromEntries(getAdvancedVideoInputs(model).map((input) => {
-    const saved = values[input.name];
-    if (saved == null) return [input.name, defaults[input.name]];
-    if (input.type === 'boolean') return [input.name, Boolean(saved)];
-    if (Array.isArray(input.enum) && input.enum.length > 0) {
-      const match = input.enum.find((value) => String(value) === String(saved));
-      return [input.name, match ?? defaults[input.name]];
-    }
-    if (['int', 'float', 'number'].includes(input.type)) {
-      const numeric = Number(saved);
-      if (!Number.isFinite(numeric)) return [input.name, defaults[input.name]];
-      const bounded = Math.min(input.maxValue ?? numeric, Math.max(input.minValue ?? numeric, numeric));
-      return [input.name, input.type === 'int' ? Math.round(bounded) : bounded];
-    }
-    return [input.name, typeof saved === 'string' ? saved : defaults[input.name]];
-  }));
-}
-
-export function normalizeVideoPreferences(value) {
-  if (!value || typeof value !== 'object') return null;
-  const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
-  if (!modelId || modelId.length > 256) return null;
-  const duration = Number(value.duration);
-  const stringValue = (candidate) => typeof candidate === 'string' ? candidate.trim() : '';
-  const advancedValues = value.advancedValues && typeof value.advancedValues === 'object' && !Array.isArray(value.advancedValues)
-    ? Object.fromEntries(Object.entries(value.advancedValues).filter(([, candidate]) => (
-      ['string', 'number', 'boolean'].includes(typeof candidate) && (typeof candidate !== 'number' || Number.isFinite(candidate))
-    )))
-    : {};
-  const loraSelections = {};
-  if (value.loraSelections && typeof value.loraSelections === 'object' && !Array.isArray(value.loraSelections)) {
-    Object.entries(value.loraSelections).forEach(([model, selections]) => {
-      if (!model || !Array.isArray(selections)) return;
-      loraSelections[model] = selections.flatMap((selection) => {
-        const id = stringValue(selection?.id);
-        if (!id) return [];
-        const rawStrength = Number(selection.strength);
-        const strength = Number.isFinite(rawStrength) ? Math.max(-10, Math.min(10, rawStrength)) : 1;
-        return [{
-          id,
-          name: stringValue(selection.name) || id,
-          displayName: stringValue(selection.displayName) || stringValue(selection.name) || id,
-          previewUrl: stringValue(selection.previewUrl),
-          strength,
-          // Muted LoRAs stay in the list (with their weight) across reloads.
-          enabled: selection.enabled !== false,
-        }];
-      });
-    });
-  }
-  const ingredientSelections = normalizeVideoIngredientSelections(value.ingredientSelections);
-  const ingredientSheets = normalizeVideoIngredientSelections(value.ingredientSheets);
-  const ingredientSelectedSheet = normalizeSelectedVideoIngredientSheet(
-    value.ingredientSelectedSheet,
-    ingredientSelections,
-    ingredientSheets,
-  );
-  return {
-    modelId,
-    localMode: typeof value.localMode === 'boolean' ? value.localMode : null,
-    rentedOnly: typeof value.rentedOnly === 'boolean' ? value.rentedOnly : null,
-    aspectRatio: stringValue(value.aspectRatio),
-    duration: Number.isFinite(duration) && duration > 0 ? duration : null,
-    resolution: stringValue(value.resolution),
-    quality: stringValue(value.quality),
-    mode: stringValue(value.mode),
-    effectName: stringValue(value.effectName),
-    matchStartFrameAr: typeof value.matchStartFrameAr === 'boolean' ? value.matchStartFrameAr : null,
-    denoise: ['light', 'strong'].includes(value.denoise) ? value.denoise : '',
-    // NAG strength is a setting, not prompt text, so it persists here. The
-    // negative prompt itself deliberately does not — it lives in the encrypted
-    // composer with the positive prompt.
-    nagScale: (typeof value.nagScale === 'number' && Number.isFinite(value.nagScale)) ? value.nagScale : null,
-    // IC-LoRA Detailer strength. 0 means the gateway skips the pass entirely, so
-    // this defaulting to 0 is what keeps an ordinary generation unchanged.
-    videoTask: ['generate', 'extend', 'head-swap'].includes(value.videoTask) ? value.videoTask : 'generate',
-    // Which head-swap engine, and its knobs. Settings, so they persist.
-    headSwapBackend: value.headSwapBackend === 'facefusion' ? 'facefusion' : 'bfs',
-    headSwapFaceEnhancer: typeof value.headSwapFaceEnhancer === 'boolean' ? value.headSwapFaceEnhancer : false,
-    // null = use whatever the selected workflow ships with; true/false is an
-    // explicit user override of the forecaster.
-    spectrum: typeof value.spectrum === 'boolean' ? value.spectrum : null,
-    // Sampling-steps override (H3 refinement). null = workflow default. Only
-    // sent for models whose registry maps a steps slot, so a stale value from
-    // another model cannot leak into a graph without one.
-    steps: (typeof value.steps === 'number' && Number.isFinite(value.steps) && value.steps >= 1 && value.steps <= 100)
-        ? Math.round(value.steps)
-        : null,
-    // Head-swap identity strength. A setting, so it persists like the rest.
-    headSwapLoraStrength: (typeof value.headSwapLoraStrength === 'number' && Number.isFinite(value.headSwapLoraStrength))
-        ? Math.min(1.5, Math.max(0.5, value.headSwapLoraStrength))
-        : 1,
-    detailerStrength: (typeof value.detailerStrength === 'number' && Number.isFinite(value.detailerStrength) && value.detailerStrength > 0)
-        ? Math.min(1.5, value.detailerStrength)
-        : 0,
-    seed: (typeof value.seed === 'number' && Number.isFinite(value.seed) && value.seed >= 0) ? Math.floor(value.seed) : -1,
-    // Scene chaining: an OPAQUE same-origin pointer to the sealed clip being
-    // continued — no plaintext content — so an in-progress chain survives a
-    // reload. Foreign/absolute URLs are dropped on principle.
-    motionContextUrl: (() => {
-      const url = stringValue(value.motionContextUrl);
-      return url.startsWith('/') && url.length <= 512 ? url : '';
-    })(),
-    motionContextIndex: (typeof value.motionContextIndex === 'number'
-        && Number.isFinite(value.motionContextIndex) && value.motionContextIndex >= 1)
-        ? Math.floor(value.motionContextIndex)
-        : null,
-    advancedValues,
-    loraSelections,
-    ingredientSelections,
-    ingredientSheets,
-    ingredientSelectedSheet,
-    // The completion ping is a shared all-studio setting (lib/completionPing.js),
-    // not a video preference — legacy values here are migrated once on load.
-  };
-}
-
-export function normalizeVideoIngredientSelections(value) {
-  const lists = Array.isArray(value)
-    ? [value]
-    : (value && typeof value === 'object'
-      ? Object.values(value).filter(Array.isArray)
-      : []);
-  const normalized = [];
-  const indexesByUrl = new Map();
-  for (const selections of lists) {
-    for (const selection of selections) {
-      const url = typeof selection?.url === 'string' ? selection.url.trim() : '';
-      if (!url.startsWith('/api/media-studio/references/')) continue;
-      const description = typeof selection?.description === 'string'
-        ? selection.description.trim().slice(0, 1000)
-        : '';
-      const existingIndex = indexesByUrl.get(url);
-      if (existingIndex !== undefined) {
-        if (!normalized[existingIndex].description && description) {
-          normalized[existingIndex] = { ...normalized[existingIndex], description };
-        }
-        continue;
-      }
-      if (normalized.length >= 12) continue;
-      indexesByUrl.set(url, normalized.length);
-      normalized.push({ url, description });
-    }
-  }
-  return normalized;
-}
-
-export function normalizeSelectedVideoIngredientSheet(value, ingredientSelections, ingredientSheets) {
-  const views = Array.isArray(ingredientSelections) ? ingredientSelections : [];
-  const sheets = Array.isArray(ingredientSheets) ? ingredientSheets : [];
-  // Legacy state carries no explicit selection: saved reference views were implicitly active.
-  if (typeof value !== 'string') return views.length ? 'stitched' : '';
-  const candidate = value.trim();
-  if (candidate === 'stitched') return views.length ? 'stitched' : '';
-  return sheets.some((sheet) => sheet?.url === candidate) ? candidate : '';
-}
-
-export function normalizeVideoGenerationProgress(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  const normalized = value > 1 ? value / 100 : value;
-  return Math.min(1, Math.max(0, normalized));
-}
-
-// Smoothed, MONOTONIC progress for the generation bar — now shared with the image
+// Smoothed, MONOTONIC progress for the generation bar — shared with the image
 // studio; re-exported so existing videoLogic importers keep working.
-export { computeSmoothProgress } from '../../lib/genProgress.js';
-
-export { normalizeSamplerSteps } from '../../lib/genProgress.js';
-
-export function classifyVideoGenerationStage(status) {
-  const value = String(status || '').toLowerCase();
-  if (/load|model|startup|prepar/.test(value)) return 'loading';
-  if (/encod|decod|export|sav|final/.test(value)) return 'finishing';
-  if (/queue|pending|submit/.test(value)) return 'queued';
-  return 'rendering';
-}
-
-export function formatVideoGenerationElapsed(elapsedMs) {
-  const totalSeconds = Math.max(0, Math.floor((Number(elapsedMs) || 0) / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = String(totalSeconds % 60).padStart(2, '0');
-  return `${minutes}:${seconds}`;
-}
-
-export function clampVideoDropdownMaxHeight(anchorTop, minimum = 180, margin = 24) {
-  return Math.max(minimum, Math.round(Number(anchorTop) || 0) - margin);
-}
-
-export function clampVideoDropdownViewportLeft(preferredLeft, dropdownWidth, viewportWidth, padding = 12) {
-  const safePadding = Math.max(0, Number(padding) || 0);
-  const width = Math.max(0, Number(dropdownWidth) || 0);
-  const viewport = Math.max(0, Number(viewportWidth) || 0);
-  const maximum = Math.max(safePadding, viewport - width - safePadding);
-  return Math.min(maximum, Math.max(safePadding, Number(preferredLeft) || 0));
-}
-
-export function closestVideoAspectRatio(width, height, availableRatios = []) {
-  const sourceWidth = Number(width);
-  const sourceHeight = Number(height);
-  if (!(sourceWidth > 0) || !(sourceHeight > 0)) return null;
-  const sourceRatio = sourceWidth / sourceHeight;
-  return availableRatios.reduce((best, value) => {
-    const match = String(value).match(/^\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)\s*$/);
-    if (!match) return best;
-    const ratio = Number(match[1]) / Number(match[2]);
-    if (!(ratio > 0)) return best;
-    const distance = Math.abs(Math.log(ratio / sourceRatio));
-    return !best || distance < best.distance ? { value, distance } : best;
-  }, null)?.value || null;
-}
+export { computeSmoothProgress, normalizeSamplerSteps } from '../../lib/genProgress.js';
 
 export function imageDimensions(source) {
   return new Promise((resolve, reject) => {
@@ -375,18 +142,53 @@ export function buildCatalogs(hivemindI2V) {
   };
 }
 
-// Capability lookups (currentModel and friends), never the picker's list.
-// Hivemind local workflows take the start frame as an OPTIONAL input — H3 is
-// text-to-video by default — so they belong in BOTH modes. Listing them only
-// under imageMode meant that any state with imageMode false (restoring a
-// generation that had no start frame, which is every reference run) resolved
-// currentModel to undefined, and every capability read off it silently went
-// false: the Frames control vanished while the References menu, which resolves
-// through the lib's own list, stayed. Same model, two answers.
-export const modelsFor = (s, c) => (s.v2vMode
-  ? v2vModels
-  : (s.imageMode ? c.allI2V : [...(c.hivemindI2V || []), ...c.allT2V]));
-export const currentModel = (s, c) => modelsFor(s, c).find((m) => m.id === s.modelId);
+// ---- Two lists, two jobs. Do not merge them, and do not swap them. ----
+
+// EVERY model the studio knows, mode-blind. Ids are unique across the t2v/i2v/
+// v2v catalogs (asserted in tests), so a flat search is unambiguous.
+export const allVideoModels = (c) => [
+  ...(c?.hivemindI2V || []),
+  ...(c?.allI2V || []),
+  ...(c?.allT2V || []),
+  ...v2vModels,
+];
+
+// Resolve a model by id to answer a CAPABILITY question. Deliberately mode-blind:
+// what a model can do is a property of the model, not of whether the studio
+// currently happens to have a start frame attached.
+//
+// Resolving capabilities through the mode-scoped picker list instead is the
+// single most expensive mistake in this file's history. Hivemind local workflows
+// take the start frame as an OPTIONAL input — H3 is text-to-video by default —
+// so a state with imageMode false (every reference run, and every restore of a
+// generation that had no start frame) found nothing in the t2v list, and every
+// capability read off the result silently went false. The Frames control
+// vanished while the References menu, which resolved through the lib's own flat
+// registry, kept rendering: same model, two answers, depending only on which
+// lookup a given line of code happened to use.
+export const resolveVideoModel = (id, c) => allVideoModels(c).find((m) => m.id === id) || null;
+export const currentModel = (s, c) => resolveVideoModel(s.modelId, c);
+
+// The model picker's "Generation" section — mode-scoped on purpose, because the
+// menu should offer what makes sense for the current mode. Never use it to
+// answer a question about what a model can do. The picker's "Video Tools"
+// section is v2vModels, listed alongside this rather than instead of it.
+export const generationModelsFor = (s, c) => (s.imageMode
+  ? c.allI2V
+  : [...(c.hivemindI2V || []), ...c.allT2V]);
+
+// The ONE writer of the selected-model triple. `modelFamily` is a denormalized
+// copy of the model's registry family that every family-scoped gate (task strip,
+// frame slots, scene chaining, the H3 quality controls) reads back out of the
+// setup — so a transition that changed the model but forgot to update it left
+// those gates answering for the PREVIOUS model. Six of the ten transitions below
+// used to do exactly that.
+export const withSelectedModel = (s, model) => ({
+  ...s,
+  modelId: model.id,
+  modelName: model.name,
+  modelFamily: String(model.workflowFamily || ''),
+});
 export const isMotionControlV2V = (s, c) => s.v2vMode && !!currentModel(s, c)?.imageField;
 // "This run extends an uploaded clip." Derived from the plan rather than
 // re-tested here, so there is exactly one definition of what an extension is.
@@ -421,9 +223,7 @@ export const resolutionsFor = (s, id) => {
     // MiniMax H3 additionally gets Max (~1.0MP): the model's trained canvas
     // (768px short edge at 16:9) and its measured quality knee. Nothing above
     // 1MP is offered — H3 grows less coherent past it.
-    return String(hive.workflowFamily || '').toLowerCase().startsWith('minimax')
-      ? ['High', 'Standard', 'Max']
-      : ['High', 'Standard'];
+    return isMinimaxFamilyModel(hive) ? ['High', 'Standard', 'Max'] : ['High', 'Standard'];
   }
   if (getLocalModelById(id)) return [];
   return s.imageMode ? getResolutionsForI2VModel(id) : getResolutionsForVideoModel(id);
@@ -431,15 +231,9 @@ export const resolutionsFor = (s, id) => {
 
 export const modesFor = (id) => getModesForModel(id);
 
-export const qualitiesFor = (s, c, id) => {
-  const model = modelsFor(s, c).find((m) => m.id === id);
-  return model?.inputs?.quality?.enum || [];
-};
+export const qualitiesFor = (s, c, id) => resolveVideoModel(id, c)?.inputs?.quality?.enum || [];
 
-export const effectNamesFor = (s, c, id) => {
-  const model = modelsFor(s, c).find((m) => m.id === id);
-  return model?.inputs?.name?.enum || [];
-};
+export const effectNamesFor = (s, c, id) => resolveVideoModel(id, c)?.inputs?.name?.enum || [];
 
 /* ------------------------------------------------------------------ */
 /* Setup-state transitions (port of the imperative cascades)           */
@@ -447,9 +241,7 @@ export const effectNamesFor = (s, c, id) => {
 
 export function buildInitialSetup(c) {
   const defaultModel = c.allT2V[0];
-  return {
-    modelId: defaultModel.id,
-    modelName: defaultModel.name,
+  return withSelectedModel({
     localMode: isHivemindStudioEnabled() && isLocalAIAvailable()
       ? true
       : isLocalVideoModel(defaultModel.id),
@@ -485,14 +277,14 @@ export function buildInitialSetup(c) {
     videoUrl: null,
     videoName: null,
     prompt: '',
-  };
+  }, defaultModel);
 }
 
 // Port of updateControlsForModel (1001-1100): re-derives the per-model default
 // selections. Visibility is derived at render time via deriveControlVisibility.
 export function applyModelDefaults(prev, c) {
   const s = { ...prev };
-  const model = modelsFor(s, c).find((m) => m.id === s.modelId);
+  const model = resolveVideoModel(s.modelId, c);
   s.advancedValues = getDefaultAdvancedVideoValues(model);
   if (s.v2vMode) return s; // v2v hides all parameter controls; values untouched
   const localVideoInput = isHivemindVideoInputMode(s);
@@ -615,8 +407,7 @@ export function startFrameSelectedTransition(prev, url, c) {
     const currentT2V = c.allT2V.find((m) => m.id === s.modelId);
     const sibling = currentT2V?.family ? c.allI2V.find((m) => m.family === currentT2V.family) : null;
     const target = sibling || c.allI2V[0];
-    s = applyModelDefaults({ ...s, imageMode: true, modelId: target.id, modelName: target.name,
-    modelFamily: target.workflowFamily || '' }, c);
+    s = applyModelDefaults(withSelectedModel({ ...s, imageMode: true }, target), c);
     modelChanged = true;
   }
   return { setup: s, matchAspect: true, modelChanged };
@@ -632,13 +423,7 @@ export function startFrameClearedTransition(prev, c) {
   // model unmounted the keyframe picker mid-edit and discarded middle/end.
   if (isHivemindVideoModelId(s.modelId)) return s;
   // Clearing the start frame invalidates any selected end frame.
-  s = {
-    ...s,
-    imageMode: false,
-    endImageUrl: null,
-    modelId: c.allT2V[0].id,
-    modelName: c.allT2V[0].name,
-  };
+  s = withSelectedModel({ ...s, imageMode: false, endImageUrl: null }, c.allT2V[0]);
   return applyModelDefaults(s, c);
 }
 
@@ -649,11 +434,9 @@ export function clearVideoUploadTransition(prev, c) {
   // Motion-control v2v: keep the model and image; user can re-upload a video
   if (isMotionControlV2V(s, c)) return s;
   if (wasHivemindVideo) {
-    s = { ...s, imageMode: false, modelId: c.allT2V[0].id, modelName: c.allT2V[0].name };
-    return applyModelDefaults(s, c);
+    return applyModelDefaults(withSelectedModel({ ...s, imageMode: false }, c.allT2V[0]), c);
   }
-  s = { ...s, v2vMode: false, modelId: c.allT2V[0].id, modelName: c.allT2V[0].name };
-  return applyModelDefaults(s, c);
+  return applyModelDefaults(withSelectedModel({ ...s, v2vMode: false }, c.allT2V[0]), c);
 }
 
 // After a reference video finished uploading (old videoFileInput.onchange, 663-706).
@@ -661,7 +444,7 @@ export function videoUploadedTransition(prev, { url, name, useHivemind, preferre
   let s = { ...prev, videoUrl: url, videoName: name };
   if (useHivemind) {
     const keepFace = videoRequestPlan(s).keepImageOnVideoUpload;
-    s = {
+    s = withSelectedModel({
       ...s,
       ...(keepFace ? {} : { imageUrl: null }),
       endImageUrl: null,
@@ -671,16 +454,14 @@ export function videoUploadedTransition(prev, { url, name, useHivemind, preferre
       referenceVideos: [],
       v2vMode: false,
       imageMode: true,
-      modelId: preferredHive.id,
-      modelName: preferredHive.name,
-    };
+    }, preferredHive);
     return applyModelDefaults(s, c);
   }
   // If a motion-control v2v model is already selected, keep it and the image upload
   if (isMotionControlV2V(s, c)) return s;
   // Default v2v flow — auto-pick the first v2v model
   if (s.imageMode) s = { ...s, imageUrl: null, imageMode: false };
-  s = { ...s, v2vMode: true, modelId: v2vModels[0].id, modelName: v2vModels[0].name };
+  s = withSelectedModel({ ...s, v2vMode: true }, v2vModels[0]);
   return applyModelDefaults(s, c);
 }
 
@@ -689,29 +470,26 @@ export function selectV2VModelTransition(prev, m, c) {
   let s = { ...prev, v2vMode: true, imageMode: false };
   // Single-input v2v (watermark remover etc.) — drop any image
   if (!m.imageField) s = { ...s, imageUrl: null };
-  s = { ...s, modelId: m.id, modelName: m.name, modelFamily: m.workflowFamily || '' };
-  return applyModelDefaults(s, c);
+  return applyModelDefaults(withSelectedModel(s, m), c);
 }
 
 export function selectRegularModelTransition(prev, m, c) {
   let s = prev;
   if (s.v2vMode) s = { ...s, v2vMode: false, videoUrl: null, videoName: null };
-  s = { ...s, modelId: m.id, modelName: m.name, modelFamily: m.workflowFamily || '' };
-  return applyModelDefaults(s, c);
+  return applyModelDefaults(withSelectedModel(s, m), c);
 }
 
 // selectHivemindWorkflowModel (old 1208-1232) — caller checks target exists.
 export function selectHivemindWorkflowTransition(prev, target, c) {
   let s = prev;
   if (s.v2vMode) s = { ...s, v2vMode: false, videoUrl: null, videoName: null };
-  s = { ...s, imageMode: true, localMode: true, modelId: target.id, modelName: target.name,
-    modelFamily: target.workflowFamily || '' };
+  s = withSelectedModel({ ...s, imageMode: true, localMode: true }, target);
   return applyModelDefaults(s, c);
 }
 
 // "+ New" full reset (old newPromptBtn, 2940-2962).
 export function newPromptTransition(prev, c) {
-  const s = {
+  const s = withSelectedModel({
     ...prev,
     prompt: '',
     imageUrl: null,
@@ -728,22 +506,14 @@ export function newPromptTransition(prev, c) {
     videoUrl: null,
     videoName: null,
     v2vMode: false,
-    modelId: c.allT2V[0].id,
-    modelName: c.allT2V[0].name,
-  };
+  }, c.allT2V[0]);
   return applyModelDefaults(s, c);
 }
 
 // Extend flow (old extendBtn, 2964-2978).
 export function extendTransition(prev, c) {
-  const s = {
-    ...prev,
-    prompt: '',
-    imageUrl: null,
-    imageMode: false,
-    modelId: 'seedance-v2.0-extend',
-    modelName: 'Seedance 2.0 Extend',
-  };
+  const s = withSelectedModel({ ...prev, prompt: '', imageUrl: null, imageMode: false },
+    { id: 'seedance-v2.0-extend', name: 'Seedance 2.0 Extend' });
   return applyModelDefaults(s, c);
 }
 
@@ -757,16 +527,13 @@ export function applyRestoredPreferences(prev, preferences, c) {
   const t2vModel = c.allT2V.find((model) => model.id === preferences.modelId);
   const target = v2vModel || i2vModel || t2vModel;
   if (!target) return null;
-  let s = {
+  let s = withSelectedModel({
     ...prev,
     v2vMode: Boolean(v2vModel),
     imageMode: !v2vModel && Boolean(i2vModel),
-    modelId: target.id,
-    modelName: target.name,
-    modelFamily: target.workflowFamily || '',
     localMode: preferences.localMode ?? isLocalVideoModel(target.id),
     rentedOnly: Boolean(preferences.rentedOnly && (preferences.localMode ?? isLocalVideoModel(target.id))),
-  };
+  }, target);
   s = applyModelDefaults(s, c);
   const matchingDuration = durationsFor(s, s.modelId)
     .find((duration) => Number(duration) === preferences.duration);
@@ -800,16 +567,16 @@ export function applyRestoredPreferences(prev, preferences, c) {
 export function applyGenerationContext(prev, context, c) {
   if (!context?.model) return null;
   const s0 = { ...prev, imageMode: Boolean(context.imageMode), v2vMode: Boolean(context.v2vMode) };
-  const model = modelsFor(s0, c).find((entry) => entry.id === context.model);
+  // Mode-blind on purpose: a captured run records the mode it ran in, and a
+  // reference run records imageMode false. Looking the model up in the list for
+  // THAT mode failed to find it and abandoned the whole restore.
+  const model = resolveVideoModel(context.model, c);
   if (!model) return null;
   let s = {
-    ...s0,
-    modelId: context.model,
+    ...withSelectedModel(s0, model),
+    // The captured label wins over the catalog's — a workflow renamed since the
+    // run should still restore under the name the user saw.
     modelName: context.modelName || model.name,
-    // Family drives every family-scoped gate (task strip, frame slots, scene
-    // chaining). Inheriting it from `prev` left LTX-only controls showing on a
-    // restored H3 setup and vice versa.
-    modelFamily: String(model.workflowFamily || ''),
     imageUrl: context.imageUrl || null,
     endImageUrl: context.endImageUrl || null,
     referenceImageUrls: Array.isArray(context.referenceImageUrls)
@@ -891,18 +658,10 @@ export const redactPrivateHistoryEntry = (entry) => (
 );
 
 
-// Spectrum forecasting is a per-workflow capability: the registry lists it in
-// `accepts` only for graphs that actually carry the node, so the toggle appears
-// exactly where it does something.
-export function supportsSpectrum(model) {
-  return Array.isArray(model?.accepts) && model.accepts.includes('spectrum');
-}
-
-// The refinement (sampling steps) control: needs a registry-mapped steps slot
-// AND a full-step lane. A distilled turbo build registers 4-8 steps, where a
-// 32-step "high detail" override would fight the distillation (community
-// consensus: past ~8 steps a turbo LoRA over-sharpens), so it gets no control.
-export function supportsQualitySteps(model) {
-  return Array.isArray(model?.accepts) && model.accepts.includes('steps')
-    && Number(model?.defaultSteps) >= 10;
-}
+// Capability readers. The `accepts` → capability derivation itself lives in ONE
+// place — mapHivemindWorkflowModels in lib/hivemindStudio.js — so these are
+// deliberately thin: re-testing `accepts` here is how a rule ends up with two
+// definitions that disagree. A cloud model has no such field and reads false,
+// which is correct: these are local-graph capabilities.
+export const supportsSpectrum = (model) => Boolean(model?.supportsSpectrum);
+export const supportsQualitySteps = (model) => Boolean(model?.supportsQualitySteps);

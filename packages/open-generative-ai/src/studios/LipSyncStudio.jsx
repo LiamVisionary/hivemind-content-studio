@@ -1,4 +1,4 @@
-// Lip Sync Studio — React redesign of components/LipSyncStudio.js.
+// Lip Sync Studio — React redesign of the retired vanilla studio.
 // Pairs a portrait image OR a source video with an audio track and produces a
 // lipsynced video via muapi.processLipSync. Audio is upload-only (no TTS in the
 // original). Model catalog + resolution live in the left panel; the input slots,
@@ -12,9 +12,9 @@
 //   is handed back; removePendingJob on BOTH success and error.
 // - Crash-safe pending-job resume (pendingJobs 'lipsync') runs once per mount and is
 //   StrictMode-idempotent (a mountedOnce ref claims the pass before polling).
-// - Preferences persist to 'lipsync_generation_preferences' via a normalizer that is
-//   behaviorally identical to the old normalizeLipSyncPreferences (the old file stays
-//   on disk so its exported normalizer keeps satisfying the persistence test).
+// - Preferences persist to 'lipsync_generation_preferences' via the shared
+//   normalizer in lib/studioPreferences.js — one definition, which the
+//   persistence test exercises directly.
 // - History persists to 'lipsync_history' (slice 0..30), same entry shape.
 // - Every media src goes through useMediaSrc (E2E decrypt, fail-open); the download
 //   filename resolves from the unencrypted entry.url so E2E blob URLs still match.
@@ -43,23 +43,9 @@ import { Modal } from '../ui/Modal.jsx';
 
 import { UploadPicker } from './UploadPicker.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
+import { LIPSYNC_PREFERENCES_KEY, normalizeLipSyncPreferences } from '../lib/studioPreferences.js';
 
-const LIPSYNC_PREFERENCES_KEY = 'lipsync_generation_preferences';
 const LIPSYNC_HISTORY_KEY = 'lipsync_history';
-
-// Behaviorally identical to normalizeLipSyncPreferences in components/LipSyncStudio.js
-// (the old file is untouched; the persistence test imports the normalizer from there).
-function normalizeLipSyncPreferences(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const inputMode = value.inputMode === 'video' ? 'video' : 'image';
-  const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
-  if (!modelId) return null;
-  return {
-    inputMode,
-    modelId,
-    resolution: typeof value.resolution === 'string' ? value.resolution.trim() : '',
-  };
-}
 
 function createEngine() {
   let persisted = null;

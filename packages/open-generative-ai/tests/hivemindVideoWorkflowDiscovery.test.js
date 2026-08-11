@@ -69,6 +69,10 @@ test('video workflow discovery recovers after an owner-session startup race', as
             supportsEndFrame: false,
             supportsMotionContext: false,
             supportsReferenceImages: false,
+            // Every accepts-driven capability is derived HERE and read verbatim
+            // downstream; the studio must not re-test `accepts` for itself.
+            supportsSpectrum: false,
+            supportsQualitySteps: false,
             // No reference slots wired on this workflow — the References panel
             // reads this to size itself, and null means "no reference lane".
             referenceSlots: null,

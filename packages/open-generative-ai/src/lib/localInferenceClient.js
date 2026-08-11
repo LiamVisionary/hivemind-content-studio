@@ -209,6 +209,22 @@ class LocalInferenceClient {
         return window.localAI.saveEpisode(params);
     }
 
+    // LTX Director timeline render — hosted bridge only.
+    async ltxDirector(params) {
+        if (!isLocalAIAvailable() || typeof window.localAI.ltxDirector !== 'function') {
+            throw new Error('LTX Director is available through Unified Studio.');
+        }
+        return window.localAI.ltxDirector(params);
+    }
+
+    // SAM3 smart-select mask (name or tap an object) — hosted bridge only.
+    async smartMask(params) {
+        if (!isLocalAIAvailable() || typeof window.localAI.smartMask !== 'function') {
+            throw new Error('Smart select is available through Unified Studio.');
+        }
+        return window.localAI.smartMask(params);
+    }
+
     async warmIdeogram4() {
         if (!isLocalAIAvailable()) throw new Error('Local AI only available in the desktop app.');
         return window.localAI.warmIdeogram4();

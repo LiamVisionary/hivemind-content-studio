@@ -1,8 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+// The SHIPPED normalizer. This used to import the retired vanilla studio's copy,
+// so the rule the app actually runs was never exercised.
 async function loadImageStudioHelpers() {
-    return import('../src/components/ImageStudio.js');
+    return import('../src/studios/image/imagePrefs.js');
 }
 
 test('image preferences retain provider, dropdown, advanced, and per-model LoRA settings', async () => {
@@ -59,6 +61,15 @@ test('image preferences retain provider, dropdown, advanced, and per-model LoRA 
         coupleDirection: 'vertical',
         coupleSplit: 90,
         couplePair: 'boys',
+        // Added after the React port; the retired vanilla normalizer never knew
+        // them, which is why this expectation had drifted out of date.
+        baseSize: 0,
+        characterSheetMode: false,
+        characterSheetPreset: 'turnaround',
+        regionMode: false,
+        rentedOnly: false,
+        sampler: '',
+        scheduler: '',
         modelSettings: {},
         loraSelections: {
             'krea2-turbo': [{
@@ -67,6 +78,7 @@ test('image preferences retain provider, dropdown, advanced, and per-model LoRA 
                 displayName: 'Pink Hair',
                 previewUrl: '/preview/pink.jpg',
                 strength: 10,
+                enabled: true,
             }],
         },
     });
@@ -97,6 +109,13 @@ test('image preferences reject missing models and recover safe defaults', async 
         coupleDirection: 'horizontal',
         coupleSplit: 50,
         couplePair: 'girls',
+        baseSize: 0,
+        characterSheetMode: false,
+        characterSheetPreset: 'turnaround',
+        regionMode: false,
+        rentedOnly: false,
+        sampler: '',
+        scheduler: '',
         modelSettings: {},
         loraSelections: {},
     });
@@ -141,6 +160,12 @@ test('per-model settings are sanitized and junk entries dropped', async () => {
             coupleDirection: 'vertical',
             coupleSplit: 65,
             couplePair: 'mixed',
+            baseSize: 0,
+            characterSheetMode: false,
+            characterSheetPreset: 'turnaround',
+            regionMode: false,
+            sampler: '',
+            scheduler: '',
         },
     });
 });

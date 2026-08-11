@@ -134,6 +134,72 @@
     }
   }
 
+  // LTX Director: render one window of a multi-track timeline. Slow by nature
+  // — a cold run loads a 27GB checkpoint and a 13GB text encoder before the
+  // first step — so the poll is patient and reports elapsed time rather than a
+  // fake percentage the node does not publish.
+  async function ltxDirector(params) {
+    emitProgress({ status: 'queued', progress: 0, message: 'Preparing the timeline' });
+    const submitted = await jsonFetch('/local-ai/ltx-director', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    });
+    const jobId = submitted.id;
+    if (!jobId) throw new Error('No job id returned by LTX Director');
+
+    const startedAt = Date.now();
+    let last = null;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, last ? 3000 : 1000));
+      last = await jsonFetch(`/local-ai/job/${encodeURIComponent(jobId)}`);
+      const status = last.status || 'running';
+      const mins = Math.floor((Date.now() - startedAt) / 60000);
+      emitProgress({
+        status,
+        progress: status === 'success' ? 1 : 0.5,
+        message: status === 'success'
+          ? 'Rendered'
+          : `Rendering the timeline${mins ? ` — ${mins} min` : ''}`,
+      });
+      if (status === 'success') {
+        const url = (last.outputs || [])[0];
+        if (!url) throw new Error('LTX Director finished without a clip');
+        return { url, mediaType: 'video', elapsedSeconds: last.elapsed_seconds };
+      }
+      if (status === 'error') throw new Error(last.error || 'LTX Director failed');
+    }
+  }
+
+  // SAM3 smart-select: name or tap an object, get its silhouette back as a
+  // mask. The mask returns INLINE (never an output), so nothing about the
+  // selection is stored anywhere.
+  async function smartMask(params) {
+    emitProgress({ status: 'queued', progress: 0, message: 'Finding the object (SAM3)' });
+    const submitted = await jsonFetch('/local-ai/smart-mask', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    });
+    const jobId = submitted.id;
+    if (!jobId) throw new Error('No job id returned by smart select');
+
+    let last = null;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, last ? 1500 : 800));
+      last = await jsonFetch(`/local-ai/job/${encodeURIComponent(jobId)}`);
+      const status = last.status || 'running';
+      emitProgress({
+        status,
+        progress: status === 'success' ? 1 : 0.5,
+        message: status === 'success' ? 'Selected' : 'Finding the object (SAM3)',
+      });
+      if (status === 'success') {
+        if (!last.mask_base64) throw new Error('Smart select finished without a mask');
+        return { maskBase64: last.mask_base64 };
+      }
+      if (status === 'error') throw new Error(last.error || 'Smart select failed');
+    }
+  }
+
   async function listLoras(modelId, baseModels) {
     // Video workflows are defined in the Media Studio MCP, not in the registry the
     // bridge reads, so carry the base models from the catalog we were given.
@@ -213,6 +279,8 @@
     upscale,
     interpolate,
     saveEpisode,
+    smartMask,
+    ltxDirector,
     cancelGeneration: async () => ({ ok: true }),
     wan2gp: {
       getConfig: async () => ({ url: '' }),

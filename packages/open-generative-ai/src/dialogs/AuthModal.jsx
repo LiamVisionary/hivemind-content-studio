@@ -1,4 +1,4 @@
-// Muapi API-key entry modal (React port of components/AuthModal.js).
+// Muapi API-key entry modal (React port of the retired vanilla studio).
 // Contract preserved: trimmed key -> localStorage 'muapi_key', close, then onSaved
 // (the UploadPicker retry continuation). Empty submit aborts with inline feedback.
 import { useState } from 'react';

@@ -1,7 +1,15 @@
 import { decryptMedia } from './e2eVault.js';
 import { ensureVaultReady } from './vaultSession.js';
+import {
+    hivemindVideoModelId,
+    isHivemindVideoModelId,
+    workflowIdFromHivemindModelId,
+} from './hivemindModelIds.js';
+import { isMinimaxFamilyModel } from './videoTasks.js';
 
-const HIVE_VIDEO_PREFIX = 'hivemind-media:';
+// Re-exported so the id format keeps one import path for existing callers.
+export { isHivemindVideoModelId, workflowIdFromHivemindModelId };
+
 const VIDEO_SELECTION_KEY = 'hivemind.explore.videoSelection';
 const OPTIONS_KEY = 'hivemind.explore.options';
 const PENDING_JOBS_KEY = 'muapi_pending_jobs';
@@ -74,18 +82,6 @@ function workflowProvider(catalog) {
     return catalog?.media?.video?.find((provider) => provider.id === 'media-studio-mcp') || null;
 }
 
-function workflowModelId(workflowId) {
-    return `${HIVE_VIDEO_PREFIX}${encodeURIComponent(workflowId)}`;
-}
-
-export function isHivemindVideoModelId(id) {
-    return typeof id === 'string' && id.startsWith(HIVE_VIDEO_PREFIX);
-}
-
-export function workflowIdFromHivemindModelId(id) {
-    return decodeURIComponent(String(id || '').slice(HIVE_VIDEO_PREFIX.length));
-}
-
 export function getHivemindVideoModelById(id) {
     return hiveVideoModels.find((model) => model.id === id) || null;
 }
@@ -146,6 +142,17 @@ export function mapHivemindWorkflowModels(catalog) {
                 // (up to 9, order-preserving) instead of a start frame. Distinct
                 // from ingredient_images, which LTX stitches into one sheet.
                 supportsReferenceImages: accepts.includes('reference_images'),
+                // Spectrum forecasting is a per-workflow capability: the registry
+                // lists it in `accepts` only for graphs that carry the node, so
+                // the toggle appears exactly where it does something.
+                supportsSpectrum: accepts.includes('spectrum'),
+                // The refinement (sampling steps) control needs a registry-mapped
+                // steps slot AND a full-step lane. A distilled turbo build
+                // registers 4-8 steps, where a 32-step "high detail" override
+                // would fight the distillation (community consensus: past ~8 steps
+                // a turbo LoRA over-sharpens), so it gets no control.
+                supportsQualitySteps: accepts.includes('steps')
+                    && Number(workflow.default_steps) >= 10,
                 // Kept in this list so reference routing can still resolve it,
                 // but filtered out of the picker by the studio.
                 routingOnly: Boolean(workflow.routing_only),
@@ -164,7 +171,7 @@ export function mapHivemindWorkflowModels(catalog) {
                     : null,
             };
         })(),
-        id: workflowModelId(workflow.id),
+        id: hivemindVideoModelId(workflow.id),
         workflowId: workflow.id,
         // Models shipping both a distilled and a full-step build share a
         // tierGroup; the picker collapses them into one row with a switch.
@@ -189,7 +196,7 @@ export function mapHivemindWorkflowModels(catalog) {
         // together for the whole span, so its ceiling is 15; everything else
         // keeps the 10s list. Past 15s H3 visibly loses subject identity
         // (hair/wardrobe morphs), which is why the studio does not offer more.
-        durations: String(workflow.family || '').toLowerCase().startsWith('minimax')
+        durations: isMinimaxFamilyModel({ workflowFamily: workflow.family })
             ? Array.from({ length: 15 }, (_, second) => second + 1)
             : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         defaultDuration: Number(workflow.default_duration_seconds) || 4,
@@ -244,12 +251,45 @@ export async function uploadFileToHivemindStudio(file) {
     if (!response.ok || data.ok === false || !data.url) {
         throw new Error(data.detail || data.error || `Reference upload failed with HTTP ${response.status}`);
     }
+    const posterUrl = data.poster_url ? String(data.poster_url) : null;
     return {
         url: data.url,
         path: data.url,
-        thumbnail: data.url,
+        // The server builds a poster while the plaintext is still in hand, so a
+        // freshly uploaded clip draws its tile without decrypting the original.
+        posterUrl,
+        thumbnail: posterUrl || data.url,
         encryptedAtRest: Boolean(data.encrypted_at_rest),
     };
+}
+
+/**
+ * Hand back a poster for a reference sealed before posters existed.
+ *
+ * The host cannot build one for those: it has no vault key, so it cannot read
+ * them. The browser decrypts the clip to display it anyway, so it is the only
+ * party that can produce the frame — it sends that one frame back, sealed on
+ * arrival like any other reference. Best-effort: a failure just means the next
+ * render decodes locally again.
+ */
+export async function backfillHivemindReferencePoster(referenceUrl, jpegBlob) {
+    if (!isHivemindStudioEnabled() || !referenceUrl || !jpegBlob) return null;
+    const path = mediaStudioReferencePath(referenceUrl);
+    if (!path) return null;
+    try {
+        const form = new FormData();
+        form.append('file', jpegBlob, 'poster.jpg');
+        const response = await fetch(`${path}/poster`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            body: form,
+        });
+        if (!response.ok) return null;
+        const data = await response.json().catch(() => ({}));
+        return data.poster_url ? String(data.poster_url) : null;
+    } catch {
+        return null;
+    }
 }
 
 export function mediaStudioReferencePath(value) {
@@ -312,7 +352,13 @@ export async function fetchHivemindReferences({ kind = 'image' } = {}) {
                 name: String(ref.name || ''),
                 kind: String(ref.kind || 'image'),
                 uploadedUrl: String(ref.url),
-                thumbnail: null, // no stored thumbnail — Thumb decrypts the full E2E image
+                // A sealed few-KB poster. Without one, drawing a 32px tile means
+                // fetching and decrypting the WHOLE asset — 62 MB for a screen
+                // recording — which is what made this panel take seconds to fill.
+                // Null for references sealed before posters existed; the browser
+                // decrypts those once and backfills a poster for next time.
+                posterUrl: ref.poster_url ? String(ref.poster_url) : null,
+                thumbnail: ref.poster_url ? String(ref.poster_url) : null,
                 timestamp: typeof ref.timestamp === 'number' ? new Date(ref.timestamp * 1000).toISOString() : '',
                 serverReference: true,
             }));

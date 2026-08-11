@@ -1,4 +1,4 @@
-// Reference upload picker (React port of components/UploadPicker.js).
+// Reference upload picker (React port of the retired vanilla studio).
 //
 // CONTROLLED API — other studios code against exactly this:
 //   <UploadPicker

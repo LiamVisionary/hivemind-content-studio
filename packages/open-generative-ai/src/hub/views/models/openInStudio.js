@@ -11,7 +11,7 @@
 import { getComposerSection, updateComposerSection } from '../../../lib/composerState.js';
 import { t2iModels } from '../../../lib/models.js';
 import { IMAGE_PREFERENCES_KEY, normalizeImagePreferences } from '../../../studios/image/imagePrefs.js';
-import { VIDEO_PREFERENCES_KEY, normalizeVideoPreferences } from '../../../studios/video/videoLogic.jsx';
+import { VIDEO_PREFERENCES_KEY, normalizeVideoPreferences } from '../../../studios/video/videoLogic.js';
 
 function readJson(key) {
   try {

@@ -14,7 +14,7 @@ import { ActionButton, cx } from '../../ui/kit.jsx';
 const BRUSH_MIN = 12;
 const BRUSH_MAX = 160;
 
-export function MaskEditorDialog({ entry, busy, onClose, onSubmit }) {
+export function MaskEditorDialog({ entry, busy, onClose, onSubmit, onSmartSelect }) {
   const src = useMediaSrc(entry?.url);
   const canvasRef = useRef(null);
   const imgRef = useRef(null);
@@ -25,6 +25,12 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit }) {
   const [expand, setExpand] = useState(14);
   const [influence, setInfluence] = useState(78);
   const [prompt, setPrompt] = useState('');
+  // Smart select (SAM3): name the thing, or tap it. Taps are collected in
+  // image-fraction coordinates so the gateway never needs the display size.
+  const [selecting, setSelecting] = useState(false);
+  const [pointMode, setPointMode] = useState(false);
+  const [selectText, setSelectText] = useState('');
+  const [selectError, setSelectError] = useState('');
 
   const sizeCanvasToImage = () => {
     const img = imgRef.current;
@@ -72,8 +78,56 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit }) {
     setHasPaint(true);
   };
 
+  // Paint SAM3's silhouette into the same canvas the brush uses, so a smart
+  // selection and hand-painted strokes are one mask and every downstream
+  // control (collar, strength, the inpaint graph) works unchanged.
+  const paintReturnedMask = (maskDataUrl) => new Promise((resolve, reject) => {
+    const canvas = canvasRef.current;
+    if (!canvas) { resolve(false); return; }
+    const mask = new Image();
+    mask.onload = () => {
+      const ctx = canvas.getContext('2d');
+      // The mask arrives white-on-black; 'lighten' keeps existing strokes and
+      // adds the new region, and drops the black background on the way in.
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighten';
+      ctx.drawImage(mask, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+      setHasPaint(true);
+      resolve(true);
+    };
+    mask.onerror = () => reject(new Error('Could not read the returned mask'));
+    mask.src = maskDataUrl;
+  });
+
+  const runSmartSelect = async (points) => {
+    if (!onSmartSelect || selecting || busy) return;
+    setSelecting(true);
+    setSelectError('');
+    try {
+      const result = await onSmartSelect({ prompt: points ? '' : selectText.trim(), points });
+      if (result?.maskBase64) await paintReturnedMask(result.maskBase64);
+    } catch (error) {
+      setSelectError(error?.message || 'Smart select failed');
+    } finally {
+      setSelecting(false);
+    }
+  };
+
   const onPointerDown = (e) => {
     if (!ready || busy) return;
+    if (pointMode) {
+      // A tap is a selection, not a stroke: send it as a fraction of the image.
+      const canvas = canvasRef.current;
+      const point = canvasPoint(e);
+      void runSmartSelect([{
+        x: point.x / canvas.width,
+        y: point.y / canvas.height,
+        // Alt/right-click taps say "not this" — the donor's negative points.
+        foreground: !(e.altKey || e.button === 2),
+      }]);
+      return;
+    }
     // Capture can throw (released/synthetic pointers) — losing capture only
     // means a stroke ends at the canvas edge, never worth aborting the stroke.
     try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch { /* non-critical */ }
@@ -133,9 +187,54 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit }) {
     >
       <div className="flex flex-col gap-3">
         <p className="text-xs leading-relaxed text-ink3">
-          Paint the area to change. Only that area (plus a small blending collar)
-          regenerates — everything else keeps its exact pixels.
+          Paint the area to change{onSmartSelect ? ', or name it below and let SAM3 select it for you' : ''}.
+          Only that area (plus a small blending collar) regenerates — everything
+          else keeps its exact pixels.
         </p>
+
+        {onSmartSelect ? (
+          <div className="flex flex-col gap-1.5 rounded-lg border border-line1 bg-bg1 p-2.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Smart select</span>
+              <button
+                type="button"
+                onClick={() => setPointMode((on) => !on)}
+                disabled={busy || selecting}
+                title="Tap the thing on the image instead of naming it (alt-tap to exclude)"
+                className={cx(
+                  'rounded border px-2 py-0.5 text-[11px] transition-colors',
+                  pointMode ? 'border-honey/60 bg-honey-tint text-honey' : 'border-line1 bg-bg0 text-ink2 hover:border-line2',
+                )}
+              >
+                {pointMode ? 'Tap to select: on' : 'Tap to select'}
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={selectText}
+                onChange={(e) => setSelectText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && selectText.trim()) void runSmartSelect(null); }}
+                placeholder="e.g. the jacket"
+                disabled={busy || selecting}
+                className="flex-1 rounded-md border border-line1 bg-bg0 px-2.5 py-1.5 text-[13px] text-ink1 outline-none placeholder:text-ink3 focus:border-honey/50"
+              />
+              <ActionButton
+                variant="neutral"
+                label={selecting ? 'Selecting…' : 'Select'}
+                loading={selecting}
+                disabled={busy || selecting || !selectText.trim()}
+                onClick={() => void runSmartSelect(null)}
+              />
+            </div>
+            <p className="text-[11px] leading-relaxed text-ink3">
+              {pointMode
+                ? 'Tap the object on the image; alt-tap something to exclude it. The silhouette is added to your mask.'
+                : 'The selection is added to whatever you have already painted, so you can refine it with the brush.'}
+            </p>
+            {selectError ? <p className="text-[11px] text-danger">{selectError}</p> : null}
+          </div>
+        ) : null}
         <div className="grid place-items-center overflow-hidden rounded-lg border border-line1 bg-bg0">
           <div className="relative">
             <img
@@ -148,8 +247,9 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit }) {
             />
             <canvas
               ref={canvasRef}
-              className={cx('absolute inset-0 h-full w-full opacity-45', busy ? 'cursor-wait' : 'cursor-crosshair')}
+              className={cx('absolute inset-0 h-full w-full opacity-45', (busy || selecting) ? 'cursor-wait' : 'cursor-crosshair')}
               style={{ touchAction: 'none' }}
+              onContextMenu={(e) => { if (pointMode) e.preventDefault(); }}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={onPointerUp}

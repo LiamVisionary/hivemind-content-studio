@@ -103,6 +103,7 @@ export const IMAGE_TAB_FIELDS = [
   'seed', 'seedText', 'selectedStyle', 'batchCount',
   'customWidth', 'customHeight', 'sampler', 'scheduler', 'baseSize', 'referenceStrength',
   'coupleMode', 'coupleDirection', 'coupleSplit', 'couplePair', 'coupleShared', 'coupleA', 'coupleB',
+  'regionMode', 'regions',
   'characterSheetMode', 'characterSheetPreset',
   'loraSelectionsByModel', 'modelSettingsById', 'loraOpen',
 ];

@@ -104,15 +104,17 @@ test('hosted workflow discovery resolves inherited workflow definitions', () => 
 });
 
 test('Explore discovers runtime image workflows and forwards inline images', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../src/components/ImageStudio.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../src/studios/ImageStudio.jsx'), 'utf8');
     assert.match(source, /localAI\.listModels\(\)/);
     assert.match(source, /compatibleLocalModels\(\)/);
-    assert.match(source, /image_base64: sourceImage/);
-    assert.match(source, /localAI\.listLoras\(model\.id\)/);
-    assert.match(source, /loras: loraGenerationPayload\(currentLoraSelection\(\)\)/);
-    assert.match(source, /createCivitaiDownloadDialog/);
-    assert.match(source, /download-lora-btn/);
-    assert.match(source, /localAI\.generatePrompt\(/);
-    assert.match(source, /data-prompt-helper-use/);
+    // References travel as inline base64, never as an object URL the backend
+    // could not resolve — and never as a plaintext blob left in page memory.
+    assert.match(source, /image_base64: /);
     assert.doesNotMatch(source, /URL\.createObjectURL\(file\)/);
+    assert.match(source, /localAI\.listLoras\(model\.id\)/);
+    assert.match(source, /loraGenerationPayload\(/);
+    assert.match(source, /localAI\.generatePrompt\(/);
+    assert.match(source, /promptHelper/);
+    // The Civitai download entry point moved into the LoRA section component.
+    assert.match(fs.readFileSync(path.join(__dirname, '../src/studios/image/LoraSection.jsx'), 'utf8'), /Download LoRA/);
 });

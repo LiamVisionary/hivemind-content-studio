@@ -26,6 +26,20 @@ export function referenceKindForFile({ type = '', name = '' } = {}) {
   return Object.keys(EXTENSIONS).find((kind) => EXTENSIONS[kind].includes(extension)) || null;
 }
 
+// Why a dropped file cannot be attached, as a CODE — the wording (and its
+// translation) belongs to the panel. null means it can be.
+//
+// These are three unrelated failures and they used to be reported as one
+// sentence, "Not usable as a reference: <name>", which told you nothing about
+// which had happened. A full row and an unsupported file need opposite fixes,
+// and a server refusal (too large, unsupported codec) already carries its own
+// explanation that the drop handler was discarding.
+export function referenceDropBlock({ kind, taken = 0, limit = 0 } = {}) {
+  if (!kind) return 'unsupported';
+  if (taken >= limit) return 'full';
+  return null;
+}
+
 // The kinds a drag is carrying, for highlighting the row it will land in.
 // During dragover the browser exposes each item's TYPE but not its name, so an
 // extension-only drag reads as unknown — the drop still routes it correctly.

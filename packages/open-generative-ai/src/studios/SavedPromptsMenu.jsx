@@ -5,13 +5,20 @@
 // The whole library is sealed to the owner vault (savedLibraryStore), so prompt
 // text never reaches the server in a readable form — the same client-only E2E
 // rule the composer, history, and generated media already follow.
+//
+// Below the saved entries sits the DEFAULT library (lib/defaultPrompts.js): the
+// starters that ship with the app, filtered to the model that is selected right
+// now — each is a finished prompt in that model's own format, so the ones for
+// other models are hidden rather than listed. They are not vault data, so they
+// show even while the vault is locked.
 import { useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useSavedLibrary } from '../hooks/hooks.js';
 import { LIBRARIES, deleteLibraryEntry, saveLibraryEntry } from '../lib/savedLibraryStore.js';
+import { defaultPromptsFor, describeDefaultPrompt, describeDefaultPromptPart } from '../lib/defaultPrompts.js';
 import { Icon } from '../ui/icons.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
-import { ChipButton, Menu } from '../ui/Menu.jsx';
+import { ChipButton, Menu, MenuHeading } from '../ui/Menu.jsx';
 import { LibraryDeleteButton, LibraryStateNote, SaveNameModal } from '../ui/SavedLibrary.jsx';
 import { cx } from '../ui/kit.jsx';
 
@@ -44,13 +51,16 @@ export function describeSavedContext(section, context) {
   return parts.filter(Boolean).map(String).join(' · ');
 }
 
-export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture, onLoadPrompt, onLoadContext }) {
+// `modelSource` is the current studio setup — used only to float the starters
+// written for the selected model to the top, so it stays optional.
+export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture, modelSource = null, onLoadPrompt, onLoadContext }) {
   const { entries, loading, locked, retry } = useSavedLibrary(LIBRARIES.prompts);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const hasPrompt = Boolean(String(prompt || '').trim());
+  const starters = defaultPromptsFor(section, modelSource);
 
   const save = async (name) => {
     setSaving(true);
@@ -78,6 +88,22 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
   const loadPromptOnly = (entry) => {
     onLoadPrompt({ prompt: entry.data?.prompt || '', negativePrompt: entry.data?.negativePrompt || '' });
     toast.success(`Loaded the prompt from “${entry.name}”.`);
+  };
+
+  // A starter carries no negative prompt of its own, so the current one is
+  // passed straight back rather than cleared — replacing the prompt text is what
+  // was asked for, wiping a negative prompt is not.
+  //
+  // The toast carries the part's own instruction (arm the chain, press Extend)
+  // because that step happens BEFORE the pasted prompt makes sense, and the
+  // hover title it came from is gone the moment the menu closes.
+  const loadStarter = (entry, part, index = 0) => {
+    onLoadPrompt({ prompt: part.prompt, negativePrompt });
+    const name = entry.parts.length > 1
+      ? `${entry.name} — part ${index + 1}`
+      : entry.name;
+    if (part.note) toast.success(`Loaded “${name}”. ${part.note}`, { duration: 8000 });
+    else toast.success(`Loaded “${name}”.`);
   };
 
   const loadEverything = (entry) => {
@@ -192,6 +218,56 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
                   );
                 })}
               </div>
+            ) : null}
+
+            {starters.length ? (
+              <>
+                <div className="my-1 h-px bg-line1" />
+                <MenuHeading>Starter prompts</MenuHeading>
+                <div className="max-h-72 overflow-y-auto">
+                  {starters.map((entry) => {
+                    const split = entry.parts.length > 1;
+                    // A single-part starter is the row itself. A split one keeps
+                    // the row as a label and gives each part its own button —
+                    // the parts are generated in separate runs, so there is no
+                    // "load the whole thing" to offer.
+                    const Row = split ? 'div' : 'button';
+                    return (
+                      <div key={entry.id} className="rounded-md px-1 py-0.5">
+                        <Row
+                          {...(split ? {} : {
+                            type: 'button',
+                            onClick: () => { loadStarter(entry, entry.parts[0]); close(); },
+                            title: entry.note || 'Replace the prompt text with this starter',
+                          })}
+                          className={cx(
+                            'flex w-full flex-col items-start rounded-md px-1.5 py-1 text-left transition-colors',
+                            split ? '' : 'hover:bg-bg2',
+                          )}
+                        >
+                          <span className="truncate text-[13px] font-medium text-ink1">{entry.name}</span>
+                          <span className="truncate text-[10px] text-ink3">{describeDefaultPrompt(entry)}</span>
+                        </Row>
+                        {split ? (
+                          <div className="mt-1 flex flex-wrap items-center gap-1 px-1.5 pb-1">
+                            {entry.parts.map((part, index) => (
+                              <button
+                                key={part.label}
+                                type="button"
+                                onClick={() => { loadStarter(entry, part, index); close(); }}
+                                title={[entry.note, part.note].filter(Boolean).join('\n\n')}
+                                className="rounded-sm border border-line1 bg-bg1 px-2 py-1 text-[11px] font-semibold text-ink1 transition-colors hover:border-honey/50 hover:text-honey"
+                              >
+                                {describeDefaultPromptPart(part, index)}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
             ) : null}
           </>
         )}

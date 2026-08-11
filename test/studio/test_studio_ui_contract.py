@@ -105,8 +105,10 @@ def test_root_owner_gate_can_lock_and_handoff_to_canvas_without_url_credentials(
 
 
 def test_embedded_creative_surfaces_keep_prompts_and_outputs_out_of_persistent_browser_storage() -> None:
-    image_studio = (OPEN_GEN_ROOT / "components" / "ImageStudio.js").read_text(encoding="utf-8")
-    video_studio = (OPEN_GEN_ROOT / "components" / "VideoStudio.js").read_text(encoding="utf-8")
+    # The shipped React studios; the vanilla ones these used to read were
+    # retired in 2026-08 (git history: src/components/).
+    image_studio = (OPEN_GEN_ROOT / "studios" / "ImageStudio.jsx").read_text(encoding="utf-8")
+    video_studio = (OPEN_GEN_ROOT / "studios" / "VideoStudio.jsx").read_text(encoding="utf-8")
     private_bridge = (OPEN_GEN_ROOT / "lib" / "hivemindStudio.js").read_text(encoding="utf-8")
     pending_jobs = (OPEN_GEN_ROOT / "lib" / "pendingJobs.js").read_text(encoding="utf-8")
 

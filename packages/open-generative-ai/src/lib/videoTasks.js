@@ -14,36 +14,78 @@
 // AND an image — was silently impossible, and every fix only moved the failure to
 // the next copy. Adding a task must mean editing this file, not eight of them.
 //
-// Lives in src/lib rather than videoLogic.jsx so the node:test suite can import
+// Lives in src/lib rather than videoLogic.js so the node:test suite can import
 // it; that suite cannot load JSX, which is precisely why the two rules that stayed
 // in the JSX file were the ones no test caught.
 
-import { isHivemindVideoModelId } from './hivemindStudio.js';
+import { isHivemindVideoModelId, workflowIdFromHivemindModelId } from './hivemindModelIds.js';
+
+/**
+ * The workflow-registry family of a studio SETUP or a catalog MODEL ENTRY,
+ * lower-cased, or '' when the thing has no registry family at all.
+ *
+ * One fact, two field names, because it is denormalized: the studio copies it
+ * into `setup.modelFamily`, and catalog entries carry it as `workflowFamily`.
+ * Accepting both is what lets every family question be asked of whichever
+ * object a caller happens to be holding — the alternative (a setup-only
+ * predicate plus an inline `String(entry.workflowFamily).startsWith(...)` at
+ * each model-shaped call site) is how the two drifted apart in the first place.
+ *
+ * The cloud catalogs' own `family` field is DELIBERATELY not consulted. It is a
+ * different namespace that happens to collide: `ltx-2-pro-image-to-video` is
+ * family "ltx" and MiniMax Hailuo is "minimax-2", and reading it here would
+ * hand a remote provider's model the local graph's controls.
+ */
+function registryFamily(source) {
+    const family = String(source?.modelFamily ?? source?.workflowFamily ?? '').toLowerCase();
+    if (family) return family;
+    // Fallback for setups persisted before modelFamily existed. Only local
+    // workflow ids carry the provider prefix, and only local workflows have a
+    // registry family, so a bare cloud id is never guessed at — that guess is
+    // what would misread `ltx-2-pro-image-to-video` as an LTX-graph workflow.
+    const id = String(source?.modelId ?? source?.id ?? '');
+    return isHivemindVideoModelId(id) ? workflowIdFromHivemindModelId(id).toLowerCase() : '';
+}
 
 /** Extend and head swap are LTX-GRAPH features (the extension graph and the
  *  BFS head-swap LoRA). Other families — MiniMax H3 and anything added later
- *  — can only generate, so offering those tabs there is a lie. Family comes
- *  from the workflow registry; the id prefix is the fallback for setups
- *  persisted before the field existed. */
-export function isLtxFamilyModel(setup) {
-    const family = String(setup?.modelFamily || '').toLowerCase();
-    if (family) return family.startsWith('ltx');
-    // Fallback for setups persisted before modelFamily existed. The workflow
-    // id sits AFTER the provider prefix ("hivemind-media:ltx23-eros-…"), so
-    // testing the raw id would never match a real selection.
-    const id = String(setup?.modelId || '');
-    return /^ltx/i.test(id.includes(':') ? id.slice(id.indexOf(':') + 1) : id);
+ *  — can only generate, so offering those tabs there is a lie. */
+export function isLtxFamilyModel(source) {
+    return registryFamily(source).startsWith('ltx');
 }
 
 /** MiniMax H3-family workflows get their own quality controls (15s duration
  *  ceiling, native-canvas resolution tier, refinement steps) because those
  *  tradeoffs are measured properties of THIS model, not of local video
- *  generally. Same family/id-fallback contract as isLtxFamilyModel. */
-export function isMinimaxFamilyModel(setup) {
-    const family = String(setup?.modelFamily || '').toLowerCase();
-    if (family) return family.startsWith('minimax');
-    const id = String(setup?.modelId || '');
-    return /^minimax/i.test(id.includes(':') ? id.slice(id.indexOf(':') + 1) : id);
+ *  generally. */
+export function isMinimaxFamilyModel(source) {
+    return registryFamily(source).startsWith('minimax');
+}
+
+/**
+ * What attaching a SOURCE clip is about to cost, or null when it costs nothing.
+ *
+ * Extend and head swap are LTX-graph features, so attaching a clip while a
+ * non-LTX workflow is selected moves you to an LTX one — and a source clip and
+ * reference mode never combine, so any attached references are dropped. Both
+ * used to happen silently: you picked MiniMax H3, dropped in a clip, and were
+ * quietly on a different model with your references gone.
+ *
+ * Returns the facts; the studio does the asking.
+ */
+export function sourceVideoSwitchCost({ setup, target } = {}) {
+    const fromId = String(setup?.modelId || '');
+    const toId = String(target?.id || '');
+    const referenceCount = ['referenceImageUrls', 'referenceVideos', 'referenceAudios']
+        .reduce((total, key) => total + (Array.isArray(setup?.[key]) ? setup[key].filter(Boolean).length : 0), 0);
+    const switchesModel = Boolean(toId) && toId !== fromId;
+    if (!switchesModel && !referenceCount) return null;
+    return {
+        switchesModel,
+        fromModel: String(setup?.modelName || fromId),
+        toModel: String(target?.name || toId),
+        droppedReferences: referenceCount,
+    };
 }
 
 export const VIDEO_TASKS = ['generate', 'extend', 'head-swap'];
@@ -81,9 +123,18 @@ export function slotLabelsFor(task, zh = false) {
             ? { image: '起始帧', video: '要延长的视频', imageHint: '', videoHint: '在其结尾追加新画面' }
             : { image: 'Start frame', video: 'Video to extend', imageHint: '', videoHint: 'New footage is appended to its end' };
     }
+    // NOT "Reference video". This slot is the SOURCE clip — attaching one puts
+    // the run on the extend/tools path and clears any references. Naming it
+    // "Reference video" put it one word away from the References menu beside
+    // it, which conditions on motion clips and is a different input entirely.
     return zh
-        ? { image: '起始帧', video: '参考视频', imageHint: '第一帧', videoHint: '' }
-        : { image: 'Start frame', video: 'Reference video', imageHint: 'Becomes the first frame', videoHint: '' };
+        ? { image: '起始帧', video: '要延长或编辑的片段', imageHint: '第一帧', videoHint: '会切换到延长/视频工具流程' }
+        : {
+            image: 'Start frame',
+            video: 'Clip to extend or edit',
+            imageHint: 'Becomes the first frame',
+            videoHint: 'Switches to the extend / video-tools path',
+        };
 }
 
 /**

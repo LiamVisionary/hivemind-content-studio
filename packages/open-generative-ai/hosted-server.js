@@ -775,6 +775,53 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       return sendJson(res, 202, submitted);
     } catch (e) { return sendJson(res, 502, { error: e.message }); }
   }
+  if (pathname === '/local-ai/smart-mask' && req.method === 'POST') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });
+    try {
+      const body = JSON.parse((await readBody(req, 64 * 1024 * 1024)).toString('utf8') || '{}');
+      if (!body.image_base64) return sendJson(res, 400, { error: 'image_base64 is required' });
+      const payload = {
+        image_base64: body.image_base64,
+        prompt: typeof body.prompt === 'string' ? body.prompt : '',
+        points: Array.isArray(body.points) ? body.points : undefined,
+        ...(Number.isFinite(Number(body.confidence)) ? { confidence: Number(body.confidence) } : {}),
+      };
+      const submitted = await requestJson(`${ZIMAGE_URL}/api/smart-mask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+        timeout: 120000,
+      });
+      return sendJson(res, 202, submitted);
+    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+  }
+  if (pathname === '/local-ai/ltx-director' && req.method === 'POST') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });
+    try {
+      const body = JSON.parse((await readBody(req, 8 * 1024 * 1024)).toString('utf8') || '{}');
+      if (!body.project || typeof body.project !== 'object') {
+        return sendJson(res, 400, { error: 'project is required' });
+      }
+      // The project is the payload; the gateway validates it and answers 400
+      // with a sentence, so this only forwards the fields the route reads.
+      const payload = {
+        project: body.project,
+        ...(Number.isFinite(Number(body.width)) ? { width: Number(body.width) } : {}),
+        ...(Number.isFinite(Number(body.height)) ? { height: Number(body.height) } : {}),
+        ...(Number.isFinite(Number(body.seed)) ? { seed: Number(body.seed) } : {}),
+        ...(Array.isArray(body.loras) ? { loras: body.loras } : {}),
+      };
+      const submitted = await requestJson(`${ZIMAGE_URL}/api/ltx-director`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+        timeout: 120000,
+      });
+      return sendJson(res, 202, submitted);
+    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+  }
   if (pathname === '/local-ai/episode' && req.method === 'POST') {
     const token = readToken();
     if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });

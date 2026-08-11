@@ -70,18 +70,46 @@ test('isMinimaxFamilyModel follows the registry family with an id fallback', asy
     }
 });
 
-test('refinement steps stay gated on a full-step lane end to end', () => {
-    // videoLogic.jsx cannot be imported by node:test (JSX), so pin the two
-    // load-bearing rules as source assertions, like loraSelection.test.js does.
-    const videoLogic = fs.readFileSync(path.join(__dirname, '../src/studios/video/videoLogic.jsx'), 'utf8');
+test('refinement steps stay gated on a full-step lane end to end', async () => {
     // The capability needs BOTH a registry-mapped steps slot and a full-step
     // default — a distilled turbo build (4-8 steps) must never get the 32-step
-    // preset bolted on.
-    assert.match(videoLogic, /accepts\.includes\('steps'\)\s*\n?\s*&& Number\(model\?\.defaultSteps\) >= 10/);
+    // preset bolted on. Derived in ONE place (the registry mapper), so assert it
+    // there, against real workflow shapes rather than against source text.
+    const restore = stubBrowserGlobals();
+    try {
+        const studio = await import(`${pathToFileURL(path.join(__dirname, '../src/lib/hivemindStudio.js')).href}?test=steps-gate`);
+        const map = (workflows) => studio.mapHivemindWorkflowModels({
+            media: { video: [{ id: 'media-studio-mcp', label: 'Media Studio', available: true, models: workflows }] },
+        });
+        const [full, turbo, noSlot] = map([
+            { id: 'minimax-h3', label: 'MiniMax H3', family: 'minimax', accepts: ['steps'], default_steps: 15 },
+            { id: 'minimax-h3-turbo', label: 'Turbo', family: 'minimax', accepts: ['steps'], default_steps: 6 },
+            { id: 'ltx23-eros-fast', label: 'LTX', family: 'ltx-2.3', accepts: [], default_steps: 30 },
+        ]);
+        assert.equal(full.supportsQualitySteps, true);
+        assert.equal(turbo.supportsQualitySteps, false, 'a distilled lane gets no 32-step override');
+        assert.equal(noSlot.supportsQualitySteps, false, 'no registry steps slot, no control');
+    } finally {
+        restore();
+    }
+
+    const videoLogic = fs.readFileSync(path.join(__dirname, '../src/studios/video/videoLogic.js'), 'utf8');
+    // The studio must READ that derivation, never restate it: a second copy of
+    // the rule is how the two ended up able to disagree.
+    assert.doesNotMatch(videoLogic, /accepts\.includes\('steps'\)/);
     const videoStudio = fs.readFileSync(path.join(__dirname, '../src/studios/VideoStudio.jsx'), 'utf8');
     // The request only carries steps when the SELECTED model passes that gate,
     // so a preference saved on H3 cannot leak into a turbo or LTX graph.
     assert.match(videoStudio, /supportsQualitySteps\(currentModel\(setup, s\.catalogs\)\)/);
-    // And the persisted preference round-trips within sane bounds.
-    assert.match(videoLogic, /steps: \(typeof value\.steps === 'number'/);
+});
+
+test('the persisted steps override round-trips within sane bounds', async () => {
+    const { normalizeVideoPreferences } = await import('../src/lib/videoPreferences.js');
+    const steps = (value) => normalizeVideoPreferences({ modelId: 'hivemind-media:minimax-h3', steps: value }).steps;
+    assert.equal(steps(32), 32);
+    assert.equal(steps(15.6), 16, 'rounded to a whole sampler step');
+    assert.equal(steps(0), null, 'out of range falls back to the workflow default');
+    assert.equal(steps(101), null);
+    assert.equal(steps('32'), null, 'a string is not a step count');
+    assert.equal(steps(undefined), null);
 });

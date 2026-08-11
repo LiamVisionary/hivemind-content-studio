@@ -23,18 +23,20 @@
 //     uploadFn={async (file) => url | { url }}
 //     requireApiKey={() => boolean}
 //   />
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { AuthModal } from '../../dialogs/AuthModal.jsx';
-import { useMediaSrc } from '../../hooks/hooks.js';
+import { useMediaSrc, useVideoPoster } from '../../hooks/hooks.js';
 import {
   motionReferenceWarning,
+  referenceDropBlock,
   referenceKindForFile,
   referenceKindsInDrag,
   referenceLabels,
   withMotionRetentionTags,
 } from '../../lib/h3References.js';
 import {
+  backfillHivemindReferencePoster,
   fetchHivemindReferences,
   isHivemindStudioEnabled,
   uploadFileToHivemindStudio,
@@ -45,7 +47,7 @@ import { useDismissable } from '../../ui/Menu.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
 import { Thumb } from '../UploadPicker.jsx';
-import { zh } from './videoLogic.jsx';
+import { zh } from './videoLogic.js';
 
 const KINDS = ['images', 'videos', 'audios'];
 
@@ -90,10 +92,43 @@ function fileLabel(item) {
 
 // Sealed sources decrypt in-browser, so previews take the resolved blob URL
 // exactly like Thumb does — and render a skeleton while that is in flight.
-function VideoRowPreview({ url }) {
-  const resolved = useMediaSrc(url);
-  if (!resolved) return <div className="h-full w-full animate-pulse bg-bg3" aria-label="Decrypting" />;
-  return <video src={resolved} muted playsInline preload="metadata" className="h-full w-full object-cover" />;
+//
+// A decoded first frame rather than a bare <video>: `preload="metadata"` fetches
+// duration and dimensions but no pixels, so the element sat blank and every clip
+// looked like every other clip. The <video> is still what mounts once a frame
+// exists, so hovering can play it; the poster is what makes it identifiable at
+// 36px. Falls back to the film icon for anything that will not decode.
+export function VideoThumb({ url, posterUrl = null, icon = 'film', onPosterCaptured }) {
+  // A server-built poster is a few KB, so the tile costs one small decrypt
+  // instead of pulling down and decrypting the entire clip.
+  const { poster, resolved, pending } = useVideoPoster(posterUrl ? '' : url);
+  useEffect(() => {
+    // Only for clips sealed before posters existed: hand the frame we just
+    // decoded back to the server so the next render is cheap for good.
+    if (posterUrl || !poster || !onPosterCaptured) return;
+    onPosterCaptured(url, poster);
+  }, [posterUrl, poster, url, onPosterCaptured]);
+  if (posterUrl) return <Thumb src={posterUrl} alt="" />;
+  if (!resolved || pending) {
+    return <div className="h-full w-full animate-pulse bg-bg3" aria-label={zh() ? '解密中' : 'Decrypting'} />;
+  }
+  if (!poster) {
+    return (
+      <span className="grid h-full w-full place-items-center bg-bg3 text-ink3" title={zh() ? '无法预览此片段' : 'This clip could not be previewed'}>
+        <Icon name={icon} size={12} />
+      </span>
+    );
+  }
+  return (
+    <video
+      src={resolved}
+      poster={poster}
+      muted
+      playsInline
+      preload="none"
+      className="h-full w-full object-cover"
+    />
+  );
 }
 
 function AudioRowPreview({ url }) {
@@ -128,7 +163,7 @@ function AudioRowPreview({ url }) {
   );
 }
 
-function ReferenceRow({ kind, index, item, label, onRemove, onToggleAudio }) {
+function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio }) {
   const meta = KIND_META[kind];
   const url = typeof item === 'string' ? item : item?.url;
   const name = fileLabel(item);
@@ -137,7 +172,7 @@ function ReferenceRow({ kind, index, item, label, onRemove, onToggleAudio }) {
     <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg2 p-1 pr-1.5">
       <div className="h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3">
         {kind === 'images' ? <Thumb src={url} alt={meta.tag(index)} /> : null}
-        {kind === 'videos' ? <VideoRowPreview url={url} /> : null}
+        {kind === 'videos' ? <VideoThumb url={url} posterUrl={posterUrl} onPosterCaptured={onPosterCaptured} /> : null}
         {kind === 'audios' ? <AudioRowPreview url={url} /> : null}
       </div>
       <span className="min-w-0 flex-1">
@@ -177,9 +212,9 @@ function ReferenceRow({ kind, index, item, label, onRemove, onToggleAudio }) {
   );
 }
 
-function ReferenceSection({
+export function ReferenceSection({
   kind, items, limit, labels, onAdd, onRemove, onToggleAudio, busy, recent, onPickRecent,
-  dropTarget, onWriteTags,
+  dropTarget, onWriteTags, posters = {}, onPosterCaptured,
 }) {
   const meta = KIND_META[kind];
   const full = items.length >= limit;
@@ -218,6 +253,8 @@ function ReferenceSection({
           index={index}
           item={item}
           label={labels[index]}
+          posterUrl={posters[typeof item === 'string' ? item : item?.url] || null}
+          onPosterCaptured={onPosterCaptured}
           onRemove={() => onRemove(index)}
           onToggleAudio={() => onToggleAudio?.(index)}
         />
@@ -237,8 +274,11 @@ function ReferenceSection({
         {full ? (zh() ? '已达上限' : 'All slots used') : meta.add()}
       </button>
       {!full && recent.length ? (
-        <div className="flex flex-wrap gap-1">
-          {recent.slice(0, 6).map((entry) => (
+        // Saved clips and voice notes get a wider tile with their filename:
+        // six identical film icons told you nothing about which clip was which,
+        // which is the one thing this list exists to answer.
+        <div className={cx('flex gap-1', kind === 'images' ? 'flex-wrap' : 'flex-col')}>
+          {recent.slice(0, 6).map((entry) => (kind === 'images' ? (
             <button
               key={entry.id}
               type="button"
@@ -246,11 +286,26 @@ function ReferenceSection({
               title={entry.name || entry.uploadedUrl}
               className="h-8 w-8 overflow-hidden rounded border border-line1 bg-bg3 transition-colors hover:border-honey/60"
             >
-              {kind === 'images'
-                ? <Thumb src={entry.uploadedUrl} alt="" />
-                : <span className="grid h-full w-full place-items-center text-ink3"><Icon name={meta.icon} size={12} /></span>}
+              <Thumb src={entry.uploadedUrl} alt="" />
             </button>
-          ))}
+          ) : (
+            <button
+              key={entry.id}
+              type="button"
+              onClick={() => onPickRecent(entry.uploadedUrl)}
+              title={entry.name || entry.uploadedUrl}
+              className="flex items-center gap-1.5 overflow-hidden rounded border border-line1 bg-bg2 p-0.5 pr-1.5 text-left transition-colors hover:border-honey/60"
+            >
+              <span className="h-8 w-8 shrink-0 overflow-hidden rounded bg-bg3">
+                {kind === 'videos'
+                  ? <VideoThumb url={entry.uploadedUrl} posterUrl={entry.posterUrl || posters[entry.uploadedUrl] || null} icon={meta.icon} onPosterCaptured={onPosterCaptured} />
+                  : <span className="grid h-full w-full place-items-center text-ink3"><Icon name={meta.icon} size={12} /></span>}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[10px] text-ink2">
+                {entry.name || (zh() ? '已保存的参考' : 'Saved reference')}
+              </span>
+            </button>
+          )))}
         </div>
       ) : null}
     </div>
@@ -273,7 +328,13 @@ export function ReferencesMenu({
   const [busyKind, setBusyKind] = useState('');
   const [authOpen, setAuthOpen] = useState(false);
   const [recent, setRecent] = useState({ images: [], videos: [], audios: [] });
+  // reference url -> sealed poster url, from the saved-reference listing. The
+  // ATTACHED rows read it too: an attached clip is one of these references, and
+  // without the map each row would decrypt the whole clip to draw 36 pixels.
+  const [posters, setPosters] = useState({});
   const [dragKinds, setDragKinds] = useState([]);
+  // One backfill attempt per clip per session, whatever re-renders happen.
+  const backfilledRef = useRef(new Set());
   const fileInputRef = useRef(null);
   const pendingKindRef = useRef('images');
   // dragenter/dragleave fire for every child element, so a plain boolean
@@ -302,10 +363,25 @@ export function ReferencesMenu({
           videos: of('video'),
           audios: of('audio'),
         });
+        setPosters(Object.fromEntries(refs
+          .filter((entry) => entry.posterUrl)
+          .map((entry) => [entry.uploadedUrl, entry.posterUrl])));
       })
       .catch(() => {});
     return () => { alive = false; };
   }, [panelOpen]);
+
+  // A clip sealed before posters existed just got decoded in the browser — the
+  // only place it CAN be decoded — so hand that frame back for next time.
+  const onPosterCaptured = useCallback(async (url, dataUrl) => {
+    if (!url || !dataUrl || backfilledRef.current.has(url)) return;
+    backfilledRef.current.add(url);
+    try {
+      const blob = await (await fetch(dataUrl)).blob();
+      const posterUrl = await backfillHivemindReferencePoster(url, blob);
+      if (posterUrl) setPosters((previous) => ({ ...previous, [url]: posterUrl }));
+    } catch { /* a thumbnail is a nicety; the local decode already drew it */ }
+  }, []);
 
   const values = { images, videos, audios };
   const labels = referenceLabels({ images, videos, audios });
@@ -377,17 +453,40 @@ export function ReferencesMenu({
     }
     const taken = { images: images.length, videos: videos.length, audios: audios.length };
     const added = { images: [], videos: [], audios: [] };
+    // Each rejection carries WHY. Three unrelated failures — an unsupported
+    // file, a full row, and a server refusal (too large, too short, bad codec)
+    // — used to collapse into one "Not usable as a reference", so a clip the
+    // server had explained perfectly well came back unexplained. The single-file
+    // picker always surfaced err.message; only this path threw it away.
     const rejected = [];
     for (const file of files) {
       const kind = referenceKindForFile(file);
-      if (!kind) { rejected.push(file.name); continue; }
-      if (taken[kind] >= limits[kind]) { rejected.push(file.name); continue; }
+      const block = referenceDropBlock({ kind, taken: taken[kind], limit: limits[kind] });
+      if (block === 'unsupported') {
+        rejected.push({ name: file.name, reason: zh() ? '不是图片、视频或音频文件' : 'not a picture, clip or voice file' });
+        continue;
+      }
+      if (block === 'full') {
+        rejected.push({
+          name: file.name,
+          reason: zh()
+            ? `${KIND_META[kind].label()}已满（上限 ${limits[kind]}）`
+            : `the ${KIND_META[kind].label()} row is full (${limits[kind]} max)`,
+        });
+        continue;
+      }
       taken[kind] += 1;
       try {
         added[kind].push(await uploadInto(kind, file));
       } catch (err) {
         console.error('[ReferencesMenu] dropped upload failed:', err);
-        rejected.push(file.name);
+        // The server states its cap but cannot state YOUR file's size, and "max
+        // 100 MB" is only actionable next to the number it is being compared to.
+        const megabytes = file.size ? ` (${(file.size / 1024 / 1024).toFixed(1)} MB)` : '';
+        rejected.push({
+          name: file.name,
+          reason: `${err?.message || (zh() ? '上传失败' : 'upload failed')}${megabytes}`,
+        });
         taken[kind] -= 1;
       }
     }
@@ -396,10 +495,8 @@ export function ReferencesMenu({
       emit('videos', [...videos, ...added.videos.map((item) => ({ ...item, useAudio: false }))]);
     }
     if (added.audios.length) emit('audios', [...audios, ...added.audios]);
-    if (rejected.length) {
-      toast.error(zh()
-        ? `无法作为参考使用：${rejected.join('、')}`
-        : `Not usable as a reference: ${rejected.join(', ')}`);
+    for (const { name, reason } of rejected) {
+      toast.error(zh() ? `${name}：${reason}` : `${name} — ${reason}`);
     }
   };
 
@@ -466,6 +563,8 @@ export function ReferencesMenu({
               busy={busyKind === kind}
               recent={recent[kind] || []}
               dropTarget={dragKinds.includes(kind)}
+              posters={posters}
+              onPosterCaptured={onPosterCaptured}
               onWriteTags={kind === 'videos' && onPromptChange
                 ? () => onPromptChange(withMotionRetentionTags(prompt, videos))
                 : null}

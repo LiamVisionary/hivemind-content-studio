@@ -51,18 +51,26 @@ test('extend and head swap never send motion context', () => {
     assert.equal(videoRequestPlan(ltx({ videoTask: 'head-swap', videoUrl: 'v.mp4', imageUrl: 'f.png', motionContextUrl: '/x.mp4' })).sendMotionContext, false);
 });
 
-test('the persisted chain pointer stays an opaque same-origin path', () => {
-    // videoLogic.jsx cannot be imported by node:test (JSX), so pin the two
-    // load-bearing preference rules as source assertions, like
-    // minimaxVideoControls.test.js does for the steps gate.
-    const videoLogic = fs.readFileSync(path.join(__dirname, '../src/studios/video/videoLogic.jsx'), 'utf8');
-    // normalizeVideoPreferences: only a bounded same-origin path survives —
-    // the pointer must never become a foreign-URL exfiltration channel.
-    assert.match(videoLogic, /url\.startsWith\('\/'\) && url\.length <= 512 \? url : ''/);
+test('the persisted chain pointer stays an opaque same-origin path', async () => {
+    // Only a bounded same-origin path survives — the pointer must never become a
+    // foreign-URL exfiltration channel. Now a real round-trip: the normalizer
+    // moved out of the .jsx file the node suite could not load.
+    const { normalizeVideoPreferences } = await import('../src/lib/videoPreferences.js');
+    const pointer = (motionContextUrl) => normalizeVideoPreferences({
+        modelId: 'hivemind-media:minimax-h3', motionContextUrl,
+    }).motionContextUrl;
+    assert.equal(pointer('/api/media-studio/runs/opaque.mp4'), '/api/media-studio/runs/opaque.mp4');
+    assert.equal(pointer('https://exfil.test/clip.mp4'), '', 'a foreign origin is dropped');
+    assert.equal(pointer('//exfil.test/clip.mp4'), '', 'a protocol-relative host is not same-origin');
+    assert.equal(pointer(`/${'x'.repeat(600)}`), '', 'bounded length');
+
+    const videoLogic = fs.readFileSync(path.join(__dirname, '../src/studios/video/videoLogic.js'), 'utf8');
     // applyRestoredPreferences: an in-progress chain survives reload.
     assert.match(videoLogic, /s\.motionContextUrl = preferences\.motionContextUrl/);
     // applyGenerationContext restores BOTH the family (which gates the chain
-    // plan) and the armed pointer when a sealed setup is dragged back in.
+    // plan) and the armed pointer when a sealed setup is dragged back in. The
+    // family now comes from the one selected-model writer.
     assert.match(videoLogic, /modelFamily: String\(model\.workflowFamily \|\| ''\)/);
+    assert.match(videoLogic, /withSelectedModel\(s0, model\)/);
     assert.match(videoLogic, /motionContextUrl: context\.motionContextUrl \|\| null/);
 });

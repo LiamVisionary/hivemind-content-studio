@@ -235,6 +235,9 @@ from klein_character_sheet import (
     character_sheet_view_prompt,
     resolve_character_sheet_views,
 )
+from smart_mask import build_sam3_mask_prompt
+from ltx_director_graph import build_ltx_director_prompt, missing_ltx_director_assets
+from ltx_director_timeline import DirectorProjectError, director_missing_assets
 
 try:
     from hardware_profile import capabilities_for_profile, detect_profile
@@ -4224,6 +4227,284 @@ def run_comfy_krea2_outpaint(job_id, prompt, image_path, options=None, outpaint=
                     outputs.append(str(path))
         if not outputs:
             raise RuntimeError("outpaint completed without an output image")
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": encrypt_outputs(outputs),
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as exc:
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(exc)})
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
+COMFY_TEMP_DIR = Path(
+    os.environ.get("COMFY_TEMP_DIR", str(Path.home() / ".comfy-private.noindex/temp"))
+)
+
+
+def resolve_comfy_temp_file(filename, subfolder=""):
+    """Where ComfyUI actually put a temp output.
+
+    ComfyUI appends its own "temp" segment to the directory it is given, so a
+    file the history reports as `x.png` lives at `<COMFY_TEMP_DIR>/temp/x.png`
+    on this stack — while a plain ComfyUI puts it directly in the root. Both
+    layouts are checked rather than assumed; getting this wrong reads as "the
+    graph produced nothing" even though it ran perfectly."""
+    name = safe_name(str(filename or ""))
+    if not name:
+        return None
+    sub = str(subfolder or "").strip().strip("/")
+    root = COMFY_TEMP_DIR.expanduser().resolve()
+    for base in (root / "temp", root):
+        candidate = (base / sub / name) if sub else (base / name)
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            continue
+        if _is_under(candidate, root) and candidate.is_file():
+            return candidate
+    return None
+
+
+def run_sam3_smart_mask(job_id, image_path, options=None):
+    """Segment an object out of an image and hand the mask straight back.
+
+    This is the selection step of the masked edit: instead of painting the
+    region, name it ("the jacket") or tap it, and SAM3 returns the exact
+    silhouette for the existing inpaint path to use.
+
+    The mask never becomes an output. It leaves the graph through PreviewImage
+    into ComfyUI's temp directory, is read once, returned INLINE as a data URL,
+    and deleted — so smart-select leaves nothing sealed in History and nothing
+    plaintext on disk. The source image arrives already-decrypted from the
+    browser, so this never needs the vault key."""
+    started = now_iso()
+    options = options or {}
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "sam3-smart-mask",
+        "created_at": started,
+        "outputs": [],
+        "mode": "text" if str(options.get("prompt") or "").strip() else "points",
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    temp_files = []
+    try:
+        source = Path(image_path).expanduser().resolve()
+        if not source.is_file():
+            raise RuntimeError("smart-select source image is missing")
+        COMFY_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+        name = safe_name(source.name)
+        staged = (COMFY_INPUT_DIR / name).resolve()
+        if staged != source:
+            staged.write_bytes(source.read_bytes())
+
+        t0 = time.monotonic()
+        api_prompt = build_sam3_mask_prompt(
+            name,
+            prompt=options.get("prompt") or "",
+            points=options.get("points"),
+            confidence=float_option(options, "confidence", 0.2, 0.05, 0.95),
+        )
+        body = json.dumps({"prompt": api_prompt, "client_id": f"media-smartmask-{job_id}"}).encode("utf-8")
+        req = Request(f"{COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
+        try:
+            queued = json.loads(urlopen(req, timeout=30).read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"ComfyUI rejected the smart-select graph: {detail[:2000]}") from exc
+        prompt_id = queued.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI did not return prompt_id: {queued}")
+
+        history = None
+        # First run loads a 3.45GB checkpoint; warm runs are ~20s.
+        for _ in range(300):
+            time.sleep(2)
+            try:
+                payload = urlopen(f"{COMFY_HTTP_DEFAULT}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                data = json.loads(payload or "{}")
+                if prompt_id in data:
+                    history = data[prompt_id]
+                    break
+            except Exception:
+                pass
+        if history is None:
+            raise RuntimeError(f"smart-select timed out waiting for prompt {prompt_id}")
+        status = history.get("status") or {}
+        if status.get("status_str") != "success":
+            raise RuntimeError(f"smart-select failed: {status}")
+
+        mask_bytes = None
+        for node_out in (history.get("outputs") or {}).values():
+            for image in node_out.get("images") or []:
+                filename = str(image.get("filename") or "")
+                if not filename:
+                    continue
+                candidate = resolve_comfy_temp_file(filename, image.get("subfolder"))
+                if candidate is None:
+                    continue
+                temp_files.append(candidate)
+                if mask_bytes is None:
+                    mask_bytes = candidate.read_bytes()
+        if not mask_bytes:
+            raise RuntimeError("smart-select produced no mask — try naming the object differently")
+
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "elapsed_seconds": round(time.monotonic() - t0, 2),
+            # Inline: the browser composites this into the mask canvas straight
+            # away, and nothing about the selection is written down anywhere.
+            "mask_base64": "data:image/png;base64," + base64.b64encode(mask_bytes).decode("ascii"),
+        })
+    except Exception as exc:
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(exc)})
+    finally:
+        for path in temp_files:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    # The mask rides back in memory only. Writing it to history.jsonl would put
+    # a plaintext selection on disk forever — the one thing the temp-file dance
+    # above exists to avoid — and bloat the log with megabytes of base64.
+    append_history({key: value for key, value in rec.items() if key != "mask_base64"})
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
+def comfy_model_catalog():
+    """What ComfyUI is actually offering, per model folder.
+
+    Read from a loader node's combo options rather than the filesystem, because
+    that is the exact list the graph's names have to match — a file present on
+    disk but not in the list (wrong folder, not yet rescanned) would otherwise
+    look installed and then fail at validation.
+    """
+    sources = {
+        "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
+        "loras": ("LoraLoaderModelOnly", "lora_name"),
+        "text_encoders": ("LTXAVTextEncoderLoader", "text_encoder"),
+        "latent_upscale_models": ("LatentUpscaleModelLoader", "model_name"),
+    }
+    catalog = {}
+    for folder, (class_type, field) in sources.items():
+        names = []
+        try:
+            payload = urlopen(f"{COMFY_HTTP_DEFAULT}/object_info/{class_type}", timeout=10).read()
+            spec = json.loads(payload.decode("utf-8")).get(class_type) or {}
+            options = (spec.get("input", {}).get("required", {}).get(field) or [None])[0]
+            if isinstance(options, list):
+                names = [str(n) for n in options]
+        except Exception:
+            names = []
+        catalog[folder] = names
+    return catalog
+
+
+def run_ltx_director(job_id, project, options=None):
+    """Render one window of an LTX Director timeline (Mix-Studio port).
+
+    The timeline is validated before anything is queued — a bad segment reaches
+    ComfyUI as an opaque node error, so `normalize_director_project` refusing it
+    here with a sentence is the whole point of the data model. Referenced media
+    and the required weights are both checked up front for the same reason.
+
+    Unlike the studio's other video lanes this graph is built in code rather
+    than patched from a workflow JSON, because the node takes a bundle of
+    scalars that only make sense derived together (see ltx_director_graph)."""
+    started = now_iso()
+    options = dict(options or {})
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "ltx-director",
+        "created_at": started,
+        "outputs": [],
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    try:
+        t0 = time.monotonic()
+        options.setdefault("filename_prefix", f"ltx_director_{job_id}")
+        options.setdefault("seed", resolve_seed_option(options))
+        graph, meta = build_ltx_director_prompt(project, options)
+
+        missing_media = director_missing_assets(meta["project"], str(COMFY_INPUT_DIR))
+        if missing_media:
+            raise RuntimeError(
+                "these timeline files are not in the input directory: "
+                + ", ".join(missing_media[:8])
+            )
+        missing_weights = missing_ltx_director_assets(comfy_model_catalog())
+        if missing_weights:
+            raise RuntimeError(
+                "LTX Director is missing model files: " + ", ".join(missing_weights)
+            )
+        # Frames/duration are recorded before the run so a timeout still says
+        # what was attempted.
+        rec["options"] = {
+            "frames": meta["frames"],
+            "width": meta["width"],
+            "height": meta["height"],
+            "seconds": meta["seconds"],
+            "seed": options["seed"],
+        }
+
+        body = json.dumps({"prompt": graph, "client_id": f"media-ltxdirector-{job_id}"}).encode("utf-8")
+        req = Request(f"{COMFY_HTTP_DEFAULT}/prompt", data=body, headers={"Content-Type": "application/json"})
+        try:
+            queued = json.loads(urlopen(req, timeout=60).read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"ComfyUI rejected the Director graph: {detail[:2000]}") from exc
+        prompt_id = queued.get("prompt_id")
+        if not prompt_id:
+            raise RuntimeError(f"ComfyUI did not return prompt_id: {queued}")
+
+        history = None
+        # A cold run loads a 27GB checkpoint plus a 13GB text encoder, so the
+        # first render is minutes of loading before a single step.
+        for _ in range(1800):
+            time.sleep(2)
+            try:
+                payload = urlopen(f"{COMFY_HTTP_DEFAULT}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                data = json.loads(payload or "{}")
+                if prompt_id in data:
+                    history = data[prompt_id]
+                    break
+            except Exception:
+                pass
+        if history is None:
+            raise RuntimeError(f"LTX Director timed out waiting for prompt {prompt_id}")
+        status = history.get("status") or {}
+        if status.get("status_str") != "success":
+            raise RuntimeError(f"LTX Director failed: {status}")
+
+        outputs = []
+        for node_out in (history.get("outputs") or {}).values():
+            # SaveVideo reports under "images" on some builds and "videos" on
+            # others; take whichever the node actually produced.
+            for item in (node_out.get("videos") or []) + (node_out.get("images") or []):
+                name = safe_name(item.get("filename") or "")
+                if not name:
+                    continue
+                subfolder = item.get("subfolder") or ""
+                root = COMFY_OUTPUT_DIR if (item.get("type") or "output") == "output" else COMFY_INPUT_DIR
+                path = (root / subfolder / name).resolve()
+                if existing_output_path(path):
+                    outputs.append(str(path))
+        if not outputs:
+            raise RuntimeError("LTX Director completed without producing a video")
+
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
@@ -9882,6 +10163,69 @@ class Handler(BaseHTTPRequestHandler):
                     "page_url": f"/job/{job_id}",
                     "history_url": "/api/history",
                 }, 202)
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 400)
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, 500)
+        if parsed.path == "/api/smart-mask":
+            try:
+                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+                staged = stage_inline_image_base64(data.get("image_base64"))
+                if staged is None:
+                    return self.send_json({"error": "image_base64 is required"}, 400)
+                options = {
+                    "prompt": str(data.get("prompt") or "")[:400],
+                    "points": data.get("points"),
+                    "confidence": data.get("confidence"),
+                }
+                if not options["prompt"].strip() and not options["points"]:
+                    return self.send_json({"error": "describe an object or tap the image"}, 400)
+                job_id = uuid.uuid4().hex[:12]
+                with jobs_lock:
+                    jobs[job_id] = {"id": job_id, "prompt": PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": now_iso(), "backend": "sam3-smart-mask"}
+                threading.Thread(
+                    target=run_sam3_smart_mask, args=(job_id, staged, options), daemon=True,
+                ).start()
+                return self.send_json({
+                    "id": job_id,
+                    "status": "queued",
+                    "backend": "sam3-smart-mask",
+                    "job_url": f"/api/job/{job_id}",
+                }, 202)
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 400)
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, 500)
+        if parsed.path == "/api/ltx-director":
+            try:
+                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+                project = data.get("project")
+                if not isinstance(project, dict):
+                    return self.send_json({"error": "project is required"}, 400)
+                options = {
+                    "width": data.get("width"),
+                    "height": data.get("height"),
+                    "seed": data.get("seed"),
+                    "loras": data.get("loras"),
+                }
+                options = {k: v for k, v in options.items() if v is not None}
+                # Validate before queueing so a malformed timeline answers the
+                # caller directly instead of failing inside a background job.
+                build_ltx_director_prompt(project, options)
+                job_id = uuid.uuid4().hex[:12]
+                with jobs_lock:
+                    jobs[job_id] = {"id": job_id, "prompt": PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": now_iso(), "backend": "ltx-director"}
+                threading.Thread(
+                    target=run_ltx_director, args=(job_id, project, options), daemon=True,
+                ).start()
+                return self.send_json({
+                    "id": job_id,
+                    "status": "queued",
+                    "backend": "ltx-director",
+                    "job_url": f"/api/job/{job_id}",
+                }, 202)
+            except DirectorProjectError as exc:
+                return self.send_json({"error": str(exc)}, 400)
             except ValueError as exc:
                 return self.send_json({"error": str(exc)}, 400)
             except Exception as exc:

@@ -1,4 +1,4 @@
-// Settings modal (React port of components/SettingsModal.js).
+// Settings modal (React port of the retired vanilla studio).
 // Contracts preserved: API key seeded from localStorage 'muapi_key' at open;
 // Save trims + rejects empty (t('settings.invalidKey')) + writes the key + closes;
 // Cancel/X/backdrop/Escape close WITHOUT saving; the Local Models tab exists only
