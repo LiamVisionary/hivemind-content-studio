@@ -144,10 +144,27 @@ Verdicts from a full sweep of both codebases (2026-08-10; see ASSIMILATION_LOG.m
   to 8n+1; window re-basing that advances media trims. Added `director_missing_assets()` so a missing file
   is named up front instead of failing mid-sample. Their `extensionSource {itemId, videoId}` form points
   into a plaintext media library we do not have, so only the input-file form is accepted.
-  **Remaining:** `buildLtxDirectorGraph` (L332+) and the multi-track UI. Blocked because the LTX 2.3 22B
-  base checkpoint is not on this machine — ComfyUI lists only `waiANIMA_v10Base10.safetensors`. The IC-LoRA
-  ingredients 0.9, the 384 distilled LoRA and the spatial upscaler ARE present; our LTX lane runs through
-  MLX rather than a ComfyUI checkpoint, which is why the gap exists.
+  Graph builder shipped too: `packages/media-gateway/ltx_director_graph.py` + 13 tests, `/api/ltx-director`
+  route, bridge passthrough, allowlist entry, client method.
+  **Weights fetched 2026-08-11** (~40 GB): `ltx-2.3-22b-dev-fp8.safetensors` (27.1 GB) and
+  `gemma_3_12B_it_fp8_scaled.safetensors` (12.3 GB) — the donor pins the fp4_mixed encoder, an NVIDIA
+  quantisation this Mac cannot run. MLX weights are NOT substitutable: the MLX transformer is MLX
+  block-quantised (U32 + `.scales`/`.biases`), diffusers-keyed and transformer-only.
+  **LIVE-VERIFIED 2026-08-11 — video yes, audio NO.** A 2-segment 3s window rendered in 381s cold:
+  73 frames at 704x384, i.e. exactly the 8n+1 lattice the timeline model predicts, with no extra frames —
+  which is the proof `LTXDirectorCropGuides` stripped the guide frames instead of baking them in. Output
+  sealed to the owner vault as expected. QA copies were taken through ComfyUI's temp dir (the sweeper
+  ignores it, same trick as smart-select) because the server cannot read its own sealed output.
+  **The audio track decodes to digital silence** (peak 1/32767, -91 dB, correct 48 kHz stereo 3.05 s
+  shape). Bisected by decoding the audio latent after EACH pass: silent after the base pass too, so it is
+  never denoised rather than lost in the refine pass. Ruled out: our wiring (faithful to the donor,
+  node-for-node), `LTXVConcatAVLatent` mask semantics (an unmasked audio latent is filled with
+  `ones_like` = generate), `prepare_noise` (it unbinds nested AV latents and noises each part), and the
+  checkpoint (it carries `audio_vae` + `vocoder` tensors). Remaining suspects are model/platform level:
+  fp8 audio branch on MPS, the distilled LoRA at 0.5, or a text-encoder variant mismatch. Same failure
+  CLASS as the eros lane's silent clips (fixed 2026-08-10), different cause — worth checking that lane's
+  fix first when this is picked up.
+  **Remaining:** the multi-track timeline UI, and the audio investigation above.
 
 ### Phase 4 — library/ops, needs privacy-aware redesign (their design assumes plaintext server storage)
 - Library search / folders / user groups / trash-with-recovery / ZIP export: rebuild client-side over

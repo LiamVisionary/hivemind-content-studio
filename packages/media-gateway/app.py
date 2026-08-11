@@ -4380,6 +4380,25 @@ def run_sam3_smart_mask(job_id, image_path, options=None):
         jobs[job_id] = rec
 
 
+def comfy_combo_options(entry):
+    """The choices in a node's combo input, whichever schema it uses.
+
+    V1 nodes put the list in element 0; V3 nodes put the literal string 'COMBO'
+    there and move the choices into element 1's 'options'. Reading only element
+    0 silently yields nothing for V3 nodes, which reads as "the model is not
+    installed" when it is sitting right there on disk.
+    """
+    if not isinstance(entry, (list, tuple)) or not entry:
+        return []
+    if isinstance(entry[0], list):
+        return entry[0]
+    if len(entry) > 1 and isinstance(entry[1], dict):
+        options = entry[1].get("options")
+        if isinstance(options, list):
+            return options
+    return []
+
+
 def comfy_model_catalog():
     """What ComfyUI is actually offering, per model folder.
 
@@ -4400,9 +4419,8 @@ def comfy_model_catalog():
         try:
             payload = urlopen(f"{COMFY_HTTP_DEFAULT}/object_info/{class_type}", timeout=10).read()
             spec = json.loads(payload.decode("utf-8")).get(class_type) or {}
-            options = (spec.get("input", {}).get("required", {}).get(field) or [None])[0]
-            if isinstance(options, list):
-                names = [str(n) for n in options]
+            entry = spec.get("input", {}).get("required", {}).get(field) or []
+            names = [str(n) for n in comfy_combo_options(entry)]
         except Exception:
             names = []
         catalog[folder] = names

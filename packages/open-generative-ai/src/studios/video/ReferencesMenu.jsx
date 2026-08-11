@@ -41,6 +41,9 @@ import {
   isHivemindStudioEnabled,
   uploadFileToHivemindStudio,
 } from '../../lib/hivemindStudio.js';
+import { peekResolvedMediaSrc, resolveMediaSrc, revokeResolvedMedia } from '../../lib/e2eMedia.js';
+import { captureImagePoster, captureVideoPoster } from '../../lib/mediaPoster.js';
+import { warmReferencePosters } from '../../lib/referencePosterWarmup.js';
 import { muapi } from '../../lib/muapi.js';
 import { getUploadHistory, saveUpload } from '../../lib/uploadHistory.js';
 import { useDismissable } from '../../ui/Menu.jsx';
@@ -350,6 +353,12 @@ export function ReferencesMenu({
   const [dragKinds, setDragKinds] = useState([]);
   // One backfill attempt per clip per session, whatever re-renders happen.
   const backfilledRef = useRef(new Set());
+  // The background warm-up runs once per mount, and keeps going after the panel
+  // is closed — it exists so nobody ever waits for a thumbnail, including the
+  // person who opened the panel first.
+  const warmupRef = useRef(false);
+  const liveRef = useRef(true);
+  useEffect(() => () => { liveRef.current = false; }, []);
   const fileInputRef = useRef(null);
   const pendingKindRef = useRef('images');
   // dragenter/dragleave fire for every child element, so a plain boolean
@@ -381,10 +390,48 @@ export function ReferencesMenu({
         setPosters(Object.fromEntries(refs
           .filter((entry) => entry.posterUrl)
           .map((entry) => [entry.uploadedUrl, entry.posterUrl])));
+        if (!warmupRef.current) {
+          warmupRef.current = true;
+          void startPosterWarmup(refs);
+        }
       })
       .catch(() => {});
     return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panelOpen]);
+
+  // Decrypt ONE reference, reduce it to a thumbnail, and let go of it again.
+  // Holding every decrypted original would mean 286 MB of live blobs after a
+  // pass over a real library — worse than the problem this fixes. Only release
+  // what this brought in: a tile on screen may be displaying one already cached.
+  const capturePosterFor = async (url, kind) => {
+    const wasCached = Boolean(peekResolvedMediaSrc(url));
+    const src = await resolveMediaSrc(url);
+    // resolveMediaSrc fails open by returning the original url — which means
+    // the vault is locked or it is not sealed. Nothing to decode either way.
+    if (!src || src === url) return null;
+    try {
+      return kind === 'video' ? await captureVideoPoster(src) : await captureImagePoster(src);
+    } finally {
+      if (!wasCached) revokeResolvedMedia(url);
+    }
+  };
+
+  const startPosterWarmup = (refs) => warmReferencePosters(refs, {
+    capture: capturePosterFor,
+    publish: async (url, dataUrl) => {
+      const blob = await (await fetch(dataUrl)).blob();
+      return backfillHivemindReferencePoster(url, blob);
+    },
+    onPoster: (url, posterUrl) => {
+      backfilledRef.current.add(url);
+      if (liveRef.current) setPosters((previous) => ({ ...previous, [url]: posterUrl }));
+    },
+    pause: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+    // Housekeeping yields to everything: a closed tab or an unmounted studio
+    // ends the pass, and the next mount picks up whatever is still missing.
+    shouldStop: () => !liveRef.current || (typeof document !== 'undefined' && document.hidden),
+  }).catch(() => {});
 
   // A clip sealed before posters existed just got decoded in the browser — the
   // only place it CAN be decoded — so hand that frame back for next time.
