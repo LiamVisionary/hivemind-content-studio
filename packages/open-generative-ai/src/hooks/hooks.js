@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCivitaiDownloads, subscribeCivitaiDownloads } from '../lib/civitaiDownloadStore.js';
 import { getRentalLoras, refreshRentalLoras, subscribeRentalLoras } from '../lib/rentalLoras.js';
 import { peekResolvedMediaSrc, resolveMediaSrc } from '../lib/e2eMedia.js';
-import { captureVideoPoster, peekVideoPoster } from '../lib/videoPoster.js';
+import { captureImagePoster, captureVideoPoster, peekMediaPoster } from '../lib/mediaPoster.js';
 import { ensureLibraryLoaded, isLibraryLoaded, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
 import { getLang, setLang, t, tf } from '../lib/i18n.js';
 
@@ -76,17 +76,20 @@ export function useMediaSrc(url) {
   return src;
 }
 
-// A video's first frame, as a data URL, for thumbnails. Decrypts the clip like
-// useMediaSrc does, then decodes ONE frame from it — a <video> pointed at a blob
-// paints nothing until it has decoded something, which is why sealed clips
-// showed up as identical placeholder icons.
+// A small poster for a sealed reference, as a data URL.
 //
-// Returns { poster, resolved, pending }: `poster` when a frame was decoded,
-// `resolved` so the caller can still mount a real <video> if it prefers, and
-// `pending` to tell "still working" apart from "this clip cannot be decoded".
-export function useVideoPoster(url) {
+// Decrypts the source like useMediaSrc does, then reduces it to a thumbnail:
+// one decoded frame for a clip (a <video> pointed at a blob paints nothing
+// until it decodes something, which is why sealed clips showed up as identical
+// placeholder icons), or a downscale for a picture (which renders fine, but
+// only after the whole multi-megabyte original has come down to fill 36px).
+//
+// Returns { poster, resolved, pending }: `poster` when one was produced,
+// `resolved` so the caller can still mount the real media if it prefers, and
+// `pending` to tell "still working" apart from "this cannot be decoded".
+export function useMediaPoster(url, { kind = 'video' } = {}) {
   const resolved = useMediaSrc(url);
-  const [poster, setPoster] = useState(() => peekVideoPoster(resolved));
+  const [poster, setPoster] = useState(() => peekMediaPoster(resolved));
   const [pending, setPending] = useState(false);
   useEffect(() => {
     if (!resolved) {
@@ -94,7 +97,7 @@ export function useVideoPoster(url) {
       setPending(false);
       return undefined;
     }
-    const cached = peekVideoPoster(resolved);
+    const cached = peekMediaPoster(resolved);
     if (cached !== null) {
       setPoster(cached);
       setPending(false);
@@ -102,13 +105,14 @@ export function useVideoPoster(url) {
     }
     let alive = true;
     setPending(true);
-    captureVideoPoster(resolved).then((value) => {
+    const capture = kind === 'image' ? captureImagePoster : captureVideoPoster;
+    capture(resolved).then((value) => {
       if (!alive) return;
       setPoster(value);
       setPending(false);
     });
     return () => { alive = false; };
-  }, [resolved]);
+  }, [resolved, kind]);
   return { poster, resolved, pending };
 }
 

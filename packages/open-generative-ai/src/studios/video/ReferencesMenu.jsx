@@ -26,7 +26,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { AuthModal } from '../../dialogs/AuthModal.jsx';
-import { useMediaSrc, useVideoPoster } from '../../hooks/hooks.js';
+import { useMediaPoster, useMediaSrc } from '../../hooks/hooks.js';
 import {
   motionReferenceWarning,
   referenceDropBlock,
@@ -90,35 +90,37 @@ function fileLabel(item) {
   return name.length > 34 ? `${name.slice(0, 31)}…` : name;
 }
 
-// Sealed sources decrypt in-browser, so previews take the resolved blob URL
-// exactly like Thumb does — and render a skeleton while that is in flight.
+// ONE tile for pictures and clips alike, and the whole point of it is not
+// drawing 36 pixels from a multi-megabyte original.
 //
-// A decoded first frame rather than a bare <video>: `preload="metadata"` fetches
-// duration and dimensions but no pixels, so the element sat blank and every clip
-// looked like every other clip. The <video> is still what mounts once a frame
-// exists, so hovering can play it; the poster is what makes it identifiable at
-// 36px. Falls back to the film icon for anything that will not decode.
-export function VideoThumb({ url, posterUrl = null, icon = 'film', onPosterCaptured }) {
-  // A server-built poster is a few KB, so the tile costs one small decrypt
-  // instead of pulling down and decrypting the entire clip.
-  const { poster, resolved, pending } = useVideoPoster(posterUrl ? '' : url);
+// `posterUrl` is a few-KB sealed thumbnail the server built at upload; with one
+// the tile costs a single small decrypt. Without one — every reference sealed
+// before posters existed — the browser falls back to decrypting the original,
+// draws the thumbnail itself, and hands it back through onPosterCaptured so the
+// next session is cheap. A clip additionally needs a frame DECODED: a <video>
+// pointed at a blob paints nothing until it has one, which is why sealed clips
+// used to render as identical placeholder icons.
+export function MediaThumb({ url, posterUrl = null, kind = 'video', alt = '', icon, onPosterCaptured }) {
+  const { poster, resolved, pending } = useMediaPoster(posterUrl ? '' : url, { kind });
   useEffect(() => {
-    // Only for clips sealed before posters existed: hand the frame we just
-    // decoded back to the server so the next render is cheap for good.
     if (posterUrl || !poster || !onPosterCaptured) return;
     onPosterCaptured(url, poster);
   }, [posterUrl, poster, url, onPosterCaptured]);
-  if (posterUrl) return <Thumb src={posterUrl} alt="" />;
+
+  if (posterUrl) return <Thumb src={posterUrl} alt={alt} />;
   if (!resolved || pending) {
     return <div className="h-full w-full animate-pulse bg-bg3" aria-label={zh() ? '解密中' : 'Decrypting'} />;
   }
   if (!poster) {
+    // Nothing decodable. A picture can still be shown as itself; a clip cannot.
+    if (kind === 'image') return <Thumb src={url} alt={alt} />;
     return (
       <span className="grid h-full w-full place-items-center bg-bg3 text-ink3" title={zh() ? '无法预览此片段' : 'This clip could not be previewed'}>
-        <Icon name={icon} size={12} />
+        <Icon name={icon || 'film'} size={12} />
       </span>
     );
   }
+  if (kind === 'image') return <img src={poster} alt={alt} className="h-full w-full object-cover" />;
   return (
     <video
       src={resolved}
@@ -171,8 +173,16 @@ function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, o
   return (
     <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg2 p-1 pr-1.5">
       <div className="h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3">
-        {kind === 'images' ? <Thumb src={url} alt={meta.tag(index)} /> : null}
-        {kind === 'videos' ? <VideoThumb url={url} posterUrl={posterUrl} onPosterCaptured={onPosterCaptured} /> : null}
+        {kind === 'images' || kind === 'videos' ? (
+          <MediaThumb
+            url={url}
+            posterUrl={posterUrl}
+            kind={kind === 'images' ? 'image' : 'video'}
+            alt={meta.tag(index)}
+            icon={meta.icon}
+            onPosterCaptured={onPosterCaptured}
+          />
+        ) : null}
         {kind === 'audios' ? <AudioRowPreview url={url} /> : null}
       </div>
       <span className="min-w-0 flex-1">
@@ -286,7 +296,12 @@ export function ReferenceSection({
               title={entry.name || entry.uploadedUrl}
               className="h-8 w-8 overflow-hidden rounded border border-line1 bg-bg3 transition-colors hover:border-honey/60"
             >
-              <Thumb src={entry.uploadedUrl} alt="" />
+              <MediaThumb
+                url={entry.uploadedUrl}
+                posterUrl={entry.posterUrl || posters[entry.uploadedUrl] || null}
+                kind="image"
+                onPosterCaptured={onPosterCaptured}
+              />
             </button>
           ) : (
             <button
@@ -298,7 +313,7 @@ export function ReferenceSection({
             >
               <span className="h-8 w-8 shrink-0 overflow-hidden rounded bg-bg3">
                 {kind === 'videos'
-                  ? <VideoThumb url={entry.uploadedUrl} posterUrl={entry.posterUrl || posters[entry.uploadedUrl] || null} icon={meta.icon} onPosterCaptured={onPosterCaptured} />
+                  ? <MediaThumb url={entry.uploadedUrl} posterUrl={entry.posterUrl || posters[entry.uploadedUrl] || null} icon={meta.icon} onPosterCaptured={onPosterCaptured} />
                   : <span className="grid h-full w-full place-items-center text-ink3"><Icon name={meta.icon} size={12} /></span>}
               </span>
               <span className="min-w-0 flex-1 truncate text-[10px] text-ink2">
