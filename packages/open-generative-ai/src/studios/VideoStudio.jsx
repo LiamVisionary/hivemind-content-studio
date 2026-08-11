@@ -2892,6 +2892,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
               audios={Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : []}
               videos={Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : []}
               prompt={s.setup.prompt}
+              onPromptChange={(next) => { setPrompt(next); focusPrompt(); }}
               limits={{
                 images: referenceEntry.referenceSlots?.images || 9,
                 audios: referenceEntry.referenceSlots?.audios || 3,

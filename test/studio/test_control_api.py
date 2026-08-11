@@ -6,6 +6,7 @@ import json
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -1782,6 +1783,62 @@ def test_media_studio_video_start_stages_ordered_reference_images(tmp_path: Path
     )
     assert refused.status_code == 400
     assert "At most 9" in refused.json()["detail"]
+
+
+@pytest.mark.parametrize("filename,content_type", [
+    # What a browser actually sends for each: m4a arrives as audio/x-m4a from
+    # Safari and audio/mp4 from Chrome, and some pickers send nothing useful at
+    # all — then only the extension identifies it.
+    ("voice.m4a", "audio/x-m4a"),
+    ("voice.m4a", "audio/mp4"),
+    ("voice.m4a", "application/octet-stream"),
+    ("voice.wav", "audio/wav"),
+    ("voice.mp3", "audio/mpeg"),
+    ("clip.mp4", "video/mp4"),
+    ("still.png", "image/png"),
+])
+def test_reference_upload_accepts_every_kind_h3_conditions_on(
+    tmp_path: Path, monkeypatch, filename: str, content_type: str
+) -> None:
+    """H3 Reference mode takes pictures, motion clips AND voice clips, so the
+    owner's reference store has to hold all three. Voice used to 415 here with
+    'must be a supported image or video', which stranded the whole voice lane
+    behind an upload it could never make."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": (filename, b"\x00\x01reference-bytes", content_type)},
+    )
+
+    assert upload.status_code == 200, upload.text
+    assert upload.json()["encrypted_at_rest"] is True
+    assert upload.json()["url"].endswith(Path(filename).suffix)
+
+
+def test_reference_upload_still_refuses_what_it_cannot_condition_on(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    refused = client.post(
+        "/api/media-studio/references",
+        files={"file": ("notes.pdf", b"%PDF-1.4", "application/pdf")},
+    )
+    assert refused.status_code == 415
+    assert "audio" in refused.json()["detail"]
+
+
+def test_reference_listing_tags_each_entry_with_its_medium(tmp_path: Path, monkeypatch) -> None:
+    """The pickers filter on this: a voice clip has no business in the picture
+    grid, where its thumbnail would never resolve."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    for filename, content_type in (("a.png", "image/png"), ("b.mp4", "video/mp4"), ("c.m4a", "audio/x-m4a")):
+        assert client.post(
+            "/api/media-studio/references",
+            files={"file": (filename, b"\x00\x01bytes", content_type)},
+        ).status_code == 200
+
+    listed = client.get("/api/media-studio/references")
+    assert listed.status_code == 200
+    assert sorted(item["kind"] for item in listed.json()["references"]) == ["audio", "image", "video"]
 
 
 def test_media_studio_video_start_stages_reference_audio_and_video(tmp_path: Path, monkeypatch) -> None:

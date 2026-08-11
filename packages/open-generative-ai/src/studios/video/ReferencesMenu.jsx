@@ -17,6 +17,7 @@
 //     images={[url]}                                  // <Picture N>
 //     audios={[{ url, name }]}                        // <Audio N>
 //     videos={[{ url, name, useAudio }]}              // <Video N>
+//     prompt={string} onPromptChange={(next) => void}  // for the tag button
 //     limits={{ images: 9, audios: 3, videos: 3 }}
 //     onChange={{ images, audios, videos }}           // one setter per kind
 //     uploadFn={async (file) => url | { url }}
@@ -26,7 +27,13 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { AuthModal } from '../../dialogs/AuthModal.jsx';
 import { useMediaSrc } from '../../hooks/hooks.js';
-import { motionReferenceWarning, referenceLabels } from '../../lib/h3References.js';
+import {
+  motionReferenceWarning,
+  referenceKindForFile,
+  referenceKindsInDrag,
+  referenceLabels,
+  withMotionRetentionTags,
+} from '../../lib/h3References.js';
 import {
   fetchHivemindReferences,
   isHivemindStudioEnabled,
@@ -170,14 +177,38 @@ function ReferenceRow({ kind, index, item, label, onRemove, onToggleAudio }) {
   );
 }
 
-function ReferenceSection({ kind, items, limit, labels, onAdd, onRemove, onToggleAudio, busy, recent, onPickRecent }) {
+function ReferenceSection({
+  kind, items, limit, labels, onAdd, onRemove, onToggleAudio, busy, recent, onPickRecent,
+  dropTarget, onWriteTags,
+}) {
   const meta = KIND_META[kind];
   const full = items.length >= limit;
   return (
-    <div className="flex flex-col gap-1.5">
+    <div
+      className={cx(
+        'flex flex-col gap-1.5 rounded-lg border p-1.5 transition-colors',
+        // The row a drop is heading for lights up, so the panel tells you where
+        // the file lands before you let go of it.
+        dropTarget ? 'border-honey bg-honey-tint' : 'border-transparent',
+      )}
+    >
       <div className="flex items-baseline justify-between gap-2">
         <SectionLabel>{meta.label()}</SectionLabel>
-        <span className="text-[10px] text-ink3">{items.length}/{limit}</span>
+        <span className="flex items-baseline gap-2">
+          {onWriteTags && items.length ? (
+            <button
+              type="button"
+              onClick={onWriteTags}
+              title={zh()
+                ? '把每个动作参考的 retention_analysis 标签写进提示词（含"不要带过来"的说明）'
+                : "Write each clip's retention_analysis line into the prompt, including what must not carry"}
+              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-ink3 transition-colors hover:bg-honey-tint hover:text-honey"
+            >
+              {zh() ? '写入标签' : 'Add tags to prompt'}
+            </button>
+          ) : null}
+          <span className="text-[10px] text-ink3">{items.length}/{limit}</span>
+        </span>
       </div>
       <p className="text-[10px] leading-snug text-ink3">{meta.hint()}</p>
       {items.map((item, index) => (
@@ -231,6 +262,7 @@ export function ReferencesMenu({
   audios = [],
   videos = [],
   prompt = '',
+  onPromptChange,
   limits = { images: 9, audios: 3, videos: 3 },
   onChange = {},
   uploadFn,
@@ -241,8 +273,12 @@ export function ReferencesMenu({
   const [busyKind, setBusyKind] = useState('');
   const [authOpen, setAuthOpen] = useState(false);
   const [recent, setRecent] = useState({ images: [], videos: [], audios: [] });
+  const [dragKinds, setDragKinds] = useState([]);
   const fileInputRef = useRef(null);
   const pendingKindRef = useRef('images');
+  // dragenter/dragleave fire for every child element, so a plain boolean
+  // flickers as the pointer crosses rows. Count enters instead.
+  const dragDepthRef = useRef(0);
   const rootRef = useDismissable(panelOpen, () => setPanelOpen(false));
 
   const studioMode = isHivemindStudioEnabled();
@@ -299,9 +335,7 @@ export function ReferencesMenu({
     }
   };
 
-  const handleFile = async (file) => {
-    if (!file) return;
-    const kind = pendingKindRef.current;
+  const uploadInto = async (kind, file) => {
     setBusyKind(kind);
     try {
       const uploaded = await doUpload(file);
@@ -310,12 +344,62 @@ export function ReferencesMenu({
       // Only pictures join the shared upload history — it backs the picture
       // grids elsewhere in the studio, which cannot render a clip.
       if (kind === 'images') saveUpload({ uploadedUrl: url, name: file.name });
-      attach(kind, url, file.name);
+      return { url, name: file.name };
+    } finally {
+      setBusyKind('');
+    }
+  };
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    const kind = pendingKindRef.current;
+    try {
+      const uploaded = await uploadInto(kind, file);
+      attach(kind, uploaded.url, uploaded.name);
     } catch (err) {
       console.error('[ReferencesMenu] upload failed:', err);
       toast.error(`${zh() ? '参考上传失败' : 'Reference upload failed'}: ${err.message}`);
-    } finally {
-      setBusyKind('');
+    }
+  };
+
+  // Dropping anywhere in the panel files each item in ITS row — you never have
+  // to hit a target. The counts are tracked locally because several files can
+  // land in one drop, before React has re-rendered with the first one attached.
+  const handleDrop = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragKinds([]);
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (!files.length) return;
+    if (needsKey() && !localStorage.getItem('muapi_key')) {
+      setAuthOpen(true);
+      return;
+    }
+    const taken = { images: images.length, videos: videos.length, audios: audios.length };
+    const added = { images: [], videos: [], audios: [] };
+    const rejected = [];
+    for (const file of files) {
+      const kind = referenceKindForFile(file);
+      if (!kind) { rejected.push(file.name); continue; }
+      if (taken[kind] >= limits[kind]) { rejected.push(file.name); continue; }
+      taken[kind] += 1;
+      try {
+        added[kind].push(await uploadInto(kind, file));
+      } catch (err) {
+        console.error('[ReferencesMenu] dropped upload failed:', err);
+        rejected.push(file.name);
+        taken[kind] -= 1;
+      }
+    }
+    if (added.images.length) emit('images', [...images, ...added.images.map((item) => item.url)]);
+    if (added.videos.length) {
+      emit('videos', [...videos, ...added.videos.map((item) => ({ ...item, useAudio: false }))]);
+    }
+    if (added.audios.length) emit('audios', [...audios, ...added.audios]);
+    if (rejected.length) {
+      toast.error(zh()
+        ? `无法作为参考使用：${rejected.join('、')}`
+        : `Not usable as a reference: ${rejected.join(', ')}`);
     }
   };
 
@@ -346,7 +430,32 @@ export function ReferencesMenu({
       </button>
 
       {panelOpen ? (
-        <div className="absolute bottom-full left-0 z-40 mb-2 flex max-h-[70vh] w-[320px] flex-col gap-3 overflow-y-auto rounded-lg border border-line1 bg-bg1 p-2.5 shadow-xl">
+        <div
+          // The window-level "drag an output back in to restore its settings"
+          // zone skips anything inside [data-upload-picker], so marking the
+          // panel keeps a reference drop from being read as a settings restore.
+          data-upload-picker=""
+          onDragEnter={(event) => {
+            if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
+            event.preventDefault();
+            dragDepthRef.current += 1;
+            setDragKinds(referenceKindsInDrag(event.dataTransfer));
+          }}
+          onDragOver={(event) => {
+            if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+          }}
+          onDragLeave={() => {
+            dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+            if (!dragDepthRef.current) setDragKinds([]);
+          }}
+          onDrop={(event) => { dragDepthRef.current = 0; void handleDrop(event); }}
+          className={cx(
+            'absolute bottom-full left-0 z-40 mb-2 flex max-h-[70vh] w-[320px] flex-col gap-3 overflow-y-auto rounded-lg border bg-bg1 p-2.5 shadow-xl',
+            dragDepthRef.current ? 'border-honey/60' : 'border-line1',
+          )}
+        >
           {KINDS.map((kind) => (
             <ReferenceSection
               key={kind}
@@ -356,6 +465,10 @@ export function ReferencesMenu({
               labels={labels[kind]}
               busy={busyKind === kind}
               recent={recent[kind] || []}
+              dropTarget={dragKinds.includes(kind)}
+              onWriteTags={kind === 'videos' && onPromptChange
+                ? () => onPromptChange(withMotionRetentionTags(prompt, videos))
+                : null}
               onPickRecent={(url) => attach(kind, url)}
               onAdd={() => openPicker(kind)}
               onRemove={(index) => emit(kind, values[kind].filter((_, i) => i !== index))}
