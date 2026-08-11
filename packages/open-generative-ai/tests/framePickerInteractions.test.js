@@ -131,3 +131,22 @@ test('clearing the start frame keeps a local workflow selected', () => {
     assert.match(logic, /export function frameSlotsVisible\(s, c\) \{/);
     assert.match(read('src/studios/VideoStudio.jsx'), /const ltxFramesVisible = frameSlotsVisible\(s\.setup, s\.catalogs\)/);
 });
+
+test('a local workflow resolves its capabilities with or without a start frame', () => {
+    const logic = read('src/studios/video/videoLogic.jsx');
+
+    // modelsFor feeds currentModel, which every capability gate reads. Hivemind
+    // workflows take the start frame as an OPTIONAL input (H3 is text-to-video
+    // by default), so they have to be in BOTH branches. When the t2v branch was
+    // allT2V alone, any state with imageMode false — restoring a generation that
+    // had no start frame, which is every reference run — resolved currentModel
+    // to undefined and silently turned every capability false: the Frames
+    // control vanished while the References menu, which resolves through the
+    // lib's own model list, stayed. Same model, two answers.
+    const modelsFor = logic.slice(logic.indexOf('export const modelsFor'));
+    const body = modelsFor.slice(0, modelsFor.indexOf(';'));
+    assert.match(body, /c\.hivemindI2V/, 'the non-imageMode branch must still see local workflows');
+    assert.match(body, /s\.imageMode \? c\.allI2V/);
+    // v2v keeps its own list — this is not a licence to resolve anything anywhere.
+    assert.match(body, /s\.v2vMode\s*\n?\s*\? v2vModels/);
+});

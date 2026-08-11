@@ -47,8 +47,23 @@ Verdicts from a full sweep of both codebases (2026-08-10; see ASSIMILATION_LOG.m
 > **Live E2E complete (same evening):** stack restarted at idle; all four routes proven on
 > real hardware (RIFE 2.24s · Strength Hunt 4/4 + sheet · outpaint 139s · inpaint 71s), plus
 > outpaint placement anchors (offset_x/y, live-proven) and the six H3 restyle presets landed.
-> Still deferred: SAM3 smart-select (custom node install). Still open: H3 reference-mode UI
-> for video/audio refs.
+>
+> **Phase 2 closed out 2026-08-11** (verified by inspection, not recall): the H3 reference-mode
+> UI shipped (`ReferencesMenu.jsx` — 9 images / 3 videos / 3 audio clips, kinds mixing freely),
+> so the only Phase-2 item left undone is **SAM3 smart-select**, which needs the
+> `pozzettiandrea/comfyui-sam3` custom node installed and pinned per lane.
+>
+> Chaining also went well past the donor after a run of real-use bug reports: the pinned frames
+> carry motion but NOT the scene (live-proven on the rental), so `armChainPrompt` keeps the
+> scene description in the composer, the prompt helper is continuation-aware
+> (`isContinuation` + `previousPrompt`), and the episode now has a **scene timeline** — ordered
+> shot tiles, drop-a-shot, per-shot export, and the joined cut as an animated final tile that is
+> saved back as a first-class sealed output (`POST /api/episode`). The donor has none of this;
+> its join was a server-side ffmpeg concat with no timeline.
+>
+> **Phases 3 and 4 are NOT started** — confirmed by grep: no SAM3, Ideogram4PromptBuilderKJ,
+> Krea2RegionalMultiLoRA, DepthAnything, WanAnimate, SCAIL, LTXDirector, prompt-preset-pack or
+> queue-health anywhere in the tree.
 
 ### Phase 2 — high-value, moderate effort (NEXT)
 - **Mask/inpaint UI + soft-inpaint graphs**: donor `lib/edit-mask.js` (pure, 168 lines) + `mask-boxes.js` (pure)

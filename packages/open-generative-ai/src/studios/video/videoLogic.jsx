@@ -375,7 +375,17 @@ export function buildCatalogs(hivemindI2V) {
   };
 }
 
-export const modelsFor = (s, c) => (s.v2vMode ? v2vModels : (s.imageMode ? c.allI2V : c.allT2V));
+// Capability lookups (currentModel and friends), never the picker's list.
+// Hivemind local workflows take the start frame as an OPTIONAL input — H3 is
+// text-to-video by default — so they belong in BOTH modes. Listing them only
+// under imageMode meant that any state with imageMode false (restoring a
+// generation that had no start frame, which is every reference run) resolved
+// currentModel to undefined, and every capability read off it silently went
+// false: the Frames control vanished while the References menu, which resolves
+// through the lib's own list, stayed. Same model, two answers.
+export const modelsFor = (s, c) => (s.v2vMode
+  ? v2vModels
+  : (s.imageMode ? c.allI2V : [...(c.hivemindI2V || []), ...c.allT2V]));
 export const currentModel = (s, c) => modelsFor(s, c).find((m) => m.id === s.modelId);
 export const isMotionControlV2V = (s, c) => s.v2vMode && !!currentModel(s, c)?.imageField;
 // "This run extends an uploaded clip." Derived from the plan rather than
