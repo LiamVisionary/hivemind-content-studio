@@ -79,18 +79,25 @@ test('end-frame models get the combined slots picker, never twin icon buttons', 
     assert.doesNotMatch(studio, /keepOpenOnSelect=\{endFrameVisible\}/);
 });
 
-test('character references ride their own picker and route to the reference workflow', () => {
+test('every reference kind rides one menu and routes to the reference workflow', () => {
     const studio = read('src/studios/VideoStudio.jsx');
     // The control shows whenever the family has a reference lane…
     assert.match(studio, /referenceWorkflowForHivemindModel\(s\.setup\.modelId\)/);
-    assert.match(studio, /maxImages=\{9\}/);
-    // …and attached refs reroute the submission to that workflow.
+    assert.match(studio, /<ReferencesMenu/);
+    // …sized from the slots the graph actually wired, never hardcoded…
+    assert.match(studio, /images: referenceEntry\.referenceSlots\?\.images \|\| 9/);
+    assert.match(studio, /videos: referenceEntry\.referenceSlots\?\.videos \|\| 3/);
+    // …and attached refs reroute the submission to that workflow, all three kinds.
     assert.match(studio, /if \(plan\.sendReferenceImages\) \{/);
     assert.match(studio, /localParams\.referenceImages = \(setup\.referenceImageUrls \|\| \[\]\)\.filter\(Boolean\)/);
+    assert.match(studio, /localParams\.referenceAudios = \(setup\.referenceAudios \|\| \[\]\)/);
+    assert.match(studio, /localParams\.referenceVideos = \(setup\.referenceVideos \|\| \[\]\)/);
 
-    // The plan is the single decision point: refs replace the start frame.
+    // The plan is the single decision point: refs replace the start frame, and
+    // a voice or motion clip arms the mode just as a picture does.
     const tasks = read('src/lib/videoTasks.js');
     assert.match(tasks, /sendImage: !setup\?\.videoUrl && !sendMotionContext && !sendReferenceImages/);
+    assert.match(tasks, /'referenceImageUrls', 'referenceVideos', 'referenceAudios'/);
 });
 
 test('a start-frame pick that switches to a keyframe model opens that picker', () => {

@@ -1059,7 +1059,7 @@
       "id": "ltx23-eros-dmd-ic-ingredients-lora",
       "inherits": "ltx23-eros-ic-ingredients-lora",
       "title": "LTX 2.3 Eros DMD IC-LoRA Ingredients",
-      "description": "The Ingredients IC-LoRA reference-sheet workflow on the 10Eros v1.3 DMD checkpoint. The v1 lane runs the Comfy dev recipe: a dev transformer with the generic LTX distilled LoRA fused at 0.5 alongside the IC-LoRA. A DMD build has the distillation merged into its weights and ships no dev transformer, so this lane clears both and runs ic-lora's plain distilled mode with the Ingredients IC-LoRA as the only adapter. Everything else — reference assembly, timeline anchors, prompt contract, audio, frame bucket, IC-LoRA strength, generation controls — is inherited unchanged, so this is an apples-to-apples sibling of the v1 lane.",
+      "description": "The Ingredients IC-LoRA reference-sheet workflow on the 10Eros v1.3 DMD checkpoint. The v1 lane runs the Comfy dev recipe: a dev transformer with the generic LTX distilled LoRA fused at 0.5 alongside the IC-LoRA. A DMD build has the distillation merged into its weights and ships no dev transformer, so this lane clears both and runs ic-lora's plain distilled mode with the Ingredients IC-LoRA as the only adapter. Everything else \u2014 reference assembly, timeline anchors, prompt contract, audio, frame bucket, IC-LoRA strength, generation controls \u2014 is inherited unchanged, so this is an apples-to-apples sibling of the v1 lane.",
       "native_mlx": {
         "variant": "eros-dmd-v13-ic",
         "title": "LTX 2.3 10Eros v1.3 DMD q8 + Ingredients IC-LoRA",
@@ -1074,7 +1074,7 @@
     {
       "id": "ltx23-eros-v14-comfy",
       "media_type": "video",
-      "title": "10Eros v1.4 · Comfy lane",
+      "title": "10Eros v1.4 \u00b7 Comfy lane",
       "description": "LTX 2.3 10Eros v1.4 with the author's DMD LoRA on the Comfy-graph path (8 steps, cfg 1, joint audio+video latent, and the mp4 carries the generated audio). References the exact files the GPU-rental video tier provisions (ltx2310eros_v14 + DMD LoRA + Gemma 3 12B fp8), so the same workflow runs on the local Comfy lane or routes to an attached rented machine via the gateway's lane rules with requester-sealed fetch-back. CUDA-validated 2026-07-31 (48s per 4s clip @768x512 on an RTX 5090).",
       "family": "ltx",
       "builder": "comfy-api",
@@ -1152,7 +1152,7 @@
       "inherits": "minimax-h3",
       "title": "MiniMax H3 Turbo",
       "beta": true,
-      "description": "MiniMax H3 with larryvrh's experimental 4-step Turbo distill LoRA (drbaph ckpt500 pruned-ComfyUI conversion): the same joint video+stereo-audio generation at 6 sampling steps with Spectrum forecasting, benchmarked on a rented RTX 5090 at 68s for a 5s 960x544 clip against 98s for MiniMax H3 — about 30% faster end to end, and 21s of sampling against 49s. Preview-quality weights from an in-progress training run: keep MiniMax H3 as the quality tier and A/B anything that matters. Runs on the SAME rented machine as MiniMax H3 with no re-provisioning — the tier ships both the full DiT and this LoRA.",
+      "description": "MiniMax H3 with larryvrh's experimental 4-step Turbo distill LoRA (drbaph ckpt500 pruned-ComfyUI conversion): the same joint video+stereo-audio generation at 6 sampling steps with Spectrum forecasting, benchmarked on a rented RTX 5090 at 68s for a 5s 960x544 clip against 98s for MiniMax H3 \u2014 about 30% faster end to end, and 21s of sampling against 49s. Preview-quality weights from an in-progress training run: keep MiniMax H3 as the quality tier and A/B anything that matters. Runs on the SAME rented machine as MiniMax H3 with no re-provisioning \u2014 the tier ships both the full DiT and this LoRA.",
       "api_workflow": "workflows/minimax-h3-turbo.api.json",
       "defaults": {
         "steps": 6
@@ -1163,7 +1163,7 @@
       "inherits": "minimax-h3",
       "title": "MiniMax H3 Reference",
       "beta": true,
-      "description": "MiniMax H3 conditioned on up to nine reference pictures instead of a start/end frame — the model's Reference mode. Subjects, clothing, environments and styles are carried across from the references; the prompt follows MiniMax's full-reference format (subject_definitions, retention_analysis, <Subject N>/<Picture N> labels). Same weights and same rented lane as MiniMax H3, so no re-provisioning.",
+      "description": "MiniMax H3 conditioned on up to nine reference pictures, three reference videos and three reference audio clips instead of a start/end frame \u2014 the model's Reference mode. Subjects, clothing, environments and styles are carried across from the pictures; a reference video carries MOTION \u2014 how a body moves, gesticulates and holds its mannerisms and expressions \u2014 and how literally it is copied is set by the prompt's retention_analysis tag for that <Video k>, from fully_preserved (reproduce this motion) down through attribute_transfer (a different action performed in this performer's manner) to weak_reference (loose pacing cue); each reference video may also carry its own soundtrack. A reference audio clip clones a VOICE (or music) \u2014 either reperforming its exact dialogue or lending only its timbre and delivery to new lines. Audio clips must be 2-15s each, 15s combined, and always ride alongside at least one picture or video. Reference videos are read as 24 fps, are trimmed to the generated clip's own length, and their tokens ride through every sampling step, so they cost real time. The prompt follows MiniMax's full-reference format (subject_definitions, retention_analysis, <Subject N>/<Picture N>/<Video N>/<Audio N> labels). Same weights and same rented lane as MiniMax H3, so no re-provisioning.",
       "api_workflow": "workflows/minimax-h3-reference.api.json",
       "requires": {
         "prompt": true,
@@ -1172,6 +1172,8 @@
       "accepts": [
         "prompt",
         "reference_images",
+        "reference_audios",
+        "reference_videos",
         "motion_context_path",
         "motion_context_base64",
         "motion_context_url",
@@ -1181,7 +1183,11 @@
         "frames",
         "seed",
         "steps",
-        "spectrum"
+        "spectrum",
+        "loras",
+        "easycache",
+        "solattn_tau",
+        "interpolate"
       ],
       "reference_image_slots": [
         {
@@ -1221,18 +1227,72 @@
           "input": "image"
         }
       ],
+      "reference_audio_slots": [
+        {
+          "node": "129",
+          "input": "audio"
+        },
+        {
+          "node": "130",
+          "input": "audio"
+        },
+        {
+          "node": "131",
+          "input": "audio"
+        }
+      ],
+      "reference_video_slots": [
+        {
+          "node": "140",
+          "input": "file",
+          "audio_link": {
+            "node": "104",
+            "input": "ref_video_audios.ref_video_audio_1"
+          }
+        },
+        {
+          "node": "141",
+          "input": "file",
+          "audio_link": {
+            "node": "104",
+            "input": "ref_video_audios.ref_video_audio_2"
+          }
+        },
+        {
+          "node": "142",
+          "input": "file",
+          "audio_link": {
+            "node": "104",
+            "input": "ref_video_audios.ref_video_audio_3"
+          }
+        }
+      ],
       "prompt_contract": {
-        "guidance": "Reference mode uses MiniMax's full-reference rewrite format (ref_en): six sections in order — subject_definitions (label every reference as <Subject N> / <Picture N>), summary, retention_analysis (fully_preserved | partially_preserved | attribute_transfer | weak_reference per label), detailed_description (shots, <d>[English] …</d> speech, (S1) ids), overall_soundscape, non_diegetic_music. Reference pictures are supplied in order, so <Picture 1> is the first image sent."
+        "guidance": "Reference mode uses MiniMax's full-reference rewrite format (ref_en): six sections in order \u2014 subject_definitions (label every reference as <Subject N> / <Picture N> / <Video N>), summary, retention_analysis (fully_preserved | partially_preserved | attribute_transfer | weak_reference per label), detailed_description (shots, <d>[English] \u2026</d> speech, (S1) ids), overall_soundscape, non_diegetic_music. Reference pictures are supplied in order, so <Picture 1> is the first image sent. Reference videos are labeled <Video N> in their own supplied order. A reference video is a MOTION reference: retention_analysis decides how literally it binds \u2014 fully_preserved reproduces the movement itself, partially_preserved keeps its broad shape, attribute_transfer performs a DIFFERENT action in that performer's manner (gesticulation style, posture, mannerisms, facial expressiveness), weak_reference is a loose pacing or rhythm cue. Say which subject inherits it ('<Subject 1> (S1) moves with the gesture style of <Video 1>.'). Reference audio clips are labeled <Audio N>, numbered independently of pictures and videos \u2014 but a reference video's OWN soundtrack also takes an <Audio N> label, emitted before its <Video N>, so a video-with-sound plus one standalone voice clip numbers as <Audio 1> (the video's track), <Video 1>, then <Audio 2> (the voice clip). Define each in subject_definitions ('<Audio 1> is the voice-timbre reference for <Subject 1> (S1).'), tag the summary [audio reuse] when the source words are reperformed verbatim (keep them, original language, inside <d>\u2026</d>) or [audio reference] when only timbre/rhythm/emotion carries (then the source's own words must NOT appear), and mark each <Audio N> in retention_analysis with fully_copy | partially_copy | reference | weak_reference."
       }
     },
     {
       "id": "minimax-h3",
       "media_type": "video",
       "title": "MiniMax H3",
-      "description": "MiniMax H3 omni-modal video generation: video and native stereo audio (voice, SFX, music) are denoised jointly in one pass. Text-to-video by default; supply a start image for image-to-video. Runs on an H3-capable CUDA Comfy lane (pruned int8_convrot DiT + Qwen3-VL 32B nvfp4 encoder, ComfyUI >= e377e263 with the Spectrum forecaster node — see packages/gpu-rentals). Native canvas is a 768px short edge at 24 fps, up to ~15s on the 17k+5 frame grid. Spectrum forecasting is on by default and can be switched off per generation: it predicts about half the transformer steps instead of computing them, which roughly halves sampling time but softens fine detail.",
+      "description": "MiniMax H3 omni-modal video generation: video and native stereo audio (voice, SFX, music) are denoised jointly in one pass. Text-to-video by default; supply a start image for image-to-video. Runs on an H3-capable CUDA Comfy lane (pruned int8_convrot DiT + Qwen3-VL 32B nvfp4 encoder, ComfyUI >= e377e263 with the Spectrum forecaster node \u2014 see packages/gpu-rentals). Native canvas is a 768px short edge at 24 fps, up to ~15s on the 17k+5 frame grid. Spectrum forecasting is on by default and can be switched off per generation: it predicts about half the transformer steps instead of computing them, which roughly halves sampling time but softens fine detail. Three optional accelerators ride the same graph, all OFF by default and lifted out of the chain entirely when unset, so the default path is unchanged. Measured on a rented RTX 5090 (5s @ 960x544, warm, fixed seed, ComfyUI's own per-prompt timing): no acceleration 60.3s; spectrum (the default) 39.1s; solattn_tau 1.3 34.3s \u2014 NVlabs sparse attention chained onto sage, 11% faster than spectrum at equal-or-better detail and the same take, needs the pinned SolAttn Triton node and pays ~6s of kernel autotune on the first run of a process; easycache 0.2-0.3 41.9s. easycache and spectrum CANNOT combine \u2014 the forecaster disables itself whenever a cache wrapper patches the same model \u2014 and the choice between them is about fidelity, not speed: easycache lands 28-35 dB from the unaccelerated render where spectrum lands ~20 dB, i.e. spectrum reaches a visibly different take at the same seed. interpolate 2 runs core RIFE over the decoded frames for 24 -> 48 fps at +2.9s (3 gives 72 fps at +4.0s), leaving clip duration and the sampled frame count alone.",
       "family": "minimax",
       "builder": "comfy-api",
-      "supports_loras": false,
+      "supports_loras": true,
+      "compatible_base_models": [
+        "MiniMax H3"
+      ],
+      "lora_injection": {
+        "class_type": "LoraLoaderModelOnly",
+        "targets": [
+          {
+            "node": "31",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model"
+      },
       "api_workflow": "workflows/minimax-h3.api.json",
       "default": false,
       "frame_grid": {
@@ -1245,7 +1305,7 @@
         "image": false
       },
       "prompt_contract": {
-        "guidance": "H3 was trained on the structured rewrite its authors' pipeline emits (docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md), so the format is part of the interface. Send three fields in order, blank-line separated: 'integrated_multimodal_description:' (open with one style/composition sentence, then numbered shots — '[Shot 1]' with no timestamp, later shots '[Shot N] At MM:SS.mmm,'; stable speaker ids (S1),(S2); speech in <d>[English] the exact words</d>, marked <cutoff> if still running at the end; camera moves as prose naming move, distance and speed), 'overall_soundscape:' (1-4 sentences of ambience and action sound, never dialogue), 'non_diegetic_music:' (1-3 sentences or N/A). With a start image, open with the anchor line 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.' H3 has no negative conditioning: state everything affirmatively."
+        "guidance": "H3 was trained on the structured rewrite its authors' pipeline emits (docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md), so the format is part of the interface. Send three fields in order, blank-line separated: 'integrated_multimodal_description:' (open with one style/composition sentence, then numbered shots \u2014 '[Shot 1]' with no timestamp, later shots '[Shot N] At MM:SS.mmm,'; stable speaker ids (S1),(S2); speech in <d>[English] the exact words</d>, marked <cutoff> if still running at the end; camera moves as prose naming move, distance and speed), 'overall_soundscape:' (1-4 sentences of ambience and action sound, never dialogue), 'non_diegetic_music:' (1-3 sentences or N/A). With a start image, open with the anchor line 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.' H3 has no negative conditioning: state everything affirmatively."
       },
       "accepts": [
         "prompt",
@@ -1264,7 +1324,11 @@
         "frames",
         "seed",
         "steps",
-        "spectrum"
+        "spectrum",
+        "loras",
+        "easycache",
+        "solattn_tau",
+        "interpolate"
       ],
       "defaults": {
         "width": 1216,
@@ -1273,7 +1337,10 @@
         "duration_seconds": 5,
         "seed": -1,
         "steps": 15,
-        "spectrum": true
+        "spectrum": true,
+        "easycache": 0,
+        "solattn_tau": 1.3,
+        "interpolate": 1
       },
       "slots": {
         "prompt": {
@@ -1311,6 +1378,22 @@
         "end_image_path": {
           "node": "71",
           "input": "image"
+        },
+        "easycache": {
+          "node": "32",
+          "input": "reuse_threshold"
+        },
+        "solattn_tau": {
+          "node": "33",
+          "input": "tau"
+        },
+        "interpolate": {
+          "node": "35",
+          "input": "multiplier"
+        },
+        "frame_rate": {
+          "node": "91",
+          "input": "fps"
         }
       }
     }

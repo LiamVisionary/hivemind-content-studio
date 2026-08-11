@@ -13,3 +13,40 @@
   overflow: hidden;
   background: var(--bg-0);
 }
+
+/* Scene timeline — the joined episode tile.
+   The shots are parts; the joined cut is the deliverable, so its border moves
+   while every shot tile stays a flat outline. The gradient sits in the tile's
+   own padding box (the inner panel covers the middle), which keeps it a border
+   rather than a glow that would tint the video. */
+.chain-combined-tile {
+  background:
+    linear-gradient(var(--bg-2), var(--bg-2)) padding-box,
+    conic-gradient(
+      from var(--chain-cut-angle, 0deg),
+      var(--honey), #7dd3fc, #c084fc, #f472b6, var(--honey)
+    ) border-box;
+  border: 2px solid transparent;
+  animation: chain-cut-spin 6s linear infinite;
+}
+
+.chain-combined-tile--active {
+  box-shadow: 0 0 0 1px var(--honey);
+}
+
+@property --chain-cut-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes chain-cut-spin {
+  to { --chain-cut-angle: 360deg; }
+}
+
+/* Browsers without @property cannot interpolate the angle, so the border would
+   sit still — rotate the whole tile's gradient by opacity instead of faking it.
+   Reduced-motion users get the same colours, held still. */
+@media (prefers-reduced-motion: reduce) {
+  .chain-combined-tile { animation: none; }
+}

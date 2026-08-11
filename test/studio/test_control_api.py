@@ -1784,6 +1784,58 @@ def test_media_studio_video_start_stages_ordered_reference_images(tmp_path: Path
     assert "At most 9" in refused.json()["detail"]
 
 
+def test_media_studio_video_start_stages_reference_audio_and_video(tmp_path: Path, monkeypatch) -> None:
+    """The other two reference kinds travel the same inline path as pictures: a
+    voice clip becomes <Audio N>, a motion clip becomes <Video N>, and each
+    video carries its own use_audio flag through to the runner."""
+    started: dict = {}
+
+    def fake_start(**kwargs):
+        started.update(kwargs)
+        started["staged_audio"] = [Path(item).read_bytes() for item in kwargs["reference_audios"]]
+        started["staged_video"] = [Path(item["video_path"]).read_bytes() for item in kwargs["reference_videos"]]
+        return {"job_id": "job-ref-2", "uploaded_names": [], "provider": "Media Studio"}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", fake_start)
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_finish",
+        lambda job_id, **_: {"job_id": job_id, "provider": "Media Studio", "gateway_output": "ref-out.mp4.e2e"},
+    )
+    client, _, _ = _client(tmp_path, monkeypatch)
+    voice = base64.b64encode(b"british-voice-bytes").decode("ascii")
+    motion = base64.b64encode(b"gesture-clip-bytes").decode("ascii")
+
+    queued = client.post(
+        "/api/media-studio/video/start",
+        json={
+            "prompt": "she speaks in the referenced voice, moving like the reference",
+            "workflow_id": "minimax-h3-reference",
+            "reference_images": [{"image_base64": f"data:image/png;base64,{base64.b64encode(b'sheet').decode()}"}],
+            "reference_audios": [{"audio_base64": f"data:audio/wav;base64,{voice}"}],
+            "reference_videos": [{"video_base64": f"data:video/mp4;base64,{motion}", "use_audio": True}],
+            "duration_seconds": 5,
+        },
+    )
+    assert queued.status_code == 200
+    assert started["staged_audio"] == [b"british-voice-bytes"]
+    assert started["staged_video"] == [b"gesture-clip-bytes"]
+    assert started["reference_videos"][0]["use_audio"] is True
+    # Both staged copies are released once the gateway owns the uploads.
+    assert not Path(started["reference_audios"][0]).exists()
+    assert not Path(started["reference_videos"][0]["video_path"]).exists()
+
+    refused = client.post(
+        "/api/media-studio/video/start",
+        json={
+            "prompt": "too many",
+            "workflow_id": "minimax-h3-reference",
+            "reference_videos": [{"video_base64": f"data:video/mp4;base64,{motion}"} for _ in range(4)],
+        },
+    )
+    assert refused.status_code == 400
+    assert "At most 3 reference videos" in refused.json()["detail"]
+
+
 def test_media_studio_video_start_refuses_motion_context_plus_source_video(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "hivemind_content_studio.control_api.run_media_studio_video_start",

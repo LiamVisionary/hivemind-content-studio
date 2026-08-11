@@ -26,6 +26,10 @@ class MediaModel:
     supports_loras: bool = False
     compatible_base_models: tuple[str, ...] = ()
     ingredient_inputs: dict | None = None
+    # How many reference pictures / videos / audio clips the workflow's graph
+    # actually wired (MiniMax H3 Reference mode). The studio sizes its
+    # References panel from this instead of hardcoding the counts.
+    reference_slots: dict | None = None
     aspect_ratios: tuple[str, ...] = ()
     default_duration_seconds: float | None = None
     # The workflow's registered sampling-step default. Lets the studio label its
@@ -185,6 +189,7 @@ def _media_studio_video_models(status: dict | None = None) -> tuple[MediaModel, 
             supports_loras=bool(workflow.get("supports_loras")),
             compatible_base_models=tuple(str(value) for value in workflow.get("compatible_base_models", []) if str(value).strip()),
             ingredient_inputs=dict(workflow.get("ingredient_inputs")) if isinstance(workflow.get("ingredient_inputs"), dict) else None,
+            reference_slots=dict(workflow.get("reference_slots")) if isinstance(workflow.get("reference_slots"), dict) else None,
             aspect_ratios=tuple(str(value) for value in workflow.get("aspect_ratios", []) if str(value).strip()),
             default_duration_seconds=float(defaults["duration_seconds"]) if defaults.get("duration_seconds") is not None else None,
             default_steps=float(defaults["steps"]) if defaults.get("steps") is not None else None,

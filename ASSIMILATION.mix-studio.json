@@ -1,161 +1,191 @@
 {
-  "created_at": "2026-08-10T23:41:17.116387+00:00",
-  "request": "Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio",
-  "custom_code_assessment": "balanced",
-  "entries": [
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "public/camera-motion.js",
-      "target_path": "packages/open-generative-ai/src/lib/cameraMotion.js",
-      "reuse_type": "adapted_code",
-      "note": "24-motion catalog + idempotent phrase composer"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "test/camera-motion.test.js",
-      "target_path": "packages/open-generative-ai/tests/cameraMotion.test.js",
-      "reuse_type": "test_adapted",
-      "note": "pure-function coverage"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "public/app.js (compare viewer)",
-      "target_path": "packages/open-generative-ai/src/lib/compareMath.js",
-      "reuse_type": "adapted_code",
-      "note": "shared-transform sync + anchored zoom + pan clamp"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "public/app.js (compare viewer)",
-      "target_path": "packages/open-generative-ai/src/studios/image/CompareViewer.jsx",
-      "reuse_type": "adapted_code",
-      "note": "reveal divider + modes + pinch/wheel/keys React port"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "test/compare-ui.test.js",
-      "target_path": "packages/open-generative-ai/tests/compareMath.test.js",
-      "reuse_type": "test_adapted",
-      "note": "geometry invariants"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "public/service-worker.js",
-      "target_path": "packages/open-generative-ai/public/service-worker.js",
-      "reuse_type": "adapted_code",
-      "note": "nav-only SW + offline shell + manifest/registration"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "lib/strength-hunt.js",
-      "target_path": "packages/media-gateway/strength_hunt.py",
-      "reuse_type": "translated_code",
-      "note": "sweep plan + one-job graph merge + sheet layout"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "lib/strength-hunt.js (sheet)",
-      "target_path": "packages/media-gateway/bin/compose-strength-hunt-sheet.py",
-      "reuse_type": "translated_code",
-      "note": "PIL sheet composer"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "test/strength-hunt.test.js",
-      "target_path": "packages/media-gateway/test_strength_hunt.py",
-      "reuse_type": "test_adapted",
-      "note": "plan/merge/layout, 17 tests"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "server.js (strengthHunt flag UX)",
-      "target_path": "packages/open-generative-ai/src/lib/loraSelection.js",
-      "reuse_type": "adapted_code",
-      "note": "hunt-axis selection + LoraSection toggle UX"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "lib/krea2-outpaint.js (plan math)",
-      "target_path": "packages/open-generative-ai/src/lib/expandGeometry.js",
-      "reuse_type": "adapted_code",
-      "note": "/16 snap + pixel-budget targets"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "lib/edit-outpaint-workflows.js (expand UX)",
-      "target_path": "packages/open-generative-ai/src/studios/image/ExpandDialog.jsx",
-      "reuse_type": "adapted_code",
-      "note": "expansion dialog + gateway outpaint route"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "test/strength-hunt.test.js (selection)",
-      "target_path": "packages/open-generative-ai/tests/imageStyleAndHunt.test.js",
-      "reuse_type": "test_adapted",
-      "note": "hunt caps + style idempotency"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "lib/krea2-outpaint.js (plan tests)",
-      "target_path": "packages/open-generative-ai/tests/expandGeometry.test.js",
-      "reuse_type": "test_adapted",
-      "note": "growth/snap/budget invariants"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "lib/regional-workflows.js (buildKrea2InpaintGraph)",
-      "target_path": "packages/media-gateway/krea2_identity_workflow.py",
-      "reuse_type": "translated_code",
-      "note": "soft-inpaint graph, core nodes only"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "lib/edit-mask.js",
-      "target_path": "packages/media-gateway/krea2_identity_workflow.py",
-      "reuse_type": "translated_code",
-      "note": "mask clamps + localized-edit preservation clause"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "public/app.js (mask brush canvas)",
-      "target_path": "packages/open-generative-ai/src/studios/image/MaskEditorDialog.jsx",
-      "reuse_type": "adapted_code",
-      "note": "natural-res brush + black-composite export"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "test/edit-mask.test.js",
-      "target_path": "packages/media-gateway/test_krea2_inpaint.py",
-      "reuse_type": "test_adapted",
-      "note": "soft-inpaint wiring + clamps, 8 tests"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "lib/edit-angle.js",
-      "target_path": "packages/open-generative-ai/src/lib/editAngles.js",
-      "reuse_type": "adapted_code",
-      "note": "azimuth/elevation/framing catalog + klein/qwen prompt dialects incl. anti-collage clauses"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "lib/edit-sequence.js",
-      "target_path": "packages/open-generative-ai/src/lib/editSequence.js",
-      "reuse_type": "adapted_code",
-      "note": "sequence normalization caps; chain orchestration client-side (seed+step)"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "server.js (camera variation + sequence UX)",
-      "target_path": "packages/open-generative-ai/src/studios/image/AngleVariationsDialog.jsx",
-      "reuse_type": "adapted_code",
-      "note": "viewpoint picker dialog + SequenceEditDialog + ImageStudio sequential runners"
-    },
-    {
-      "source_repo": "BlackMixture/Mix-Studio",
-      "source_path": "test/edit-mask.test.js (dialect semantics)",
-      "target_path": "packages/open-generative-ai/tests/editAnglesAndSequence.test.js",
-      "reuse_type": "test_adapted",
-      "note": "dialect prompts + normalization, 5 tests"
-    }
-  ]
+ "created_at": "2026-08-10T23:41:17.116387+00:00",
+ "request": "Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio",
+ "custom_code_assessment": "balanced",
+ "entries": [
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "public/camera-motion.js",
+   "target_path": "packages/open-generative-ai/src/lib/cameraMotion.js",
+   "reuse_type": "adapted_code",
+   "note": "24-motion catalog + idempotent phrase composer"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "test/camera-motion.test.js",
+   "target_path": "packages/open-generative-ai/tests/cameraMotion.test.js",
+   "reuse_type": "test_adapted",
+   "note": "pure-function coverage"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "public/app.js (compare viewer)",
+   "target_path": "packages/open-generative-ai/src/lib/compareMath.js",
+   "reuse_type": "adapted_code",
+   "note": "shared-transform sync + anchored zoom + pan clamp"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "public/app.js (compare viewer)",
+   "target_path": "packages/open-generative-ai/src/studios/image/CompareViewer.jsx",
+   "reuse_type": "adapted_code",
+   "note": "reveal divider + modes + pinch/wheel/keys React port"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "test/compare-ui.test.js",
+   "target_path": "packages/open-generative-ai/tests/compareMath.test.js",
+   "reuse_type": "test_adapted",
+   "note": "geometry invariants"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "public/service-worker.js",
+   "target_path": "packages/open-generative-ai/public/service-worker.js",
+   "reuse_type": "adapted_code",
+   "note": "nav-only SW + offline shell + manifest/registration"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/strength-hunt.js",
+   "target_path": "packages/media-gateway/strength_hunt.py",
+   "reuse_type": "translated_code",
+   "note": "sweep plan + one-job graph merge + sheet layout"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/strength-hunt.js (sheet)",
+   "target_path": "packages/media-gateway/bin/compose-strength-hunt-sheet.py",
+   "reuse_type": "translated_code",
+   "note": "PIL sheet composer"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "test/strength-hunt.test.js",
+   "target_path": "packages/media-gateway/test_strength_hunt.py",
+   "reuse_type": "test_adapted",
+   "note": "plan/merge/layout, 17 tests"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "server.js (strengthHunt flag UX)",
+   "target_path": "packages/open-generative-ai/src/lib/loraSelection.js",
+   "reuse_type": "adapted_code",
+   "note": "hunt-axis selection + LoraSection toggle UX"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/krea2-outpaint.js (plan math)",
+   "target_path": "packages/open-generative-ai/src/lib/expandGeometry.js",
+   "reuse_type": "adapted_code",
+   "note": "/16 snap + pixel-budget targets"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/edit-outpaint-workflows.js (expand UX)",
+   "target_path": "packages/open-generative-ai/src/studios/image/ExpandDialog.jsx",
+   "reuse_type": "adapted_code",
+   "note": "expansion dialog + gateway outpaint route"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "test/strength-hunt.test.js (selection)",
+   "target_path": "packages/open-generative-ai/tests/imageStyleAndHunt.test.js",
+   "reuse_type": "test_adapted",
+   "note": "hunt caps + style idempotency"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/krea2-outpaint.js (plan tests)",
+   "target_path": "packages/open-generative-ai/tests/expandGeometry.test.js",
+   "reuse_type": "test_adapted",
+   "note": "growth/snap/budget invariants"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/regional-workflows.js (buildKrea2InpaintGraph)",
+   "target_path": "packages/media-gateway/krea2_identity_workflow.py",
+   "reuse_type": "translated_code",
+   "note": "soft-inpaint graph, core nodes only"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/edit-mask.js",
+   "target_path": "packages/media-gateway/krea2_identity_workflow.py",
+   "reuse_type": "translated_code",
+   "note": "mask clamps + localized-edit preservation clause"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "public/app.js (mask brush canvas)",
+   "target_path": "packages/open-generative-ai/src/studios/image/MaskEditorDialog.jsx",
+   "reuse_type": "adapted_code",
+   "note": "natural-res brush + black-composite export"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "test/edit-mask.test.js",
+   "target_path": "packages/media-gateway/test_krea2_inpaint.py",
+   "reuse_type": "test_adapted",
+   "note": "soft-inpaint wiring + clamps, 8 tests"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/edit-angle.js",
+   "target_path": "packages/open-generative-ai/src/lib/editAngles.js",
+   "reuse_type": "adapted_code",
+   "note": "azimuth/elevation/framing catalog + klein/qwen prompt dialects incl. anti-collage clauses"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/edit-sequence.js",
+   "target_path": "packages/open-generative-ai/src/lib/editSequence.js",
+   "reuse_type": "adapted_code",
+   "note": "sequence normalization caps; chain orchestration client-side (seed+step)"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "server.js (camera variation + sequence UX)",
+   "target_path": "packages/open-generative-ai/src/studios/image/AngleVariationsDialog.jsx",
+   "reuse_type": "adapted_code",
+   "note": "viewpoint picker dialog + SequenceEditDialog + ImageStudio sequential runners"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "test/edit-mask.test.js (dialect semantics)",
+   "target_path": "packages/open-generative-ai/tests/editAnglesAndSequence.test.js",
+   "reuse_type": "test_adapted",
+   "note": "dialect prompts + normalization, 5 tests"
+  },
+  {
+   "source_repo": "xocialize/rife-mlx",
+   "source_path": "entire package @764b89be (MIT)",
+   "target_path": "packages/media-gateway/vendor/rife-mlx",
+   "reuse_type": "copied_code",
+   "note": "24-motion catalog + idempotent phrase composer",
+   "description": "vendored proper-RIFE (Practical-RIFE 4.25 MLX port) for the native lane; weights auto-download from mlx-community/RIFE-4.25"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/video-extension-join.js (join semantics)",
+   "target_path": "packages/open-generative-ai/src/lib/clipJoiner.js",
+   "reuse_type": "adapted_code",
+   "note": "24-motion catalog + idempotent phrase composer",
+   "description": "lossless concat contract re-expressed client-side via mediabunny packet copy; E2E-sealed clips can only join in the browser"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "public/h3-prompt-guide.js (STYLE_TRANSFER_PRESETS)",
+   "target_path": "packages/open-generative-ai/src/lib/h3RestylePresets.js",
+   "reuse_type": "copied_code",
+   "note": "six restyle prompts verbatim + idempotent apply; RestyleMenu on H3 models"
+  },
+  {
+   "source_repo": "BlackMixture/Mix-Studio",
+   "source_path": "lib/krea2-outpaint.js (outpaintOffsets placement)",
+   "target_path": "packages/media-gateway/krea2_identity_workflow.py",
+   "reuse_type": "adapted_code",
+   "note": "offset_x/offset_y placement in ltx_anchor_canvas_geometry + route/bridge/dialog plumbing; live-verified left/right 0/640"
+  }
+ ]
 }

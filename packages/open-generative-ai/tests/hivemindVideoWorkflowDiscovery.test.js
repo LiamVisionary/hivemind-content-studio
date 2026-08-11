@@ -69,6 +69,9 @@ test('video workflow discovery recovers after an owner-session startup race', as
             supportsEndFrame: false,
             supportsMotionContext: false,
             supportsReferenceImages: false,
+            // No reference slots wired on this workflow — the References panel
+            // reads this to size itself, and null means "no reference lane".
+            referenceSlots: null,
             ingredientInputs: { max_images: 12, layout: 'adaptive-pack' },
             id: 'hivemind-media:ltx23-ic-ingredients-lora',
             workflowId: 'ltx23-ic-ingredients-lora',

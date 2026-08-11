@@ -4123,6 +4123,10 @@ def run_comfy_krea2_outpaint(job_id, prompt, image_path, options=None, outpaint=
             "steps": int_option(options, "steps", 10, 1, 50),
             "seed": resolve_seed_option(options),
             "feathering": int_option(outpaint, "feathering", 48, 0, 256),
+            # Placement of the source on the grown canvas: 0=start, 0.5=center,
+            # 1=end per axis (Mix-Studio outpaint-plan port).
+            "offset_x": float_option(outpaint, "offset_x", 0.5, 0.0, 1.0),
+            "offset_y": float_option(outpaint, "offset_y", 0.5, 0.0, 1.0),
         },
     }
     with jobs_lock:
@@ -4160,6 +4164,8 @@ def run_comfy_krea2_outpaint(job_id, prompt, image_path, options=None, outpaint=
                 "identity_strength": 1.0,
                 "grounding_px": 768,
                 "feathering": rec["options"]["feathering"],
+                "offset_x": rec["options"]["offset_x"],
+                "offset_y": rec["options"]["offset_y"],
             },
             profile=accelerator_profile(),
             filename_prefix=f"krea2_outpaint_{job_id}",
@@ -4446,6 +4452,58 @@ def run_video_interpolation(job_id, video_path, options=None):
             "finished_at": now_iso(),
             "outputs": encrypt_outputs([str(output)]),
             "elapsed_seconds": round(time.monotonic() - t0, 2),
+        })
+    except Exception as exc:
+        if output is not None:
+            output.unlink(missing_ok=True)
+        rec.update({"status": "error", "finished_at": now_iso(), "error": str(exc)})
+    finally:
+        video_path.unlink(missing_ok=True)
+    append_history(rec)
+    with jobs_lock:
+        jobs[job_id] = rec
+
+
+def run_episode_save(job_id, video_path, options=None):
+    """Store a chained episode the BROWSER assembled as a first-class output.
+
+    The shots are E2E-sealed at rest, so only the client can read them and only
+    the client can join them (see clipJoiner.js). That left the finished
+    episode as a blob URL living in one tab: gone on reload, invisible to
+    History, unreachable from any other surface. This is the missing half —
+    the joined file is written into the normal output directory and sealed by
+    the normal path, so it appears in History exactly like a generated clip.
+
+    The clip arrives already-decrypted from the browser, the same round trip
+    RIFE and upscale already make; nothing here needs the vault key."""
+    started = now_iso()
+    options = options or {}
+    shots = int_option(options, "shots", 0, 0, 512)
+    rec = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "status": "running",
+        "backend": "episode-join",
+        "created_at": started,
+        "outputs": [],
+        "options": {"shots": shots},
+    }
+    with jobs_lock:
+        jobs[job_id] = rec
+    video_path = Path(video_path)
+    output = None
+    try:
+        if not video_path.is_file():
+            raise RuntimeError("episode clip is missing")
+        COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        output = COMFY_OUTPUT_DIR / f"episode_{job_id}.mp4"
+        # Move, not copy: the staged input is a plaintext copy of the episode
+        # and every extra one is another file the sweeper has to chase.
+        shutil.move(str(video_path), str(output))
+        rec.update({
+            "status": "success",
+            "finished_at": now_iso(),
+            "outputs": encrypt_outputs([str(output)]),
         })
     except Exception as exc:
         if output is not None:
@@ -9820,6 +9878,31 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "queued",
                     "backend": "rife-interpolation",
                     "mode": f"{factor}x",
+                    "job_url": f"/api/job/{job_id}",
+                    "page_url": f"/job/{job_id}",
+                    "history_url": "/api/history",
+                }, 202)
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 400)
+            except Exception as exc:
+                return self.send_json({"error": str(exc)}, 500)
+        if parsed.path == "/api/episode":
+            try:
+                data = json.loads((self.read_body(max_bytes=INTERPOLATE_MAX_BODY_BYTES) or b"{}").decode("utf-8"))
+                staged = stage_inline_video_base64(data.get("video_base64"))
+                if staged is None:
+                    return self.send_json({"error": "video_base64 is required"}, 400)
+                shots = int_option(data, "shots", 0, 0, 512)
+                job_id = uuid.uuid4().hex[:12]
+                with jobs_lock:
+                    jobs[job_id] = {"id": job_id, "prompt": PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": now_iso(), "backend": "episode-join", "options": {"shots": shots}}
+                threading.Thread(
+                    target=run_episode_save, args=(job_id, staged, {"shots": shots}), daemon=True,
+                ).start()
+                return self.send_json({
+                    "id": job_id,
+                    "status": "queued",
+                    "backend": "episode-join",
                     "job_url": f"/api/job/{job_id}",
                     "page_url": f"/job/{job_id}",
                     "history_url": "/api/history",

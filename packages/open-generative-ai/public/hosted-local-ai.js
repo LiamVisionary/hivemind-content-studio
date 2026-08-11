@@ -104,6 +104,36 @@
     }
   }
 
+  // Store a chained episode the browser joined as a real output, so it lands
+  // in History like any generated clip instead of living as a blob URL in one
+  // tab. Same round trip as interpolate: bytes up, sealed clip back.
+  async function saveEpisode(params) {
+    emitProgress({ status: 'queued', progress: 0, message: 'Saving the episode' });
+    const submitted = await jsonFetch('/local-ai/episode', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    });
+    const jobId = submitted.id;
+    if (!jobId) throw new Error('No job id returned when saving the episode');
+
+    let last = null;
+    for (;;) {
+      await new Promise(resolve => setTimeout(resolve, last ? 1500 : 800));
+      last = await jsonFetch(`/local-ai/job/${encodeURIComponent(jobId)}`);
+      const status = last.status || 'running';
+      emitProgress({
+        status,
+        progress: status === 'success' ? 1 : 0.5,
+        message: status === 'success' ? 'Episode saved' : 'Saving the episode',
+      });
+      if (status === 'success') {
+        if (!last.url) throw new Error('Saving finished without a clip');
+        return { url: last.url, mediaType: last.mediaType || 'video' };
+      }
+      if (status === 'error') throw new Error(last.error || 'Saving the episode failed');
+    }
+  }
+
   async function listLoras(modelId, baseModels) {
     // Video workflows are defined in the Media Studio MCP, not in the registry the
     // bridge reads, so carry the base models from the catalog we were given.
@@ -182,6 +212,7 @@
     generate,
     upscale,
     interpolate,
+    saveEpisode,
     cancelGeneration: async () => ({ ok: true }),
     wan2gp: {
       getConfig: async () => ({ url: '' }),

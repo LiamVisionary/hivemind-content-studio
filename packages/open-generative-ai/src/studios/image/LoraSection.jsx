@@ -3,17 +3,20 @@
 // The one piece of state it reads directly is the Civitai download in flight, so
 // an update-and-replace can draw its progress on the card being replaced.
 import { useEffect, useRef, useState } from 'react';
-import { useCivitaiDownloads, useMediaSrc, useWindowEvent } from '../../hooks/hooks.js';
+import { useCivitaiDownloads, useMediaSrc, useRentalLoras, useWindowEvent } from '../../hooks/hooks.js';
 import {
   cancelCivitaiDownload,
   civitaiDownloadPercent,
   describeCivitaiDownload,
 } from '../../lib/civitaiDownloadStore.js';
+import { isDevMode } from '../../lib/devMode.js';
 import { localAI } from '../../lib/localInferenceClient.js';
 import { loraVersionLabel } from '../../lib/loraSelection.js';
+import { filterRentalLoras } from '../../lib/rentalLoras.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Button, SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
 import { LoraGroupsMenu } from './LoraGroupsMenu.jsx';
+import { LoraRentalControl } from './LoraRentalControl.jsx';
 import { PendingLoraCard } from './PendingLoraCard.jsx';
 
 function LoraPreview({ lora, className = '' }) {
@@ -70,9 +73,21 @@ export function LoraSection({
   // Strength Hunt (Mix-Studio port): present only when the selected model's
   // backend supports the sweep — the toggle marks a LoRA as a hunt axis.
   onToggleHunt,
+  // Source is "rented": the catalog narrows to LoRAs registered for rentals,
+  // because those are the only files a machine provisioned today would have.
+  rentedOnly = false,
 }) {
   const mutedCount = selection.filter((lora) => lora.enabled === false).length;
   const huntedCount = selection.filter((lora) => lora.hunt).length;
+  // Rental registry: dev mode manages it (per-card Rental control), rented
+  // mode filters by it. Neither active → the hook never fetches.
+  const devMode = isDevMode();
+  const rentalRegistry = useRentalLoras(devMode || rentedOnly);
+  const rentalEntries = rentalRegistry.entries;
+  const visibleLoras = rentedOnly ? filterRentalLoras(loras, rentalEntries) : loras;
+  // Which card is showing the rental SFW/NSFW chooser. Same one-at-a-time,
+  // in-card pattern as the update menu below.
+  const [rentalChoicesFor, setRentalChoicesFor] = useState('');
   // Several downloads run at once: each plain one gets its own card up front, and
   // each replace draws on the card it supersedes.
   const downloads = useCivitaiDownloads();
@@ -96,6 +111,7 @@ export function LoraSection({
   };
   useWindowEvent('keydown', (e) => {
     if (e.key === 'Escape' && updateChoicesFor) setUpdateChoicesFor('');
+    if (e.key === 'Escape' && rentalChoicesFor) setRentalChoicesFor('');
   });
 
   return (
@@ -253,6 +269,15 @@ export function LoraSection({
               <span>{message}</span>
             </div>
           ) : null}
+          {/* Rented mode with installed LoRAs but none registered: say why the
+              grid is empty instead of looking like the collection vanished. */}
+          {rentedOnly && loras.length > 0 && visibleLoras.length === 0 ? (
+            <div className="rounded-md border border-line1 bg-bg2 px-3 py-2.5 text-xs text-ink3">
+              None of these LoRAs are on rented machines. Switch Source to Local and use a
+              card&apos;s Rental button (dev mode) — machines rented afterwards download them
+              during provisioning.
+            </div>
+          ) : null}
           {/* The grid renders whenever the panel is open: an in-flight download owns
               the first card even before its file exists, and an empty grid is
               invisible, so no `loras.length` gate here. */}
@@ -260,7 +285,7 @@ export function LoraSection({
             {pendingDownloads.map((item) => (
               <PendingLoraCard key={item.key} download={item} />
             ))}
-            {loras.map((lora) => {
+            {visibleLoras.map((lora) => {
               const selected = selection.some((item) => item.id === lora.id);
               const label = lora.displayName || lora.name;
               const version = loraVersionLabel(lora);
@@ -269,9 +294,14 @@ export function LoraSection({
               const updating = Boolean(updatingDownload);
               const updatePercent = civitaiDownloadPercent(updatingDownload);
               const choosing = updateChoicesFor === lora.id;
-              // With the choices open the card's job is to dismiss them, not to
-              // toggle selection out from under the click.
-              const toggle = () => (choosing ? setUpdateChoicesFor('') : onToggleLora(lora));
+              const rentalChoosing = rentalChoicesFor === lora.id;
+              // With either in-card menu open the card's job is to dismiss it,
+              // not to toggle selection out from under the click.
+              const toggle = () => {
+                if (choosing) return setUpdateChoicesFor('');
+                if (rentalChoosing) return setRentalChoicesFor('');
+                onToggleLora(lora);
+              };
               return (
                 // Not a <button>: the card holds the update menu, which cannot nest
                 // inside one. Same role/keyboard pattern as the selected rows above.
@@ -390,6 +420,19 @@ export function LoraSection({
                         Download update as new
                       </button>
                     </div>
+                  ) : null}
+
+                  {/* Rental availability: badge always, management in dev mode.
+                      Chooser overlays the card like the update menu above. */}
+                  {(devMode || rentalEntries?.[lora.id]) && !updating ? (
+                    <LoraRentalControl
+                      lora={lora}
+                      entry={rentalEntries?.[lora.id]}
+                      devMode={devMode && rentalRegistry.status === 'ready'}
+                      baseModels={baseModels}
+                      choosing={rentalChoosing}
+                      onToggleChooser={(open) => setRentalChoicesFor(open ? lora.id : '')}
+                    />
                   ) : null}
 
                   {/* An update-and-replace reports on the card it will replace. The

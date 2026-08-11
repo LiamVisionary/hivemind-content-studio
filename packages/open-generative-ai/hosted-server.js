@@ -612,7 +612,13 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         const media = await requestBuffer(mediaUrl, { Authorization: `Bearer ${token}` });
         const contentType = String(media.contentType).split(';')[0];
         job.url = `data:${contentType};base64,${media.buffer.toString('base64')}`;
-        job.mediaType = contentType.startsWith('video/') ? 'video' : 'image';
+        // A SEALED output answers as the envelope type (application/vnd.hivemind.e2e+json),
+        // which is neither video/ nor image/ — so the content type alone called every
+        // sealed clip an image. The filename still carries the truth.
+        job.mediaType = contentType.startsWith('video/')
+          || /\.(mp4|mov|webm|mkv|m4v)(\.(e2e|zenc))?$/i.test(String(job.image_urls[0]).split('?')[0])
+          ? 'video'
+          : 'image';
       }
       return sendJson(res, 200, job);
     } catch (e) { return sendJson(res, 502, { status: 'error', error: e.message }); }
@@ -680,6 +686,8 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
           width: Math.round(Number(body.outpaint.width)),
           height: Math.round(Number(body.outpaint.height)),
           ...(Number(body.outpaint.feathering) >= 0 ? { feathering: Math.round(Number(body.outpaint.feathering)) } : {}),
+          ...(body.outpaint.offset_x != null ? { offset_x: Number(body.outpaint.offset_x) } : {}),
+          ...(body.outpaint.offset_y != null ? { offset_y: Number(body.outpaint.offset_y) } : {}),
         };
       }
       // Masked edit (soft inpaint): the browser paints a white-on-black mask
@@ -759,6 +767,27 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         factor: Number(body.factor) === 4 ? 4 : 2,
       };
       const submitted = await requestJson(`${ZIMAGE_URL}/api/interpolate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+        timeout: 180000,
+      });
+      return sendJson(res, 202, submitted);
+    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+  }
+  if (pathname === '/local-ai/episode' && req.method === 'POST') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });
+    try {
+      // A joined episode is every shot in one file — the largest thing the
+      // studio ever uploads, and the default JSON cap would reject it.
+      const body = JSON.parse((await readBody(req, 512 * 1024 * 1024)).toString('utf8') || '{}');
+      if (!body.video_base64) return sendJson(res, 400, { error: 'video_base64 is required' });
+      const payload = {
+        video_base64: body.video_base64,
+        shots: Number(body.shots) > 0 ? Math.floor(Number(body.shots)) : 0,
+      };
+      const submitted = await requestJson(`${ZIMAGE_URL}/api/episode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(payload),

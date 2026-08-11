@@ -1161,6 +1161,24 @@ export async function ensureCanvasHistoryLoaded() {
 // Reverse-lookup: find the canvas-history entry whose output matches a dropped URL or
 // filename, so drag-to-restore can recover older local-ComfyUI outputs that predate
 // the per-output setup store, reusing loadCanvasOutputInStudio's decrypt+restore path.
+// The History row for an output the studio only knows by the URL it had when
+// it was generated. This is what lets an episode be reassembled after a
+// reload: the studio's strip is session-only, so a chain's earlier shots exist
+// only here, under a different (history-id) URL.
+export function findCanvasOutputForUrl(url, basename) {
+  const id = findCanvasHistoryIdForOutput(url, basename);
+  if (!id) return null;
+  const entry = hubState.canvasHistory.find((item) => item.history_id === id);
+  if (!entry) return null;
+  return {
+    historyId: id,
+    mediaUrl: entry.media_url,
+    basename: entry.output_basename || basenameOf(entry.media_url),
+    createdAt: entry.created_at || null,
+    mediaType: entry.media_type || '',
+  };
+}
+
 export function findCanvasHistoryIdForOutput(url, basename) {
   const targetName = basename || (url ? outputBasename(url) : '');
   const entry = hubState.canvasHistory.find((item) => {
@@ -1190,6 +1208,20 @@ function sealedLookupKeys(entry) {
   };
 }
 
+// The output itself, handed to the studio alongside its settings. Restoring only
+// the settings left the Video studio with no clip on the canvas, so every action
+// that lives ON a result — Continue scene, Smooth 2x, Compare, Download — was
+// unreachable for anything made before the current session (the studio's own
+// strip is deliberately session-only). media_url is the sealed envelope; the
+// studio decrypts it in-browser like any other sealed media.
+function outputHandoff(entry) {
+  return {
+    url: entry.media_url,
+    id: entry.history_id,
+    timestamp: entry.created_at || null,
+  };
+}
+
 async function restoreSealedGenerationSetup(entry) {
   let result = null;
   try {
@@ -1197,9 +1229,16 @@ async function restoreSealedGenerationSetup(entry) {
   } catch { return false; }
   if (!result?.context) return false;
   const section = result.section || (entry.media_type?.startsWith('video/') ? 'video' : 'image');
-  loadStudioSetup(section, { format: 'studio-full-context', section, context: result.context });
+  loadStudioSetup(section, {
+    format: 'studio-full-context',
+    section,
+    context: result.context,
+    output: outputHandoff(entry),
+  });
   window.dispatchEvent(new CustomEvent('navigate', { detail: { page: section } }));
-  toast.success(`Settings restored into the ${section === 'video' ? 'Video' : 'Image'} studio.`);
+  toast.success(section === 'video'
+    ? 'Loaded the clip and its settings into the Video studio.'
+    : 'Settings restored into the Image studio.');
   return true;
 }
 
@@ -1228,8 +1267,10 @@ export async function loadCanvasOutputInStudio(historyId) {
     const section = isVideo ? 'video' : 'image';
     updateComposerSection(section, { prompt: setup.primaryPrompt || '' });
     // Hand the FULL setup to the studio (restores model, seed, steps, cfg, dims,
-    // negative, prompt); queues + drains when the studio activates below.
-    loadStudioSetup(section, setup);
+    // negative, prompt); queues + drains when the studio activates below. The
+    // clip rides along so the video result actions work on it, same as the
+    // sealed-setup path above.
+    loadStudioSetup(section, { ...setup, output: outputHandoff(entry) });
     // Route to the studio PAGE directly — navigateHub only handles hub views and
     // would fall back to the Planner ('create') for a studio page.
     window.dispatchEvent(new CustomEvent('navigate', { detail: { page: section } }));

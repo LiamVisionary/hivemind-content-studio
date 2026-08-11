@@ -1,5 +1,5 @@
 {
-  "comment": "MiniMax H3 reference mode. Conditions on up to nine reference pictures through MiniMaxH3ReferenceToVideo's autogrow ref_images inputs rather than a first/last frame. Same weights and lane as minimax-h3; prompts follow the ref_en guide's subject_definitions / retention_analysis format.",
+  "comment": "MiniMax H3 reference mode. Conditions on up to nine reference pictures (autogrow ref_images), up to three reference videos (autogrow ref_videos, each optionally carrying its own soundtrack through ref_video_audios) and up to three standalone reference audio clips (autogrow ref_audios \u2014 voice/music timbre cloning; each 2-15s, 15s total, never audio alone) through MiniMaxH3ReferenceToVideo rather than a first/last frame. Same weights and lane as minimax-h3; prompts follow the ref_en guide's subject_definitions / retention_analysis format with <Picture i> / <Video k> / <Audio j> labels. Reference videos load through core LoadVideo -> GetVideoComponents, whose images output is the ref_video frame stack and whose audio output is the same-numbered ref_video_audio; the node reads those frames as 24 fps, so the MCP resamples every uploaded clip to 24 fps before staging it.",
   "prompt": {
     "6": {
       "class_type": "UNETLoader",
@@ -42,7 +42,7 @@
       "class_type": "SpectrumApplyMiniMaxH3",
       "inputs": {
         "model": [
-          "31",
+          "33",
           0
         ],
         "enabled": true,
@@ -118,6 +118,42 @@
         "ref_images.ref_image_9": [
           "128",
           0
+        ],
+        "ref_videos.ref_video_1": [
+          "143",
+          0
+        ],
+        "ref_videos.ref_video_2": [
+          "144",
+          0
+        ],
+        "ref_videos.ref_video_3": [
+          "145",
+          0
+        ],
+        "ref_video_audios.ref_video_audio_1": [
+          "143",
+          1
+        ],
+        "ref_video_audios.ref_video_audio_2": [
+          "144",
+          1
+        ],
+        "ref_video_audios.ref_video_audio_3": [
+          "145",
+          1
+        ],
+        "ref_audios.ref_audio_1": [
+          "129",
+          0
+        ],
+        "ref_audios.ref_audio_2": [
+          "130",
+          0
+        ],
+        "ref_audios.ref_audio_3": [
+          "131",
+          0
         ]
       },
       "_meta": {
@@ -128,7 +164,7 @@
       "class_type": "BasicScheduler",
       "inputs": {
         "model": [
-          "30",
+          "32",
           0
         ],
         "scheduler": "simple",
@@ -152,7 +188,7 @@
       "class_type": "BasicGuider",
       "inputs": {
         "model": [
-          "30",
+          "32",
           0
         ],
         "conditioning": [
@@ -216,7 +252,7 @@
       "class_type": "CreateVideo",
       "inputs": {
         "images": [
-          "10",
+          "35",
           0
         ],
         "audio": [
@@ -317,6 +353,162 @@
       },
       "_meta": {
         "title": "Reference picture 9"
+      }
+    },
+    "129": {
+      "class_type": "LoadAudio",
+      "inputs": {
+        "audio": ""
+      },
+      "_meta": {
+        "title": "Reference audio 1"
+      }
+    },
+    "130": {
+      "class_type": "LoadAudio",
+      "inputs": {
+        "audio": ""
+      },
+      "_meta": {
+        "title": "Reference audio 2"
+      }
+    },
+    "131": {
+      "class_type": "LoadAudio",
+      "inputs": {
+        "audio": ""
+      },
+      "_meta": {
+        "title": "Reference audio 3"
+      }
+    },
+    "140": {
+      "class_type": "LoadVideo",
+      "inputs": {
+        "file": ""
+      },
+      "_meta": {
+        "title": "Reference video 1"
+      }
+    },
+    "141": {
+      "class_type": "LoadVideo",
+      "inputs": {
+        "file": ""
+      },
+      "_meta": {
+        "title": "Reference video 2"
+      }
+    },
+    "142": {
+      "class_type": "LoadVideo",
+      "inputs": {
+        "file": ""
+      },
+      "_meta": {
+        "title": "Reference video 3"
+      }
+    },
+    "143": {
+      "class_type": "GetVideoComponents",
+      "inputs": {
+        "video": [
+          "140",
+          0
+        ]
+      },
+      "_meta": {
+        "title": "Reference video 1 frames + soundtrack"
+      }
+    },
+    "144": {
+      "class_type": "GetVideoComponents",
+      "inputs": {
+        "video": [
+          "141",
+          0
+        ]
+      },
+      "_meta": {
+        "title": "Reference video 2 frames + soundtrack"
+      }
+    },
+    "145": {
+      "class_type": "GetVideoComponents",
+      "inputs": {
+        "video": [
+          "142",
+          0
+        ]
+      },
+      "_meta": {
+        "title": "Reference video 3 frames + soundtrack"
+      }
+    },
+    "32": {
+      "class_type": "EasyCache",
+      "inputs": {
+        "model": [
+          "30",
+          0
+        ],
+        "reuse_threshold": 0.0,
+        "start_percent": 0.15,
+        "end_percent": 0.95,
+        "verbose": false
+      },
+      "_meta": {
+        "title": "EasyCache (0 = off)"
+      }
+    },
+    "33": {
+      "class_type": "SolAttnPatch",
+      "inputs": {
+        "model": [
+          "31",
+          0
+        ],
+        "tau": 0.0,
+        "start_percent": 0.2,
+        "end_percent": 0.9,
+        "min_tokens": 4096,
+        "int8_qk": true,
+        "sink_conditioning": "exact_kv_and_rows",
+        "morton": false,
+        "morton_curve": "2d_frame",
+        "int8_pv": true,
+        "verbose": false,
+        "use_tma": false,
+        "dense_blocks": ""
+      },
+      "_meta": {
+        "title": "Sol-Attn (tau 0 = off)"
+      }
+    },
+    "34": {
+      "class_type": "FrameInterpolationModelLoader",
+      "inputs": {
+        "model_name": "rife_v4.26.safetensors"
+      },
+      "_meta": {
+        "title": "RIFE model"
+      }
+    },
+    "35": {
+      "class_type": "FrameInterpolate",
+      "inputs": {
+        "interp_model": [
+          "34",
+          0
+        ],
+        "images": [
+          "10",
+          0
+        ],
+        "multiplier": 1
+      },
+      "_meta": {
+        "title": "Frame interpolation (1 = off)"
       }
     }
   }

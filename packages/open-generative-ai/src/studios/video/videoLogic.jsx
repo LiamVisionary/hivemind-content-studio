@@ -458,8 +458,12 @@ export function buildInitialSetup(c) {
     seed: -1,
     imageUrl: null,
     endImageUrl: null,
-    // MiniMax H3 Reference mode: character/subject pictures (up to 9, ordered).
+    // MiniMax H3 Reference mode: character/subject pictures (up to 9, ordered),
+    // voice clips (<Audio N>) and motion clips (<Video N>, each with its own
+    // useAudio flag). All three are optional and mix freely.
     referenceImageUrls: [],
+    referenceAudios: [],
+    referenceVideos: [],
     ltxMiddleUrl: null,
     ltxEndUrl: null,
     matchStartFrameAr: true,
@@ -653,6 +657,8 @@ export function videoUploadedTransition(prev, { url, name, useHivemind, preferre
       endImageUrl: null,
       // A source video means extend/head-swap — reference mode never combines.
       referenceImageUrls: [],
+      referenceAudios: [],
+      referenceVideos: [],
       v2vMode: false,
       imageMode: true,
       modelId: preferredHive.id,
@@ -701,6 +707,8 @@ export function newPromptTransition(prev, c) {
     imageUrl: null,
     endImageUrl: null,
     referenceImageUrls: [],
+    referenceAudios: [],
+    referenceVideos: [],
     ltxMiddleUrl: null,
     ltxEndUrl: null,
     matchStartFrameAr: true,
@@ -796,6 +804,12 @@ export function applyGenerationContext(prev, context, c) {
     endImageUrl: context.endImageUrl || null,
     referenceImageUrls: Array.isArray(context.referenceImageUrls)
       ? context.referenceImageUrls.filter(Boolean)
+      : [],
+    referenceAudios: Array.isArray(context.referenceAudios)
+      ? context.referenceAudios.filter((item) => item?.url)
+      : [],
+    referenceVideos: Array.isArray(context.referenceVideos)
+      ? context.referenceVideos.filter((item) => item?.url)
       : [],
     videoUrl: context.videoUrl || null,
     videoName: context.videoName || null,

@@ -382,7 +382,7 @@ def build_krea2_turbo_identity_prompt(
     return graph
 
 
-def ltx_anchor_canvas_geometry(source_width, source_height, target_width, target_height):
+def ltx_anchor_canvas_geometry(source_width, source_height, target_width, target_height, offset_x=0.5, offset_y=0.5):
     """Return a contain-and-pad plan without changing the source aspect ratio."""
     values = [source_width, source_height, target_width, target_height]
     if any(int(value) <= 0 for value in values):
@@ -411,8 +411,20 @@ def ltx_anchor_canvas_geometry(source_width, source_height, target_width, target
     scaled_height = max(1, min(target_height, round(source_height * scale)))
     horizontal = target_width - scaled_width
     vertical = target_height - scaled_height
-    left = horizontal // 2
-    top = vertical // 2
+    # Placement (Mix-Studio outpaint-plan port): 0 anchors the source at the
+    # start of the growth axis, 1 at the end, 0.5 centers (the default every
+    # existing caller — the LTX anchor pipeline included — keeps).
+    def _offset_fraction(value):
+        try:
+            fraction = float(value)
+        except (TypeError, ValueError):
+            return 0.5
+        if fraction != fraction:
+            return 0.5
+        return max(0.0, min(1.0, fraction))
+
+    left = round(horizontal * _offset_fraction(offset_x))
+    top = round(vertical * _offset_fraction(offset_y))
     return {
         "mode": "outpaint",
         "source_width": source_width,
@@ -455,6 +467,8 @@ def build_krea2_turbo_outpaint_prompt(
         source_height,
         target_width,
         target_height,
+        offset_x=options.get("offset_x", 0.5),
+        offset_y=options.get("offset_y", 0.5),
     )
 
     if geometry["mode"] == "passthrough":

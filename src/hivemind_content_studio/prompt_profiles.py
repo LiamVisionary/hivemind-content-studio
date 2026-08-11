@@ -75,6 +75,7 @@ Inside integrated_multimodal_description:
 - Open with one sentence of visual style and composition: photographic or animated look, palette, lens feel, grading.
 - Write the clip as shots. The first is "[Shot 1]" with no timestamp; every later shot opens with its start time in MM:SS.mmm, exactly like "[Shot 2] At 00:03.500," — two digits, two digits, three digits. Never write a bare list number before a shot header.
 - Introduce each character where they first appear, and give every distinct voice a stable speaker id — (S1), (S2), … in the order they are first heard, and (S1,S2) when they speak together.
+- When the idea names a known fictional character, anchor them to their source. H3 recognises characters through the work they come from, so refer to them at first mention as full name plus source — "Buffy Summers as played by Sarah Michelle Gellar" for a live-action role, and afterwards keep using "as played by <actor>" at each visual re-introduction. When the whole clip lives in that world, open the style sentence with the source framing and repeat it as the style: "A television scene from the American television drama series Buffy the Vampire Slayer from 1997, professional color grading, in the style and aesthetics of the drama series Buffy the Vampire Slayer." (Adapt "television drama series" to the real medium: video game, animated series, anime series, film.) When a known character speaks, extend the language bracket with their voice: <d>[English in Buffy's voice from Buffy the Vampire Slayer as played by Sarah Michelle Gellar] the words</d>. Never invent a casting — when unsure who played a role, name only the character and the work with its year.
 - Speech is OPTIONAL and off by default. Write a spoken line ONLY when the idea actually asks for one — someone talking, singing, being quoted, narrating. If the idea does not, the clip has no voice in it: no <d> tag, no speaker id, and nobody described as speaking. H3 renders the audio too, so an invented line becomes a real voice saying words nobody asked for. A scene with a person in it is not a reason to give them something to say.
 - When the idea DOES call for speech, put the words in a dialogue tag, exactly like this: (S1) says: <d>[English] I get off at the next station.</d>
 - Every <d> tag MUST open with a bracketed language, [English] unless the idea asks for another language. A <d> tag without it is malformed. The words inside are used verbatim, so write the line you actually want said.
@@ -150,17 +151,40 @@ Describe what leads UP to that image: the clip opens elsewhere and arrives at wh
 
 # Reference mode has its OWN format — six sections, not three fields.
 # Distilled from MiniMaxAI/MiniMax-H3 docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md
-# (read 2026-08-09). Reachable because ComfyUI ships MiniMaxH3ReferenceToVideo,
-# whose autogrow ref_images inputs take up to nine pictures; the workflow sends
-# them in order, so <Picture N> is the Nth image the user attached.
+# (read 2026-08-09; audio-reference rules re-read 2026-08-10). Reachable because
+# ComfyUI ships MiniMaxH3ReferenceToVideo, whose autogrow ref_images inputs take
+# up to nine pictures and whose ref_audios inputs take up to three voice/music
+# clips; the workflow sends each group in order, so <Picture N> is the Nth image
+# and <Audio N> the Nth clip the user attached — the two are numbered
+# independently. The audio markers ([audio reuse]/[audio reference],
+# fully_copy family) are the guide's trained-on forms and must not drift.
 _MINIMAX_H3_REFERENCE = """\
-You turn a creative brief plus reference pictures into a prompt for MiniMax H3's \
-Reference mode, which carries subjects, clothing, environments and styles across from \
-the references into a new clip with its own audio.
+You turn a creative brief plus reference pictures — and optionally reference video \
+and audio clips — into a prompt for MiniMax H3's Reference mode, which carries \
+subjects, clothing, environments, styles, movement and voices across from the \
+references into a new clip with its own audio.
 
-The references are attached in order: the first is <Picture 1>, the second <Picture 2>, \
-and so on. Look at them and describe what is actually there — never invent a detail a \
-picture does not show.
+The references are attached in order: the first picture is <Picture 1>, the second \
+<Picture 2>, and so on. Video clips number separately — the first is <Video 1> — and \
+so do audio clips, the first being <Audio 1>. Look at the pictures and describe what \
+is actually there — never invent a detail a picture does not show.
+
+A reference VIDEO is a movement reference. It carries how a body moves — gesture \
+size and rhythm, posture, mannerisms, facial expressiveness — and its retention \
+marker decides how literally: fully_preserved reproduces the movement itself, \
+attribute_transfer performs a DIFFERENT action in that performer's manner, \
+weak_reference is a loose pacing cue. Unless the brief asks to copy the source shot, \
+prefer attribute_transfer and say plainly what does NOT carry: the reference \
+performer's face, clothing, setting and framing.
+
+A reference audio clip clones a VOICE (or piece of music). It works in exactly one of \
+two modes, and the brief decides which:
+- [audio reuse] — the clip's own words are reperformed. Keep the source words \
+VERBATIM, in their original language, inside the <d>…</d> tag. Do not translate, \
+trim or paraphrase them.
+- [audio reference] — only the timbre, rhythm, emotion and delivery carry over into \
+NEW dialogue you write. The source clip's own words must NOT appear anywhere in the \
+prompt.
 
 Reference mode was trained on a six-section format. Emit exactly these sections, in \
 this order, each label on its own line:
@@ -169,18 +193,29 @@ subject_definitions:
   One line per thing you will reuse. Give it a label and say what it is, citing where it
   came from: "<Subject 1> is the woman in the yellow raincoat from <Picture 1>."
   Use <Subject N> for reusable content (a person, a garment, a place, a style) and
-  <Picture N> for a picture used as a concrete frame anchor.
+  <Picture N> for a picture used as a concrete frame anchor. Define each audio clip by
+  its role and bind it to its speaker: "<Audio 1> is the voice-timbre reference for
+  <Subject 1> (S1), containing a spoken female voiceover." Define each video clip by
+  the movement it carries and say who inherits it: "<Video 1> is a motion reference:
+  quick punctuating hand gestures and lively expressiveness, inherited by <Subject 1>."
 summary:
-  One paragraph: what the target clip is, and which references drive it.
+  One paragraph: what the target clip is, and which references drive it. When audio
+  references are present, include the task-type marker — [audio reuse] or
+  [audio reference] — and cite the <Audio N> labels.
 retention_analysis:
-  One line per label, each ending in exactly one marker — fully_preserved,
-  partially_preserved, attribute_transfer or weak_reference — then why in a clause.
+  One line per label, each ending in exactly one marker, then why in a clause.
+  Pictures, subjects and videos use fully_preserved, partially_preserved,
+  attribute_transfer or weak_reference. Audio labels use the copy family instead:
+  fully_copy (words and voice reperformed), partially_copy, reference (timbre guides
+  new dialogue without copying the signal) or weak_reference.
   A newly invented plot beat is not a loss of fidelity; do not mark it as one.
 detailed_description:
   The clip itself, shot by shot. "[Shot 1]" carries no timestamp; later shots open
   "[Shot N] At MM:SS.mmm,". Give each distinct voice a stable id — (S1), (S2) — and put
   spoken words in <d>[English] the exact words</d>, marked <cutoff> if still running when
-  the clip ends. Camera movement is prose inside the action: the move, how far, how fast.
+  the clip ends. Where a voice reference is active, say so at the line: "(S1) says, using
+  the calm male voice timbre referenced from <Audio 1>: <d>[English] …</d>". Camera
+  movement is prose inside the action: the move, how far, how fast.
   350-500 words unless the brief is simple.
 overall_soundscape:
   1-4 sentences: ambience, the sounds the action makes, non-verbal human sound. Never
@@ -191,6 +226,9 @@ non_diegetic_music:
 Rules:
 - Speech is OPTIONAL and off by default. Only write a <d> tag when the brief asks for
   someone to speak or sing; H3 renders the audio, so an invented line becomes a real voice.
+- A VOICE reference is the exception: an <Audio N> defined as a voice exists to drive
+  dialogue, so write the lines it governs — the source words verbatim under
+  [audio reuse], entirely new words under [audio reference], never a mix.
 - Once a label is assigned it means the same thing in every section.
 - Present tense, concrete and filmable. H3 has no negative prompt: state what should be there.
 - Never mention resolutions, step counts, settings or the model itself.
@@ -237,7 +275,7 @@ PROFILES: dict[str, dict[str, str]] = {
         "system": _MINIMAX_H3_L2VA,
     },
     "minimax-h3-reference": {
-        "label": "MiniMax H3 (reference pictures)",
+        "label": "MiniMax H3 (reference pictures + voice)",
         "system": _MINIMAX_H3_REFERENCE,
     },
     "image": {
@@ -294,15 +332,166 @@ def profile_for(
     return DEFAULT_VIDEO_PROFILE
 
 
-def system_prompt(profile: str, *, duration_seconds: float | None = None) -> str:
+# Scene chaining (MiniMax H3 Motion Context). The previous clip's last frames
+# are pinned to the head of the new one, which carries MOTION and room tone —
+# not the scene. Measured on the rental 2026-08-10: a chained prompt that keeps
+# describing the established subjects and style continues seamlessly, while one
+# that opens on a new arrangement renders a hard cut into an unrelated
+# photoreal take from the first delivered frame. So a continuation prompt is a
+# different kind of prompt, and the helper has to be told which it is writing —
+# without this it answers a bare line of new dialogue by inventing a fresh
+# scene, which is precisely the failure.
+_H3_CONTINUATION_CLAUSE = (
+    "\n\nThis clip CONTINUES the previous one with no cut: that shot's closing frames are pinned to "
+    "the head of this one. Write it accordingly.\n"
+    "- Re-describe the established scene in full — the same characters (same names and castings), "
+    "wardrobe, location, art style, colour palette and lens. Naming them again is what holds the "
+    "scene together; a prompt that stops naming them makes the model cut to a different, unrelated "
+    "scene. Never open on a new setting or a new arrangement of people unless the idea explicitly "
+    "asks for that change.\n"
+    "- [Shot 1] must be the HOLD: the previous shot's closing framing, unchanged, with NO dialogue in "
+    "it — only small continuing motion (a breath, a weight shift, an eyeline change). A held framing "
+    "with nothing happening renders as a literal freeze, so always give it something small to do. "
+    "Everything new happens from [Shot 2] onward.\n"
+    "- The first ~0.9s of the clip is that carried-over hold, so the first spoken line and the first "
+    "shot change must both start at 1s or later — write the timestamp explicitly.\n"
+    "- If the idea is only a line of new dialogue, it is the NEXT thing said in this same scene — "
+    "keep everything else exactly as established."
+)
+
+
+# UGC is a LAYER, not a profile. The format a model was trained on does not
+# change because the clip is an ad — H3 still wants its three fields, LTX still
+# wants its paragraph — but almost every judgement inside that format inverts.
+# Distilled from the UGC realism brief the studio ships with (see
+# src/lib/ugcMode.js for the composer half): the goal is a moment that
+# accidentally became content, and the two things that give it away are polish
+# and repetition. Repetition is handled client-side by dealing a new cast; this
+# is the anti-polish half.
+#
+# The single most important line is the speech one. Every H3 profile says speech
+# is OPTIONAL and off by default, for good reason — H3 renders the audio, so an
+# invented line becomes a real voice. A UGC clip is someone talking to their own
+# camera, so that default is exactly wrong here and has to be reversed out loud.
+_UGC_CLAUSE = """\
+
+This is a UGC clip: one real person filming themselves on their own phone. It is \
+NOT an ad and must never read as one. The viewer should not register that it is an \
+advertisement or that it is generated; both die the same way, on polish.
+
+- SPEECH IS REQUIRED here, overriding the default above. The person talks the whole \
+way through, in one voice. Write their words.
+- Write words that sound SAID, not written. Contractions, a filler word ("like", "I \
+don't know"), one thought that trails off and restarts. If a line sounds composed, \
+rewrite it until it sounds spoken.
+- Keep the brief's beat timings. Open already mid-sentence, as if we joined late — \
+never with a greeting, an introduction or a name. Any call to action arrives as an \
+afterthought near the end and trails off; it is never a slogan or a tagline.
+- End unresolved or interrupted. No payoff, no lesson, no summary line.
+- The camera is a hand holding a phone: chest-up selfie framing with natural micro \
+shakes. Never a tripod, never a crane, never a cinematic move.
+- The picture is a phone front camera, not a production: real skin texture with \
+visible pores and under-eye shadows, no beauty filter, no colour grading, no \
+"cinematic" or "professional" anything. Name the actual light source in the room \
+rather than describing the lighting as good, soft or flattering.
+- The audio is a phone microphone: the voice close and slightly boxy, room tone \
+underneath, and one ambient sound event from the location. No music at all.
+- Keep the environment alive — something moves or sounds in the background at least \
+once — and let the performance be imperfect: a hesitation, a gaze break, a shift of \
+weight.
+- Use the behavioural beats named in the brief, and no others."""
+
+# H3 renders a score if it is asked for one, and scored UGC is instantly an ad.
+_UGC_H3_CLAUSE = """
+- non_diegetic_music must be exactly N/A. A UGC clip has no score.
+- Give the speaker (S1) and put every line inside <d>[English] …</d>, marked \
+<cutoff> if it is still running when the clip ends — a real one usually is."""
+
+_UGC_IMAGE_CLAUSE = """\
+
+This is the FIRST FRAME of a UGC clip: a still that has to pass as a photo the \
+person took of themselves, not a picture anyone lit or composed.
+
+- Ultra realistic phone front-camera selfie, 9:16, shallow depth of field.
+- Real skin texture with visible pores and light under-eye shadows. No beauty \
+filter, no retouching, no glow.
+- One specific person in one specific place — invent the specifics and commit to \
+them rather than describing a type.
+- Name the light source and where it is ("afternoon sun through the windshield from \
+the left", "a lamp behind and to the right"). Never write "good lighting", "soft \
+light" or "studio lighting".
+- A lived-in background with one imperfect detail in it.
+- Candid mid-sentence expression, eyes off the lens.
+- No text, no captions, no logos, no watermark.
+- Never "cinematic", "professional", "high fashion", "8k" or any other production \
+word. This is a phone photo."""
+
+
+# The system prompt is a token budget, not a dumping ground (same rule as the
+# character notes). A written H3 prompt runs ~1-2k characters; this keeps a long
+# one from crowding out the format rules it has to sit beside.
+_PREVIOUS_PROMPT_LIMIT = 2400
+
+
+def system_prompt(
+    profile: str,
+    *,
+    duration_seconds: float | None = None,
+    character_notes: list[str] | None = None,
+    continuation: bool = False,
+    previous_prompt: str | None = None,
+    ugc: bool = False,
+) -> str:
     """The instruction, with the clip length folded in when the studio knows it.
 
     Without it the helper writes whatever timeline the idea suggests and H3
     happily accepts shot headers past the end of the clip — measured
     2026-08-09: a "[Shot 3] At 00:07.800" on a clip set to 5 seconds. Those
     beats simply never render, so the last thing described is silently missing
-    from the result."""
+    from the result.
+
+    ``character_notes`` are verified name/casting/work/year lines for
+    characters the studio's catalog matched in the idea (client-computed from
+    the same list the composer's quick-add button uses). Folded in only for
+    the H3 profiles — the small local helpers misremember castings, and a
+    wrong "as played by" steers H3 to the wrong face entirely.
+
+    ``continuation`` says the studio has a scene chain armed, so this prompt is
+    the NEXT shot of a running scene rather than a new one. ``previous_prompt``
+    is how the shot being continued was written — the only thing that tells the
+    helper WHAT scene to keep when the idea is just the next line of dialogue.
+
+    ``ugc`` says the composer has UGC mode armed. It layers on top of whichever
+    profile was chosen rather than replacing it: the model's trained format is
+    unaffected by the clip being an ad, but most of the judgements inside it
+    invert — speech stops being optional, and polish becomes the failure."""
     system = PROFILES.get(profile, PROFILES[DEFAULT_VIDEO_PROFILE])["system"]
+    if ugc:
+        if profile == DEFAULT_IMAGE_PROFILE:
+            system += _UGC_IMAGE_CLAUSE
+        else:
+            system += _UGC_CLAUSE
+            if profile.startswith("minimax-h3"):
+                system += _UGC_H3_CLAUSE
+    if continuation and profile.startswith("minimax-h3"):
+        system += _H3_CONTINUATION_CLAUSE
+        previous = (previous_prompt or "").strip()
+        if previous:
+            system += (
+                "\n\nThe shot you are continuing was written as:\n"
+                f"---\n{previous[:_PREVIOUS_PROMPT_LIMIT]}\n---\n"
+                "That is the established scene. Carry its characters, wardrobe, location, art style, "
+                "colour palette and lens into your prompt, and change only what the idea asks for."
+            )
+    if character_notes and profile.startswith("minimax-h3"):
+        lines = "\n".join(f"- {note}" for note in character_notes)
+        system += (
+            "\n\nThe idea mentions characters this studio has verified source facts for. When you "
+            "refer to one of them, use these exact names, castings, works and years — they override "
+            "your own recollection:\n"
+            f"{lines}\n"
+            "Only expand the characters the idea actually refers to; ignore the rest of the list."
+        )
     if not duration_seconds or duration_seconds <= 0 or profile == DEFAULT_IMAGE_PROFILE:
         return system
     seconds = round(float(duration_seconds), 2)
@@ -358,7 +547,25 @@ def normalize(profile: str, prompt: str) -> str:
     return _SHOT_LIST_NUMBER.sub("", repaired)
 
 
-_SHOT_TIMESTAMP = re.compile(r"\[Shot\s+\d+\][^\n]*?\bAt\s+(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?")
+# A line carrying a shot header, and the timestamps written on it. Both orders
+# occur in real output — the instruction teaches "[Shot 2] At 00:03.500," and
+# helpers also write "At 00:03.500 [Shot 2]" (both of Liam's own H3 prompts used
+# the second form). Matching only the taught order left the timeline check
+# silently inert on exactly those prompts, so the header and the timestamp are
+# now found independently, on the same line.
+_SHOT_LINE = re.compile(r"^.*\[Shot\s+\d+\].*$", re.MULTILINE)
+_TIMESTAMP = re.compile(r"\bAt\s+(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?")
+
+
+def _shot_start_times(prompt: str) -> list[tuple[int, float]]:
+    """(position in the prompt, seconds) for every timestamped shot header."""
+    starts: list[tuple[int, float]] = []
+    for line in _SHOT_LINE.finditer(prompt or ""):
+        for stamp in _TIMESTAMP.finditer(line.group(0)):
+            minutes, secs, millis = stamp.groups()
+            at = int(minutes) * 60 + int(secs) + int((millis or "0").ljust(3, "0")) / 1000
+            starts.append((line.start() + stamp.start(), round(at, 3)))
+    return starts
 
 
 def timeline_overruns(prompt: str, duration_seconds: float | None) -> list[float]:
@@ -369,12 +576,32 @@ def timeline_overruns(prompt: str, duration_seconds: float | None) -> list[float
     means silently losing the last beat."""
     if not duration_seconds or duration_seconds <= 0:
         return []
-    late = []
-    for minutes, secs, millis in _SHOT_TIMESTAMP.findall(prompt or ""):
-        at = int(minutes) * 60 + int(secs) + int((millis or "0").ljust(3, "0")) / 1000
-        if at >= float(duration_seconds):
-            late.append(round(at, 3))
-    return late
+    return [at for _, at in _shot_start_times(prompt) if at >= float(duration_seconds)]
+
+
+_SPEECH_LINE = re.compile(r"<d>\s*\[")
+
+
+def continuation_opens_on_speech(prompt: str) -> bool:
+    """True when a chained prompt starts talking before the carried-over head.
+
+    The first ~0.9s of a chained clip is the previous shot's pinned tail. A
+    line spoken over it is a line spoken while the picture is still replaying
+    the last shot — the join reads as a jump cut, and the words land early.
+    The instruction says to hold first; measured against a 12B helper it keeps
+    the SCENE reliably but still opens [Shot 1] on dialogue, so this is checked
+    rather than trusted, the same way the clip length is.
+
+    Detects the speech that lands before the first timestamp at or after 1s;
+    the repair is asked of the model (moving a beat rewrites intent, so it is
+    not safe to do by hand)."""
+    text = prompt or ""
+    speech = _SPEECH_LINE.search(text)
+    if not speech:
+        return False
+    # The hold counts only if a shot at or past 1s OPENS before the first line
+    # is spoken. A timestamp written after it belongs to a later beat.
+    return not any(at >= 1.0 and where < speech.start() for where, at in _shot_start_times(text))
 
 
 def changed_lines(before: str, after: str) -> int:
@@ -389,5 +616,67 @@ def changed_lines(before: str, after: str) -> int:
     return sum(max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in opcodes if tag != "equal")
 
 
-def profile_label(profile: str) -> str:
-    return PROFILES.get(profile, PROFILES[DEFAULT_VIDEO_PROFILE])["label"]
+def profile_label(profile: str, *, continuation: bool = False, ugc: bool = False) -> str:
+    label = PROFILES.get(profile, PROFILES[DEFAULT_VIDEO_PROFILE])["label"]
+    if continuation and profile.startswith("minimax-h3"):
+        label = f"{label} · continuing a scene"
+    if ugc:
+        label = f"{label} · UGC"
+    return label
+
+
+# Words that mark a prompt as produced. Each is a production term a UGC clip
+# cannot survive: "cinematic" and "film grain" describe a camera nobody filming
+# themselves owns, a "beauty filter" or "flawless skin" removes exactly the pores
+# the realism depends on, and "studio lighting" is the opposite of a named lamp
+# in a real room. Small helpers reach for these by habit — they are what a video
+# prompt normally wants — so the check is mechanical rather than another line of
+# instruction that competes with the format rules.
+_UGC_POLISH_TELLS = (
+    "cinematic",
+    "film grain",
+    "professional color grading",
+    "professional colour grading",
+    "studio lighting",
+    "softbox",
+    "soft box",
+    "beauty filter",
+    "flawless skin",
+    "perfect skin",
+    "airbrushed",
+    "8k",
+    "high fashion",
+    "tripod",
+    "dolly",
+    "crane shot",
+    "steadicam",
+    "gimbal",
+)
+
+_UGC_MUSIC_LINE = re.compile(r"^non_diegetic_music:\s*(.+)$", re.MULTILINE)
+
+
+def ugc_polish_tells(prompt: str) -> list[str]:
+    """Production words a UGC prompt should not contain, in the order found."""
+    text = (prompt or "").lower()
+    return [tell for tell in _UGC_POLISH_TELLS if tell in text]
+
+
+def ugc_missing_speech(profile: str, prompt: str) -> bool:
+    """True when a UGC clip has nobody talking in it.
+
+    Only checkable on the H3 profiles, which carry speech in an explicit <d>
+    tag. It matters because those profiles say speech is optional and off by
+    default — the UGC layer reverses that, and a helper that follows the older,
+    longer rule hands back a silent clip of a person moving their face."""
+    if not profile.startswith("minimax-h3"):
+        return False
+    return not _SPEECH_LINE.search(prompt or "")
+
+
+def ugc_has_music(prompt: str) -> bool:
+    """True when an H3 prompt scores the clip. UGC with a score is an ad."""
+    match = _UGC_MUSIC_LINE.search(prompt or "")
+    if not match:
+        return False
+    return match.group(1).strip().lower().rstrip(".") not in {"n/a", "na", "none"}

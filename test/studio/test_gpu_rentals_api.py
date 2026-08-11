@@ -28,6 +28,17 @@ def _isolate_offer_cache():
 
 
 @pytest.fixture(autouse=True)
+def _isolated_media_state(tmp_path: Path, monkeypatch):
+    """_onstart_script and tier_download_gb read the rental-LoRA registry under
+    MEDIA_STATE_ROOT; no test may see the developer machine's real one (or
+    another test's). Tests that care about the path still override it."""
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "media-state-default")
+    gpu_rentals._rental_lora_progress.clear()
+    yield
+    gpu_rentals._rental_lora_progress.clear()
+
+
+@pytest.fixture(autouse=True)
 def _funded_account(monkeypatch):
     """Renting checks the credit first. That is its own seam so the tests
     about renting do not all have to fake a bank balance; the tests about the
@@ -1376,3 +1387,174 @@ def test_minimax_tier_ships_the_turbo_lora(tmp_path: Path, monkeypatch) -> None:
     assert "curl -sfL" in script
     # The tier's bandwidth floor must account for the public bytes too.
     assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(43.3, abs=0.2)
+
+
+# --- rental LoRA registry ---------------------------------------------------
+# Dev mode marks an installed LoRA as "available for rentals": uploaded once to
+# R2, then appended to the onstart download list of every tier whose serving
+# set accepts its base-model family — preserving the local models/loras
+# relative path, because the studios send exactly that id as the graph's
+# lora_name and the rented box must resolve the same name.
+
+
+def _install_lora(tmp_path: Path, monkeypatch, rel: str = "glow.safetensors",
+                  base: str | None = "LTXV 2.3", size: int = 2048) -> str:
+    root = tmp_path / "comfy-loras"
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"x" * size)
+    if base is not None:
+        Path(str(target) + ".civitai.json").write_text(json.dumps({"modelVersion": {"baseModel": base}}))
+    monkeypatch.setattr(gpu_rentals, "COMFY_LORAS_ROOT", root)
+    return rel
+
+
+def _sync_uploads(monkeypatch, status: str = "ready", error: str = "") -> list[tuple[str, str, str]]:
+    """Replace the background upload thread with an immediate outcome."""
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_start(lora_id: str, path: Path, r2_key: str) -> None:
+        calls.append((lora_id, str(path), r2_key))
+        gpu_rentals._patch_rental_lora(lora_id, status=status, error=error)
+
+    monkeypatch.setattr(gpu_rentals, "_start_rental_lora_upload", fake_start)
+    return calls
+
+
+def test_rental_lora_routes_require_owner(tmp_path: Path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch, unlock=False)
+    assert client.get("/api/gpu-rentals/loras").status_code == 401
+    assert client.post("/api/gpu-rentals/loras", json={}).status_code == 401
+    assert client.delete("/api/gpu-rentals/loras/x.safetensors").status_code == 401
+
+
+def test_rental_lora_add_provisions_matching_tiers(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}?sig=x")
+    rel = _install_lora(tmp_path, monkeypatch)
+    uploads = _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "NSFW"})
+    assert response.status_code == 201
+    body = response.json()
+    # Sidecar family "LTXV 2.3" prefix-matches the tier's "LTXV" — and only
+    # the LTX tier: an image-tier box has nothing that could load it.
+    assert body["tiers"] == ["video"]
+    assert body["rating"] == "nsfw"
+    assert uploads == [(rel, str(tmp_path / "comfy-loras" / rel), f"user-loras/{rel}")]
+
+    listed = client.get("/api/gpu-rentals/loras").json()["loras"]
+    assert [(e["id"], e["status"]) for e in listed] == [(rel, "ready")]
+
+    script = gpu_rentals._onstart_script("video")
+    assert f"https://r2.example/user-loras/{rel}?sig=x" in script
+    assert f'"$M/loras/{rel}"' in script
+    # 11 curated video files + this one, in the same beacon accounting.
+    assert '"total":12' in script
+    assert rel not in gpu_rentals._onstart_script("image")
+
+
+def test_rental_lora_keeps_nested_relative_path(tmp_path: Path, monkeypatch) -> None:
+    """A LoRA installed under a subdirectory must land at the SAME relative
+    path on the box — the graph's lora_name is that relative id."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    rel = _install_lora(tmp_path, monkeypatch, rel="ltx/glow lora.safetensors")
+    _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+    assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).status_code == 201
+    assert gpu_rentals._rental_lora_downloads("video") == [(f"user-loras/{rel}", "loras/ltx")]
+    script = gpu_rentals._onstart_script("video")
+    assert 'mkdir -p "$M/loras/ltx"' in script
+    assert '"$M/loras/ltx/glow lora.safetensors"' in script
+
+
+def test_rental_lora_minimax_h3_maps_to_the_minimax_tier(tmp_path: Path, monkeypatch) -> None:
+    """Civitai's H3 category is "MiniMax H3" (character/style LoRAs exist there,
+    not just the turbo distill). They ride the H3 tier only — nothing on the
+    LTX or image boxes can load them."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    rel = _install_lora(tmp_path, monkeypatch, rel="h3/lain.safetensors", base="MiniMax H3")
+    _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+    body = client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).json()
+    assert body["tiers"] == ["minimax"]
+    script = gpu_rentals._onstart_script("minimax")
+    assert '"$M/loras/h3/lain.safetensors"' in script
+    assert rel not in gpu_rentals._onstart_script("video")
+
+
+def test_rental_lora_context_bases_cover_handplaced_files(tmp_path: Path, monkeypatch) -> None:
+    """No sidecar → fall back to the base families the LoRA panel was scoped
+    to when the user clicked. Krea 2 rides on both image tiers."""
+    rel = _install_lora(tmp_path, monkeypatch, rel="hand-placed.safetensors", base=None)
+    _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+    body = client.post("/api/gpu-rentals/loras",
+                       json={"id": rel, "rating": "sfw", "contextBaseModels": ["Krea 2"]}).json()
+    assert body["tiers"] == ["image", "video"]
+
+
+def test_rental_lora_rejects_bad_input(tmp_path: Path, monkeypatch) -> None:
+    rel = _install_lora(tmp_path, monkeypatch, rel="klein.safetensors", base="Flux.2 Klein 9B")
+    _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+    # Rating is the whole point of the add dialog; no default.
+    assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "spicy"}).status_code == 400
+    # Klein runs local-MLX only — no rental tier can load it, say so up front.
+    response = client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"})
+    assert response.status_code == 400
+    assert "Flux.2 Klein 9B" in response.json()["detail"]
+    # Missing file and traversal both refuse.
+    assert client.post("/api/gpu-rentals/loras", json={"id": "missing.safetensors", "rating": "sfw"}).status_code == 404
+    assert client.post("/api/gpu-rentals/loras", json={"id": "../../etc/passwd", "rating": "sfw"}).status_code == 400
+
+
+def test_rental_lora_failed_upload_is_excluded_and_retryable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    rel = _install_lora(tmp_path, monkeypatch)
+    _sync_uploads(monkeypatch, status="error", error="R2 upload failed: HTTP 500")
+    client = _client(tmp_path, monkeypatch)
+    client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"})
+    listed = client.get("/api/gpu-rentals/loras").json()["loras"]
+    assert listed[0]["status"] == "error" and "HTTP 500" in listed[0]["error"]
+    # A half-uploaded LoRA must never reach a box's download list.
+    assert rel not in gpu_rentals._onstart_script("video")
+    # Re-adding is the retry path.
+    _sync_uploads(monkeypatch)
+    assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).status_code == 201
+    assert rel in gpu_rentals._onstart_script("video")
+
+
+def test_rental_lora_remove(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
+    # The R2 object delete is hygiene, not correctness: a presign failure
+    # (no Cloudflare env in tests) must not block the withdrawal.
+    monkeypatch.setattr(gpu_rentals, "_presign_r2",
+                        lambda method, key: (_ for _ in ()).throw(RuntimeError("no creds")))
+    rel = _install_lora(tmp_path, monkeypatch, rel="ltx/glow.safetensors")
+    _sync_uploads(monkeypatch)
+    client = _client(tmp_path, monkeypatch)
+    client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"})
+    assert client.delete(f"/api/gpu-rentals/loras/{rel}").status_code == 200
+    assert client.get("/api/gpu-rentals/loras").json()["loras"] == []
+    assert rel not in gpu_rentals._onstart_script("video")
+    assert client.delete(f"/api/gpu-rentals/loras/{rel}").status_code == 404
+
+
+def test_rental_lora_counts_toward_tier_download_gb(tmp_path: Path, monkeypatch) -> None:
+    baseline = gpu_rentals.tier_download_gb("video")
+    gpu_rentals._write_rental_loras({
+        "big.safetensors": {
+            "id": "big.safetensors", "r2_key": "user-loras/big.safetensors",
+            "tiers": ["video"], "status": "ready", "size_gb": 1.6,
+        },
+    })
+    assert gpu_rentals.tier_download_gb("video") == pytest.approx(baseline + 1.6, abs=0.1)
+    # Not ready → not provisioned → not counted.
+    gpu_rentals._write_rental_loras({
+        "big.safetensors": {
+            "id": "big.safetensors", "r2_key": "user-loras/big.safetensors",
+            "tiers": ["video"], "status": "uploading", "size_gb": 1.6,
+        },
+    })
+    assert gpu_rentals.tier_download_gb("video") == pytest.approx(baseline, abs=0.01)

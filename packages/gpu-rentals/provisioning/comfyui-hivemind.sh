@@ -371,6 +371,25 @@ if [[ "${RENTAL_TIER:-image}" == "minimax-video" ]]; then
     [[ -f "$kjnodes_dir/requirements.txt" ]] && pip install -q -r "$kjnodes_dir/requirements.txt"
     pip install -q sageattention
 
+    # Sol-Attn: NVlabs' training-free sparse attention (arXiv 2607.24027) as a
+    # Triton kernel. Measured on a rented 5090 (5s @ 960x544, warm, one seed):
+    # 34.3s against 38.6s for the Spectrum baseline — 11% off the whole run at
+    # equal-or-better detail, holding the same take. It CHAINS onto sage rather
+    # than replacing it (sage stays the dense fallback), keeps H3's packed
+    # conditioning rows exact, and needs Triton, which the CUDA 13 image has.
+    # First use compiles + autotunes its kernels (~6s, once per process).
+    # Pinned: it is experimental and moves fast.
+    solattn_dir="${COMFYUI_DIR}/custom_nodes/ComfyUI-SolAttn_triton"
+    if [[ ! -d "$solattn_dir" ]]; then
+        git clone -q https://github.com/kijai/ComfyUI-SolAttn_triton.git "$solattn_dir"
+        git -C "$solattn_dir" checkout -q 842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc
+    fi
+
+    # RIFE weights for core ComfyUI's FrameInterpolate (no custom node needed).
+    # 24 -> 48 fps costs +2.9s on a ~40s generation and leaves duration intact.
+    fetch "https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.26.safetensors" \
+          "frame_interpolation/rife_v4.26.safetensors"
+
     fetch "${R2_BASE_URL}/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors" \
           "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     fetch "${R2_BASE_URL}/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" \

@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -276,6 +277,11 @@ TIERS: dict[str, dict[str, Any]] = {
         "reference_job": "1024² image",
         "lane_needles": ["krea2_turbo_convrot", "waianima"],
         "studio_pages": ["image"],
+        # Civitai base-model families whose add-on LoRAs this tier's serving
+        # set can actually load — the routing key for user-registered rental
+        # LoRAs. Matched with the gateway's normalized-prefix family rule, so
+        # "LTXV" accepts sidecars that say "LTXV 2.3".
+        "lora_base_models": ["Krea 2", "Anima"],
     },
     # Both video tiers make sound. LTX 2.3 denoises a joint audio+video latent
     # exactly like H3 does, so the old "Video" vs "Video + audio" split was
@@ -299,6 +305,7 @@ TIERS: dict[str, dict[str, Any]] = {
         # the UI's normalized matcher recognize the ltx23-eros-v14-comfy model id.
         "lane_needles": ["krea2_turbo_convrot", "waianima", "ltx2310eros", "ltx-2.3-22b", "ltx23-eros"],
         "studio_pages": ["image", "video"],
+        "lora_base_models": ["Krea 2", "Anima", "LTXV"],
     },
     "minimax": {
         "label": "Video · MiniMax H3",
@@ -323,6 +330,10 @@ TIERS: dict[str, dict[str, Any]] = {
         "public_models": _MINIMAX_PUBLIC_FILES,
         "lane_needles": ["minimax_h3"],
         "studio_pages": ["video"],
+        # Civitai's base-model category for H3 add-on LoRAs (style/character/
+        # motion — distinct from the turbo LoRA baked into the serving set) is
+        # exactly "MiniMax H3".
+        "lora_base_models": ["MiniMax H3"],
     },
 }
 
@@ -449,7 +460,7 @@ def _r2_credentials() -> tuple[str, str, str]:
     return _s3_creds_cache["access_key"], _s3_creds_cache["secret"], account
 
 
-def _presign_r2_get(object_key: str, *, now: datetime | None = None) -> str:
+def _presign_r2(method: str, object_key: str, *, now: datetime | None = None) -> str:
     access_key, secret, account = _r2_credentials()
     host = f"{account}.r2.cloudflarestorage.com"
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
@@ -465,7 +476,7 @@ def _presign_r2_get(object_key: str, *, now: datetime | None = None) -> str:
     }
     canonical_query = "&".join(f"{quote(k, safe='')}={quote(v, safe='')}" for k, v in sorted(query.items()))
     canonical_request = "\n".join(
-        ["GET", path, canonical_query, f"host:{host}\n", "host", "UNSIGNED-PAYLOAD"]
+        [method, path, canonical_query, f"host:{host}\n", "host", "UNSIGNED-PAYLOAD"]
     )
     string_to_sign = "\n".join(
         ["AWS4-HMAC-SHA256", stamp, scope, hashlib.sha256(canonical_request.encode()).hexdigest()]
@@ -475,6 +486,272 @@ def _presign_r2_get(object_key: str, *, now: datetime | None = None) -> str:
         key = hmac.new(key, part.encode(), hashlib.sha256).digest()
     signature = hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest()
     return f"https://{host}{path}?{canonical_query}&X-Amz-Signature={signature}"
+
+
+def _presign_r2_get(object_key: str, *, now: datetime | None = None) -> str:
+    return _presign_r2("GET", object_key, now=now)
+
+
+# --- user LoRA registry for rentals -----------------------------------------
+# Dev-mode "Use in rentals" on a studio LoRA card: the locally installed file
+# is uploaded once to the private R2 bucket and recorded here, and provisioning
+# appends it to the onstart download list of every tier whose serving set
+# accepts the LoRA's base-model family. The registry lives next to
+# rental-lanes.json so all rental state shares one root. Machines already
+# running keep the serving set they provisioned with — this changes what the
+# NEXT rental downloads, by design.
+#
+# Every entry carries an sfw/nsfw rating, asked at add time. Today that is
+# categorization only; it exists so a later NSFW mode can hide "nsfw" entries
+# by default without re-asking about every file.
+
+RENTAL_LORA_R2_PREFIX = "user-loras/"
+RENTAL_LORA_RATINGS = {"sfw", "nsfw"}
+# Same default as the media-gateway (COMFY_DIR in packages/media-gateway/app.py)
+# and the stack launcher, so all three agree on where installed LoRAs live.
+COMFY_LORAS_ROOT = Path(os.environ.get("COMFY_DIR", str(Path.home() / "comfy/ComfyUI"))) / "models" / "loras"
+
+_rental_lora_lock = threading.Lock()
+# id -> {"done": bytes, "total": bytes} while an upload thread is running.
+# In-memory on purpose: writing the registry file per chunk would thrash it.
+_rental_lora_progress: dict[str, dict[str, int]] = {}
+
+
+def _normalize_base(value: Any) -> str:
+    """Mirror of the gateway's normalize_base (packages/media-gateway/app.py)."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _lora_base_matches(base: Any, families: list[str] | None) -> bool:
+    """The gateway's lora_base_matches family rule: normalized prefix match in
+    either direction, so "LTXV" accepts a sidecar that says "LTXV 2.3"."""
+    cur = {_normalize_base(x) for x in (families or []) if _normalize_base(x)}
+    b = _normalize_base(base)
+    if not b or not cur:
+        return False
+    return b in cur or any(b.startswith(x) or x.startswith(b) for x in cur)
+
+
+def tiers_for_lora_base(base_models: list[str] | None) -> list[str]:
+    """Tiers whose serving set accepts any of these base-model families."""
+    return [
+        tier for tier, spec in TIERS.items()
+        if any(_lora_base_matches(base, spec.get("lora_base_models")) for base in (base_models or []))
+    ]
+
+
+def _rental_lora_registry_path() -> Path:
+    return MEDIA_STATE_ROOT / "rental-loras.json"
+
+
+def read_rental_loras() -> dict[str, dict]:
+    try:
+        data = json.loads(_rental_lora_registry_path().read_text())
+        loras = data.get("loras") if isinstance(data, dict) else None
+        return loras if isinstance(loras, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_rental_loras(entries: dict[str, dict]) -> None:
+    MEDIA_STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    _rental_lora_registry_path().write_text(json.dumps({"version": 1, "loras": entries}, indent=1))
+
+
+def _patch_rental_lora(lora_id: str, **fields: Any) -> dict | None:
+    """Read-modify-write one entry under the lock — the upload thread and the
+    API mutate the same file."""
+    with _rental_lora_lock:
+        entries = read_rental_loras()
+        entry = entries.get(lora_id)
+        if entry is None:
+            return None
+        entry.update(fields)
+        _write_rental_loras(entries)
+        return entry
+
+
+def rental_loras_for_tier(tier: str) -> list[dict]:
+    """Entries this tier must download: uploaded (ready) and family-matched."""
+    return [
+        entry for entry in read_rental_loras().values()
+        if entry.get("status") == "ready" and tier in (entry.get("tiers") or [])
+    ]
+
+
+def _rental_lora_downloads(tier: str) -> list[tuple[str, str]]:
+    """(R2 key, models/ subpath) per registered LoRA, preserving the LOCAL
+    relative path on the box: the studios put installed-LoRA ids like
+    "ltx/foo.safetensors" straight into the graph as lora_name, so the rented
+    ComfyUI must resolve exactly the same name under models/loras."""
+    out = []
+    for entry in rental_loras_for_tier(tier):
+        rel = str(entry.get("id") or "")
+        subdir = "loras" if "/" not in rel else f"loras/{rel.rsplit('/', 1)[0]}"
+        out.append((str(entry.get("r2_key") or f"{RENTAL_LORA_R2_PREFIX}{rel}"), subdir))
+    return out
+
+
+def _resolve_local_lora(lora_id: str) -> Path:
+    """Absolute path for an installed-LoRA id — same traversal guard as the
+    gateway's resolve_installed_lora_path."""
+    root = COMFY_LORAS_ROOT.resolve()
+    candidate = (root / str(lora_id or "")).resolve()
+    if candidate == root or root not in candidate.parents:
+        raise GpuRentalError("refusing to touch a LoRA outside the ComfyUI loras directory", status_code=400)
+    if not candidate.is_file():
+        raise GpuRentalError(f"no installed LoRA named '{lora_id}'", status_code=404)
+    return candidate
+
+
+def _sidecar_base_model(path: Path) -> str:
+    """Base-model family from the Civitai sidecar; empty for hand-placed files."""
+    try:
+        data = json.loads(Path(str(path) + ".civitai.json").read_text())
+        version = data.get("modelVersion") if isinstance(data.get("modelVersion"), dict) else data
+        return str(version.get("baseModel") or "").strip()
+    except Exception:
+        return ""
+
+
+def list_rental_loras() -> dict:
+    entries = sorted(read_rental_loras().values(), key=lambda e: str(e.get("added_at") or ""))
+    for entry in entries:
+        progress = _rental_lora_progress.get(str(entry.get("id") or ""))
+        if progress and entry.get("status") == "uploading":
+            entry["uploaded_bytes"] = int(progress.get("done") or 0)
+    return {"loras": entries}
+
+
+def add_rental_lora(
+    lora_id: str,
+    rating: str,
+    base_model: str = "",
+    display_name: str = "",
+    context_base_models: list[str] | None = None,
+) -> dict:
+    """Register an installed LoRA for rental provisioning.
+
+    The R2 upload runs in the background; the entry only joins a tier's
+    download list once it lands (status "ready"). Re-adding is how a rating is
+    changed and how a failed upload is retried — a file already uploaded at the
+    same size just gets its metadata refreshed, no second transfer."""
+    rating = str(rating or "").strip().lower()
+    if rating not in RENTAL_LORA_RATINGS:
+        raise GpuRentalError("rating must be 'sfw' or 'nsfw'", status_code=400)
+    # The id lands inside a double-quoted bash word in the onstart script, so
+    # refuse anything the shell or curl could reinterpret. Spaces are fine.
+    if re.search(r'["\'$`\\\n\r\x00-\x1f?#&%]', str(lora_id or "")):
+        raise GpuRentalError("LoRA filename has characters the provisioning script cannot carry", status_code=400)
+    path = _resolve_local_lora(lora_id)
+    base = str(base_model or "").strip() or _sidecar_base_model(path)
+    if _normalize_base(base) == _normalize_base("Unknown/local"):
+        base = ""
+    tiers = tiers_for_lora_base([base] if base else [])
+    if not tiers:
+        # Hand-placed file with no sidecar: fall back to the base families the
+        # LoRA panel was scoped to when the user clicked.
+        tiers = tiers_for_lora_base(context_base_models)
+    if not tiers:
+        raise GpuRentalError(
+            f"no rental tier serves LoRAs for base model '{base or 'unknown'}'",
+            status_code=400,
+        )
+    size_bytes = path.stat().st_size
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _rental_lora_lock:
+        entries = read_rental_loras()
+        existing = entries.get(lora_id)
+        if existing and existing.get("status") == "uploading":
+            raise GpuRentalError("this LoRA is already uploading", status_code=409)
+        already_uploaded = bool(
+            existing
+            and existing.get("status") == "ready"
+            and int(existing.get("size_bytes") or 0) == size_bytes
+        )
+        entry = {
+            "id": lora_id,
+            "filename": path.name,
+            "displayName": str(display_name or "").strip() or path.stem,
+            "baseModel": base,
+            "rating": rating,
+            "tiers": tiers,
+            "r2_key": f"{RENTAL_LORA_R2_PREFIX}{lora_id}",
+            "size_bytes": size_bytes,
+            "size_gb": round(size_bytes / 1e9, 3),
+            "added_at": str((existing or {}).get("added_at") or now),
+            "status": "ready" if already_uploaded else "uploading",
+            "error": "",
+        }
+        entries[lora_id] = entry
+        _write_rental_loras(entries)
+    if not already_uploaded:
+        _rental_lora_progress[lora_id] = {"done": 0, "total": size_bytes}
+        _start_rental_lora_upload(lora_id, path, entry["r2_key"])
+    return entry
+
+
+def remove_rental_lora(lora_id: str) -> dict:
+    with _rental_lora_lock:
+        entries = read_rental_loras()
+        entry = entries.pop(lora_id, None)
+        if entry is None:
+            raise GpuRentalError(f"'{lora_id}' is not registered for rentals", status_code=404)
+        _write_rental_loras(entries)
+    # Bucket hygiene, not correctness: a stale object costs pennies and a
+    # re-add with the same id simply overwrites it.
+    with contextlib.suppress(Exception):
+        requests.delete(_presign_r2("DELETE", str(entry.get("r2_key") or "")), timeout=_REQUEST_TIMEOUT)
+    return {"removed": lora_id}
+
+
+class _FileWithProgress:
+    """File wrapper requests can stream. __len__ keeps the transfer a plain
+    Content-Length PUT (R2 rejects chunked bodies on presigned PUTs), and each
+    read updates the progress the LoRA panel polls."""
+
+    def __init__(self, fh: Any, size: int, lora_id: str) -> None:
+        self._fh = fh
+        self._size = size
+        self._id = lora_id
+
+    def __len__(self) -> int:
+        return self._size
+
+    def read(self, amount: int = -1) -> bytes:
+        chunk = self._fh.read(amount)
+        if chunk:
+            progress = _rental_lora_progress.get(self._id)
+            if progress is not None:
+                progress["done"] += len(chunk)
+        return chunk
+
+
+def _upload_rental_lora(lora_id: str, path: Path, r2_key: str) -> None:
+    try:
+        url = _presign_r2("PUT", r2_key)
+        with path.open("rb") as fh:
+            response = requests.put(
+                url,
+                data=_FileWithProgress(fh, path.stat().st_size, lora_id),
+                timeout=(30, 300),
+            )
+        if response.status_code >= 400:
+            raise GpuRentalError(f"R2 upload failed: HTTP {response.status_code} {response.text[:120]}")
+        _patch_rental_lora(lora_id, status="ready", error="")
+    except Exception as exc:  # presign 503s and requests errors: same surface
+        _patch_rental_lora(lora_id, status="error", error=str(exc))
+    finally:
+        _rental_lora_progress.pop(lora_id, None)
+
+
+def _start_rental_lora_upload(lora_id: str, path: Path, r2_key: str) -> None:
+    threading.Thread(
+        target=_upload_rental_lora,
+        args=(lora_id, path, r2_key),
+        name=f"rental-lora-upload-{path.name}",
+        daemon=True,
+    ).start()
 
 
 # --- provisioning ----------------------------------------------------------
@@ -574,7 +851,10 @@ def _authorize_rental_key_lines() -> list[str]:
 
 def _onstart_script(tier: str) -> str:
     spec = TIERS[tier]
-    total = len(spec["models"]) + len(spec.get("public_models") or [])
+    # The tier's curated serving set plus every user LoRA registered for it —
+    # same presigned-GET delivery, same beacon accounting, same atomic .dl→mv.
+    models = list(spec["models"]) + _rental_lora_downloads(tier)
+    total = len(models) + len(spec.get("public_models") or [])
     lines = [
         "#!/bin/bash",
         "exec > /root/hivemind-provision.log 2>&1",
@@ -646,7 +926,7 @@ def _onstart_script(tier: str) -> str:
         ]
     files = []
     lines.append('beacon downloading 0 "Starting model downloads"')
-    for object_key, subdir in spec["models"]:
+    for object_key, subdir in models:
         filename = object_key.rsplit("/", 1)[-1]
         url = _presign_r2_get(object_key)
         files.append(f'"$M/{subdir}/{filename}"')
@@ -739,6 +1019,9 @@ def tier_download_gb(tier: str) -> float:
     spec = TIERS[tier]
     total = sum(MODEL_SIZE_GB.get(key, 2.0) for key, _ in spec["models"])
     total += sum(size for _url, _sub, _name, size in spec.get("public_models") or [])
+    # Registered user LoRAs count too: they shape the bandwidth floor exactly
+    # like the curated set does.
+    total += sum(float(entry.get("size_gb") or 2.0) for entry in rental_loras_for_tier(tier))
     return round(total, 1)
 
 
@@ -1820,6 +2103,30 @@ def register_gpu_rental_routes(app, require_owner) -> None:
     @app.get("/api/gpu-rentals", dependencies=[Depends(require_owner)])
     def gpu_rentals_index() -> dict:
         return _guard(list_rentals)
+
+    # The rental-LoRA routes come before the {rental_id} ones: Starlette
+    # matches in registration order, and a literal "loras" segment must never
+    # be parsed as a rental id.
+    @app.get("/api/gpu-rentals/loras", dependencies=[Depends(require_owner)])
+    def gpu_rental_loras_index() -> dict:
+        return _guard(list_rental_loras)
+
+    @app.post("/api/gpu-rentals/loras", status_code=201, dependencies=[Depends(require_owner)])
+    def gpu_rental_loras_add(payload: dict = Body(default={})) -> dict:
+        context = payload.get("contextBaseModels")
+        return _guard(
+            add_rental_lora,
+            str(payload.get("id") or ""),
+            str(payload.get("rating") or ""),
+            str(payload.get("baseModel") or ""),
+            str(payload.get("displayName") or ""),
+            [str(value) for value in context] if isinstance(context, list) else None,
+        )
+
+    # :path — installed-LoRA ids keep their models/loras subdirectories.
+    @app.delete("/api/gpu-rentals/loras/{lora_id:path}", dependencies=[Depends(require_owner)])
+    def gpu_rental_loras_remove(lora_id: str) -> dict:
+        return _guard(remove_rental_lora, lora_id)
 
     @app.post("/api/gpu-rentals", status_code=201, dependencies=[Depends(require_owner)])
     def gpu_rentals_create(payload: dict = Body(default={})) -> dict:

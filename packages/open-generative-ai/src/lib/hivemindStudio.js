@@ -130,6 +130,16 @@ export function mapHivemindWorkflowModels(catalog) {
                 // (up to 9, order-preserving) instead of a start frame. Distinct
                 // from ingredient_images, which LTX stitches into one sheet.
                 supportsReferenceImages: accepts.includes('reference_images'),
+                // How many of each kind the graph actually wired, read off the
+                // registry so the References panel can never offer a slot that
+                // does not exist. Absent on workflows without reference slots.
+                referenceSlots: workflow.reference_slots && typeof workflow.reference_slots === 'object'
+                    ? {
+                        images: Number(workflow.reference_slots.images) || 0,
+                        videos: Number(workflow.reference_slots.videos) || 0,
+                        audios: Number(workflow.reference_slots.audios) || 0,
+                    }
+                    : null,
                 ingredientInputs: workflow.ingredient_inputs && typeof workflow.ingredient_inputs === 'object'
                     ? workflow.ingredient_inputs
                     : null,
@@ -264,7 +274,11 @@ export async function deleteHivemindStudioUpload(value) {
 // empty. Returns upload-history-shaped entries; each uploadedUrl points at the
 // E2E envelope route, so the picker's Thumb decrypts it in-browser — this host
 // never decrypts. Empty outside studio mode or when the endpoint is unavailable.
-export async function fetchHivemindReferences() {
+// Saved owner references. `kind` filters them by medium — a voice clip or a
+// motion clip has no business in the picture grid, where its thumbnail would
+// never resolve. Older servers omit the field, so an entry without one is
+// treated as a picture (which is all this route used to hold).
+export async function fetchHivemindReferences({ kind = 'image' } = {}) {
     if (!isHivemindStudioEnabled()) return [];
     try {
         const response = await fetch('/api/media-studio/references', { credentials: 'same-origin' });
@@ -273,9 +287,11 @@ export async function fetchHivemindReferences() {
         const references = Array.isArray(data.references) ? data.references : [];
         return references
             .filter((ref) => ref && ref.url)
+            .filter((ref) => !kind || String(ref.kind || 'image') === kind)
             .map((ref) => ({
                 id: String(ref.name || ref.url),
                 name: String(ref.name || ''),
+                kind: String(ref.kind || 'image'),
                 uploadedUrl: String(ref.url),
                 thumbnail: null, // no stored thumbnail — Thumb decrypts the full E2E image
                 timestamp: typeof ref.timestamp === 'number' ? new Date(ref.timestamp * 1000).toISOString() : '',
@@ -434,10 +450,24 @@ export async function generateHivemindVideo(params) {
     const referenceImages = await Promise.all((Array.isArray(params.referenceImages) ? params.referenceImages : [])
         .filter(Boolean)
         .map(async (source) => ({ image_base64: await mediaSourceToDataUrl(source, 'image') })));
+    // The other two reference kinds ride the same inline path: a voice clip
+    // becomes <Audio N>, a motion clip becomes <Video N>, and use_audio decides
+    // whether that clip's own soundtrack is conditioned in too.
+    const referenceAudios = await Promise.all((Array.isArray(params.referenceAudios) ? params.referenceAudios : [])
+        .map((item) => (typeof item === 'string' ? { url: item } : item))
+        .filter((item) => item?.url)
+        .map(async (item) => ({ audio_base64: await mediaSourceToDataUrl(item.url, 'audio') })));
+    const referenceVideos = await Promise.all((Array.isArray(params.referenceVideos) ? params.referenceVideos : [])
+        .map((item) => (typeof item === 'string' ? { url: item } : item))
+        .filter((item) => item?.url)
+        .map(async (item) => ({
+            video_base64: await mediaSourceToDataUrl(item.url, 'video'),
+            use_audio: Boolean(item.useAudio),
+        })));
     // LTX 2.3 supports text-to-video: a prompt alone is enough. Only a completely
     // empty request (no prompt and no media) is rejected.
     if (!videoBase64 && !imageBase64 && !ingredientImages.length && !referenceImages.length
-        && !String(params.prompt || '').trim()) {
+        && !referenceVideos.length && !String(params.prompt || '').trim()) {
         throw new Error('Enter a prompt, or add a start image or source video.');
     }
     const rawWorkflowId = params.workflow_id || workflowIdFromHivemindModelId(params.model);
@@ -454,6 +484,8 @@ export async function generateHivemindVideo(params) {
             : {}),
         ...(ingredientImages.length ? { ingredient_images: ingredientImages } : {}),
         ...(referenceImages.length ? { reference_images: referenceImages } : {}),
+        ...(referenceAudios.length ? { reference_audios: referenceAudios } : {}),
+        ...(referenceVideos.length ? { reference_videos: referenceVideos } : {}),
         // `task` was decided once in videoTasks.js and is forwarded verbatim.
         // This layer attaches whatever media it was handed and states the task;
         // it does NOT re-infer the job from which media are present, which is the

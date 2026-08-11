@@ -42,7 +42,7 @@
       "class_type": "SpectrumApplyMiniMaxH3",
       "inputs": {
         "model": [
-          "31",
+          "33",
           0
         ],
         "enabled": true,
@@ -98,7 +98,7 @@
       "class_type": "BasicScheduler",
       "inputs": {
         "model": [
-          "30",
+          "32",
           0
         ],
         "scheduler": "simple",
@@ -122,7 +122,7 @@
       "class_type": "BasicGuider",
       "inputs": {
         "model": [
-          "30",
+          "32",
           0
         ],
         "conditioning": [
@@ -186,7 +186,7 @@
       "class_type": "CreateVideo",
       "inputs": {
         "images": [
-          "10",
+          "35",
           0
         ],
         "audio": [
@@ -215,6 +215,72 @@
       },
       "_meta": {
         "title": "End frame (optional)"
+      }
+    },
+    "32": {
+      "class_type": "EasyCache",
+      "inputs": {
+        "model": [
+          "30",
+          0
+        ],
+        "reuse_threshold": 0.0,
+        "start_percent": 0.15,
+        "end_percent": 0.95,
+        "verbose": false
+      },
+      "_meta": {
+        "title": "EasyCache (0 = off)"
+      }
+    },
+    "33": {
+      "class_type": "SolAttnPatch",
+      "inputs": {
+        "model": [
+          "31",
+          0
+        ],
+        "tau": 0.0,
+        "start_percent": 0.2,
+        "end_percent": 0.9,
+        "min_tokens": 4096,
+        "int8_qk": true,
+        "sink_conditioning": "exact_kv_and_rows",
+        "morton": false,
+        "morton_curve": "2d_frame",
+        "int8_pv": true,
+        "verbose": false,
+        "use_tma": false,
+        "dense_blocks": ""
+      },
+      "_meta": {
+        "title": "Sol-Attn (tau 0 = off)"
+      }
+    },
+    "34": {
+      "class_type": "FrameInterpolationModelLoader",
+      "inputs": {
+        "model_name": "rife_v4.26.safetensors"
+      },
+      "_meta": {
+        "title": "RIFE model"
+      }
+    },
+    "35": {
+      "class_type": "FrameInterpolate",
+      "inputs": {
+        "interp_model": [
+          "34",
+          0
+        ],
+        "images": [
+          "10",
+          0
+        ],
+        "multiplier": 1
+      },
+      "_meta": {
+        "title": "Frame interpolation (1 = off)"
       }
     }
   }

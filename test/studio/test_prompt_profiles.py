@@ -500,3 +500,342 @@ def test_the_registry_guidance_agrees_with_the_helper() -> None:
     for token in ("integrated_multimodal_description", "overall_soundscape", "non_diegetic_music",
                   "[Shot N] At MM:SS.mmm", "<d>[English]", "<cutoff>", "<Picture 1>"):
         assert token in guidance
+
+
+def test_character_notes_reach_the_h3_instruction_only() -> None:
+    """Verified castings override the local model's recollection — but only
+    for H3, whose community-tested form hangs a character on its source
+    ("Buffy Summers as played by Sarah Michelle Gellar from the television
+    series Buffy the Vampire Slayer (1997)"). Other models' instructions never
+    asked for character facts."""
+    notes = [
+        "Buffy Summers — played by Sarah Michelle Gellar — from the television "
+        "series Buffy the Vampire Slayer (1997)",
+    ]
+    with_notes = prompt_profiles.system_prompt("minimax-h3-t2v", character_notes=notes)
+    assert notes[0] in with_notes
+    assert "override" in with_notes
+    assert notes[0] not in prompt_profiles.system_prompt("ltx-video", character_notes=notes)
+    # Notes and the clip length are independent clauses; both must survive.
+    with_both = prompt_profiles.system_prompt(
+        "minimax-h3-t2v", duration_seconds=5, character_notes=notes)
+    assert notes[0] in with_both and "5 seconds long" in with_both
+    # The body itself teaches the source form, so characters the studio's
+    # catalog does not know still get expanded from the model's own knowledge.
+    assert "as played by" in prompt_profiles.system_prompt("minimax-h3-t2v")
+    assert "in the style and aesthetics of" in prompt_profiles.system_prompt("minimax-h3-t2v")
+
+
+def test_the_route_folds_character_notes_into_the_system_prompt(
+    tmp_path: Path, monkeypatch, captured_system,
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post("/api/prompt-helper/generate", json={
+        "modelId": "some-gguf", "idea": "buffy walks through a cemetery at night",
+        "targetModel": "minimax-h3",
+        "characterNotes": [
+            "Buffy Summers — played by Sarah Michelle Gellar — from the television "
+            "series Buffy the Vampire Slayer (1997)",
+            "   ",
+            "y" * 500,
+        ],
+    })
+
+    assert response.status_code == 200
+    assert "Sarah Michelle Gellar" in captured_system[0]
+    # Sanitised at the route: blank lines dropped, runaway lines capped.
+    assert "y" * 201 not in captured_system[0]
+
+
+def test_continuation_clause_tells_the_helper_to_keep_the_established_scene():
+    """A chained shot is a different writing job from a fresh one.
+
+    The pinned frames carry motion and room tone, NOT the scene: measured on
+    the rental 2026-08-10, a chained prompt that stops describing the
+    established subjects and style renders a hard cut into an unrelated take.
+    Without this clause the helper answered a bare line of new dialogue by
+    inventing a whole new scene (a Batcave shot became a noir alley, and
+    Batman became "a man in a dark coat"), which is exactly that failure.
+    """
+    plain = prompt_profiles.system_prompt("minimax-h3-t2v")
+    chained = prompt_profiles.system_prompt("minimax-h3-t2v", continuation=True)
+    assert chained.startswith(plain), "the continuation rules are additive"
+    assert "CONTINUES the previous one" in chained
+    # The three rules that make a join hold: keep the scene, open on a held
+    # framing, and leave room for the carried-over head.
+    assert "colour palette" in chained
+    assert "must be the HOLD" in chained
+    assert "1s or later" in chained
+    # A line of new dialogue is the next thing said, not a new scene — the
+    # exact case that failed.
+    assert "only a line of new dialogue" in chained
+
+    # It composes with the other clauses rather than replacing them.
+    with_all = prompt_profiles.system_prompt(
+        "minimax-h3-t2v", duration_seconds=8, continuation=True,
+        character_notes=["Batman — from the DC comics (1939)"],
+    )
+    assert "CONTINUES the previous one" in with_all
+    assert "8 seconds long" in with_all
+    assert "Batman" in with_all
+
+    # Chaining is a MiniMax H3 capability; other lanes have their own
+    # continuation mechanism (LTX extends inside the graph) and must not be
+    # handed H3's rules.
+    assert "CONTINUES the previous one" not in prompt_profiles.system_prompt(
+        "ltx-video", continuation=True)
+    assert "CONTINUES the previous one" not in prompt_profiles.system_prompt(
+        "image", continuation=True)
+
+
+def test_profile_label_says_when_a_scene_is_being_continued():
+    assert prompt_profiles.profile_label("minimax-h3-t2v") == "MiniMax H3 (text to video)"
+    assert prompt_profiles.profile_label("minimax-h3-t2v", continuation=True) == (
+        "MiniMax H3 (text to video) · continuing a scene"
+    )
+    # Not an H3 lane: no chaining, so no claim about one.
+    assert "continuing" not in prompt_profiles.profile_label("ltx-video", continuation=True)
+
+
+def test_continuation_opening_on_dialogue_is_detected():
+    """The carried-over head is picture from the PREVIOUS shot.
+
+    A line spoken over it lands early and reads as a jump cut. The instruction
+    asks for a silent hold first; a 12B helper keeps the scene but still opens
+    on dialogue, so the result is checked (and one repair asked) rather than
+    trusted — same contract as the clip-length check.
+    """
+    opens_talking = (
+        "[Shot 1] Batman speaks. (S1) says: <d>[English] We have to find him.</d>\n"
+        "At 00:04.000 [Shot 2] The camera pulls back."
+    )
+    assert prompt_profiles.continuation_opens_on_speech(opens_talking)
+
+    holds_first = (
+        "[Shot 1] Batman holds the closing framing, breathing, cape settling.\n"
+        "At 00:01.500 [Shot 2] He turns to the console. (S1) says: <d>[English] We have to find him.</d>"
+    )
+    assert not prompt_profiles.continuation_opens_on_speech(holds_first)
+
+    # A hold that is too short still opens over the pinned frames.
+    assert prompt_profiles.continuation_opens_on_speech(
+        "[Shot 1] Batman breathes.\n"
+        "At 00:00.400 [Shot 2] (S1) says: <d>[English] Now.</d>"
+    )
+    # No speech at all is fine — nothing can land early.
+    assert not prompt_profiles.continuation_opens_on_speech(
+        "[Shot 1] Batman holds still.\nAt 00:02.000 [Shot 2] He stands up."
+    )
+    assert not prompt_profiles.continuation_opens_on_speech("")
+
+
+def test_shot_timestamps_are_read_in_both_written_orders():
+    """The instruction teaches "[Shot 2] At 00:03.500," and helpers also write
+    "At 00:03.500 [Shot 2]" — both of Liam's own H3 prompts used the second
+    form. Reading only the taught order left the overrun check inert on exactly
+    those prompts, so a beat past the end of an 8s clip shipped unflagged."""
+    taught = "[Shot 2] At 00:09.000, the camera pulls back."
+    also_written = "At 00:09.000 [Shot 2] The camera pulls back."
+    assert prompt_profiles.timeline_overruns(taught, 8) == [9.0]
+    assert prompt_profiles.timeline_overruns(also_written, 8) == [9.0]
+    # In-range beats in either order are not flagged.
+    assert prompt_profiles.timeline_overruns("At 00:03.200 [Shot 2] Cut in.", 8) == []
+    # A bare timestamp with no shot header is prose, not a beat.
+    assert prompt_profiles.timeline_overruns("The clock reads At 09:00.", 8) == []
+
+
+def test_the_route_tells_the_helper_when_it_is_continuing_a_scene(
+    tmp_path: Path, monkeypatch, captured_system,
+) -> None:
+    """The studio knows a chain is armed; the helper did not.
+
+    Reproduced against the loaded 12B on 2026-08-10 with Liam's own request: a
+    line of new Batman dialogue, answered with a brand-new scene (no Batman, no
+    Batcave) — which is exactly what makes the chained render cut away. With
+    the flag and the previous shot's prompt, the same model kept the character,
+    the location, the palette and the soundscape.
+    """
+    client = _client(tmp_path, monkeypatch)
+    previous = "[Shot 1] Batman sits at a workstation in the Batcave, blue-and-shadow palette."
+
+    response = client.post("/api/prompt-helper/generate", json={
+        "modelId": "some-gguf",
+        "idea": "He's in hiding. We've got to find him. Now.",
+        "targetModel": "minimax-h3",
+        "isContinuation": True,
+        "previousPrompt": previous,
+    })
+
+    assert response.status_code == 200
+    system = captured_system[0]
+    assert "CONTINUES the previous one" in system
+    assert previous in system, "the helper is told WHAT scene to keep"
+    # Visible in the dialog, so a continuation prompt is not mistaken for a fresh one.
+    assert response.json()["profileLabel"] == "MiniMax H3 (text to video) · continuing a scene"
+
+
+def test_a_fresh_shot_is_not_handed_the_continuation_rules(
+    tmp_path: Path, monkeypatch, captured_system,
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    client.post("/api/prompt-helper/generate", json={
+        "modelId": "some-gguf", "idea": "a courier waits for a train",
+        "targetModel": "minimax-h3",
+    })
+    assert "CONTINUES the previous one" not in captured_system[0]
+
+
+# --- UGC mode ----------------------------------------------------------------
+#
+# UGC is a LAYER, not a profile: the format a model was trained on does not
+# change because the clip is an ad, but nearly every judgement inside it does.
+# These pin the inversion (speech becomes required, polish becomes the failure)
+# and the mechanical checks that catch a helper reverting to its habits.
+
+
+def test_ugc_layers_onto_the_model_format_rather_than_replacing_it() -> None:
+    """The H3 field interface has to survive UGC mode.
+
+    A UGC clip is still an H3 clip. Losing integrated_multimodal_description to
+    a realism instruction would produce a beautifully un-produced prompt in a
+    format H3 was never trained to read.
+    """
+    system = prompt_profiles.system_prompt("minimax-h3-t2v", ugc=True)
+    assert "integrated_multimodal_description:" in system
+    assert "overall_soundscape:" in system
+    assert "UGC clip" in system
+
+
+def test_ugc_reverses_the_speech_default_out_loud() -> None:
+    """Every H3 profile says speech is optional and off by default — correct in
+    general, and exactly wrong for a clip whose whole content is someone
+    talking. The reversal has to be explicit or the older, longer rule wins."""
+    plain = prompt_profiles.system_prompt("minimax-h3-i2v")
+    ugc = prompt_profiles.system_prompt("minimax-h3-i2v", ugc=True)
+    assert "Speech is OPTIONAL and off by default" in plain
+    assert "SPEECH IS REQUIRED here, overriding the default above" in ugc
+    # H3 renders a score if asked for one, and scored UGC is instantly an ad.
+    assert "non_diegetic_music must be exactly N/A" in ugc
+
+
+def test_a_ugc_first_frame_gets_the_image_stack_not_the_clip_rules() -> None:
+    system = prompt_profiles.system_prompt("image", ugc=True)
+    assert "phone front-camera selfie" in system
+    assert "visible pores" in system
+    assert "Never write \"good lighting\"" in system
+    # Clip-only instructions would be noise on a still.
+    assert "phone microphone" not in system
+
+
+def test_ugc_off_leaves_every_profile_exactly_as_it_was() -> None:
+    for profile in ("minimax-h3-t2v", "ltx-video", "ltx-eros-scene-script", "image"):
+        assert prompt_profiles.system_prompt(profile) == prompt_profiles.system_prompt(profile, ugc=False)
+        assert "UGC" not in prompt_profiles.system_prompt(profile)
+
+
+def test_ugc_composes_with_the_continuation_rules() -> None:
+    """A chained UGC shot is both things at once — the same person still
+    talking, in the same room, after the cut."""
+    system = prompt_profiles.system_prompt(
+        "minimax-h3-t2v", ugc=True, continuation=True, previous_prompt="[Shot 1] a woman in a car",
+    )
+    assert "CONTINUES the previous one" in system
+    assert "SPEECH IS REQUIRED here" in system
+    assert prompt_profiles.profile_label("minimax-h3-t2v", continuation=True, ugc=True) == (
+        "MiniMax H3 (text to video) · continuing a scene · UGC"
+    )
+
+
+def test_polish_tells_are_the_words_a_helper_reaches_for_by_habit() -> None:
+    """These are what a video prompt normally WANTS, which is why the check is
+    code rather than one more line competing with the format rules."""
+    found = prompt_profiles.ugc_polish_tells(
+        "A cinematic handheld shot with soft film grain and flawless skin, shot on a gimbal."
+    )
+    assert found == ["cinematic", "film grain", "flawless skin", "gimbal"]
+    assert prompt_profiles.ugc_polish_tells(
+        "She talks to her phone in a parked car, afternoon sun through the windshield."
+    ) == []
+
+
+def test_a_silent_ugc_clip_is_caught_only_where_speech_is_checkable() -> None:
+    silent = "[Shot 1] A woman sits in a parked car, moving her hands as she thinks."
+    talking = "[Shot 1] (S1) says: <d>[English] no but the weird part is</d>"
+    assert prompt_profiles.ugc_missing_speech("minimax-h3-t2v", silent) is True
+    assert prompt_profiles.ugc_missing_speech("minimax-h3-t2v", talking) is False
+    # LTX carries dialogue as prose, so there is no tag to check for.
+    assert prompt_profiles.ugc_missing_speech("ltx-video", silent) is False
+
+
+def test_a_scored_ugc_clip_is_caught() -> None:
+    assert prompt_profiles.ugc_has_music("non_diegetic_music: N/A") is False
+    assert prompt_profiles.ugc_has_music("non_diegetic_music: None.") is False
+    assert prompt_profiles.ugc_has_music(
+        "non_diegetic_music: A warm lo-fi beat rises under the final line."
+    ) is True
+    # No field at all (a non-H3 prompt) is not a music problem.
+    assert prompt_profiles.ugc_has_music("she keeps talking") is False
+
+
+def test_the_route_pushes_back_once_on_a_prompt_that_reads_as_produced(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The repair is asked for, not applied: deleting "cinematic" from a
+    sentence by hand leaves the sentence broken, and the beats around it are the
+    model's business. One push, then say what survived."""
+    drafts = [
+        "integrated_multimodal_description: A cinematic shot on a gimbal.\nnon_diegetic_music: A warm beat.",
+        "integrated_multimodal_description: [Shot 1] (S1) says: <d>[English] ok so</d>\n"
+        "non_diegetic_music: N/A",
+    ]
+    asks: list[str] = []
+
+    class FakeRuntime:
+        def chat(self, *, model_id, messages, **_kwargs):
+            asks.append(messages[-1]["content"])
+            return drafts[min(len(asks) - 1, len(drafts) - 1)]
+
+    monkeypatch.setattr(local_llm, "runtime", FakeRuntime)
+    monkeypatch.setattr(control_api.local_llm, "runtime", FakeRuntime)
+
+    response = _client(tmp_path, monkeypatch).post("/api/prompt-helper/generate", json={
+        "modelId": "some-gguf", "idea": "a sleep tracker", "targetModel": "minimax-h3", "ugc": True,
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    # Every fault was named in the push-back, so the model knows what to fix.
+    assert "cinematic" in asks[1] and "gimbal" in asks[1]
+    assert "nobody speaks in it" in asks[1]
+    assert "non_diegetic_music must be N/A" in asks[1]
+    # The corrected draft is what comes back, and nothing is warned about.
+    assert body["prompt"] == drafts[1]
+    assert body["warnings"] == []
+    assert body["profileLabel"] == "MiniMax H3 (text to video) · UGC"
+
+
+def test_faults_that_survive_the_push_back_are_reported_not_shipped_quietly(
+    tmp_path: Path, monkeypatch, captured_system,
+) -> None:
+    # captured_system's stand-in returns "written prompt" every time — a clip
+    # with nobody talking in it, twice.
+    response = _client(tmp_path, monkeypatch).post("/api/prompt-helper/generate", json={
+        "modelId": "some-gguf", "idea": "a sleep tracker", "targetModel": "minimax-h3", "ugc": True,
+    })
+
+    assert response.status_code == 200
+    warnings = response.json()["warnings"]
+    assert any("nobody speaks in it" in warning for warning in warnings), warnings
+    assert all(warning.startswith("Reads as produced rather than filmed:") for warning in warnings)
+
+
+def test_a_non_ugc_prompt_is_never_checked_for_polish(
+    tmp_path: Path, monkeypatch, captured_system,
+) -> None:
+    """A silent cinematic clip is a perfectly good ordinary prompt."""
+    response = _client(tmp_path, monkeypatch).post("/api/prompt-helper/generate", json={
+        "modelId": "some-gguf", "idea": "a courier waits for a train", "targetModel": "minimax-h3",
+    })
+    assert response.json()["warnings"] == []
+    assert "UGC" not in captured_system[0]

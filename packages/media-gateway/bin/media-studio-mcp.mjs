@@ -45,6 +45,9 @@ const comfyDir = process.env.COMFY_DIR || join(homedir(), 'comfy', 'ComfyUI');
 const comfyInputDir = process.env.COMFY_INPUT_DIR || join(homedir(), '.comfy-private.noindex', 'input');
 const maxInlineImageBytes = Number(process.env.MEDIA_STUDIO_MCP_MAX_INLINE_IMAGE_BYTES || 50 * 1024 * 1024);
 const maxInlineVideoBytes = Number(process.env.MEDIA_STUDIO_MCP_MAX_INLINE_VIDEO_BYTES || 18 * 1024 * 1024);
+// Reference audio clips are capped at 15s combined by the H3 model card, so
+// even lossless stereo stays small; the cap guards against non-audio payloads.
+const maxInlineAudioBytes = Number(process.env.MEDIA_STUDIO_MCP_MAX_INLINE_AUDIO_BYTES || 25 * 1024 * 1024);
 const machinePrivate = process.env.MEDIA_STUDIO_MCP_MACHINE_PRIVATE !== '0';
 const ltxErosApiWorkflowPath = process.env.MEDIA_STUDIO_LTX_EROS_API_WORKFLOW || process.env.ZIMG_LTX_EROS_API_WORKFLOW || join(comfyDir, 'workflows', 'civitai', 'ltx23-eros-anchor', 'ltx23-eros-anchor.user-image-api.json');
 const ltxErosMobileWorkflowDir = process.env.MEDIA_STUDIO_LTX_EROS_MOBILE_WORKFLOW_DIR || process.env.ZIMG_LTX_EROS_MOBILE_WORKFLOW_DIR || join(comfyDir, 'user', 'default', 'workflows');
@@ -420,6 +423,17 @@ function publicWorkflow(workflow) {
     supports_loras: Boolean(workflow.supports_loras),
     compatible_base_models: Array.isArray(workflow.compatible_base_models) ? workflow.compatible_base_models : [],
     ...(workflow.max_reference_images ? { max_reference_images: workflow.max_reference_images } : {}),
+    // Reference-mode capacity, read off the wired slots rather than restated:
+    // the studio sizes its References menu from this instead of hardcoding 9/3/3.
+    ...(workflow.reference_image_slots || workflow.reference_video_slots || workflow.reference_audio_slots
+      ? {
+        reference_slots: {
+          images: (workflow.reference_image_slots || []).length,
+          videos: (workflow.reference_video_slots || []).length,
+          audios: (workflow.reference_audio_slots || []).length,
+        },
+      }
+      : {}),
     defaults: publicWorkflowDefaults(workflow.id),
     ...(workflow.beta ? { beta: true } : {}),
     ...(workflow.prompt_helper ? { prompt_helper: workflow.prompt_helper } : {}),
@@ -762,6 +776,177 @@ async function stageVideoUrl(value) {
   return stageVideoBuffer(buffer, { mime, sourceName: basename(source.pathname) });
 }
 
+function extensionForAudioMime(mime) {
+  const normalized = String(mime || '').split(';')[0].trim().toLowerCase();
+  return {
+    'audio/wav': '.wav',
+    'audio/x-wav': '.wav',
+    'audio/wave': '.wav',
+    'audio/mpeg': '.mp3',
+    'audio/mp3': '.mp3',
+    'audio/flac': '.flac',
+    'audio/x-flac': '.flac',
+    'audio/ogg': '.ogg',
+    'audio/mp4': '.m4a',
+    'audio/x-m4a': '.m4a',
+    'audio/aac': '.aac',
+  }[normalized] || '';
+}
+
+function detectAudioExtension(buffer, mime, sourceName) {
+  if (buffer?.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WAVE') return '.wav';
+  if (buffer?.length >= 4 && buffer.toString('ascii', 0, 4) === 'fLaC') return '.flac';
+  if (buffer?.length >= 4 && buffer.toString('ascii', 0, 4) === 'OggS') return '.ogg';
+  if (buffer?.length >= 3 && buffer.toString('ascii', 0, 3) === 'ID3') return '.mp3';
+  if (buffer?.length >= 2 && buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) return '.mp3';
+  if (buffer?.length >= 12 && buffer.toString('ascii', 4, 8) === 'ftyp') return '.m4a';
+  const fromMime = extensionForAudioMime(mime);
+  if (fromMime) return fromMime;
+  const fromName = extname(String(sourceName || '')).toLowerCase();
+  return ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac'].includes(fromName) ? fromName : '';
+}
+
+function stageAudioBuffer(buffer, { mime = '', sourceName = '' } = {}) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('inline audio is empty');
+  if (buffer.length > maxInlineAudioBytes) {
+    throw new Error(`inline audio is too large; max ${Math.round(maxInlineAudioBytes / 1024 / 1024)} MB (reference clips are 15 seconds at most anyway)`);
+  }
+  const ext = detectAudioExtension(buffer, mime, sourceName);
+  if (!ext) throw new Error(`inline audio must be WAV, MP3, FLAC, OGG, M4A, or AAC; received ${mime || 'unknown type'}`);
+  mkdirSync(comfyInputDir, { recursive: true });
+  const stagedName = `mcp_audio_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}${ext}`;
+  writeFileSync(join(comfyInputDir, stagedName), buffer);
+  return stagedName;
+}
+
+function decodeBase64Audio(value) {
+  const text = String(value || '').trim();
+  if (!text) throw new Error('audio_base64 is empty');
+  const dataUrl = text.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.*)$/is);
+  const mime = dataUrl ? String(dataUrl[1] || '').trim().toLowerCase() : '';
+  if (mime && !mime.startsWith('audio/')) throw new Error(`audio_base64 data URL must be audio/*, got ${mime}`);
+  let encoded = (dataUrl ? dataUrl[2] : text).replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/');
+  if (!encoded || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('audio_base64 is not valid base64');
+  encoded = encoded.padEnd(Math.ceil(encoded.length / 4) * 4, '=');
+  return { buffer: Buffer.from(encoded, 'base64'), mime };
+}
+
+function stageBase64Audio(value) {
+  const decoded = decodeBase64Audio(value);
+  return stageAudioBuffer(decoded.buffer, { mime: decoded.mime });
+}
+
+async function stageAudioUrl(value) {
+  const source = new URL(String(value || '').trim());
+  if (!['http:', 'https:'].includes(source.protocol)) throw new Error('audio_url must be http or https');
+  const response = await fetch(source, {
+    headers: { Accept: 'audio/*,application/octet-stream' },
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!response.ok) throw new Error(`audio_url fetch failed: HTTP ${response.status}`);
+  const length = Number(response.headers.get('content-length') || 0);
+  if (length && length > maxInlineAudioBytes) {
+    throw new Error(`audio_url is too large; max ${Math.round(maxInlineAudioBytes / 1024 / 1024)} MB`);
+  }
+  const mime = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return stageAudioBuffer(buffer, { mime, sourceName: basename(source.pathname) });
+}
+
+// Resolves one reference_audios entry to a Comfy input filename: inline data
+// and URLs are staged, an absolute path is copied in, and a bare name is
+// trusted to already be in the input folder (same contract as ref images).
+async function audioSourceFromEntry(entry = {}) {
+  const audioBase64 = entry.audio_base64;
+  if (audioBase64 !== undefined && audioBase64 !== null && String(audioBase64).trim() !== '') {
+    return stageBase64Audio(audioBase64);
+  }
+  const audioUrl = entry.audio_url;
+  if (audioUrl !== undefined && audioUrl !== null && String(audioUrl).trim() !== '') {
+    return stageAudioUrl(audioUrl);
+  }
+  const audioPath = String(entry.audio_path ?? '').trim();
+  if (!audioPath) return undefined;
+  if (!isAbsolute(audioPath)) return audioPath;
+  const source = resolve(audioPath);
+  if (!existsSync(source)) throw new Error(`audio_path not found: ${audioPath}`);
+  const alreadyInput = inputRelativeName(source);
+  if (alreadyInput) return alreadyInput;
+  if (!detectAudioExtension(null, '', source)) {
+    throw new Error(`audio_path must be WAV, MP3, FLAC, OGG, M4A, or AAC: ${audioPath}`);
+  }
+  mkdirSync(comfyInputDir, { recursive: true });
+  const stagedName = `mcp_audio_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}${extname(source).toLowerCase()}`;
+  copyFileSync(source, join(comfyInputDir, stagedName));
+  return stagedName;
+}
+
+// Resolves one reference_videos entry to a Comfy input filename, mirroring the
+// reference-audio contract: inline data and URLs are staged, an absolute path is
+// copied in, and a bare name is trusted to already be in the input folder.
+async function referenceVideoSourceFromEntry(entry = {}) {
+  const videoBase64 = entry.video_base64;
+  if (videoBase64 !== undefined && videoBase64 !== null && String(videoBase64).trim() !== '') {
+    return stageBase64Video(videoBase64);
+  }
+  const videoUrl = entry.video_url;
+  if (videoUrl !== undefined && videoUrl !== null && String(videoUrl).trim() !== '') {
+    return stageVideoUrl(videoUrl);
+  }
+  const videoPath = String(entry.video_path ?? '').trim();
+  if (!videoPath) return undefined;
+  return stageLtxVideo(videoPath);
+}
+
+function stagedMediaDuration(name) {
+  const value = String(name || '').trim();
+  if (!value) return null;
+  const path = isAbsolute(value) ? resolve(value) : resolve(comfyInputDir, value);
+  const result = spawnSync(process.env.FFPROBE || 'ffprobe', [
+    '-v', 'error',
+    '-show_entries', 'format=duration',
+    '-of', 'csv=p=0',
+    path,
+  ], { encoding: 'utf8', timeout: 15000 });
+  if (result.error || result.status !== 0) return null;
+  const seconds = Number(String(result.stdout || '').trim());
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
+
+// MiniMaxH3ReferenceToVideo reads a reference video's frames AS 24 fps — it
+// never asks how fast they were shot — so a 30 fps download would play back
+// 25% slow and drag every gesture with it. Re-encode to a true 24 fps, hold the
+// model card's 15s ceiling, and cap the long edge so a 4K source doesn't make
+// the lane decode frames it will only downscale again. Audio is kept only when
+// the caller wants the clip's own soundtrack conditioned in.
+function normalizeReferenceVideo(stagedName, { keepAudio = false, maxSeconds = 15 } = {}) {
+  const source = resolve(comfyInputDir, stagedName);
+  const duration = stagedMediaDuration(stagedName);
+  if (duration !== null && duration < 2) {
+    throw new Error(
+      `reference video is ${duration.toFixed(1)}s; MiniMax H3 reference videos must be at least 2 seconds`,
+    );
+  }
+  mkdirSync(comfyInputDir, { recursive: true });
+  const outputName = `mcp_refvideo_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}.mp4`;
+  const result = spawnSync(process.env.FFMPEG || 'ffmpeg', [
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-i', source,
+    '-t', String(maxSeconds),
+    '-vf', 'fps=24,scale=w=min(iw\\,1280):h=-2',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
+    ...(keepAudio ? ['-c:a', 'aac', '-b:a', '128k'] : ['-an']),
+    join(comfyInputDir, outputName),
+  ], { encoding: 'utf8', timeout: 300000 });
+  if (result.error?.code === 'ENOENT') {
+    throw new Error('ffmpeg is required to stage a reference video (it is resampled to 24 fps) but was not found');
+  }
+  if (result.status !== 0) {
+    throw new Error(`reference video could not be converted to 24 fps: ${String(result.stderr || '').trim().slice(0, 300)}`);
+  }
+  return outputName;
+}
+
 async function stageInlineImageFromArgs(args = {}) {
   const params = args.params && typeof args.params === 'object' ? args.params : {};
   const imageBase64 = args.image_base64 ?? params.image_base64;
@@ -1026,6 +1211,49 @@ function apiPromptNode(prompt, id) {
 
 function setApiInput(prompt, id, key, value) {
   apiPromptNode(prompt, id).inputs[key] = value;
+}
+
+// Drops a node from an API graph along with every link into it, then follows
+// the break downstream: a consumer left with NO link inputs at all existed only
+// to serve the pruned chain (a reference video's LoadVideo -> GetVideoComponents
+// pair), so it goes too. A consumer that still holds other links — the reference
+// conditioner, which merely loses one optional autogrow key — stays put.
+// Lifts a pass-through node out of a graph: every consumer of its output is
+// reconnected to whatever fed `throughInput`, then the node is dropped. Unlike
+// pruneApiNode this keeps the chain intact — it is how an optional model
+// wrapper (EasyCache) turns fully off instead of running as a no-op.
+function bypassApiNode(prompt, nodeId, throughInput) {
+  const id = String(nodeId ?? '').trim();
+  const node = prompt?.[id];
+  const upstream = node?.inputs?.[throughInput];
+  if (!node || !Array.isArray(upstream)) return;
+  delete prompt[id];
+  for (const consumer of Object.values(prompt)) {
+    if (!consumer?.inputs) continue;
+    for (const [key, value] of Object.entries(consumer.inputs)) {
+      if (Array.isArray(value) && String(value[0]) === id) consumer.inputs[key] = upstream;
+    }
+  }
+}
+
+function pruneApiNode(prompt, nodeId) {
+  const id = String(nodeId ?? '').trim();
+  if (!id || !prompt?.[id]) return;
+  delete prompt[id];
+  for (const [consumerId, node] of Object.entries(prompt)) {
+    if (!prompt[consumerId] || !node?.inputs) continue;
+    let unlinked = false;
+    for (const [key, value] of Object.entries(node.inputs)) {
+      if (Array.isArray(value) && String(value[0]) === id) {
+        delete node.inputs[key];
+        unlinked = true;
+      }
+    }
+    if (!unlinked) continue;
+    if (!Object.values(node.inputs).some((value) => Array.isArray(value))) {
+      pruneApiNode(prompt, consumerId);
+    }
+  }
 }
 
 function normalizeSlot(slot) {
@@ -2137,15 +2365,7 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
         // value is rejected there (only the native-MLX intercept tolerates it).
         // Drop the loader and every link to it; the downstream input must be
         // optional (e.g. MiniMaxH3ImageToVideo.first_frame).
-        delete promptGraph[imageSlot.node];
-        for (const node of Object.values(promptGraph)) {
-          if (!node?.inputs) continue;
-          for (const [key, value] of Object.entries(node.inputs)) {
-            if (Array.isArray(value) && String(value[0]) === String(imageSlot.node)) {
-              delete node.inputs[key];
-            }
-          }
-        }
+        pruneApiNode(promptGraph, imageSlot.node);
       } else if (imageSlot) {
         setApiInput(promptGraph, imageSlot.node, imageSlot.input, '');
       }
@@ -2164,15 +2384,7 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     } else {
       const endSlot = normalizeSlot(slots.end_image_path);
       if (endSlot && workflow.image_clear === 'prune') {
-        delete promptGraph[endSlot.node];
-        for (const node of Object.values(promptGraph)) {
-          if (!node?.inputs) continue;
-          for (const [key, value] of Object.entries(node.inputs)) {
-            if (Array.isArray(value) && String(value[0]) === String(endSlot.node)) {
-              delete node.inputs[key];
-            }
-          }
-        }
+        pruneApiNode(promptGraph, endSlot.node);
       } else if (endSlot) {
         setApiInput(promptGraph, endSlot.node, endSlot.input, '');
       }
@@ -2198,22 +2410,110 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
         setMappedApiInput(promptGraph, slot, staged[staged.length - 1]);
         continue;
       }
-      const normalized = normalizeSlot(slot);
-      if (!normalized) continue;
-      delete promptGraph[normalized.node];
-      for (const node of Object.values(promptGraph)) {
-        if (!node?.inputs) continue;
-        for (const [key, value] of Object.entries(node.inputs)) {
-          if (Array.isArray(value) && String(value[0]) === String(normalized.node)) {
-            delete node.inputs[key];
-          }
+      pruneApiNode(promptGraph, normalizeSlot(slot)?.node);
+    }
+    if (staged.length) settings.referenceImageNames = staged;
+  }
+  // Reference videos: MOTION references. Each is its own LoadVideo ->
+  // GetVideoComponents pair, whose frames become ref_video_N and whose
+  // soundtrack becomes the same-numbered ref_video_audio_N. Pruning an unfilled
+  // slot cascades through the components node, so both autogrow keys go with it.
+  // A caller who does not want the source clip's audio conditioned in keeps the
+  // node but drops the audio link — that is also what stops a silent download
+  // from spending an <Audio N> label on nothing.
+  if (Array.isArray(workflow.reference_video_slots) && workflow.reference_video_slots.length) {
+    const supplied = Array.isArray(args.reference_videos) ? args.reference_videos : [];
+    if (supplied.length > workflow.reference_video_slots.length) {
+      throw new Error(
+        `workflow ${workflow.id} accepts at most ${workflow.reference_video_slots.length} reference videos`,
+      );
+    }
+    const stagedVideos = [];
+    for (const [index, slot] of workflow.reference_video_slots.entries()) {
+      const entry = supplied[index];
+      const source = entry ? await referenceVideoSourceFromEntry(entry) : undefined;
+      if (source !== undefined) {
+        const keepAudio = entry.use_audio === true && stagedVideoHasAudio(source);
+        const normalizedName = normalizeReferenceVideo(source, { keepAudio });
+        stagedVideos.push({ name: normalizedName, audio: keepAudio });
+        setMappedApiInput(promptGraph, slot, normalizedName);
+        const audioLink = normalizeSlot(slot?.audio_link);
+        if (!keepAudio && audioLink && promptGraph[audioLink.node]?.inputs) {
+          delete promptGraph[audioLink.node].inputs[audioLink.input];
         }
+        continue;
       }
+      pruneApiNode(promptGraph, normalizeSlot(slot)?.node);
     }
-    if (!staged.length) {
-      throw new Error(`workflow ${workflow.id} requires at least one reference image`);
+    if (stagedVideos.length) {
+      settings.referenceVideoNames = stagedVideos.map((item) => item.name);
+      settings.referenceVideoAudio = stagedVideos.map((item) => item.audio);
     }
-    settings.referenceImageNames = staged;
+  }
+  // Reference audio: voice/music cloning through the same autogrow contract.
+  // Clip N is the prompt's <Audio N> (numbered independently of <Picture N>),
+  // and every unfilled slot is pruned the same way — a real Comfy lane rejects
+  // an empty LoadAudio filename at submit. The model card caps clips at 2-15s
+  // each and 15s combined, and forbids audio as the sole reference, so an
+  // audio-only request fails loudly here instead of as a lane-side error.
+  if (Array.isArray(workflow.reference_audio_slots) && workflow.reference_audio_slots.length) {
+    const supplied = Array.isArray(args.reference_audios) ? args.reference_audios : [];
+    if (supplied.length > workflow.reference_audio_slots.length) {
+      throw new Error(
+        `workflow ${workflow.id} accepts at most ${workflow.reference_audio_slots.length} reference audio clips`,
+      );
+    }
+    if (supplied.length && !settings.referenceImageNames?.length && !settings.referenceVideoNames?.length) {
+      throw new Error(
+        `workflow ${workflow.id} cannot take reference audio alone — supply at least one reference picture or video alongside it`,
+      );
+    }
+    const stagedAudio = [];
+    for (const [index, slot] of workflow.reference_audio_slots.entries()) {
+      const entry = supplied[index];
+      const source = entry ? await audioSourceFromEntry(entry) : undefined;
+      if (source !== undefined) {
+        stagedAudio.push(source);
+        setMappedApiInput(promptGraph, slot, source);
+        continue;
+      }
+      pruneApiNode(promptGraph, normalizeSlot(slot)?.node);
+    }
+    if (stagedAudio.length) settings.referenceAudioNames = stagedAudio;
+  }
+  // Every reference loader pruned leaves the conditioning node with nothing to
+  // condition on — a graph that only fails once it reaches the GPU. Checked
+  // after the audio pass so an audio-only request still gets the specific
+  // "audio can never be the sole reference" refusal rather than this one.
+  if (Array.isArray(workflow.reference_image_slots) && workflow.reference_image_slots.length
+      && !settings.referenceImageNames?.length && !settings.referenceVideoNames?.length) {
+    throw new Error(`workflow ${workflow.id} requires at least one reference picture or reference video`);
+  }
+  // The prompt has to name every reference by the label the model will give it,
+  // and the numbering is NOT simply "one counter per argument list": the node
+  // presents pictures, then each video (its own soundtrack claiming an <Audio N>
+  // immediately BEFORE its <Video N>), then the standalone clips. So a video
+  // with sound plus one voice clip numbers <Audio 1>, <Video 1>, <Audio 2>.
+  // Callers get the resolved map back rather than having to re-derive that rule.
+  if (settings.referenceImageNames?.length || settings.referenceVideoNames?.length
+      || settings.referenceAudioNames?.length) {
+    const labels = [];
+    let audioOrdinal = 0;
+    (settings.referenceImageNames || []).forEach((_, index) => {
+      labels.push({ label: `<Picture ${index + 1}>`, kind: 'picture' });
+    });
+    (settings.referenceVideoNames || []).forEach((_, index) => {
+      if (settings.referenceVideoAudio?.[index]) {
+        audioOrdinal += 1;
+        labels.push({ label: `<Audio ${audioOrdinal}>`, kind: 'video_soundtrack', video: index + 1 });
+      }
+      labels.push({ label: `<Video ${index + 1}>`, kind: 'video' });
+    });
+    (settings.referenceAudioNames || []).forEach(() => {
+      audioOrdinal += 1;
+      labels.push({ label: `<Audio ${audioOrdinal}>`, kind: 'audio' });
+    });
+    settings.referenceLabels = labels;
   }
   if (timelineImageName) settings.timelineImageName = timelineImageName;
   if (ingredientSheet) {
@@ -2245,6 +2545,9 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     // setMappedApiInput only skips undefined/null/'', so `false` reaches the
     // graph and actually disables the node.
     spectrum: slots.spectrum,
+    easycache: slots.easycache,
+    solattn_tau: slots.solattn_tau,
+    interpolate: slots.interpolate,
   })) {
     // The seed slot never inherits a literal default: an omitted (or -1) seed
     // is a request for a fresh one, not for the workflow's baked-in number.
@@ -2255,6 +2558,57 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     if (value !== undefined) {
       settings[key] = value;
       setMappedApiInput(promptGraph, slot, value);
+    }
+  }
+  // EasyCache reuses a cached transformer step whenever the latent has barely
+  // moved. At a 0 threshold nothing ever qualifies, so rather than leave a
+  // no-op wrapper (and its per-step subsampling bookkeeping) in every default
+  // run, the node is lifted out of the model chain entirely and its consumers
+  // are reconnected to whatever fed it. Off means off, byte for byte.
+  if (slots.easycache && !(Number(settings.easycache) > 0)) {
+    const cacheSlot = normalizeSlot(slots.easycache);
+    if (cacheSlot) {
+      delete settings.easycache;
+      bypassApiNode(promptGraph, cacheSlot.node, 'model');
+    }
+  } else if (slots.easycache && slots.spectrum && settings.spectrum !== false) {
+    // Measured on the rented 5090 (5s @ 960x544, one seed): the Spectrum node
+    // REFUSES to run when a cache wrapper patches the same model ("Spectrum H3
+    // disabled for this run because EasyCache or LazyCache is active"), so
+    // asking for both silently gets EasyCache alone. They are alternatives, and
+    // the choice is not about speed — 39.1s vs 41.9s against 60.3s unaccelerated
+    // — but about fidelity: EasyCache lands 28-35 dB from the unaccelerated
+    // render, Spectrum ~20 dB, i.e. a visibly different take at the same seed.
+    throw new Error(
+      'easycache and spectrum cannot both be on: the Spectrum forecaster disables itself whenever a '
+      + 'cache wrapper patches the same model, so the pair silently runs as easycache alone. Pick one — '
+      + 'spectrum is marginally faster, easycache stays much closer to the unaccelerated render — by '
+      + 'sending spectrum:false alongside easycache.',
+    );
+  }
+  // Sol-Attn sparsifies self-attention; tau 0 means "no sparsification", which
+  // is a wrapper doing nothing, so it comes out of the chain the same way.
+  if (slots.solattn_tau && !(Number(settings.solattn_tau) > 0)) {
+    const solSlot = normalizeSlot(slots.solattn_tau);
+    if (solSlot) {
+      delete settings.solattn_tau;
+      bypassApiNode(promptGraph, solSlot.node, 'model');
+    }
+  }
+  // Frame interpolation runs on the decoded frames. A multiplier below 2 is no
+  // interpolation at all: lift the node out and let the muxer take the decode
+  // straight, then drop the model loader it was the only consumer of.
+  if (slots.interpolate) {
+    const interpolateSlot = normalizeSlot(slots.interpolate);
+    const multiplier = Math.round(Number(settings.interpolate) || 0);
+    if (interpolateSlot && multiplier >= 2) {
+      settings.interpolate = multiplier;
+      setMappedApiInput(promptGraph, interpolateSlot, multiplier);
+    } else if (interpolateSlot) {
+      delete settings.interpolate;
+      const loader = promptGraph[interpolateSlot.node]?.inputs?.interp_model;
+      bypassApiNode(promptGraph, interpolateSlot.node, 'images');
+      if (Array.isArray(loader)) pruneApiNode(promptGraph, loader[0]);
     }
   }
   settings.frameRate = Number(settings.frame_rate ?? defaults.frame_rate ?? 24) || 24;
@@ -2270,6 +2624,15 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     settings.frames = normalizedGridFrameCount(workflow, durationFrames)
       ?? normalizedLtxFrameCount(durationFrames + 1);
     setMappedApiInput(promptGraph, slots.frames, settings.frames);
+  }
+  // Interpolated frames are real frames, so the clip has to be MUXED at the
+  // higher rate or a 2x pass plays back at half speed. This runs after the
+  // frame-count maths on purpose: the model still samples its own 24 fps grid,
+  // and folding the multiplier into settings.frameRate any earlier made a 5s
+  // request generate 243 frames — ten seconds of content — before RIFE ever ran.
+  if (Number(settings.interpolate) >= 2 && slots.frame_rate) {
+    settings.outputFrameRate = settings.frameRate * Number(settings.interpolate);
+    setMappedApiInput(promptGraph, slots.frame_rate, settings.outputFrameRate);
   }
   if (settings.motionContextName) {
     if (settings.imageName) {
@@ -2989,6 +3352,33 @@ function buildServer() {
       })).max(9).optional().describe(
         'MiniMax H3 Reference mode: up to nine reference pictures, in order. '
         + 'Reference N is the prompt\'s <Picture N>.',
+      ),
+      reference_videos: z.array(z.object({
+        video_path: z.string().optional(),
+        video_base64: z.string().optional(),
+        video_url: z.string().optional(),
+        use_audio: z.boolean().optional(),
+      })).max(3).optional().describe(
+        'MiniMax H3 Reference mode: up to three MOTION reference videos, in order — video N is the prompt\'s '
+        + '<Video N>. Carries how a body moves: gesture style, posture, mannerisms, facial expressiveness. How '
+        + 'literally it binds is set by that <Video N>\'s retention_analysis tag — fully_preserved reproduces the '
+        + 'movement, attribute_transfer performs a DIFFERENT action in that performer\'s manner, weak_reference is '
+        + 'a loose pacing cue. Each clip 2-15s, MP4/MOV/WebM/MKV/AVI/M4V, resampled to 24 fps on staging and read '
+        + 'only up to the generated clip\'s own length. Requires at least one reference picture or video overall. '
+        + 'Set use_audio to also condition on the clip\'s soundtrack — that soundtrack then takes an <Audio N> '
+        + 'label of its own, emitted BEFORE its <Video N>, which shifts the numbering of any standalone clips.',
+      ),
+      reference_audios: z.array(z.object({
+        audio_path: z.string().optional(),
+        audio_base64: z.string().optional(),
+        audio_url: z.string().optional(),
+      })).max(3).optional().describe(
+        'MiniMax H3 Reference mode: up to three voice (or music) reference clips, in order — clip N is the '
+        + 'prompt\'s <Audio N>, numbered after any reference video\'s own soundtrack. Each clip 2-15s, 15s combined, '
+        + 'WAV/MP3/FLAC/OGG/M4A/AAC; requires at least one reference picture or video alongside. Clones the voice two ways: tag the prompt summary '
+        + '[audio reuse] to reperform the clip\'s exact words (keep them verbatim, original language, inside <d>…</d>), '
+        + 'or [audio reference] to lend only its timbre and delivery to NEW dialogue (never repeat the source words). '
+        + 'Define each in subject_definitions, e.g. "<Audio 1> is the voice-timbre reference for <Subject 1> (S1)."',
       ),
       loras: z.array(z.object({
         id: z.string().min(1),

@@ -22,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -154,12 +155,28 @@ class PromptHelperGenerateBody(BaseModel):
     # A last frame turns the same request into FL2VA (with a start frame) or
     # L2VA (without) — each has its own anchor line.
     hasLastFrame: bool = False
+    # A scene chain is armed: this prompt is the next shot of a running scene,
+    # not a new one. Without it the helper answers a line of new dialogue by
+    # inventing a fresh scene, which makes the chained render cut away.
+    isContinuation: bool = False
+    # How the shot being continued was written. The clause above says to keep
+    # the established scene; this is what says WHAT it is. Local-only, like
+    # every other prompt here — it goes to a llama-server on this machine.
+    previousPrompt: str | None = None
+    # UGC mode is armed in the composer. It layers onto whichever profile the
+    # target model selects rather than replacing it — the format stays, the
+    # judgements inside it invert (speech becomes required, polish becomes the
+    # failure mode).
+    ugc: bool = False
     # The clip length the studio is set to, so the written timeline fits inside it.
     durationSeconds: float | None = None
     # The start frame itself, as a data URL, for models with a projector: an
     # I2VA prompt describes the first frame, and describing one it has never
     # seen is guesswork.
     imageBase64: str | None = None
+    # Verified character facts (name / casting / work / year) the client's H3
+    # character catalog matched in the idea, one line per character.
+    characterNotes: list[str] | None = None
     # Revise an existing prompt instead of writing a new one: the prompt to
     # change, and what the owner wants different about it.
     currentPrompt: str | None = None
@@ -177,6 +194,50 @@ class MediaStudioIngredientImageBody(BaseModel):
     description: str = ""
 
 
+@dataclass(slots=True)
+class _StagedVideoInputs:
+    """Every media file a video request decoded onto disk. Named rather than a
+    positional tuple: staging grew from one image to nine kinds of input, and
+    each has to be handed to the runner AND deleted afterwards."""
+
+    image: Path | None = None
+    middle: Path | None = None
+    end: Path | None = None
+    video: Path | None = None
+    motion_context: Path | None = None
+    ingredient_images: list[dict[str, Any]] = field(default_factory=list)
+    reference_images: list[Path] = field(default_factory=list)
+    reference_audios: list[Path] = field(default_factory=list)
+    reference_videos: list[dict[str, Any]] = field(default_factory=list)
+
+    def paths(self) -> list[Path]:
+        return [
+            source
+            for source in [
+                self.image, self.middle, self.end, self.video, self.motion_context,
+                *(item["image_path"] for item in self.ingredient_images),
+                *self.reference_images,
+                *self.reference_audios,
+                *(item["video_path"] for item in self.reference_videos),
+            ]
+            if source is not None
+        ]
+
+
+class MediaStudioReferenceAudioBody(BaseModel):
+    audio_base64: str | None = None
+    audio_reference: str | None = None
+
+
+class MediaStudioReferenceVideoBody(BaseModel):
+    video_base64: str | None = None
+    video_reference: str | None = None
+    # Condition on the clip's own soundtrack too. Off by default: a downloaded
+    # motion reference usually carries audio nobody wants in the shot, and an
+    # unwanted soundtrack silently spends one of the model's <Audio N> labels.
+    use_audio: bool = False
+
+
 class MediaStudioVideoBody(BaseModel):
     prompt: str = ""
     workflow_id: str = ""
@@ -186,6 +247,11 @@ class MediaStudioVideoBody(BaseModel):
     # the clip in order (reference N is the prompt's <Picture N>). Distinct from
     # ingredient_images, which LTX composes into one conditioning sheet.
     reference_images: list[MediaStudioIngredientImageBody] = []
+    # Voice/timbre clips (<Audio N>) and motion references (<Video N>) for the
+    # same H3 Reference mode. All three reference kinds are optional and mix
+    # freely; only audio may never be the sole reference.
+    reference_audios: list[MediaStudioReferenceAudioBody] = []
+    reference_videos: list[MediaStudioReferenceVideoBody] = []
     image_base64: str | None = None
     image_reference: str | None = None
     middle_image_base64: str | None = None
@@ -424,6 +490,20 @@ _INLINE_VIDEO_SUFFIXES = {
     "video/x-m4v": ".m4v",
 }
 
+_INLINE_AUDIO_SUFFIXES = {
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/flac": ".flac",
+    "audio/x-flac": ".flac",
+    "audio/ogg": ".ogg",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/aac": ".aac",
+}
+
 _PRIVATE_MEDIA_SUFFIX = ".zenc"
 _MAX_PRIVATE_IMAGE_BYTES = 32 * 1024 * 1024
 _MAX_PRIVATE_VIDEO_BYTES = 100 * 1024 * 1024
@@ -600,6 +680,19 @@ def _write_inline_video(value: str, destination_dir: Path) -> Path:
         mime_suffixes=_INLINE_VIDEO_SUFFIXES,
         default_suffix=".mp4",
         max_bytes=100 * 1024 * 1024,
+    )
+
+
+def _write_inline_audio(value: str, destination_dir: Path) -> Path:
+    # Reference clips are 15 seconds at most, so even lossless stereo stays
+    # small; the cap is here to reject non-audio payloads, not to bound length.
+    return _write_inline_media(
+        value,
+        destination_dir,
+        field_name="audio_base64",
+        mime_suffixes=_INLINE_AUDIO_SUFFIXES,
+        default_suffix=".wav",
+        max_bytes=25 * 1024 * 1024,
     )
 
 
@@ -962,6 +1055,7 @@ def build_control_app(
             "local-ai/generate",
             "local-ai/upscale",
             "local-ai/interpolate",
+            "local-ai/episode",
             "local-ai/prompt-helper",
             "local-ai/civitai-download",
             "local-ai/lora-updates",
@@ -1122,9 +1216,14 @@ def build_control_app(
                 "the opening shot describes the idea, not the image."
             )
             image = None
+        # Client-computed from the composer's character catalog; bounded here
+        # because the system prompt is a token budget, not a dumping ground.
+        notes = [note.strip()[:200] for note in (body.characterNotes or []) if note.strip()][:12]
         messages = [
             {"role": "system", "content": prompt_profiles.system_prompt(
-                profile, duration_seconds=body.durationSeconds)},
+                profile, duration_seconds=body.durationSeconds, character_notes=notes,
+                continuation=body.isContinuation, previous_prompt=body.previousPrompt,
+                ugc=body.ugc)},
             {"role": "user", "content": idea},
         ]
         # Revising is the same conversation with the current draft in it, so
@@ -1196,10 +1295,75 @@ def build_control_app(
                     f"The timeline still runs past the {body.durationSeconds:g}s clip — trim it or "
                     "regenerate before using it."
                 )
+        if body.isContinuation and prompt_profiles.continuation_opens_on_speech(prompt):
+            # Same shape as the timeline repair above, and for the same reason:
+            # the instruction says to hold the carried-over framing before
+            # anything is said, and small helpers still open [Shot 1] on
+            # dialogue. Asked once, then reported rather than silently shipped.
+            retry = messages + [
+                {"role": "assistant", "content": prompt},
+                {"role": "user", "content":
+                    "The clip opens on dialogue, but its first ~0.9s is the previous shot's "
+                    "carried-over frames — those words would be spoken over the old picture. "
+                    "Rewrite the whole prompt so [Shot 1] is a silent hold on the previous "
+                    "framing with only small motion, and the first spoken line starts at 1s or "
+                    "later with an explicit timestamp. Keep the scene and the format identical."},
+            ]
+            second = prompt_profiles.normalize(profile, _write(retry))
+            if not prompt_profiles.continuation_opens_on_speech(second) \
+                    and not prompt_profiles.timeline_overruns(second, body.durationSeconds):
+                prompt = second
+            else:
+                warnings.append(
+                    "This continuation starts speaking over the frames carried from the previous "
+                    "shot. Move the first line a second in, or the join will read as a cut."
+                )
+        if body.ugc:
+            # Polish and silence are the two ways a UGC prompt fails, and both
+            # are things a helper does by habit rather than by choice — the
+            # production vocabulary is what a video prompt normally wants, and
+            # every H3 profile tells it speech is off by default. Checked in one
+            # pass and repaired once, same shape as the timeline fix above:
+            # naming the offending words is safe to ask for, but deleting them
+            # by hand would leave the sentences around them broken.
+            def _ugc_faults(text: str) -> list[str]:
+                found = []
+                tells = prompt_profiles.ugc_polish_tells(text)
+                if tells:
+                    found.append(
+                        "it uses production words that give the clip away as an ad — "
+                        + ", ".join(f'"{tell}"' for tell in tells)
+                    )
+                if prompt_profiles.ugc_missing_speech(profile, text):
+                    found.append("nobody speaks in it, and a UGC clip is someone talking to camera")
+                if profile.startswith("minimax-h3") and prompt_profiles.ugc_has_music(text):
+                    found.append("it scores the clip, and UGC has no music — non_diegetic_music must be N/A")
+                return found
+
+            faults = _ugc_faults(prompt)
+            if faults:
+                retry = messages + [
+                    {"role": "assistant", "content": prompt},
+                    {"role": "user", "content":
+                        "That prompt would not pass as something a real person filmed: "
+                        + "; ".join(faults)
+                        + ". Rewrite the whole prompt fixing every one of those, keeping the same "
+                        "story, the same beats and the format identical."},
+                ]
+                second = prompt_profiles.normalize(profile, _write(retry))
+                remaining = _ugc_faults(second)
+                if len(remaining) < len(faults) and not prompt_profiles.timeline_overruns(
+                        second, body.durationSeconds):
+                    prompt, faults = second, remaining
+                for fault in faults:
+                    warnings.append(f"Reads as produced rather than filmed: {fault}.")
         return {
             "prompt": prompt,
             "profile": profile,
-            "profileLabel": prompt_profiles.profile_label(profile),
+            # Say when the continuation rules were in force, so a prompt written
+            # for a chained shot is visibly a different job from a fresh one.
+            "profileLabel": prompt_profiles.profile_label(
+                profile, continuation=body.isContinuation, ugc=body.ugc),
             "warnings": warnings,
             "sawImage": bool(image),
             # None for a fresh write; a line count for a revision, so the UI can
@@ -1459,7 +1623,7 @@ def build_control_app(
 
     def _staged_media_studio_video_inputs(
         body: MediaStudioVideoBody, request: Request
-    ) -> tuple[Path | None, Path | None, Path | None, Path | None, Path | None, list[dict[str, Any]], list[Path]]:
+    ) -> _StagedVideoInputs:
         image: Path | None = None
         middle: Path | None = None
         end: Path | None = None
@@ -1467,8 +1631,12 @@ def build_control_app(
         motion_context: Path | None = None
         ingredient_images: list[dict[str, Any]] = []
         reference_images: list[Path] = []
+        reference_audios: list[Path] = []
+        reference_videos: list[dict[str, Any]] = []
         has_private_reference = body.image_reference or body.video_reference or any(
             item.image_reference for item in [*body.ingredient_images, *body.reference_images]
+        ) or any(item.audio_reference for item in body.reference_audios) or any(
+            item.video_reference for item in body.reference_videos
         )
         if has_private_reference and not bool(getattr(request.state, "is_owner", False)):
             raise HTTPException(status_code=403, detail="Private media references require an owner session")
@@ -1497,6 +1665,31 @@ def build_control_app(
                     reference_images.append(stage_media_studio_reference(item.image_reference))
                 else:
                     raise ValueError(f"Reference image {index + 1} has no image")
+            # Voice clips and motion references ride the same order-is-load-bearing
+            # contract as the pictures: clip N is the prompt's <Audio N>, video N
+            # its <Video N>.
+            if len(body.reference_audios) > 3:
+                raise ValueError("At most 3 reference audio clips are supported")
+            for index, audio_item in enumerate(body.reference_audios):
+                if audio_item.audio_base64:
+                    reference_audios.append(_write_inline_audio(audio_item.audio_base64, media_studio_input_root))
+                elif audio_item.audio_reference:
+                    reference_audios.append(stage_media_studio_reference(audio_item.audio_reference))
+                else:
+                    raise ValueError(f"Reference audio {index + 1} has no clip")
+            if len(body.reference_videos) > 3:
+                raise ValueError("At most 3 reference videos are supported")
+            for index, video_item in enumerate(body.reference_videos):
+                if video_item.video_base64:
+                    staged_reference = _write_inline_video(video_item.video_base64, media_studio_input_root)
+                elif video_item.video_reference:
+                    staged_reference = stage_media_studio_reference(video_item.video_reference)
+                else:
+                    raise ValueError(f"Reference video {index + 1} has no clip")
+                reference_videos.append({
+                    "video_path": staged_reference,
+                    "use_audio": bool(video_item.use_audio),
+                })
             # Video and image are decoded INDEPENDENTLY. They used to share one
             # if/elif chain, so a request carrying both — the only kind head swap
             # can make — silently lost the image and failed downstream claiming
@@ -1528,7 +1721,17 @@ def build_control_app(
                     end = _write_inline_image(body.end_image_base64, media_studio_input_root)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        return image, middle, end, video, motion_context, ingredient_images, reference_images
+        return _StagedVideoInputs(
+            image=image,
+            middle=middle,
+            end=end,
+            video=video,
+            motion_context=motion_context,
+            ingredient_images=ingredient_images,
+            reference_images=reference_images,
+            reference_audios=reference_audios,
+            reference_videos=reference_videos,
+        )
 
     def _validated_media_studio_loras(body: MediaStudioVideoBody) -> list[dict[str, Any]]:
         loras: list[dict[str, Any]] = []
@@ -1541,19 +1744,10 @@ def build_control_app(
             loras.append({"id": lora_id, "strength": item.strength})
         return loras
 
-    def _unlink_staged_media_studio_sources(
-        image: Path | None, middle: Path | None, end: Path | None,
-        video: Path | None, motion_context: Path | None, ingredient_images: list[dict[str, Any]],
-        reference_images: list[Path] | None = None,
-    ) -> None:
-        for source in [
-            image, middle, end, video, motion_context,
-            *(item["image_path"] for item in ingredient_images),
-            *(reference_images or []),
-        ]:
-            if source is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    source.unlink()
+    def _unlink_staged_media_studio_sources(staged: _StagedVideoInputs) -> None:
+        for source in staged.paths():
+            with contextlib.suppress(FileNotFoundError):
+                source.unlink()
 
     def _finalize_media_studio_video(result: dict[str, Any], started: float) -> dict[str, Any]:
         gateway_output = Path(str(result.get("gateway_output") or "")).name
@@ -1603,24 +1797,25 @@ def build_control_app(
 
     @app.post("/api/media-studio/video", dependencies=[Depends(require_owner_or_control)])
     async def generate_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
-        image, middle, end, video, motion_context, ingredient_images, reference_images = (
-            _staged_media_studio_video_inputs(body, request))
+        staged = _staged_media_studio_video_inputs(body, request)
         loras = _validated_media_studio_loras(body)
         started = time.perf_counter()
         try:
             result = await asyncio.to_thread(
                 run_media_studio_video,
-                image_path=image,
-                middle_image_path=middle,
-                end_image_path=end,
-                video_path=video,
-                motion_context_path=motion_context,
+                image_path=staged.image,
+                middle_image_path=staged.middle,
+                end_image_path=staged.end,
+                video_path=staged.video,
+                motion_context_path=staged.motion_context,
                 video_mode=body.video_mode,
                 task=body.task,
                 prompt=body.prompt.strip(),
                 reference_description=body.reference_description.strip(),
-                ingredient_images=ingredient_images,
-                reference_images=reference_images,
+                ingredient_images=staged.ingredient_images,
+                reference_images=staged.reference_images,
+                reference_audios=staged.reference_audios,
+                reference_videos=staged.reference_videos,
                 duration_seconds=body.duration_seconds,
                 aspect_ratio=body.aspect_ratio,
                 resolution=body.resolution,
@@ -1632,8 +1827,7 @@ def build_control_app(
             detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
             raise HTTPException(status_code=503, detail=detail) from None
         finally:
-            _unlink_staged_media_studio_sources(
-                image, middle, end, video, motion_context, ingredient_images, reference_images)
+            _unlink_staged_media_studio_sources(staged)
         try:
             response = _finalize_media_studio_video(result, started)
         except RuntimeError as exc:
@@ -1696,24 +1890,25 @@ def build_control_app(
 
     @app.post("/api/media-studio/video/start", dependencies=[Depends(require_owner_or_control)])
     async def start_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
-        image, middle, end, video, motion_context, ingredient_images, reference_images = (
-            _staged_media_studio_video_inputs(body, request))
+        staged = _staged_media_studio_video_inputs(body, request)
         loras = _validated_media_studio_loras(body)
         started = time.perf_counter()
         try:
             queued = await asyncio.to_thread(
                 run_media_studio_video_start,
-                image_path=image,
-                middle_image_path=middle,
-                end_image_path=end,
-                video_path=video,
-                motion_context_path=motion_context,
+                image_path=staged.image,
+                middle_image_path=staged.middle,
+                end_image_path=staged.end,
+                video_path=staged.video,
+                motion_context_path=staged.motion_context,
                 video_mode=body.video_mode,
                 task=body.task,
                 prompt=body.prompt.strip(),
                 reference_description=body.reference_description.strip(),
-                ingredient_images=ingredient_images,
-                reference_images=reference_images,
+                ingredient_images=staged.ingredient_images,
+                reference_images=staged.reference_images,
+                reference_audios=staged.reference_audios,
+                reference_videos=staged.reference_videos,
                 duration_seconds=body.duration_seconds,
                 aspect_ratio=body.aspect_ratio,
                 resolution=body.resolution,
@@ -1735,8 +1930,7 @@ def build_control_app(
         finally:
             # start_video uploads the inputs to the gateway before returning,
             # so the staged control-api copies are no longer needed either way.
-            _unlink_staged_media_studio_sources(
-                image, middle, end, video, motion_context, ingredient_images, reference_images)
+            _unlink_staged_media_studio_sources(staged)
         job_id = str(queued["job_id"])
         _prune_media_studio_video_jobs()
         signature, workflow, work_units = _video_timing_signature(body)
@@ -1905,14 +2099,16 @@ def build_control_app(
     @app.post("/api/media-studio/references", dependencies=[Depends(require_owner)])
     async def upload_media_studio_reference(file: UploadFile = File(...)) -> dict:
         content_type = str(file.content_type or "").split(";", 1)[0].strip().lower()
-        mime_suffixes = {**_INLINE_IMAGE_SUFFIXES, **_INLINE_VIDEO_SUFFIXES}
+        # Voice clips join pictures and clips here: H3 Reference mode conditions
+        # on all three, and each is sealed to the owner vault the same way.
+        mime_suffixes = {**_INLINE_IMAGE_SUFFIXES, **_INLINE_VIDEO_SUFFIXES, **_INLINE_AUDIO_SUFFIXES}
         suffix = mime_suffixes.get(content_type)
         if not suffix:
             candidate = Path(str(file.filename or "")).suffix.lower()
             if candidate in set(mime_suffixes.values()):
                 suffix = candidate
         if not suffix:
-            raise HTTPException(status_code=415, detail="Reference must be a supported image or video")
+            raise HTTPException(status_code=415, detail="Reference must be a supported image, video, or audio clip")
         is_video = content_type in _INLINE_VIDEO_SUFFIXES or suffix in set(_INLINE_VIDEO_SUFFIXES.values())
         max_bytes = _MAX_PRIVATE_VIDEO_BYTES if is_video else _MAX_PRIVATE_IMAGE_BYTES
         body = await file.read(max_bytes + 1)
@@ -2010,11 +2206,22 @@ def build_control_app(
                     continue
                 if base not in newest or mtime > newest[base]:
                     newest[base] = mtime
+        def reference_kind(name: str) -> str:
+            suffix = Path(name).suffix.lower()
+            if suffix in set(_INLINE_VIDEO_SUFFIXES.values()):
+                return "video"
+            if suffix in set(_INLINE_AUDIO_SUFFIXES.values()):
+                return "audio"
+            return "image"
+
         references = [
             {
                 "name": base,
                 "url": f"/api/media-studio/references/{urllib.parse.quote(base)}",
                 "timestamp": mtime,
+                # Pickers filter on this: a saved voice clip has no business in
+                # the picture grid, and its thumbnail would never resolve.
+                "kind": reference_kind(base),
             }
             for base, mtime in sorted(newest.items(), key=lambda item: item[1], reverse=True)
         ]

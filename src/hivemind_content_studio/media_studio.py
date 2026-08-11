@@ -165,6 +165,12 @@ def start_video(
     # order — reference N is the prompt's <Picture N>. Distinct from
     # ingredient_images, which LTX stitches into one conditioning sheet.
     reference_images: list[str | Path] | None = None,
+    # Voice/timbre clips (<Audio N>) and motion references (<Video N>) for the
+    # same Reference mode. Each reference video is {"video_path", "use_audio"};
+    # use_audio also conditions on that clip's own soundtrack, which then takes
+    # an <Audio N> label of its own ahead of its <Video N>.
+    reference_audios: list[str | Path] | None = None,
+    reference_videos: list[dict[str, Any]] | None = None,
     duration_seconds: float = 4,
     aspect_ratio: str = "",
     resolution: str = "",
@@ -216,6 +222,24 @@ def start_video(
     for reference in references:
         if not reference.is_file():
             raise FileNotFoundError(f"Reference image not found: {reference}")
+    audio_references = [Path(str(item)).expanduser().resolve() for item in (reference_audios or [])]
+    if len(audio_references) > 3:
+        raise ValueError("At most 3 reference audio clips are supported")
+    for reference in audio_references:
+        if not reference.is_file():
+            raise FileNotFoundError(f"Reference audio not found: {reference}")
+    video_references = [
+        {
+            "video_path": Path(str(item.get("video_path") or "")).expanduser().resolve(),
+            "use_audio": bool(item.get("use_audio")),
+        }
+        for item in (reference_videos or [])
+    ]
+    if len(video_references) > 3:
+        raise ValueError("At most 3 reference videos are supported")
+    for reference in video_references:
+        if not reference["video_path"].is_file():
+            raise FileNotFoundError(f"Reference video not found: {reference['video_path']}")
     if video is not None and not video.is_file():
         raise FileNotFoundError(f"Input video not found: {video}")
     if motion_context is not None and not motion_context.is_file():
@@ -260,6 +284,16 @@ def start_video(
             uploaded_names.append(end_name)
         reference_names = [_upload_image(descriptor, reference) for reference in references]
         uploaded_names.extend(name for name in reference_names if name)
+        reference_audio_names = [_upload_audio(descriptor, reference) for reference in audio_references]
+        uploaded_names.extend(name for name in reference_audio_names if name)
+        reference_video_entries = [
+            {
+                "video_path": _upload_video(descriptor, reference["video_path"]),
+                "use_audio": reference["use_audio"],
+            }
+            for reference in video_references
+        ]
+        uploaded_names.extend(item["video_path"] for item in reference_video_entries if item["video_path"])
         uploaded_ingredients = []
         for item in ingredients:
             name = _upload_image(descriptor, item["image_path"])
@@ -282,6 +316,9 @@ def start_video(
             **({"end_image_path": end_name} if end_name else {}),
             **({"reference_images": [{"image_path": name} for name in reference_names]}
                if reference_names else {}),
+            **({"reference_audios": [{"audio_path": name} for name in reference_audio_names]}
+               if reference_audio_names else {}),
+            **({"reference_videos": reference_video_entries} if reference_video_entries else {}),
             # Forward a concrete seed so each run differs; a missing/-1 seed makes the
             # runner fall back to its FIXED default (42), which is why "every video
             # looked the same". Callers send a fresh random seed for random mode.
@@ -548,6 +585,8 @@ def generate_video(
     reference_description: str = "",
     ingredient_images: list[dict[str, Any]] | None = None,
     reference_images: list[str | Path] | None = None,
+    reference_audios: list[str | Path] | None = None,
+    reference_videos: list[dict[str, Any]] | None = None,
     duration_seconds: float = 4,
     aspect_ratio: str = "",
     resolution: str = "",
@@ -576,6 +615,8 @@ def generate_video(
         reference_description=reference_description,
         ingredient_images=ingredient_images,
         reference_images=reference_images,
+        reference_audios=reference_audios,
+        reference_videos=reference_videos,
         duration_seconds=duration_seconds,
         aspect_ratio=aspect_ratio,
         resolution=resolution,
@@ -696,6 +737,10 @@ def _upload_image(descriptor: MediaStudioDescriptor, image: Path) -> str:
 
 def _upload_video(descriptor: MediaStudioDescriptor, video: Path) -> str:
     return _upload_input(descriptor, video, "video")
+
+
+def _upload_audio(descriptor: MediaStudioDescriptor, audio: Path) -> str:
+    return _upload_input(descriptor, audio, "audio")
 
 
 def _upload_input(descriptor: MediaStudioDescriptor, media: Path, label: str) -> str:

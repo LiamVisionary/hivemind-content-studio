@@ -128,12 +128,17 @@ export function videoRequestPlan(setup) {
     // armed state entirely (their continuation is the extend task above).
     const sendMotionContext = local && isMinimaxFamilyModel(setup)
         && !setup?.videoUrl && Boolean(String(setup?.motionContextUrl || '').trim());
-    // Reference mode (MiniMax H3): attached character/subject pictures REPLACE
-    // the start/end frames — the reference graph has no frame inputs at all —
-    // the same way an armed chain replaces the start frame. Motion context
-    // still composes with references (the registry accepts both).
+    // Reference mode (MiniMax H3): attached references REPLACE the start/end
+    // frames — the reference graph has no frame inputs at all — the same way an
+    // armed chain replaces the start frame. Motion context still composes with
+    // references (the registry accepts both). ANY reference kind arms the mode:
+    // a motion clip alone is valid conditioning, and a voice clip alone is not
+    // (the server refuses it) but must still route to the reference workflow to
+    // be told so, rather than being silently dropped from a frame-based run.
+    const referenceCount = ['referenceImageUrls', 'referenceVideos', 'referenceAudios']
+        .reduce((total, key) => total + (Array.isArray(setup?.[key]) ? setup[key].filter(Boolean).length : 0), 0);
     const sendReferenceImages = local && isMinimaxFamilyModel(setup) && !setup?.videoUrl
-        && (Array.isArray(setup?.referenceImageUrls) ? setup.referenceImageUrls.filter(Boolean) : []).length > 0;
+        && referenceCount > 0;
     return {
         task,
         // Plain generation still accepts a dropped-in clip, which historically

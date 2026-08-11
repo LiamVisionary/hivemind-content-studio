@@ -70,6 +70,8 @@ import {
 } from './image/imagePrefs.js';
 import { LoraSection } from './image/LoraSection.jsx';
 import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
+import { UgcMenu } from './UgcMenu.jsx';
+import { applyUgcFirstFrame, hasUgcFirstFrame, ugcVariantAt } from '../lib/ugcMode.js';
 import { GalleryCard, ViewerModal } from './image/GalleryAndViewer.jsx';
 import { CompareViewer } from './image/CompareViewer.jsx';
 import { ExpandDialog } from './image/ExpandDialog.jsx';
@@ -203,6 +205,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     batchCount: persistedImagePreferences?.batchCount ?? 1,
     customWidth: persistedImagePreferences?.customWidth ?? 0,
     customHeight: persistedImagePreferences?.customHeight ?? 0,
+    // UI-only: keeps the Custom aspect tile (and its W/H inputs) open while the
+    // user is mid-edit with one of the fields cleared. Dims persisting is what
+    // makes custom stick across reloads.
+    customArOpen: Boolean(persistedImagePreferences?.customWidth && persistedImagePreferences?.customHeight),
     // Sampler/scheduler override + short-side resolution for local workflows
     // that expose them. Empty/0 = the workflow's own step-appropriate choice.
     sampler: persistedImagePreferences?.sampler || '',
@@ -836,6 +842,32 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
     bump();
   };
 
+  // Same source the aspect picker renders from — local models carry their own
+  // list, API models get theirs from the catalog.
+  const ugcVerticalAvailable = () => (s.useLocalModel
+    ? (localModelById(s.selectedLocalModel)?.aspectRatios || [])
+    : getCurrentAspectRatios(s.selectedModel)).includes('9:16');
+
+  // UGC mode — the first-frame half of the two-prompt workflow: the realism
+  // stack (phone front camera, named light source, pores and under-eye shadows,
+  // one imperfect detail) written into the prompt as an idempotent block, so
+  // dealing a new cast replaces it rather than stacking. Only the deal number
+  // lives in state; the text is derived from it. Passing null clears.
+  const applyUgc = (index) => {
+    const variant = Number.isInteger(index) ? ugcVariantAt(index) : null;
+    const prompt = applyUgcFirstFrame(s.prompt, variant);
+    s.prompt = prompt;
+    // Kept when clearing, so turning UGC back on deals the NEXT cast instead of
+    // restarting the cycle at the one you just used.
+    if (variant) s.ugcVariantIndex = variant.index;
+    // A first frame for a phone-selfie clip is portrait. Said out loud in the menu.
+    if (variant && ugcVerticalAvailable()) s.selectedAr = '9:16';
+    updateComposerDraft({ prompt });
+    persistImagePreferences();
+    bump();
+    promptRef.current?.focus();
+  };
+
   /* ---------------- model selection ---------------- */
 
   const selectLocalModel = (m) => {
@@ -1066,7 +1098,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
   // lane is installed locally.
   const krea2LocalModel = () => s.localImageModels.find((m) => m.backend === 'comfy-krea2-turbo-identity-edit') || null;
 
-  const runExpand = async (entry, { width, height, prompt }) => {
+  const runExpand = async (entry, { width, height, prompt, offsetX, offsetY }) => {
     const model = krea2LocalModel();
     if (!model || !entry?.url) return;
     s.expandBusy = true;
@@ -1085,7 +1117,12 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         model: model.id,
         prompt: prompt || entry.prompt || '',
         image_base64: dataUrl,
-        outpaint: { width, height },
+        outpaint: {
+          width,
+          height,
+          ...(offsetX != null ? { offset_x: offsetX } : {}),
+          ...(offsetY != null ? { offset_y: offsetY } : {}),
+        },
         seed: -1,
       });
       if (!result?.url) throw new Error('Expand finished without an image');
@@ -1957,6 +1994,10 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       model: activeLocalModel,
     })
     : null;
+  // Custom tile stays open while a W/H field is cleared mid-edit (customArOpen),
+  // and re-derives from persisted dims on reload. Local-only: cloud APIs accept
+  // enumerated ratios, not free sizes.
+  const customDimsActive = s.useLocalModel && Boolean(s.customArOpen || (s.customWidth && s.customHeight));
   // Rented selected with nothing to run on: every setting below is moot,
   // so the panel collapses to the Source block and its rent/provisioning CTA.
   const rentedBlocked = Boolean(s.rentedOnly && !s.rentedMachines?.length);
@@ -2025,12 +2066,45 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           <Field label="Aspect ratio">
             <AspectRatioPicker
               options={aspectRatios}
-              value={s.selectedAr}
-              onChange={(v) => { s.selectedAr = v; persistImagePreferences(); bump(); }}
+              value={customDimsActive ? 'custom' : s.selectedAr}
+              onChange={(v) => {
+                if (v === 'custom') {
+                  s.customArOpen = true;
+                  if (!(s.customWidth && s.customHeight)) {
+                    s.customWidth = resolvedDims?.width || activeLocalModel?.defaultWidth || 1024;
+                    s.customHeight = resolvedDims?.height || activeLocalModel?.defaultWidth || 1024;
+                  }
+                } else {
+                  s.selectedAr = v;
+                  s.customArOpen = false;
+                  s.customWidth = 0;
+                  s.customHeight = 0;
+                }
+                persistImagePreferences();
+                bump();
+              }}
               nameFor={aspectRatioName}
+              custom={s.useLocalModel ? {
+                name: t('ar.custom'),
+                detail: (s.customWidth && s.customHeight) ? `${s.customWidth}×${s.customHeight}` : 'W×H',
+              } : null}
             />
           </Field>
         )}
+        {customDimsActive && !referenceDrivesAspect ? (
+          <div className="grid grid-cols-2 gap-2">
+            <Field label={t('image.width')}>
+              <TextInput type="number" className="font-mono" placeholder={t('image.widthPlaceholder')}
+                value={s.customWidth ? String(s.customWidth) : ''}
+                onChange={(e) => { s.customWidth = parseInt(e.target.value) || 0; persistImagePreferences(); bump(); }} />
+            </Field>
+            <Field label={t('image.height')}>
+              <TextInput type="number" className="font-mono" placeholder={t('image.heightPlaceholder')}
+                value={s.customHeight ? String(s.customHeight) : ''}
+                onChange={(e) => { s.customHeight = parseInt(e.target.value) || 0; persistImagePreferences(); bump(); }} />
+            </Field>
+          </div>
+        ) : null}
         {resolutions.length > 0 ? (
           <Field label="Resolution">
             <NativeSelect
@@ -2046,7 +2120,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           <Field
             label="Resolution"
             hint={resolvedDims.custom
-              ? `${resolvedDims.width} × ${resolvedDims.height} — set by Width/Height below`
+              ? `${resolvedDims.width} × ${resolvedDims.height} — set by the Custom aspect ratio above`
               : `${resolvedDims.width} × ${resolvedDims.height} — sampling time scales with pixel count (Krea 2 @ 8 steps: 1024≈42s, 896≈32s, 768≈26s, 640≈18s)`}
           >
             <NativeSelect
@@ -2155,18 +2229,6 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
             {t('image.negPromptUnsupported')(localModelById(s.selectedLocalModel)?.name || 'This workflow')}
           </p>
         ) : null}
-        <div className="grid grid-cols-2 gap-2">
-          <Field label={t('image.width')}>
-            <TextInput type="number" className="font-mono" placeholder={t('image.widthPlaceholder')}
-              value={s.customWidth ? String(s.customWidth) : ''}
-              onChange={(e) => { s.customWidth = parseInt(e.target.value) || 0; bump(); }} />
-          </Field>
-          <Field label={t('image.height')}>
-            <TextInput type="number" className="font-mono" placeholder={t('image.heightPlaceholder')}
-              value={s.customHeight ? String(s.customHeight) : ''}
-              onChange={(e) => { s.customHeight = parseInt(e.target.value) || 0; bump(); }} />
-          </Field>
-        </div>
         <Field label={t('image.refStrength')} hint={t('image.refStrengthNote')}>
           <Slider min={0} max={100} step={5} value={s.referenceStrength} format={(v) => `${v}%`}
             onChange={(v) => { s.referenceStrength = v; bump(); }} />
@@ -2309,6 +2371,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           status={s.loraCatalogStatus}
           message={s.loraCatalogMessage}
           loras={s.availableLoras}
+          rentedOnly={Boolean(s.rentedOnly)}
           selection={currentLoraSelection()}
           getSelection={currentLoraSelection}
           onToggleLora={(lora) => {
@@ -2528,6 +2591,14 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
               promptRef.current?.focus();
             }}
             onLoadContext={(context) => restoreImageContext(context)}
+          />
+
+          <UgcMenu
+            mode="image"
+            active={hasUgcFirstFrame(s.prompt)}
+            variantIndex={Number.isInteger(s.ugcVariantIndex) ? s.ugcVariantIndex : null}
+            verticalAvailable={ugcVerticalAvailable()}
+            onArm={applyUgc}
           />
 
           {/* Starting over lives here rather than in the result viewer: it is how
@@ -2805,6 +2876,9 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         idea={s.prompt}
         targetModel={s.useLocalModel ? s.selectedLocalModel : s.selectedModel}
         mediaType="image"
+        // UGC first frames are judged on looking un-produced, which is the
+        // opposite of what the default image guidance optimises for.
+        ugc={hasUgcFirstFrame(s.prompt)}
         onUse={(prompt) => { setPromptValue(prompt); persistImagePreferences(); }}
       />
 

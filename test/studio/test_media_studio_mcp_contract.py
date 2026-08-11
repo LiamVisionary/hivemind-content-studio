@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import threading
@@ -88,23 +89,32 @@ def test_video_loras_have_native_mlx_and_comfy_graph_parity():
     assert "mergeNativeWorkflowLoras(nativeSpec.loras, settings.loras)" in source
 
     registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    # Civitai's base-model category per family — what the studio's LoRA panel
+    # filters the installed catalog by.
+    expected_bases = {"ltx-2.3": ["LTXV"], "minimax": ["MiniMax H3"]}
     checked = 0
     for workflow in (item for item in _resolved_registry_workflows(registry) if item["media_type"] == "video"):
         if not workflow.get("supports_loras"):
-            # Non-LTX families (e.g. minimax-h3) have no LoRA lane; the parity
-            # contract below is specifically about LTXV LoRA injection.
             assert "lora_injection" not in workflow
             assert "loras" not in workflow.get("accepts", [])
             continue
         checked += 1
         assert workflow["supports_loras"] is True
-        assert workflow["compatible_base_models"] == ["LTXV"]
+        assert workflow["compatible_base_models"] == expected_bases[workflow["family"]]
         assert "loras" in workflow["accepts"]
         injection = workflow["lora_injection"]
-        graph = json.loads(Path(workflow["api_workflow"]).read_text(encoding="utf-8"))["prompt"]
+        graph_path = Path(workflow["api_workflow"])
+        if not graph_path.is_absolute():
+            graph_path = ROOT / "packages" / "media-gateway" / graph_path
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))["prompt"]
         sources = [graph[target["node"]]["inputs"][target["input"]] for target in injection["targets"]]
         assert all(source_ref == sources[0] for source_ref in sources)
     assert checked, "no LoRA-capable video workflows resolved — registry parse regressed"
+    # All three H3 graphs (base, turbo, reference) route the model through the
+    # SageAttention patch node the inherited injection contract targets, so the
+    # loop above just proved LoRA injection has a live seam in each of them.
+    h3 = [w for w in _resolved_registry_workflows(registry) if w.get("family") == "minimax"]
+    assert h3 and all(w["supports_loras"] is True for w in h3)
 
 
 def test_minimax_h3_registry_entry_matches_its_comfy_graph():
@@ -135,16 +145,21 @@ def test_minimax_h3_registry_entry_matches_its_comfy_graph():
         )
 
     # The accelerator chain must sit on the MODEL edge feeding both the
-    # scheduler and the guider: UNETLoader -> SageAttention patch -> Spectrum.
+    # scheduler and the guider, in this order. Sol-Attn and EasyCache are the
+    # optional ones — they ship inert (tau 0 / threshold 0) and the MCP lifts
+    # them out of the chain entirely unless a run asks for them.
+    # (Upstream KJNodes really does register the sage class with that typo.)
+    assert _model_chain(graph) == [
+        "EasyCache",
+        "SpectrumApplyMiniMaxH3",
+        "SolAttnPatch",
+        "PathchSageAttentionKJ",
+        "UNETLoader",
+    ]
     spectrum = [nid for nid, node in graph.items() if node["class_type"] == "SpectrumApplyMiniMaxH3"]
     assert len(spectrum) == 1
-    sage = graph[spectrum[0]]["inputs"]["model"][0]
-    # Upstream KJNodes really does register the class with this typo.
-    assert graph[sage]["class_type"] == "PathchSageAttentionKJ"
-    assert graph[sage]["inputs"]["model"][0] == "6"
-    assert graph["6"]["class_type"] == "UNETLoader"
     for consumer in ("9", "16"):
-        assert graph[consumer]["inputs"]["model"] == [spectrum[0], 0]
+        assert graph[consumer]["inputs"]["model"] == graph["9"]["inputs"]["model"]
 
     # Spectrum's optional inputs must be pinned, never inherited: upstream
     # dc6e1b3 flipped bootstrap_first_forecast's default to true and every H3
@@ -230,17 +245,24 @@ def test_minimax_h3_turbo_inherits_and_bakes_the_distill_contract():
     graph = json.loads(graph_path.read_text(encoding="utf-8"))["prompt"]
 
     # MODEL chain: UNETLoader -> UPSTREAM's turbo LoRA loader -> SageAttention
-    # -> the MANDATORY dual sigma shift -> Spectrum, feeding scheduler+guider.
-    spectrum = graph["9"]["inputs"]["model"][0]
-    assert graph[spectrum]["class_type"] == "SpectrumApplyMiniMaxH3"
-    assert graph["16"]["inputs"]["model"] == [spectrum, 0]
-    shift = graph[spectrum]["inputs"]["model"][0]
-    assert graph[shift]["class_type"] == "MiniMaxH3SigmaShift"
+    # -> optional Sol-Attn -> the MANDATORY dual sigma shift -> Spectrum ->
+    # optional EasyCache, feeding scheduler+guider.
+    assert _model_chain(graph) == [
+        "EasyCache",
+        "SpectrumApplyMiniMaxH3",
+        "MiniMaxH3SigmaShift",
+        "SolAttnPatch",
+        "PathchSageAttentionKJ",
+        "MiniMaxH3TurboLoRA",
+        "UNETLoader",
+    ]
+    spectrum = next(nid for nid, node in graph.items()
+                    if node["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert graph["16"]["inputs"]["model"] == graph["9"]["inputs"]["model"]
+    shift = next(nid for nid, node in graph.items() if node["class_type"] == "MiniMaxH3SigmaShift")
     assert graph[shift]["inputs"]["shift_video"] == 12.0
     assert graph[shift]["inputs"]["shift_audio"] == 6.0
-    sage = graph[shift]["inputs"]["model"][0]
-    assert graph[sage]["class_type"] == "PathchSageAttentionKJ"
-    lora = graph[sage]["inputs"]["model"][0]
+    lora = next(nid for nid, node in graph.items() if node["class_type"] == "MiniMaxH3TurboLoRA")
     # ComfyUI's plain loader CANNOT apply this LoRA to our pruned int8-convrot
     # base: the 51 AdaLN pairs have nowhere to go, which is why we used to ship
     # a conversion with them stripped out. Upstream's loader re-injects the time
@@ -1385,6 +1407,18 @@ def test_spectrum_toggle_reaches_the_graph(tmp_path, workflow_id, spectrum):
     assert node["inputs"]["enabled"] is spectrum
 
 
+def _model_chain(graph):
+    """Class names along the MODEL edge feeding the scheduler, sampler-first."""
+    chain = []
+    node = graph["9"]["inputs"]["model"][0]
+    while True:
+        chain.append(graph[node]["class_type"])
+        upstream = graph[node]["inputs"].get("model")
+        if not isinstance(upstream, list):
+            return chain
+        node = upstream[0]
+
+
 def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False):
     """Run the real MCP against a capture backend and return the posted graph.
 
@@ -1483,6 +1517,13 @@ _TINY_PNG = (
     "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 )
 
+# Eight samples of 16 kHz mono silence with a full RIFF/WAVE header: enough for
+# the MCP's magic-byte sniff to stage it as .wav, nothing to decode.
+_TINY_WAV = (
+    "data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YRAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAA"
+)
+
 
 @pytest.mark.parametrize("start,end,expect_first,expect_last", [
     (False, False, False, False),   # T2VA
@@ -1566,7 +1607,7 @@ def test_reference_mode_refuses_a_request_with_no_references(tmp_path):
     condition on — a graph that only fails once it reaches the GPU."""
     reply = _capture_video_graph(
         tmp_path, "minimax-h3-reference", {"prompt": "no references at all"}, expect_refusal=True)
-    assert "requires at least one reference image" in reply
+    assert "requires at least one reference picture or reference video" in reply
 
 
 def test_reference_mode_refuses_more_references_than_it_has_slots(tmp_path):
@@ -1575,6 +1616,258 @@ def test_reference_mode_refuses_more_references_than_it_has_slots(tmp_path):
         {"prompt": "x", "reference_images": [{"image_base64": _TINY_PNG}] * 10},
         expect_refusal=True)
     assert "at most 9 reference images" in reply or "Too big" in reply or "max" in reply
+
+
+def test_minimax_h3_reference_audio_fills_slots_in_order_and_prunes_the_rest(tmp_path):
+    """Voice cloning: standalone reference audio rides the same autogrow
+    contract as pictures — LoadAudio into ref_audios.ref_audio_N, clip N is the
+    prompt's <Audio N> (numbered independently of <Picture N>) — and an
+    unfilled audio slot must take its key and loader with it when pruned: a
+    real Comfy lane rejects an empty LoadAudio filename at submit.
+    """
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "she speaks new lines in the referenced voice",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_audios": [{"audio_base64": _TINY_WAV}, {"audio_base64": _TINY_WAV}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    audio_keys = sorted(k for k in node["inputs"] if k.startswith("ref_audios."))
+    assert audio_keys == ["ref_audios.ref_audio_1", "ref_audios.ref_audio_2"]
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadAudio"]
+    assert len(loaders) == 2, "the unused reference audio loader must be pruned"
+    assert all(n["inputs"]["audio"].endswith(".wav") for n in loaders), \
+        "staged reference audio must carry a real filename with its sniffed extension"
+    # Pictures are untouched by the audio pass.
+    assert [k for k in node["inputs"] if k.startswith("ref_images.")] == ["ref_images.ref_image_1"]
+
+
+def test_reference_audio_cannot_be_the_sole_reference(tmp_path):
+    """The model card is explicit: audio must accompany an image or video
+    reference and can never be the only conditioning. Without the guard this
+    only fails once the graph reaches the GPU."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "voice only", "reference_audios": [{"audio_base64": _TINY_WAV}]},
+        expect_refusal=True)
+    assert "cannot take reference audio alone" in reply
+
+
+def test_easycache_is_absent_from_the_graph_unless_it_is_asked_for(tmp_path):
+    """EasyCache reuses transformer steps whose latent barely moved. At a 0
+    threshold nothing ever qualifies, but the wrapper still does per-step
+    subsampling bookkeeping — so off has to mean LIFTED OUT, with the sampler
+    reconnected to whatever fed it, not left in the chain doing nothing."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+
+    assert not [n for n in graph.values() if n["class_type"] == "EasyCache"]
+    # The model chain closes back up: sampler and scheduler read the Spectrum node.
+    spectrum_id = next(k for k, v in graph.items() if v["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert graph["9"]["inputs"]["model"] == [spectrum_id, 0]
+    assert graph["16"]["inputs"]["model"] == [spectrum_id, 0]
+
+
+def test_easycache_threshold_wires_the_node_between_spectrum_and_the_sampler(tmp_path):
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour",
+        # Choosing the cache means turning the forecaster off — the two refuse
+        # to run together, so the caller has to say which one it wants.
+        "spectrum": False,
+        "params": {"easycache": 0.25},
+    })
+
+    cache_id = next(k for k, v in graph.items() if v["class_type"] == "EasyCache")
+    cache = graph[cache_id]
+    assert cache["inputs"]["reuse_threshold"] == 0.25
+    # Applied LAST, outermost of the model wrappers: loader -> sage -> spectrum -> cache.
+    spectrum_id = next(k for k, v in graph.items() if v["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert cache["inputs"]["model"] == [spectrum_id, 0]
+    assert graph["9"]["inputs"]["model"] == [cache_id, 0]
+    assert graph["16"]["inputs"]["model"] == [cache_id, 0]
+
+
+def test_frame_interpolation_is_absent_unless_asked_for(tmp_path):
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+
+    assert not [n for n in graph.values() if n["class_type"] == "FrameInterpolate"]
+    # The model loader goes with it — it existed only to feed the pruned node.
+    assert not [n for n in graph.values() if n["class_type"] == "FrameInterpolationModelLoader"]
+    assert graph["91"]["inputs"]["images"] == ["10", 0], "the muxer reads the decode directly"
+    assert graph["91"]["inputs"]["fps"] == 24
+
+
+def test_frame_interpolation_raises_the_mux_rate_but_not_the_sampled_frame_count(tmp_path):
+    """Interpolation invents frames AFTER the decode. Folding its multiplier
+    into the frame rate any earlier makes the frame-count maths sample the
+    longer grid — a 5s request generated 243 frames, ten seconds of content,
+    before RIFE had run at all."""
+    plain = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour", "duration_seconds": 5})
+    interpolated = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour", "duration_seconds": 5, "params": {"interpolate": 2}})
+
+    assert interpolated["104"]["inputs"]["length"] == plain["104"]["inputs"]["length"]
+    assert interpolated["91"]["inputs"]["fps"] == 48
+    interp = next(n for n in interpolated.values() if n["class_type"] == "FrameInterpolate")
+    assert interp["inputs"]["multiplier"] == 2
+    assert interp["inputs"]["images"] == ["10", 0]
+    assert interpolated["91"]["inputs"]["images"][1] == 0
+
+
+def test_solattn_is_on_by_default_and_lifts_out_at_tau_zero(tmp_path):
+    """Sol-Attn is the default accelerator as of 2026-08-11: measured 34.3s
+    against 38.6s for Spectrum alone on a rented 5090, same take, detail equal
+    or better. tau 0 is the escape hatch — needed for any lane provisioned
+    before the node was pinned, where the class does not exist."""
+    sparse = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+    node = next(n for n in sparse.values() if n["class_type"] == "SolAttnPatch")
+    assert node["inputs"]["tau"] == 1.3
+
+    plain = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour", "params": {"solattn_tau": 0}})
+    assert not [n for n in plain.values() if n["class_type"] == "SolAttnPatch"]
+    # The model chain closes back up around it.
+    sage_id = next(k for k, v in plain.items() if v["class_type"] == "PathchSageAttentionKJ")
+    spectrum = next(v for v in plain.values() if v["class_type"] == "SpectrumApplyMiniMaxH3")
+    assert spectrum["inputs"]["model"] == [sage_id, 0]
+    # Applied after sage attention, which stays as the dense fallback backend.
+    assert node["inputs"]["model"] == ["31", 0]
+    # H3 packs its conditioning as extra attention rows; those stay exact or
+    # sparsification eats the cloned voice and the reference identity.
+    assert node["inputs"]["sink_conditioning"] == "exact_kv_and_rows"
+
+
+def test_easycache_and_spectrum_cannot_both_be_asked_for(tmp_path):
+    """Measured: the Spectrum node disables itself whenever a cache wrapper
+    patches the same model, so the pair silently runs as easycache alone."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3",
+        {"prompt": "x", "spectrum": True, "params": {"easycache": 0.3}},
+        expect_refusal=True)
+    assert "cannot both be on" in reply
+
+
+def _write_test_video(path, *, seconds=3, fps=30, with_audio=False):
+    """A real, decodable clip — the reference-video path re-encodes through
+    ffmpeg, so a fake byte blob proves nothing."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is required to build a reference-video fixture")
+    command = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", f"testsrc=size=320x240:rate={fps}:duration={seconds}",
+    ]
+    if with_audio:
+        command += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-c:a", "aac", "-shortest"]
+    else:
+        command += ["-an"]
+    command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)]
+    subprocess.run(command, check=True)
+    return path
+
+
+def _probe(path, stream, entries):
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", stream, "-show_entries", entries,
+         "-of", "csv=p=0", str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def test_minimax_h3_reference_video_wires_frames_and_resamples_to_24fps(tmp_path):
+    """A reference video is a MOTION reference: its frames ride ref_videos.
+    ref_video_N through core LoadVideo -> GetVideoComponents. The node reads
+    those frames AS 24 fps without asking how fast they were shot, so a 30 fps
+    source must be resampled on the way in or every gesture plays 25% slow.
+    """
+    source = _write_test_video(tmp_path / "motion.mp4", seconds=3, fps=30)
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "she moves with the manner of the reference",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source)}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_1"]
+    # No use_audio, so the clip's own soundtrack must not claim an <Audio N>.
+    assert [k for k in node["inputs"] if k.startswith("ref_video_audios.")] == []
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadVideo"]
+    components = [n for n in graph.values() if n["class_type"] == "GetVideoComponents"]
+    assert len(loaders) == 1, "the two unused reference video loaders must be pruned"
+    assert len(components) == 1, "pruning a video loader must take its components node with it"
+
+    staged = tmp_path / "input" / loaders[0]["inputs"]["file"]
+    assert staged.is_file(), "the reference video must be staged into the Comfy input dir"
+    assert _probe(staged, "v:0", "stream=r_frame_rate") == "24/1"
+    assert _probe(staged, "a:0", "stream=index") == "", "audio must be stripped when use_audio is off"
+
+
+def test_reference_video_soundtrack_claims_an_audio_label_before_its_video(tmp_path):
+    """use_audio conditions on the clip's own soundtrack, which the node labels
+    <Audio N> BEFORE its <Video N> — so a standalone voice clip alongside it
+    becomes <Audio 2>, not <Audio 1>."""
+    source = _write_test_video(tmp_path / "spoken.mp4", seconds=3, fps=24, with_audio=True)
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "the reference performance drives her delivery",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source), "use_audio": True}],
+        "reference_audios": [{"audio_base64": _TINY_WAV}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert [k for k in node["inputs"] if k.startswith("ref_video_audios.")] == \
+        ["ref_video_audios.ref_video_audio_1"]
+    components = next(n for n in graph.values() if n["class_type"] == "GetVideoComponents")
+    component_id = next(k for k, v in graph.items() if v is components)
+    # frames from output 0, soundtrack from output 1 of the SAME components node.
+    assert node["inputs"]["ref_videos.ref_video_1"] == [component_id, 0]
+    assert node["inputs"]["ref_video_audios.ref_video_audio_1"] == [component_id, 1]
+    staged = tmp_path / "input" / next(
+        n for n in graph.values() if n["class_type"] == "LoadVideo")["inputs"]["file"]
+    assert _probe(staged, "a:0", "stream=index") != "", "use_audio must keep the soundtrack"
+
+
+def test_reference_video_alone_is_a_valid_reference(tmp_path):
+    """A motion reference with no picture is legitimate conditioning — only
+    AUDIO is barred from being the sole reference."""
+    source = _write_test_video(tmp_path / "solo.mp4", seconds=3, fps=24)
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "a dancer moving like the reference",
+        "reference_videos": [{"video_path": str(source)}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_1"]
+    assert [k for k in node["inputs"] if k.startswith("ref_images.")] == []
+    assert not [n for n in graph.values() if n["class_type"] == "LoadImage"]
+
+
+def test_reference_video_refuses_a_clip_shorter_than_the_model_card_allows(tmp_path):
+    source = _write_test_video(tmp_path / "blink.mp4", seconds=1, fps=24)
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "reference_videos": [{"video_path": str(source)}]},
+        expect_refusal=True)
+    assert "at least 2 seconds" in reply
+
+
+def test_reference_video_refuses_more_clips_than_it_has_slots(tmp_path):
+    source = _write_test_video(tmp_path / "many.mp4", seconds=3, fps=24)
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "reference_videos": [{"video_path": str(source)}] * 4},
+        expect_refusal=True)
+    assert "at most 3 reference videos" in reply or "Too big" in reply or "max" in reply
+
+
+def test_reference_audio_refuses_more_clips_than_it_has_slots(tmp_path):
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x",
+         "reference_images": [{"image_base64": _TINY_PNG}],
+         "reference_audios": [{"audio_base64": _TINY_WAV}] * 4},
+        expect_refusal=True)
+    assert "at most 3 reference audio clips" in reply or "Too big" in reply or "max" in reply
 
 
 def _tiny_video_data_url(tmp_path, *, with_audio=True, size="96x64", frames=30):

@@ -39,11 +39,16 @@ Verdicts from a full sweep of both codebases (2026-08-10; see ASSIMILATION_LOG.m
 > dialog, the **mask/inpaint feature end-to-end** (`build_krea2_turbo_inpaint_prompt` +
 > `run_comfy_krea2_inpaint` + "Edit area" brush dialog), and **angle variations + edit
 > sequences** ("Angles"/"Steps" viewer actions, client-orchestrated on the live Klein/Qwen
-> edit lanes — one real angle render verified end-to-end). Deferred with recorded reasons:
-> RIFE (per-lane node pinning + no Comfy path on the native MLX lane), chained-clip MP4 join
-> (clips are E2E-sealed before a join could run — needs client-side WebCodecs/ffmpeg.wasm or
-> a pre-seal hook; architecture decision), SAM3 smart-select (custom node install). Still
-> open: H3 reference-mode UI, outpaint position/scale controls.
+> edit lanes — one real angle render verified end-to-end). **RIFE and the chain join landed
+> later the same day**: proper RIFE (Practical-RIFE 4.25, Apple-MLX port vendored at
+> `packages/media-gateway/vendor/rife-mlx`) as a lane-agnostic post-process
+> (`POST /api/interpolate` + "Smooth 2×"), and the chained-episode join as a client-only
+> mediabunny packet-copy concat ("Join N shots" — clips never leave the device).
+> **Live E2E complete (same evening):** stack restarted at idle; all four routes proven on
+> real hardware (RIFE 2.24s · Strength Hunt 4/4 + sheet · outpaint 139s · inpaint 71s), plus
+> outpaint placement anchors (offset_x/y, live-proven) and the six H3 restyle presets landed.
+> Still deferred: SAM3 smart-select (custom node install). Still open: H3 reference-mode UI
+> for video/audio refs.
 
 ### Phase 2 — high-value, moderate effort (NEXT)
 - **Mask/inpaint UI + soft-inpaint graphs**: donor `lib/edit-mask.js` (pure, 168 lines) + `mask-boxes.js` (pure)

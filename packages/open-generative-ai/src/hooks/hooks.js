@@ -1,6 +1,7 @@
 // Shared React hooks bridging the immutable src/lib logic layer.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCivitaiDownloads, subscribeCivitaiDownloads } from '../lib/civitaiDownloadStore.js';
+import { getRentalLoras, refreshRentalLoras, subscribeRentalLoras } from '../lib/rentalLoras.js';
 import { peekResolvedMediaSrc, resolveMediaSrc } from '../lib/e2eMedia.js';
 import { ensureLibraryLoaded, isLibraryLoaded, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
 import { getLang, setLang, t, tf } from '../lib/i18n.js';
@@ -112,6 +113,21 @@ export function useCivitaiDownloads() {
   const [list, setList] = useState(getCivitaiDownloads);
   useEffect(() => subscribeCivitaiDownloads(setList), []);
   return list;
+}
+
+// The rental-LoRA registry (which installed LoRAs rented machines download at
+// provisioning). `active` gates the fetch: most sessions never open the panel
+// in dev mode or Rented source, and the registry lives behind the owner-gated
+// control API, so don't even ask until someone can act on the answer.
+export function useRentalLoras(active = true) {
+  const [registry, setRegistry] = useState(getRentalLoras);
+  useEffect(() => {
+    if (!active) return undefined;
+    const unsubscribe = subscribeRentalLoras(setRegistry);
+    void refreshRentalLoras();
+    return unsubscribe;
+  }, [active]);
+  return registry;
 }
 
 // An owner-sealed named library (LoRA groups, saved prompts). Reads the vault

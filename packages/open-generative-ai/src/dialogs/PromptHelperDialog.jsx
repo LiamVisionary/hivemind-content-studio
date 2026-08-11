@@ -24,6 +24,7 @@ import {
 } from '../lib/promptHelperRuntime.js';
 import { referenceToLocalImageInput } from '../lib/hivemindStudio.js';
 import { videoContactSheet } from '../lib/contactSheet.js';
+import { characterNoteLines, charactersMentionedIn } from '../lib/h3Characters.js';
 
 async function api(path, body) {
     const response = await fetch(path, {
@@ -40,6 +41,22 @@ async function api(path, body) {
 export function PromptHelperDialog({
     open, onClose, idea, targetModel, mediaType = 'video',
     hasFirstFrame = false, hasLastFrame = false, imageUrl = '', videoUrl = '',
+    // The armed scene-chaining clip, when this prompt is for a continuation.
+    // Without it the helper writes each shot as a fresh scene from the idea
+    // alone — and a chained prompt that stops describing the established
+    // subjects and style makes H3 cut to an unrelated take (measured on the
+    // rental, 2026-08-10). It is also the best thing a vision model can look
+    // at here: the shot this one has to match.
+    continuingFromUrl = '',
+    // How that shot was written. The rules say to keep the established scene;
+    // this is what says what it IS — without it, an idea like "he keeps
+    // talking" leaves the helper nothing to preserve.
+    continuingFromPrompt = '',
+    // UGC mode is armed in the composer. It layers onto whichever profile the
+    // target model picks — the model's trained format is unchanged by the clip
+    // being an ad, but the judgements inside it invert: speech stops being
+    // optional, and every production word becomes a tell.
+    ugc = false,
     durationSeconds = null, onUse,
 }) {
     const [snapshot, setSnapshot] = useState(null);
@@ -116,31 +133,50 @@ export function PromptHelperDialog({
             // The start frame is sealed at rest, so it is decrypted here and
             // sent as a data URL — it goes to a llama-server on this machine
             // and no further.
+            // A clip beats a still: it carries the motion, which is what a video
+            // prompt is actually about. An armed chain counts — the shot this
+            // one continues is the thing the new prompt has to keep matching.
+            const sourceClip = videoUrl || continuingFromUrl;
+            const sourceLabel = videoUrl ? 'source clip' : continuingFromUrl ? 'previous shot' : 'start frame';
             let image = '';
-            if (selectedModel.vision && (videoUrl || imageUrl)) {
-                setBusy(videoUrl ? 'Watching the source clip…' : 'Reading the start frame…');
+            if (selectedModel.vision && (sourceClip || imageUrl)) {
+                setBusy(sourceClip ? `Watching the ${sourceLabel}…` : 'Reading the start frame…');
                 try {
-                    // A source video beats a start frame: it carries the motion,
-                    // which is what a video prompt is actually about. The vision
-                    // projector only reads stills, so it gets a contact sheet.
-                    image = videoUrl
-                        ? (await videoContactSheet(videoUrl)) || ''
+                    // The vision projector only reads stills, so a clip goes in
+                    // as a contact sheet.
+                    image = sourceClip
+                        ? (await videoContactSheet(sourceClip)) || ''
                         : (await referenceToLocalImageInput(imageUrl)).image_base64 || '';
                 } catch { /* fall back to writing from the idea alone */ }
                 if (ticket !== requestRef.current) return;
             }
             setBusy(revise
                 ? 'Applying your changes…'
-                : image ? `Writing prompt from your ${videoUrl ? 'source clip' : 'start frame'}…` : 'Writing prompt…');
+                : image ? `Writing prompt from your ${sourceLabel}…` : 'Writing prompt…');
+            // H3 identifies characters through their source (name, casting,
+            // work, year). When the idea names ones the studio's catalog
+            // knows, ship the verified facts so the local model cannot
+            // misremember a casting. Matched against the draft too: a
+            // revision like "add Willow" should land enriched as well.
+            const characterNotes = /minimax|(^|[-_.])h3([-_.]|$)/i.test(targetModel || '')
+                ? characterNoteLines(charactersMentionedIn(`${idea}\n${revise ? `${result || ''}\n${revise}` : ''}`))
+                : [];
             const data = await api('/api/prompt-helper/generate', {
                 modelId: selectedModel.id,
                 idea,
                 targetModel: targetModel || '',
                 mediaType,
+                characterNotes: characterNotes.length ? characterNotes : undefined,
                 // MiniMax H3 treats a start frame as a different task, with its
                 // own opening anchor line, so the helper has to be told.
                 hasFirstFrame: Boolean(hasFirstFrame),
                 hasLastFrame: Boolean(hasLastFrame),
+                // Scene chaining: this prompt continues an existing shot, which
+                // changes what a good prompt IS — it has to re-describe the
+                // established scene and open on the carried-over framing.
+                isContinuation: Boolean(continuingFromUrl),
+                previousPrompt: (continuingFromUrl && continuingFromPrompt) || null,
+                ugc: Boolean(ugc),
                 durationSeconds: durationSeconds || null,
                 imageBase64: image || null,
                 currentPrompt: revise ? (result || idea || '') : null,

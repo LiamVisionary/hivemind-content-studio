@@ -529,3 +529,39 @@
 - Source: verify-assimilation-manifest
 - Decision: passed
 - Reason: ASSIMILATION.mix-studio.json: 22 concrete reuse entries, 15 substantive
+## 2026-08-11T00:19:05.938588+00:00 - implementation
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: public-search
+- Decision: adapted_code
+- Note: Liam directives: proper RIFE on the native MLX lane (no filters) + most-correct long-term client-side join. RIFE E2E-verified twice (CLI 24f@12->47f@24 w/ audio; unittest 8f->15f). Join verified in Node (ffprobe: 60 frames bit-copied) AND in-browser (3.0s joined MP4, audioJoined true). Fixes en route: AAC priming negative timestamps (per-track rebase), trailing padding collision (video-duration trim).
+## 2026-08-11T00:19:05.977418+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: Gates: gateway 186/186 (incl real-RIFE runner test), frontend 307/302+5 (incl real join tests), builds+parses OK everywhere, dist rebuilt w/ lazy joiner chunk. UI verified live: Smooth 2x + Join 2 shots buttons render on a chained result; in-page join engine returned {size:37218, seconds:3, audioJoined:true}. Restart-gated: /api/interpolate + bridge route + control_api allowlist go live at next idle zimage-stack restart.
+## 2026-08-11T00:19:34.249386+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: failed
+- Reason: ASSIMILATION.mix-studio.json: Entry 23 missing source_repo.
+## 2026-08-11T00:19:50.735329+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 24 concrete reuse entries, 17 substantive
+## 2026-08-11T00:48:35.369374+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: local-project
+- Decision: selected
+- Note: LIVE E2E, all four restart-gated routes on real hardware: RIFE interpolate success 2.24s (rife_*_2x.mp4 sealed); Strength Hunt success 4/4 variants + composed sheet, 5 sealed outputs (apple sequential path); outpaint success 139s WITH new left-anchor placement proven live (geometry left/right 0/640); inpaint success 71s. Stack restarted twice at verified-idle. Also landed+verified this pass: outpaint placement (offset_x/y through geometry->builder->route->bridge->ExpandDialog anchor chips, 5 unit tests + live run + browser check) and six H3 restyle presets ported verbatim from donor h3-prompt-guide.js STYLE_TRANSFER_PRESETS (idempotent Style menu on H3 models, 2 unit tests). Final gates: frontend 315/310+5, gateway suites all OK, dist rebuilt.
+## 2026-08-11T00:48:35.481266+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 26 concrete reuse entries, 19 substantive

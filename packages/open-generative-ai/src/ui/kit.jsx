@@ -249,8 +249,17 @@ export function Segmented({ options, value, onChange, size = 'md', className = '
 // Card-grid replacement for an aspect-ratio <select>: each option renders a
 // proportion-true shape preview plus its "W:H" label. `nameFor` optionally maps
 // a ratio to a friendly name shown above the label (kept a prop so the kit
-// stays i18n-free).
-export function AspectRatioPicker({ options, value, onChange, nameFor, disabled = false, className = '' }) {
+// stays i18n-free). `custom` ({ name, detail? }) appends a free-size tile that
+// reports onChange('custom') and reads as selected when value === 'custom'.
+function arTileClass(on) {
+  return cx(
+    'flex flex-col items-center gap-1 rounded-md border px-1 pb-1.5 pt-2 transition-colors duration-150',
+    on ? 'border-honey/70 bg-honey/10' : 'border-line1 bg-bg2 hover:border-line2',
+  );
+}
+
+export function AspectRatioPicker({ options, value, onChange, nameFor, custom = null, disabled = false, className = '' }) {
+  const customOn = value === 'custom';
   return (
     <div role="radiogroup" className={cx('grid grid-cols-3 gap-1.5', disabled && 'opacity-40', className)}>
       {options.map((ar) => {
@@ -269,10 +278,7 @@ export function AspectRatioPicker({ options, value, onChange, nameFor, disabled 
             aria-checked={on}
             disabled={disabled}
             onClick={() => onChange(ar)}
-            className={cx(
-              'flex flex-col items-center gap-1 rounded-md border px-1 pb-1.5 pt-2 transition-colors duration-150',
-              on ? 'border-honey/70 bg-honey/10' : 'border-line1 bg-bg2 hover:border-line2',
-            )}
+            className={arTileClass(on)}
           >
             <span className="flex h-[20px] items-center justify-center">
               <span
@@ -287,6 +293,29 @@ export function AspectRatioPicker({ options, value, onChange, nameFor, disabled 
           </button>
         );
       })}
+      {custom ? (
+        <button
+          type="button"
+          role="radio"
+          aria-checked={customOn}
+          disabled={disabled}
+          onClick={() => onChange('custom')}
+          className={arTileClass(customOn)}
+        >
+          <span className="flex h-[20px] items-center justify-center">
+            <span
+              className={cx(
+                'flex h-4 w-4 items-center justify-center rounded-[3px] border border-dashed text-[10px] leading-none',
+                customOn ? 'border-honey text-honey' : 'border-line2 text-ink3',
+              )}
+            >
+              ?
+            </span>
+          </span>
+          <span className={cx('text-[11px] font-medium leading-none', customOn ? 'text-ink1' : 'text-ink2')}>{custom.name}</span>
+          <span className={cx('font-mono text-[10px] leading-none', customOn ? 'text-ink2' : 'text-ink3')}>{custom.detail || 'W×H'}</span>
+        </button>
+      ) : null}
     </div>
   );
 }

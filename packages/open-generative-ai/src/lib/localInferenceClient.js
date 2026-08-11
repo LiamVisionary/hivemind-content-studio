@@ -201,6 +201,14 @@ class LocalInferenceClient {
         return window.localAI.interpolate(params);
     }
 
+    // Store a browser-joined chained episode as a real output — hosted bridge only.
+    async saveEpisode(params) {
+        if (!isLocalAIAvailable() || typeof window.localAI.saveEpisode !== 'function') {
+            throw new Error('Saving an episode is available through Unified Studio.');
+        }
+        return window.localAI.saveEpisode(params);
+    }
+
     async warmIdeogram4() {
         if (!isLocalAIAvailable()) throw new Error('Local AI only available in the desktop app.');
         return window.localAI.warmIdeogram4();

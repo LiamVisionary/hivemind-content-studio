@@ -28,12 +28,22 @@ import { loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggle
 import { createGenerationContextStore } from '../lib/generationContext.js';
 import { applyCameraMotionPrompt, cameraMotionPhrase, normalizeCameraMotions } from '../lib/cameraMotion.js';
 import { CameraMotionMenu } from './video/CameraMotionMenu.jsx';
+import { applyRestylePrompt } from '../lib/h3RestylePresets.js';
+import { RestyleMenu } from './video/RestyleMenu.jsx';
+import { CharacterMenu } from './video/CharacterMenu.jsx';
+import { applyCharacterToPrompt } from '../lib/h3Characters.js';
 import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 // joinClips itself is imported dynamically inside joinChainFrom — it carries
 // mediabunny, which should not weigh down the studio chunk until a join runs.
-import { collectChainClips } from '../lib/chainLineage.js';
+import { collectChainClips, missingChainParent } from '../lib/chainLineage.js';
+import { chainKey, chainTimelineModel } from '../lib/chainTimeline.js';
+import { ChainTimeline } from './video/ChainTimeline.jsx';
+import { armChainPrompt } from '../lib/chainPrompt.js';
+import { applyUgcVideoBrief, hasUgcVideoBrief, ugcVariantAt } from '../lib/ugcMode.js';
+import { UgcMenu } from './UgcMenu.jsx';
+import { restoredHistoryEntry } from '../lib/restoredOutput.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
 import { videoDownloadName } from '../lib/downloadNames.js';
 import {
@@ -73,6 +83,7 @@ import { StudioLayout } from '../ui/kit.jsx';
 
 import { UploadPicker } from './UploadPicker.jsx';
 import { FrameSlotsPicker } from './video/FrameSlotsPicker.jsx';
+import { ReferencesMenu } from './video/ReferencesMenu.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
 import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
@@ -237,6 +248,19 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     resumeRemaining: 0,
     deleteTarget: null,
     persistTimer: null,
+    // A History "Load in Studio" that arrived before the workflow catalog did,
+    // held until the catalog can resolve its model.
+    pendingRestore: null,
+    // Scene timeline: which chain is on screen, which shots the user dropped
+    // from the cut, and the built cut itself (an object URL — revoked when it
+    // is replaced, so a rebuild never leaks the old one).
+    chainAnchor: null,
+    chainExcluded: [],
+    chainCombined: null,
+    resolvingChain: false,
+    // Shot sets already stored as an output, so rebuilding the same episode
+    // does not file a second copy of it.
+    chainSavedKeys: [],
   };
 
   // A duplicate overlays the source tab's configuration on top of the defaults.
@@ -441,6 +465,53 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     bump();
   };
 
+  // H3 restyle preset — same idempotent phrase contract as camera motions:
+  // only the preset ID lives in setup, the phrase is derived, switching
+  // replaces the previous phrase in the prompt.
+  const applyRestyle = (id) => {
+    const next = applyRestylePrompt(s.setup.prompt, s.setup.restylePresetId, id);
+    s.setup = { ...s.setup, prompt: next.prompt, restylePresetId: next.id };
+    updateComposerDraft({ prompt: next.prompt });
+    bump();
+  };
+
+  // UGC mode — same idempotent-block contract as the phrases above, with one
+  // difference that matters: re-dealing the cast KEEPS the script already
+  // written into the block, because varying the person/room/light/beats while
+  // the words stay put is exactly how a batch is made. Passing null clears.
+  // Only the deal number lives in setup; the block is derived from it and the
+  // clip length, so nothing prompt-like reaches the plaintext settings store.
+  const applyUgc = (index) => {
+    const variant = Number.isInteger(index) ? ugcVariantAt(index) : null;
+    const prompt = applyUgcVideoBrief(s.setup.prompt, variant, {
+      durationSeconds: Number(s.setup.duration) || null,
+    });
+    // A UGC clip is a phone held in portrait. Switching here rather than
+    // leaving it to the user, and said out loud in the menu.
+    const vertical = aspectRatiosFor(s.setup, s.setup.modelId).includes('9:16');
+    s.setup = {
+      ...s.setup,
+      prompt,
+      // Kept when clearing, so turning UGC back on deals the NEXT cast instead
+      // of restarting the cycle at the one you just used.
+      ugcVariantIndex: variant ? variant.index : s.setup.ugcVariantIndex ?? null,
+      ar: variant && vertical ? '9:16' : s.setup.ar,
+    };
+    updateComposerDraft({ prompt });
+    persistVideoPreferences();
+    bump();
+    focusPrompt();
+  };
+
+  // H3 character quick-add — unlike camera/restyle phrases these are plain
+  // prompt text. The lib inserts the full source form (name, casting, series,
+  // year), enriching a bare name in place; re-picking is a no-op.
+  const addH3Character = (entry) => {
+    const next = applyCharacterToPrompt(s.setup.prompt, entry);
+    if (next !== s.setup.prompt) setPrompt(next);
+    focusPrompt();
+  };
+
   const setPing = (checked) => {
     s.pingWhenComplete = setCompletionPingEnabled(checked);
     bump();
@@ -496,6 +567,19 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   // the family's reference workflow and replaces the start/end frames.
   const onCharacterRefsChange = (urls) => {
     s.setup = { ...s.setup, referenceImageUrls: (Array.isArray(urls) ? urls : []).filter(Boolean) };
+    bump();
+  };
+
+  // Voice clips (<Audio N>) and motion clips (<Video N>) of the same Reference
+  // mode. Each entry keeps its filename for the row label, and a video keeps
+  // whether its own soundtrack rides along.
+  const onReferenceAudiosChange = (items) => {
+    s.setup = { ...s.setup, referenceAudios: (Array.isArray(items) ? items : []).filter((item) => item?.url) };
+    bump();
+  };
+
+  const onReferenceVideosChange = (items) => {
+    s.setup = { ...s.setup, referenceVideos: (Array.isArray(items) ? items : []).filter((item) => item?.url) };
     bump();
   };
 
@@ -866,10 +950,14 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
 
   /* ---------------- canvas / history ---------------- */
 
-  const showVideoInCanvas = (url, model, { fromGeneration = false } = {}) => {
+  const showVideoInCanvas = (url, model, { fromGeneration = false, anchorChain = true } = {}) => {
     s.contextStore.view(url);
     s.resultUrl = url;
     s.resultModel = model;
+    // Which chain the timeline is showing. Anchored to a SHOT, so previewing
+    // the joined cut (a blob URL that is in no history) does not collapse the
+    // timeline that produced it.
+    if (anchorChain) s.chainAnchor = url;
     if (fromGeneration) {
       s.progressDisplay = 1;
       s.progressReal = 1;
@@ -965,23 +1053,58 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   // browser (which holds the vault key) decrypts each shot and packet-copies
   // them into a single file: a lossless concat, no re-encode, audio included
   // when every shot carries it. The result downloads straight to disk.
-  const joinChainFrom = async (entry) => {
-    if (s.joiningChain) return;
-    const chain = collectChainClips(entry, s.generationHistory);
-    if (chain.length < 2) {
+  // Store a built cut as a first-class output: sealed into the same place
+  // every generated clip goes, so it shows up in History and survives the tab.
+  // The shots themselves never leave the device unencrypted — this uploads the
+  // JOINED file the same way Smooth 2x already uploads a clip.
+  const saveChainCut = async (blob, shots, key) => {
+    if (!isLocalAIAvailable() || s.chainSavedKeys.includes(key)) return;
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('Could not read the joined episode'));
+        reader.readAsDataURL(blob);
+      });
+      const saved = await localAI.saveEpisode({ video_base64: dataUrl, shots });
+      if (!saved?.url) return;
+      // Same shot set, already stored — a rebuild after dropping a shot is a
+      // different episode and does get its own output.
+      s.chainSavedKeys = [...s.chainSavedKeys, key];
+      addToHistory({
+        id: `episode-${Date.now()}`,
+        url: saved.url,
+        model: zh() ? '合成片' : 'Joined episode',
+        timestamp: new Date().toISOString(),
+      });
+      toast.success(zh() ? '合成片已保存到历史记录。' : 'Episode saved — it is in History now.');
+    } catch (error) {
+      // Not fatal: the cut is on screen and the export button still works.
+      toast.error(zh()
+        ? `合成片未能保存到历史记录：${error?.message || ''}`
+        : `Could not save the episode to History: ${error?.message || 'unknown error'}`);
+    }
+  };
+
+  // Builds the cut and PUTS IT ON SCREEN. It used to only download the file,
+  // which meant the one thing the whole feature exists to produce was the one
+  // thing you could not look at.
+  const buildChainCut = async (urls, key) => {
+    if (s.joiningChain) return null;
+    if (!Array.isArray(urls) || urls.length < 2) {
       toast.error(zh() ? '没有可拼接的接续镜头。' : 'No chained shots to join for this clip.');
-      return;
+      return null;
     }
     s.joiningChain = true;
     bump();
     const loadingId = toast.loading(zh()
-      ? `拼接 ${chain.length} 段镜头（无损，本机完成）…`
-      : `Joining ${chain.length} shots losslessly on this device…`);
+      ? `拼接 ${urls.length} 段镜头（无损，本机完成）…`
+      : `Joining ${urls.length} shots losslessly on this device…`);
     try {
       const { joinClips } = await import('../lib/clipJoiner.js');
       const blobs = [];
-      for (const clip of chain) {
-        const src = await resolveMediaSrc(clip.url);
+      for (const url of urls) {
+        const src = await resolveMediaSrc(url);
         blobs.push(await (await fetch(src)).blob());
       }
       const joined = await joinClips(blobs, {
@@ -989,21 +1112,109 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
           toast.loading(zh() ? `拼接第 ${index + 1}/${total} 段…` : `Joining shot ${index + 1} of ${total}…`, { id: loadingId });
         },
       });
-      const objectUrl = URL.createObjectURL(joined.blob);
-      try {
-        await downloadFile(objectUrl, videoDownloadName(`${entry.model || 'video'} joined`, entry.id));
-      } finally {
-        URL.revokeObjectURL(objectUrl);
-      }
+      // The previous cut's object URL is dead the moment a new one replaces it.
+      if (s.chainCombined?.url) URL.revokeObjectURL(s.chainCombined.url);
+      s.chainCombined = {
+        url: URL.createObjectURL(joined.blob),
+        seconds: joined.seconds,
+        audioJoined: joined.audioJoined,
+        key,
+      };
+      showVideoInCanvas(s.chainCombined.url, zh() ? '合成片' : 'Joined episode', { anchorChain: false });
       toast.success(zh()
-        ? `已拼接 ${chain.length} 段（${Math.round(joined.seconds)} 秒）并下载。`
-        : `Joined ${chain.length} shots (${Math.round(joined.seconds)}s)${joined.audioJoined ? '' : ' — video only, a shot had no audio'} and saved the file.`, { id: loadingId });
+        ? `已拼接 ${urls.length} 段（${Math.round(joined.seconds)} 秒）。`
+        : `Joined ${urls.length} shots (${Math.round(joined.seconds)}s)${joined.audioJoined ? '' : ' — video only, a shot had no audio'}.`, { id: loadingId });
+      // Keep it: an object URL dies with the tab, so the finished episode is
+      // stored as a real output — sealed like any other, and therefore in
+      // History and restorable later. Best-effort: the cut is already on
+      // screen and exportable if this fails.
+      void saveChainCut(joined.blob, urls.length, s.chainCombined.key);
+      return s.chainCombined;
     } catch (error) {
       toast.error(error?.message || 'Join failed', { id: loadingId });
+      return null;
     } finally {
       s.joiningChain = false;
       bump();
     }
+  };
+
+  // Pull a chain's earlier shots out of the durable History view.
+  //
+  // The strip is session-only, so after a reload an episode's earlier shots
+  // live only in History — the lineage still names them, by the URL they had
+  // when they were generated. Match those against History's rows, adopt what
+  // is found, and record the old URL as an alias so the walk reconnects.
+  const resolveChainAncestors = async (entry) => {
+    if (s.resolvingChain) return;
+    let missing = missingChainParent(entry, s.generationHistory);
+    if (!missing) return;
+    s.resolvingChain = true;
+    bump();
+    try {
+      const [hub, store] = await Promise.all([
+        import('../hub/hubData.js'),
+        import('../lib/generationSetupStore.js'),
+      ]);
+      await hub.ensureCanvasHistoryLoaded();
+      // Bounded: a corrupt link must not spin, and no real episode is 24 shots
+      // of chained H3 (that is over three minutes of generation).
+      for (let hop = 0; missing && hop < 24; hop += 1) {
+        const row = hub.findCanvasOutputForUrl(missing, store.basenameOf(missing));
+        if (!row) break;
+        const found = await store
+          .resolveGenerationSetup({ url: row.mediaUrl, basename: row.basename })
+          .catch(() => null);
+        const context = found?.context || null;
+        const restored = restoredHistoryEntry(
+          { url: row.mediaUrl, id: row.historyId, timestamp: row.createdAt, aliasUrls: [missing] },
+          context,
+          {
+            history: s.generationHistory,
+            modelId: context?.model || null,
+            aspectRatio: context?.aspectRatio || null,
+            duration: context?.duration || null,
+          },
+        );
+        if (context) s.contextStore.remember(row.mediaUrl, context);
+        if (restored) {
+          addToHistory(restored);
+        } else {
+          // Already in the strip under its history URL, just not linked to the
+          // URL the lineage names. Teach the existing entry that alias rather
+          // than adding the same clip twice.
+          const existing = s.generationHistory.find((item) => item.url === row.mediaUrl);
+          if (!existing) break;
+          existing.aliasUrls = [...new Set([...(existing.aliasUrls || []), missing])];
+        }
+        const next = missingChainParent(entry, s.generationHistory);
+        if (next === missing) break; // nothing moved — stop rather than spin
+        missing = next;
+      }
+    } catch { /* the timeline still shows the shots it has */ } finally {
+      s.resolvingChain = false;
+      bump();
+    }
+  };
+
+  const joinChainFrom = (entry) => {
+    const chain = collectChainClips(entry, s.generationHistory);
+    const urls = chain.map((clip) => clip.url).filter((url) => !s.chainExcluded.includes(url));
+    return buildChainCut(urls, chainKey(urls));
+  };
+
+  const exportChainCut = async () => {
+    const cut = s.chainCombined;
+    if (!cut?.url) return;
+    const anchor = s.generationHistory.find((entry) => entry.url === s.chainAnchor);
+    await downloadFile(cut.url, videoDownloadName(`${anchor?.model || 'video'} joined`, anchor?.id || 'episode'));
+  };
+
+  const toggleChainShot = (url) => {
+    s.chainExcluded = s.chainExcluded.includes(url)
+      ? s.chainExcluded.filter((value) => value !== url)
+      : [...s.chainExcluded, url];
+    bump();
   };
 
   /* ---------------- generation context capture / restore ---------------- */
@@ -1033,12 +1244,48 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       referenceImageUrls: Array.isArray(s.setup.referenceImageUrls)
         ? s.setup.referenceImageUrls.filter(Boolean)
         : [],
+      referenceAudios: Array.isArray(s.setup.referenceAudios)
+        ? s.setup.referenceAudios.filter((item) => item?.url).map((item) => ({ ...item }))
+        : [],
+      referenceVideos: Array.isArray(s.setup.referenceVideos)
+        ? s.setup.referenceVideos.filter((item) => item?.url).map((item) => ({ ...item }))
+        : [],
       videoUrl: s.setup.videoUrl,
       videoName: s.setup.videoName,
       motionContextUrl: s.setup.motionContextUrl || null,
       motionContextIndex: s.setup.motionContextIndex || null,
       sourceGenerationId: model?.requiresRequestId ? s.lastGenerationId : null,
     };
+  };
+
+  // Adopt an output that already exists (History's "Load in Studio") into this
+  // session. The studio's own strip never persists — prompts and output URLs
+  // would then sit in plaintext localStorage — so History is where a clip from
+  // a previous session lives, and this is how it becomes actionable again:
+  // back on the canvas, so Continue scene / Smooth / Compare / Download apply
+  // to it, and back in the strip so it survives navigating away from the result.
+  const adoptRestoredOutput = (output, context, model) => {
+    const url = String(output?.url || '').trim();
+    if (!url) return;
+    const entry = restoredHistoryEntry(output, context, {
+      history: s.generationHistory,
+      modelId: model,
+      aspectRatio: s.setup.ar,
+      duration: s.setup.duration,
+    });
+    // No generation context is passed to addToHistory: these settings are
+    // already sealed for this output (they are what we just restored), so
+    // re-sealing would only rewrite the same vault record.
+    if (entry) addToHistory(entry);
+    // Session-only recall, so "Back to setup" on the restored clip returns to
+    // the settings it was made with rather than whatever is in the composer.
+    if (context) s.contextStore.remember(url, context);
+    showVideoInCanvas(url, model);
+    // If this clip continues an episode whose earlier shots are not in this
+    // session, go and get them — otherwise the timeline shows half a story and
+    // the cut would silently be missing its opening.
+    const anchor = entry || s.generationHistory.find((item) => item.url === url);
+    if (anchor?.chainFromUrl) void resolveChainAncestors(anchor);
   };
 
   const restoreGenerationContext = (context) => {
@@ -1132,10 +1379,16 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       videoName: null,
       motionContextUrl: url,
       motionContextIndex: 1,
+      // The pinned frames carry motion, not the scene: a chained prompt that
+      // stops describing the established subjects/style renders as a hard cut
+      // into an unrelated take (live-verified on the rental). Keep the shot's
+      // description in the composer and append the visible continuity scaffold
+      // for the user to finish with the next beat.
+      prompt: armChainPrompt(next.prompt),
     });
-    s.resultUrl = null;
-    s.resultModel = null;
-    bump();
+    // Keep the armed clip on screen — it IS this shot's opening. Blanking the
+    // canvas here read as "my clip got erased" the moment Continue was pressed.
+    showVideoInCanvas(url, target.id);
     focusPrompt();
   };
   const clearMotionContext = () => {
@@ -1320,6 +1573,10 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
           const refTarget = referenceWorkflowForHivemindModel(setup.modelId);
           if (refTarget) localParams.workflow_id = refTarget.workflowId;
           localParams.referenceImages = (setup.referenceImageUrls || []).filter(Boolean);
+          // Voice clips (<Audio N>) and motion clips (<Video N>) ride the same
+          // reference workflow; each video carries its own soundtrack flag.
+          localParams.referenceAudios = (setup.referenceAudios || []).filter((item) => item?.url);
+          localParams.referenceVideos = (setup.referenceVideos || []).filter((item) => item?.url);
         }
         // LTX 2.3 first/middle/end keyframes only apply to image-driven runs.
         if (videoRequestPlan(setup).showFrameSlots) {
@@ -1545,6 +1802,22 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     // module-wide; apply every later update so the local lane recovers in place.
     const hivemindI2V = videoModels.map(adaptHivemindToVideoEntry);
     s.catalogs = buildCatalogs(hivemindI2V);
+    // A "Load in Studio" that arrived before this catalog did. It outranks the
+    // persisted preferences below — the user asked for THIS clip's setup, and
+    // letting the defaults win would quietly hand back the wrong settings.
+    if (s.pendingRestore) {
+      const pending = s.pendingRestore;
+      s.pendingRestore = null;
+      if (restoreGenerationContext(pending.context)) {
+        // The clip is already on the canvas; re-point it at the model that
+        // actually made it, now that the catalog can resolve it.
+        if (pending.output?.url) {
+          s.contextStore.remember(pending.output.url, pending.context);
+          showVideoInCanvas(pending.output.url, s.setup.modelId);
+        }
+        return;
+      }
+    }
     const restored = applyRestoredPreferences(s.setup, s.persistedVideoPreferences, s.catalogs);
     if (restored) {
       s.setup = restored;
@@ -1563,8 +1836,10 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     bump();
   };
 
-  const refreshHivemindWorkflows = async () => {
-    let context = await loadHivemindStudioContext();
+  const refreshHivemindWorkflows = async ({ force = false } = {}) => {
+    // `force` is the user pressing Refresh: the module-level context is cached,
+    // so without it a stale-but-non-empty catalog would answer from memory.
+    let context = await loadHivemindStudioContext({ refresh: force });
     // Owner unlock and backend startup can race the iframe's first request.
     if (!context.videoModels?.length) context = await loadHivemindStudioContext({ refresh: true });
     applyHivemindWorkflows(context);
@@ -1726,11 +2001,19 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     const onContextUpdated = (event) => {
       if (event.detail?.context) applyHivemindWorkflows(event.detail.context);
     };
+    // The catalog is fetched twice at mount and then never again, so a tab that
+    // asked while the stack was restarting keeps an EMPTY workflow list for the
+    // rest of its life — the model picker and every capability gated on it
+    // (Continue scene, Spectrum, refinement) silently vanish, and only a full
+    // page reload brings them back. Refresh now covers the studio too.
+    const onHubRefresh = () => { void refreshHivemindWorkflows({ force: true }); };
     window.addEventListener('hivemind-workflow-selected', onWorkflowSelected);
     window.addEventListener('hivemind-context-updated', onContextUpdated);
+    window.addEventListener('hivemind-hub-refresh', onHubRefresh);
     return () => {
       window.removeEventListener('hivemind-workflow-selected', onWorkflowSelected);
       window.removeEventListener('hivemind-context-updated', onContextUpdated);
+      window.removeEventListener('hivemind-hub-refresh', onHubRefresh);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1749,7 +2032,25 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       // Drag-to-restore hands the full captured context; apply it verbatim
       // (model, duration, resolution, aspect, keyframes, LoRAs, ingredients…).
       if (setup?.format === 'studio-full-context' && setup.context) {
-        restoreGenerationContext(setup.context);
+        const restored = restoreGenerationContext(setup.context);
+        // The workflow catalog loads over the network, and "Load in Studio"
+        // navigates here the moment it has the settings — so the payload can
+        // arrive BEFORE the catalog does. applyGenerationContext resolves the
+        // model out of that catalog, so it just fails, and the settings were
+        // silently dropped while the toast said they had been restored. Keep
+        // the payload and re-apply it when the catalog lands.
+        if (!restored && !s.catalogs.hivemindI2V.length) s.pendingRestore = setup;
+        // "Load in Studio" also hands over the clip itself (drag-to-restore
+        // does not — the dragged output is already on screen). If the settings
+        // could not be applied, still show the clip, but under the model it was
+        // actually made with rather than whatever the composer happens to hold.
+        if (setup.output?.url) {
+          adoptRestoredOutput(
+            setup.output,
+            restored ? setup.context : null,
+            restored ? s.setup.modelId : (setup.context.model || null),
+          );
+        }
         focusPrompt();
         return;
       }
@@ -1762,6 +2063,9 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         return;
       }
       setPrompt(setup?.primaryPrompt || '');
+      // Canvas-bridge restores carry no captured context, but the clip is still
+      // worth putting back on the canvas.
+      if (setup?.output?.url) adoptRestoredOutput(setup.output, null, s.setup.modelId);
       focusPrompt();
     });
     return () => { offInsert(); offSet(); };
@@ -1898,6 +2202,9 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     mountedRef.current = false;
     if (s.generationTimer) { clearInterval(s.generationTimer); s.generationTimer = null; }
     releaseIngredientSheetPreview();
+    // The joined cut lives only as an object URL; a closed tab that never
+    // revoked it holds the whole episode in memory for the page's lifetime.
+    if (s.chainCombined?.url) { URL.revokeObjectURL(s.chainCombined.url); s.chainCombined = null; }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2454,6 +2761,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             status={s.videoLoraCatalogStatus}
             message={s.videoLoraCatalogMessage}
             loras={s.availableVideoLoras}
+            rentedOnly={Boolean(s.setup.rentedOnly)}
             selection={currentVideoLoraSelection()}
             getSelection={currentVideoLoraSelection}
             onToggleLora={(lora) => setCurrentVideoLoraSelection(toggleLoraSelection(currentVideoLoraSelection(), lora))}
@@ -2517,7 +2825,12 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
           ) : chainArmed ? (
             // Scene chaining replaces the start frame: the armed clip's tail IS
             // the opening of this shot, so the picker gives way to the chain chip.
-            <div className="flex items-center gap-1.5 rounded-md border border-honey/40 bg-honey-tint px-2 py-1">
+            <div
+              className="flex items-center gap-1.5 rounded-md border border-honey/40 bg-honey-tint px-2 py-1"
+              title={zh()
+                ? '接续的画面会延续上一段的运动与环境音，但场景要靠提示词维持：保留原有的风格与主体描述，先按上一段的收尾构图停一拍，再写接下来发生什么。'
+                : "The pinned frames carry motion and room tone — the SCENE carries through the prompt. Keep the shot's style and subject words, hold the previous closing framing for a beat, then describe what happens next."}
+            >
               <Icon name="film" size={13} className="text-honey" />
               <span className="text-xs font-medium text-honey">
                 {zh() ? `接续第 ${chainShot} 段` : `Continuing shot ${chainShot}`}
@@ -2571,15 +2884,26 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
           )}
 
           {referenceEntry ? (
-            <UploadPicker
-              values={Array.isArray(s.setup.referenceImageUrls) ? s.setup.referenceImageUrls : []}
-              onChange={onCharacterRefsChange}
+            // One control for all three reference kinds. The slot counts come
+            // from the workflow entry rather than being restated here, so the
+            // panel can never offer a slot the graph has not wired.
+            <ReferencesMenu
+              images={Array.isArray(s.setup.referenceImageUrls) ? s.setup.referenceImageUrls : []}
+              audios={Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : []}
+              videos={Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : []}
+              prompt={s.setup.prompt}
+              limits={{
+                images: referenceEntry.referenceSlots?.images || 9,
+                audios: referenceEntry.referenceSlots?.audios || 3,
+                videos: referenceEntry.referenceSlots?.videos || 3,
+              }}
+              onChange={{
+                images: onCharacterRefsChange,
+                audios: onReferenceAudiosChange,
+                videos: onReferenceVideosChange,
+              }}
               uploadFn={uploadFnForFrame}
               requireApiKey={frameRequiresApiKey}
-              maxImages={9}
-              accept="image/*"
-              compact
-              label={zh() ? '角色参考（最多 9 张）' : 'Character reference (up to 9)'}
             />
           ) : null}
 
@@ -2613,6 +2937,23 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             selectedIds={s.setup.cameraMotionIds || []}
             onApply={applyCameraMotions}
           />
+
+          <UgcMenu
+            mode="video"
+            active={hasUgcVideoBrief(s.setup.prompt)}
+            variantIndex={Number.isInteger(s.setup.ugcVariantIndex) ? s.setup.ugcVariantIndex : null}
+            durationSeconds={Number(s.setup.duration) || null}
+            verticalAvailable={aspectRatiosFor(s.setup, s.setup.modelId).includes('9:16')}
+            onArm={applyUgc}
+          />
+
+          {/* Restyle presets + character quick-add are tuned for the MiniMax H3 family. */}
+          {/minimax-h3/.test(s.setup.modelId || '') ? (
+            <>
+              <RestyleMenu activeId={s.setup.restylePresetId || null} onApply={applyRestyle} />
+              <CharacterMenu prompt={s.setup.prompt} onPick={addH3Character} />
+            </>
+          ) : null}
 
           <IconButton
             icon="sparkles"
@@ -2773,6 +3114,40 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             </div>
           ) : null}
 
+          {/* The episode, above its shots: chaining produces one clip per shot,
+              so without this the finished cut was only ever a downloaded file. */}
+          {(() => {
+            const anchor = s.generationHistory.find((entry) => entry.url === s.chainAnchor);
+            const timeline = anchor
+              ? chainTimelineModel(anchor, s.generationHistory, {
+                excludedUrls: s.chainExcluded,
+                combined: s.chainCombined,
+                // Armed chain → the episode starts existing now, not once the
+                // second clip has rendered.
+                armedFromUrl: chainArmed ? (s.setup.motionContextUrl || '') : '',
+              })
+              : null;
+            if (!timeline) return null;
+            return (
+              <ChainTimeline
+                model={timeline}
+                activeUrl={s.resultUrl}
+                zh={zh()}
+                building={s.joiningChain}
+                // Previewing from the timeline never re-anchors it: the anchor
+                // is the episode's LAST shot, and clicking shot 1 (which has no
+                // ancestors) would otherwise collapse the timeline you are
+                // browsing. Only a generation or a pick from the strip below
+                // moves it.
+                onSelect={(url, model) => showVideoInCanvas(url, model, { anchorChain: false })}
+                onToggleExcluded={toggleChainShot}
+                onExport={(shot) => downloadFile(shot.url, videoDownloadName(shot.model, shot.id))}
+                onBuild={() => void buildChainCut(timeline.includedUrls, timeline.key)}
+                onExportCombined={() => void exportChainCut()}
+              />
+            );
+          })()}
+
           {hasHistory ? (
             <>
               <div className="flex items-center justify-between gap-2">
@@ -2903,7 +3278,15 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         hasLastFrame={Boolean(s.setup.endImageUrl || s.setup.ltxEndUrl)}
         imageUrl={s.setup.imageUrl || ''}
         videoUrl={s.setup.videoUrl || ''}
+        continuingFromUrl={chainArmed ? (s.setup.motionContextUrl || '') : ''}
+        continuingFromPrompt={chainArmed
+          ? (s.contextStore.recall(s.setup.motionContextUrl)?.prompt || '')
+          : ''}
         durationSeconds={Number(s.setup.duration) || null}
+        // UGC inverts several of the per-model defaults — speech becomes
+        // required rather than optional, polish becomes the failure mode — so
+        // the helper has to be told, the same way it is told about a chain.
+        ugc={hasUgcVideoBrief(s.setup.prompt)}
         onUse={(prompt) => { setPrompt(prompt); focusPrompt(); }}
       />
 
