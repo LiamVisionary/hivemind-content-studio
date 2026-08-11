@@ -1269,7 +1269,8 @@
       ],
       "prompt_contract": {
         "guidance": "Reference mode uses MiniMax's full-reference rewrite format (ref_en): six sections in order \u2014 subject_definitions (label every reference as <Subject N> / <Picture N> / <Video N>), summary, retention_analysis (fully_preserved | partially_preserved | attribute_transfer | weak_reference per label), detailed_description (shots, <d>[English] \u2026</d> speech, (S1) ids), overall_soundscape, non_diegetic_music. Reference pictures are supplied in order, so <Picture 1> is the first image sent. Reference videos are labeled <Video N> in their own supplied order. A reference video is a MOTION reference: retention_analysis decides how literally it binds \u2014 fully_preserved reproduces the movement itself, partially_preserved keeps its broad shape, attribute_transfer performs a DIFFERENT action in that performer's manner (gesticulation style, posture, mannerisms, facial expressiveness), weak_reference is a loose pacing or rhythm cue. Say which subject inherits it ('<Subject 1> (S1) moves with the gesture style of <Video 1>.'). Reference audio clips are labeled <Audio N>, numbered independently of pictures and videos \u2014 but a reference video's OWN soundtrack also takes an <Audio N> label, emitted before its <Video N>, so a video-with-sound plus one standalone voice clip numbers as <Audio 1> (the video's track), <Video 1>, then <Audio 2> (the voice clip). Define each in subject_definitions ('<Audio 1> is the voice-timbre reference for <Subject 1> (S1).'), tag the summary [audio reuse] when the source words are reperformed verbatim (keep them, original language, inside <d>\u2026</d>) or [audio reference] when only timbre/rhythm/emotion carries (then the source's own words must NOT appear), and mark each <Audio N> in retention_analysis with fully_copy | partially_copy | reference | weak_reference."
-      }
+      },
+      "routing_only": true
     },
     {
       "id": "minimax-h3",

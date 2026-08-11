@@ -72,6 +72,8 @@ test('video workflow discovery recovers after an owner-session startup race', as
             // No reference slots wired on this workflow — the References panel
             // reads this to size itself, and null means "no reference lane".
             referenceSlots: null,
+            // Not a routing target — it is a tier the user picks directly.
+            routingOnly: false,
             ingredientInputs: { max_images: 12, layout: 'adaptive-pack' },
             id: 'hivemind-media:ltx23-ic-ingredients-lora',
             workflowId: 'ltx23-ic-ingredients-lora',
@@ -104,6 +106,93 @@ test('video workflow discovery recovers after an owner-session startup race', as
         assert.equal(catalogRequests, 3);
         assert.equal(retained.videoModels[0].workflowId, 'ltx23-ic-ingredients-lora');
         assert.equal(studio.getHivemindVideoModelById(retained.videoModels[0].id)?.workflowId, 'ltx23-ic-ingredients-lora');
+    } finally {
+        global.window = originalWindow;
+        global.fetch = originalFetch;
+        global.localStorage = originalLocalStorage;
+        global.sessionStorage = originalSessionStorage;
+    }
+});
+
+// Reference mode is reached by attaching references to the normal tier, never
+// by picking it. Landing ON it strands the user: its graph has no frame inputs
+// (the Frames control vanishes) and it refuses to run without a reference — a
+// real reload came back stuck exactly that way.
+test('a routing-only workflow stays resolvable but maps back to its real tier', async () => {
+    const originalWindow = global.window;
+    const originalFetch = global.fetch;
+    const originalLocalStorage = global.localStorage;
+    const originalSessionStorage = global.sessionStorage;
+    const eventTarget = new EventTarget();
+    eventTarget.location = { search: '?hivemindStudio=1', origin: 'https://studio.test' };
+    eventTarget.parent = { postMessage() {} };
+    global.window = eventTarget;
+    global.localStorage = { getItem: () => null, removeItem() {}, setItem() {} };
+    global.sessionStorage = { getItem: () => null, removeItem() {}, setItem() {} };
+
+    global.fetch = async (url) => {
+        if (String(url).startsWith('/api/simple/prompts')) return response(true, { prompts: [] });
+        return response(true, {
+            ok: true,
+            media: {
+                video: [{
+                    id: 'media-studio-mcp',
+                    label: 'Media Studio',
+                    available: true,
+                    detail: 'ready',
+                    models: [
+                        {
+                            id: 'minimax-h3',
+                            label: 'MiniMax H3',
+                            family: 'minimax',
+                            // The real tier does NOT accept references itself —
+                            // that is exactly why attaching one has to route.
+                            accepts: ['prompt', 'end_image_base64'],
+                            compatible_base_models: ['MiniMax H3'],
+                        },
+                        {
+                            id: 'minimax-h3-turbo',
+                            label: 'MiniMax H3 Turbo',
+                            family: 'minimax',
+                            beta: true,
+                            accepts: ['prompt', 'end_image_base64'],
+                            compatible_base_models: ['MiniMax H3'],
+                        },
+                        {
+                            id: 'minimax-h3-reference',
+                            label: 'MiniMax H3 Reference',
+                            family: 'minimax',
+                            beta: true,
+                            routing_only: true,
+                            accepts: ['prompt', 'reference_images', 'reference_videos', 'reference_audios'],
+                            compatible_base_models: ['MiniMax H3'],
+                            reference_slots: { images: 9, videos: 3, audios: 3 },
+                        },
+                    ],
+                }],
+            },
+        });
+    };
+
+    try {
+        const moduleUrl = `${pathToFileURL(path.join(__dirname, '../src/lib/hivemindStudio.js')).href}?test=${Date.now()}`;
+        const studio = await import(moduleUrl);
+        await studio.loadHivemindStudioContext({ refresh: true });
+
+        const referenceId = 'hivemind-media:minimax-h3-reference';
+        const baseId = 'hivemind-media:minimax-h3';
+        const turboId = 'hivemind-media:minimax-h3-turbo';
+
+        // Still discoverable — reference routing resolves against this list.
+        assert.equal(studio.getHivemindVideoModelById(referenceId)?.routingOnly, true);
+        assert.equal(studio.referenceWorkflowForHivemindModel(baseId)?.id, referenceId);
+        assert.equal(studio.getHivemindVideoModelById(referenceId)?.referenceSlots?.videos, 3);
+
+        // …but never a tier you sit on. It maps back to the plain H3 rather
+        // than the beta turbo, and ordinary ids are returned untouched.
+        assert.equal(studio.selectableHivemindModelId(referenceId), baseId);
+        assert.equal(studio.selectableHivemindModelId(baseId), baseId);
+        assert.equal(studio.selectableHivemindModelId(turboId), turboId);
     } finally {
         global.window = originalWindow;
         global.fetch = originalFetch;

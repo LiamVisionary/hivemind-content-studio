@@ -2001,3 +2001,20 @@ def test_minimax_h3_motion_context_is_declared_on_every_h3_tier():
             assert field in workflow["accepts"], f"{workflow_id} must accept {field}"
         # video_* stays LTX-only: it flips extend/head-swap behavior stack-wide.
         assert not any(str(f).startswith("video_") for f in workflow["accepts"])
+
+
+def test_reference_mode_is_a_routing_target_not_a_tier(tmp_path):
+    """There is ONE MiniMax H3 with levers, not a separate Reference model.
+    Reference mode is where a run is ROUTED when references are attached, so
+    offering it in the picker only strands the user: its graph has no frame
+    inputs, so the Frames control vanishes, and it refuses to run at all
+    without a reference. A real session reloaded stuck exactly that way."""
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    workflows = {item["id"]: item for item in _resolved_registry_workflows(registry)}
+
+    assert workflows["minimax-h3-reference"]["routing_only"] is True
+    # The tier the user actually picks stays selectable, and does NOT take
+    # references itself — that is what makes the routing necessary.
+    assert not workflows["minimax-h3"].get("routing_only")
+    assert not workflows["minimax-h3-turbo"].get("routing_only")
+    assert "reference_images" not in workflows["minimax-h3"]["accepts"]

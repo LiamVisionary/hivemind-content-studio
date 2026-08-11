@@ -62,6 +62,7 @@ import {
   pollHivemindVideoJob,
   previewHivemindIngredientSheet,
   referenceWorkflowForHivemindModel,
+  selectableHivemindModelId,
   saveStudioGenerationHistory,
   uploadFileToHivemindStudio,
   workflowIdFromHivemindModelId,
@@ -1800,8 +1801,25 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     s.hivemindWorkflowSignature = signature;
     // Catalogs fetched before owner-unlock come back empty and are memoized
     // module-wide; apply every later update so the local lane recovers in place.
-    const hivemindI2V = videoModels.map(adaptHivemindToVideoEntry);
+    // Routing-only workflows are dropped here and ONLY here: reference mode is
+    // reached by attaching references to the normal tier, so listing it as its
+    // own model just strands the user on a graph with no frame inputs that
+    // cannot run without a reference. It stays in the lib's list, which is what
+    // reference routing resolves against.
+    const hivemindI2V = videoModels.filter((m) => !m.routingOnly).map(adaptHivemindToVideoEntry);
     s.catalogs = buildCatalogs(hivemindI2V);
+    // Anything still pointing at a routing-only id — a preference persisted
+    // before it was hidden, or a "Load in Studio" of a past reference run —
+    // is rewritten to the family's real tier. This has to happen BEFORE the
+    // restore below reads it: an id the catalog cannot resolve makes the
+    // restore give up entirely and fall back to the generic default, which is
+    // how a MiniMax H3 session came back as LTX.
+    if (s.persistedVideoPreferences?.modelId) {
+      const selectableId = selectableHivemindModelId(s.persistedVideoPreferences.modelId);
+      if (selectableId !== s.persistedVideoPreferences.modelId) {
+        s.persistedVideoPreferences = { ...s.persistedVideoPreferences, modelId: selectableId };
+      }
+    }
     // A "Load in Studio" that arrived before this catalog did. It outranks the
     // persisted preferences below — the user asked for THIS clip's setup, and
     // letting the defaults win would quietly hand back the wrong settings.

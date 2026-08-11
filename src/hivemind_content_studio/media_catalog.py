@@ -46,6 +46,10 @@ class MediaModel:
     # Experimental workflows (preview weights, unfinished training runs) get a
     # beta badge in the pickers instead of a separate catalog section.
     beta: bool = False
+    # Reached by routing, never picked by hand: the studio routes a run here
+    # when references are attached to the family's normal tier, so offering it
+    # as its own tier only strands the user on a graph with no frame inputs.
+    routing_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,6 +198,7 @@ def _media_studio_video_models(status: dict | None = None) -> tuple[MediaModel, 
             default_duration_seconds=float(defaults["duration_seconds"]) if defaults.get("duration_seconds") is not None else None,
             default_steps=float(defaults["steps"]) if defaults.get("steps") is not None else None,
             beta=bool(workflow.get("beta")),
+            routing_only=bool(workflow.get("routing_only")),
         )
     return tuple(models.values())
 

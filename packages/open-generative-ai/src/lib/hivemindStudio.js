@@ -94,6 +94,22 @@ export function getHivemindVideoModelById(id) {
 // family that accepts reference_images (minimax-h3-reference for the H3 tiers).
 // A model that itself takes references is its own sibling. Null when the family
 // has no reference lane — the composer hides the character-reference control.
+// A routing-only workflow is never a tier the user picks — the studio sends a
+// run there when references are attached to the family's normal tier. Landing
+// ON one strands you: its graph has no frame inputs, so the Frames control
+// vanishes, and it refuses to run at all without a reference. Anything holding
+// such an id (a restored preference, a "Load in Studio" of a past reference
+// run) is mapped back to the family's real tier.
+export function selectableHivemindModelId(id) {
+    const model = getHivemindVideoModelById(id);
+    if (!model?.routingOnly) return id;
+    const family = String(model.workflowFamily || '').toLowerCase();
+    const siblings = hiveVideoModels.filter((entry) => !entry.routingOnly
+        && String(entry.workflowFamily || '').toLowerCase() === family);
+    // The plain tier over the experimental ones — turbo is a preview distill.
+    return (siblings.find((entry) => !entry.beta) || siblings[0])?.id || id;
+}
+
 export function referenceWorkflowForHivemindModel(id) {
     const model = getHivemindVideoModelById(id);
     if (!model) return null;
@@ -130,6 +146,9 @@ export function mapHivemindWorkflowModels(catalog) {
                 // (up to 9, order-preserving) instead of a start frame. Distinct
                 // from ingredient_images, which LTX stitches into one sheet.
                 supportsReferenceImages: accepts.includes('reference_images'),
+                // Kept in this list so reference routing can still resolve it,
+                // but filtered out of the picker by the studio.
+                routingOnly: Boolean(workflow.routing_only),
                 // How many of each kind the graph actually wired, read off the
                 // registry so the References panel can never offer a slot that
                 // does not exist. Absent on workflows without reference slots.

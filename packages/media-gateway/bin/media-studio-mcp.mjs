@@ -436,6 +436,9 @@ function publicWorkflow(workflow) {
       : {}),
     defaults: publicWorkflowDefaults(workflow.id),
     ...(workflow.beta ? { beta: true } : {}),
+    // Reached by routing, never picked by hand: the studio sends a run here
+    // when references are attached to the family's normal tier.
+    ...(workflow.routing_only ? { routing_only: true } : {}),
     ...(workflow.prompt_helper ? { prompt_helper: workflow.prompt_helper } : {}),
     ...(workflow.prompt_contract ? { prompt_contract: workflow.prompt_contract } : {}),
     ...(workflow.ingredient_inputs ? { ingredient_inputs: workflow.ingredient_inputs } : {}),
