@@ -6,7 +6,10 @@ import {
     canSelect,
     externalHold,
     formatBytes,
+    lastUsedModelId,
     modelStatus,
+    preferredModelId,
+    rememberModelId,
     sortModels,
 } from '../src/lib/promptHelperRuntime.js';
 
@@ -75,14 +78,37 @@ test('a model is preselected when nothing is loaded', () => {
         { id: 'huge.gguf', name: 'Huge', fit: 'insufficient', estimatedLoadBytes: 9e10 },
         { id: 'scout.gguf', name: 'Swarm Scout 12B', fit: 'fits', estimatedLoadBytes: 1e10 },
     ];
-    const pick = (data) => {
-        const live = data.loaded?.[0]?.modelId;
-        if (live) return live;
-        return sortModels(data.models).find((m) => canSelect(m, { unloadOthers: true }))?.id || '';
-    };
-    assert.equal(pick({ models, loaded: [] }), 'scout.gguf');
-    // A model already in RAM still wins — it costs nothing to use.
-    assert.equal(pick({ models, loaded: [{ modelId: 'huge.gguf' }] }), 'huge.gguf');
+    assert.equal(preferredModelId(models), 'scout.gguf');
+    // A model already in RAM wins over the top row — it costs nothing to use.
+    const withLive = [...models, { id: 'live.gguf', name: 'Live', fit: 'loaded', estimatedLoadBytes: 2e10 }];
+    assert.equal(preferredModelId(withLive, { loadedId: 'live.gguf' }), 'live.gguf');
     // Nothing usable at all stays empty rather than selecting the unusable.
-    assert.equal(pick({ models: [models[0]], loaded: [] }), '');
+    assert.equal(preferredModelId([models[0]]), '');
+});
+
+test('the last used model wins the preselection', () => {
+    const models = [
+        { id: 'big.gguf', name: 'Big', fit: 'fits', sizeBytes: 5e10, estimatedLoadBytes: 5e10 },
+        { id: 'scout.gguf', name: 'Scout', fit: 'fits', sizeBytes: 1e10, estimatedLoadBytes: 1e10 },
+        { id: 'huge.gguf', name: 'Huge', fit: 'insufficient', estimatedLoadBytes: 9e10 },
+    ];
+    // Over the sort order — the picker is largest-first, which is why a fresh
+    // page kept re-offering a model the owner had already passed over.
+    assert.equal(preferredModelId(models, { lastUsedId: 'scout.gguf' }), 'scout.gguf');
+    // And over whatever happens to be in RAM: the owner chose this one.
+    assert.equal(
+        preferredModelId(models, { lastUsedId: 'scout.gguf', loadedId: 'big.gguf' }),
+        'scout.gguf',
+    );
+    // A remembered model that is gone from disk, or too big to load now, gives
+    // way rather than leaving the dialog pointed at something unusable.
+    assert.equal(preferredModelId(models, { lastUsedId: 'deleted.gguf', loadedId: 'big.gguf' }), 'big.gguf');
+    assert.equal(preferredModelId(models, { lastUsedId: 'huge.gguf' }), 'big.gguf');
+});
+
+test('the remembered id survives a browser with no localStorage', () => {
+    // node:test has no localStorage; the helpers must degrade to "nothing
+    // remembered" instead of throwing on the way into the picker.
+    assert.equal(lastUsedModelId(), '');
+    assert.doesNotThrow(() => rememberModelId('scout.gguf'));
 });

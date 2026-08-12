@@ -156,15 +156,27 @@ Verdicts from a full sweep of both codebases (2026-08-10; see ASSIMILATION_LOG.m
   sealed to the owner vault as expected. QA copies were taken through ComfyUI's temp dir (the sweeper
   ignores it, same trick as smart-select) because the server cannot read its own sealed output.
   **The audio track decodes to digital silence** (peak 1/32767, -91 dB, correct 48 kHz stereo 3.05 s
-  shape). Bisected by decoding the audio latent after EACH pass: silent after the base pass too, so it is
-  never denoised rather than lost in the refine pass. Ruled out: our wiring (faithful to the donor,
-  node-for-node), `LTXVConcatAVLatent` mask semantics (an unmasked audio latent is filled with
-  `ones_like` = generate), `prepare_noise` (it unbinds nested AV latents and noises each part), and the
-  checkpoint (it carries `audio_vae` + `vocoder` tensors). Remaining suspects are model/platform level:
-  fp8 audio branch on MPS, the distilled LoRA at 0.5, or a text-encoder variant mismatch. Same failure
-  CLASS as the eros lane's silent clips (fixed 2026-08-10), different cause — worth checking that lane's
-  fix first when this is picked up.
-  **Remaining:** the multi-track timeline UI, and the audio investigation above.
+  shape). **NOT our port — reproduced with the stock reference graph.** Five configurations were measured
+  and every one produced a BYTE-IDENTICAL 27,415-byte silent FLAC:
+    1. Director graph, audio decoded after the base pass
+    2. Director graph, after the refine pass
+    3. the eros AV reference structure (`workflows/ltx23-eros-v14.api.json`) rebuilt on this checkpoint,
+       no Director nodes at all, distilled LoRA 0.5, 8 steps
+    4. same, WITHOUT the distilled LoRA
+    5. same, LoRA 0.5, 20 steps
+  Identical output across graph structure, LoRA presence, step count and prompt means the audio half of
+  the nested latent is never modified by sampling — the decoder always sees zeros.
+  Ruled out: our wiring (node-for-node faithful to the donor); `LTXVConcatAVLatent` mask semantics (an
+  unmasked audio latent is filled `ones_like` = generate); `comfy.sample.prepare_noise` (it unbinds nested
+  AV latents and noises each part); `LTXVSeparateAVLatent` (unbinds and takes index 1 correctly);
+  the checkpoint (4,728 audio tensors in the transformer, incl. `scale_shift_table_a2v_ca_audio`, plus
+  `audio_vae` + `vocoder`); the audio VAE (loads and decodes with no missing-key warnings);
+  `LTXAVModel.forward` (accepts the combined AV tensor and derives `a_timestep`).
+  Leading remaining hypothesis: the audio timestep / nested-latent sampling path under this ComfyUI +
+  MPS build. `LTX2AudioLatentNormalizingSampling` was checked and is a quality patch, not a prerequisite.
+  **Decisive next test:** run control graph #3 unchanged on a rented CUDA box — the donor validated this
+  exact configuration on NVIDIA, so that separates "this machine/MPS" from "model/config" outright.
+  **Remaining:** the multi-track timeline UI, and the audio question above.
 
 ### Phase 4 — library/ops, needs privacy-aware redesign (their design assumes plaintext server storage)
 - Library search / folders / user groups / trash-with-recovery / ZIP export: rebuild client-side over

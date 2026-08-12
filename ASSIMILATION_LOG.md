@@ -630,3 +630,19 @@
 - Note: Ruled out as causes: our wiring (node-for-node faithful to the donor), LTXVConcatAVLatent mask semantics (unmasked audio gets ones_like = generate), comfy.sample.prepare_noise (it unbinds nested AV latents and noises each), and the checkpoint (carries audio_vae + vocoder). Remaining suspects are model/platform level: fp8 audio branch on MPS, distilled LoRA at 0.5, or text-encoder variant.
 - Note: DOWNLOADER BUG worth remembering: parallel range-chunk fetch reassembled with 'cat part.*' — the shell globs lexicographically, so with 12 parts part.10/part.11 landed before part.2 and both files were byte-scrambled. Size and safetensors data_offsets still matched exactly, so the cheap integrity check passed; it only surfaced as a sentencepiece parse failure loading the tokenizer. Recovered WITHOUT re-downloading by inverting the known permutation, then verified against HuggingFace's published sha256.
 - Note: MLX weights are not substitutable for the ComfyUI ones: the MLX transformer is MLX block-quantised (1632 U32 tensors with .scales/.biases), diffusers-keyed, transformer-only.
+## 2026-08-12T00:08:44.027484+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio
+- Query: `LTX Director silent audio root cause`
+- Decision: passed
+- Reason: The silent audio is NOT in our port. It reproduces with the stock reference AV graph structure and no Director nodes at all.
+- Verification: Five configurations measured, every one a BYTE-IDENTICAL 27415-byte silent FLAC (peak 1/32767): Director base pass; Director refine pass; eros AV reference structure rebuilt on this checkpoint with no Director nodes, distilled LoRA 0.5, 8 steps; the same without the LoRA; the same at 20 steps. Invariance across graph structure, LoRA, step count and prompt means the audio half of the nested latent is never modified by sampling. Gateway suite 260 passed / 11 skipped.
+- Note: Ruled out: our wiring; LTXVConcatAVLatent mask semantics (unmasked audio gets ones_like = generate); comfy.sample.prepare_noise (unbinds nested AV latents and noises each); LTXVSeparateAVLatent (unbinds, index 1); the checkpoint (4,728 audio tensors in the transformer incl. scale_shift_table_a2v_ca_audio, plus audio_vae + vocoder); the audio VAE (loads and decodes, no missing-key warnings); LTXAVModel.forward (accepts the combined AV tensor and derives a_timestep). LTX2AudioLatentNormalizingSampling is a quality patch, not a prerequisite.
+- Note: Decisive next test: run the unchanged control graph on a rented CUDA box. The donor validated this exact configuration on NVIDIA, so it separates 'this machine/MPS' from 'model/config' outright.
+## 2026-08-12T00:08:44.127735+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.mix-studio.json: 34 concrete reuse entries, 24 substantive

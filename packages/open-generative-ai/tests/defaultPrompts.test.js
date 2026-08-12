@@ -16,6 +16,10 @@ test('every starter is fully described and targets a known family', async () => 
         assert.ok(entry.id && entry.name && entry.summary, `${entry.id} labelled`);
         assert.ok(PROMPT_FAMILIES[entry.family], `${entry.id} targets a known family`);
         assert.ok(['image', 'video'].includes(entry.section), `${entry.id} belongs to a studio section`);
+        // The format decides which shape check below applies to it; an unknown
+        // one would silently skip every check a starter has.
+        assert.ok(['prose', 'paragraph', 'h3-fields', 'h3-reference'].includes(entry.format),
+            `${entry.id} declares a known format`);
         assert.ok(entry.parts.length >= 1, `${entry.id} has at least one part`);
         for (const part of entry.parts) {
             assert.ok(part.label, `${entry.id} part labelled`);
@@ -104,7 +108,7 @@ test('continuations re-describe the scene instead of assuming it', async () => {
 
 test('H3 starters obey the trained three-field format', async () => {
     const { DEFAULT_PROMPTS } = await import('../src/lib/defaultPrompts.js');
-    const h3 = DEFAULT_PROMPTS.filter((entry) => entry.family === 'minimax');
+    const h3 = DEFAULT_PROMPTS.filter((entry) => entry.format === 'h3-fields');
     assert.ok(h3.length);
     for (const entry of h3) {
         for (const { prompt, label } of entry.parts) {
@@ -124,6 +128,46 @@ test('H3 starters obey the trained three-field format', async () => {
             assert.ok(!/<d>(?!\s*\[)/.test(prompt), `${where} tags every spoken line with its language`);
             // H3 has no negative prompt: "no music" is written as N/A, not forbidden.
             assert.doesNotMatch(prompt, /\bno music\b/i, `${where} states what is there rather than what is not`);
+        }
+    }
+});
+
+test('H3 reference starters obey the six-section format and label media from 1', async () => {
+    const { DEFAULT_PROMPTS } = await import('../src/lib/defaultPrompts.js');
+    const SECTIONS = ['subject_definitions:', 'summary:', 'retention_analysis:',
+        'detailed_description:', 'overall_soundscape:', 'non_diegetic_music:'];
+    const refs = DEFAULT_PROMPTS.filter((entry) => entry.format === 'h3-reference');
+    assert.ok(refs.length);
+    for (const entry of refs) {
+        // Reference mode needs media attached; a starter that does not say so
+        // generates a reaction shot with nothing on the screen.
+        assert.ok(entry.requires, `${entry.id} names the media it needs`);
+        for (const { prompt, label } of entry.parts) {
+            const where = `${entry.id}/${label}`;
+            let cursor = -1;
+            for (const section of SECTIONS) {
+                const at = prompt.indexOf(`\n${section}\n`, cursor) >= 0
+                    ? prompt.indexOf(`\n${section}\n`, cursor)
+                    : (prompt.startsWith(`${section}\n`) ? 0 : -1);
+                assert.ok(at > cursor || (at === 0 && cursor === -1),
+                    `${where} carries ${section} on its own line, in order`);
+                cursor = at;
+            }
+            // Labels are 1-based: the first attached video is <Video 1>. <Video 0>
+            // points at a slot the graph never fills.
+            assert.doesNotMatch(prompt, /<(Picture|Video|Audio) 0>/, `${where} numbers references from 1`);
+            assert.match(prompt, /<Video 1>/, `${where} cites the attached clip`);
+            // Audio retention comes from the copy family, picture/video retention
+            // from the preserved family — mixing them is a malformed marker.
+            assert.match(prompt, /<Audio 1>: (fully_copy|partially_copy|reference|weak_reference)\b/,
+                `${where} marks its audio with a copy-family marker`);
+            assert.match(prompt, /<Video 1>: (fully_preserved|partially_preserved|attribute_transfer|weak_reference)\b/,
+                `${where} marks its video with a preserved-family marker`);
+            // The task-type marker is what selects reuse over timbre-only.
+            assert.match(prompt, /\[audio (reuse|reference)\]/, `${where} declares its audio task type`);
+            // Every fill-in is a real hole, and no show name is baked in.
+            assert.match(prompt, /\[SHOW NAME\]/, `${where} keeps the show a fill-in`);
+            assert.doesNotMatch(prompt, /castlevania|alucard|sypha/i, `${where} names no specific show`);
         }
     }
 });

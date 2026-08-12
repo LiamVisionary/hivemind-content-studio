@@ -1592,7 +1592,7 @@ def test_minimax_h3_reference_mode_fills_slots_in_order_and_prunes_the_rest(tmp_
 
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
     keys = sorted(k for k in node["inputs"] if k.startswith("ref_images."))
-    assert keys == ["ref_images.ref_image_1", "ref_images.ref_image_2"]
+    assert keys == ["ref_images.ref_image_0", "ref_images.ref_image_1"]
     # Combo, not a pixel size — an int here fails validation at submit.
     assert node["inputs"]["ref_image_size"] == "match"
     # Reference mode renders audio too, so the audio VAE has to be wired.
@@ -1633,13 +1633,13 @@ def test_minimax_h3_reference_audio_fills_slots_in_order_and_prunes_the_rest(tmp
 
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
     audio_keys = sorted(k for k in node["inputs"] if k.startswith("ref_audios."))
-    assert audio_keys == ["ref_audios.ref_audio_1", "ref_audios.ref_audio_2"]
+    assert audio_keys == ["ref_audios.ref_audio_0", "ref_audios.ref_audio_1"]
     loaders = [n for n in graph.values() if n["class_type"] == "LoadAudio"]
     assert len(loaders) == 2, "the unused reference audio loader must be pruned"
     assert all(n["inputs"]["audio"].endswith(".wav") for n in loaders), \
         "staged reference audio must carry a real filename with its sniffed extension"
     # Pictures are untouched by the audio pass.
-    assert [k for k in node["inputs"] if k.startswith("ref_images.")] == ["ref_images.ref_image_1"]
+    assert [k for k in node["inputs"] if k.startswith("ref_images.")] == ["ref_images.ref_image_0"]
 
 
 def test_reference_audio_cannot_be_the_sole_reference(tmp_path):
@@ -1788,7 +1788,7 @@ def test_minimax_h3_reference_video_wires_frames_and_resamples_to_24fps(tmp_path
     })
 
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
-    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_1"]
+    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_0"]
     # No use_audio, so the clip's own soundtrack must not claim an <Audio N>.
     assert [k for k in node["inputs"] if k.startswith("ref_video_audios.")] == []
     loaders = [n for n in graph.values() if n["class_type"] == "LoadVideo"]
@@ -1816,12 +1816,12 @@ def test_reference_video_soundtrack_claims_an_audio_label_before_its_video(tmp_p
 
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
     assert [k for k in node["inputs"] if k.startswith("ref_video_audios.")] == \
-        ["ref_video_audios.ref_video_audio_1"]
+        ["ref_video_audios.ref_video_audio_0"]
     components = next(n for n in graph.values() if n["class_type"] == "GetVideoComponents")
     component_id = next(k for k, v in graph.items() if v is components)
     # frames from output 0, soundtrack from output 1 of the SAME components node.
-    assert node["inputs"]["ref_videos.ref_video_1"] == [component_id, 0]
-    assert node["inputs"]["ref_video_audios.ref_video_audio_1"] == [component_id, 1]
+    assert node["inputs"]["ref_videos.ref_video_0"] == [component_id, 0]
+    assert node["inputs"]["ref_video_audios.ref_video_audio_0"] == [component_id, 1]
     staged = tmp_path / "input" / next(
         n for n in graph.values() if n["class_type"] == "LoadVideo")["inputs"]["file"]
     assert _probe(staged, "a:0", "stream=index") != "", "use_audio must keep the soundtrack"
@@ -1837,7 +1837,7 @@ def test_reference_video_alone_is_a_valid_reference(tmp_path):
     })
 
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
-    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_1"]
+    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_0"]
     assert [k for k in node["inputs"] if k.startswith("ref_images.")] == []
     assert not [n for n in graph.values() if n["class_type"] == "LoadImage"]
 
@@ -1987,7 +1987,7 @@ def test_minimax_h3_reference_mode_supports_motion_context(tmp_path):
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
     assert context[1]["inputs"]["conditioning"] == ["104", 0]
     assert graph["16"]["inputs"]["conditioning"] == [context[0], 0]
-    assert "ref_images.ref_image_1" in node["inputs"]
+    assert "ref_images.ref_image_0" in node["inputs"]
     assert graph["30"]["inputs"]["enabled"] is False
 
 
@@ -2018,3 +2018,36 @@ def test_reference_mode_is_a_routing_target_not_a_tier(tmp_path):
     assert not workflows["minimax-h3"].get("routing_only")
     assert not workflows["minimax-h3-turbo"].get("routing_only")
     assert "reference_images" not in workflows["minimax-h3"]["accepts"]
+
+
+def test_autogrow_reference_slots_are_zero_indexed_like_comfyui_names_them() -> None:
+    """ComfyUI builds autogrow slot names as [f"{prefix}{i}" for i in range(max)]
+    — zero-based. Ours were written 1..N, so 1..max-1 were coincidentally valid
+    indices and the LAST slot fell outside the range: with nine pictures
+    attached, `ref_images.ref_image_9` was passed to execute() as a literal
+    keyword argument instead of being folded into the ref_images dict, and the
+    node raised TypeError. It only ever failed at the maximum, which is why it
+    survived every test that attached fewer.
+    """
+    import json
+
+    graph = json.loads((ROOT / "packages/media-gateway/workflows/minimax-h3-reference.api.json").read_text())
+    inputs = graph["prompt"]["104"]["inputs"]
+
+    for group, expected in (("ref_images", 9), ("ref_videos", 3), ("ref_video_audios", 3), ("ref_audios", 3)):
+        indices = sorted(
+            int(key.rsplit("_", 1)[1])
+            for key in inputs
+            if key.startswith(f"{group}.")
+        )
+        assert indices == list(range(expected)), f"{group} must be 0..{expected - 1}, got {indices}"
+
+    # And the registry's audio links have to address the same slots, or a clip's
+    # soundtrack lands on a different clip than its frames.
+    registry = json.loads((ROOT / "packages/media-gateway/workflow-registry.json").read_text())
+    workflow = next(w for w in registry["workflows"] if w["id"] == "minimax-h3-reference")
+    links = [slot["audio_link"]["input"] for slot in workflow["reference_video_slots"]]
+    assert links == [f"ref_video_audios.ref_video_audio_{i}" for i in range(3)]
+    # Each video slot's audio link must carry the same ordinal as the video.
+    for index, slot in enumerate(workflow["reference_video_slots"]):
+        assert slot["audio_link"]["input"].endswith(f"_{index}")

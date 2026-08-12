@@ -143,14 +143,82 @@ const KOREAN_HOME_VIDEO_LTX_A = `Handheld early-2000s DV camcorder footage, fade
 
 const KOREAN_HOME_VIDEO_LTX_B = `Handheld early-2000s DV camcorder footage continuing without a cut, faded colour and soft contrast with visible sensor noise, autofocus hunting and exposure pumping. The same Korean woman in her early twenties — messy black side ponytail with wispy bangs, faded charcoal-grey sleeveless crop top, loose light-wash jeans, black canvas sneakers — crouches in the narrow alley as a stray tabby cat walks up to her, strokes its back and sets a small piece of food on the concrete, the focus shifting imperfectly between her face and the animal. She stands and moves into a small front yard, where she pegs a damp shirt onto a clothesline, the fabric swinging in the breeze as a cloud crosses the sun and the exposure dips and recovers. The camera reframes late, clipping the top of her head for a moment.`;
 
+// ── Screen reaction (H3 REFERENCE mode) ─────────────────────────────────────
+// A different H3 format from the three-field one above: reference mode was
+// trained on six sections, and it is reached by ATTACHING references to the
+// ordinary H3 tier rather than by picking a workflow (minimax-h3-reference is
+// routing-only). One clip goes in the References menu as a reference video with
+// its "sound" toggle on, which hands the graph <Video 1> for the picture and
+// <Audio 1> for that clip's own soundtrack — the label the toggle spends, ahead
+// of its <Video N> (see media_studio.py). Video labels start at <Video 1>, not
+// <Video 0>.
+//
+// [audio reuse] means the attached track is reperformed rather than used as a
+// timbre hint, which is what keeps the show's dialogue intelligible; the audio
+// retention marker therefore comes from the copy family (fully_copy), not the
+// preserved family the picture labels use.
+//
+// The show is a fill-in on purpose. In reference mode the model is looking at
+// the clip you attached, and the guide is explicit that you describe what is
+// actually there — so every [BRACKET] below has to be replaced with your own
+// clip's content before generating.
+const SCREEN_REACTION_SUBJECT = `<Subject 1> is a young adult woman in real-life American-anime street style: fair skin; sharp stylised makeup with bold winged eyeliner and glossy lips; wild neon-green hair in chaotic twin pigtails with loose flyaways and uneven bangs framing her face; an exaggerated cute-but-edgy anime-IRL look that never becomes a 2D cartoon. Colourful layered street fashion, dressed for an evening at home. No picture references are attached — her appearance is defined by this text only.`;
+
+const SCREEN_REACTION_TV = `subject_definitions:
+${SCREEN_REACTION_SUBJECT} She sits on a couch facing a television, her back and near shoulder toward the camera in over-the-shoulder framing.
+<Video 1> is the ten-second clip from [SHOW NAME] that plays ON the television screen: [WHAT THE CLIP SHOWS — the setting, who is in frame and where they stand, the palette and the light]. <Video 1> is the screen content and nothing else: it is not a full-frame edit of the living room, and it is not an identity source for <Subject 1>.
+<Audio 1> is the complete synchronised soundtrack of that same clip — [SHOW NAME] dialogue, its room tone and its effects. <Audio 1> is reused 1:1 as the target video's entire final audio track. Do not rewrite, paraphrase, mumble or re-synthesise the spoken lines, and do not build a competing living-room mix that replaces it.
+
+summary:
+[audio reuse] A live-action cinematic 16:9 over-the-shoulder shot: <Subject 1> sits on a couch watching television while the screen plays <Video 1> beat for beat, and <Audio 1> is copied 1:1 as the complete soundtrack. Real time, about ten seconds.
+
+retention_analysis:
+<Subject 1>: attribute_transfer — the neon-green pigtails, the anime-IRL styling and the over-the-shoulder couch pose come from the text above, with no picture identity source.
+<Video 1>: fully_preserved as the television picture only — the [SHOW NAME] footage stays readable on the screen for the whole clip, while the living room, the couch and <Subject 1> are new and taken from nothing in it.
+<Audio 1>: fully_copy — reused 1:1 as the complete final audio track, its dialogue and effects intelligible and verbatim, never a re-spoken or garbled replacement.
+
+detailed_description:
+Live-action photoreal cinematic 16:9 in a dim, cosy living room at night. [Shot 1] The camera holds a locked over-the-shoulder position behind <Subject 1> and slightly to one side: her neon-green pigtails and the edge of her near shoulder and head fill the foreground, slightly soft, and past them the television glows in the midground. The bezel and the whole screen stay inside the frame, and the picture on it is <Video 1> — [WHAT THE CLIP SHOWS, in one short clause] — playing continuously and updating in sync for the full ten seconds. Soft television light falls on the back of her hair and across the couch fabric; a low lamp and a plain wall sit behind her in the dark. She watches attentively with only small natural movement — a breath, a slight tilt of the head, one shift of weight — and never turns toward the camera. The composition does not change: no cutaway, no camera move, no push in that crops the screen, and the shot ends still holding it. The [SHOW NAME] dialogue and effects heard across the clip are the copied soundtrack itself, so do not give the on-screen characters a speaker id in this room and do not replace <Audio 1> with newly generated speech.
+
+overall_soundscape:
+The copied soundtrack from <Audio 1> runs throughout as the complete final mix — the clip's dialogue, ambience and effects, clear and unaltered. <Subject 1> says nothing, and no separate living-room bed is laid over the top.
+
+non_diegetic_music:
+N/A`;
+
+const SCREEN_REACTION_PHONE = `subject_definitions:
+${SCREEN_REACTION_SUBJECT} She is curled into the corner of a couch at night, holding a phone upright in one hand a little below eye level, the camera behind her shoulder in over-the-shoulder framing.
+<Video 1> is the ten-second clip from [SHOW NAME] that plays ON the phone screen: [WHAT THE CLIP SHOWS — the setting, who is in frame and where they stand, the palette and the light]. <Video 1> is the screen content and nothing else: it is not a full-frame edit of the room, and it is not an identity source for <Subject 1>.
+<Audio 1> is the complete synchronised soundtrack of that same clip — [SHOW NAME] dialogue, its room tone and its effects — playing out of the phone's small speaker. <Audio 1> is reused 1:1 as the target video's entire final audio track. Do not rewrite, paraphrase, mumble or re-synthesise the spoken lines, and do not build a competing room mix that replaces it.
+
+summary:
+[audio reuse] A live-action vertical 9:16 over-the-shoulder shot: <Subject 1> watches <Video 1> on the phone in her hand, the clip letterboxed across the middle of the upright screen and playing beat for beat, with <Audio 1> copied 1:1 as the complete soundtrack. Real time, about ten seconds.
+
+retention_analysis:
+<Subject 1>: attribute_transfer — the neon-green pigtails, the anime-IRL styling and the phone-in-hand couch pose come from the text above, with no picture identity source.
+<Video 1>: fully_preserved as the phone-screen picture only — the [SHOW NAME] footage stays sharp and readable inside the letterbox for the whole clip, while the room, the phone and <Subject 1> are new and taken from nothing in it.
+<Audio 1>: fully_copy — reused 1:1 as the complete final audio track, its dialogue and effects intelligible and verbatim, never a re-spoken or garbled replacement.
+
+detailed_description:
+Live-action photoreal vertical 9:16 in a dark room at night, lit almost entirely by the phone. [Shot 1] The camera holds a locked over-the-shoulder position close behind <Subject 1>: her neon-green pigtails and the curve of her shoulder frame the lower left of the picture, slightly soft, and the phone she holds in her raised hand sits in the middle third of the frame, screen square to the lens and large enough to read easily. The screen plays <Video 1> — [WHAT THE CLIP SHOWS, in one short clause] — letterboxed across the middle of the upright display with black bands above and below, updating in sync for the full ten seconds. The phone is never perfectly still: a real hand holds it, so it drifts and settles by a few millimetres, and her thumb rests along the edge of the case. Cold screen light rakes across her fingers, her jaw and the flyaway strands of her hair, and falls off into darkness a short distance behind her; a faint sheen of fingerprints catches the glow at the screen's edge without ever obscuring the picture. She watches with small natural movement — a blink, a slight tilt of the head, one shift of weight — and never turns toward the camera. The composition does not change: no cutaway, no camera move, no reframe that crops the screen or tips it out of the light. The [SHOW NAME] dialogue and effects heard across the clip are the copied soundtrack itself, so do not give the on-screen characters a speaker id in this room and do not replace <Audio 1> with newly generated speech.
+
+overall_soundscape:
+The copied soundtrack from <Audio 1> runs throughout as the complete final mix — the clip's dialogue, ambience and effects, clear and unaltered, as if coming from the phone's speaker. <Subject 1> says nothing, and no separate room bed is laid over the top.
+
+non_diegetic_music:
+N/A`;
+
 const KOREAN_HOME_VIDEO_LTX_C = `Handheld early-2000s DV camcorder footage continuing without a cut, faded colour and soft contrast with visible sensor noise, autofocus hunting and exposure pumping. The same Korean woman in her early twenties — messy black side ponytail with wispy bangs, faded charcoal-grey sleeveless crop top, loose light-wash jeans, black canvas sneakers — sits on a quiet terrace holding a plain ceramic coffee cup in both hands, watching the neighbourhood and tucking a loose strand of hair behind her ear while the camera drifts slowly to the side. She turns towards someone off camera, smiles warmly and raises a hand in greeting, and the camera reacts a moment late and swings to recentre her. She walks slowly away down a tree-lined residential lane with the cup in her hand, dappled sunlight crossing her shoulders, glances at the camera with a small genuine smile, then looks away and keeps walking as the recording cuts abruptly to black mid-step.`;
 
 /**
  * The shipped library.
  *
  * `idea` groups the variants of one scene; `family` decides which model they are
- * written for; `parts` is the scene split at that model's own length ceiling —
- * one entry for a model that can render the whole thing in a single generation.
+ * written for; `format` is the shape of the text itself, which is checked in
+ * tests because a starter in the wrong shape is a broken generation, not a
+ * rough draft; `requires` names media the prompt cannot run without; `parts` is
+ * the scene split at that model's own length ceiling — one entry for a model
+ * that can render the whole thing in a single generation.
  */
 export const DEFAULT_PROMPTS = Object.freeze([
   Object.freeze({
@@ -158,6 +226,7 @@ export const DEFAULT_PROMPTS = Object.freeze([
     idea: 'korean-home-video',
     section: 'video',
     family: 'seedance-2.5',
+    format: 'prose',
     name: 'Korean neighbourhood home video',
     summary: 'Candid early-2000s camcorder day, six beats',
     note: 'The whole 30s in one generation — Seedance 2.5 takes 4-30s.',
@@ -172,6 +241,7 @@ export const DEFAULT_PROMPTS = Object.freeze([
     idea: 'korean-home-video',
     section: 'video',
     family: 'seedance',
+    format: 'prose',
     name: 'Korean neighbourhood home video',
     summary: 'Candid early-2000s camcorder day, six beats',
     note: 'Seedance 2.0 and older render 15s at a time, so the scene is split in two.',
@@ -196,6 +266,7 @@ export const DEFAULT_PROMPTS = Object.freeze([
     idea: 'korean-home-video',
     section: 'video',
     family: 'minimax',
+    format: 'h3-fields',
     name: 'Korean neighbourhood home video',
     summary: 'Same six beats in H3 three-field format',
     note: 'H3 holds a scene for ~15s, so the day is two chained clips. Part 2 opens on a hold because the first ~0.9s is the pinned tail of part 1.',
@@ -216,10 +287,43 @@ export const DEFAULT_PROMPTS = Object.freeze([
     ],
   }),
   Object.freeze({
+    id: 'screen-reaction-tv-h3',
+    idea: 'screen-reaction',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-reference',
+    name: 'Watching a show on TV',
+    summary: 'Over-the-shoulder reaction, clip playing on the screen',
+    requires: 'One reference video with its sound on',
+    note: 'Reference mode: attach the clip in References as a reference video and turn on its “sound” toggle — that gives the prompt <Video 1> and <Audio 1>, and routes the job to the H3 reference workflow. Replace every [BRACKET] with your own clip before generating; the model is looking at what you attached.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 10,
+      prompt: SCREEN_REACTION_TV,
+    })],
+  }),
+  Object.freeze({
+    id: 'screen-reaction-phone-h3',
+    idea: 'screen-reaction',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-reference',
+    name: 'Watching a show on a phone',
+    summary: 'Vertical 9:16 over-the-shoulder, clip on the phone in hand',
+    requires: 'One reference video with its sound on',
+    note: 'Same reference setup as the TV version — reference video with “sound” on — but framed 9:16 for a vertical feed, with the clip letterboxed on an upright phone. Set the aspect ratio to 9:16. Replace every [BRACKET] with your own clip before generating.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 10,
+      prompt: SCREEN_REACTION_PHONE,
+    })],
+  }),
+  Object.freeze({
     id: 'korean-home-video-ltx',
     idea: 'korean-home-video',
     section: 'video',
     family: 'ltx',
+    format: 'paragraph',
     name: 'Korean neighbourhood home video',
     summary: 'Same day as three LTX paragraphs',
     note: 'LTX workflows top out at 10s here, so the scene is three clips joined with the Extend task. Greetings are described, not quoted — dialogue text does not belong in LTX visual conditioning.',

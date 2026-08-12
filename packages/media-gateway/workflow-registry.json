@@ -1247,7 +1247,7 @@
           "input": "file",
           "audio_link": {
             "node": "104",
-            "input": "ref_video_audios.ref_video_audio_1"
+            "input": "ref_video_audios.ref_video_audio_0"
           }
         },
         {
@@ -1255,7 +1255,7 @@
           "input": "file",
           "audio_link": {
             "node": "104",
-            "input": "ref_video_audios.ref_video_audio_2"
+            "input": "ref_video_audios.ref_video_audio_1"
           }
         },
         {
@@ -1263,7 +1263,7 @@
           "input": "file",
           "audio_link": {
             "node": "104",
-            "input": "ref_video_audios.ref_video_audio_3"
+            "input": "ref_video_audios.ref_video_audio_2"
           }
         }
       ],

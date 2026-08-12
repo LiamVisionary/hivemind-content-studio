@@ -87,6 +87,7 @@ import { FrameSlotsPicker } from './video/FrameSlotsPicker.jsx';
 import { ReferencesMenu } from './video/ReferencesMenu.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
+import { withReferenceTags } from '../lib/h3References.js';
 import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
 import { LoraSection } from './image/LoraSection.jsx';
 import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
@@ -3339,7 +3340,23 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         open={Boolean(s.promptHelperOpen)}
         onClose={() => { s.promptHelperOpen = false; bump(); }}
         idea={s.setup.prompt}
-        targetModel={workflowIdFromHivemindModelId(s.setup.modelId) || s.setup.modelId}
+        // The workflow this run will ACTUALLY use, which for armed references is
+        // the reference lane — the same decision videoRequestPlan makes at
+        // submit. Sending the picker's id instead handed the helper the plain
+        // text-to-video profile, so it wrote a prompt with no <Picture N> /
+        // <Video N> / <Audio N> labels at all and replaced the ones already
+        // there. The reference profile knows every rule this needs; it was
+        // simply never being selected.
+        targetModel={(refsArmed && referenceEntry?.workflowId)
+          || workflowIdFromHivemindModelId(s.setup.modelId)
+          || s.setup.modelId}
+        // How many of each are attached, so the labels it writes are the labels
+        // the graph will actually carry.
+        references={refsArmed ? {
+          images: (s.setup.referenceImageUrls || []).length,
+          videos: (s.setup.referenceVideos || []).map((item) => ({ useAudio: Boolean(item?.useAudio) })),
+          audios: (s.setup.referenceAudios || []).length,
+        } : null}
         mediaType="video"
         hasFirstFrame={Boolean(s.setup.imageUrl)}
         hasLastFrame={Boolean(s.setup.endImageUrl || s.setup.ltxEndUrl)}
@@ -3354,7 +3371,17 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         // required rather than optional, polish becomes the failure mode — so
         // the helper has to be told, the same way it is told about a chain.
         ugc={hasUgcVideoBrief(s.setup.prompt)}
-        onUse={(prompt) => { setPrompt(prompt); focusPrompt(); }}
+        onUse={(prompt) => {
+          // A helper result that omits a label would silently unbind that
+          // reference. Re-applying the scaffold puts back only what is missing.
+          setPrompt(refsArmed
+            ? withReferenceTags(prompt, {
+              videos: s.setup.referenceVideos || [],
+              audios: s.setup.referenceAudios || [],
+            })
+            : prompt);
+          focusPrompt();
+        }}
       />
 
       <ConfirmModal

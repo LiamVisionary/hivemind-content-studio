@@ -19,7 +19,10 @@ import {
     canSelect,
     externalHold,
     formatBytes,
+    lastUsedModelId,
     modelStatus,
+    preferredModelId,
+    rememberModelId,
     sortModels,
 } from '../lib/promptHelperRuntime.js';
 import { referenceToLocalImageInput } from '../lib/hivemindStudio.js';
@@ -57,6 +60,10 @@ export function PromptHelperDialog({
     // being an ad, but the judgements inside it invert: speech stops being
     // optional, and every production word becomes a tell.
     ugc = false,
+    // What the run will condition on, when reference mode is armed:
+    // { images: N, videos: [{ useAudio }], audios: N }. The helper has to write
+    // the labels the graph will actually carry, and it cannot count them itself.
+    references = null,
     durationSeconds = null, onUse,
 }) {
     const [snapshot, setSnapshot] = useState(null);
@@ -83,16 +90,15 @@ export function PromptHelperDialog({
         try {
             const data = await api('/api/prompt-helper/runtime');
             setSnapshot(data);
-            setSelected((current) => {
-                if (current) return current;
-                const live = data.loaded?.[0]?.modelId;
-                if (live) return live;
-                // Nothing in RAM (a fresh page load, or the stack restarted and
-                // killed the server). Leaving this empty left every action
-                // silently inert, so fall back to the first model that fits.
-                const usable = sortModels(data.models).find((model) => canSelect(model, { unloadOthers: true }));
-                return usable?.id || '';
-            });
+            // Nothing chosen yet — a fresh page load, or the stack restarted
+            // and killed the server. Start from the model this browser last
+            // used; only when that one is gone or cannot fit does it fall back
+            // to what is in RAM, and then to the first model that fits (leaving
+            // it empty left every action silently inert).
+            setSelected((current) => current || preferredModelId(data.models, {
+                lastUsedId: lastUsedModelId(),
+                loadedId: data.loaded?.[0]?.modelId || '',
+            }));
         } catch (exc) {
             setError(exc.message);
         }
@@ -103,6 +109,13 @@ export function PromptHelperDialog({
         setError('');
         refresh();
     }, [open, refresh]);
+
+    // Picking a model is a durable choice, not a per-open one: the next open
+    // starts here, on this machine, whatever ends up loaded in the meantime.
+    const choose = useCallback((modelId) => {
+        setSelected(modelId);
+        rememberModelId(modelId);
+    }, []);
 
     const models = sortModels(snapshot?.models);
     const selectedModel = models.find((m) => m.id === selected) || null;
@@ -177,12 +190,25 @@ export function PromptHelperDialog({
                 isContinuation: Boolean(continuingFromUrl),
                 previousPrompt: (continuingFromUrl && continuingFromPrompt) || null,
                 ugc: Boolean(ugc),
+                // Reference mode: how many of each are attached, and which
+                // clips bring their own soundtrack (each of those takes an
+                // <Audio N> label of its own, before its <Video N>).
+                references: references && (references.images || references.videos?.length || references.audios)
+                  ? {
+                    images: Number(references.images) || 0,
+                    videos: (references.videos || []).map((item) => ({ useAudio: Boolean(item?.useAudio) })),
+                    audios: Number(references.audios) || 0,
+                  }
+                  : undefined,
                 durationSeconds: durationSeconds || null,
                 imageBase64: image || null,
                 currentPrompt: revise ? (result || idea || '') : null,
                 revision: revise || null,
             });
             if (ticket !== requestRef.current) return;
+            // Covers the model the picker chose for them: once it has actually
+            // written a prompt, it is the one to come back to.
+            rememberModelId(selectedModel.id);
             setResult(data.prompt || '');
             setProfileLabel(data.profileLabel || '');
             setWarnings(data.warnings || []);
@@ -326,7 +352,7 @@ export function PromptHelperDialog({
                                     key={model.id}
                                     type="button"
                                     disabled={!selectable || Boolean(busy)}
-                                    onClick={() => setSelected(model.id)}
+                                    onClick={() => choose(model.id)}
                                     title={reason || model.id}
                                     className={cx(
                                         'flex items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors',

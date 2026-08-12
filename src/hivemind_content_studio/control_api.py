@@ -163,6 +163,11 @@ class PromptHelperGenerateBody(BaseModel):
     # the established scene; this is what says WHAT it is. Local-only, like
     # every other prompt here — it goes to a llama-server on this machine.
     previousPrompt: str | None = None
+    # What reference mode will condition on: how many pictures, which motion
+    # clips carry their own soundtrack, how many voice clips. The profile
+    # explains the label SCHEME; this says how many of each label exist, so the
+    # helper writes the ones the graph will actually carry.
+    references: dict | None = None
     # UGC mode is armed in the composer. It layers onto whichever profile the
     # target model selects rather than replacing it — the format stays, the
     # judgements inside it invert (speech becomes required, polish becomes the
@@ -1225,7 +1230,7 @@ def build_control_app(
             {"role": "system", "content": prompt_profiles.system_prompt(
                 profile, duration_seconds=body.durationSeconds, character_notes=notes,
                 continuation=body.isContinuation, previous_prompt=body.previousPrompt,
-                ugc=body.ugc)},
+                ugc=body.ugc, references=body.references)},
             {"role": "user", "content": idea},
         ]
         # Revising is the same conversation with the current draft in it, so

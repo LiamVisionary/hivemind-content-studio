@@ -69,3 +69,38 @@ export function sortModels(models) {
         return (b.sizeBytes || 0) - (a.sizeBytes || 0);
     });
 }
+
+// The owner's last choice, so a fresh page load does not re-offer a model they
+// already passed over. An id is a filename, not prompt text, so localStorage is
+// the right home for it.
+const LAST_MODEL_KEY = 'prompt_helper_last_model';
+
+/** The model this browser last used, or '' if it has never been told. */
+export function lastUsedModelId() {
+    try { return localStorage.getItem(LAST_MODEL_KEY) || ''; } catch { return ''; }
+}
+
+/** Remember a choice so the next open starts from it. */
+export function rememberModelId(modelId) {
+    try { if (modelId) localStorage.setItem(LAST_MODEL_KEY, modelId); } catch { /* quota */ }
+}
+
+/**
+ * Which model the picker should start on when nothing is chosen yet.
+ *
+ * The last used one wins outright — including over a model that happens to be
+ * in RAM, since the picker is sorted loaded-first/largest-first and falling
+ * through to the top row is exactly the behaviour being replaced. It only loses
+ * when it is gone from disk or cannot fit at all.
+ */
+export function preferredModelId(models, { lastUsedId = '', loadedId = '' } = {}) {
+    const rows = sortModels(models);
+    const selectable = (id) => {
+        const model = id ? rows.find((row) => row.id === id) : null;
+        return canSelect(model, { unloadOthers: true }) ? model.id : '';
+    };
+    return selectable(lastUsedId)
+        || selectable(loadedId)
+        || rows.find((row) => canSelect(row, { unloadOthers: true }))?.id
+        || '';
+}

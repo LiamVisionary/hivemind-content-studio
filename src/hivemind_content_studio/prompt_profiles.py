@@ -433,6 +433,50 @@ word. This is a phone photo."""
 _PREVIOUS_PROMPT_LIMIT = 2400
 
 
+
+def _reference_inventory_clause(references: dict | None) -> str:
+    """Name every label the graph will carry, in the model's own order.
+
+    The order is not per-kind: a reference video's own soundtrack takes an
+    <Audio N> emitted immediately BEFORE its <Video N>, so a clip-with-sound
+    plus one voice clip is <Audio 1>, <Video 1>, <Audio 2>. A prompt numbered
+    any other way addresses the wrong reference.
+    """
+    if not isinstance(references, dict):
+        return ""
+    images = max(0, int(references.get("images") or 0))
+    audios = max(0, int(references.get("audios") or 0))
+    videos = references.get("videos") or []
+    if not isinstance(videos, list):
+        videos = []
+    if not (images or audios or videos):
+        return ""
+    lines: list[str] = []
+    if images:
+        span = "<Picture 1>" if images == 1 else f"<Picture 1> through <Picture {images}>"
+        lines.append(f"- {images} reference picture{'s' if images != 1 else ''}: {span}.")
+    audio_ordinal = 0
+    for index, video in enumerate(videos, start=1):
+        with_sound = bool((video or {}).get("useAudio"))
+        if with_sound:
+            audio_ordinal += 1
+            lines.append(
+                f"- <Audio {audio_ordinal}> is the soundtrack of <Video {index}> "
+                "(numbered before it, because that is the order the model reads them in)."
+            )
+        lines.append(f"- <Video {index}> is a motion reference.")
+    for _ in range(audios):
+        audio_ordinal += 1
+        lines.append(f"- <Audio {audio_ordinal}> is a standalone voice or music clip.")
+    body = "\n".join(lines)
+    return (
+        "\n\nThe run carries exactly these references, in this order — write these labels and no "
+        "others, and give every one of them a line in subject_definitions and retention_analysis:\n"
+        f"{body}\n"
+        "Do not refer to a label that is not on this list; there is nothing attached for it."
+    )
+
+
 def system_prompt(
     profile: str,
     *,
@@ -441,6 +485,7 @@ def system_prompt(
     continuation: bool = False,
     previous_prompt: str | None = None,
     ugc: bool = False,
+    references: dict | None = None,
 ) -> str:
     """The instruction, with the clip length folded in when the studio knows it.
 
@@ -464,7 +509,15 @@ def system_prompt(
     ``ugc`` says the composer has UGC mode armed. It layers on top of whichever
     profile was chosen rather than replacing it: the model's trained format is
     unaffected by the clip being an ad, but most of the judgements inside it
-    invert — speech stops being optional, and polish becomes the failure."""
+    invert — speech stops being optional, and polish becomes the failure.
+
+    ``references`` is what reference mode will actually condition on:
+    ``{"images": N, "videos": [{"useAudio": bool}, …], "audios": N}``. The
+    profile explains the labelling SCHEME; this says which labels exist, so the
+    helper writes <Picture 1>..<Picture N> for pictures that are really there
+    instead of guessing a count — and gets the interleaved audio numbering
+    right, since a clip carrying its own soundtrack takes an <Audio N> emitted
+    before its <Video N>."""
     system = PROFILES.get(profile, PROFILES[DEFAULT_VIDEO_PROFILE])["system"]
     if ugc:
         if profile == DEFAULT_IMAGE_PROFILE:
@@ -483,6 +536,9 @@ def system_prompt(
                 "That is the established scene. Carry its characters, wardrobe, location, art style, "
                 "colour palette and lens into your prompt, and change only what the idea asks for."
             )
+    reference_clause = _reference_inventory_clause(references)
+    if reference_clause and profile == "minimax-h3-reference":
+        system += reference_clause
     if character_notes and profile.startswith("minimax-h3"):
         lines = "\n".join(f"- {note}" for note in character_notes)
         system += (

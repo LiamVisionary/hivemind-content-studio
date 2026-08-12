@@ -102,7 +102,10 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
     const name = entry.parts.length > 1
       ? `${entry.name} — part ${index + 1}`
       : entry.name;
-    if (part.note) toast.success(`Loaded “${name}”. ${part.note}`, { duration: 8000 });
+    // The part's own step where there is one (arm the chain, press Extend),
+    // otherwise the entry's (attach the reference clip, fill in the brackets).
+    const step = part.note || entry.note;
+    if (step) toast.success(`Loaded “${name}”. ${step}`, { duration: 10000 });
     else toast.success(`Loaded “${name}”.`);
   };
 
@@ -247,6 +250,12 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
                         >
                           <span className="truncate text-[13px] font-medium text-ink1">{entry.name}</span>
                           <span className="truncate text-[10px] text-ink3">{describeDefaultPrompt(entry)}</span>
+                          {/* Media the prompt cannot run without — pasting one of
+                              these into an empty composer and pressing Generate
+                              produces a clip with no clip in it. */}
+                          {entry.requires ? (
+                            <span className="truncate text-[10px] text-honey/80">Needs {entry.requires}</span>
+                          ) : null}
                         </Row>
                         {split ? (
                           <div className="mt-1 flex flex-wrap items-center gap-1 px-1.5 pb-1">
