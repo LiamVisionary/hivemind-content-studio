@@ -52,29 +52,101 @@ export function referenceKindsInDrag(dataTransfer) {
   return [...new Set(kinds)];
 }
 
-// One click writes the retention line the shot actually needs. It names the
-// label AND states the exclusion, because a motion clip that is merely tagged
-// still hands its performer's face and setting to the shot. Idempotent, and it
-// lands inside retention_analysis when the six-section format is in use.
-export function withMotionRetentionTags(prompt, videos = []) {
-  const existing = String(prompt || '');
-  const lines = videos
-    .map((_, index) => index + 1)
-    .filter((ordinal) => !existing.includes(`<Video ${ordinal}>:`))
-    .map((ordinal) => (
-      `<Video ${ordinal}>: attribute_transfer — only its manner of movement carries: the same gesture style, `
-      + `posture and facial expressiveness, performed by <Subject 1>. Its performer's appearance, clothing, `
-      + `setting and framing do NOT carry.`
-    ));
-  if (!lines.length) return existing;
-  const block = lines.join('\n');
-  const section = existing.match(/^retention_analysis:[ \t]*$/m);
-  if (section) {
-    const at = existing.indexOf(section[0]) + section[0].length;
-    return `${existing.slice(0, at)}\n${block}${existing.slice(at)}`;
-  }
-  return existing.trim() ? `${existing.replace(/\s+$/, '')}\n\n${block}` : block;
+// One click writes the whole reference scaffold the shot needs: a
+// retention_analysis line per attached reference, the summary's audio tag, and
+// a dialogue stub in the format the model reads speech from.
+//
+// It used to write the <Video N> line alone, which left the two hardest parts
+// undiscoverable — that a clip's soundtrack takes an <Audio N> label of its
+// own, and that spoken lines go in <d>…</d> inside detailed_description with a
+// (S1) speaker id. Nobody guesses that from an empty box.
+//
+// The markers are the model's own vocabulary, not ours: video references take
+// fully_preserved | partially_preserved | attribute_transfer | weak_reference,
+// audio references take fully_copy | partially_copy | reference |
+// weak_reference. The defaults written here are the common intent — borrow the
+// manner, not the content — and each line names the alternative, so the other
+// choice is one edit away rather than a documentation hunt.
+//
+// Idempotent: a label already spoken for is left exactly as the user wrote it.
+
+const VIDEO_RETENTION = (label) => (
+  `${label}: attribute_transfer — only its manner of movement carries: the same gesture style, `
+  + `posture and facial expressiveness, performed by <Subject 1>. Its performer's appearance, clothing, `
+  + `setting and framing do NOT carry. (fully_preserved to reproduce the movement itself.)`
+);
+
+const SOUNDTRACK_RETENTION = (label, videoLabel) => (
+  `${label}: reference — the voice from ${videoLabel}'s own soundtrack: its timbre, accent and delivery. `
+  + `The words spoken in it do NOT carry; <Subject 1> speaks the lines written below. `
+  + `(fully_copy instead to reperform that clip's own words verbatim.)`
+);
+
+const VOICE_RETENTION = (label) => (
+  `${label}: reference — only the voice carries: timbre, accent, pacing and emotion. Its original words do `
+  + `NOT carry; <Subject 1> speaks the lines written below. (fully_copy instead to reperform its own words verbatim.)`
+);
+
+// Speech reaches the model only inside <d>…</d>, attributed to a speaker id.
+const DIALOGUE_STUB = '(S1) <d>[English] Write the line you want spoken here — this is what the cloned voice says.</d>';
+
+// The summary declares which of the two audio contracts is in force:
+// [audio reference] means the source's own words must NOT appear;
+// [audio reuse] means they are reperformed verbatim and kept in their language.
+const AUDIO_SUMMARY_TAG = '[audio reference]';
+
+function insertIntoSection(prompt, sectionName, block) {
+  const section = prompt.match(new RegExp(`^${sectionName}:[ \\t]*$`, 'm'));
+  if (!section) return null;
+  const at = prompt.indexOf(section[0]) + section[0].length;
+  return `${prompt.slice(0, at)}\n${block}${prompt.slice(at)}`;
 }
+
+export function withReferenceTags(prompt, { videos = [], audios = [] } = {}) {
+  let out = String(prompt || '');
+  const labels = referenceLabels({ videos, audios });
+
+  // retention_analysis, in the order the model presents the references: each
+  // clip's soundtrack immediately before the clip itself, then the voice clips.
+  const retention = [];
+  labels.videos.forEach((label) => {
+    if (label.audio && !out.includes(`${label.audio}:`)) {
+      retention.push(SOUNDTRACK_RETENTION(label.audio, label.video));
+    }
+    if (!out.includes(`${label.video}:`)) retention.push(VIDEO_RETENTION(label.video));
+  });
+  labels.audios.forEach((label) => {
+    if (!out.includes(`${label}:`)) retention.push(VOICE_RETENTION(label));
+  });
+
+  const hasAudio = labels.audios.length > 0 || labels.videos.some((label) => label.audio);
+
+  if (retention.length) {
+    const block = retention.join('\n');
+    out = insertIntoSection(out, 'retention_analysis', block)
+      ?? (out.trim() ? `${out.replace(/\s+$/, '')}\n\n${block}` : block);
+  }
+
+  // A cloned voice with nothing to say is the other half of the problem.
+  if (hasAudio && !out.includes('<d>')) {
+    out = insertIntoSection(out, 'detailed_description', DIALOGUE_STUB)
+      ?? `${out.replace(/\s+$/, '')}\n\n${DIALOGUE_STUB}`;
+  }
+
+  // The audio contract has to be declared somewhere the model will read it.
+  // In the six-section format that is the summary; in a freeform prompt there
+  // is no summary to put it in, and dropping it silently left the clip with a
+  // cloned voice and no statement of whether its own words should come back.
+  if (hasAudio && !/\[audio (reuse|reference)\]/.test(out)) {
+    out = insertIntoSection(out, 'summary', AUDIO_SUMMARY_TAG)
+      ?? `${out.replace(/\s+$/, '')}\n${AUDIO_SUMMARY_TAG} — the cloned voice speaks the line above, not the words from the source clip.`;
+  }
+
+  return out;
+}
+
+// Kept for callers that only ever had motion clips.
+export const withMotionRetentionTags = (prompt, videos = []) => withReferenceTags(prompt, { videos });
 
 // A reference video will TAKE OVER the shot if the prompt lets it. Measured on
 // the rental: the same clip under the same attribute_transfer tag kept our

@@ -188,3 +188,70 @@ test('a rejected drop reports WHICH failure it was', async () => {
     const menu = fs.readFileSync(path.join(__dirname, '../src/studios/video/ReferencesMenu.jsx'), 'utf8');
     assert.match(menu, /reason: `\$\{err\?\.message/);
 });
+
+// The scaffold button. It used to write the <Video N> line alone, which left
+// the two hardest parts of reference mode undiscoverable: that a clip's
+// soundtrack takes an <Audio N> label of its own, and that spoken lines live in
+// <d>…</d> with a speaker id. Nobody guesses either from an empty box.
+test('the scaffold covers a clip, its soundtrack, and what gets said', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const out = withReferenceTags('', { videos: [{ useAudio: true }], audios: [{ url: '/v.m4a' }] });
+    const lines = out.split('\n').filter(Boolean);
+
+    // Numbered in the order the model presents them: the clip's own track
+    // immediately BEFORE the clip, then the standalone voice.
+    assert.match(lines[0], /^<Audio 1>: reference —/);
+    assert.match(lines[1], /^<Video 1>: attribute_transfer —/);
+    assert.match(lines[2], /^<Audio 2>: reference —/);
+
+    // Markers come from the model's own vocabulary — audio and video do not
+    // share a set, and writing a video marker on an audio label is nonsense.
+    assert.match(out, /\(fully_copy instead/, 'the audio alternative is named');
+    assert.match(out, /\(fully_preserved to reproduce/, 'the video alternative is named');
+    assert.doesNotMatch(out.split('\n')[0], /attribute_transfer/);
+
+    // Speech, in the only form the model reads it.
+    assert.match(out, /\(S1\) <d>\[English\] .+<\/d>/);
+    // And the summary contract that says the source's words must not reappear.
+    assert.match(out, /\[audio reference\]/);
+});
+
+test('a clip with no soundtrack gets no audio scaffold', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const out = withReferenceTags('', { videos: [{ useAudio: false }] });
+    assert.match(out, /^<Video 1>: attribute_transfer/);
+    assert.doesNotMatch(out, /<Audio/);
+    assert.doesNotMatch(out, /<d>/, 'nothing is speaking, so there is no line to write');
+    assert.doesNotMatch(out, /\[audio reference\]/);
+});
+
+test('pressing it twice does not write the scaffold twice', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const refs = { videos: [{ useAudio: true }], audios: [{ url: '/v.m4a' }] };
+    const once = withReferenceTags('', refs);
+    assert.equal(withReferenceTags(once, refs), once);
+
+    // And a label the user already wrote is left exactly as they wrote it.
+    const edited = once.replace(/<Video 1>: attribute_transfer[^\n]*/, '<Video 1>: fully_preserved — copy this move.');
+    const after = withReferenceTags(edited, refs);
+    assert.match(after, /<Video 1>: fully_preserved — copy this move\./);
+    assert.equal((after.match(/<Video 1>:/g) || []).length, 1);
+});
+
+test('each piece lands in its own section when the six-section format is in use', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const prompt = [
+        'subject_definitions:', '<Subject 1> is a courier.', '',
+        'summary:', 'She crosses a rooftop.', '',
+        'retention_analysis:', '<Picture 1>: fully_preserved — same person.', '',
+        'detailed_description:', '[Shot 1] She walks.',
+    ].join('\n');
+    const out = withReferenceTags(prompt, { videos: [{ useAudio: true }] });
+    const lines = out.split('\n');
+
+    assert.match(lines[lines.indexOf('summary:') + 1], /\[audio reference\]/);
+    assert.match(lines[lines.indexOf('retention_analysis:') + 1], /^<Audio 1>:/);
+    assert.match(lines[lines.indexOf('detailed_description:') + 1], /^\(S1\) <d>/);
+    // The user's own retention line survives.
+    assert.match(out, /<Picture 1>: fully_preserved — same person\./);
+});

@@ -33,7 +33,7 @@ import {
   referenceKindForFile,
   referenceKindsInDrag,
   referenceLabels,
-  withMotionRetentionTags,
+  withReferenceTags,
 } from '../../lib/h3References.js';
 import {
   backfillHivemindReferencePoster,
@@ -248,11 +248,11 @@ export function ReferenceSection({
               type="button"
               onClick={onWriteTags}
               title={zh()
-                ? '把每个动作参考的 retention_analysis 标签写进提示词（含"不要带过来"的说明）'
-                : "Write each clip's retention_analysis line into the prompt, including what must not carry"}
+                ? '把每个参考的 retention_analysis 标签、音频标记和一行示例台词写进提示词'
+                : 'Write a retention_analysis line for every attached reference, the summary audio tag, and a dialogue line to fill in'}
               className="rounded px-1.5 py-0.5 text-[10px] font-medium text-ink3 transition-colors hover:bg-honey-tint hover:text-honey"
             >
-              {zh() ? '写入标签' : 'Add tags to prompt'}
+              {zh() ? '写入标签与台词' : 'Add tags + dialogue'}
             </button>
           ) : null}
           <span className="text-[10px] text-ink3">{items.length}/{limit}</span>
@@ -446,6 +446,10 @@ export function ReferencesMenu({
   }, []);
 
   const values = { images, videos, audios };
+  // The scaffold covers every attached reference at once, so it needs exactly
+  // one button. It sits on the first section that has something to tag — which
+  // means someone with only a voice clip still finds it.
+  const tagSectionKind = videos.length ? 'videos' : (audios.length ? 'audios' : null);
   const labels = referenceLabels({ images, videos, audios });
   const motionWarning = motionReferenceWarning({ prompt, videos });
   const total = images.length + videos.length + audios.length;
@@ -627,8 +631,8 @@ export function ReferencesMenu({
               dropTarget={dragKinds.includes(kind)}
               posters={posters}
               onPosterCaptured={onPosterCaptured}
-              onWriteTags={kind === 'videos' && onPromptChange
-                ? () => onPromptChange(withMotionRetentionTags(prompt, videos))
+              onWriteTags={kind === tagSectionKind && onPromptChange
+                ? () => onPromptChange(withReferenceTags(prompt, { videos, audios }))
                 : null}
               onPickRecent={(url) => attach(kind, url)}
               onAdd={() => openPicker(kind)}
