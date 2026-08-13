@@ -22,6 +22,10 @@ const ZIMAGE_TOKEN_FILE = process.env.ZIMAGE_TOKEN_FILE || path.join(MEDIA_STATE
 const LOCAL_AI_DIR = path.join(process.env.HOME || '', 'Library/Application Support/open-generative-ai/local-ai');
 const WORKFLOW_REGISTRY = process.env.MEDIA_STUDIO_WORKFLOW_REGISTRY || path.resolve(ROOT, '../media-gateway/workflow-registry.json');
 const MAX_REQUEST_BODY = 25 * 1024 * 1024;
+// FLUX.2 Klein conditions on up to four reference images total. The gateway
+// enforces the same ceiling (BIGLOVE_KLEIN3_MAX_REFERENCES); this bound just
+// keeps the bridge from fetching bytes that would be dropped downstream.
+const KLEIN_MAX_REFERENCE_IMAGES = 4;
 
 function readToken() {
   try { return fs.readFileSync(ZIMAGE_TOKEN_FILE, 'utf8').trim(); } catch { return ''; }
@@ -699,13 +703,14 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
           ...(body.inpaint.mask_influence != null ? { mask_influence: Math.round(Number(body.inpaint.mask_influence)) } : {}),
         };
       }
-      // Additional references (Klein conditions on up to 3 images total):
-      // data URLs pass through; an absolute http(s) entry is fetched here the
-      // same way the primary image_url is. Sealed reference paths must arrive
-      // already decrypted as data URLs — this host holds no vault key.
+      // Additional references — these ride ALONGSIDE the primary image, so the
+      // list holds at most KLEIN_MAX_REFERENCE_IMAGES - 1 entries. Data URLs
+      // pass through; an absolute http(s) entry is fetched here the same way
+      // the primary image_url is. Sealed reference paths must arrive already
+      // decrypted as data URLs — this host holds no vault key.
       if (Array.isArray(body.images_base64) && body.images_base64.length) {
         const extras = [];
-        for (const entry of body.images_base64.slice(0, 3)) {
+        for (const entry of body.images_base64.slice(0, KLEIN_MAX_REFERENCE_IMAGES - 1)) {
           const value = String(entry || '').trim();
           if (!value) continue;
           if (value.startsWith('data:')) {

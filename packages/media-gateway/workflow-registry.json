@@ -169,7 +169,7 @@
         "seed",
         "loras"
       ],
-      "max_reference_images": 3,
+      "max_reference_images": 4,
       "defaults": {
         "width": 1024,
         "height": 1024,
@@ -1340,7 +1340,7 @@
         "steps": 15,
         "spectrum": true,
         "easycache": 0,
-        "solattn_tau": 1.3,
+        "solattn_tau": 0,
         "interpolate": 1
       },
       "slots": {

@@ -133,6 +133,54 @@ test('the highlight reads every kind the drag is carrying', async () => {
     assert.deepEqual(referenceKindsInDrag(null), []);
 });
 
+// Attaching the same source twice. Nothing about a reference varies per slot —
+// the item carries a url, a filename and (video only) its soundtrack switch,
+// which belongs to the one row — so a repeat sent the model one picture as two
+// <Picture N>s, burned a slot, and collided the rows' React keys.
+test('a source already in the row is found whatever shape the row holds', async () => {
+    const { referenceAttachIndex } = await import('../src/lib/h3References.js');
+
+    // Pictures are bare urls; clips are objects, and the extra per-slot state a
+    // clip carries (name, soundtrack) does not make it a different attachment.
+    assert.equal(referenceAttachIndex(['/a.png', '/b.png'], '/b.png'), 1);
+    assert.equal(referenceAttachIndex(['/a.png'], '/c.png'), -1);
+    assert.equal(referenceAttachIndex([{ url: '/v.mp4', name: 'take 1', useAudio: true }], '/v.mp4'), 0);
+    assert.equal(referenceAttachIndex([{ url: '/voice.m4a', name: 'her' }], '/voice.m4a'), 0);
+
+    assert.equal(referenceAttachIndex([], '/a.png'), -1);
+    assert.equal(referenceAttachIndex(['/a.png'], ''), -1);
+});
+
+test('the panel names the label that already holds it, and never attaches twice', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const menu = fs.readFileSync(path.join(__dirname, '../src/studios/video/ReferencesMenu.jsx'), 'utf8');
+
+    // The check runs BEFORE the row-full return, or a saved picture clicked
+    // into a full row would come back as silence rather than "already attached".
+    const guard = menu.indexOf('const attached = referenceAttachIndex(current, url);');
+    assert.ok(guard > 0, 'attach() consults the row it is adding to');
+    assert.ok(guard < menu.indexOf('if (current.length >= limits[kind]) return;'));
+    assert.match(menu.slice(guard), /Already attached as \$\{tag\}/);
+});
+
+test('row keys survive a list that arrives with the same source twice', async () => {
+    const { referenceRowKeys } = await import('../src/lib/h3References.js');
+
+    // The url IS the key, so removing one reference leaves the others mounted
+    // with their decrypted previews intact.
+    assert.deepEqual(referenceRowKeys(['/a.png', '/b.png']), ['/a.png', '/b.png']);
+
+    // A restored generation sealed before attach() deduped can still hand over
+    // a repeat, and duplicate keys are a React error rather than a cosmetic one.
+    const keys = referenceRowKeys(['/a.png', '/b.png', '/a.png', '/a.png']);
+    assert.equal(new Set(keys).size, 4);
+    assert.equal(keys[0], '/a.png', 'the first of each stays bare');
+
+    // Clips key off their url too, and an entry with no url at all still keys.
+    assert.deepEqual(referenceRowKeys([{ url: '/v.mp4' }, {}]), ['/v.mp4', 'row-1']);
+});
+
 // The retention-tag button: it has to produce a line that clears the warning.
 test('the tag button writes a line that names the clip AND excludes its look', async () => {
     const { withMotionRetentionTags, motionReferenceWarning } = await loadDrag();
@@ -195,20 +243,21 @@ test('a rejected drop reports WHICH failure it was', async () => {
 // <d>…</d> with a speaker id. Nobody guesses either from an empty box.
 test('the scaffold covers a clip, its soundtrack, and what gets said', async () => {
     const { withReferenceTags } = await import('../src/lib/h3References.js');
-    const out = withReferenceTags('', { videos: [{ useAudio: true }], audios: [{ url: '/v.m4a' }] });
-    const lines = out.split('\n').filter(Boolean);
+    const out = withReferenceTags('', { images: ['/a.png'], videos: [{ useAudio: true }], audios: [{ url: '/v.m4a' }] });
+    const retention = out.split('retention_analysis:\n')[1].split('\n\n')[0].split('\n');
 
-    // Numbered in the order the model presents them: the clip's own track
-    // immediately BEFORE the clip, then the standalone voice.
-    assert.match(lines[0], /^<Audio 1>: reference —/);
-    assert.match(lines[1], /^<Video 1>: attribute_transfer —/);
-    assert.match(lines[2], /^<Audio 2>: reference —/);
+    // Numbered in the order the model presents them: pictures, then the clip's
+    // own track immediately BEFORE the clip, then the standalone voice.
+    assert.match(retention[0], /^<Picture 1>: fully_preserved —/);
+    assert.match(retention[1], /^<Audio 1>: reference —/);
+    assert.match(retention[2], /^<Video 1>: attribute_transfer —/);
+    assert.match(retention[3], /^<Audio 2>: reference —/);
 
     // Markers come from the model's own vocabulary — audio and video do not
     // share a set, and writing a video marker on an audio label is nonsense.
     assert.match(out, /\(fully_copy instead/, 'the audio alternative is named');
     assert.match(out, /\(fully_preserved to reproduce/, 'the video alternative is named');
-    assert.doesNotMatch(out.split('\n')[0], /attribute_transfer/);
+    assert.doesNotMatch(retention[1], /attribute_transfer/);
 
     // Speech, in the only form the model reads it.
     assert.match(out, /\(S1\) <d>\[English\] .+<\/d>/);
@@ -216,13 +265,61 @@ test('the scaffold covers a clip, its soundtrack, and what gets said', async () 
     assert.match(out, /\[audio reference\]/);
 });
 
-test('a clip with no soundtrack gets no audio scaffold', async () => {
+// The scaffold used to stop at the retention lines and the dialogue stub, which
+// read finished and was not: a run built that way spent half of an eight-second
+// clip on invented speech, because nothing said who <Subject 1> was, what the
+// shot was, or that no one else speaks. An empty composer gets the whole frame.
+test('an empty composer gets the whole six-section frame, not a bare tag block', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const out = withReferenceTags('', { images: ['/a.png'], videos: [{ useAudio: true }] });
+
+    assert.deepEqual(
+        out.split('\n').filter((line) => /^[a-z_]+:$/.test(line)),
+        ['subject_definitions:', 'summary:', 'retention_analysis:', 'detailed_description:', 'overall_soundscape:', 'non_diegetic_music:'],
+    );
+    // <Subject 1> is written into every retention line, so something has to say
+    // who it is and which voice belongs to it.
+    assert.match(out, /<Subject 1> is the person shown in <Picture 1>: \[hair, face/);
+    assert.match(out, /<Audio 1> is the voice-timbre reference for <Subject 1> \(S1\)\./);
+    assert.match(out, /^\[Shot 1\] /m, 'there is a shot for the dialogue to happen in');
+    // The instruction whose absence let the model talk over the empty seconds.
+    assert.match(out, /no speech before or after the line above/);
+});
+
+test('a clip with no soundtrack gets a frame but no audio scaffold', async () => {
     const { withReferenceTags } = await import('../src/lib/h3References.js');
     const out = withReferenceTags('', { videos: [{ useAudio: false }] });
-    assert.match(out, /^<Video 1>: attribute_transfer/);
+    assert.match(out, /^subject_definitions:/);
+    assert.match(out, /<Video 1>: attribute_transfer/);
     assert.doesNotMatch(out, /<Audio/);
     assert.doesNotMatch(out, /<d>/, 'nothing is speaking, so there is no line to write');
     assert.doesNotMatch(out, /\[audio reference\]/);
+    assert.match(out, /No speech and no music\./);
+});
+
+test('whatever was already typed becomes the shot rather than being dropped', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const out = withReferenceTags('She steps onto the rooftop at dusk.', { images: ['/a.png'], audios: [{ url: '/v.m4a' }] });
+    assert.match(out, /^\[Shot 1\] She steps onto the rooftop at dusk\.$/m);
+    assert.equal((out.match(/She steps onto the rooftop/g) || []).length, 1, 'not left dangling above the frame as well');
+});
+
+test('a line already written keeps its own slot and does not earn a second one', async () => {
+    // Wrapping a bare dialogue line is the exact recovery path for a prompt
+    // written before the frame existed. Folding it into [Shot 1] buried it AND
+    // added the placeholder underneath, so the clip had two lines to say.
+    const { withReferenceTags, unscriptedTimeWarning } = await import('../src/lib/h3References.js');
+    const videos = [{ useAudio: true }];
+    const bare = "(S1) <d>[English] Oh my god, I can't believe Liam made this with Hivemind OS</d>";
+    const out = withReferenceTags(bare, { images: ['/a.png'], videos });
+
+    assert.equal((out.match(/<d>/g) || []).length, 1, 'exactly one line to speak');
+    assert.doesNotMatch(out, /Write the line you want spoken here/, 'no placeholder on top of a real line');
+    assert.match(out, /^\(S1\) <d>\[English\] Oh my god[^\n]*<\/d>$/m, 'on its own line under the shot');
+    assert.match(out, /^\[Shot 1\] Medium shot of <Subject 1>/m, 'and the shot is the default, not the line');
+    // Which is the point: pressing the button is what clears the warning.
+    assert.ok(unscriptedTimeWarning({ prompt: bare, durationSeconds: 8, videos }));
+    assert.equal(unscriptedTimeWarning({ prompt: out, durationSeconds: 8, videos }), null);
 });
 
 test('pressing it twice does not write the scaffold twice', async () => {
@@ -254,4 +351,49 @@ test('each piece lands in its own section when the six-section format is in use'
     assert.match(lines[lines.indexOf('detailed_description:') + 1], /^\(S1\) <d>/);
     // The user's own retention line survives.
     assert.match(out, /<Picture 1>: fully_preserved — same person\./);
+});
+
+// Unscripted time. The clip that failed on 2026-08-11 was eight seconds long
+// with one ~4s line and nothing describing the rest; the model filled the gap
+// with invented speech before reaching the written words. A voice reference
+// makes it want to talk, so silence has to be asked for or the span shortened.
+test('a clip much longer than its dialogue is flagged before the run', async () => {
+    const { unscriptedTimeWarning } = await import('../src/lib/h3References.js');
+    const line = "(S1) <d>[English] Oh my god, I can't believe Liam made this with Hivemind OS</d>";
+    const videos = [{ useAudio: true }];
+
+    const warning = unscriptedTimeWarning({ prompt: line, durationSeconds: 8, videos });
+    assert.equal(warning.kind, 'unscripted');
+    assert.equal(warning.spoken, 4, '12 words at ~3 a second');
+    assert.equal(warning.gap, 4);
+
+    // The same line in a clip sized for it is fine — this is the fix, so it
+    // must not keep nagging once applied.
+    assert.equal(unscriptedTimeWarning({ prompt: line, durationSeconds: 6, videos }), null);
+});
+
+test('saying nobody else speaks clears the warning, because that IS the fix', async () => {
+    const { unscriptedTimeWarning, withReferenceTags } = await import('../src/lib/h3References.js');
+    const videos = [{ useAudio: true }];
+    // The scaffold writes that sentence into overall_soundscape, so pressing
+    // the button must not leave a warning still sitting there.
+    const scaffolded = withReferenceTags('', { videos });
+    assert.equal(unscriptedTimeWarning({ prompt: scaffolded, durationSeconds: 15, videos }), null);
+    assert.match(unscriptedTimeWarning({
+        prompt: '(S1) <d>[English] Two words</d>', durationSeconds: 15, videos,
+    })?.kind, /unscripted/);
+});
+
+test('nothing to say, and nothing to warn about without a voice', async () => {
+    const { unscriptedTimeWarning } = await import('../src/lib/h3References.js');
+    // A voice clone with no line at all is the sharper version of the same bug.
+    assert.equal(unscriptedTimeWarning({
+        prompt: 'subject_definitions:\nA woman on a rooftop.', durationSeconds: 8, videos: [{ useAudio: true }],
+    }).kind, 'no-line');
+    // A silent clip is allowed to be as long as it likes.
+    assert.equal(unscriptedTimeWarning({
+        prompt: '(S1) <d>[English] Hi</d>', durationSeconds: 15, videos: [{ useAudio: false }],
+    }), null);
+    // And an untouched composer is not a mistake yet.
+    assert.equal(unscriptedTimeWarning({ prompt: '', durationSeconds: 8, audios: [{ url: '/v.m4a' }] }), null);
 });

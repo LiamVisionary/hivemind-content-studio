@@ -166,16 +166,45 @@ MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
 )
 
 
-def _media_studio_video_models(status: dict | None = None) -> tuple[MediaModel, ...]:
+# The last workflow registry that actually answered. A capability list is not
+# something the catalog may approximate: BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS
+# knows nothing of reference mode, end frames or motion context, so handing it
+# out in place of a live read silently strips the References and Frames controls
+# out of the studio — the same MiniMax H3 model, rendered with its pre-reference
+# toolbar. The reachability probe that gates the read is a 3s initialize POST
+# while the read itself gets 30s, so a gateway that is merely busy (mid-
+# generation) or still starting fails the probe and passes the read. Remembering
+# the last live answer means a transient miss can never downgrade the UI.
+_last_live_media_studio_models: tuple[MediaModel, ...] = ()
+
+
+def _media_studio_fallback_models() -> tuple[MediaModel, ...]:
+    return _last_live_media_studio_models or BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS
+
+
+def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel, ...], bool]:
+    """The Media Studio video workflows, and whether they were read LIVE.
+
+    `live` is False whenever the registry could not be reached this time round.
+    The models are then the last live read, or the built-in list if there has
+    never been one; callers surface the flag so the studio can retry rather than
+    render a model with the wrong capabilities and stay that way.
+    """
+    global _last_live_media_studio_models
     models = {model.id: model for model in BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS}
     if status is not None and not status.get("available"):
-        return tuple(models.values())
+        # Skipping the read keeps the catalog responsive when the endpoint is
+        # genuinely down (list_media_studio_workflows would wait out its own
+        # 30s); the remembered registry above keeps the answer honest.
+        return _media_studio_fallback_models(), False
     try:
         from .media_studio import list_media_studio_workflows
 
         workflows = list_media_studio_workflows("video")
     except Exception:
-        return tuple(models.values())
+        return _media_studio_fallback_models(), False
+    if not workflows:
+        return _media_studio_fallback_models(), False
     for workflow in workflows:
         workflow_id = str(workflow.get("id") or "").strip()
         if not workflow_id:
@@ -200,7 +229,12 @@ def _media_studio_video_models(status: dict | None = None) -> tuple[MediaModel, 
             beta=bool(workflow.get("beta")),
             routing_only=bool(workflow.get("routing_only")),
         )
-    return tuple(models.values())
+    _last_live_media_studio_models = tuple(models.values())
+    return _last_live_media_studio_models, True
+
+
+def _media_studio_video_models(status: dict | None = None) -> tuple[MediaModel, ...]:
+    return _media_studio_registry(status)[0]
 
 
 def media_catalog() -> dict[str, list[dict]]:
@@ -208,12 +242,21 @@ def media_catalog() -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {"image": [], "video": []}
     for provider in MEDIA_MODEL_MATRIX:
         status = readiness.get(provider.id, {})
-        models = _media_studio_video_models(status) if provider.id == "media-studio-mcp" and provider.kind == "video" else provider.models
+        if provider.id == "media-studio-mcp" and provider.kind == "video":
+            models, registry_live = _media_studio_registry(status)
+        else:
+            models, registry_live = provider.models, True
         result[provider.kind].append({
             "id": provider.id,
             "label": provider.label,
             "available": bool(status.get("available")),
             "detail": str(status.get("detail") or ""),
+            # False when this row's model list could not be read live. Distinct
+            # from `available`: the provider can be down while the list is still
+            # the real one (remembered), and a list can be a stale guess while
+            # the probe passes. Only the flag tells a client its capability
+            # fields are trustworthy.
+            "registry_live": registry_live,
             "models": [{
                 **asdict(model),
                 "reference_roles": list(model.reference_roles),

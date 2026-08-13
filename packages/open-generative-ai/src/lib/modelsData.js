@@ -9994,6 +9994,69 @@ export const i2vModels = [
     },
     "provider": "bytedance",
     "provider_name": "ByteDance"
+  },
+  // Seedance 2.5 Omni Reference. Identity/style references rather than a first
+  // frame: the pictures steer who and what appears WITHOUT dictating the opening
+  // shot, which is what a "keep her face consistent for 30 seconds" prompt
+  // actually wants — with plain i2v the photo IS frame zero, so the clip has to
+  // begin wherever that photo was taken.
+  //
+  // Its own family token keeps it OFF the start-frame switch: attaching an image
+  // on the 2.5 t2v tier must land on the plain i2v model, not silently on this
+  // one. Pick it from the model list instead.
+  //
+  // Upstream also accepts videos_list (10) and audios_list (10); the studio's
+  // cloud image-to-video path only sends images, so only images are declared —
+  // a declared input the client never fills is a control that lies.
+  {
+    "id": "seedance-2.5-omni-reference",
+    "name": "Seedance 2.5 Omni Reference",
+    "endpoint": "seedance-2.5-omni-reference",
+    "family": "seedance-2.5-omni",
+    "imageField": "images_list",
+    "hasPrompt": true,
+    "maxImages": 8,
+    "inputs": {
+      "prompt": {
+        "type": "string",
+        "title": "Prompt",
+        "name": "prompt",
+        "description": "Text prompt describing the video, referencing the supplied images as subject, environment and mood cues."
+      },
+      "aspect_ratio": {
+        "type": "string",
+        "title": "Aspect Ratio",
+        "name": "aspect_ratio",
+        "description": "Aspect ratio of the output video.",
+        "enum": [
+          "16:9",
+          "9:16",
+          "1:1",
+          "4:3",
+          "3:4",
+          "21:9",
+          "9:21"
+        ],
+        "default": "16:9"
+      },
+      "duration": {
+        "type": "int",
+        "title": "Duration",
+        "name": "duration",
+        "description": "The duration of the generated video in seconds.",
+        "enum": [
+          5,
+          10,
+          15,
+          20,
+          25,
+          30
+        ],
+        "default": 5
+      }
+    },
+    "provider": "bytedance",
+    "provider_name": "ByteDance"
   }
 ];
 

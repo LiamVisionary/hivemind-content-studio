@@ -60,8 +60,18 @@ _REQUEST_TIMEOUT = 30
 # 8.3GB file, holding a billed box at 10/11 the whole time. Healthy R2 pulls run
 # 55-100 MB/s aggregate — 5-9 MB/s per file with a whole tier in flight — so
 # 1 MB/s sits well below "contended" and well above "dead".
-DOWNLOAD_MIN_BYTES_PER_SEC = 1_048_576
-DOWNLOAD_STALL_SECONDS = 60
+# A connection this slow for this long is stalled, not busy. It used to be
+# 1 MB/s, which is a THROUGHPUT expectation rather than a liveness check: a
+# healthy 5090 whose link was momentarily shared tripped it and the watchdog
+# destroyed the machine. Liveness is this floor; throughput is the deadline.
+DOWNLOAD_MIN_BYTES_PER_SEC = 131_072
+DOWNLOAD_STALL_SECONDS = 90
+# Weights are fetched with several ranged connections per file. One stream tops
+# out well below what the box can take — a 5090 measured 6 MB/s on a single
+# stream and 32 MB/s across five — and the largest file is the whole tail of
+# provisioning, so splitting IT is what shortens the wait.
+DOWNLOAD_CONNECTIONS = 8
+DOWNLOAD_SPLIT_MIN_BYTES = 512 * 1024 * 1024
 # Backstop for a stall the per-transfer floor cannot see, e.g. a connection that
 # hangs without dying or a retry loop that keeps resetting. The slowest healthy
 # provision observed is ~20 minutes (95GB video tier), so this only fires on a
@@ -139,6 +149,16 @@ _H3_KJNODES_COMMIT = "35e5956193769d18a13136cdedb73a36a05c73e6"
 # latent picture path. Patches apply on first node execution only, so plain H3
 # jobs on the same box are untouched.
 _H3_MOTION_CONTEXT_COMMIT = "c140ae99b8c38f782ebd8564c267b42aacade6a4"
+
+# Sol-Attn: NVlabs sparse attention as a Triton kernel, chained onto sage rather
+# than replacing it. Measured on a rented 5090 (5s @ 960x544, warm, one seed):
+# 34.3s against 38.6s for the Spectrum baseline, same take, detail equal or
+# better. It is the DEFAULT accelerator (tau 1.3) in every registered H3 graph,
+# which makes this node mandatory on an H3 lane rather than optional: without it
+# ComfyUI rejects the whole prompt, including runs that never wanted it. Pinned
+# because it is experimental and moves fast; same commit as the standalone
+# provisioning script in packages/gpu-rentals.
+_H3_SOLATTN_COMMIT = "842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc"
 
 # lane_needles: lowercase substrings matched by the media-gateway's
 # COMFY_LANE_RULES against graph class names + model file inputs — attach
@@ -868,8 +888,46 @@ def _onstart_script(tier: str) -> str:
         + str(total)
         + ",\"detail\":\"%s\",\"ts\":%s}' \"$1\" \"$2\" \"$3\" \"$(date +%s)\""
         " > /root/beacon/progress.json.tmp && mv /root/beacon/progress.json.tmp /root/beacon/progress.json; }",
+        # pget <url> <dest> — fetch one object over several ranged
+        # connections and reassemble it. Falls back to a single stream when the
+        # server will not do ranges or the file is small enough not to matter.
+        "pget() {",
+        '  u="$1"; d="$2"; one() { curl -sfL -C - --retry 8 --retry-delay 5'
+        f' --speed-limit {DOWNLOAD_MIN_BYTES_PER_SEC} --speed-time {DOWNLOAD_STALL_SECONDS}'
+        ' -o "$d.dl" "$u" && mv "$d.dl" "$d"; }',
+        "  len=$(curl -sfIL \"$u\" | tr -d '\\r' | awk 'tolower($1)==\"content-length:\"{n=$2} END{print n}')",
+        f'  case "$len" in (*[!0-9]*|"") one; return;; esac',
+        f'  [ "$len" -lt {DOWNLOAD_SPLIT_MIN_BYTES} ] && {{ one; return; }}',
+        f'  n={DOWNLOAD_CONNECTIONS}; chunk=$(( (len + n - 1) / n )); i=0',
+        '  rm -f "$d".part*',
+        '  while [ $i -lt $n ]; do',
+        '    s=$(( i * chunk )); e=$(( s + chunk - 1 )); [ $e -ge $len ] && e=$(( len - 1 ))',
+        '    curl -sfL -C - --retry 8 --retry-delay 5'
+        f' --speed-limit {DOWNLOAD_MIN_BYTES_PER_SEC} --speed-time {DOWNLOAD_STALL_SECONDS}'
+        ' -r "$s-$e" -o "$(printf \'%s.part%03d\' "$d" $i)" "$u" &',
+        '    i=$(( i + 1 ))',
+        '  done',
+        '  wait',
+        # Reassemble by INDEX, never by glob: `cat part.*` orders
+        # lexicographically and silently scrambles a file past nine chunks,
+        # producing bytes that still pass a size check.
+        '  i=0; : > "$d.dl"',
+        '  while [ $i -lt $n ]; do',
+        '    part=$(printf \'%s.part%03d\' "$d" $i)',
+        '    [ -s "$part" ] || { rm -f "$d".part* "$d.dl"; return 1; }',
+        '    cat "$part" >> "$d.dl" || { rm -f "$d".part* "$d.dl"; return 1; }',
+        '    i=$(( i + 1 ))',
+        '  done',
+        '  rm -f "$d".part*',
+        # wc -c rather than stat -c%s: the GNU flag is right for the container
+        # but makes this function untestable anywhere else.
+        '  [ "$(wc -c < "$d.dl" | tr -d " ")" = "$len" ] || { rm -f "$d.dl"; return 1; }',
+        '  mv "$d.dl" "$d"',
+        "}",
         'beacon booting 0 "Host accepted, preparing environment"',
-        f"(cd /root/beacon && nohup python3 -m http.server {BEACON_PORT} --bind 0.0.0.0 >/dev/null 2>&1 &)",
+        # setsid for the same reason as ComfyUI below: the beacon is how the boot
+        # reports itself, so it must outlive whatever signals onstart's group.
+        f"(cd /root/beacon && setsid nohup python3 -m http.server {BEACON_PORT} --bind 0.0.0.0 >/dev/null 2>&1 < /dev/null &)",
         'beacon installing 0 "Installing the ComfyUI stack"',
         "mkdir -p /workspace/ComfyUI",
         "rsync -a /opt/workspace-internal/ComfyUI/ /workspace/ComfyUI/",
@@ -920,6 +978,15 @@ def _onstart_script(tier: str) -> str:
             "git clone -q --depth 1 https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context "
             "/workspace/ComfyUI/custom_nodes/ComfyUI-H3-Motion-Context || true",
             f"pin /workspace/ComfyUI/custom_nodes/ComfyUI-H3-Motion-Context {_H3_MOTION_CONTEXT_COMMIT}",
+            # Sol-Attn, which every H3 graph carries at tau 1.3 BY DEFAULT since
+            # 2026-08-11 — so a box without it rejects every H3 job outright
+            # ("Node 'Sol-Attn (tau 0 = off)' not found", HTTP 400 from the
+            # prompt endpoint), not just the runs that asked for acceleration.
+            # It was pinned into the standalone provisioning script and never
+            # into this onstart, which is the one API-rented boxes actually run.
+            "git clone -q --depth 1 https://github.com/kijai/ComfyUI-SolAttn_triton "
+            "/workspace/ComfyUI/custom_nodes/ComfyUI-SolAttn_triton || true",
+            f"pin /workspace/ComfyUI/custom_nodes/ComfyUI-SolAttn_triton {_H3_SOLATTN_COMMIT}",
             "[ -f /workspace/ComfyUI/custom_nodes/comfyui-kjnodes/requirements.txt ] && "
             "/venv/main/bin/pip install -q -r /workspace/ComfyUI/custom_nodes/comfyui-kjnodes/requirements.txt",
             "/venv/main/bin/pip install -q sageattention",
@@ -935,10 +1002,7 @@ def _onstart_script(tier: str) -> str:
         # complete model (by the beacon counter, or by a rerun's [ -s ]).
         # -C - resumes the .dl partial across curl's own retries.
         lines.append(
-            f'[ -s "$M/{subdir}/{filename}" ] || {{ curl -sf -C - --retry 8 --retry-delay 5 '
-            f'--speed-limit {DOWNLOAD_MIN_BYTES_PER_SEC} --speed-time {DOWNLOAD_STALL_SECONDS} '
-            f'-o "$M/{subdir}/{filename}.dl" "{url}" '
-            f'&& mv "$M/{subdir}/{filename}.dl" "$M/{subdir}/{filename}"; }} &'
+            f'[ -s "$M/{subdir}/{filename}" ] || pget "{url}" "$M/{subdir}/{filename}" &'
         )
     # Public upstream weights (no presigning, no R2 round trip) pulled the same
     # atomic way and counted in the same beacon total.
@@ -946,10 +1010,7 @@ def _onstart_script(tier: str) -> str:
         files.append(f'"$M/{subdir}/{filename}"')
         lines.append(f'mkdir -p "$M/{subdir}"')
         lines.append(
-            f'[ -s "$M/{subdir}/{filename}" ] || {{ curl -sfL -C - --retry 8 --retry-delay 5 '
-            f'--speed-limit {DOWNLOAD_MIN_BYTES_PER_SEC} --speed-time {DOWNLOAD_STALL_SECONDS} '
-            f'-o "$M/{subdir}/{filename}.dl" "{url}" '
-            f'&& mv "$M/{subdir}/{filename}.dl" "$M/{subdir}/{filename}"; }} &'
+            f'[ -s "$M/{subdir}/{filename}" ] || pget "{url}" "$M/{subdir}/{filename}" &'
         )
     lines += [
         f"FILES=({' '.join(files)})",
@@ -985,8 +1046,16 @@ def _onstart_script(tier: str) -> str:
         "cd /workspace/ComfyUI",
         # Stock memory flags on purpose: --highvram OOMs the convrot loader
         # (tuning sweep 2026-07-31). Bound to localhost — reach it over SSH.
-        "nohup python main.py --disable-auto-launch --disable-metadata $EXTRA_ARGS "
-        "--port 18188 --listen 127.0.0.1 > /root/comfyui.log 2>&1 &",
+        #
+        # setsid, not bare nohup: nohup only blocks SIGHUP, so ComfyUI stayed in
+        # onstart's process group and a signal aimed at that group took it with
+        # it. Measured 2026-08-13 — the log stopped mid-run at "got prompt" with
+        # no traceback, 2 MiB of 32 GB VRAM in use, and a submitted job rendered
+        # nothing for twenty minutes. Its own session means only a signal aimed
+        # at ComfyUI can end it. stdin from /dev/null so it can never be stopped
+        # waiting on a terminal that is no longer there.
+        "setsid nohup python main.py --disable-auto-launch --disable-metadata $EXTRA_ARGS "
+        "--port 18188 --listen 127.0.0.1 > /root/comfyui.log 2>&1 < /dev/null &",
         "until curl -sf localhost:18188/system_stats >/dev/null; do sleep 2; done",
         # The privacy layer is a precondition, not a nice-to-have: if its scrub
         # route did not register, this box cannot delete customer media after a
@@ -1139,6 +1208,60 @@ def _ssh_endpoint(instance: dict) -> tuple[str, str] | None:
     return None
 
 
+# How long a managed box may sit in Vast's "loading" state with its container's
+# SSH port still closed before we call it wedged rather than slow. Measured
+# 2026-08-11: a healthy first-time rental opens that port within a few minutes
+# even when the image pull is cold; the box that burned an hour never opened it
+# at all while Vast reported the instance up the whole time.
+BOOT_STALL_SECONDS = int(os.environ.get("HIVEMIND_RENTAL_BOOT_STALL_SECONDS", "480"))
+
+
+def _container_ssh_open(endpoint: tuple[str, str] | None, timeout: float = 3.0) -> bool:
+    """Is the container's own sshd accepting yet?
+
+    This is the honest boot signal. Vast marks an instance running the moment
+    the HOST accepts the contract, which is long before the image is unpacked
+    and the container exists — so "the instance is up" says nothing about
+    whether anything of ours can start. The port answering does.
+    """
+    if not endpoint:
+        return False
+    host, port = endpoint
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def _boot_stall(instance: dict, endpoint: tuple[str, str] | None) -> dict | None:
+    """A provisioning record for a box whose container never came up.
+
+    Returns None while the box is merely booting - most are - and a terminal
+    record once it has had long enough and its SSH port is still shut. Without
+    this the studio shows "Booting host" forever: there is no beacon to report
+    a failure, because nothing that could write one was ever started, so the
+    operator waits on a hopeful progress step while the meter runs.
+    """
+    started = instance.get("start_date")
+    if not started:
+        return None
+    waited = time.time() - float(started)
+    if waited < BOOT_STALL_SECONDS:
+        return None
+    if _container_ssh_open(endpoint):
+        return None
+    return {
+        "step": "error",
+        "done": 0,
+        "total": None,
+        "detail": (
+            f"the host never started this container ({int(waited // 60)} min, SSH still closed). "
+            f"That is a bad host, not a slow one - destroy it and rent again."
+        ),
+    }
+
+
 def _instance_dto(instance: dict, probe: bool = False) -> dict:
     label = instance.get("label") or ""
     managed = label.startswith(STUDIO_LABEL_PREFIX)
@@ -1155,6 +1278,15 @@ def _instance_dto(instance: dict, probe: bool = False) -> dict:
         phase = "paused"
     elif actual in (None, "", "created", "loading"):
         phase = "booting"
+        # ...unless it has been "booting" long past the point where a container
+        # would exist. Escalating to "error" is what puts it in front of the
+        # operator and hands it to the reaper below, exactly like a beacon that
+        # reports a failure — the difference is only that this box never got
+        # far enough to have a beacon at all.
+        stall = _boot_stall(instance, endpoint) if (probe and managed) else None
+        if stall:
+            phase = "error"
+            provision = stall
     elif actual == "running" and managed:
         beacon_port = _mapped_port(instance, BEACON_PORT)
         beacon = _fetch_beacon(f"http://{ip}:{beacon_port}/progress.json") if (probe and ip and beacon_port) else None
@@ -1204,12 +1336,18 @@ def _instance_dto(instance: dict, probe: bool = False) -> dict:
         # the studios' machine picker writes this.
         "priority": (attachment or {}).get("priority", 0),
         "pending_reattach": bool(_read_paused_state().get(str(instance.get("id")), {}).get("pending_reattach")),
-        "tunnel_alive": bool(attachment and _tunnel_pid(instance.get("id"))),
+        # The forward, not the process: a live ssh with a dead forward reads as
+        # healthy to a pid check and hides the only fact that matters here.
+        "tunnel_alive": bool(attachment and _tunnel_carrying_traffic(instance.get("id"))),
         "models_served": (attachment or {}).get("needles")
         or TIERS.get(_tier_from_label(label), {}).get("lane_needles", []),
         "studio_pages": (attachment or {}).get("studio_pages")
         or TIERS.get(_tier_from_label(label), {}).get("studio_pages", []),
         "gpu": instance.get("gpu_name"),
+        # The physical host, not the rental. A rental is gone once destroyed;
+        # the machine that wedged it is still in the market tomorrow, so this
+        # is what a failure has to be remembered against.
+        "machine_id": instance.get("machine_id"),
         "usd_per_hour": round(float(instance.get("dph_total") or 0), 4),
         # What a paused box costs: Vast keeps billing the disk only.
         "paused_usd_per_hour": round(float(instance.get("storage_total_cost") or 0), 4),
@@ -1258,11 +1396,17 @@ def _search_offers(tier: str, prefer: str = "balanced", gpu_class: str | None = 
 
 def _rank_offers(tier: str, offers: list[dict], limit: int = 8) -> list[dict]:
     download_gb = tier_download_gb(tier)
+    bad_machines = recent_bad_machine_ids()
     dtos = []
     for offer in offers:
         # Drop half-power SKUs before price ranking, which would otherwise
         # prefer them precisely because they are cheap. See _underpowered.
         if _underpowered(offer):
+            continue
+        # And drop hosts that already failed us today. Cheapest-first ranking
+        # otherwise walks straight back onto the machine that just wasted an
+        # hour, because nothing about its listing changed when it wedged.
+        if offer.get("machine_id") in bad_machines:
             continue
         dto = _offer_dto(offer)
         down = float(offer.get("inet_down") or 0)
@@ -1658,6 +1802,48 @@ def _tunnel_pid(rental_id: int) -> int | None:
         return None
 
 
+def _lane_answers(port: int, timeout: float = 1.5) -> bool:
+    """Does something on the far end ANSWER on this lane?
+
+    Deliberately a real HTTP request rather than a TCP connect. OpenSSH accepts
+    the local connection BEFORE it opens the channel to the far end, so
+    connect() succeeds against a forward whose remote service is dead and the
+    connection is reset a moment later. Measured on a live lane 2026-08-13:
+    connect() SUCCEEDED while the same port answered curl with http_code=000.
+    """
+    try:
+        response = requests.get(
+            f"http://127.0.0.1:{int(port)}/system_stats", timeout=timeout
+        )
+        return response.ok
+    except Exception:
+        return False
+
+
+def _tunnel_carrying_traffic(rental_id: int, timeout: float = 1.5) -> bool:
+    """Is the lane actually usable, not merely the ssh process alive?
+
+    Three layers of this have now been wrong, each one a smaller version of the
+    same mistake — checking a proxy for reachability instead of reachability:
+
+      1. a pid check called the tunnel healthy while its forward had been torn
+         down by the far end (2026-08-11);
+      2. a TCP connect to the local port passed for a forward whose remote
+         service was dead, because ssh accepts before it dials (2026-08-13);
+      3. so the probe is now a request the far end has to answer.
+
+    What layer 2 cost: ComfyUI on a rental was killed mid-session, and every
+    reading stayed green — live ssh pid, accepting local port, `tunnel_alive`
+    true — while a submitted job sat rendering nothing. Nobody found out until
+    a person asked why there was no clip.
+    """
+    attachment = _read_attachments().get(str(rental_id)) or {}
+    port = attachment.get("local_port")
+    if not port:
+        return False
+    return _lane_answers(int(port), timeout=timeout)
+
+
 def _spawn_tunnel(rental_id: int, ip: str, ssh_port: str, local_port: int) -> int:
     if not RENTAL_SSH_KEY.exists():
         raise GpuRentalError(f"rental SSH key missing at {RENTAL_SSH_KEY}", status_code=503)
@@ -1686,8 +1872,16 @@ def _await_tunnel(rental_id: int, proc: subprocess.Popen, local_port: int, timeo
     happened for real (Vast's proxy refused an account key it had accepted an
     hour earlier on another host), and the studio reported the machine attached
     while every generation had nowhere to go. Wait for the forward, and hand
-    back ssh's own last words when it dies."""
+    back ssh's own last words when it dies.
+
+    Waits for a real ANSWER, not an accepted socket: ssh accepts before it dials
+    the far end, so a TCP check here would call the attach a success against a
+    box whose ComfyUI is dead — and the studio would list the machine ready
+    while every generation had nowhere to land. The two failures get different
+    sentences because they need different fixes: a forward that never opened is
+    an SSH problem, a forward that opened onto silence is a machine problem."""
     deadline = time.monotonic() + timeout
+    forward_opened = False
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             reason = _tunnel_failure_reason(rental_id)
@@ -1695,11 +1889,20 @@ def _await_tunnel(rental_id: int, proc: subprocess.Popen, local_port: int, timeo
             raise GpuRentalError(
                 f"SSH tunnel to the machine failed: {reason}", status_code=502
             )
+        if _lane_answers(local_port, timeout=1.0):
+            return
         with contextlib.suppress(OSError):
             with socket.create_connection(("127.0.0.1", local_port), timeout=1):
-                return
+                forward_opened = True
         time.sleep(0.5)
     _kill_tunnel(rental_id)
+    if forward_opened:
+        raise GpuRentalError(
+            f"The SSH tunnel opened but the machine's ComfyUI did not answer within "
+            f"{int(timeout)}s — the box is up and the forward is fine, but nothing is "
+            "serving on it. Check /root/comfyui.log on the machine.",
+            status_code=502,
+        )
     raise GpuRentalError(
         f"SSH tunnel to the machine did not come up within {int(timeout)}s "
         f"({_tunnel_failure_reason(rental_id)})",
@@ -1929,6 +2132,8 @@ def reap_failed_rentals(instances: list[dict]) -> list[dict]:
             "tier": dto.get("tier"),
             "gpu_class": dto.get("gpu_class"),
             "gpu": dto.get("gpu"),
+            # Remembered so the next search does not hand back the same host.
+            "machine_id": dto.get("machine_id"),
             # The beacon's own words — the only account of what went wrong that
             # outlives the machine.
             "reason": provision.get("detail") or "provisioning failed",
@@ -1959,6 +2164,60 @@ def recent_rental_failures(within_seconds: float = 6 * 3600) -> list[dict]:
     """Failures still worth showing — the machine they describe is gone."""
     cutoff = time.time() - within_seconds
     return [e for e in _read_failure_state()["log"] if (e.get("destroyed_at") or 0) >= cutoff]
+
+
+# How long a host that just failed us stays out of the running. Long enough to
+# get through a session without meeting it twice; short enough that a host with
+# one bad day is not blacklisted forever.
+BAD_MACHINE_COOLDOWN_SECONDS = int(os.environ.get("HIVEMIND_RENTAL_BAD_MACHINE_HOURS", "24")) * 3600
+
+
+def _shared_bad_machine_ids() -> set[int]:
+    """Machines that failed the HOSTED renter, which rents from this same Vast
+    account. Empty unless HIVEMIND_GPU_RENTALS_GATEWAY_URL is configured.
+
+    Fails open on purpose: a blocklist is an optimisation, and a gateway that
+    is slow or down must never be the reason a machine cannot be rented.
+    """
+    base = os.environ.get("HIVEMIND_GPU_RENTALS_GATEWAY_URL", "").strip().rstrip("/")
+    if not base:
+        return set()
+    shared: set[int] = set()
+    try:
+        response = requests.get(
+            f"{base}/v1/bad-machines", headers={"Accept": "application/json"}, timeout=2,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        for entry in payload.get("machines") or []:
+            for key in ("machineId", "hostId"):
+                with contextlib.suppress(TypeError, ValueError):
+                    if entry.get(key) is not None:
+                        shared.add(int(entry[key]))
+    except Exception:
+        return set()
+    return shared
+
+
+def recent_bad_machine_ids(within_seconds: float = BAD_MACHINE_COOLDOWN_SECONDS) -> set[int]:
+    """Hosts that failed recently, by physical machine.
+
+    Every offer we rank passes Vast's own reliability filter (reliability2 >
+    0.99), and the host that never started a container had passed it too — so
+    the market's score cannot be the only guard. Experience of a host is the
+    evidence it does not have — ours locally, and the hosted gateway's, which
+    rents from the same account and meets the same hardware.
+    """
+    cutoff = time.time() - within_seconds
+    bad: set[int] = set()
+    for entry in _read_failure_state()["log"]:
+        if (entry.get("destroyed_at") or 0) < cutoff:
+            continue
+        machine_id = entry.get("machine_id")
+        if machine_id is not None:
+            with contextlib.suppress(TypeError, ValueError):
+                bad.add(int(machine_id))
+    return bad | _shared_bad_machine_ids()
 
 
 def pause_rental(rental_id: int) -> dict:

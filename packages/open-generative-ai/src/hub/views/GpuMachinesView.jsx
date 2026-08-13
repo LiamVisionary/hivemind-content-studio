@@ -769,7 +769,16 @@ export function GpuMachinesView({ active }) {
               </div>
             ))}
             <small className="text-[11px] text-ink3">
-              Usually a bad host rather than a bad tier — renting again normally lands on a different machine.
+              {/* Two different failures used to share one verdict. A host that
+                  never starts its container IS a bad host. A download that
+                  stalls often is not — it can be a transient dip, or the link
+                  being shared — and telling someone to blame the host sends
+                  them re-renting instead of retrying. */}
+              {failures.every((failure) => /never started/i.test(failure.reason || ''))
+                ? 'The host never started its container, so this is the machine rather than the tier — renting again normally lands on a different one.'
+                : failures.every((failure) => /download/i.test(failure.reason || ''))
+                  ? 'A weight download stalled. That is often the machine, but a shared or briefly slow link does it too, so the same tier is usually still worth retrying.'
+                  : 'Often the machine rather than the tier — renting again normally lands on a different one.'}
             </small>
           </Card>
         )}

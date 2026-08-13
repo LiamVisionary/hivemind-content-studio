@@ -20,6 +20,12 @@ from PIL import Image
 from .config import load_config
 from .mcp_http import PROTOCOL_VERSION, McpHttpClient
 from .publishing import encode_multipart
+
+# How long to wait for the MCP to hand back a queued video job. Sized against
+# the two slow stretches inside that call - staging references on the target
+# lane, then ComfyUI accepting the prompt once its executor frees up - and kept
+# under the 190s Hivemind Link proxy leg so a phone gets the answer too.
+_VIDEO_START_TIMEOUT_SECONDS = 180.0
 from .qa import qa_video
 
 
@@ -367,6 +373,15 @@ def start_video(
             client.call_tool(
                 descriptor.tool,
                 arguments,
+                # Queueing is not instant and giving up does not cancel it: the
+                # references are staged on the target lane inside this call, and
+                # ComfyUI only answers once its executor is free, so a submit
+                # behind a running render routinely passed the old 30s default.
+                # The studio then reported "timed out" for a job that went on to
+                # render with nobody holding its id. The MCP recovers the id
+                # itself now; this waits long enough to be told about it, while
+                # staying inside the 190s Hivemind Link proxy leg.
+                timeout=_VIDEO_START_TIMEOUT_SECONDS,
             )
         )
         job_id = _job_id(queued)

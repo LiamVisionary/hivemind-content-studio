@@ -47,9 +47,13 @@ class McpHttpClient:
             raise McpError("MCP tools/list returned an invalid tools field")
         return tools
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def call_tool(self, name: str, arguments: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+        """Call an MCP tool. `timeout` raises the default for tools that queue
+        work rather than answer from memory - a video submit stages its
+        references on the target lane inside the call, so 30s is not a
+        meaningful ceiling for it."""
         self.initialize()
-        timeout = 30.0
+        timeout = 30.0 if timeout is None else max(30.0, float(timeout))
         if arguments.get("wait") and arguments.get("timeout_s") is not None:
             try:
                 timeout = max(timeout, float(arguments["timeout_s"]) + 30.0)

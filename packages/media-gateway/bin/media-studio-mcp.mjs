@@ -793,6 +793,16 @@ function extensionForAudioMime(mime) {
     'audio/mp4': '.m4a',
     'audio/x-m4a': '.m4a',
     'audio/aac': '.aac',
+    // What real recorders label AAC-in-MP4. Kept in step with
+    // control_api._INLINE_AUDIO_SUFFIXES, which is the gate that hard-fails.
+    'audio/mp4a-latm': '.m4a',
+    'audio/aacp': '.aac',
+    'audio/x-hx-aac-adts': '.aac',
+    'audio/webm': '.webm',
+    'audio/opus': '.opus',
+    'audio/3gpp': '.3gp',
+    'audio/amr': '.amr',
+    'audio/x-caf': '.caf',
   }[normalized] || '';
 }
 
@@ -916,12 +926,37 @@ function stagedMediaDuration(name) {
   return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
+// The reference-frame budget MiniMaxH3ReferenceToVideo actually works to.
+//
+// Its adapt_canvas() puts every reference video on a 768-short-edge canvas
+// capped at 768*1344 pixels, rounds each axis to 32 — and never upscales. Both
+// directions of missing that budget cost something:
+//
+//   too big   the node downscales what we sent, so the lane decoded, encoded
+//             and shipped pixels that were thrown away
+//   too small the node keeps OUR frames rather than upscaling to its canvas,
+//             so the reference is permanently coarser than the model would
+//             have used
+//
+// So the cap is the node's own area cap, not a round number. The previous rule
+// (`scale=w=min(iw,1280)`) capped WIDTH, which its own comment called a long
+// edge: it fired on landscape 4K and did nothing at all for portrait phone
+// footage, where 1080 is already under 1280 — the common case now.
+const REF_VIDEO_MAX_PIXELS = 768 * 1344;
+
 // MiniMaxH3ReferenceToVideo reads a reference video's frames AS 24 fps — it
 // never asks how fast they were shot — so a 30 fps download would play back
 // 25% slow and drag every gesture with it. Re-encode to a true 24 fps, hold the
-// model card's 15s ceiling, and cap the long edge so a 4K source doesn't make
-// the lane decode frames it will only downscale again. Audio is kept only when
-// the caller wants the clip's own soundtrack conditioned in.
+// model card's 15s ceiling, and land inside the reference-frame budget above.
+// Audio is kept only when the caller wants the clip's own soundtrack in.
+// Aspect-preserving downscale into REF_VIDEO_MAX_PIXELS, never an upscale, both
+// axes even (yuv420p needs it). Written as an ffmpeg expression rather than
+// probed dimensions so one filter is right for portrait, landscape and square.
+function referenceVideoScaleFilter() {
+  const s = `min(1\\,sqrt(${REF_VIDEO_MAX_PIXELS}/(iw*ih)))`;
+  return `scale=w=trunc(iw*${s}/2)*2:h=trunc(ih*${s}/2)*2`;
+}
+
 function normalizeReferenceVideo(stagedName, { keepAudio = false, maxSeconds = 15 } = {}) {
   const source = resolve(comfyInputDir, stagedName);
   const duration = stagedMediaDuration(stagedName);
@@ -936,7 +971,7 @@ function normalizeReferenceVideo(stagedName, { keepAudio = false, maxSeconds = 1
     '-y', '-hide_banner', '-loglevel', 'error',
     '-i', source,
     '-t', String(maxSeconds),
-    '-vf', 'fps=24,scale=w=min(iw\\,1280):h=-2',
+    '-vf', `fps=24,${referenceVideoScaleFilter()}`,
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
     ...(keepAudio ? ['-c:a', 'aac', '-b:a', '128k'] : ['-an']),
     join(comfyInputDir, outputName),
@@ -2922,9 +2957,65 @@ async function requestJson(path, { method = 'GET', body, query, timeoutMs = 6000
     const err = new Error(message);
     err.status = response.status;
     err.response = data;
+    // Operational failures describe the MACHINE, not the work: an unreachable
+    // lane, a dropped tunnel, a rental that no longer exists. They carry no
+    // prompt or media content, so they survive machine-private redaction —
+    // otherwise every one of them reaches the studio as a bare timeout and the
+    // one thing the user could act on is the thing that gets stripped.
+    err.machineSafe = Boolean(data?.operational);
     throw err;
   }
   return data;
+}
+
+// Submitting a video is not a quick POST, and a caller that gives up does NOT
+// stop it. Two slow stretches live inside this one request: a reference job's
+// inputs are staged on the remote lane first (measured ~1 MB/s over the rental
+// tunnel, so a motion clip plus nine pictures is 15-25s), and then ComfyUI only
+// answers /prompt once its executor is free — behind a running 8-minute render
+// that alone can take most of a minute. At the old 60s cap the abort landed
+// mid-flight while the gateway went on to queue the prompt, record its lane and
+// start the harvest watcher: a real render nobody was holding the id for.
+//
+// So the timeout is sized to the work, and an abort is no longer terminal —
+// the gateway files each submission under the client_id we minted for it, and
+// we ask for that id back rather than abandoning a job that is already running.
+const VIDEO_SUBMIT_TIMEOUT_MS = 150000;
+const SUBMIT_RECONCILE_WINDOW_MS = 30000;
+const SUBMIT_RECONCILE_INTERVAL_MS = 2000;
+
+const sleepMs = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+async function adoptSubmittedPrompt(clientId) {
+  const deadline = Date.now() + SUBMIT_RECONCILE_WINDOW_MS;
+  for (;;) {
+    try {
+      const found = await requestJson(`/api/comfy/prompt-by-client/${encodeURIComponent(clientId)}`, { timeoutMs: 15000 });
+      if (found?.prompt_id) return found;
+    } catch {
+      // A 404 is the normal answer until Comfy accepts the prompt: the route is
+      // recorded from the submit response, so it appears only once it exists.
+    }
+    if (Date.now() >= deadline) return null;
+    await sleepMs(SUBMIT_RECONCILE_INTERVAL_MS);
+  }
+}
+
+async function submitVideoPrompt(body) {
+  try {
+    return await requestJson('/comfy/api/prompt', { method: 'POST', body, timeoutMs: VIDEO_SUBMIT_TIMEOUT_MS });
+  } catch (error) {
+    const clientId = body?.client_id;
+    if (!clientId) throw error;
+    const adopted = await adoptSubmittedPrompt(clientId);
+    // Nothing queued under our id: the submit really did fail, so report it.
+    if (!adopted) throw error;
+    console.error(
+      `[media-studio-mcp] lost the submit response (${error?.message || error}); `
+      + `adopted prompt ${adopted.prompt_id} already queued on lane ${adopted.lane}`,
+    );
+    return { prompt_id: adopted.prompt_id, status: 'queued', adopted: true };
+  }
 }
 
 function ok(data) {
@@ -2988,6 +3079,10 @@ function machineFailureReceipt(error) {
     privacy: 'machine-redacted',
     status: error?.status,
     error_type: 'MediaStudioError',
+    // A machine-safe reason is about the infrastructure, never the job: it is
+    // the difference between "MediaStudioError" and "the machine behind this
+    // lane is not answering — re-attach it". Everything else stays redacted.
+    ...(error?.machineSafe && error?.message ? { error: String(error.message) } : {}),
     prompts_redacted: true,
     media_redacted: true,
   };
@@ -3265,8 +3360,8 @@ function buildServer() {
       image_path: z.string().optional().describe('Existing local image path or Comfy input filename for edit backends.'),
       image_base64: z.string().optional().describe('Inline source image as raw base64 or data:image/...;base64,... data URL. Wins over image_path.'),
       image_url: z.string().optional().describe('Optional HTTP(S) source image fetched by Media Studio. Ignored when image_base64 is supplied.'),
-      image_paths: z.array(z.string()).max(3).optional().describe('Additional reference images as local paths or Comfy input filenames for multi-reference edit backends (BigLove Klein conditions on up to 3 references total, e.g. for character sheets).'),
-      images_base64: z.array(z.string()).max(3).optional().describe('Additional inline reference images (raw base64 or data URLs) for multi-reference edit backends. Combined with image_path/image_base64, the first 3 unique references are used.'),
+      image_paths: z.array(z.string()).max(4).optional().describe('Additional reference images as local paths or Comfy input filenames for multi-reference edit backends (BigLove Klein conditions on up to 4 references total, e.g. for character sheets).'),
+      images_base64: z.array(z.string()).max(4).optional().describe('Additional inline reference images (raw base64 or data URLs) for multi-reference edit backends. Combined with image_path/image_base64, the first 4 unique references are used.'),
       loras: z.array(z.object({
         id: z.string(),
         strength: z.number().optional(),
@@ -3413,11 +3508,7 @@ function buildServer() {
   }, tool(async (args) => {
     const includeUrls = machinePrivate ? false : args.include_urls;
     const { spec, workflow, settings, body } = await buildVideoPromptBody(args);
-    const submission = await requestJson('/comfy/api/prompt', {
-      method: 'POST',
-      body,
-      timeoutMs: 60000,
-    });
+    const submission = await submitVideoPrompt(body);
     const promptId = submission.prompt_id || submission.id;
     if (!promptId) {
       throw new Error(`LTX Eros workflow did not return a prompt id: ${JSON.stringify(submission)}`);

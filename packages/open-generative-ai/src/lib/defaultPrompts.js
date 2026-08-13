@@ -143,6 +143,88 @@ const KOREAN_HOME_VIDEO_LTX_A = `Handheld early-2000s DV camcorder footage, fade
 
 const KOREAN_HOME_VIDEO_LTX_B = `Handheld early-2000s DV camcorder footage continuing without a cut, faded colour and soft contrast with visible sensor noise, autofocus hunting and exposure pumping. The same Korean woman in her early twenties — messy black side ponytail with wispy bangs, faded charcoal-grey sleeveless crop top, loose light-wash jeans, black canvas sneakers — crouches in the narrow alley as a stray tabby cat walks up to her, strokes its back and sets a small piece of food on the concrete, the focus shifting imperfectly between her face and the animal. She stands and moves into a small front yard, where she pegs a damp shirt onto a clothesline, the fabric swinging in the breeze as a cloud crosses the sun and the exposure dips and recovers. The camera reframes late, clipping the top of her head for a moment.`;
 
+// Verbatim from Liam's Seedance 2.5 travel-vlog prompt (2026-08-11). Kept as
+// written, including the "No cinematic commercial aesthetic / No face changes"
+// block: Seedance takes prohibitions in the prompt, unlike H3 where "no X" is
+// documented not to work. Prompt style is not portable between models, so the
+// H3 rule is deliberately NOT applied here.
+//
+// It is reference-driven ("the woman from the reference image"), which means it
+// runs on an image tier, not plain text-to-video — see the entry note for the
+// two ways to supply her.
+const TRAVEL_VLOG_SEEDANCE_25 = `An ultra-realistic handheld travel vlog filmed by a friend following the main character throughout the day. Use the woman from the reference image as the main subject. Maintain her exact facial identity, hairstyle, facial features, and body proportions consistently throughout the entire video.
+
+The camera should feel like a genuine personal vlog camera rather than a commercial production. Use natural handheld movement, casual framing, subtle imperfections in human camera operation, and an authentic everyday atmosphere. Avoid scripted acting. The woman behaves naturally, interacting with her surroundings as she would in a real travel vlog.
+
+0–5s: Morning departure. The woman leaves a cozy apartment carrying a small backpack. She checks her phone, smiles toward the camera, adjusts her hair, and begins walking outside. The camera follows her from behind with slight natural shakiness, as if a friend is casually filming her. Morning sunlight fills the scene, with quiet neighborhood streets and people beginning their day.
+
+5–12s: Exploring the city. The camera follows her through local streets. She visits a small café, buys a drink, briefly talks to the camera, and laughs naturally. She continues through a street market, looks around at small shops, and takes casual photos. The camera remains close to her, capturing spontaneous everyday moments.
+
+12–20s: Arriving at the beach. She takes public transportation or walks toward the coast. The environment gradually transitions from busy city streets into a peaceful seaside town. The ocean breeze naturally moves her hair. She becomes visibly excited when she sees the ocean for the first time. The camera follows her along the beach as she picks up a seashell, watches the waves, and naturally interacts with people nearby.
+
+20–27s: Summer beach afternoon. She meets friends at the beach. Everyone chats, laughs, and plays casually near the water. The camera naturally moves between the group, capturing genuine candid moments rather than staged performances. She eventually looks back toward the camera and smiles naturally.
+
+27–30s: Ending moment. Golden-hour sunset. She sits near the ocean holding a drink while quietly watching the sunset. The camera slowly moves backward, gradually revealing the beach, waves, and peaceful evening atmosphere. The final moment should feel like a genuine personal travel memory captured spontaneously.
+
+Visual style: Ultra-realistic authentic travel-vlog footage. Ultra-realistic smartphone or mirrorless-camera appearance. Natural daylight and believable environmental lighting. Casual handheld movement with subtle camera shake and imperfect human operation. Genuine human reactions and spontaneous interactions. Documentary-level realism with highly detailed skin, hair, clothing, environments, and natural textures.
+
+No cinematic commercial aesthetic. No dramatic posing. No artificial transitions. No text overlays. No logos. No face changes. No identity changes.
+
+The entire 30-second generation should feel like one continuous, coherent day captured by a real friend-not a collection of disconnected AI-generated scenes.`;
+
+// The same travel vlog for H3, which holds a scene for ~15s — so 30 seconds is
+// two chained clips. Written in REFERENCE format rather than the three-field
+// one, because the Seedance original gets its subject from a photograph and
+// text alone will not hold one face across two separate generations: the same
+// pictures stay attached for both parts and anchor her in each.
+//
+// Chaining and references compose — an armed motion context and attached
+// references are both accepted on the same request (videoTasks.videoRequestPlan)
+// — so part 2 keeps the pictures AND pins part 1's tail. Part 2 therefore obeys
+// the chain rules on top of the reference format: it re-describes the whole
+// scene, opens on a hold with no dialogue, and starts its first real beat at 1s,
+// because the opening ~0.9s is part 1's carried-over tail.
+const TRAVEL_VLOG_H3_SUBJECT = `<Subject 1> is the young woman shown in <Picture 1>: [DESCRIBE HER FROM YOUR OWN PICTURE — face, skin, hair colour and style, build, and the clothes she wears for the day]. She is the only person the camera follows, and her face, hair, build and outfit stay exactly the same in every shot.
+<Picture 1> is a photograph of her used as the identity source only. Its background, framing and pose are not reproduced; the clip opens on its own action somewhere else.`;
+
+const TRAVEL_VLOG_H3_A = `subject_definitions:
+${TRAVEL_VLOG_H3_SUBJECT}
+
+summary:
+A handheld personal travel vlog filmed by a friend walking with her: <Subject 1> leaves her apartment in the morning, walks through the city, stops for a coffee and drifts through a street market, in one continuous fifteen-second stretch. <Picture 1> drives who she is; every place and action is new.
+
+retention_analysis:
+<Subject 1>: fully_preserved — her face, hair, build and outfit stay exactly as the picture shows them, in every shot and at every distance.
+<Picture 1>: attribute_transfer — used as the identity source only, with its own background, framing and pose left behind.
+
+detailed_description:
+Ultra-realistic handheld travel-vlog footage, shot by a friend on a phone or a small mirrorless camera: natural daylight, believable everyday exposure, casual framing that sits slightly off-centre, subtle camera shake and the small imperfections of a person operating a camera while walking. No cinematic grading, no dramatic posing, no artificial transitions. [Shot 1] Morning. <Subject 1> steps out of a cosy apartment doorway with a small backpack over one shoulder, glances down at her phone, looks up and smiles toward the camera, tucks her hair back and starts walking down the quiet residential street; the camera follows a step or two behind her, drifting and correcting as the operator walks, with low morning sun across the pavement and a few neighbours beginning their day in the background. [Shot 2] At 00:05.000, the camera follows her along a narrow city street and into a small café, where she orders and takes a paper cup with both hands, turns back toward the lens and laughs at something the person filming says. (S1) says: <d>[English] okay — coffee first, then I swear we're actually going.</d> The camera stays close and hand-held, dipping slightly as the operator laughs. [Shot 3] At 00:10.000, she moves through a street market, glancing over stalls of fruit and small goods, lifting her phone to take a casual photo of something off to the side, then turning to walk on with the cup still in her hand; the camera swings a little late to keep her in frame and the clip ends with her mid-stride, still walking.
+
+overall_soundscape:
+Ordinary morning street tone — distant traffic, birds, a scooter passing, the clatter and chatter of a café, an espresso machine, market voices and footsteps on pavement. Close handling noise from the camera and the operator's breathing as they walk. Her laugh, and the small ambient movement of a city getting going.
+
+non_diegetic_music:
+N/A`;
+
+const TRAVEL_VLOG_H3_B = `subject_definitions:
+${TRAVEL_VLOG_H3_SUBJECT}
+
+summary:
+The same handheld travel vlog continuing without a cut: <Subject 1> reaches the coast, sees the ocean, meets friends on the beach and ends the day sitting by the water at sunset, in one continuous fifteen-second stretch. <Picture 1> drives who she is; the day carries on from where the previous clip stopped.
+
+retention_analysis:
+<Subject 1>: fully_preserved — the same face, hair, build and outfit as the previous clip and as the picture, unchanged by the new location and light.
+<Picture 1>: attribute_transfer — still the identity source only; its background, framing and pose are not reproduced.
+
+detailed_description:
+Ultra-realistic handheld travel-vlog footage continuing from the previous clip with no cut, filmed by the same friend on the same phone or small mirrorless camera: natural daylight, casual off-centre framing, subtle shake and the imperfections of walking while filming. No cinematic grading, no dramatic posing, no artificial transitions. [Shot 1] The held framing from the end of the previous clip: <Subject 1> mid-stride with her cup, the camera a step behind her, nothing yet changing — she breathes, shifts the backpack strap on her shoulder and a strand of hair moves across her face. Nobody speaks. [Shot 2] At 00:01.000, the street opens out and the city gives way to a quiet seaside town; she walks toward the water with the sea breeze pulling at her hair, and her face lifts into real surprise and delight the moment the ocean comes into view. (S1) says: <d>[English] oh my god — look at it.</d> She crouches on the sand, picks up a seashell, turns it over and watches the waves come in, the camera following loose and low behind her. [Shot 3] At 00:06.000, she reaches a group of friends on the beach; they talk over each other and laugh, someone kicks water at someone else, and the camera moves naturally between them rather than settling on anyone, catching half-finished gestures and people walking through frame. She glances back at the lens and smiles. [Shot 4] At 00:11.000, golden hour: she sits near the water holding a drink, watching the sun go down with the wind still moving her hair, and the camera drifts slowly backward to reveal the beach, the waves and the evening light before the clip ends on that wide, quiet frame.
+
+overall_soundscape:
+Coast tone taking over from the town — waves breaking and drawing back, wind across the microphone, gulls, distant voices along the beach and the crunch of sand underfoot. Her friends' overlapping talk and laughter, her own breathing and laugh, the camera handling close to the mic, and the wind settling into a calmer evening as the shot pulls back.
+
+non_diegetic_music:
+N/A`;
+
 // ── Screen reaction (H3 REFERENCE mode) ─────────────────────────────────────
 // A different H3 format from the three-field one above: reference mode was
 // trained on six sections, and it is reached by ATTACHING references to the
@@ -220,6 +302,55 @@ const KOREAN_HOME_VIDEO_LTX_C = `Handheld early-2000s DV camcorder footage conti
  * the scene split at that model's own length ceiling — one entry for a model
  * that can render the whole thing in a single generation.
  */
+// Two fighters in one 8s take: one from YOUR reference pictures and voice clip,
+// one a character H3 already knows. Compiled by lib/castPrompt.js — the same
+// module the studio's Cast control runs — so the starter is literally what that
+// button produces, rather than a hand-copy that drifts away from it.
+//
+// Every rule visible here was bought with a failed take (2026-08-12/13):
+// the subject who owns <Audio 1> speaks FIRST so <Subject 1> is also S1
+// (crossing those swapped the fighters' lines); each punch says its fist
+// REBOUNDS (an un-retracted arm followed the opponent around); the reaction is
+// on the frame of contact (a taunt in the gap read as a pause); the cartoon's
+// face and voice are both described AND told what they must not be (it grinned
+// through a punch, then spoke as an older man); and every character noise is
+// in a beat rather than the soundscape, where nothing carries a speaker id.
+const FIGHT_TWO_HANDED_H3 = `subject_definitions:
+<Subject 1> is the character shown in <Picture 1>, <Picture 2>, <Picture 3>: [DESCRIBE THE PERSON IN YOUR REFERENCE PICTURES — hair, build, wardrobe, footwear].
+<Subject 1> is rendered as photoreal live-action, real human skin texture and hair, shot on camera — not illustrated, not stylised.
+<Subject 1> speaks as S1.
+<Audio 1> is the voice-timbre reference for <Subject 1> (S1). It is not the voice of any other subject in this clip.
+<Subject 2> is SpongeBob SquarePants from the animated series SpongeBob SquarePants (1999).
+<Subject 2> is rendered as 3D CGI character animation with soft subsurface shading and cinematic lighting — semi-realistic and physically present in the scene, NOT flat 2D animation and NOT pixel art.
+<Subject 2> speaks as S2, in SpongeBob SquarePants' voice from SpongeBob SquarePants as voiced by Tom Kenny.
+<Subject 2>'s voice is high-pitched, nasal, squeaky and childlike, with a bright excitable delivery — never deep, gravelly or adult-sounding.
+
+summary:
+[audio reference] Live-action photoreal footage of a one-on-one fight between <Subject 1> and <Subject 2>, filmed side-on with a single locked camera, both fighters head to toe and filling the frame height throughout.
+
+retention_analysis:
+<Subject 1>: fully_preserved — the same face, hair, build and wardrobe in every shot and at every distance.
+<Picture 1>: fully_preserved — <Subject 1>'s face, hair and wardrobe carry into the clip.
+<Picture 2>: fully_preserved — <Subject 1>'s face, hair and wardrobe carry into the clip.
+<Picture 3>: fully_preserved — <Subject 1>'s face, hair and wardrobe carry into the clip.
+<Audio 1>: reference — only the timbre carries. Its words do NOT carry.
+
+detailed_description:
+The entire clip is one continuous live-action photoreal take with no cuts and no camera move: a single locked side-on camera at hip height, as if filming a fight from the sidelines. The location is a real neon-lit back street at night, wet asphalt underfoot, brick wall behind, signage glow reflecting in the puddles. The image is photographic throughout — real depth of field, real motion blur on fast limbs, real skin texture, real fabric movement. Both fighters stay in full view from head to toe for every frame; at no point does the framing crop above the knee.
+[Shot 1] <Subject 1> stands on the left in profile in a boxing stance, weight forward on the balls of <Subject 1>'s feet, both fists raised. <Subject 2> stands facing <Subject 1> on the right in profile, guard up, knees bent. Both fighters are in full view from head to toe, their shoes flat on the wet asphalt, filling the frame from top to bottom with only a hand of headroom. Neither speaks.
+At 00:00.800, <Subject 1> drives off the back foot and throws a fast straight right. The punch CONNECTS for a single frame only: <Subject 1>'s fist strikes <Subject 2>, and in the SAME instant it rebounds off <Subject 2> and snaps all the way back to guard. The fist does not stay on <Subject 2>, does not press into <Subject 2> and does not travel with <Subject 2> — the contact is one sharp blow and the hand is immediately gone. <Subject 2> is driven backwards by it, heels skidding on the wet ground. <Subject 2>'s recoil begins on the very frame of contact with NO pause of any kind: <Subject 2> is already reeling as the hand comes back, staggering with arms flailing wide for balance, face instantly contorted in pain — eyes screwed tightly shut, eyebrows pushed high and pinched together, mouth stretched wide open and pulled down at the corners. <Subject 2> is NOT smiling and NOT grinning at any point after the blow lands.
+At 00:01.800, guard already back up at the chin and weight settling, <Subject 1> lifts <Subject 1>'s chin and looks straight at <Subject 2>, who is still staggering backwards. <Subject 1> (S1) says: <d>[English] [THE LINE THEY SAY AFTER LANDING THE FIRST HIT]</d>
+At 00:02.700, <Subject 2> catches balance at the end of the stagger, doubled over with both hands on the knees and face still screwed up in pain, and cries out. Both of <Subject 2>'s legs stay in frame throughout. <Subject 2> (S2) says: <d>[English in SpongeBob SquarePants' voice from SpongeBob SquarePants as voiced by Tom Kenny] Ouch! That really hurt!</d>
+At 00:04.200, <Subject 2> plants both feet, recovers balance and swings a wide spinning kick at head height. The kick MISSES: <Subject 1> drops into a deep crouch, bending fully at the knees with both feet flat, and <Subject 2>'s leg passes over <Subject 1>'s head through empty air. <Subject 2> is left off balance with their back half turned.
+At 00:05.300, from the bottom of that crouch <Subject 1> drives upward, extending through both legs, and lands a second clean hit on <Subject 2>. It CONNECTS square and the fist rebounds instantly back to guard — again the contact is one blow and the hand does not linger. <Subject 2> is knocked backwards, both feet leaving the ground for an instant before landing hard on the heels and rocking on the spot, face still screwed up in pain.
+At 00:06.300, <Subject 1> rises smoothly out of the crouch to a standing guard, feet set shoulder width apart and flat on the wet asphalt, fists back up at the chin, breathing hard. <Subject 2> sways unsteadily opposite, arms hanging, and keeps their mouth closed for the rest of the clip. <Subject 1> (S1) says: <d>[English] [THE LINE THEY SAY AFTER LANDING THE SECOND HIT]</d>
+
+overall_soundscape:
+Night street room tone with distant traffic and a faint electrical hum from the signage. Two blunt impact thuds where the punches connect, a low whoosh where the kick misses, shoes scuffing and skidding on wet asphalt, fabric rustle on fast limbs. No crowd, no announcer, and no speech from anyone other than the lines written above.
+
+non_diegetic_music:
+none`;
+
 export const DEFAULT_PROMPTS = Object.freeze([
   Object.freeze({
     id: 'korean-home-video-seedance-25',
@@ -235,6 +366,48 @@ export const DEFAULT_PROMPTS = Object.freeze([
       durationSeconds: 30,
       prompt: KOREAN_HOME_VIDEO_SEEDANCE_25,
     })],
+  }),
+  Object.freeze({
+    id: 'travel-vlog-seedance-25',
+    idea: 'travel-vlog',
+    section: 'video',
+    family: 'seedance-2.5',
+    format: 'prose',
+    name: 'Friend-filmed travel vlog',
+    summary: 'Apartment to sunset in one 30s take, five beats',
+    requires: 'a photo of the subject',
+    note: 'One 30s generation (~$10.20 at 720p, ~$5.10 on the 480p tier). She comes from a picture, so pick a tier that takes one: attach a start frame and the studio switches to Seedance 2.5 I2V, where the photo becomes frame zero — or choose Seedance 2.5 Omni Reference and attach several photos of her, which steers identity without deciding the opening shot.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 30,
+      prompt: TRAVEL_VLOG_SEEDANCE_25,
+    })],
+  }),
+  Object.freeze({
+    id: 'travel-vlog-h3',
+    idea: 'travel-vlog',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-reference',
+    name: 'Friend-filmed travel vlog',
+    summary: 'Same day as two chained H3 clips, identity from a photo',
+    requires: 'a photo of the subject, attached as a reference picture',
+    note: 'H3 holds a scene for ~15s, so the day is two chained clips. Attach her photo in References (reference picture) and leave it attached for both parts — text alone will not hold one face across two generations. Fill in [DESCRIBE HER…] from your own picture.',
+    parts: [
+      Object.freeze({
+        label: 'Morning to market',
+        durationSeconds: 15,
+        prompt: TRAVEL_VLOG_H3_A,
+        note: 'Set duration to 15s, attach her reference picture, and generate.',
+      }),
+      Object.freeze({
+        label: 'Coast to sunset',
+        durationSeconds: 15,
+        continuation: true,
+        prompt: TRAVEL_VLOG_H3_B,
+        note: 'Press Continue scene on the part 1 result, keep her reference picture attached, then paste this over the armed prompt.',
+      }),
+    ],
   }),
   Object.freeze({
     id: 'korean-home-video-seedance',
@@ -294,7 +467,7 @@ export const DEFAULT_PROMPTS = Object.freeze([
     format: 'h3-reference',
     name: 'Watching a show on TV',
     summary: 'Over-the-shoulder reaction, clip playing on the screen',
-    requires: 'One reference video with its sound on',
+    requires: 'one reference video with its sound on',
     note: 'Reference mode: attach the clip in References as a reference video and turn on its “sound” toggle — that gives the prompt <Video 1> and <Audio 1>, and routes the job to the H3 reference workflow. Replace every [BRACKET] with your own clip before generating; the model is looking at what you attached.',
     parts: [Object.freeze({
       label: 'Whole clip',
@@ -310,12 +483,28 @@ export const DEFAULT_PROMPTS = Object.freeze([
     format: 'h3-reference',
     name: 'Watching a show on a phone',
     summary: 'Vertical 9:16 over-the-shoulder, clip on the phone in hand',
-    requires: 'One reference video with its sound on',
+    requires: 'one reference video with its sound on',
     note: 'Same reference setup as the TV version — reference video with “sound” on — but framed 9:16 for a vertical feed, with the clip letterboxed on an upright phone. Set the aspect ratio to 9:16. Replace every [BRACKET] with your own clip before generating.',
     parts: [Object.freeze({
       label: 'Whole clip',
       durationSeconds: 10,
       prompt: SCREEN_REACTION_PHONE,
+    })],
+  }),
+  Object.freeze({
+    id: 'fight-cast-h3',
+    idea: 'fight-cast',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-reference',
+    name: 'Fight a cartoon character',
+    summary: 'Your character vs SpongeBob, one locked 8s take, seven timed beats',
+    requires: 'three or more reference pictures of your character, plus a voice clip of them',
+    note: 'Reference mode: attach your pictures and ONE voice clip in References — that gives the prompt <Picture 1-3> and <Audio 1>. Set duration to 8s. Fill in the appearance bracket from your own pictures and write the two lines. The beats are timed to 8.0s exactly, so if you add or cut action, adjust the At MM:SS.mmm stamps to match — overrunning the clip makes the model compress, and compressing reorders. Swap SpongeBob for any name from the Character menu, and use the Cast control to rebuild the whole thing for a different cast.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 8,
+      prompt: FIGHT_TWO_HANDED_H3,
     })],
   }),
   Object.freeze({

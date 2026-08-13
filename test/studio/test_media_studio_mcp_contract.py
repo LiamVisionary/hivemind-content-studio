@@ -1714,18 +1714,32 @@ def test_frame_interpolation_raises_the_mux_rate_but_not_the_sampled_frame_count
     assert interpolated["91"]["inputs"]["images"][1] == 0
 
 
-def test_solattn_is_on_by_default_and_lifts_out_at_tau_zero(tmp_path):
-    """Sol-Attn is the default accelerator as of 2026-08-11: measured 34.3s
-    against 38.6s for Spectrum alone on a rented 5090, same take, detail equal
-    or better. tau 0 is the escape hatch — needed for any lane provisioned
-    before the node was pinned, where the class does not exist."""
-    sparse = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+def test_solattn_is_opt_in_and_lifts_out_of_the_default_graph(tmp_path):
+    """Sol-Attn is an OPT-IN accelerator, not the default path.
+
+    It was made the default on 2026-08-11 on the strength of 34.3s against
+    38.6s for Spectrum alone — measured at 5s @ 960x544. Two things broke that
+    (2026-08-12), both of which the default hid until a fresh box hit them:
+
+    - Its node was pinned into the standalone provisioning script but never
+      into the rental onstart, so EVERY freshly rented H3 box rejected EVERY
+      job with "Node 'Sol-Attn (tau 0 = off)' not found" — acceleration or not,
+      because ComfyUI validates the whole prompt. The onstart installs it now.
+    - Its workspace scales with sequence length. At 8s/16:9 the sparse forward
+      asked for a single 14.54 GiB allocation and OOM'd a 31 GiB card, inside
+      _morton_h3.py. The measurement that justified the default never covered
+      the durations the studio offers.
+
+    So the default is what the workflow's own description always claimed: the
+    accelerators are off, and the default path is unchanged. Opting in still
+    works for anyone who wants the 11% on a short clip."""
+    plain = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+    assert not [n for n in plain.values() if n["class_type"] == "SolAttnPatch"]
+
+    sparse = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour", "params": {"solattn_tau": 1.3}})
     node = next(n for n in sparse.values() if n["class_type"] == "SolAttnPatch")
     assert node["inputs"]["tau"] == 1.3
-
-    plain = _capture_video_graph(tmp_path, "minimax-h3", {
-        "prompt": "a kite over a harbour", "params": {"solattn_tau": 0}})
-    assert not [n for n in plain.values() if n["class_type"] == "SolAttnPatch"]
     # The model chain closes back up around it.
     sage_id = next(k for k, v in plain.items() if v["class_type"] == "PathchSageAttentionKJ")
     spectrum = next(v for v in plain.values() if v["class_type"] == "SpectrumApplyMiniMaxH3")
@@ -1747,14 +1761,14 @@ def test_easycache_and_spectrum_cannot_both_be_asked_for(tmp_path):
     assert "cannot both be on" in reply
 
 
-def _write_test_video(path, *, seconds=3, fps=30, with_audio=False):
+def _write_test_video(path, *, seconds=3, fps=30, with_audio=False, size="320x240"):
     """A real, decodable clip — the reference-video path re-encodes through
     ffmpeg, so a fake byte blob proves nothing."""
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required to build a reference-video fixture")
     command = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", f"testsrc=size=320x240:rate={fps}:duration={seconds}",
+        "-f", "lavfi", "-i", f"testsrc=size={size}:rate={fps}:duration={seconds}",
     ]
     if with_audio:
         command += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-c:a", "aac", "-shortest"]
@@ -1800,6 +1814,62 @@ def test_minimax_h3_reference_video_wires_frames_and_resamples_to_24fps(tmp_path
     assert staged.is_file(), "the reference video must be staged into the Comfy input dir"
     assert _probe(staged, "v:0", "stream=r_frame_rate") == "24/1"
     assert _probe(staged, "a:0", "stream=index") == "", "audio must be stripped when use_audio is off"
+
+
+# MiniMaxH3ReferenceToVideo.adapt_canvas puts every reference video on a
+# 768-short-edge canvas capped at 768*1344 px, and never upscales. Both ways of
+# missing that budget cost something, which is why the cap is that number and
+# not a round one.
+REF_VIDEO_MAX_PIXELS = 768 * 1344
+
+
+@pytest.mark.parametrize("size,label", [
+    ("3840x2160", "landscape 4K"),
+    ("1080x2346", "portrait phone footage"),
+    ("1080x1920", "portrait 1080p"),
+])
+def test_reference_video_is_capped_to_the_nodes_own_frame_budget(tmp_path, size, label):
+    """Oversized references are downscaled to the budget the node works to.
+
+    The previous rule capped WIDTH at 1280 while its comment claimed a long
+    edge: it fired on landscape 4K and did nothing at all for portrait phone
+    footage, where the width is already under 1280 — so the lane encoded and
+    shipped frames the node immediately threw away.
+    """
+    source = _write_test_video(tmp_path / "big.mp4", seconds=3, fps=30, size=size)
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "she moves with the manner of the reference",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source)}],
+    })
+    loader = next(n for n in graph.values() if n["class_type"] == "LoadVideo")
+    staged = tmp_path / "input" / loader["inputs"]["file"]
+    width = int(_probe(staged, "v:0", "stream=width"))
+    height = int(_probe(staged, "v:0", "stream=height"))
+
+    assert width * height <= REF_VIDEO_MAX_PIXELS * 1.01, (
+        f"{label} stayed above the node's frame budget at {width}x{height}"
+    )
+    source_w, source_h = (int(v) for v in size.split("x"))
+    assert abs((width / height) - (source_w / source_h)) < 0.02, "aspect must be preserved"
+    # Both axes even: yuv420p cannot encode an odd dimension.
+    assert width % 2 == 0 and height % 2 == 0
+
+
+def test_a_small_reference_video_is_never_upscaled(tmp_path):
+    """The node keeps OUR frames rather than upscaling to its canvas, so
+    inflating a small clip here would only cost bytes — and pre-scaling one
+    below the canvas would permanently coarsen the reference."""
+    source = _write_test_video(tmp_path / "small.mp4", seconds=3, fps=30, size="640x480")
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "she moves with the manner of the reference",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source)}],
+    })
+    loader = next(n for n in graph.values() if n["class_type"] == "LoadVideo")
+    staged = tmp_path / "input" / loader["inputs"]["file"]
+    assert int(_probe(staged, "v:0", "stream=width")) == 640
+    assert int(_probe(staged, "v:0", "stream=height")) == 480
 
 
 def test_reference_video_soundtrack_claims_an_audio_label_before_its_video(tmp_path):

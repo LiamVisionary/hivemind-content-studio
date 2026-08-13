@@ -52,8 +52,8 @@ import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { Icon } from '../ui/icons.jsx';
 import {
-  AspectRatioPicker, Button, Card, EmptyState, Field, IconButton, NativeSelect, Pill, ProgressBar,
-  SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput, Toggle, cx,
+  AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, Field, IconButton, NativeSelect,
+  Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput, Toggle, cx,
 } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { StudioLayout } from '../ui/kit.jsx';
@@ -1572,7 +1572,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         // not something the bridge can read: decrypt it here and send the bytes
         // inline. Sending the bare path made the bridge fail on "Invalid URL".
         const referenceInput = await referenceToLocalImageInput(sourceImage);
-        // Models that condition on several references (Klein takes up to 3)
+        // Models that condition on several references (Klein takes up to 4)
         // get the rest of the attached refs too, decrypted the same way.
         const extraReferences = [];
         if (localModelSupportsImageInput(lm) && (lm.maxReferenceImages || 1) > 1) {
@@ -2056,6 +2056,20 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
   const referenceDrivesAspect = s.useLocalModel && refCount > 0 && Boolean(activeLocalModel?.requires?.image);
   const coupleOn = coupleActive();
   const sheetOn = characterSheetActive();
+  // Everything below Format lives behind the Advanced disclosure, so whatever is
+  // switched on in there has to show on the closed header — a region layout or a
+  // stale negative prompt silently steering every generation is the exact bug
+  // collapsing a panel invites.
+  const activeLoraCount = s.useLocalModel ? currentLoraSelection().filter((l) => l.enabled !== false).length : 0;
+  const regionCount = s.regionMode && !coupleOn ? (s.regions?.length || 0) : 0;
+  const advancedHint = [
+    // Region mode with no boxes drawn changes nothing, so it is not worth a badge.
+    regionCount ? `${regionCount} region${regionCount === 1 ? '' : 's'}` : '',
+    coupleOn ? 'couple' : '',
+    sheetOn ? 'sheet' : '',
+    activeLoraCount ? `${activeLoraCount} LoRA${activeLoraCount === 1 ? '' : 's'}` : '',
+    s.negativePrompt.trim() && currentModelSupportsNegativePrompt() ? 'negative' : '',
+  ].filter(Boolean).join(' · ');
   const viewerEntry = s.viewerUrl ? s.history.find((e) => e.url === s.viewerUrl) : null;
   const enhanced = [s.enhanceBase.trim(), Array.from(s.enhanceTags).join(', ')].filter(Boolean).join(', ');
 
@@ -2186,8 +2200,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         ) : null}
       </div>
 
-      <div className="flex flex-col gap-3">
-        <SectionLabel>{t('image.advancedOptions')}</SectionLabel>
+      <CollapsibleSection title={t('image.advancedOptions')} hint={advancedHint} storageKey="image.advanced">
         <Field label={t('image.steps')}>
           <Slider min={1} max={50} step={1} value={s.steps}
             onChange={(v) => { s.steps = v; bump(); }} />
@@ -2285,8 +2298,6 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           <span className="text-xs font-medium text-ink2">{t('common.pingWhenComplete')}</span>
           <Toggle label={t('common.pingWhenComplete')} checked={s.pingWhenComplete} onChange={setPing} />
         </div>
-      </div>
-
       {showRuntimeMode ? (
         <div className="flex flex-col gap-2">
           <SectionLabel>Local runtime mode</SectionLabel>
@@ -2483,6 +2494,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           } : undefined}
         />
       ) : null}
+      </CollapsibleSection>
         </>
       )}
     </>

@@ -162,35 +162,35 @@ export const H3_CHARACTERS = Object.freeze([
   { name: 'Billy Butcher', series: 'The Boys', medium: 'tv', year: 2019, actor: 'Karl Urban', filled: true },
 
   // ---- Animated TV ----
-  { name: 'Homer Simpson', series: 'The Simpsons', medium: 'animation', year: 1989 },
-  { name: 'Marge Simpson', series: 'The Simpsons', medium: 'animation', year: 1989, filled: true },
-  { name: 'Bart Simpson', series: 'The Simpsons', medium: 'animation', year: 1989, filled: true },
-  { name: 'Lisa Simpson', series: 'The Simpsons', medium: 'animation', year: 1989, filled: true },
+  { name: 'Homer Simpson', series: 'The Simpsons', medium: 'animation', year: 1989, voiceActor: 'Dan Castellaneta', voiceQuality: "a gruff, dopey adult male voice with a slack, slurring delivery" },
+  { name: 'Marge Simpson', series: 'The Simpsons', medium: 'animation', year: 1989, voiceActor: 'Julie Kavner', filled: true },
+  { name: 'Bart Simpson', series: 'The Simpsons', medium: 'animation', year: 1989, voiceActor: 'Nancy Cartwright', filled: true, voiceQuality: "a bratty ten-year-old boy's voice, raspy and mischievous — never adult" },
+  { name: 'Lisa Simpson', series: 'The Simpsons', medium: 'animation', year: 1989, voiceActor: 'Yeardley Smith', filled: true, voiceQuality: "a bright, earnest eight-year-old girl's voice — never adult" },
   { name: 'Rick Sanchez', series: 'Rick and Morty', medium: 'animation', year: 2013, filled: true },
   { name: 'Morty Smith', series: 'Rick and Morty', medium: 'animation', year: 2013, filled: true },
-  { name: 'SpongeBob SquarePants', series: 'SpongeBob SquarePants', medium: 'animation', year: 1999, filled: true },
-  { name: 'Patrick Star', series: 'SpongeBob SquarePants', medium: 'animation', year: 1999, filled: true },
-  { name: 'Squidward Tentacles', series: 'SpongeBob SquarePants', medium: 'animation', year: 1999, filled: true },
-  { name: 'Peter Griffin', series: 'Family Guy', medium: 'animation', year: 1999, filled: true },
-  { name: 'Stewie Griffin', series: 'Family Guy', medium: 'animation', year: 1999, filled: true },
-  { name: 'Brian Griffin', series: 'Family Guy', medium: 'animation', year: 1999, filled: true },
-  { name: 'Eric Cartman', series: 'South Park', medium: 'animation', year: 1997, filled: true },
-  { name: 'Stan Marsh', series: 'South Park', medium: 'animation', year: 1997, filled: true },
-  { name: 'Kyle Broflovski', series: 'South Park', medium: 'animation', year: 1997, filled: true },
-  { name: 'Kenny McCormick', series: 'South Park', medium: 'animation', year: 1997, filled: true },
-  { name: 'Beavis', series: 'Beavis and Butt-Head', medium: 'animation', year: 1993, filled: true },
-  { name: 'Butt-Head', series: 'Beavis and Butt-Head', medium: 'animation', year: 1993, filled: true },
-  { name: 'Woody', series: 'Toy Story', medium: 'animated-film', year: 1995, filled: true },
-  { name: 'Buzz Lightyear', series: 'Toy Story', medium: 'animated-film', year: 1995, filled: true },
+  { name: 'SpongeBob SquarePants', series: 'SpongeBob SquarePants', medium: 'animation', year: 1999, voiceActor: 'Tom Kenny', filled: true, voiceQuality: "high-pitched, nasal, squeaky and childlike, with a bright excitable delivery — never deep, gravelly or adult-sounding" },
+  { name: 'Patrick Star', series: 'SpongeBob SquarePants', medium: 'animation', year: 1999, voiceActor: 'Bill Fagerbakke', filled: true, voiceQuality: "slow, dopey and low-pitched with a dim, unhurried delivery — never sharp or quick" },
+  { name: 'Squidward Tentacles', series: 'SpongeBob SquarePants', medium: 'animation', year: 1999, voiceActor: 'Rodger Bumpass', filled: true, voiceQuality: "nasal, droning and sardonic, with a weary put-upon delivery — never bright or cheerful" },
+  { name: 'Peter Griffin', series: 'Family Guy', medium: 'animation', year: 1999, voiceActor: 'Seth MacFarlane', filled: true },
+  { name: 'Stewie Griffin', series: 'Family Guy', medium: 'animation', year: 1999, voiceActor: 'Seth MacFarlane', filled: true, voiceQuality: "a small child's voice with a theatrical upper-class English accent — never American and never adult" },
+  { name: 'Brian Griffin', series: 'Family Guy', medium: 'animation', year: 1999, voiceActor: 'Seth MacFarlane', filled: true },
+  { name: 'Eric Cartman', series: 'South Park', medium: 'animation', year: 1997, voiceActor: 'Trey Parker', filled: true, voiceQuality: "a nasal, whining boy's voice with a bratty petulant delivery — never adult" },
+  { name: 'Stan Marsh', series: 'South Park', medium: 'animation', year: 1997, voiceActor: 'Trey Parker', filled: true },
+  { name: 'Kyle Broflovski', series: 'South Park', medium: 'animation', year: 1997, voiceActor: 'Matt Stone', filled: true },
+  { name: 'Kenny McCormick', series: 'South Park', medium: 'animation', year: 1997, voiceActor: 'Matt Stone', filled: true },
+  { name: 'Beavis', series: 'Beavis and Butt-Head', medium: 'animation', year: 1993, voiceActor: 'Mike Judge', filled: true },
+  { name: 'Butt-Head', series: 'Beavis and Butt-Head', medium: 'animation', year: 1993, voiceActor: 'Mike Judge', filled: true },
+  { name: 'Woody', series: 'Toy Story', medium: 'animated-film', year: 1995, voiceActor: 'Tom Hanks', filled: true },
+  { name: 'Buzz Lightyear', series: 'Toy Story', medium: 'animated-film', year: 1995, voiceActor: 'Tim Allen', filled: true },
   { name: 'Leonardo', series: 'Teenage Mutant Ninja Turtles', medium: 'animation', year: 1987, filled: true },
   { name: 'Raphael', series: 'Teenage Mutant Ninja Turtles', medium: 'animation', year: 1987, filled: true },
   { name: 'Donatello', series: 'Teenage Mutant Ninja Turtles', medium: 'animation', year: 1987, filled: true },
   { name: 'Michelangelo', series: 'Teenage Mutant Ninja Turtles', medium: 'animation', year: 1987, filled: true },
-  { name: 'Mickey Mouse', series: 'Disney', origin: 'the classic Disney animated cartoons (1928)', filled: true },
-  { name: 'Elsa', series: 'Disney', origin: 'the animated film Frozen (2013)', filled: true },
+  { name: 'Mickey Mouse', series: 'Disney', origin: 'the classic Disney animated cartoons (1928)', filled: true, voiceQuality: "a very high, breathy, falsetto voice — never deep or adult-sounding" },
+  { name: 'Elsa', series: 'Disney', origin: 'the animated film Frozen (2013)', voiceActor: 'Idina Menzel', filled: true },
 
   // ---- Film ----
-  { name: 'Shrek', series: 'Shrek', medium: 'animated-film', year: 2001 },
+  { name: 'Shrek', series: 'Shrek', medium: 'animated-film', year: 2001, voiceActor: 'Mike Myers' },
   { name: 'Patrick Bateman', series: 'American Psycho', medium: 'film', year: 2000, actor: 'Christian Bale' },
   { name: 'Jack Sparrow', series: 'Pirates of the Caribbean', medium: 'films', year: 2003, actor: 'Johnny Depp' },
   { name: 'Harry Potter', series: 'Harry Potter', medium: 'films', year: 2001, actor: 'Daniel Radcliffe' },
@@ -202,7 +202,7 @@ export const H3_CHARACTERS = Object.freeze([
   { name: 'Luke Skywalker', series: 'Star Wars', medium: 'films', year: 1977, actor: 'Mark Hamill', filled: true },
   { name: 'Princess Leia', series: 'Star Wars', medium: 'films', year: 1977, actor: 'Carrie Fisher', filled: true },
   { name: 'Han Solo', series: 'Star Wars', medium: 'films', year: 1977, actor: 'Harrison Ford', filled: true },
-  { name: 'Yoda', series: 'Star Wars', medium: 'films', year: 1977, filled: true },
+  { name: 'Yoda', series: 'Star Wars', medium: 'films', year: 1977, filled: true, voiceQuality: "a small, croaky, high-pitched old voice with slow deliberate phrasing" },
   { name: 'Chewbacca', series: 'Star Wars', medium: 'films', year: 1977, filled: true },
   { name: 'Stormtrooper', series: 'Star Wars', prompt: 'a stormtrooper', medium: 'films', year: 1977, filled: true },
   { name: 'Deadpool', series: 'Marvel', origin: 'the superhero film Deadpool (2016)', actor: 'Ryan Reynolds' },
@@ -244,6 +244,39 @@ export function characterPromptText(entry) {
   const base = entry.prompt || entry.name;
   const played = entry.actor ? `${base} as played by ${entry.actor}` : base;
   return `${played} from ${characterOriginText(entry)}`;
+}
+
+// How a known character SOUNDS. H3 knows a character's voice the same way it
+// knows their face, and it is invoked inside the dialogue LANGUAGE tag rather
+// than through a cloned reference clip:
+//
+//   <d>[English in Willow's voice from Buffy the Vampire Slayer as played by
+//   Alyson Hannigan] …</d>
+//
+// The source here is the bare series — what the community form uses — not the
+// "the television series X (1997)" clause that identifies a likeness.
+//
+// The SOURCE and the PERFORMER are the two halves that make a voice
+// retrievable, so both are always named when known. An earlier version of this
+// collapsed to "their own voice" when the character shared its title with the
+// series, to avoid reading as a mistake — and rendered SpongeBob in a voice
+// that was not his (2026-08-12), because "SpongeBob SquarePants' own voice"
+// asks for nothing the model can look up. Repetition beats a content-free tag.
+//
+// `voiceActor` is separate from `actor` on purpose: for a live-action likeness
+// the on-screen performer IS the voice, but for animation the person who
+// identifies the sound never appears, and naming the wrong one is worse than
+// naming none.
+export function characterVoiceText(entry) {
+  if (!entry) return '';
+  const base = entry.prompt || entry.name;
+  const owner = `${base}${/s$/i.test(base) ? "'" : "'s"}`;
+  const performer = entry.voiceActor
+    ? ` as voiced by ${entry.voiceActor}`
+    : (entry.actor ? ` as played by ${entry.actor}` : '');
+  return entry.series
+    ? `${owner} voice from ${entry.series}${performer}`
+    : `${owner} voice${performer}`;
 }
 
 // Name + series substring match; empty query returns the whole catalog.

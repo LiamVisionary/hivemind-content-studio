@@ -4,15 +4,24 @@ import { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons.jsx';
 import { cx } from './kit.jsx';
 
+// A modal is portaled to document.body, so it is never INSIDE the popover that
+// opened it — without this, typing a name into a dialog raised from a panel
+// dismissed the panel underneath, unmounting the dialog mid-keystroke. A layer
+// above must not dismiss the layer below: clicks inside a dialog are its own,
+// and Escape belongs to the topmost thing on screen.
+const inModal = (node) => Boolean(node?.closest?.('[role="dialog"]'));
+const modalOpen = () => Boolean(document.querySelector('[role="dialog"]'));
+
 export function useDismissable(open, close) {
   const ref = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
     const onDown = (e) => {
+      if (inModal(e.target)) return;
       if (ref.current && !ref.current.contains(e.target)) close();
     };
     const onKey = (e) => {
-      if (e.key === 'Escape') close();
+      if (e.key === 'Escape' && !modalOpen()) close();
     };
     document.addEventListener('pointerdown', onDown, true);
     window.addEventListener('keydown', onKey);

@@ -65,43 +65,62 @@ test('only the starters written for the selected model are listed', async () => 
     assert.deepEqual(defaultPromptsFor('image', H3_MODEL), []);
 });
 
-test('a 30s idea is split at each model\'s own ceiling, and adds back up', async () => {
+test('an idea is split at each model\'s own ceiling, and every variant adds back up', async () => {
     const { DEFAULT_PROMPTS, defaultPromptTotalSeconds } = await import('../src/lib/defaultPrompts.js');
-    const byFamily = Object.fromEntries(DEFAULT_PROMPTS
-        .filter((entry) => entry.idea === 'korean-home-video')
-        .map((entry) => [entry.family, entry]));
+    // What the studio will actually offer as a duration, per family: H3 goes to
+    // 15s and other local workflows to 10s (hivemindStudio.js), Seedance 2.0 caps
+    // its enum at 15, and only Seedance 2.5 reaches 30.
+    const CEILING = { 'seedance-2.5': 30, seedance: 15, minimax: 15, ltx: 10 };
 
-    // Every variant of an idea tells the same length of story.
-    for (const entry of Object.values(byFamily)) {
-        assert.equal(defaultPromptTotalSeconds(entry), 30, `${entry.id} covers the whole idea`);
+    const ideas = new Map();
+    for (const entry of DEFAULT_PROMPTS) {
+        if (!ideas.has(entry.idea)) ideas.set(entry.idea, []);
+        ideas.get(entry.idea).push(entry);
     }
-    // Only 2.5 does it in one generation. The ceilings are the studio's own:
-    // H3 offers 1-15s, other local workflows 1-10s (hivemindStudio.js), and
-    // Seedance 2.0 caps its duration enum at 15.
-    assert.equal(byFamily['seedance-2.5'].parts.length, 1);
-    assert.ok(byFamily.seedance.parts.every((part) => part.durationSeconds <= 15));
-    assert.ok(byFamily.minimax.parts.every((part) => part.durationSeconds <= 15));
-    assert.ok(byFamily.ltx.parts.every((part) => part.durationSeconds <= 10));
 
-    // Every part after the first is a continuation, and says how to reach it.
-    for (const entry of Object.values(byFamily)) {
-        entry.parts.forEach((part, index) => {
-            if (index === 0) return;
-            assert.ok(part.continuation, `${entry.id} part ${index + 1} is marked a continuation`);
-            assert.ok(part.note, `${entry.id} part ${index + 1} says how to arm it`);
-        });
+    for (const [idea, variants] of ideas) {
+        // Every variant of one idea tells the same length of story — the split
+        // is a property of the model, never of the story.
+        const lengths = new Set(variants.map(defaultPromptTotalSeconds));
+        assert.equal(lengths.size, 1, `${idea} runs the same length on every model (${[...lengths]})`);
+        for (const entry of variants) {
+            for (const part of entry.parts) {
+                assert.ok(part.durationSeconds <= CEILING[entry.family],
+                    `${entry.id} keeps every part inside the ${entry.family} ceiling`);
+            }
+            // Every part after the first is a continuation, and says how to reach it.
+            entry.parts.forEach((part, index) => {
+                if (index === 0) return;
+                assert.ok(part.continuation, `${entry.id} part ${index + 1} is marked a continuation`);
+                assert.ok(part.note, `${entry.id} part ${index + 1} says how to arm it`);
+            });
+        }
     }
+
+    // The two 30s ideas prove the point in both directions: one generation on
+    // 2.5, several everywhere else.
+    const vlog = Object.fromEntries(ideas.get('travel-vlog').map((entry) => [entry.family, entry]));
+    assert.equal(vlog['seedance-2.5'].parts.length, 1);
+    assert.equal(vlog.minimax.parts.length, 2);
 });
 
 test('continuations re-describe the scene instead of assuming it', async () => {
     const { DEFAULT_PROMPTS } = await import('../src/lib/defaultPrompts.js');
     // A prompt that stops naming the subject makes the model cut to an unrelated
-    // take — the failure chainPrompt.js exists to prevent.
+    // take — the failure chainPrompt.js exists to prevent. Measured as shared
+    // DISTINCTIVE vocabulary rather than a keyword list, because what has to
+    // carry over differs per scene (wardrobe and camcorder in one, subject
+    // definitions and reference labels in another) and a hard-coded list only
+    // ever describes the entry it was written against. The real entries score
+    // 16-91; a continuation that merely says "she keeps walking" scores ~0.
+    const distinctive = (text) => new Set(text.toLowerCase().match(/[a-z]{7,}/g) || []);
     for (const entry of DEFAULT_PROMPTS) {
+        if (entry.parts.length < 2) continue;
+        const opening = distinctive(entry.parts[0].prompt);
         for (const part of entry.parts.slice(1)) {
-            assert.match(part.prompt, /ponytail/i, `${entry.id}/${part.label} restates her hair`);
-            assert.match(part.prompt, /crop top/i, `${entry.id}/${part.label} restates her wardrobe`);
-            assert.match(part.prompt, /camcorder/i, `${entry.id}/${part.label} restates the look`);
+            const shared = [...distinctive(part.prompt)].filter((word) => opening.has(word));
+            assert.ok(shared.length >= 12,
+                `${entry.id}/${part.label} carries the established scene forward (shared ${shared.length})`);
         }
     }
 });
@@ -156,18 +175,30 @@ test('H3 reference starters obey the six-section format and label media from 1',
             // Labels are 1-based: the first attached video is <Video 1>. <Video 0>
             // points at a slot the graph never fills.
             assert.doesNotMatch(prompt, /<(Picture|Video|Audio) 0>/, `${where} numbers references from 1`);
-            assert.match(prompt, /<Video 1>/, `${where} cites the attached clip`);
-            // Audio retention comes from the copy family, picture/video retention
-            // from the preserved family — mixing them is a malformed marker.
-            assert.match(prompt, /<Audio 1>: (fully_copy|partially_copy|reference|weak_reference)\b/,
-                `${where} marks its audio with a copy-family marker`);
-            assert.match(prompt, /<Video 1>: (fully_preserved|partially_preserved|attribute_transfer|weak_reference)\b/,
-                `${where} marks its video with a preserved-family marker`);
-            // The task-type marker is what selects reuse over timbre-only.
-            assert.match(prompt, /\[audio (reuse|reference)\]/, `${where} declares its audio task type`);
-            // Every fill-in is a real hole, and no show name is baked in.
-            assert.match(prompt, /\[SHOW NAME\]/, `${where} keeps the show a fill-in`);
+            assert.match(prompt, /<(Picture|Video|Audio) 1>/, `${where} cites at least one attached reference`);
+            // Retention markers come from the label's own family — audio from the
+            // copy family, everything else from the preserved family. Only the
+            // labels a prompt actually uses are required to carry one.
+            const PRESERVED = '(fully_preserved|partially_preserved|attribute_transfer|weak_reference)';
+            for (const kind of ['Picture', 'Video', 'Subject']) {
+                if (!prompt.includes(`<${kind} 1>`)) continue;
+                assert.match(prompt, new RegExp(`<${kind} 1>: ${PRESERVED}\\b`),
+                    `${where} marks its ${kind.toLowerCase()} with a preserved-family marker`);
+            }
+            if (prompt.includes('<Audio 1>')) {
+                assert.match(prompt, /<Audio 1>: (fully_copy|partially_copy|reference|weak_reference)\b/,
+                    `${where} marks its audio with a copy-family marker`);
+                // The task-type marker is what selects reuse over timbre-only, and
+                // it only exists when audio is attached.
+                assert.match(prompt, /\[audio (reuse|reference)\]/, `${where} declares its audio task type`);
+            }
+            // Whatever the brief needs from the user stays a hole, and nothing
+            // from the original example is baked back in.
+            assert.match(prompt, /\[[A-Z][^\]]*\]/, `${where} keeps its fill-ins`);
             assert.doesNotMatch(prompt, /castlevania|alucard|sypha/i, `${where} names no specific show`);
+            if (entry.idea === 'screen-reaction') {
+                assert.match(prompt, /\[SHOW NAME\]/, `${where} keeps the show a fill-in`);
+            }
         }
     }
 });
@@ -203,10 +234,16 @@ test('no part describes a beat past the end of itself', async () => {
                 assert.ok(at <= part.durationSeconds - 1,
                     `${entry.id}/${part.label} leaves ${stamp[0]} time to render inside ${part.durationSeconds}s`);
             }
-            // The Seedance/LTX variants write their beats as MM:SS–MM:SS ranges.
+            // The Seedance variants write their beats as ranges, in two styles:
+            // MM:SS–MM:SS and plain 12–20s. Both are timelines the model reads,
+            // so both are checked against the length the part will be generated at.
             for (const range of part.prompt.matchAll(/(\d{2}):(\d{2})[–-](\d{2}):(\d{2})/g)) {
                 const end = Number(range[3]) * 60 + Number(range[4]);
                 assert.ok(end <= part.durationSeconds,
+                    `${entry.id}/${part.label} ends ${range[0]} inside ${part.durationSeconds}s`);
+            }
+            for (const range of part.prompt.matchAll(/\b(\d{1,2})\s*[–—-]\s*(\d{1,2})\s*s\b/g)) {
+                assert.ok(Number(range[2]) <= part.durationSeconds,
                     `${entry.id}/${part.label} ends ${range[0]} inside ${part.durationSeconds}s`);
             }
         }
@@ -243,10 +280,19 @@ test('Seedance 2.5 is in the catalog and reaches 30s in one generation', async (
     assert.deepEqual(getDurationsForModel('seedance-v2.0-t2v'), [5, 10, 15]);
     assert.equal(getVideoModelById('seedance-2.5-text-to-video').name, 'Seedance 2.5');
 
+    // Omni Reference takes identity pictures rather than a first frame, so it
+    // is a picture LIST and must stay off the start-frame switch below.
+    const omni = i2vModels.find((entry) => entry.id === 'seedance-2.5-omni-reference');
+    assert.ok(omni, 'omni reference listed for image-to-video');
+    assert.equal(omni.imageField, 'images_list');
+    assert.ok(omni.maxImages > 1, 'omni reference takes several pictures');
+    assert.deepEqual(omni.inputs.duration.enum, [5, 10, 15, 20, 25, 30]);
+
     // Attaching a start frame switches to the i2v model sharing the t2v's
     // `family`, falling back to the first i2v in the catalog when none matches.
     // Each 2.5 tier must therefore pair with its OWN i2v, or the cheap tier
-    // would jump to the one that costs twice as much.
+    // would jump to the one that costs twice as much — and never onto Omni,
+    // whose pictures are not a first frame.
     for (const [t2v, i2v] of [
         ['seedance-2.5-text-to-video', 'seedance-2.5-image-to-video'],
         ['seedance-2.5-text-to-video-480p', 'seedance-2.5-image-to-video-480p'],
@@ -256,4 +302,54 @@ test('Seedance 2.5 is in the catalog and reaches 30s in one generation', async (
         assert.equal(siblings.length, 1, `${family} pairs with exactly one i2v model`);
         assert.equal(siblings[0].id, i2v);
     }
+});
+
+
+// The two-fighter starter carries a rule per failed take (2026-08-12/13). They
+// read like ordinary prose, so without this an edit "tidying" any one of them
+// would silently reintroduce a bug that cost a 14-minute render to find.
+test('the fight starter keeps every rule it was bought with', async () => {
+    const { DEFAULT_PROMPTS } = await import('../src/lib/defaultPrompts.js');
+    const entry = DEFAULT_PROMPTS.find((item) => item.id === 'fight-cast-h3');
+    assert.ok(entry, 'the fight starter ships');
+    const prompt = entry.parts[0].prompt;
+
+    // The subject who owns the voice reference speaks FIRST, so subject and
+    // speaker numbering agree. Crossing them swapped the fighters' lines.
+    assert.match(prompt, /<Subject 1> speaks as S1\./);
+    assert.match(prompt, /<Audio 1> is the voice-timbre reference for <Subject 1> \(S1\)\./);
+    assert.match(prompt, /not the voice of any other subject/);
+    const firstLine = prompt.indexOf('<Subject 1> (S1) says:');
+    const secondLine = prompt.indexOf('<Subject 2> (S2) says:');
+    assert.ok(firstLine > 0 && secondLine > firstLine, 'the voice owner speaks first');
+
+    // A punch that never retracts follows its target around the frame.
+    assert.match(prompt, /rebounds off <Subject 2> and snaps all the way back to guard/);
+    assert.match(prompt, /does not stay on <Subject 2>/);
+    // A gap between impact and reaction reads as the loser standing still.
+    assert.match(prompt, /recoil begins on the very frame of contact with NO pause/);
+    // A known character brings its default expression unless told otherwise.
+    assert.match(prompt, /NOT smiling and NOT grinning/);
+    // Naming a voice is not enough when the model cannot retrieve it.
+    assert.match(prompt, /in SpongeBob SquarePants' voice from SpongeBob SquarePants as voiced by Tom Kenny/);
+    assert.match(prompt, /voice is high-pitched, nasal, squeaky and childlike/);
+    assert.match(prompt, /never deep, gravelly or adult-sounding/);
+
+    // Character noises live in a beat, where a speaker id reaches them. The
+    // soundscape is physical sound only — an exhale written there came back as
+    // a generic old man over a cartoon.
+    const soundscape = prompt.split('overall_soundscape:\n')[1].split('\n\n')[0];
+    assert.doesNotMatch(soundscape, /\b(exhale|grunt|gasp|breath|laugh|yelp|scream)/i);
+
+    // Every timed beat lands inside the 8s the starter declares.
+    const seconds = [...prompt.matchAll(/At (\d{2}):(\d{2})\.(\d{3})/g)]
+        .map((m) => Number(m[1]) * 60 + Number(m[2]) + Number(m[3]) / 1000);
+    assert.ok(seconds.length >= 5, 'the shot is written as timed beats');
+    assert.ok(Math.max(...seconds) < entry.parts[0].durationSeconds,
+        'no beat is stamped at or past the end of the clip');
+
+    // Generalized: no trace of the person it was developed against.
+    assert.doesNotMatch(prompt, /cheryl/i);
+    assert.doesNotMatch(prompt, /\b(she|her|hers|he|him|his)\b/i,
+        'pronouns are replaced by <Subject N>, which is both generic and what H3 asks for');
 });

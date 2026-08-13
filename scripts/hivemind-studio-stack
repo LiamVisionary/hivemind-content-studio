@@ -438,6 +438,7 @@ PY
   ZIMG_DEBUG_OUTPUT_DIR="$PRIV/debug_outputs" \
   ZIMG_OUTPUT_ENCRYPTION="${ZIMG_OUTPUT_ENCRYPTION:-1}" \
   ZIMG_E2E_MEDIA="${ZIMG_E2E_MEDIA:-1}" \
+  ZIMG_AGENT_DUAL_SEAL="${ZIMG_AGENT_DUAL_SEAL:-0}" \
   ZIMG_USE_FLUX2_SERVER="${ZIMG_ENABLE_FLUX2_SERVER:-0}" \
   ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT="${ZIMG_NATIVE_MXFP8_PROMPT_INTERCEPT:-$ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS}" \
   ZIMG_ALLOW_MXFP8_COMFY_FALLBACK="${ZIMG_ALLOW_MXFP8_COMFY_FALLBACK:-0}" \
@@ -527,6 +528,7 @@ PY
   MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL="${media_studio_public_url:-http://127.0.0.1:8788}" \
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
   MEDIA_STUDIO_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  MEDIA_STUDIO_E2E_PUB_FILE="${MEDIA_STUDIO_E2E_PUB_FILE:-$MEDIA_STATE_ROOT/secure/agent-e2e-pub}" \
   hive-env-run -- node "$APP/bin/media-studio-mcp.mjs" --http >> "$PRIV/media-studio-mcp.log" 2>&1 &
   pid="$!"
   children+=("$pid")
@@ -626,7 +628,23 @@ healthy() {
   return 0
 }
 
+# Local stack overrides, dot-sourced the same way as the rental lanes overlay.
+# The supervisor runs under launchd with a FIXED inherited environment, so an
+# exported shell var never reaches the children — `FOO=1 zimage-stack restart`
+# silently keeps the old value. A file is the only handle that survives a
+# restart. Machine-local on purpose: never put secrets here (that is the shared
+# hive env's job) and never anything that should replicate across the fleet.
+load_stack_local_env() {
+  local overlay="$MEDIA_STATE_ROOT/stack-local.env"
+  if [ -f "$overlay" ]; then
+    # shellcheck disable=SC1090
+    . "$overlay"
+    log "local stack overlay loaded: $overlay"
+  fi
+}
+
 supervise() {
+  load_stack_local_env
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     local old_pid=""
     [ -f "$LOCK_DIR/pid" ] && old_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"

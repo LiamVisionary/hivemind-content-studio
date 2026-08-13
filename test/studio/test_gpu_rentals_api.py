@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -146,6 +148,116 @@ def test_offers_drop_half_power_skus_sold_under_the_same_name(tmp_path: Path, mo
     # unbenchmarked one is not evidence of anything.
     assert 12 in ids and 13 in ids
     assert next(o for o in offers if o["offer_id"] == 11)["dlperf"] == 278.9
+
+
+def test_offers_skip_a_host_that_just_failed_us(tmp_path: Path, monkeypatch) -> None:
+    """Cheapest-first ranking walks straight back onto a bad host.
+
+    Nothing about a machine's listing changes when it wedges — it keeps the
+    reliability score that let it through in the first place (2026-08-11: the
+    host that never started a container was above the 0.99 filter). Only our
+    own experience of it is evidence, so a recorded failure has to take that
+    machine out of the running for a while."""
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "media-state")
+    (tmp_path / "media-state").mkdir(parents=True, exist_ok=True)
+    gpu_rentals._write_failure_state({
+        "seen": {},
+        "log": [{"rental_id": 1, "machine_id": 144917, "destroyed_at": time.time()}],
+    })
+
+    def handler(method, path, payload):
+        return {"offers": [
+            {"id": 20, "gpu_name": "RTX 5090", "dph_total": 0.056, "inet_down": 9000, "machine_id": 144917},
+            {"id": 21, "gpu_name": "RTX 5090", "dph_total": 0.39, "inet_down": 9000, "machine_id": 999},
+        ]}
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    offers = client.get("/api/gpu-rentals/offers?tier=minimax").json()["offers"]
+    ids = [offer["offer_id"] for offer in offers]
+    assert 20 not in ids, "the machine that just failed must not be the top pick again"
+    assert ids == [21]
+
+    # The cooldown expires: a host with one bad day is not blacklisted forever.
+    gpu_rentals._write_failure_state({
+        "seen": {},
+        "log": [{"rental_id": 1, "machine_id": 144917,
+                 "destroyed_at": time.time() - gpu_rentals.BAD_MACHINE_COOLDOWN_SECONDS - 60}],
+    })
+    gpu_rentals._offer_cache.clear()
+    ids = [o["offer_id"] for o in client.get("/api/gpu-rentals/offers?tier=minimax").json()["offers"]]
+    assert 20 in ids
+
+
+def test_the_shared_blocklist_is_merged_but_never_blocks_renting(tmp_path: Path, monkeypatch) -> None:
+    """The hosted gateway rents from the SAME Vast account, so a machine that
+    wedged a customer is hardware we will meet too. Merging its list is worth
+    one request — but only if it can never be the reason a rental fails, so a
+    slow or dead gateway fails open to the local list alone."""
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    gpu_rentals._write_failure_state({"seen": {}, "log": []})
+    monkeypatch.setenv("HIVEMIND_GPU_RENTALS_GATEWAY_URL", "https://rentals.example/")
+
+    class Response:
+        status_code = 200
+        def raise_for_status(self): return None
+        def json(self):
+            return {"ok": True, "machines": [
+                {"machineId": 5150, "hostId": 77},
+                {"machineId": 5151, "hostId": None},
+            ]}
+
+    monkeypatch.setattr(gpu_rentals.requests, "get", lambda *_a, **_k: Response())
+    # Machines AND their hosts come across: one bad host, several bad machines.
+    assert gpu_rentals.recent_bad_machine_ids() == {5150, 77, 5151}
+
+    # A gateway that is down, slow, or serving nonsense leaves renting working.
+    def explode(*_args, **_kwargs):
+        raise OSError("gateway unreachable")
+
+    monkeypatch.setattr(gpu_rentals.requests, "get", explode)
+    assert gpu_rentals.recent_bad_machine_ids() == set()
+
+    # And with no gateway configured nothing is fetched at all.
+    monkeypatch.delenv("HIVEMIND_GPU_RENTALS_GATEWAY_URL")
+    monkeypatch.setattr(gpu_rentals.requests, "get",
+                        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not call out")))
+    assert gpu_rentals.recent_bad_machine_ids() == set()
+
+
+def test_a_box_that_never_boots_its_container_is_called_out(tmp_path: Path, monkeypatch) -> None:
+    """"Booting host" has no natural end, and that is the whole problem.
+
+    Vast reports the INSTANCE running from the moment the host takes the
+    contract — long before the image is unpacked and a container exists. With
+    no container there is no beacon, so nothing can report a failure, and the
+    studio sits on a hopeful progress step while the meter runs (measured
+    2026-08-11: 43 minutes, SSH port never opened, instance "loading"
+    throughout). The port answering is the honest signal."""
+    booting = {"id": 7, "label": f"{gpu_rentals.STUDIO_LABEL_PREFIX}minimax-rtx5090-x",
+               "actual_status": "loading", "public_ipaddr": "9.9.9.9", "machine_id": 144917,
+               "ssh_host": "ssh4.vast.ai", "ssh_port": "36124"}
+
+    # Freshly booting: slow is not stalled, whatever the port says.
+    monkeypatch.setattr(gpu_rentals, "_container_ssh_open", lambda *_a, **_k: False)
+    dto = gpu_rentals._instance_dto({**booting, "start_date": time.time() - 60}, probe=True)
+    assert dto["phase"] == "booting"
+
+    # Past the deadline with the port still shut: terminal, and it says why.
+    dto = gpu_rentals._instance_dto(
+        {**booting, "start_date": time.time() - gpu_rentals.BOOT_STALL_SECONDS - 60}, probe=True)
+    assert dto["phase"] == "error", "a container that never came up is not still booting"
+    assert "never started this container" in dto["provision"]["detail"]
+    assert "destroy it and rent again" in dto["provision"]["detail"]
+    # Carried so the reaper can remember the HOST, not just the rental.
+    assert dto["machine_id"] == 144917
+
+    # Same age, but the container did come up — it is provisioning, not wedged.
+    monkeypatch.setattr(gpu_rentals, "_container_ssh_open", lambda *_a, **_k: True)
+    dto = gpu_rentals._instance_dto(
+        {**booting, "start_date": time.time() - gpu_rentals.BOOT_STALL_SECONDS - 60}, probe=True)
+    assert dto["phase"] == "booting"
 
 
 def test_offers_can_be_narrowed_to_one_gpu_class(tmp_path: Path, monkeypatch) -> None:
@@ -298,6 +410,44 @@ def test_create_uses_cheapest_offer_and_provisioning_onstart(tmp_path: Path, mon
     assert response.status_code == 201
     assert response.json()["rental_id"] == 4242
     assert [c[1] for c in calls] == ["/v0/bundles/", "/v0/asks/77/"]
+
+
+def test_an_h3_box_installs_every_node_its_own_graphs_require(tmp_path: Path, monkeypatch) -> None:
+    """A node the registered graphs USE is not optional on the lane.
+
+    Sol-Attn became the default accelerator (tau 1.3) in every H3 graph on
+    2026-08-11 and was pinned into the standalone provisioning script — but not
+    into this onstart, which is the one API-rented boxes actually run. Every
+    freshly rented H3 machine then rejected every job, acceleration or not,
+    because ComfyUI validates the whole prompt: "Node 'Sol-Attn (tau 0 = off)'
+    not found", HTTP 400, surfaced to the studio as a bare MediaStudioError.
+
+    So this asserts the onstart against the graphs themselves rather than
+    against a list someone has to remember to update.
+    """
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
+    captured = {}
+
+    def handler(method, path, payload):
+        if path == "/v0/bundles/":
+            return {"offers": [{"id": 77, "dph_total": 0.4}]}
+        captured["onstart"] = payload["onstart"]
+        return {"new_contract": 4242, "success": True}
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    assert client.post("/api/gpu-rentals", json={"tier": "minimax"}).status_code == 201
+    onstart = captured["onstart"]
+
+    # Every custom class the H3 graphs reference must come from somewhere the
+    # onstart installs. The repo names are how the class packs are identified.
+    for repo in ("ComfyUI-Spectrum-MiniMax-H3", "comfyui-kjnodes",
+                 "ComfyUI-MiniMax-H3-Turbo", "ComfyUI-SolAttn_triton"):
+        assert repo in onstart, f"an H3 lane without {repo} rejects its own graphs"
+
+    # Pinned, not floating: sampling on whatever upstream shipped today is how
+    # this class of failure gets discovered in production instead of here.
+    assert gpu_rentals._H3_SOLATTN_COMMIT in onstart
 
 
 def test_renting_a_batch_takes_a_distinct_offer_for_each_machine(tmp_path: Path, monkeypatch) -> None:
@@ -814,10 +964,37 @@ def test_attach_writes_overlay_and_spawns_tunnel(tmp_path: Path, monkeypatch) ->
     assert 'RENTAL_COMFY_LANES="rental7=http://127.0.0.1:18307"' in env
     assert 'RENTAL_COMFY_LANE_RULES="rental7=krea2_turbo_convrot,waianima"' in env
     assert 'RENTAL_COMFY_REMOTE_LANES="rental7"' in env
-    # list now reports attached + tunnel_alive + studio pages
+    # list now reports attached + tunnel_alive + studio pages. The tunnel here
+    # is faked, so its liveness is faked too — tunnel_alive is a real connect to
+    # the forwarded port now, not a pid check (see the test below for why).
+    monkeypatch.setattr(gpu_rentals, "_tunnel_carrying_traffic", lambda *_a, **_k: True)
     rentals = client.get("/api/gpu-rentals").json()["rentals"]
     assert rentals[0]["attached"] is True and rentals[0]["tunnel_alive"] is True
     assert rentals[0]["studio_pages"] == ["image"]
+
+
+def test_a_live_ssh_with_a_dead_forward_is_not_a_live_tunnel(tmp_path: Path, monkeypatch) -> None:
+    """An ssh process outlives its forward, and a pid check cannot tell.
+
+    Measured 2026-08-11: the far end tore the forward down, ssh sat there for
+    24 minutes, and Machines reported the machine attached and reachable while
+    every generation failed with connection-refused. The operator re-attached
+    repeatedly on the strength of that green indicator. Liveness has to mean
+    the port answers.
+    """
+    _fake_vast(monkeypatch, lambda m, p, b: {"instances": [_ready_instance()]})
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda url: {"step": "ready", "done": 6, "total": 6, "detail": ""})
+    _attach_env(monkeypatch, tmp_path)
+    client = _client(tmp_path, monkeypatch)
+    client.post("/api/gpu-rentals/7/attach")
+
+    # The ssh process is alive and the pidfile is valid...
+    monkeypatch.setattr(gpu_rentals, "_tunnel_pid", lambda *_a, **_k: 4242)
+    # ...but nothing accepts on the forwarded port.
+    rentals = client.get("/api/gpu-rentals").json()["rentals"]
+    assert rentals[0]["attached"] is True
+    assert rentals[0]["tunnel_alive"] is False, "a dead forward must not read as a live tunnel"
 
 
 def _two_ready_instances(monkeypatch, tmp_path):
@@ -1214,6 +1391,25 @@ def test_a_box_that_failed_provisioning_is_destroyed_after_the_grace_window(
     assert gpu_rentals.recent_rental_failures()[0]["rental_id"] == 31
 
 
+def test_reaping_a_failure_takes_its_host_out_of_the_running(tmp_path: Path, monkeypatch) -> None:
+    """The rental dies; the machine that broke it is on sale again tomorrow.
+
+    Closing the loop is the point: a stalled box is called out, reaped, and the
+    HOST is remembered — otherwise cheapest-first ranking offers it straight
+    back and the same hour is lost twice."""
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(gpu_rentals, "destroy_rental", lambda rid: None)
+    monkeypatch.setattr(gpu_rentals, "PROVISION_FAILURE_GRACE_SECONDS", 0)
+
+    dto = {**_failed_dto(), "machine_id": 144917}
+    recorded = gpu_rentals.reap_failed_rentals([dto])
+
+    assert recorded[0]["machine_id"] == 144917
+    assert 144917 in gpu_rentals.recent_bad_machine_ids()
+    # A failure recorded before the cooldown began does not bar the host.
+    assert 144917 not in gpu_rentals.recent_bad_machine_ids(within_seconds=0)
+
+
 def test_a_box_that_recovers_is_not_reaped(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
     destroyed = []
@@ -1558,3 +1754,92 @@ def test_rental_lora_counts_toward_tier_download_gb(tmp_path: Path, monkeypatch)
         },
     })
     assert gpu_rentals.tier_download_gb("video") == pytest.approx(baseline, abs=0.01)
+
+
+def test_long_running_services_survive_a_signal_at_onstart_group(tmp_path: Path, monkeypatch) -> None:
+    """ComfyUI and the beacon outlive whatever kills onstart's process group.
+
+    Measured 2026-08-13: launched with bare `nohup`, ComfyUI stayed in onstart's
+    group and was killed mid-session — its log stopped at "got prompt" with no
+    traceback, 2 MiB of 32 GB VRAM in use, and a submitted job rendered nothing
+    until a person asked why. nohup only blocks SIGHUP; setsid gives the process
+    its own session, so only a signal aimed at IT can end it.
+    """
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}?sig=x")
+    onstart = gpu_rentals._onstart_script("video")
+    comfy = [line for line in onstart.splitlines() if "main.py" in line]
+    assert comfy, "onstart launches ComfyUI"
+    for line in comfy:
+        assert "setsid" in line, "ComfyUI must not share onstart's process group"
+        assert "< /dev/null" in line, "and must never block on a vanished terminal"
+    # The beacon is how the boot reports itself, so it needs the same treatment.
+    beacon = [line for line in onstart.splitlines() if "http.server" in line]
+    assert beacon and all("setsid" in line for line in beacon)
+
+
+def test_a_lane_whose_far_end_is_dead_is_not_reported_alive(tmp_path: Path, monkeypatch) -> None:
+    """`tunnel_alive` must mean "answers", not "accepts".
+
+    ssh accepts the local connection BEFORE it opens the channel to the far end,
+    so a TCP probe passes against a forward whose remote service is dead —
+    verified on a live lane: connect() succeeded while curl got http_code=000.
+    That is how a killed ComfyUI kept every reading green.
+    """
+    monkeypatch.setattr(gpu_rentals, "_read_attachments",
+                        lambda: {"7": {"local_port": 19490}})
+
+    class _Response:
+        def __init__(self, ok):
+            self.ok = ok
+
+    # The far end answers: healthy.
+    monkeypatch.setattr(gpu_rentals.requests, "get", lambda *a, **k: _Response(True))
+    assert gpu_rentals._tunnel_carrying_traffic(7) is True
+
+    # The forward accepts but the far end resets — the exact shape of the bug.
+    def _reset(*_args, **_kwargs):
+        raise ConnectionResetError(54, "Connection reset by peer")
+
+    monkeypatch.setattr(gpu_rentals.requests, "get", _reset)
+    assert gpu_rentals._tunnel_carrying_traffic(7) is False
+
+    # The far end is up but unhealthy (5xx): still not usable.
+    monkeypatch.setattr(gpu_rentals.requests, "get", lambda *a, **k: _Response(False))
+    assert gpu_rentals._tunnel_carrying_traffic(7) is False
+
+    # No attachment at all → nothing to be alive.
+    monkeypatch.setattr(gpu_rentals, "_read_attachments", lambda: {})
+    assert gpu_rentals._tunnel_carrying_traffic(7) is False
+
+
+def test_attach_separates_a_dead_forward_from_a_dead_comfyui(tmp_path: Path, monkeypatch) -> None:
+    """The two failures need different fixes, so they get different sentences."""
+    monkeypatch.setattr(gpu_rentals, "_kill_tunnel", lambda rental_id: None)
+    monkeypatch.setattr(gpu_rentals, "_tunnel_failure_reason", lambda rental_id: "ssh said nothing")
+
+    class _Proc:
+        def poll(self):
+            return None
+
+    # Forward opens, nothing answers on it → a MACHINE problem, named as one.
+    monkeypatch.setattr(gpu_rentals, "_lane_answers", lambda port, timeout=1.0: False)
+    opened = contextlib.nullcontext()
+    monkeypatch.setattr(gpu_rentals.socket, "create_connection", lambda *a, **k: opened)
+    with pytest.raises(gpu_rentals.GpuRentalError) as caught:
+        gpu_rentals._await_tunnel(7, _Proc(), 19490, timeout=0.6)
+    assert "ComfyUI did not answer" in str(caught.value)
+    assert caught.value.status_code == 502
+
+    # Forward never opens → an SSH problem, and ssh's own words come back.
+    def _refused(*_args, **_kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(gpu_rentals.socket, "create_connection", _refused)
+    with pytest.raises(gpu_rentals.GpuRentalError) as caught:
+        gpu_rentals._await_tunnel(7, _Proc(), 19490, timeout=0.6)
+    assert "did not come up" in str(caught.value)
+    assert "ssh said nothing" in str(caught.value)
+
+    # And a lane that answers attaches without complaint.
+    monkeypatch.setattr(gpu_rentals, "_lane_answers", lambda port, timeout=1.0: True)
+    gpu_rentals._await_tunnel(7, _Proc(), 19490, timeout=0.6)

@@ -71,6 +71,63 @@ class ViewPromptTest(unittest.TestCase):
             character_sheet_view_prompt(view, None),
         )
 
+    def test_per_view_prompt_replaces_the_shared_one(self):
+        views = resolve_character_sheet_views({'views': [
+            {'id': 'head', 'prompt': 'black camisole top'},
+            'front',
+        ]})
+        head, front = views
+        shared = 'black camisole and wide-leg trousers with flat shoes'
+        head_prompt = character_sheet_view_prompt(head, shared)
+        front_prompt = character_sheet_view_prompt(front, shared)
+        # The close-up describes only what it shows; the body view gets the
+        # shared head-to-toe description.
+        self.assertIn('black camisole top', head_prompt)
+        self.assertNotIn('flat shoes', head_prompt)
+        self.assertIn('flat shoes', front_prompt)
+
+    def test_close_up_views_reassert_framing_last(self):
+        view = resolve_character_sheet_views({'views': ['head']})[0]
+        prompt = character_sheet_view_prompt(view, 'wide-leg trousers and black flat shoes')
+        # The wardrobe clause is present, but framing gets the final word — this
+        # is what stops a head-and-shoulders view rendering as a full body.
+        self.assertIn('black flat shoes', prompt)
+        self.assertTrue(prompt.rstrip().endswith('cropped at the chest.'))
+        self.assertLess(prompt.index('flat shoes'), prompt.index('cropped at the chest'))
+
+    def test_full_body_views_get_no_framing_guard(self):
+        view = resolve_character_sheet_views({'views': ['back']})[0]
+        prompt = character_sheet_view_prompt(view, 'red cloak')
+        self.assertTrue(prompt.rstrip().endswith('red cloak'))
+        self.assertNotIn('Framing:', prompt)
+
+    def test_framing_guard_stays_off_when_nothing_was_described(self):
+        view = resolve_character_sheet_views({'views': ['head']})[0]
+        # No wardrobe text means nothing can drag the framing, so the donor
+        # template is left exactly as it was.
+        self.assertNotIn('Framing:', character_sheet_view_prompt(view))
+
+    def test_per_view_prompt_survives_a_preset_free_mixed_sheet(self):
+        views = resolve_character_sheet_views({'views': [
+            {'id': 'face', 'prompt': 'gold drop earrings'},
+            {'id': 'front', 'prompt': 'full outfit head to toe'},
+            'left',
+        ]})
+        self.assertEqual([v['id'] for v in views], ['face', 'front', 'left'])
+        self.assertEqual(views[0]['prompt'], 'gold drop earrings')
+        self.assertNotIn('prompt', views[2])
+
+    def test_dict_and_string_view_entries_dedupe_together(self):
+        views = resolve_character_sheet_views({'views': [
+            {'id': 'front', 'prompt': 'first wins'}, 'front', {'id': 'front'},
+        ]})
+        self.assertEqual(len(views), 1)
+        self.assertEqual(views[0]['prompt'], 'first wins')
+
+    def test_unknown_view_id_still_rejected_in_dict_form(self):
+        with self.assertRaises(ValueError):
+            resolve_character_sheet_views({'views': [{'id': 'elbow'}]})
+
 
 class GridTest(unittest.TestCase):
     def test_turnaround_stays_a_strip(self):

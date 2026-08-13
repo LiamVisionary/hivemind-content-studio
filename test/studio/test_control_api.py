@@ -472,6 +472,55 @@ def test_simple_catalog_serves_cached_payload_instead_of_reprobing(tmp_path: Pat
     assert calls["count"] == probes_after_first
 
 
+def test_simple_catalog_rebuilds_a_degraded_registry_instead_of_serving_it(tmp_path: Path, monkeypatch) -> None:
+    """A catalog built without the Media Studio workflow registry describes
+    MiniMax H3 without reference mode, so the studio renders its pre-reference
+    toolbar. Serving that for the full TTL — and refreshing behind the page load
+    that asked — is why the video studio used to need several reloads before the
+    References and Frames controls appeared."""
+    builds = {"count": 0, "live": False}
+
+    def fake_media_catalog():
+        builds["count"] += 1
+        return {
+            "image": [],
+            "video": [{
+                "id": "media-studio-mcp",
+                "label": "HivemindOS · Media Studio MCP",
+                "available": builds["live"],
+                "detail": "",
+                "registry_live": builds["live"],
+                "models": [],
+            }],
+        }
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.media_catalog", fake_media_catalog)
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    assert client.get("/api/simple/catalog").json()["media"]["video"][0]["registry_live"] is False
+    builds_after_first = builds["count"]
+
+    # Inside the short degraded window the cache still answers: a rebuild per
+    # request would put the 3s reachability probe in every page load's path.
+    assert client.get("/api/simple/catalog").json()["media"]["video"][0]["registry_live"] is False
+    assert builds["count"] == builds_after_first
+
+    # Past it, the registry has come back and the SAME request that finds the
+    # degraded entry gets the rebuilt one — not the stale list with a refresh
+    # kicked off behind it.
+    clock = time.time() + 10
+    monkeypatch.setattr("time.time", lambda: clock)
+    builds["live"] = True
+    payload = client.get("/api/simple/catalog").json()
+    assert payload["media"]["video"][0]["registry_live"] is True
+    assert builds["count"] > builds_after_first
+
+    # A live catalog goes straight back to being cached for the full TTL.
+    live_builds = builds["count"]
+    assert client.get("/api/simple/catalog").json()["media"]["video"][0]["registry_live"] is True
+    assert builds["count"] == live_builds
+
+
 def test_media_studio_detects_e2e_envelope_downloads(tmp_path: Path) -> None:
     from hivemind_content_studio.media_studio import _looks_like_e2e_envelope
 
@@ -1657,7 +1706,7 @@ def test_video_task_survives_every_hop_unchanged(tmp_path: Path, monkeypatch) ->
 
     def fake_client(_descriptor):
         class _C:
-            def call_tool(self, _name, arguments):
+            def call_tool(self, _name, arguments, **_kwargs):
                 seen.update(arguments)
                 return {"job_id": "j1"}
         return _C()
@@ -1891,6 +1940,41 @@ def test_media_studio_video_start_stages_reference_audio_and_video(tmp_path: Pat
     )
     assert refused.status_code == 400
     assert "At most 3 reference videos" in refused.json()["detail"]
+
+
+def test_inline_media_trusts_the_bytes_when_the_label_is_unfamiliar(tmp_path: Path) -> None:
+    """A media type is what the CLIENT calls a file, not what the file is.
+
+    Recorders invent spellings: Android's media framework labels ordinary
+    AAC-in-MP4 as "audio/mp4a-latm", and a voice reference recorded that way
+    was refused outright (2026-08-12) while its bytes were a plain m4a. The
+    allow-list stays — a correctly-labelled file never depends on sniffing —
+    but an unfamiliar label now asks the container before refusing."""
+    from hivemind_content_studio import control_api
+
+    # ISO-BMFF: the 'ftyp' box at byte 4 is what an m4a actually looks like.
+    m4a = b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 40
+
+    labelled = control_api._write_inline_audio(
+        "data:audio/mp4a-latm;base64," + base64.b64encode(m4a).decode(), tmp_path)
+    assert labelled.suffix == ".m4a"
+
+    # Label we have never seen, bytes we have: keep the clip, name it right.
+    sniffed = control_api._write_inline_audio(
+        "data:audio/x-something-new;base64," + base64.b64encode(b"OggS" + b"\x00" * 40).decode(), tmp_path)
+    assert sniffed.suffix == ".ogg"
+
+    # The same box is audio or video depending on what asked for it.
+    as_video = control_api._write_inline_video(
+        "data:video/x-unknown;base64," + base64.b64encode(m4a).decode(), tmp_path)
+    assert as_video.suffix == ".mp4"
+
+    # Sniffing is a fallback, not an opening: junk under an unknown label is
+    # still refused, and the message says both things that were wrong.
+    with pytest.raises(Exception) as refused:
+        control_api._write_inline_audio(
+            "data:audio/x-something-new;base64," + base64.b64encode(b"not media at all").decode(), tmp_path)
+    assert "not a recognised media container" in str(refused.value)
 
 
 def test_media_studio_video_start_refuses_motion_context_plus_source_video(tmp_path: Path, monkeypatch) -> None:

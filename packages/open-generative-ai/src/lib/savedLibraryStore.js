@@ -1,4 +1,4 @@
-// Named, owner-sealed libraries — LoRA groups and saved prompts.
+// Named, owner-sealed libraries — LoRA groups, saved prompts, Hive Persona IDs.
 //
 // Privacy shape: each library is ONE AES-GCM ciphertext stored in the owner
 // vault under a fixed key. The entry names live inside that ciphertext together
@@ -23,6 +23,9 @@ import { isHivemindStudioEnabled } from './hivemindStudio.js';
 export const LIBRARIES = {
   loraGroups: 'lora-groups',
   prompts: 'prompts',
+  // Hive Persona IDs: a named set of reference media that together describe one
+  // character — its pictures, how it moves, how it sounds.
+  personas: 'personas',
 };
 
 const NAMESPACE = 'library';
@@ -31,6 +34,7 @@ const NAMESPACE = 'library';
 const BLOB_KEYS = {
   [LIBRARIES.loraGroups]: 'lora_groups_v1',
   [LIBRARIES.prompts]: 'prompts_v1',
+  [LIBRARIES.personas]: 'personas_v1',
 };
 
 // A named save is the user's own data — never silently evict it. These caps only

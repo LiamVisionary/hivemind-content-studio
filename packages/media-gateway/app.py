@@ -478,6 +478,37 @@ def comfy_lane_transport_error(lane):
     )
 
 
+def comfy_lane_liveness_error(lane, timeout=4.0):
+    """Is the lane ANSWERING, right now, before we commit work to it?
+
+    comfy_lane_transport_error() above settles whether the lane is allowed to be
+    reached; it cannot tell whether anything is still there. A tunnelled lane
+    always passes it - "the tunnel is the auth" - so a rental that has been
+    destroyed, preempted, or has simply lost its tunnel still reads as healthy.
+    Submits then went ahead and staged references into a dead socket: uploads
+    hung, ComfyUI logged a lost connection for a client that had gone away, and
+    two minutes later the caller reported a timeout for a machine that no longer
+    existed (2026-08-11, rental 47471037 - destroyed mid-session while the lane
+    stayed attached, and every attempt hung instead of saying so).
+
+    One cheap probe before staging turns that into an immediate, true sentence.
+    """
+    if not comfy_lane_is_remote(lane):
+        return None
+    try:
+        with urlopen(comfy_lane_request(lane, "/system_stats"), timeout=timeout) as response:
+            if response.status < 400:
+                return None
+            detail = f"answered HTTP {response.status}"
+    except Exception as exc:
+        detail = f"{exc.__class__.__name__}: {exc}"
+    return (
+        f"the machine behind lane '{lane}' is not answering ({detail}). Its tunnel has "
+        f"dropped or the instance is gone - re-attach it in Machines, and detach it if the "
+        f"rental has ended."
+    )
+
+
 def comfy_lane_request(lane, path, data=None, method=None, headers=None, content_type=None):
     """Build a urllib Request to a lane, attaching the lane's auth token."""
     base = COMFY_LANES.get(lane, COMFY_HTTP_DEFAULT).rstrip('/')
@@ -753,6 +784,62 @@ def existing_output_path(logical):
     return None
 
 
+# --- Agent dual-recipient sealing -------------------------------------------
+#
+# An agent driving the gateway generates the pixels but cannot read them back:
+# every output is sealed to the OWNER's vault key and the plaintext is deleted,
+# by design. The old workaround was to run a second gateway with
+# ZIMG_OUTPUT_ENCRYPTION=0 writing plaintext into a scratch directory — an
+# unaudited hole, and the results never reached the owner's studio at all.
+#
+# Instead, seal the same output twice. The owner's envelope is byte-for-byte
+# what it has always been (same helper, same key, same <name>.e2e path), so the
+# frontend, history and sweeper are untouched. A second envelope is sealed to
+# the requesting agent's PUBLIC key at <name>.agent-<fp>.e2e; the agent holds
+# the matching private key and decrypts it itself. No plaintext is written, no
+# key is shared, and revoking the agent key ends its access to anything new.
+#
+# Off unless ZIMG_AGENT_DUAL_SEAL=1. The recipient is per-job: only jobs whose
+# submit presented X-E2E-Requester-Pub get a second envelope, so the owner's own
+# studio generations stay owner-only.
+AGENT_DUAL_SEAL_ENABLED = os.environ.get("ZIMG_AGENT_DUAL_SEAL", "0") == "1"
+AGENT_ENVELOPE_PREFIX = ".agent-"
+AGENT_SEAL_JOBS_MAX = 256
+_agent_seal_jobs = {}
+_agent_seal_lock = threading.Lock()
+
+
+def agent_envelope_path_for(path, fingerprint):
+    """<name>.agent-<fp>.e2e — one envelope per recipient, alongside the owner's."""
+    path = Path(path)
+    return path.with_name(f"{path.name}{AGENT_ENVELOPE_PREFIX}{fingerprint}{E2E_MEDIA_SUFFIX}")
+
+
+def register_agent_seal_recipient(job_id, spki):
+    """Remember that this job's outputs also seal to `spki` (a public SPKI).
+
+    Public material only — safe to hold in memory. Bounded so a long-running
+    gateway cannot grow this map without limit."""
+    if not AGENT_DUAL_SEAL_ENABLED:
+        return None
+    job_id = str(job_id or "")
+    spki = normalized_requester_spki(spki)
+    if not job_id or not spki:
+        return None
+    with _agent_seal_lock:
+        while len(_agent_seal_jobs) >= AGENT_SEAL_JOBS_MAX:
+            _agent_seal_jobs.pop(next(iter(_agent_seal_jobs)))
+        _agent_seal_jobs[job_id] = spki
+    return spki
+
+
+def agent_seal_recipient_for(job_id):
+    if not AGENT_DUAL_SEAL_ENABLED or not job_id:
+        return None
+    with _agent_seal_lock:
+        return _agent_seal_jobs.get(str(job_id))
+
+
 # The gateway runs under the system python3 (no `cryptography`). Reading the
 # public key needs only sqlite, but sealing (RSA-OAEP + AES-GCM) shells out to a
 # python that has `cryptography` — the repo venv by default.
@@ -833,8 +920,14 @@ def _seal_file_with_helper(spki, source, envelope, media_name):
                 pass
 
 
-def seal_output_to_e2e(path):
+def seal_output_to_e2e(path, agent_spki=None):
     """Seal media to the owner vault public key as <name>.e2e; delete plaintext.
+
+    When `agent_spki` is given, the SAME plaintext is additionally sealed to
+    that public key as <name>.agent-<fp>.e2e before the plaintext is removed.
+    The owner's envelope is unaffected either way. A failure to seal the agent
+    copy is logged and swallowed: the owner's copy must never be lost because a
+    secondary recipient failed.
 
     Returns True when sealed, False to fall back to legacy encryption (e.g. no
     vault exists yet). The gateway can encrypt here but can never decrypt.
@@ -854,6 +947,14 @@ def seal_output_to_e2e(path):
         source_stat = path.stat()
         _seal_file_with_helper(spki, path, envelope, path.name)
         os.utime(envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+        agent_spki = normalized_requester_spki(agent_spki)
+        if agent_spki and agent_spki != spki:
+            agent_envelope = agent_envelope_path_for(path, requester_fingerprint(agent_spki))
+            try:
+                _seal_file_with_helper(agent_spki, path, agent_envelope, path.name)
+                os.utime(agent_envelope, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+            except Exception as exc:
+                print(f"[agent-seal] second recipient failed for {path.name}: {exc}", file=sys.stderr)
         try:
             path.unlink()
         except FileNotFoundError:
@@ -861,8 +962,11 @@ def seal_output_to_e2e(path):
     return True
 
 
-def encrypt_output_file(path):
+def encrypt_output_file(path, agent_spki=None):
     """Encrypt output media in place as <name>.zenc and remove plaintext.
+
+    `agent_spki` (optional) adds a second sealed envelope for that recipient on
+    the E2E path only — the legacy .zenc path is single-key by construction.
 
     Returns the logical original path (the filename the UI should keep using).
     """
@@ -873,7 +977,7 @@ def encrypt_output_file(path):
     # fall through to the legacy Keychain-key .zenc path unchanged.
     if E2E_MEDIA_ENABLED or e2e_envelope_path_for(path).exists():
         try:
-            if seal_output_to_e2e(path):
+            if seal_output_to_e2e(path, agent_spki=agent_spki):
                 return path
         except Exception as exc:
             print(f"[e2e-media] seal failed for {path.name}; falling back: {exc}", file=sys.stderr)
@@ -939,12 +1043,19 @@ def decrypt_output_bytes(path):
     return proc.stdout, mimetypes.guess_type(str(path))[0] or "application/octet-stream"
 
 
-def encrypt_outputs(paths):
+def encrypt_outputs(paths, job_id=None):
+    """Seal every output of a finished job.
+
+    `job_id` is what ties an output back to the agent that asked for it: when
+    that job registered a requester key at submit, each output gets a second
+    envelope sealed to it. Without a job id (or without a registered key) this
+    behaves exactly as before — owner-only."""
+    agent_spki = agent_seal_recipient_for(job_id)
     out = []
     for p in paths or []:
         path = Path(p).expanduser().resolve()
         try:
-            out.append(str(encrypt_output_file(path).resolve()))
+            out.append(str(encrypt_output_file(path, agent_spki=agent_spki).resolve()))
         except Exception as e:
             if is_encryptable_output(path):
                 try:
@@ -1003,6 +1114,15 @@ def find_exact_output_logical_path(value):
 def send_output_file(handler, path):
     path = encrypt_output_file(path)
     envelope = e2e_envelope_path_for(Path(path))
+    # Same URL, recipient chosen by the key the caller presents: an agent that
+    # sends its own X-E2E-Requester-Pub gets the envelope sealed to that key.
+    # Serving it leaks nothing — only the matching private key opens it — and
+    # the owner's browser, which presents no such header, is unaffected.
+    agent_spki = normalized_requester_spki(handler.headers.get(REQUESTER_PUB_HEADER))
+    if AGENT_DUAL_SEAL_ENABLED and agent_spki:
+        agent_envelope = agent_envelope_path_for(Path(path), requester_fingerprint(agent_spki))
+        if agent_envelope.is_file():
+            envelope = agent_envelope
     if envelope.is_file():
         # Client-side E2E: the gateway holds no key for this file. Hand the
         # sealed envelope to the browser, which decrypts it with the vault
@@ -1261,11 +1381,17 @@ def _persist_comfy_prompt_routes_locked():
         print(f"[comfy-routes] persist failed: {exc}", file=sys.stderr)
 
 
-def record_comfy_prompt_route(prompt_id, lane, requester_spki=None, pushed_inputs=None):
+def record_comfy_prompt_route(prompt_id, lane, requester_spki=None, pushed_inputs=None, client_id=None):
     """Remember which lane runs a Comfy prompt and who may read it back.
 
     The requester key is public material (an RSA SPKI) - safe to persist; it is
-    what remote outputs get sealed to and what history reads are scoped by."""
+    what remote outputs get sealed to and what history reads are scoped by.
+
+    The submitter's client_id is kept too, because it is the ONLY handle a
+    caller still holds when it never received the prompt id: staging a reference
+    job's inputs on a remote lane happens inside this request, so a submit can
+    outlive the caller's timeout, and the caller then abandons a job that is
+    already queued and watched. comfy_prompt_id_for_client() sells it back."""
     prompt_id = str(prompt_id or "")
     if not prompt_id:
         return None
@@ -1282,6 +1408,8 @@ def record_comfy_prompt_route(prompt_id, lane, requester_spki=None, pushed_input
         entry["requester_fp"] = requester_fingerprint(spki)
     if pushed_inputs:
         entry["pushed_inputs"] = [str(name) for name in pushed_inputs]
+    if client_id:
+        entry["client_id"] = str(client_id)
     with comfy_prompt_routes_lock:
         _comfy_prompt_routes[prompt_id] = entry
         _persist_comfy_prompt_routes_locked()
@@ -1293,6 +1421,28 @@ def comfy_prompt_route(prompt_id):
     with comfy_prompt_routes_lock:
         entry = _comfy_prompt_routes.get(str(prompt_id or ""))
         return dict(entry) if isinstance(entry, dict) else None
+
+
+def comfy_prompt_id_for_client(client_id):
+    """The prompt a given client_id submitted, newest first.
+
+    A client_id is minted per submission by the caller, so this is a lookup of
+    its own job - not a way to enumerate anyone else's. Reads stay scoped by
+    requester key at the route layer, exactly as history reads are."""
+    wanted = str(client_id or "").strip()
+    if not wanted:
+        return None, None
+    _ensure_comfy_prompt_routes_loaded()
+    with comfy_prompt_routes_lock:
+        matches = [
+            (pid, dict(entry))
+            for pid, entry in _comfy_prompt_routes.items()
+            if isinstance(entry, dict) and str(entry.get("client_id") or "") == wanted
+        ]
+    if not matches:
+        return None, None
+    matches.sort(key=lambda item: str(item[1].get("created_at") or ""), reverse=True)
+    return matches[0]
 
 
 def update_comfy_prompt_route(prompt_id, **fields):
@@ -2185,13 +2335,13 @@ def delete_output_everywhere(value):
     }
 
 
-def mirror_output_to_comfy_output(path):
+def mirror_output_to_comfy_output(path, job_id=None):
     src = Path(path).resolve()
     if not src.exists() or not src.is_file():
         return src
     if OUTPUT_ENCRYPTION_ENABLED:
         # Do not duplicate native outputs into a second plaintext directory.
-        return encrypt_output_file(src)
+        return encrypt_output_file(src, agent_spki=agent_seal_recipient_for(job_id))
     COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     dst = (COMFY_OUTPUT_DIR / safe_name(src.name)).resolve()
     if str(dst).startswith(str(COMFY_OUTPUT_DIR.resolve())) and dst != src:
@@ -2631,7 +2781,20 @@ def _prompt_nodes_from_body(body):
         return {}
 
 
+def _prompt_body_client_id(body):
+    """The submitter's own client_id, which Comfy echoes on the queue entry."""
+    try:
+        data = json.loads(body.decode('utf-8', errors='replace') if isinstance(body, (bytes, bytearray)) else body)
+        return str(data.get('client_id') or '') if isinstance(data, dict) else ''
+    except Exception:
+        return ''
+
+
 BIGLOVE_KLEIN3_BASE_BUCKET = (1024, 1536)
+# FLUX.2 Klein conditions on up to 4 reference images (the Swift engine's
+# Flux2Config.maxReferenceImages for every klein variant, matching BFL's
+# editing docs). Every reference cap on this route reads this one number.
+BIGLOVE_KLEIN3_MAX_REFERENCES = 4
 BIGLOVE_KLEIN3_COMFY_MXFP8_MODEL = "BigLoveKlein3_mxfp8.safetensors"
 BIGLOVE_KLEIN3_COMFY_DEQUANT_BF16_MODEL = "BigLoveKlein3_mxfp8_dequant_bf16.safetensors"
 BIGLOVE_KLEIN3_COMFY_BF16_MODEL = "BigLoveKlein3_bf16.safetensors"
@@ -3051,7 +3214,8 @@ def run_generation(job_id, prompt, loras=None, options=None):
             except Exception:
                 pass
         outputs = result.get("outputs", []) if isinstance(result, dict) else []
-        outputs = encrypt_outputs(str(Path(p).resolve()) for p in outputs if Path(p).exists())
+        outputs = encrypt_outputs(
+            (str(Path(p).resolve()) for p in outputs if Path(p).exists()), job_id=job_id)
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
@@ -3254,7 +3418,7 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
                     outputs.append(str(p))
         if not outputs:
             raise RuntimeError("ComfyUI Klein3 edit completed without output images")
-        outputs = encrypt_outputs(outputs)
+        outputs = encrypt_outputs(outputs, job_id=job_id)
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
@@ -3720,7 +3884,7 @@ def run_comfy_api_image(job_id, prompt, options=None):
             record_studio_workflow_setup([Path(p).name for p in outputs], graph, rec.get("comfy_prompt_id"), rec.get("workflow"))
         except Exception as exc:
             print(f"[workflow-index] studio record skipped: {exc}", file=sys.stderr)
-        outputs = encrypt_outputs(outputs)
+        outputs = encrypt_outputs(outputs, job_id=job_id)
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
@@ -3856,7 +4020,7 @@ def run_comfy_krea2_identity(job_id, prompt, image_path=None, options=None):
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
-            "outputs": encrypt_outputs(outputs),
+            "outputs": encrypt_outputs(outputs, job_id=job_id),
             "elapsed_seconds": round(time.monotonic() - t0, 2),
         })
     except Exception as exc:
@@ -4091,7 +4255,7 @@ def run_comfy_krea2_strength_hunt(job_id, prompt, image_path=None, options=None,
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
-            "outputs": encrypt_outputs(final_outputs),
+            "outputs": encrypt_outputs(final_outputs, job_id=job_id),
             "elapsed_seconds": round(time.monotonic() - t0, 2),
         })
     except Exception as exc:
@@ -4230,7 +4394,7 @@ def run_comfy_krea2_outpaint(job_id, prompt, image_path, options=None, outpaint=
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
-            "outputs": encrypt_outputs(outputs),
+            "outputs": encrypt_outputs(outputs, job_id=job_id),
             "elapsed_seconds": round(time.monotonic() - t0, 2),
         })
     except Exception as exc:
@@ -4526,7 +4690,7 @@ def run_ltx_director(job_id, project, options=None):
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
-            "outputs": encrypt_outputs(outputs),
+            "outputs": encrypt_outputs(outputs, job_id=job_id),
             "elapsed_seconds": round(time.monotonic() - t0, 2),
         })
     except Exception as exc:
@@ -4639,7 +4803,7 @@ def run_comfy_krea2_inpaint(job_id, prompt, image_path, mask_path, options=None)
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
-            "outputs": encrypt_outputs(outputs),
+            "outputs": encrypt_outputs(outputs, job_id=job_id),
             "elapsed_seconds": round(time.monotonic() - t0, 2),
         })
     except Exception as exc:
@@ -4749,7 +4913,7 @@ def run_video_interpolation(job_id, video_path, options=None):
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
-            "outputs": encrypt_outputs([str(output)]),
+            "outputs": encrypt_outputs([str(output)], job_id=job_id),
             "elapsed_seconds": round(time.monotonic() - t0, 2),
         })
     except Exception as exc:
@@ -4802,7 +4966,7 @@ def run_episode_save(job_id, video_path, options=None):
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
-            "outputs": encrypt_outputs([str(output)]),
+            "outputs": encrypt_outputs([str(output)], job_id=job_id),
         })
     except Exception as exc:
         if output is not None:
@@ -4925,7 +5089,7 @@ def run_comfy_upscale(job_id, image_path, options=None):
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
-            "outputs": encrypt_outputs(outputs),
+            "outputs": encrypt_outputs(outputs, job_id=job_id),
             "elapsed_seconds": round(time.monotonic() - t0, 2),
         })
     except Exception as exc:
@@ -5008,7 +5172,7 @@ def _native_reference_image_names(nodes_by_id, nodes, sampler_inputs):
                 if image_name:
                     names.append(image_name)
                     break
-    return names[:3]
+    return names[:BIGLOVE_KLEIN3_MAX_REFERENCES]
 
 
 def _prompt_string(value):
@@ -6171,7 +6335,7 @@ def queue_native_mlx_biglove_job(prompt, image_path, options, workflow=None):
     options = dict(options or {})
     image_names = options.get('image_paths') if isinstance(options.get('image_paths'), list) else [image_path]
     uploaded_images = []
-    for item in image_names[:3]:
+    for item in image_names[:BIGLOVE_KLEIN3_MAX_REFERENCES]:
         p = Path(str(item))
         if not p.is_absolute():
             p = COMFY_INPUT_DIR / str(item)
@@ -6217,7 +6381,7 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
     for item in (options.get('image_paths') if isinstance(options.get('image_paths'), list) else [image_path]):
         p = Path(str(item)).resolve()
         reference_images.append(p)
-    reference_images = reference_images[:3] or [Path(image_path).resolve()]
+    reference_images = reference_images[:BIGLOVE_KLEIN3_MAX_REFERENCES] or [Path(image_path).resolve()]
     out = OUT_DIR / f"biglove_klein3_mlx_{job_id}.png"
     rec = {
         "id": job_id,
@@ -6282,7 +6446,7 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
         if result.get("warm_fallback"):
             rec["warm_server_fallback"] = result["warm_fallback"]
         embed_workflow_text_chunk(out, workflow)
-        visible_out = mirror_output_to_comfy_output(out)
+        visible_out = mirror_output_to_comfy_output(out, job_id=job_id)
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
@@ -6609,7 +6773,7 @@ def run_klein_character_sheet(job_id, prompt, reference_images, options=None, vi
             staged = staging_dir / f"tile_{index:02d}.png"
             staged.write_bytes(data)
             tiles.append({"path": str(staged), "label": view["label"], "index": index})
-            visible_out = mirror_output_to_comfy_output(out)
+            visible_out = mirror_output_to_comfy_output(out, job_id=job_id)
             view_outputs.append(str(visible_out.resolve()))
             with jobs_lock:
                 job = jobs.get(job_id) or rec
@@ -6639,7 +6803,7 @@ def run_klein_character_sheet(job_id, prompt, reference_images, options=None, vi
         )
         sheet_outputs = []
         if sheet_path is not None:
-            sheet_outputs = [str(mirror_output_to_comfy_output(sheet_path).resolve())]
+            sheet_outputs = [str(mirror_output_to_comfy_output(sheet_path, job_id=job_id).resolve())]
         rec["character_sheet"]["sheet"] = bool(sheet_outputs)
         rec.update({
             "status": "success",
@@ -6954,7 +7118,7 @@ def run_facefusion_head_swap(job_id, native, options, *, started):
             raise RuntimeError('facefusion finished without a valid output video')
         width, height = _probe_video_dimensions(out)
         rec['options'].update({'width': width, 'height': height})
-        visible_out = mirror_output_to_comfy_output(out)
+        visible_out = mirror_output_to_comfy_output(out, job_id=job_id)
         rec.update({
             'status': 'success',
             'finished_at': now_iso(),
@@ -8043,7 +8207,7 @@ def run_native_mlx_ltx_video(job_id, native, workflow=None):
                 rec['options']['denoise'] = denoise_detail
                 if not denoise_detail.get('applied'):
                     print(f"[ltx] denoise pass skipped for {job_id}: {denoise_detail.get('error')}", flush=True)
-            visible_out = mirror_output_to_comfy_output(out)
+            visible_out = mirror_output_to_comfy_output(out, job_id=job_id)
         finally:
             mark_output_inactive(out)
         rec.update({
@@ -9647,6 +9811,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def send_json(self, data, status=200):
+        # Handing a caller a NEW job id (202 Accepted) is the one moment we know
+        # both the job and who asked for it, for every generate route at once —
+        # so that is where an agent registers as a second seal recipient. A 202
+        # is always returned before the job finishes, so registration lands well
+        # ahead of output sealing. No-op unless ZIMG_AGENT_DUAL_SEAL=1 and the
+        # request presented X-E2E-Requester-Pub.
+        if status == 202 and isinstance(data, dict) and data.get("id"):
+            try:
+                register_agent_seal_recipient(data["id"], self.headers.get(REQUESTER_PUB_HEADER))
+            except Exception as exc:
+                print(f"[agent-seal] register failed: {exc}", file=sys.stderr)
         body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.cors_headers()
@@ -9783,17 +9958,42 @@ class Handler(BaseHTTPRequestHandler):
             if comfy_lane_is_remote(lane_name):
                 transport_error = comfy_lane_transport_error(lane_name)
                 if transport_error:
-                    return self.send_json({"error": transport_error}, 502)
+                    return self.send_json({"error": transport_error, "operational": True}, 502)
                 if not (requester_spki or vault_public_key_spki()):
                     return self.send_json({
                         "error": "remote lane requires a sealing key: present "
                                  f"{REQUESTER_PUB_HEADER} with the job or create the owner vault",
                     }, 409)
+                # Only once the lane is both permitted AND sealable: ask whether
+                # it is still there, before staging anything on it. Staging into
+                # a dead tunnel hangs for minutes and then surfaces as an
+                # unexplained timeout. This costs one round trip and names the
+                # real problem while it is still actionable. It stays BELOW the
+                # sealing-key refusal so a lane we may not use is never touched.
+                liveness_error = comfy_lane_liveness_error(lane_name)
+                if liveness_error:
+                    return self.send_json({"error": liveness_error, "operational": True}, 502)
                 try:
                     pushed_inputs = push_prompt_inputs_to_lane(body, lane_name)
                 except Exception as e:
-                    return self.send_json({"error": f"could not stage inputs on remote lane '{lane_name}': {e}"}, 502)
-            submit_route_meta = {"lane": lane_name, "requester_spki": requester_spki, "pushed_inputs": pushed_inputs}
+                    # Also operational: a staging failure is the transport
+                    # giving out mid-upload, which the liveness probe above
+                    # cannot predict — a small GET succeeds on a path that
+                    # still cannot carry a multi-megabyte reference.
+                    return self.send_json({
+                        "error": f"could not stage inputs on remote lane '{lane_name}': {e}",
+                        "operational": True,
+                    }, 502)
+            submit_route_meta = {
+                "lane": lane_name,
+                "requester_spki": requester_spki,
+                "pushed_inputs": pushed_inputs,
+                # Staging a reference job's inputs (above) runs inside this
+                # request and can outlast the caller's timeout. Keeping the
+                # submitter's own client_id is what lets it find the job again
+                # instead of leaving it queued with nobody holding its id.
+                "client_id": _prompt_body_client_id(body),
+            }
         # ComfyUI's aiohttp server rejects cross-origin-looking browser requests
         # (403) when forwarded with the wrapper's Origin/Referer. Strip browser
         # origin metadata so this remains a same-machine server-to-server proxy.
@@ -9815,6 +10015,7 @@ class Handler(BaseHTTPRequestHandler):
                             submitted_pid, submit_route_meta["lane"],
                             requester_spki=submit_route_meta["requester_spki"],
                             pushed_inputs=submit_route_meta["pushed_inputs"],
+                            client_id=submit_route_meta["client_id"],
                         )
                         if comfy_lane_is_remote(submit_route_meta["lane"]):
                             threading.Thread(target=watch_remote_comfy_prompt, args=(submitted_pid,), daemon=True).start()
@@ -10075,6 +10276,25 @@ class Handler(BaseHTTPRequestHandler):
             with download_jobs_lock:
                 rec = download_jobs.get(jid)
             return self.send_json(public_download_job(rec) if rec else {"error": "not found"}, 200 if rec else 404)
+        if parsed.path.startswith("/api/comfy/prompt-by-client/"):
+            # Hand a submitter back the prompt id it never received. Staging a
+            # reference job's inputs on a remote lane happens inside the submit
+            # request, so a caller can time out while the job goes on to queue,
+            # run and be harvested with nobody holding its id. Scoped the same
+            # way history is: the requester key that submitted it may read it.
+            client_id = unquote(parsed.path.rsplit("/", 1)[-1])
+            prompt_id, route = comfy_prompt_id_for_client(client_id)
+            if not prompt_id:
+                return self.send_json({"error": "no prompt recorded for this client id"}, 404)
+            if not requester_may_read_prompt(route, self.headers.get(REQUESTER_PUB_HEADER)):
+                return self.send_json({"error": "not found"}, 404)
+            return self.send_json({
+                "prompt_id": prompt_id,
+                "lane": route.get("lane"),
+                "remote": bool(route.get("remote")),
+                "status": route.get("status"),
+                "created_at": route.get("created_at"),
+            })
         if parsed.path in ["/comfy/view", "/view"]:
             name = safe_name(qs.get('filename', [''])[0])
             p = find_output_logical_path(name)
@@ -10583,9 +10803,9 @@ class Handler(BaseHTTPRequestHandler):
                 if native_loras:
                     options['loras'] = native_loras
                 # Collect every reference the caller sent — Klein conditions on
-                # up to 3 images (identity across views, character sheets).
-                # Order: inline/multipart image first, then image_path, then
-                # the images_base64 / image_paths lists.
+                # up to BIGLOVE_KLEIN3_MAX_REFERENCES images (identity across
+                # views, character sheets). Order: inline/multipart image first,
+                # then image_path, then the images_base64 / image_paths lists.
                 reference_images = [uploaded_image] if uploaded_image is not None else []
                 if isinstance(data, dict):
                     maybe_image = str(data.get('image_path', '') or '')
@@ -10617,7 +10837,7 @@ class Handler(BaseHTTPRequestHandler):
                     if resolved_ref not in seen_refs:
                         seen_refs.add(resolved_ref)
                         deduped_refs.append(Path(resolved_ref))
-                reference_images = deduped_refs[:3]
+                reference_images = deduped_refs[:BIGLOVE_KLEIN3_MAX_REFERENCES]
                 if not reference_images:
                     return self.send_json({"error": "image required for BigLoveKlein3 edit"}, 400)
                 uploaded_image = reference_images[0]

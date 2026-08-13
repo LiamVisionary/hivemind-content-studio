@@ -40,6 +40,44 @@ def test_media_catalog_preserves_workflow_geometry_and_duration(monkeypatch) -> 
     assert model.default_duration_seconds == 5
 
 
+def test_unreachable_probe_keeps_the_last_live_workflow_capabilities(monkeypatch) -> None:
+    """The reachability probe is a 3s initialize POST gating a 30s registry read,
+    so a gateway that is merely busy fails it. Falling back to the built-in model
+    list there silently strips reference mode off MiniMax H3 — same model, no
+    References panel — which is the studio's most confusing failure: nothing
+    looks broken, the controls are just the old ones."""
+    from hivemind_content_studio import media_catalog as catalog_module
+
+    monkeypatch.setattr(
+        "hivemind_content_studio.media_studio.list_media_studio_workflows",
+        lambda _kind: [{
+            "id": "minimax-h3-reference",
+            "title": "MiniMax H3 Reference",
+            "accepts": ["prompt", "reference_images"],
+            "reference_slots": {"images": 9, "videos": 3, "audios": 3},
+            "routing_only": True,
+            "family": "minimax",
+        }],
+    )
+    monkeypatch.setattr(catalog_module, "_last_live_media_studio_models", ())
+
+    live, is_live = catalog_module._media_studio_registry({"available": True})
+    assert is_live is True
+    assert any(model.id == "minimax-h3-reference" for model in live)
+
+    remembered, is_live = catalog_module._media_studio_registry({"available": False})
+    assert is_live is False, "a probe miss must be reported, not passed off as a live read"
+    reference = next(model for model in remembered if model.id == "minimax-h3-reference")
+    assert reference.reference_slots == {"images": 9, "videos": 3, "audios": 3}
+
+    # Only a process that has never had a live read falls back to the built-ins,
+    # and it says so.
+    monkeypatch.setattr(catalog_module, "_last_live_media_studio_models", ())
+    cold, is_live = catalog_module._media_studio_registry({"available": False})
+    assert is_live is False
+    assert not any(model.id == "minimax-h3-reference" for model in cold)
+
+
 def test_media_studio_is_discovered_from_hivemind_preferences(tmp_path: Path, monkeypatch) -> None:
     preferences = tmp_path / "app-preferences.json"
     preferences.write_text(
@@ -340,7 +378,7 @@ def test_video_generation_removes_uploaded_reference_and_qa_frame(tmp_path: Path
     private_output_lookups: list[str] = []
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             if name == descriptor.tool:
                 assert arguments["image_path"] == "media-studio-input-private.png"
                 assert arguments["loras"] == [{"id": "ltx/style.safetensors", "strength": 0.65}]
@@ -412,7 +450,7 @@ def test_video_generation_surfaces_private_backend_error_and_removes_upload(tmp_
     deleted_inputs: list[str] = []
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             assert name in {descriptor.tool, descriptor.job_tool}
             payload = (
                 {"job": {"id": "job-failed", "status": "queued"}}
@@ -466,7 +504,7 @@ def test_video_generation_routes_source_video_to_ltx_extension(tmp_path: Path, m
     deleted_inputs: list[str] = []
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             captured.update(arguments)
             assert name == descriptor.tool
             return {
@@ -535,7 +573,7 @@ def test_video_generation_forwards_ingredient_views_without_start_frame(tmp_path
     deleted_inputs: list[str] = []
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             captured.update(arguments)
             assert name == descriptor.tool
             return {"content": [{"type": "text", "text": json.dumps({
@@ -640,7 +678,7 @@ def test_video_generation_forwards_high_resolution_dimensions(tmp_path: Path, mo
     captured: dict = {}
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             captured.update(arguments)
             assert name == descriptor.tool
             return {"content": [{"type": "text", "text": json.dumps({
@@ -688,7 +726,7 @@ def test_video_generation_forwards_start_frame_with_ingredient_views(tmp_path: P
     deleted_inputs: list[str] = []
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             captured.update(arguments)
             assert name == descriptor.tool
             return {"content": [{"type": "text", "text": json.dumps({
@@ -745,7 +783,7 @@ def test_video_generation_forwards_the_grain_cleanup_choice(tmp_path: Path, monk
     captured: dict = {}
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             captured.clear()
             captured.update(arguments)
             return {"content": [{"type": "text", "text": json.dumps({"job": {"id": "job-dn", "status": "running"}})}]}
@@ -764,6 +802,43 @@ def test_video_generation_forwards_the_grain_cleanup_choice(tmp_path: Path, monk
     assert "denoise" not in captured
 
 
+def test_video_start_waits_long_enough_for_the_lane_to_accept_it(monkeypatch) -> None:
+    """Queueing is slow and abandoning it does not cancel it.
+
+    The references are staged on the target lane inside this call, and ComfyUI
+    only answers /prompt once its executor frees up, so a submit behind a
+    running render routinely passed the 30s default. The studio then reported
+    "timed out" for a job that went on to render, finish and be harvested with
+    nobody holding its id. The wait has to fit the work — and stay under the
+    190s Hivemind Link proxy leg, or a phone never hears the answer either.
+    """
+    from hivemind_content_studio import media_studio
+
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="minimax-h3-reference",
+    )
+    seen: dict = {}
+
+    class Client:
+        def call_tool(self, name, arguments, **kwargs):
+            seen.update(kwargs)
+            return {"content": [{"type": "text", "text": json.dumps({"job": {"id": "job-1", "status": "running"}})}]}
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+
+    media_studio.start_video(prompt="a slow push in", duration_seconds=5)
+    assert seen["timeout"] >= 120, "a submit gets long enough to stage its references and be accepted"
+    assert seen["timeout"] < 190, "and still fits inside the Hivemind Link proxy leg"
+
+
 def test_spectrum_toggle_is_tri_state_towards_the_mcp(monkeypatch) -> None:
     """Only an explicit choice may override the registered graph.
 
@@ -775,7 +850,7 @@ def test_spectrum_toggle_is_tri_state_towards_the_mcp(monkeypatch) -> None:
     sent: list[dict] = []
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             sent.append(arguments)
             return {"content": [{"type": "text", "text": json.dumps({"id": "job-1"})}]}
 
@@ -804,7 +879,7 @@ def test_steps_override_rides_the_params_record_to_the_mcp(monkeypatch) -> None:
     sent: list[dict] = []
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             sent.append(arguments)
             return {"content": [{"type": "text", "text": json.dumps({"id": "job-1"})}]}
 
@@ -844,7 +919,7 @@ def test_start_video_uploads_and_forwards_the_motion_context_clip(tmp_path: Path
     uploads: list[str] = []
 
     class Client:
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, **_kwargs):
             captured.update(arguments)
             assert name == descriptor.tool
             return {

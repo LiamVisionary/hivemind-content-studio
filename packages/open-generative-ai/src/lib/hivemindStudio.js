@@ -75,7 +75,9 @@ export function clearHivemindStudioPrivateState() {
 }
 
 function defaultContext() {
-    return { catalog: null, prompts: [], videoModels: [] };
+    // videoRegistryLive true: there is nothing to retry when the hivemind studio
+    // is switched off, and a false here would put callers in a retry loop.
+    return { catalog: null, prompts: [], videoModels: [], videoRegistryLive: true };
 }
 
 function workflowProvider(catalog) {
@@ -220,10 +222,17 @@ export async function loadHivemindStudioContext({ refresh = false } = {}) {
             const normalizedCatalog = catalog?.ok ? catalog : null;
             const catalogForContext = normalizedCatalog || contextCache?.catalog || null;
             const discoveredModels = mapHivemindWorkflowModels(catalogForContext);
+            const provider = workflowProvider(catalogForContext);
             const candidate = {
                 catalog: catalogForContext,
                 prompts: Array.isArray(promptPayload?.prompts) ? promptPayload.prompts : (contextCache?.prompts || []),
                 videoModels: discoveredModels.length ? discoveredModels : hiveVideoModels,
+                // The server could not read the workflow registry live, so the
+                // capability fields on these models are a guess. The list is
+                // still FULL — the fallback names the same models — which is why
+                // callers cannot detect this by counting. Absent on older
+                // payloads, which predate the flag and were always live.
+                videoRegistryLive: !catalogForContext || provider?.registry_live !== false,
             };
             if (request !== contextRequest) return contextCache || candidate;
             hiveVideoModels = candidate.videoModels;

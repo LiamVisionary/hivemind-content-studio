@@ -301,7 +301,7 @@ actor Flux2Service {
         do {
             let sourcePaths = (req.imagePaths?.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }).flatMap { $0.isEmpty ? nil : $0 } ?? [req.imagePath]
             var loadedRefs: [(path: String, image: CGImage)] = []
-            for path in sourcePaths.prefix(3) {
+            for path in sourcePaths.prefix(model.maxReferenceImages) {
                 guard let image = loadImage(from: path) else {
                     throw Flux2Error.imageProcessingFailed("Failed to load reference image: \(path)")
                 }

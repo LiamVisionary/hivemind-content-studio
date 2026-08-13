@@ -96,6 +96,37 @@ test('mentioned-character matching finds full and partial names, capped', async 
     assert.ok(charactersMentionedIn('simpson family dinner').length <= 12, 'result stays capped');
 });
 
+// A voice is asked for by NAME in the dialogue language tag, and the two halves
+// that make it retrievable are the source work and the performer. Shipping
+// "SpongeBob SquarePants' own voice" — which named neither — produced a
+// SpongeBob who did not sound like SpongeBob (2026-08-12).
+test('a voice tag names its source and performer, never just "own voice"', async () => {
+    const { H3_CHARACTERS, characterVoiceText } = await import('../src/lib/h3Characters.js');
+    const find = (name) => H3_CHARACTERS.find((entry) => entry.name === name);
+
+    // The community-proven form, from a working example: "<Character>'s voice
+    // from <Series> as played by <Actor>".
+    assert.equal(
+        characterVoiceText(find('Willow Rosenberg')),
+        "Willow Rosenberg's voice from Buffy the Vampire Slayer as played by Alyson Hannigan",
+    );
+    // Animation names the VOICE actor: the on-screen performer does not exist,
+    // and the person who identifies the sound is never in frame.
+    assert.equal(
+        characterVoiceText(find('SpongeBob SquarePants')),
+        "SpongeBob SquarePants' voice from SpongeBob SquarePants as voiced by Tom Kenny",
+    );
+    // A character with neither kind of performer still names where it is from.
+    assert.equal(characterVoiceText(find('Mario')), "Mario's voice from Super Mario");
+
+    // No catalog entry may lose its source, whatever its name and series are.
+    for (const entry of H3_CHARACTERS) {
+        const text = characterVoiceText(entry);
+        assert.doesNotMatch(text, /own voice/, `${entry.name} collapsed to a content-free voice`);
+        assert.ok(text.includes(entry.series), `${entry.name} names no source work`);
+    }
+});
+
 test('note lines carry casting and source for the prompt helper', async () => {
     const { charactersMentionedIn, characterNoteLines } = await import('../src/lib/h3Characters.js');
     const lines = characterNoteLines(charactersMentionedIn('Geralt meets Buffy'));

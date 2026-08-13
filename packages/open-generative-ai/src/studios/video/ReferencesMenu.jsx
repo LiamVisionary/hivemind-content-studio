@@ -20,19 +20,26 @@
 //     prompt={string} onPromptChange={(next) => void}  // for the tag button
 //     limits={{ images: 9, audios: 3, videos: 3 }}
 //     onChange={{ images, audios, videos }}           // one setter per kind
+//     persona={{ id, name } | null}                   // the loaded Hive Persona ID
+//     onPersonaChange={(next|null) => void}
 //     uploadFn={async (file) => url | { url }}
 //     requireApiKey={() => boolean}
 //   />
+//
+// A Hive Persona ID is a NAME for the set of references above — see PersonaBar.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { AuthModal } from '../../dialogs/AuthModal.jsx';
-import { useMediaPoster, useMediaSrc } from '../../hooks/hooks.js';
+import { useMediaSrc } from '../../hooks/hooks.js';
 import {
   motionReferenceWarning,
+  referenceAttachIndex,
   referenceDropBlock,
   referenceKindForFile,
   referenceKindsInDrag,
   referenceLabels,
+  referenceRowKeys,
+  unscriptedTimeWarning,
   withReferenceTags,
 } from '../../lib/h3References.js';
 import {
@@ -49,7 +56,8 @@ import { getUploadHistory, saveUpload } from '../../lib/uploadHistory.js';
 import { useDismissable } from '../../ui/Menu.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
-import { Thumb } from '../UploadPicker.jsx';
+import { PersonaBar } from './PersonaBar.jsx';
+import { ReferenceThumb } from './ReferenceThumb.jsx';
 import { zh } from './videoLogic.js';
 
 const KINDS = ['images', 'videos', 'audios'];
@@ -93,49 +101,6 @@ function fileLabel(item) {
   return name.length > 34 ? `${name.slice(0, 31)}…` : name;
 }
 
-// ONE tile for pictures and clips alike, and the whole point of it is not
-// drawing 36 pixels from a multi-megabyte original.
-//
-// `posterUrl` is a few-KB sealed thumbnail the server built at upload; with one
-// the tile costs a single small decrypt. Without one — every reference sealed
-// before posters existed — the browser falls back to decrypting the original,
-// draws the thumbnail itself, and hands it back through onPosterCaptured so the
-// next session is cheap. A clip additionally needs a frame DECODED: a <video>
-// pointed at a blob paints nothing until it has one, which is why sealed clips
-// used to render as identical placeholder icons.
-export function MediaThumb({ url, posterUrl = null, kind = 'video', alt = '', icon, onPosterCaptured }) {
-  const { poster, resolved, pending } = useMediaPoster(posterUrl ? '' : url, { kind });
-  useEffect(() => {
-    if (posterUrl || !poster || !onPosterCaptured) return;
-    onPosterCaptured(url, poster);
-  }, [posterUrl, poster, url, onPosterCaptured]);
-
-  if (posterUrl) return <Thumb src={posterUrl} alt={alt} />;
-  if (!resolved || pending) {
-    return <div className="h-full w-full animate-pulse bg-bg3" aria-label={zh() ? '解密中' : 'Decrypting'} />;
-  }
-  if (!poster) {
-    // Nothing decodable. A picture can still be shown as itself; a clip cannot.
-    if (kind === 'image') return <Thumb src={url} alt={alt} />;
-    return (
-      <span className="grid h-full w-full place-items-center bg-bg3 text-ink3" title={zh() ? '无法预览此片段' : 'This clip could not be previewed'}>
-        <Icon name={icon || 'film'} size={12} />
-      </span>
-    );
-  }
-  if (kind === 'image') return <img src={poster} alt={alt} className="h-full w-full object-cover" />;
-  return (
-    <video
-      src={resolved}
-      poster={poster}
-      muted
-      playsInline
-      preload="none"
-      className="h-full w-full object-cover"
-    />
-  );
-}
-
 function AudioRowPreview({ url }) {
   const resolved = useMediaSrc(url);
   const [playing, setPlaying] = useState(false);
@@ -177,7 +142,7 @@ function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, o
     <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg2 p-1 pr-1.5">
       <div className="h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3">
         {kind === 'images' || kind === 'videos' ? (
-          <MediaThumb
+          <ReferenceThumb
             url={url}
             posterUrl={posterUrl}
             kind={kind === 'images' ? 'image' : 'video'}
@@ -231,6 +196,7 @@ export function ReferenceSection({
 }) {
   const meta = KIND_META[kind];
   const full = items.length >= limit;
+  const rowKeys = referenceRowKeys(items);
   return (
     <div
       className={cx(
@@ -261,7 +227,7 @@ export function ReferenceSection({
       <p className="text-[10px] leading-snug text-ink3">{meta.hint()}</p>
       {items.map((item, index) => (
         <ReferenceRow
-          key={(typeof item === 'string' ? item : item?.url) || index}
+          key={rowKeys[index]}
           kind={kind}
           index={index}
           item={item}
@@ -299,7 +265,7 @@ export function ReferenceSection({
               title={entry.name || entry.uploadedUrl}
               className="h-8 w-8 overflow-hidden rounded border border-line1 bg-bg3 transition-colors hover:border-honey/60"
             >
-              <MediaThumb
+              <ReferenceThumb
                 url={entry.uploadedUrl}
                 posterUrl={entry.posterUrl || posters[entry.uploadedUrl] || null}
                 kind="image"
@@ -316,7 +282,7 @@ export function ReferenceSection({
             >
               <span className="h-8 w-8 shrink-0 overflow-hidden rounded bg-bg3">
                 {kind === 'videos'
-                  ? <MediaThumb url={entry.uploadedUrl} posterUrl={entry.posterUrl || posters[entry.uploadedUrl] || null} icon={meta.icon} onPosterCaptured={onPosterCaptured} />
+                  ? <ReferenceThumb url={entry.uploadedUrl} posterUrl={entry.posterUrl || posters[entry.uploadedUrl] || null} icon={meta.icon} onPosterCaptured={onPosterCaptured} />
                   : <span className="grid h-full w-full place-items-center text-ink3"><Icon name={meta.icon} size={12} /></span>}
               </span>
               <span className="min-w-0 flex-1 truncate text-[10px] text-ink2">
@@ -336,8 +302,13 @@ export function ReferencesMenu({
   videos = [],
   prompt = '',
   onPromptChange,
+  // What the run is set to produce, so the panel can say when the clip is
+  // longer than the prompt accounts for.
+  durationSeconds = 0,
   limits = { images: 9, audios: 3, videos: 3 },
   onChange = {},
+  persona = null,
+  onPersonaChange,
   uploadFn,
   requireApiKey,
   disabled = false,
@@ -346,6 +317,11 @@ export function ReferencesMenu({
   const [busyKind, setBusyKind] = useState('');
   const [authOpen, setAuthOpen] = useState(false);
   const [recent, setRecent] = useState({ images: [], videos: [], audios: [] });
+  // Every reference URL the owner still has. A Hive Persona ID outlives the
+  // files it points at, so loading one checks against this rather than
+  // attaching a URL whose file was deleted months ago. Null until the listing
+  // has been read — "could not check" must never be read as "all gone".
+  const [known, setKnown] = useState(null);
   // reference url -> sealed poster url, from the saved-reference listing. The
   // ATTACHED rows read it too: an attached clip is one of these references, and
   // without the map each row would decrypt the whole clip to draw 36 pixels.
@@ -390,6 +366,13 @@ export function ReferencesMenu({
         setPosters(Object.fromEntries(refs
           .filter((entry) => entry.posterUrl)
           .map((entry) => [entry.uploadedUrl, entry.posterUrl])));
+        // Pictures can also come from this browser's own upload history, which
+        // the server listing does not cover — counting only the listing would
+        // report perfectly good references as deleted. An empty listing means
+        // the route is unavailable (standalone mode), not an empty library.
+        setKnown(refs.length
+          ? new Set([...refs.map((entry) => entry.uploadedUrl), ...history.map((entry) => entry.uploadedUrl)])
+          : null);
         if (!warmupRef.current) {
           warmupRef.current = true;
           void startPosterWarmup(refs);
@@ -452,6 +435,7 @@ export function ReferencesMenu({
   const tagSectionKind = videos.length ? 'videos' : (audios.length ? 'audios' : null);
   const labels = referenceLabels({ images, videos, audios });
   const motionWarning = motionReferenceWarning({ prompt, videos });
+  const timeWarning = unscriptedTimeWarning({ prompt, durationSeconds, videos, audios });
   const total = images.length + videos.length + audios.length;
 
   const emit = (kind, next) => onChange[kind]?.(next);
@@ -459,6 +443,17 @@ export function ReferencesMenu({
   const attach = (kind, url, name = '') => {
     if (!url) return;
     const current = values[kind];
+    // The same source twice is never the intent — it would send the model one
+    // picture as both <Picture 2> and <Picture 5>, burning a slot on a copy —
+    // and it collided the rows' React keys. Say which label already holds it,
+    // because a saved tile gives no other clue that it is already in the row.
+    const attached = referenceAttachIndex(current, url);
+    if (attached >= 0) {
+      const label = labels[kind][attached];
+      const tag = label?.video || label || KIND_META[kind].tag(attached);
+      toast(zh() ? `已作为 ${tag} 附加` : `Already attached as ${tag}`, { icon: '📎' });
+      return;
+    }
     if (current.length >= limits[kind]) return;
     if (kind === 'images') emit('images', [...current, url]);
     else if (kind === 'videos') emit('videos', [...current, { url, name, useAudio: false }]);
@@ -587,8 +582,12 @@ export function ReferencesMenu({
           disabled ? 'cursor-not-allowed opacity-50' : '',
         )}
       >
-        <Icon name="layers" size={13} />
-        {zh() ? '参考' : 'References'}
+        {/* A loaded persona names the button: what is attached is a character,
+            not "four references". */}
+        <Icon name={persona?.name ? 'persona' : 'layers'} size={13} />
+        {persona?.name ? (
+          <span className="max-w-[9rem] truncate">{persona.name}</span>
+        ) : (zh() ? '参考' : 'References')}
         {total > 0 ? <span className="tabular-nums">{total}</span> : null}
       </button>
 
@@ -619,6 +618,27 @@ export function ReferencesMenu({
             dragDepthRef.current ? 'border-honey/60' : 'border-line1',
           )}
         >
+          {/* The character these rows add up to, above the rows themselves. */}
+          <PersonaBar
+            images={images}
+            videos={videos}
+            audios={audios}
+            persona={persona}
+            onPersonaChange={onPersonaChange}
+            limits={limits}
+            posters={posters}
+            known={known}
+            onPosterCaptured={onPosterCaptured}
+            // Importing a persona re-uploads its media, and it goes up the same
+            // way a dragged file does — the panel owns that path, not the bar.
+            uploadFn={doUpload}
+            onLoad={(next) => {
+              emit('images', next.images);
+              emit('videos', next.videos);
+              emit('audios', next.audios);
+            }}
+          />
+
           {KINDS.map((kind) => (
             <ReferenceSection
               key={kind}
@@ -632,7 +652,7 @@ export function ReferencesMenu({
               posters={posters}
               onPosterCaptured={onPosterCaptured}
               onWriteTags={kind === tagSectionKind && onPromptChange
-                ? () => onPromptChange(withReferenceTags(prompt, { videos, audios }))
+                ? () => onPromptChange(withReferenceTags(prompt, { images, videos, audios }))
                 : null}
               onPickRecent={(url) => attach(kind, url)}
               onAdd={() => openPicker(kind)}
@@ -642,6 +662,17 @@ export function ReferencesMenu({
               )))}
             />
           ))}
+          {timeWarning ? (
+            <p className="rounded-md border border-honey/40 bg-honey-tint px-2 py-1.5 text-[10px] leading-snug text-honey">
+              {timeWarning.kind === 'no-line'
+                ? (zh()
+                  ? '已附加声音参考，但提示词里没有任何 <d>…</d> 台词。克隆的声音无话可说时，模型会自己编。'
+                  : "A voice reference is attached but the prompt has no <d>…</d> line. A cloned voice with nothing to say tends to invent something.")
+                : (zh()
+                  ? `台词约 ${timeWarning.spoken} 秒，片长 ${timeWarning.duration} 秒——约 ${timeWarning.gap} 秒无人指定。请缩短片长、增加台词，或在镜头描述与 overall_soundscape 里写明这段时间发生什么（并声明没有其他说话声）。`
+                  : `Dialogue runs about ${timeWarning.spoken}s; the clip is ${timeWarning.duration}s. Roughly ${timeWarning.gap}s is unaccounted for — shorten the clip, write more line, or say what fills the time and that nobody else speaks.`)}
+            </p>
+          ) : null}
           {motionWarning ? (
             <p className="rounded-md border border-honey/40 bg-honey-tint px-2 py-1.5 text-[10px] leading-snug text-honey">
               {motionWarning.kind === 'unnamed'

@@ -266,6 +266,10 @@ export function buildInitialSetup(c) {
     referenceImageUrls: [],
     referenceAudios: [],
     referenceVideos: [],
+    // The Hive Persona ID those references were loaded from (or last saved as):
+    // { id, name }, or null when they are not a named character. It is a LABEL
+    // for the three lists above, never a source of media in its own right.
+    persona: null,
     ltxMiddleUrl: null,
     ltxEndUrl: null,
     matchStartFrameAr: true,
@@ -452,6 +456,7 @@ export function videoUploadedTransition(prev, { url, name, useHivemind, preferre
       referenceImageUrls: [],
       referenceAudios: [],
       referenceVideos: [],
+      persona: null,
       v2vMode: false,
       imageMode: true,
     }, preferredHive);
@@ -497,6 +502,7 @@ export function newPromptTransition(prev, c) {
     referenceImageUrls: [],
     referenceAudios: [],
     referenceVideos: [],
+    persona: null,
     ltxMiddleUrl: null,
     ltxEndUrl: null,
     matchStartFrameAr: true,
@@ -588,6 +594,9 @@ export function applyGenerationContext(prev, context, c) {
     referenceVideos: Array.isArray(context.referenceVideos)
       ? context.referenceVideos.filter((item) => item?.url)
       : [],
+    // Restoring a run restores which character it was: a captured persona is
+    // only its id and name, so a deleted one comes back as a plain label.
+    persona: context.persona?.name ? { id: context.persona.id || '', name: context.persona.name } : null,
     videoUrl: context.videoUrl || null,
     videoName: context.videoName || null,
     motionContextUrl: context.motionContextUrl || null,

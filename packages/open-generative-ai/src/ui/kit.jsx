@@ -378,10 +378,70 @@ export function Card({ className = '', children, ...rest }) {
   );
 }
 
+const SECTION_LABEL_TYPE = 'text-[11px] font-semibold uppercase tracking-[0.08em]';
+
 export function SectionLabel({ children, className = '' }) {
   return (
-    <div className={cx('text-[11px] font-semibold uppercase tracking-[0.08em] text-ink3', className)}>
+    <div className={cx(SECTION_LABEL_TYPE, 'text-ink3', className)}>
       {children}
+    </div>
+  );
+}
+
+// Whether a collapsible section was left open. A boolean about panel chrome —
+// no prompt or media data — so plain localStorage is safe here.
+const readSectionOpen = (storageKey, fallback) => {
+  if (!storageKey) return fallback;
+  try {
+    const stored = window.localStorage?.getItem(`hive.section.${storageKey}`);
+    return stored === null || stored === undefined ? fallback : stored === '1';
+  } catch { return fallback; }
+};
+
+/**
+ * A titled section that hides its body until asked for. Collapsed unless
+ * `defaultOpen`, and with a `storageKey` it reopens the way the user left it.
+ *
+ * `hint` is what is switched on inside — it shows on the closed header so a
+ * collapsed section never turns an active control into invisible state.
+ */
+export function CollapsibleSection({
+  title,
+  hint = '',
+  defaultOpen = false,
+  storageKey = '',
+  className = '',
+  children,
+}) {
+  const [open, setOpen] = useState(() => readSectionOpen(storageKey, defaultOpen));
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (storageKey) {
+      try { window.localStorage?.setItem(`hive.section.${storageKey}`, next ? '1' : '0'); } catch { /* quota */ }
+    }
+  };
+  return (
+    <div className={cx('flex flex-col gap-3', className)}>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="-mx-1 flex items-center gap-1.5 rounded-sm px-1 py-0.5 text-left text-ink3 transition-colors hover:text-ink1"
+      >
+        <Icon
+          name="chevronRight"
+          size={13}
+          className={cx('shrink-0 transition-transform', open && 'rotate-90')}
+        />
+        <span className={SECTION_LABEL_TYPE}>{title}</span>
+        {!open && hint ? (
+          <span className="min-w-0 truncate text-[11px] font-medium normal-case tracking-normal text-honey">
+            {hint}
+          </span>
+        ) : null}
+      </button>
+      {open ? children : null}
     </div>
   );
 }

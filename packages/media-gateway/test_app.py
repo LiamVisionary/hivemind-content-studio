@@ -1342,7 +1342,7 @@ class ZImageAppTests(unittest.TestCase):
                  ), \
                  patch.object(app, '_run_native_ltx_subprocess', side_effect=fake_run), \
                  patch.object(app, 'append_history'), \
-                patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path: path):
+                patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path, job_id=None: path):
                 app.run_native_mlx_ltx_video('job-ingredients', {
                     'variant': 'regular-q8-dev-ic',
                     'operation': 'ic-lora',
@@ -1438,7 +1438,7 @@ class ZImageAppTests(unittest.TestCase):
                  patch.object(app, 'LTX2_MLX_VARIANTS', variants), \
                  patch.object(app, '_run_native_ltx_subprocess', side_effect=fake_run), \
                  patch.object(app, 'append_history'), \
-                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path: path):
+                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path, job_id=None: path):
                 app.run_native_mlx_ltx_video('job-keyed', {
                     'variant': 'regular-q8-distilled',
                     'prompt': 'private keyed ltx prompt',
@@ -1504,7 +1504,7 @@ class ZImageAppTests(unittest.TestCase):
                  patch.object(app, 'LTX2_MLX_VARIANTS', variants), \
                  patch.object(app, '_run_native_ltx_subprocess', side_effect=fake_run), \
                  patch.object(app, 'append_history'), \
-                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path: path):
+                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda path, job_id=None: path):
                 app.run_native_mlx_ltx_video('job-extend', {
                     'variant': 'eros-v14-q8-dmd',
                     'operation': 'extend',
@@ -2011,7 +2011,8 @@ class ZImageAppTests(unittest.TestCase):
                             'images_base64': [
                                 'data:image/png;base64,' + base64.b64encode(b'side').decode(),
                                 'data:image/png;base64,' + base64.b64encode(b'back').decode(),
-                                # A 4th reference is dropped: the engine conditions on 3.
+                                'data:image/png;base64,' + base64.b64encode(b'three-quarter').decode(),
+                                # A 5th reference is dropped: the engine conditions on 4.
                                 'data:image/png;base64,' + base64.b64encode(b'extra').decode(),
                             ],
                         }).encode('utf-8'),
@@ -2031,12 +2032,119 @@ class ZImageAppTests(unittest.TestCase):
 
             self.assertEqual(payload['id'], 'job-multi-ref')
             refs = captured['options']['image_paths']
-            self.assertEqual(len(refs), 3)
+            self.assertEqual(len(refs), 4)
             self.assertEqual(str(captured['image_path']), refs[0])
             contents = [Path(p).read_bytes() for p in refs]
-            self.assertEqual(contents, [b'front', b'side', b'back'])
+            self.assertEqual(contents, [b'front', b'side', b'back', b'three-quarter'])
             for p in refs:
                 self.assertEqual(Path(p).parent, input_dir.resolve())
+
+    def _dual_seal_fixture(self, app, root):
+        """Real RSA keys + a real output file, wired for the E2E seal path.
+
+        Uses the actual seal/unseal helpers rather than fakes: the whole point
+        of the feature is that two independent private keys each open their own
+        envelope, which a mocked cipher would not prove.
+        """
+        import media_unseal
+
+        out_dir = Path(root) / 'out'
+        out_dir.mkdir(parents=True, exist_ok=True)
+        owner_key = out_dir.parent / 'owner.pem'
+        agent_key = out_dir.parent / 'agent.pem'
+        owner_spki = media_unseal.generate_keypair(owner_key)
+        agent_spki = media_unseal.generate_keypair(agent_key)
+        media = out_dir / 'gen.png'
+        media.write_bytes(b'\x89PNG\r\n\x1a\n' + b'pixels-that-only-a-key-holder-sees')
+        return {
+            'out_dir': out_dir, 'media': media,
+            'owner_key': owner_key, 'owner_spki': owner_spki,
+            'agent_key': agent_key, 'agent_spki': agent_spki,
+        }
+
+    def _open_envelope(self, path, key_path):
+        import media_unseal
+        envelope = json.loads(Path(path).read_text(encoding='utf-8'))
+        return media_unseal.unseal(envelope, media_unseal.load_private_key(key_path))
+
+    def test_agent_dual_seal_gives_each_recipient_its_own_openable_envelope(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            fx = self._dual_seal_fixture(app, td)
+            with patch.object(app, 'OUT_DIR', fx['out_dir']), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', fx['out_dir']), \
+                 patch.object(app, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app, 'E2E_MEDIA_ENABLED', True), \
+                 patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app, '_agent_seal_jobs', {}), \
+                 patch.object(app, 'vault_public_key_spki', return_value=fx['owner_spki']):
+                app.register_agent_seal_recipient('job-agent', fx['agent_spki'])
+                app.encrypt_outputs([str(fx['media'])], job_id='job-agent')
+
+                owner_envelope = app.e2e_envelope_path_for(fx['media'])
+                agent_envelope = app.agent_envelope_path_for(
+                    fx['media'], app.requester_fingerprint(fx['agent_spki']))
+
+                # Plaintext is gone; each recipient has a sealed copy.
+                self.assertFalse(fx['media'].exists())
+                self.assertTrue(owner_envelope.is_file())
+                self.assertTrue(agent_envelope.is_file())
+                # Distinct envelopes (fresh DEK + IV each), same plaintext.
+                self.assertNotEqual(owner_envelope.read_bytes(), agent_envelope.read_bytes())
+                expected = b'\x89PNG\r\n\x1a\n' + b'pixels-that-only-a-key-holder-sees'
+                self.assertEqual(self._open_envelope(owner_envelope, fx['owner_key']), expected)
+                self.assertEqual(self._open_envelope(agent_envelope, fx['agent_key']), expected)
+                # Neither key opens the other's envelope.
+                with self.assertRaises(Exception):
+                    self._open_envelope(owner_envelope, fx['agent_key'])
+                with self.assertRaises(Exception):
+                    self._open_envelope(agent_envelope, fx['owner_key'])
+
+    def test_agent_dual_seal_only_touches_jobs_that_registered_a_key(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            fx = self._dual_seal_fixture(app, td)
+            other = fx['out_dir'] / 'owner-only.png'
+            other.write_bytes(b'\x89PNG\r\n\x1a\nowner-only')
+            with patch.object(app, 'OUT_DIR', fx['out_dir']), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', fx['out_dir']), \
+                 patch.object(app, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app, 'E2E_MEDIA_ENABLED', True), \
+                 patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app, '_agent_seal_jobs', {}), \
+                 patch.object(app, 'vault_public_key_spki', return_value=fx['owner_spki']):
+                app.register_agent_seal_recipient('job-agent', fx['agent_spki'])
+                # A generation the owner started in their own studio: no key
+                # presented, so no second envelope may appear for it.
+                app.encrypt_outputs([str(other)], job_id='job-owner')
+                app.encrypt_outputs([str(fx['media'])], job_id='job-agent')
+
+            fp = app.requester_fingerprint(fx['agent_spki'])
+            self.assertTrue(app.e2e_envelope_path_for(other).is_file())
+            self.assertFalse(app.agent_envelope_path_for(other, fp).exists())
+            self.assertTrue(app.agent_envelope_path_for(fx['media'], fp).is_file())
+            # And nothing anywhere in the output dir is readable as plaintext.
+            self.assertEqual(sorted(p.name for p in fx['out_dir'].glob('*.png')), [])
+
+    def test_agent_dual_seal_stays_off_without_the_flag(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            fx = self._dual_seal_fixture(app, td)
+            with patch.object(app, 'OUT_DIR', fx['out_dir']), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', fx['out_dir']), \
+                 patch.object(app, 'OUTPUT_ENCRYPTION_ENABLED', True), \
+                 patch.object(app, 'E2E_MEDIA_ENABLED', True), \
+                 patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', False), \
+                 patch.object(app, '_agent_seal_jobs', {}), \
+                 patch.object(app, 'vault_public_key_spki', return_value=fx['owner_spki']):
+                # Registration is refused outright, so a stale caller key
+                # cannot become a silent recipient when the flag is off.
+                self.assertIsNone(app.register_agent_seal_recipient('job-agent', fx['agent_spki']))
+                app.encrypt_outputs([str(fx['media'])], job_id='job-agent')
+
+            self.assertTrue(app.e2e_envelope_path_for(fx['media']).is_file())
+            self.assertEqual(
+                [p.name for p in fx['out_dir'].glob('*.agent-*')], [])
 
     def test_generate_api_routes_character_sheet_without_prompt(self):
         app = load_app()
@@ -2231,7 +2339,7 @@ class ZImageAppTests(unittest.TestCase):
                  patch.object(app, 'SWIFT_MLX_METALLIB', metallib), \
                  patch.object(app, '_klein3_native_edit_once', side_effect=fake_edit_once), \
                  patch.object(app, '_compose_labeled_sheet', side_effect=fake_compose), \
-                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda p: Path(p)), \
+                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda p, job_id=None: Path(p)), \
                  patch.object(app, 'append_history', side_effect=history.append), \
                  patch.object(app, 'jobs', {}) as jobs:
                 app.run_klein_character_sheet(
@@ -2281,7 +2389,7 @@ class ZImageAppTests(unittest.TestCase):
                  patch.object(app, 'SWIFT_FLUX2_BIN', swift_bin), \
                  patch.object(app, 'SWIFT_MLX_METALLIB', metallib), \
                  patch.object(app, '_klein3_native_edit_once', side_effect=fake_edit_once), \
-                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda p: Path(p)), \
+                 patch.object(app, 'mirror_output_to_comfy_output', side_effect=lambda p, job_id=None: Path(p)), \
                  patch.object(app, 'append_history'), \
                  patch.object(app, 'jobs', {}) as jobs:
                 app.run_klein_character_sheet(
@@ -2870,7 +2978,7 @@ class ZImageAppTests(unittest.TestCase):
             out_dir = root / 'out'
             out_dir.mkdir()
             refs = []
-            for name in ('front.png', 'side.png', 'back.png'):
+            for name in ('front.png', 'side.png', 'back.png', 'three-quarter.png'):
                 p = out_dir / name
                 p.write_bytes(b'image')
                 refs.append(p)
@@ -2895,9 +3003,10 @@ class ZImageAppTests(unittest.TestCase):
 
         cmd = captured['cmd']
         # Swift ArgumentParser array options take one value per flag occurrence:
-        # a single --images followed by three paths dies with "unexpected
-        # arguments" — every reference needs its own --images flag.
-        self.assertEqual(cmd.count('--images'), 3)
+        # a single --images followed by several paths dies with "unexpected
+        # arguments" — every reference needs its own --images flag. Four is the
+        # engine's full reference budget, so none of them may be dropped here.
+        self.assertEqual(cmd.count('--images'), 4)
         for ref in refs:
             index = cmd.index(str(ref.resolve()))
             self.assertEqual(cmd[index - 1], '--images')
@@ -3813,6 +3922,47 @@ class RemoteComfyLaneTests(unittest.TestCase):
             request = app.comfy_lane_request('rental', '/history/x')
             self.assertEqual(request.get_header('Authorization'), 'Bearer lane-secret')
 
+    def test_a_dead_lane_is_caught_before_any_work_is_staged_on_it(self):
+        """Being ALLOWED to reach a lane is not the same as it being there.
+
+        A tunnelled lane always passes the transport contract - the tunnel is
+        the auth - so a rental that was destroyed mid-session still read as
+        healthy. Submits staged references into a dead socket, hung, and came
+        back as a bare timeout for a machine that no longer existed. The probe
+        has to name that, and it must not fire for the local lane."""
+        app = load_app()
+        lanes = {'default': 'http://127.0.0.1:8188', 'rental9': 'http://127.0.0.1:18337'}
+
+        class Answering:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+
+        with patch.object(app, 'COMFY_LANES', lanes), \
+             patch.object(app, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {}):
+            # The local lane is never probed: it is the process next door.
+            with patch.object(app, 'urlopen', side_effect=AssertionError('must not probe the local lane')):
+                self.assertIsNone(app.comfy_lane_liveness_error('default'))
+
+            with patch.object(app, 'urlopen', return_value=Answering()):
+                self.assertIsNone(app.comfy_lane_liveness_error('rental9'))
+
+            # A dead tunnel says so, names the lane, and says what to do about
+            # it — this is the sentence that has to reach the user instead of
+            # "timed out" three minutes later.
+            with patch.object(app, 'urlopen', side_effect=ConnectionRefusedError('Connection refused')):
+                message = app.comfy_lane_liveness_error('rental9')
+            self.assertIn('rental9', message)
+            self.assertIn('not answering', message)
+            self.assertIn('re-attach', message.lower())
+
+            # A lane that answers but is unhealthy is dead for our purposes too.
+            class Broken(Answering):
+                status = 502
+            with patch.object(app, 'urlopen', return_value=Broken()):
+                self.assertIn('502', app.comfy_lane_liveness_error('rental9'))
+
     def test_requester_scoping_of_prompt_routes(self):
         app = load_app()
         with TemporaryDirectory() as tmp:
@@ -3834,6 +3984,57 @@ class RemoteComfyLaneTests(unittest.TestCase):
                      patch.object(app, '_comfy_prompt_routes_loaded', False):
                     reloaded = app.comfy_prompt_route('p1')
                     self.assertEqual(reloaded['requester_fp'], route['requester_fp'])
+
+    def test_a_submitter_can_recover_the_prompt_id_it_never_received(self):
+        """Queueing a video is slow enough that callers time out mid-submit -
+        staging references on the lane happens inside that request, and Comfy
+        only answers once its executor frees up. The job still queues, runs and
+        is harvested, so the caller must be able to find it by the client_id it
+        minted rather than abandon a render nobody is holding the id for."""
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', set()):
+                app.record_comfy_prompt_route('p1', 'default', client_id='cid-1')
+                prompt_id, route = app.comfy_prompt_id_for_client('cid-1')
+                self.assertEqual(prompt_id, 'p1')
+                self.assertEqual(route['lane'], 'default')
+
+                # An unknown id resolves to nothing rather than to someone
+                # else's job, and a blank one never matches a blank record.
+                self.assertEqual(app.comfy_prompt_id_for_client('cid-nope'), (None, None))
+                app.record_comfy_prompt_route('p2', 'default')
+                self.assertEqual(app.comfy_prompt_id_for_client(''), (None, None))
+
+                # The newest submission wins: a retried client_id must not hand
+                # back the earlier, already-finished render.
+                app.record_comfy_prompt_route('p3', 'default', client_id='cid-2')
+                app.record_comfy_prompt_route('p4', 'default', client_id='cid-2')
+                self.assertEqual(app.comfy_prompt_id_for_client('cid-2')[0], 'p4')
+
+                # Recovery is scoped exactly like a history read: the key that
+                # submitted it may read it back, nobody else.
+                app.record_comfy_prompt_route('p5', 'default', requester_spki=self.SPKI, client_id='cid-3')
+                _, sealed = app.comfy_prompt_id_for_client('cid-3')
+                self.assertTrue(app.requester_may_read_prompt(sealed, self.SPKI))
+                self.assertFalse(app.requester_may_read_prompt(sealed, self.OTHER_SPKI))
+
+                # And it survives a gateway restart, which is the case that
+                # matters: the record outlives the connection that lost it.
+                with patch.object(app, '_comfy_prompt_routes', {}), \
+                     patch.object(app, '_comfy_prompt_routes_loaded', False):
+                    self.assertEqual(app.comfy_prompt_id_for_client('cid-1')[0], 'p1')
+
+    def test_client_id_is_read_from_the_submitted_prompt_body(self):
+        app = load_app()
+        body = json.dumps({'client_id': 'media-studio-mcp-abc', 'prompt': {'1': {'class_type': 'X'}}}).encode()
+        self.assertEqual(app._prompt_body_client_id(body), 'media-studio-mcp-abc')
+        # A body without one, and a body that is not JSON at all, are ordinary
+        # submissions - they must not raise inside the submit path.
+        self.assertEqual(app._prompt_body_client_id(b'{"prompt": {}}'), '')
+        self.assertEqual(app._prompt_body_client_id(b'not json'), '')
 
     def test_prompt_input_files_are_pushed_to_the_remote_lane(self):
         app = load_app()
@@ -4476,11 +4677,16 @@ class RemoteComfyLaneTests(unittest.TestCase):
                     with real_urlopen(request, timeout=5) as response:
                         payload = json.loads(response.read().decode('utf-8'))
                     self.assertEqual(payload['prompt_id'], 'rp-new-1')
+                    # The lane is asked whether it is alive BEFORE anything is
+                    # staged on it: a dead tunnel used to swallow the uploads
+                    # and surface minutes later as an unexplained timeout.
+                    self.assertEqual(upstream[0].full_url, 'http://rental.test:8188/system_stats')
+                    submitted = next(r for r in upstream if r.full_url.endswith('/api/prompt'))
                     # Routed to the rental lane, with its transport token, and
                     # without leaking the requester header upstream.
-                    self.assertEqual(upstream[0].full_url, 'http://rental.test:8188/api/prompt')
-                    self.assertEqual(upstream[0].get_header('Authorization'), 'Bearer lane-secret')
-                    self.assertIsNone(upstream[0].get_header('X-e2e-requester-pub'))
+                    self.assertEqual(submitted.full_url, 'http://rental.test:8188/api/prompt')
+                    self.assertEqual(submitted.get_header('Authorization'), 'Bearer lane-secret')
+                    self.assertIsNone(submitted.get_header('X-e2e-requester-pub'))
                     route = app.comfy_prompt_route('rp-new-1')
                     self.assertEqual(route['lane'], 'rental')
                     self.assertTrue(route['remote'])

@@ -507,7 +507,54 @@ _INLINE_AUDIO_SUFFIXES = {
     "audio/mp4": ".m4a",
     "audio/x-m4a": ".m4a",
     "audio/aac": ".aac",
+    # What real recorders actually label AAC-in-MP4: Android's media framework
+    # and anything that went through it say "mp4a-latm" (2026-08-12, a voice
+    # reference rejected on the label alone while the bytes were ordinary m4a).
+    "audio/mp4a-latm": ".m4a",
+    "audio/aacp": ".aac",
+    "audio/x-hx-aac-adts": ".aac",
+    # A browser MediaRecorder produces webm/opus by default, and phone voice
+    # memos arrive as 3gpp/amr or Apple's caf.
+    "audio/webm": ".webm",
+    "audio/opus": ".opus",
+    "audio/3gpp": ".3gp",
+    "audio/amr": ".amr",
+    "audio/x-caf": ".caf",
 }
+
+# Container signatures, for when the LABEL is unknown but the bytes are not.
+# An allow-list of media types is a guess about what clients call things; these
+# are what the file actually is. Checked only after the label misses, so a
+# correctly-labelled file never depends on sniffing.
+_MEDIA_MAGIC = (
+    (b"RIFF", 8, b"WAVE", ".wav"),
+    (b"fLaC", None, None, ".flac"),
+    (b"OggS", None, None, ".ogg"),
+    (b"ID3", None, None, ".mp3"),
+    (b"\x1a\x45\xdf\xa3", None, None, ".webm"),  # EBML: webm/mkv
+    (b"RIFF", 8, b"AVI ", ".avi"),
+    (b"RIFF", 8, b"WEBP", ".webp"),
+    (b"\x89PNG\r\n\x1a\n", None, None, ".png"),
+    (b"\xff\xd8\xff", None, None, ".jpg"),
+)
+
+
+def _sniffed_media_suffix(data: bytes, *, audio: bool) -> str:
+    """The container a blob actually is, or "" when nothing matches."""
+    for prefix, offset, marker, suffix in _MEDIA_MAGIC:
+        if not data.startswith(prefix):
+            continue
+        if marker is not None and data[offset:offset + len(marker)] != marker:
+            continue
+        return suffix
+    # ISO-BMFF (mp4/m4a/mov/3gp) puts its brand at byte 4, so the family is
+    # only distinguishable by intent: the same box carries audio and video.
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return ".m4a" if audio else ".mp4"
+    # A bare MPEG audio frame has no header at all, only a sync word.
+    if audio and len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+        return ".mp3"
+    return ""
 
 _PRIVATE_MEDIA_SUFFIX = ".zenc"
 _MAX_PRIVATE_IMAGE_BYTES = 32 * 1024 * 1024
@@ -642,19 +689,29 @@ def _write_inline_media(
         raise ValueError(f"{field_name} is required")
     suffix = default_suffix
     encoded = raw
+    mime = ""
     if raw.startswith("data:"):
         header, separator, body = raw.partition(",")
         if not separator:
             raise ValueError(f"{field_name} data URL is missing its comma separator")
         mime = header.removeprefix("data:").split(";", 1)[0].lower()
-        if mime not in mime_suffixes:
-            raise ValueError(f"{field_name} data URL has unsupported media type {mime or 'unknown'}")
-        suffix = mime_suffixes[mime]
+        suffix = mime_suffixes.get(mime, "")
         encoded = body
     try:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ValueError(f"{field_name} is not valid base64") from exc
+    if not suffix:
+        # The label is one we do not know. Ask the bytes before refusing: a
+        # media type is what the client CALLS the file, and recorders invent
+        # spellings ("audio/mp4a-latm" for ordinary AAC). Rejecting on the
+        # label alone throws away a perfectly decodable clip.
+        suffix = _sniffed_media_suffix(data, audio=field_name.startswith("audio"))
+    if not suffix:
+        raise ValueError(
+            f"{field_name} data URL has unsupported media type {mime or 'unknown'} "
+            f"and its contents are not a recognised media container"
+        )
     if not data:
         raise ValueError(f"{field_name} decoded to an empty file")
     if len(data) > max_bytes:
@@ -1140,13 +1197,31 @@ def build_control_app(
     simple_catalog_cache: dict[str, Any] = {"payload": None, "at": 0.0}
     simple_catalog_refreshing = threading.Event()
     SIMPLE_CATALOG_TTL_SECONDS = 30.0
+    # A build whose Media Studio workflow registry did not answer is not merely
+    # stale, it is wrong: it describes MiniMax H3 without reference mode, so the
+    # studio renders the pre-reference toolbar for it. Hold one for seconds, not
+    # for the full TTL — the window this covers (a stack restart where the
+    # gateway is still coming up, or a probe lost to a busy gateway) is short.
+    SIMPLE_CATALOG_DEGRADED_TTL_SECONDS = 3.0
+
+    def _catalog_registry_degraded(payload: dict | None) -> bool:
+        video = ((payload or {}).get("media") or {}).get("video") or []
+        return any(
+            row.get("id") == "media-studio-mcp" and row.get("registry_live") is False
+            for row in video
+            if isinstance(row, dict)
+        )
 
     def _refresh_simple_catalog() -> None:
         try:
             payload = _build_simple_catalog()
             simple_catalog_cache.update(payload=payload, at=time.time())
         except Exception:
-            pass  # keep serving the previous catalog; the next request retries
+            # Keep serving the previous catalog, but stamp the attempt: a build
+            # that keeps throwing would otherwise leave a degraded payload
+            # permanently past its short TTL, and rebuild inside every single
+            # request instead of backing off.
+            simple_catalog_cache["at"] = time.time()
         finally:
             simple_catalog_refreshing.clear()
 
@@ -1163,9 +1238,19 @@ def build_control_app(
             payload = _build_simple_catalog()
             simple_catalog_cache.update(payload=payload, at=time.time())
             return payload
-        if time.time() - simple_catalog_cache["at"] > SIMPLE_CATALOG_TTL_SECONDS:
+        age = time.time() - simple_catalog_cache["at"]
+        if _catalog_registry_degraded(cached) and age > SIMPLE_CATALOG_DEGRADED_TTL_SECONDS:
+            # Rebuild in the request rather than serving this page load the bad
+            # capability list and refreshing behind its back — that pattern is
+            # exactly why a reload used to be needed several times over before
+            # the studio came back with its References and Frames controls.
+            if not simple_catalog_refreshing.is_set():
+                simple_catalog_refreshing.set()
+                _refresh_simple_catalog()
+            return simple_catalog_cache["payload"] or cached
+        if age > SIMPLE_CATALOG_TTL_SECONDS:
             _kick_simple_catalog_refresh()
-        return cached
+        return simple_catalog_cache["payload"] or cached
 
     @app.on_event("startup")
     def _warm_simple_catalog() -> None:

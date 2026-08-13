@@ -31,6 +31,7 @@ import { CameraMotionMenu } from './video/CameraMotionMenu.jsx';
 import { applyRestylePrompt } from '../lib/h3RestylePresets.js';
 import { RestyleMenu } from './video/RestyleMenu.jsx';
 import { CharacterMenu } from './video/CharacterMenu.jsx';
+import { CastMenu } from './video/CastMenu.jsx';
 import { applyCharacterToPrompt } from '../lib/h3Characters.js';
 import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
@@ -75,8 +76,8 @@ import { getComposerSection, hydrateComposerState, updateComposerSection } from 
 import { useMediaSrc } from '../hooks/hooks.js';
 import { Icon } from '../ui/icons.jsx';
 import {
-  AspectRatioPicker, Button, Card, EmptyState, Field, IconButton, NativeSelect, Pill, ProgressBar,
-  SectionLabel, Segmented, Slider, Spinner, TextInput, Toggle, cx,
+  AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, Field, IconButton, NativeSelect,
+  Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextInput, Toggle, cx,
 } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
@@ -96,7 +97,7 @@ import { IngredientsPanel } from './video/IngredientsPanel.jsx';
 import {
   VIDEO_PREFERENCES_KEY, zh,
   buildCatalogs, buildInitialSetup, adaptHivemindToVideoEntry, isLocalVideoModel, v2vModels,
-  currentModel, generationModelsFor,
+  currentModel, generationModelsFor, resolveVideoModel, withSelectedModel,
   currentIngredientModel, frameSlotsVisible, activeIngredientSheetItems, ingredientSelectionSignature,
   getIngredientsWorkflow,
   isMotionControlV2V, isHivemindVideoInputMode,
@@ -336,6 +337,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   const promptRef = useRef(null);
   const videoFileInputRef = useRef(null);
   const mountedOnceRef = useRef(false);
+  const registryRetryRef = useRef(null);
 
   const focusPrompt = () => promptRef.current?.focus();
 
@@ -585,6 +587,37 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   const onReferenceVideosChange = (items) => {
     s.setup = { ...s.setup, referenceVideos: (Array.isArray(items) ? items : []).filter((item) => item?.url) };
     bump();
+  };
+
+  // Which Hive Persona ID the three reference rows currently ARE — set when one
+  // is loaded or saved, cleared when the rows are emptied or the character is
+  // deleted. Purely a label: it never adds or removes a reference itself.
+  const onPersonaChange = (next) => {
+    s.setup = { ...s.setup, persona: next?.name ? { id: next.id || '', name: next.name } : null };
+    bump();
+  };
+
+  // A cast writes both halves in one step: the prompt sections that say who the
+  // subjects are and what each reference may carry, AND the reference rows the
+  // personas bring. Applying one without the other is how a prompt ends up
+  // addressing a <Picture 7> that was never attached.
+  const applyCast = ({ prompt, images, videos, audios, persona }) => {
+    s.setup = {
+      ...s.setup,
+      prompt,
+      referenceImageUrls: images,
+      referenceVideos: videos,
+      referenceAudios: audios,
+      // The rows only still ARE one saved character when the cast is that one
+      // persona; anything else and the name would be a lie about what is loaded.
+      persona: persona?.name ? { id: persona.id || '', name: persona.name } : null,
+    };
+    updateComposerDraft({ prompt });
+    bump();
+    const total = images.length + videos.length + audios.length;
+    toast.success(zh()
+      ? `已应用演员表 · ${total} 个参考`
+      : `Cast applied — ${total} reference${total === 1 ? '' : 's'} attached`);
   };
 
   // LTX 2.3 first/middle/end keyframes (Hivemind local). Kept separate from the
@@ -1308,6 +1341,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       referenceVideos: Array.isArray(s.setup.referenceVideos)
         ? s.setup.referenceVideos.filter((item) => item?.url).map((item) => ({ ...item }))
         : [],
+      persona: s.setup.persona ? { ...s.setup.persona } : null,
       videoUrl: s.setup.videoUrl,
       videoName: s.setup.videoName,
       motionContextUrl: s.setup.motionContextUrl || null,
@@ -1850,7 +1884,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
 
   /* ---------------- hivemind catalog + window events ---------------- */
 
-  const applyHivemindWorkflows = (context) => {
+  const applyHivemindWorkflows = (context, { keepSelection = false } = {}) => {
     const videoModels = Array.isArray(context?.videoModels) ? context.videoModels : [];
     if (!videoModels.length && s.catalogs.hivemindI2V.length) return;
     const signature = JSON.stringify(videoModels);
@@ -1893,6 +1927,18 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         return;
       }
     }
+    if (keepSelection) {
+      // A catalog that arrived behind the user (the degraded-registry retry).
+      // Refresh what the models CAN do, never what the user has since chosen:
+      // re-running the restore below would hand back the persisted duration,
+      // aspect ratio and steps over anything they touched while waiting. The
+      // selection itself is already right — it is only the capability fields
+      // that were a guess — so re-point it at its refreshed entry and stop.
+      const target = resolveVideoModel(s.setup.modelId, s.catalogs);
+      if (target) s.setup = withSelectedModel(s.setup, target);
+      bump();
+      return;
+    }
     const restored = applyRestoredPreferences(s.setup, s.persistedVideoPreferences, s.catalogs);
     if (restored) {
       s.setup = restored;
@@ -1911,6 +1957,23 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     bump();
   };
 
+  // Backoff for a catalog whose workflow registry did not answer. Deliberately
+  // short and finite: the server rebuilds on each miss, so a couple of tries
+  // cover the window (a stack restart, a gateway busy mid-generation) without
+  // turning a genuinely down endpoint into a polling loop.
+  const REGISTRY_RETRY_DELAYS_MS = [1500, 4000, 10000];
+  const retryDegradedRegistry = (attempt) => {
+    if (attempt >= REGISTRY_RETRY_DELAYS_MS.length) return;
+    clearTimeout(registryRetryRef.current);
+    registryRetryRef.current = setTimeout(async () => {
+      if (!mountedRef.current) return;
+      const context = await loadHivemindStudioContext({ refresh: true });
+      if (!mountedRef.current) return;
+      applyHivemindWorkflows(context, { keepSelection: true });
+      if (context.videoRegistryLive === false) retryDegradedRegistry(attempt + 1);
+    }, REGISTRY_RETRY_DELAYS_MS[attempt]);
+  };
+
   const refreshHivemindWorkflows = async ({ force = false } = {}) => {
     // `force` is the user pressing Refresh: the module-level context is cached,
     // so without it a stale-but-non-empty catalog would answer from memory.
@@ -1918,6 +1981,14 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     // Owner unlock and backend startup can race the iframe's first request.
     if (!context.videoModels?.length) context = await loadHivemindStudioContext({ refresh: true });
     applyHivemindWorkflows(context);
+    // A catalog the server could not read live still carries a full model list,
+    // so the empty-check above never fires for it — and it is the more damaging
+    // miss of the two: the fallback list knows nothing of reference mode, so
+    // MiniMax H3 renders with its pre-reference toolbar (one start-frame picker,
+    // no References, no Frames) and stays that way, because the context is
+    // memoized module-wide and nothing re-fetches. Reloading the page was the
+    // only way out.
+    if (context.videoRegistryLive === false) retryDegradedRegistry(0);
   };
 
   const trySelectHiveById = (modelId) => {
@@ -2276,6 +2347,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   useEffect(() => () => {
     mountedRef.current = false;
     if (s.generationTimer) { clearInterval(s.generationTimer); s.generationTimer = null; }
+    clearTimeout(registryRetryRef.current);
     releaseIngredientSheetPreview();
     // The joined cut lives only as an object URL; a closed tab that never
     // revoked it holds the whole episode in memory for the page's lifetime.
@@ -2292,6 +2364,23 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   const loraModel = currentVideoLoraModel();
   const ingredientModel = currentIngredientModel(s.setup, s.catalogs);
   const hasSourceToggle = isLocalAIAvailable();
+  // The Advanced disclosure hides the LoRA and ingredient panels, so say on its
+  // closed header what is switched on down there — an active adapter or a stale
+  // negative prompt steers every generation and must never be invisible state.
+  const activeVideoLoras = loraModel ? currentVideoLoraSelection().filter((l) => l.enabled !== false).length : 0;
+  const activeIngredients = ingredientModel
+    ? activeIngredientSheetItems(ingredientModel, {
+      selectedSheet: s.selectedIngredientSheet,
+      selections: s.sharedIngredientSelections,
+      sheets: s.sharedIngredientSheets,
+    }).length
+    : 0;
+  const advancedHint = [
+    activeVideoLoras ? `${activeVideoLoras} LoRA${activeVideoLoras === 1 ? '' : 's'}` : '',
+    activeIngredients ? `${activeIngredients} ingredient${activeIngredients === 1 ? '' : 's'}` : '',
+    String(s.setup.negativePrompt || '').trim() ? (zh() ? '负面' : 'negative') : '',
+    s.setup.detailerStrength ? (zh() ? '细节增强' : 'detailer') : '',
+  ].filter(Boolean).join(' · ');
 
   const arOptions = aspectRatiosFor(s.setup, s.setup.modelId);
   // "Use starting frame aspect ratio": only relevant for a Hivemind LTX start
@@ -2649,8 +2738,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         </div>
       ) : null}
 
-      <div className="flex flex-col gap-3">
-        <SectionLabel>{zh() ? '高级' : 'Advanced'}</SectionLabel>
+      <CollapsibleSection title={zh() ? '高级' : 'Advanced'} hint={advancedHint} storageKey="video.advanced">
         {supportsSpectrum(model) ? (
           <Field
             label={zh() ? '快速采样（Spectrum）' : 'Fast sampling (Spectrum)'}
@@ -2792,8 +2880,6 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             </Field>
           );
         })}
-      </div>
-
       {ingredientModel ? (
         <IngredientsPanel
           model={ingredientModel}
@@ -2849,6 +2935,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
           />
         </div>
       ) : null}
+      </CollapsibleSection>
         </>
       )}
     </>
@@ -2967,6 +3054,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
               videos={Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : []}
               prompt={s.setup.prompt}
               onPromptChange={(next) => { setPrompt(next); focusPrompt(); }}
+              durationSeconds={Number(s.setup.duration) || 0}
               limits={{
                 images: referenceEntry.referenceSlots?.images || 9,
                 audios: referenceEntry.referenceSlots?.audios || 3,
@@ -2977,6 +3065,8 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
                 audios: onReferenceAudiosChange,
                 videos: onReferenceVideosChange,
               }}
+              persona={s.setup.persona || null}
+              onPersonaChange={onPersonaChange}
               uploadFn={uploadFnForFrame}
               requireApiKey={frameRequiresApiKey}
             />
@@ -3027,6 +3117,20 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
           {/minimax-h3/.test(s.setup.modelId || '') ? (
             <>
               <RestyleMenu activeId={s.setup.restylePresetId || null} onApply={applyRestyle} />
+              {/* The cast needs reference slots to put its personas in, so it
+                  only appears on a workflow that has them. */}
+              {referenceEntry ? (
+                <CastMenu
+                  prompt={s.setup.prompt}
+                  durationSeconds={Number(s.setup.duration) || 0}
+                  limits={{
+                    images: referenceEntry.referenceSlots?.images || 9,
+                    audios: referenceEntry.referenceSlots?.audios || 3,
+                    videos: referenceEntry.referenceSlots?.videos || 3,
+                  }}
+                  onApply={applyCast}
+                />
+              ) : null}
               <CharacterMenu prompt={s.setup.prompt} onPick={addH3Character} />
             </>
           ) : null}
@@ -3376,6 +3480,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
           // reference. Re-applying the scaffold puts back only what is missing.
           setPrompt(refsArmed
             ? withReferenceTags(prompt, {
+              images: s.setup.referenceImageUrls || [],
               videos: s.setup.referenceVideos || [],
               audios: s.setup.referenceAudios || [],
             })
