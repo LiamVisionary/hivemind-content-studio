@@ -22,7 +22,13 @@
 
 ## Removed overlap
 
-- MoneyPrinterTurbo no longer imports an Upload-Post singleton or auto-publishes after rendering.
+- MoneyPrinterTurbo never auto-publishes after rendering. Upstream 1.3.x reworked
+  cross-posting into async, state-tracked plumbing threaded through `app/services/task.py`,
+  so the 2026-08-16 catch-up restored `app/services/upload_post.py` rather than carrying a
+  large permanent divergence. It stays inert: `upload_post_enabled` and
+  `upload_post_auto_upload` both default to `false`, and `is_configured()` additionally
+  requires an API key and username. `hivemind_content_studio.publishing` remains the only
+  approval-gated publish path, and is the one the studio and MCP surfaces call.
 - Auto Clipper no longer carries a second Postiz HTTP client.
 - Animation artifacts use generic role names (`image-prompts`, `motion-prompts`, `voice-lines`, `music-brief`) rather than provider-branded duplicates.
 - Credential values are never written into app config; providers read environment at call time.

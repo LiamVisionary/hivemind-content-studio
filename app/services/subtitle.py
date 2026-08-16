@@ -15,6 +15,7 @@ from app.utils import utils
 model_size = config.whisper.get("model_size", "large-v3")
 device = config.whisper.get("device", "cpu")
 compute_type = config.whisper.get("compute_type", "int8")
+initial_prompt = config.whisper.get("initial_prompt", "") or None
 model = None
 
 
@@ -57,6 +58,7 @@ def create(audio_file, subtitle_file: str = ""):
         word_timestamps=True,
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=500),
+        **({"initial_prompt": initial_prompt} if initial_prompt else {}),
     )
 
     logger.info(
@@ -161,6 +163,13 @@ def file_to_subtitles(filename):
                 current_times, current_text = None, ""
             elif current_times:
                 current_text += line
+
+    # Flush the final block. SRT files whose last subtitle is not followed by a
+    # trailing blank line never hit the blank-line branch above, so without this
+    # the last subtitle would be silently dropped.
+    if current_times:
+        index += 1
+        times_texts.append((index, current_times.strip(), current_text.strip()))
     return times_texts
 
 
@@ -192,7 +201,8 @@ def similarity(a, b):
 
 def correct(subtitle_file, video_script):
     subtitle_items = file_to_subtitles(subtitle_file)
-    script_lines = utils.split_string_by_punctuations(video_script)
+    normalized_script = utils.normalize_script_for_subtitle_matching(video_script)
+    script_lines = utils.split_string_by_punctuations(normalized_script)
 
     corrected = False
     new_subtitle_items = []

@@ -1,5 +1,6 @@
 .DS_Store
 /config.toml
+/config.toml.bak
 /storage/
 /data/
 /.env
@@ -40,3 +41,9 @@ test_*.py
 !packages/**/tests/**/*.py
 !engines/**/Tests/**
 streamlit.log
+.coverage
+coverage.xml
+htmlcov/
+.codegraph
+/docs/superpowers
+.understand-anything

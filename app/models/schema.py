@@ -1,9 +1,9 @@
 import warnings
 from enum import Enum
-from typing import Any, List, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
 import pydantic
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import config
 
@@ -27,6 +27,8 @@ class VideoTransitionMode(str, Enum):
     fade_out = "FadeOut"
     slide_in = "SlideIn"
     slide_out = "SlideOut"
+    zoom_in = "ZoomIn"
+    zoom_out = "ZoomOut"
 
 
 class VideoAspect(str, Enum):
@@ -35,13 +37,13 @@ class VideoAspect(str, Enum):
     square = "1:1"
 
     def to_resolution(self):
-        if self == VideoAspect.landscape.value:
+        if self == VideoAspect.landscape:
             return 1920, 1080
-        elif self == VideoAspect.portrait.value:
+        elif self == VideoAspect.portrait:
             return 1080, 1920
-        elif self == VideoAspect.square.value:
+        elif self == VideoAspect.square:
             return 1080, 1080
-        return 1080, 1920
+        raise ValueError(f"unsupported video aspect: {self}")
 
 
 class _Config:
@@ -53,6 +55,10 @@ class MaterialInfo:
     provider: str = "pexels"
     url: str = ""
     duration: int = 0
+    # 在线素材搜索会附带经过筛选的公开来源信息，供搜索缓存和任务记录复用。
+    # 本地上传素材不需要填写；写入任务文件前仍会按字段白名单重新构造，
+    # 避免外部请求传入的签名 URL、凭据或无关字段进入持久化数据。
+    source_info: Optional[dict[str, Any]] = None
 
 
 class VideoParams(BaseModel):
@@ -76,15 +82,17 @@ class VideoParams(BaseModel):
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
-    video_clip_duration: Optional[int] = 5
-    video_count: Optional[int] = 1
+    video_clip_duration: int = Field(default=5, ge=1)
+    video_clip_speed: Optional[float] = 1.0
+    match_materials_to_script: bool = False
+    video_count: int = Field(default=1, ge=1)
 
     video_source: Optional[str] = "pexels"
     video_materials: Optional[List[MaterialInfo]] = (
         None  # Materials used to generate the video
     )
     
-    custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore video_script and disable subtitle
+    custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore TTS and can still use Whisper subtitles
     video_language: Optional[str] = ""  # auto detect
 
     voice_name: Optional[str] = ""
@@ -93,19 +101,26 @@ class VideoParams(BaseModel):
     bgm_type: Optional[str] = "random"
     bgm_file: Optional[str] = ""
     bgm_volume: Optional[float] = 0.2
+    # 视频配乐供应商共用提示词，WebUI 新任务统一写入该字段。保留下面的
+    # Sonilo 专用字段以兼容旧任务记录和现有 CLI 参数。
+    video_music_prompt: str = Field(default="", max_length=2000)
+    sonilo_bgm_prompt: str = Field(default="", max_length=2000)
 
     subtitle_enabled: Optional[bool] = True
     subtitle_position: Optional[str] = config.ui.get("subtitle_position", "bottom")  # top, bottom, center, custom
     custom_position: float = config.ui.get("custom_position", 70.0)
     font_name: Optional[str] = "STHeitiMedium.ttc"
     text_fore_color: Optional[str] = "#FFFFFF"
-    text_background_color: Union[bool, str] = True
+    text_background_color: Union[bool, str] = False
+    rounded_subtitle_background: bool = False
 
     font_size: int = 60
     stroke_color: Optional[str] = "#000000"
     stroke_width: float = 1.5
     n_threads: Optional[int] = 2
-    paragraph_number: Optional[int] = 1
+    paragraph_number: int = Field(default=1, ge=1, le=10)
+    video_script_prompt: str = Field(default="", max_length=2000)
+    custom_system_prompt: str = Field(default="", max_length=8000)
 
 
 class SubtitleRequest(BaseModel):
@@ -120,7 +135,8 @@ class SubtitleRequest(BaseModel):
     subtitle_position: Optional[str] = config.ui.get("subtitle_position", "bottom")
     font_name: Optional[str] = "STHeitiMedium.ttc"
     text_fore_color: Optional[str] = "#FFFFFF"
-    text_background_color: Union[bool, str] = True
+    text_background_color: Union[bool, str] = False
+    rounded_subtitle_background: bool = False
     font_size: int = 60
     stroke_color: Optional[str] = "#000000"
     stroke_width: float = 1.5
@@ -145,13 +161,17 @@ class VideoScriptParams:
     {
       "video_subject": "春天的花海",
       "video_language": "",
-      "paragraph_number": 1
+      "paragraph_number": 1,
+      "video_script_prompt": "",
+      "custom_system_prompt": ""
     }
     """
 
     video_subject: Optional[str] = "春天的花海"
     video_language: Optional[str] = ""
-    paragraph_number: Optional[int] = 1
+    paragraph_number: int = Field(default=1, ge=1, le=10)
+    video_script_prompt: str = Field(default="", max_length=2000)
+    custom_system_prompt: str = Field(default="", max_length=8000)
 
 
 class VideoTermsParams:
@@ -159,7 +179,8 @@ class VideoTermsParams:
     {
       "video_subject": "",
       "video_script": "",
-      "amount": 5
+      "amount": 5,
+      "match_materials_to_script": false
     }
     """
 
@@ -168,6 +189,23 @@ class VideoTermsParams:
         "春天的花海，如诗如画般展现在眼前。万物复苏的季节里，大地披上了一袭绚丽多彩的盛装。金黄的迎春、粉嫩的樱花、洁白的梨花、艳丽的郁金香……"
     )
     amount: Optional[int] = 5
+    match_materials_to_script: bool = False
+
+
+class VideoSocialMetadataParams:
+    """
+    {
+      "video_subject": "A day in Shanghai",
+      "video_script": "",
+      "language": "auto",
+      "platform": "tiktok"
+    }
+    """
+
+    video_subject: Optional[str] = Field(default="A day in Shanghai", max_length=500)
+    video_script: Optional[str] = Field(default="", max_length=8000)
+    language: Optional[str] = Field(default="auto", max_length=64)
+    platform: Optional[str] = Field(default="tiktok", max_length=64)
 
 
 class BaseResponse(BaseModel):
@@ -192,6 +230,10 @@ class VideoTermsRequest(VideoTermsParams, BaseModel):
     pass
 
 
+class VideoSocialMetadataRequest(VideoSocialMetadataParams, BaseModel):
+    pass
+
+
 ######################################################################################################
 ######################################################################################################
 ######################################################################################################
@@ -212,24 +254,100 @@ class TaskResponse(BaseResponse):
         }
 
 
+class TaskStatusData(BaseModel):
+    """任务查询对外保证的稳定字段；历史和扩展字段继续原样透传。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    task_id: str
+    state: int
+    progress: int = 0
+    videos: Optional[List[str]] = None
+    combined_videos: Optional[List[str]] = None
+    failed_stage: Optional[str] = None
+    error: Optional[str] = None
+    cross_post_state: Optional[
+        Literal["pending", "processing", "complete", "failed"]
+    ] = None
+    cross_post_results: Optional[List[dict[str, Any]]] = None
+    cross_post_error: Optional[str] = None
+
+
+class TaskListData(BaseModel):
+    """分页任务列表结构。"""
+
+    tasks: List[TaskStatusData]
+    total: int
+    page: int
+    page_size: int
+
+
 class TaskQueryResponse(BaseResponse):
-    class Config:
-        json_schema_extra = {
+    """
+    任务查询会返回生成状态和可选的跨平台发布状态。
+
+    生成失败时包含 `failed_stage` 和 `error`；生成完成后如果启用了自动发布，
+    `cross_post_state` 会依次进入 pending、processing、complete 或 failed。
+    """
+
+    data: TaskStatusData
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": 200,
+                    "message": "success",
+                    "data": {
+                        "task_id": "6c85c8cc-a77a-42b9-bc30-947815aa0558",
+                        "state": 1,
+                        "progress": 100,
+                        "videos": ["/tasks/example/final-1.mp4"],
+                        "cross_post_state": "complete",
+                        "cross_post_results": [{"success": True}],
+                    },
+                },
+                {
+                    "status": 200,
+                    "message": "success",
+                    "data": {
+                        "task_id": "6c85c8cc-a77a-42b9-bc30-947815aa0558",
+                        "state": -1,
+                        "progress": 30,
+                        "failed_stage": "audio",
+                        "error": "TTS request timed out",
+                    },
+                },
+            ],
+        }
+    )
+
+
+class TaskListResponse(BaseResponse):
+    """任务列表使用独立响应模型，避免与单任务查询混用文档结构。"""
+
+    data: TaskListData
+
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "status": 200,
                 "message": "success",
                 "data": {
-                    "state": 1,
-                    "progress": 100,
-                    "videos": [
-                        "http://127.0.0.1:8080/tasks/6c85c8cc-a77a-42b9-bc30-947815aa0558/final-1.mp4"
+                    "tasks": [
+                        {
+                            "task_id": "6c85c8cc-a77a-42b9-bc30-947815aa0558",
+                            "state": 4,
+                            "progress": 50,
+                        }
                     ],
-                    "combined_videos": [
-                        "http://127.0.0.1:8080/tasks/6c85c8cc-a77a-42b9-bc30-947815aa0558/combined-1.mp4"
-                    ],
+                    "total": 1,
+                    "page": 1,
+                    "page_size": 10,
                 },
-            },
+            }
         }
+    )
 
 
 class TaskDeletionResponse(BaseResponse):
@@ -276,6 +394,21 @@ class VideoTermsResponse(BaseResponse):
         }
 
 
+class VideoSocialMetadataResponse(BaseResponse):
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": 200,
+                "message": "success",
+                "data": {
+                    "title": "A Day in Shanghai You Should Not Miss",
+                    "caption": "Save this quick Shanghai inspiration and follow for more short travel ideas.",
+                    "hashtags": ["#shorts", "#travel", "#shanghai", "#viral", "#fyp"],
+                },
+            },
+        }
+
+
 class BgmRetrieveResponse(BaseResponse):
     class Config:
         json_schema_extra = {
@@ -285,9 +418,9 @@ class BgmRetrieveResponse(BaseResponse):
                 "data": {
                     "files": [
                         {
-                            "name": "output013.mp3",
+                            "name": "4fca18fce7344f3aa824777a40d45c8c.mp3",
                             "size": 1891269,
-                            "file": "/MoneyPrinterTurbo/resource/songs/output013.mp3",
+                            "file": "4fca18fce7344f3aa824777a40d45c8c.mp3",
                         }
                     ]
                 },
@@ -301,7 +434,7 @@ class BgmUploadResponse(BaseResponse):
             "example": {
                 "status": 200,
                 "message": "success",
-                "data": {"file": "/MoneyPrinterTurbo/resource/songs/example.mp3"},
+                "data": {"file": "4fca18fce7344f3aa824777a40d45c8c.mp3"},
             },
         }
 
