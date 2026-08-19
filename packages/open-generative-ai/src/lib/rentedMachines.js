@@ -7,13 +7,17 @@ const CACHE_MS = 15000;
 // Failures (vault locked, stack mid-restart) cache briefly so recovery is
 // quick — a long negative cache made the Rented option miss its moment.
 const ERROR_CACHE_MS = 4000;
-let cache = { at: 0, machines: null, inflight: null, ttl: CACHE_MS };
+let cache = { at: 0, machines: null, inflight: null, ttl: CACHE_MS, generation: -1 };
+// Bumped by every announced attachment change. A read forced by one of those
+// changes may not be answered by a request that started before it.
+let generation = 0;
 
 // Fired by the Machines view after attach/detach so mounted studios refresh
 // their Rented state immediately instead of waiting for the next poll.
 export const RENTED_CHANGED_EVENT = 'rented-machines-changed';
 
 export function notifyRentedMachinesChanged() {
+  generation += 1;
   try { window.dispatchEvent(new CustomEvent(RENTED_CHANGED_EVENT)); } catch { /* SSR/tests */ }
 }
 
@@ -44,15 +48,30 @@ async function fetchMachines() {
 
 const EMPTY_STATE = { live: [], provisioning: [], idle: [], broken: [], pending: [] };
 
+// Only the newest request may publish. One superseded by a forced refresh read
+// the world before the change that forced it, and letting it land would put the
+// machine you just switched away from back in front until the next poll.
+function publish(promise, started, state, ttl) {
+  if (cache.inflight === promise) {
+    cache = { at: Date.now(), machines: state, inflight: null, ttl, generation: started };
+  }
+  return state;
+}
+
 // Never throws — the empty state when the API is unreachable (locked vault,
 // stack restarting) so the studios degrade to the rent-a-machine CTA.
 export async function rentedMachinesState({ force = false } = {}) {
   const now = Date.now();
   if (!force && cache.machines !== null && now - cache.at < cache.ttl) return cache.machines;
-  if (!cache.inflight) {
-    cache.inflight = fetchMachines()
-      .then((state) => { cache = { at: Date.now(), machines: state, inflight: null, ttl: CACHE_MS }; return state; })
-      .catch(() => { cache = { at: Date.now(), machines: EMPTY_STATE, inflight: null, ttl: ERROR_CACHE_MS }; return EMPTY_STATE; });
+  // Share a request that is already running for this generation — every mounted
+  // studio hears the same change event, and they must not each open their own
+  // round-trip — but never share one that predates the change being forced on.
+  if (!cache.inflight || (force && cache.generation !== generation)) {
+    const started = generation;
+    const inflight = fetchMachines()
+      .then((state) => publish(inflight, started, state, CACHE_MS))
+      .catch(() => publish(inflight, started, EMPTY_STATE, ERROR_CACHE_MS));
+    cache = { ...cache, inflight, generation: started };
   }
   return cache.inflight;
 }
@@ -85,6 +104,19 @@ export function isRoutingLeader(machine, machines) {
   const order = attachedOrder(machines);
   const index = order.findIndex((m) => m.rental_id === machine.rental_id);
   return index >= 0 && !order.slice(0, index).some((ahead) => overlaps(ahead, machine));
+}
+
+// The list as it will read once a `/select` on this machine lands: attached,
+// and ahead of every other attachment — mirroring the priority the server
+// writes (max + 1). The picker renders this the instant you click, because the
+// round-trip that makes it true is seconds long (attach a cold box and it is
+// longer still), and a picker that keeps pointing at the OLD machine for that
+// long reads as a click that did nothing — so it gets clicked again.
+export function withSelection(machines, rentalId) {
+  const top = (machines || []).reduce((max, m) => Math.max(max, m.priority || 0), 0) + 1;
+  return (machines || []).map((machine) => (machine.rental_id === rentalId
+    ? { ...machine, attached: true, priority: top }
+    : machine));
 }
 
 // The machine a generation with this model would run on, if any.

@@ -25,7 +25,12 @@ MAX_BLOB_BYTES = 200 * 1024 * 1024  # generous; media DEK-sealed ciphertext live
 # Only these opaque fields are accepted for the identity record. Anything that
 # could let the server decrypt (a bare master key, passphrase, recovery key) is
 # structurally absent from the schema.
-IDENTITY_FIELDS = ("salt", "wrapped_mk_pass", "wrapped_mk_recovery", "public_key", "wrapped_private_key", "kdf")
+# `wrapped_mk_prf` is a JSON object of {credential_id: wrapped_mk}, one entry per
+# passkey whose authenticator can produce a PRF secret. It is still only ever
+# ciphertext to this server: the PRF secret never leaves the authenticator and
+# the browser, so a stolen copy of this column unwraps nothing.
+IDENTITY_FIELDS = ("salt", "wrapped_mk_pass", "wrapped_mk_recovery", "public_key",
+                   "wrapped_private_key", "kdf", "wrapped_mk_prf")
 # Namespaces that accrue one entry per generation (and, for lookup, several keys
 # per entry) would otherwise grow without bound — this store reached 3.27 GB
 # before retention existed. The server cannot read these blobs, so retention is
@@ -129,6 +134,37 @@ class VaultStore:
                 "INSERT INTO vault_identity(id, identity_json, created_at, updated_at) VALUES(1, ?, ?, ?)"
                 " ON CONFLICT(id) DO UPDATE SET identity_json = excluded.identity_json, updated_at = excluded.updated_at",
                 (json.dumps(cleaned, separators=(",", ":"), sort_keys=True), created, now),
+            )
+        return cleaned
+
+    def set_prf_wrap(self, credential_id: str, wrapped_mk: str | None) -> dict[str, str]:
+        """Add or drop one passkey's wrapped master key.
+
+        Separate from put_identity because that call refuses to overwrite an
+        existing vault — rotating an identity re-encrypts everything, whereas
+        enrolling a passkey adds one more way to unwrap the SAME master key and
+        must not look like a rotation.
+        """
+        key = str(credential_id or "").strip()
+        if not key or len(key) > 1024:
+            raise ValueError("Credential id is missing or too long")
+        with self._connect() as connection:
+            row = connection.execute("SELECT identity_json FROM vault_identity WHERE id = 1").fetchone()
+            if not row:
+                raise LookupError("This workspace has no vault yet")
+            identity = json.loads(row["identity_json"])
+            wraps = json.loads(identity.get("wrapped_mk_prf") or "{}")
+            if wrapped_mk is None:
+                wraps.pop(key, None)
+            else:
+                if not isinstance(wrapped_mk, str) or len(wrapped_mk) > 4096:
+                    raise ValueError("Wrapped master key must be a short opaque string")
+                wraps[key] = wrapped_mk
+            identity["wrapped_mk_prf"] = json.dumps(wraps, separators=(",", ":"), sort_keys=True)
+            cleaned = self._sanitize_identity(identity)
+            connection.execute(
+                "UPDATE vault_identity SET identity_json = ?, updated_at = ? WHERE id = 1",
+                (json.dumps(cleaned, separators=(",", ":"), sort_keys=True), _now()),
             )
         return cleaned
 

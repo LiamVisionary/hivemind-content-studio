@@ -1300,6 +1300,10 @@
         "modulus": 17,
         "offset": 5
       },
+      "motion_reference_budget": {
+        "max_reference_pixel_frames": 208023552,
+        "measured": "2026-08-15, rented RTX 5090 (32607MiB), ComfyUI 0.32.0 with the cudaMallocAsync allocator, MiniMax H3 reference mode at 704x1216 with nine pictures and a voice clip throughout. The node trims a reference to min(its own length, the clip's length) — frames[:frame_count] in comfy_extras/nodes_minimax_h3.py — so the cost follows that EFFECTIVE reference length, not the clip's. Measured effective lengths: 48f ran (27.88GiB, reproduced twice), 96f ran (29.13GiB), 158f ran (30.06GiB), 243f ran (28.78GiB), 305f ran OUT OF MEMORY. 704*1216*243 = 208023552. Supersedes a 2026-08-13 reading of 141f, taken before this allocator: 158f was recorded as OOM there and runs here, and the per-reference-frame cost is ~0.9GiB across 48->243f rather than the ~15GiB that reading implied. Re-measure on a new box or allocator."
+      },
       "image_clear": "prune",
       "requires": {
         "prompt": true,

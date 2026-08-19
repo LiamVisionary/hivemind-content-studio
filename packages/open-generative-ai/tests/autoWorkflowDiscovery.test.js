@@ -101,6 +101,13 @@ test('hosted server forwards couple options to the local API', () => {
     assert.match(source, /couple_direction/);
 });
 
+test('hosted image generation forwards its opaque app-tab scheduler lane', () => {
+    const hosted = fs.readFileSync(path.join(__dirname, '../hosted-server.js'), 'utf8');
+    const studio = fs.readFileSync(path.join(__dirname, '../src/studios/ImageStudio.jsx'), 'utf8');
+    assert.match(studio, /studio_lane:\s*studioLane/);
+    assert.match(hosted, /payload\.studio_lane\s*=\s*String\(body\.studio_lane\)/);
+});
+
 test('infers LoRA base compatibility from the checkpoint name', () => {
     const anima = inspectAutoWorkflow('/x/wai.json', JSON.stringify(T2I_GRAPH));
     assert.equal(anima.supportsLoras, true);

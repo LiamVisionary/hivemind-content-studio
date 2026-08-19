@@ -25,6 +25,7 @@ import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { LOCAL_MODEL_CATALOG, getLocalModelById } from '../lib/localModels.js';
 import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
+import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../lib/promptUtils.js';
 import { t, aspectRatioName } from '../lib/i18n.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
@@ -39,9 +40,11 @@ import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudR
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { huntLoraIds, isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraHunt, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { localModelSupportsImageInput, localModelSupportsNegativePrompt, negativePromptNeedsGuidance } from '../lib/localImageModelFilter.js';
+import { EDIT_SHORT_SIDES, editBudgetForShortSide, editOutputDimensions } from '../lib/editResolution.js';
 import { composeRegionalPrompt, hasActiveRegions } from '../lib/regionPrompt.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
 import { IMAGE_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
+import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import {
   isCompletionPingEnabled, setCompletionPingEnabled, subscribeCompletionPing,
   primeCompletionPing, playCompletionPing,
@@ -49,7 +52,15 @@ import {
 
 import { loadStudioSetup, registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
+import {
+  attachDroppedReferences,
+  dragCarriesDroppable,
+  droppedOutputPayload,
+  referenceKindForOutput,
+  referenceUploader,
+} from '../lib/referenceDrop.js';
 import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
+import { useMediaSrc } from '../hooks/hooks.js';
 import { Icon } from '../ui/icons.jsx';
 import {
   AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, Field, IconButton, NativeSelect,
@@ -255,6 +266,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // (lib maps 'muapi_history' to localStorage, or memory-only in studio mode).
     history: loadStudioGenerationHistory('muapi_history'),
     prompt: '',
+    // A file dropped on the composer is uploading into a reference slot; the
+    // composer's own overlay reports it.
+    composerAttaching: false,
     maxImages: useLocalModel
       ? (bootLocalModel?.maxReferenceImages || 1)
       : (apiModelSupportsImage(selectedModel) ? getMaxImagesForI2IModel(selectedModel) : 1),
@@ -324,13 +338,15 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   return engine;
 }
 
-export function ImageStudio({ active = true, tabActive = true, seed = null, apiRef = null } = {}) {
+export function ImageStudio({ active = true, tabActive = true, seed = null, apiRef = null, studioLane = '' } = {}) {
   const engineRef = useRef(null);
   // The seed is read once, at mount — StudioTabs clears it afterwards, so every
   // later "am I the original tab?" question reads the captured value.
   const seedRef = useRef(seed);
   if (!engineRef.current) engineRef.current = createEngine(seedRef.current || undefined);
   const s = engineRef.current;
+  const generationQueueRef = useRef(null);
+  if (!generationQueueRef.current) generationQueueRef.current = createStudioGenerationQueue();
   const [, setTick] = useState(0);
   const bump = () => setTick((n) => n + 1);
 
@@ -368,6 +384,13 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
     // model must not lock the upload button.
     return model ? localModelSupportsImageInput(model) : true;
   };
+
+  // Edit workflows (requires.image) size their canvas from the reference on the
+  // server: the aspect is the reference's, and the requested width/height only
+  // set the pixel budget. Both the Format panel and the payload key off this.
+  const referenceDrivenEdit = () => s.useLocalModel
+    && s.uploadedImageUrls.length > 0
+    && Boolean(localModelById(s.selectedLocalModel)?.requires?.image);
 
   // Whether the negative prompt reaches the sampler at all. Local workflows declare
   // it in `accepts`; the Krea 2 identity graph, for one, hardcodes an empty negative
@@ -1141,6 +1164,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       });
       const result = await localAI.generate({
         model: model.id,
+        studio_lane: studioLane,
         prompt: prompt || entry.prompt || '',
         image_base64: dataUrl,
         outpaint: {
@@ -1207,6 +1231,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       });
       const result = await localAI.generate({
         model: model.id,
+        studio_lane: studioLane,
         prompt: prompt || '',
         image_base64: dataUrl,
         inpaint: { mask_base64: maskDataUrl, mask_expand: maskExpand, mask_influence: maskInfluence },
@@ -1267,6 +1292,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         bump();
         const result = await localAI.generate({
           model: model.id,
+          studio_lane: studioLane,
           prompt: editAnglePrompt(dialect, angle, extraPrompt),
           image_base64: dataUrl,
           seed: -1,
@@ -1315,6 +1341,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         bump();
         const result = await localAI.generate({
           model: model.id,
+          studio_lane: studioLane,
           prompt: prompts[i],
           image_base64: dataUrl,
           seed: baseSeed + i,
@@ -1464,7 +1491,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
     bump();
   };
 
-  const generate = async () => {
+  const generateNow = async () => {
     // Rented mode is a promise about WHERE this runs. If no live machine
     // serves the selected model, stop instead of quietly using this Mac.
     if (s.rentedOnly && !servedByAnyMachine(s.rentedMachines, localModelById(s.selectedLocalModel) || { id: s.selectedLocalModel })) {
@@ -1565,6 +1592,11 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       // sent. The gateway runs one image per request, so a batch is N
       // sequential requests; a Strength Hunt is already its own batch.
       const batchTotal = (huntIds.length || sheetActive) ? 1 : Math.max(1, Math.min(4, Number(s.batchCount) || 1));
+      // A reference-driven edit gets an explicit canvas: the Resolution tier's
+      // pixel budget, shaped like the model's own bucket. The server keeps the
+      // budget and swaps in the reference's aspect. Without it the request would
+      // carry the aspect preset's dimensions — an aspect this run does not use.
+      const editBudget = referenceDrivenEdit() ? editBudgetForShortSide(s.baseSize) : null;
       try {
         // References are ignored (not sent) when the model can't take them.
         const sourceImage = localModelSupportsImageInput(lm) ? (s.uploadedImageUrls[0] || '') : '';
@@ -1590,6 +1622,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           }
           const res = await localAI.generate({
             model: s.selectedLocalModel,
+            studio_lane: studioLane,
             prompt,
             // Not sent to workflows that ignore it — the UI says as much, and a field
             // the user can no longer see must not keep riding along in the payload.
@@ -1601,11 +1634,11 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
             // never N copies; -1 stays -1 (the server randomizes each run).
             seed: (typeof s.seed === 'number' && s.seed >= 0) ? s.seed + shot : s.seed,
             runtime_mode: s.localRuntimeMode,
-            width: s.customWidth || undefined,
-            height: s.customHeight || undefined,
+            width: editBudget ? editBudget.width : (s.customWidth || undefined),
+            height: editBudget ? editBudget.height : (s.customHeight || undefined),
             // Width/height, when set, ARE the resolution and win outright; base_size
             // only scales the aspect-ratio preset (short side) when they are Auto.
-            base_size: (!s.customWidth && !s.customHeight && s.baseSize) ? s.baseSize : undefined,
+            base_size: (!editBudget && !s.customWidth && !s.customHeight && s.baseSize) ? s.baseSize : undefined,
             sampler_name: s.sampler || undefined,
             scheduler: s.scheduler || undefined,
             loras: loraGenerationPayload(currentLoraSelection()),
@@ -1743,6 +1776,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       bump();
     }
   };
+  const generate = () => generationQueueRef.current.enqueue(generateNow);
 
   /* ---------------- warm / unload (Ideogram sidecar) ---------------- */
 
@@ -1929,7 +1963,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         // persisting, so s.persistedImagePreferences can be stale here.
         persistedImagePreferences: currentImagePreferences(),
       }),
-      isBusy: () => Boolean(s.generating),
+      isBusy: () => Boolean(s.generating || generationQueueRef.current.pending),
     };
     return () => { apiRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2005,6 +2039,22 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
+  // The reference's own pixel size, measured from the decrypted bytes: it is
+  // what the server reshapes the edit budget onto, so it is the only way the
+  // Resolution hint can name the size this run will actually render.
+  const [referenceDims, setReferenceDims] = useState(null);
+  const referenceSrc = useMediaSrc(s.uploadedImageUrls[0] || '');
+  useEffect(() => {
+    if (!referenceSrc) { setReferenceDims(null); return undefined; }
+    let alive = true;
+    const probe = new Image();
+    probe.onload = () => {
+      if (alive) setReferenceDims({ width: probe.naturalWidth, height: probe.naturalHeight });
+    };
+    probe.src = referenceSrc;
+    return () => { alive = false; probe.onload = null; };
+  }, [referenceSrc]);
+
   // Prompt textarea auto-grow (same 150/250px caps as the old oninput).
   useEffect(() => {
     const el = promptRef.current;
@@ -2049,11 +2099,13 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
   // Rented selected with nothing to run on: every setting below is moot,
   // so the panel collapses to the Source block and its rent/provisioning CTA.
   const rentedBlocked = Boolean(s.rentedOnly && !s.rentedMachines?.length);
-  // Edit workflows (requires.image) size their canvas from the reference on the
-  // server, so the aspect-ratio and resolution presets would be a lie while a
-  // reference is attached — replace them with the truth instead of offering
-  // controls the output ignores.
-  const referenceDrivesAspect = s.useLocalModel && refCount > 0 && Boolean(activeLocalModel?.requires?.image);
+  // Edit workflows (requires.image) take their ASPECT from the reference on the
+  // server, so the aspect-ratio preset would be a lie while a reference is
+  // attached — replace it with the truth. The size is still the caller's to set:
+  // what reaches the server is a pixel budget it reshapes onto that aspect.
+  const referenceDrivesAspect = referenceDrivenEdit();
+  const editBudget = referenceDrivesAspect ? editBudgetForShortSide(s.baseSize) : null;
+  const editOutput = editOutputDimensions(editBudget, referenceDims?.width, referenceDims?.height);
   const coupleOn = coupleActive();
   const sheetOn = characterSheetActive();
   // Everything below Format lives behind the Advanced disclosure, so whatever is
@@ -2100,6 +2152,10 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
             ]}
           />
           {s.rentedOnly ? <RentedSourceStatus engine={s} page="image" /> : null}
+          {/* Only ever visible when another local lane finished and is still
+              sitting on real memory — see LaneMemoryNotice. Local work is the
+              only work it can affect, so it stays out of the cloud lane. */}
+          {s.useLocalModel && !s.rentedOnly ? <LaneMemoryNotice active={tabActive} /> : null}
         </div>
       ) : null}
 
@@ -2175,6 +2231,28 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
               onChange={(e) => { s.selectedResolution = e.target.value; persistImagePreferences(); bump(); }}
             >
               {resolutions.map((r) => <option key={r} value={r}>{r}</option>)}
+            </NativeSelect>
+          </Field>
+        ) : null}
+        {editBudget ? (
+          <Field
+            label="Resolution"
+            hint={editOutput
+              ? `${editOutput.width} × ${editOutput.height} for this reference — ${editBudget.megapixels.toFixed(1)} MP of canvas; sampling time scales with pixel count`
+              : `${editBudget.megapixels.toFixed(1)} MP of canvas, shaped like your reference — sampling time scales with pixel count`}
+          >
+            <NativeSelect
+              value={String(editBudget.shortSide)}
+              onChange={(e) => { s.baseSize = Number(e.target.value) || 0; persistImagePreferences(); bump(); }}
+            >
+              {EDIT_SHORT_SIDES.map((size) => {
+                const tier = editBudgetForShortSide(size);
+                return (
+                  <option key={size} value={size}>
+                    {`${tier.megapixels.toFixed(1)} MP${tier.native ? ' — the model’s native canvas' : ''}`}
+                  </option>
+                );
+              })}
             </NativeSelect>
           </Field>
         ) : null}
@@ -2500,6 +2578,121 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
     </>
   );
 
+  /* ---------------- composer drops ---------------- */
+
+  // A picture dropped ON THE COMPOSER is a reference for the next image, not a
+  // past run to restore — that is what the rest of the window does. This studio
+  // makes pictures from pictures, so a clip or a voice note has nowhere to go
+  // here and says so instead of being swallowed.
+  //
+  // Three unrelated refusals, kept apart: the wrong kind of file, no slot left,
+  // and an upload the server turned down (which explains itself).
+  const describeImageDropRejection = ({ name, code, kind, error, size }) => {
+    if (code === 'unsupported') return `${name} — not a picture`;
+    if (code === 'full') {
+      return kind === 'images'
+        ? `${name} — all ${s.maxImages} reference ${s.maxImages === 1 ? 'slot is' : 'slots are'} used`
+        : `${name} — the Image studio takes pictures; drop a clip in the Video studio`;
+    }
+    const megabytes = size ? ` (${(size / 1024 / 1024).toFixed(1)} MB)` : '';
+    return `${name} — ${error?.message || 'upload failed'}${megabytes}`;
+  };
+
+  const attachDroppedImages = async (files) => {
+    const { added, rejected } = await attachDroppedReferences({
+      files,
+      taken: { images: s.uploadedImageUrls.length },
+      limits: { images: s.maxImages, videos: 0, audios: 0 },
+      upload: referenceUploader((file) => (s.useLocalModel ? fileToDataUrl(file) : muapi.uploadFile(file))),
+    });
+    if (added.images.length) {
+      handlePickerChange([...s.uploadedImageUrls, ...added.images.map((item) => item.url)].slice(0, s.maxImages));
+    }
+    for (const rejection of rejected) {
+      if (rejection.error) console.error('[ImageStudio] composer drop upload failed:', rejection.error);
+      toast.error(describeImageDropRejection(rejection));
+    }
+    if (added.images.length) {
+      toast.success(added.images.length === 1
+        ? 'Attached as a reference image.'
+        : `Attached ${added.images.length} reference images.`);
+    }
+  };
+
+  const handleComposerFiles = async (files) => {
+    if (!files.length) return;
+    if (!refsSupported) {
+      toast.error('The selected model does not accept reference images.');
+      return;
+    }
+    // Same gate the picker uses, with the same retry continuation.
+    if (!s.useLocalModel && !localStorage.getItem('muapi_key')) {
+      authRetryRef.current = () => { void handleComposerFiles(files); };
+      s.authOpen = true;
+      bump();
+      return;
+    }
+    s.composerAttaching = true;
+    bump();
+    try {
+      await attachDroppedImages(files);
+    } catch (err) {
+      console.error('[ImageStudio] composer drop failed:', err);
+      toast.error(err?.message || 'Could not attach that.');
+    } finally {
+      s.composerAttaching = false;
+      bump();
+    }
+  };
+
+  // An image dragged out of the gallery carries a URL, not bytes: it goes up
+  // through the same reference upload "Use as starting frame" uses, so it is
+  // re-sealed and joins the recent-references grid.
+  const handleComposerOutput = async (payload) => {
+    if (!refsSupported) {
+      toast.error('The selected model does not accept reference images.');
+      return;
+    }
+    if (referenceKindForOutput(payload) !== 'images') {
+      toast.error('The image studio takes pictures — drop a clip in the Video studio.');
+      return;
+    }
+    if (s.uploadedImageUrls.length >= s.maxImages) {
+      toast.error(`All ${s.maxImages} reference slots are used.`);
+      return;
+    }
+    s.composerAttaching = true;
+    bump();
+    try {
+      const url = await promoteOutputToReference(payload.url);
+      handlePickerChange([...s.uploadedImageUrls, url]);
+      toast.success('Attached as a reference image.');
+    } catch (err) {
+      console.error('[ImageStudio] composer output drop failed:', err);
+      toast.error(err?.message || 'Could not attach that.');
+    } finally {
+      s.composerAttaching = false;
+      bump();
+    }
+  };
+
+  const composerDrop = {
+    busy: s.composerAttaching,
+    // An UploadPicker inside the composer keeps its own drop; without this the
+    // file would be attached twice, once by each.
+    accepts: (dataTransfer, target) => dragCarriesDroppable(dataTransfer)
+      && !target?.closest?.('[data-upload-picker]'),
+    hint: () => (refsSupported
+      ? 'Attach as a reference image'
+      : 'This model takes no reference images'),
+    onDrop: (dataTransfer) => {
+      const files = Array.from(dataTransfer?.files || []);
+      if (files.length) { void handleComposerFiles(files); return; }
+      const payload = droppedOutputPayload(dataTransfer);
+      if (payload) void handleComposerOutput(payload);
+    },
+  };
+
   const composer = (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-2">
       {s.promptHelper.open ? (
@@ -2747,7 +2940,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
-      <StudioLayout panel={panel} panelTitle="Image settings" composer={composer}>
+      <StudioLayout panel={panel} panelTitle="Image settings" composer={composer} composerDrop={composerDrop}>
         <div className="flex flex-col gap-4 p-4 md:p-5">
           {s.generating ? (() => {
             const pct = Math.max(0, Math.min(1, Number(s.progressDisplay) || 0));

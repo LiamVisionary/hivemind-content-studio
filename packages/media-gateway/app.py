@@ -589,6 +589,16 @@ PRIVATE_INPUT_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_MAX_AGE",
 PRIVATE_INPUT_UPLOAD_MAX_AGE_SECONDS = int(os.environ.get("ZIMG_PRIVATE_INPUT_UPLOAD_MAX_AGE", "86400"))
 jobs = {}
 jobs_lock = threading.Lock()
+# Native/gateway generation bypasses ComfyUI's own executor, so it needs the
+# same queue contract here: one worker at a time in an app-tab lane, with image
+# and video kept as independent media domains. Different tabs retain distinct
+# lanes and may overlap. Klein adds duplicate coalescing and a memory admission
+# check on top of this shared scheduler.
+studio_generation_lanes = {}
+studio_generation_lanes_lock = threading.Lock()
+klein_inflight_jobs = {}
+klein_memory_condition = threading.Condition()
+klein_reserved_memory_bytes = 0
 # Live subprocess handles for native (MLX) generation jobs, so a cancel request
 # can terminate the render instead of letting it burn the GPU to completion.
 native_job_procs = {}
@@ -1474,6 +1484,31 @@ def sealing_spki_for_route(route):
     return normalized_requester_spki((route or {}).get("requester_spki")) or vault_public_key_spki()
 
 
+def sealing_recipients_for_route(route):
+    """(owner, agent) public keys for a remote job's harvested outputs.
+
+    A harvest used to seal to exactly ONE recipient — the requester — so an
+    agent-submitted rental job produced media the owner's own studio could
+    never open: History failed to decrypt the tile and Download saved the
+    enc:v1 JSON. The local path solved this long ago by sealing twice; this is
+    that same split for the remote path. The owner's envelope keeps the plain
+    <name>.e2e path every existing reader already looks for, and the agent
+    keeps its access through <name>.agent-<fp>.e2e.
+
+    Both halves move together under the one flag the local path and
+    send_output_file() already use. With dual seal off there is still exactly
+    one envelope and it stays sealed to whoever asked for the job — flipping it
+    to the owner alone would take the agent's access away without the read side
+    ever offering it a copy it could open. With no owner vault yet, likewise:
+    one envelope, to the requester, exactly as before.
+    """
+    owner = vault_public_key_spki()
+    if not AGENT_DUAL_SEAL_ENABLED or not owner:
+        return sealing_spki_for_route(route), None
+    agent = normalized_requester_spki((route or {}).get("requester_spki"))
+    return owner, (agent if agent != owner else None)
+
+
 def _prompt_input_file_refs(body):
     """Local Comfy input files a prompt graph references (LoadImage-style
     string inputs). These are what must be staged onto a remote lane."""
@@ -1591,14 +1626,19 @@ def remote_output_logical_name(prompt_id, filename):
 
 
 def harvest_remote_comfy_outputs(prompt_id, history):
-    """Fetch a finished remote prompt's outputs and seal each to the requester
-    key BEFORE anything persists. Plaintext bytes only ever touch a 0600
-    staging file inside the gateway's private state dir - never a shared
-    output dir. Returns the logical output names."""
+    """Fetch a finished remote prompt's outputs and seal each to its recipients
+    BEFORE anything persists. Plaintext bytes only ever touch a 0600 staging
+    file inside the gateway's private state dir - never a shared output dir.
+    Returns the logical output names.
+
+    An agent-submitted job seals twice from that one staging file (owner and
+    agent, see sealing_recipients_for_route), so both can read the result and
+    neither the plaintext nor a second key ever leaves this function."""
     route = comfy_prompt_route(prompt_id) or {}
-    spki = sealing_spki_for_route(route)
+    spki, agent_spki = sealing_recipients_for_route(route)
     if not spki:
         raise RuntimeError("no sealing key: the requester presented none and no owner vault exists")
+    agent_fp = requester_fingerprint(agent_spki)
     lane = route.get("lane") or "default"
     harvested = []
     for ref in _comfy_history_output_refs(history):
@@ -1615,6 +1655,18 @@ def harvest_remote_comfy_outputs(prompt_id, history):
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
             _seal_file_with_helper(spki, staged, envelope, logical_name)
+            if agent_fp:
+                # Secondary recipient: never at the cost of the owner's copy,
+                # which is already on disk by here. A failure is logged and the
+                # harvest carries on, exactly as the local path does.
+                try:
+                    _seal_file_with_helper(
+                        agent_spki, staged,
+                        agent_envelope_path_for(COMFY_OUTPUT_DIR / logical_name, agent_fp),
+                        logical_name,
+                    )
+                except Exception as exc:
+                    print(f"[agent-seal] second recipient failed for {logical_name}: {exc}", file=sys.stderr)
         finally:
             try:
                 staged.unlink()
@@ -1794,6 +1846,11 @@ def watch_remote_comfy_prompt(prompt_id, poll_seconds=5, timeout_seconds=7200):
             history = None
         if isinstance(history, dict):
             break
+        # A prompt cancelled while still PENDING is deleted from the queue and
+        # never reaches history at all, so waiting for one is waiting forever
+        # (or until the 2-hour timeout, which then records a spurious error).
+        if str((comfy_prompt_route(prompt_id) or {}).get("status") or "") == "cancelled":
+            return comfy_prompt_route(prompt_id)
         _record_lane_progress(prompt_id, lane)
         if time.monotonic() >= deadline:
             update_comfy_prompt_route(
@@ -1804,6 +1861,11 @@ def watch_remote_comfy_prompt(prompt_id, poll_seconds=5, timeout_seconds=7200):
         time.sleep(poll_seconds)
     status = history.get("status") or {}
     failed = str(status.get("status_str") or "").lower() == "error" or not status.get("completed")
+    # An interrupted prompt lands in Comfy's history as "error" like any other
+    # failure, so the only thing that tells the two apart is our own record of
+    # having asked for it. Without this a deliberate cancel reads as a broken
+    # generation everywhere downstream.
+    was_cancelled = str((comfy_prompt_route(prompt_id) or {}).get("status") or "") == "cancelled"
     # Let the workflow-envelope index record this prompt's sealed workflow
     # before the history entry disappears from the lane.
     try:
@@ -1811,7 +1873,12 @@ def watch_remote_comfy_prompt(prompt_id, poll_seconds=5, timeout_seconds=7200):
     except Exception:
         pass
     harvest_error = None
-    if failed:
+    if failed and was_cancelled:
+        # Keep the cancelled status; the remote's "error" is the interrupt we
+        # asked for. Still falls through to the scrub below — a cancelled job's
+        # staged inputs and partial outputs need cleaning up like any other.
+        pass
+    elif failed:
         update_comfy_prompt_route(prompt_id, status="error", error=remote_comfy_failure_message(history))
     else:
         try:
@@ -2206,41 +2273,93 @@ def _delete_prompt_ids_from_comfy(prompt_ids):
     return failures
 
 
-def interrupt_comfy_prompt(prompt_id):
-    """Best-effort interrupt of one Comfy prompt across every lane: a pending
-    prompt is deleted from the queue, the currently-executing one is interrupted.
-    Returns True when a lane acknowledged either action."""
+def _queue_entry_ids(entries):
+    # Queue entries are [number, prompt_id, prompt, extra, outputs] tuples;
+    # only the id is read, so prompt redaction does not matter here.
+    return {str(item[1]) for item in (entries or []) if isinstance(item, (list, tuple)) and len(item) > 1}
+
+
+def _lane_queue_state(lane, prompt_id):
+    """Where `prompt_id` sits on one lane: 'pending', 'running', or None."""
+    try:
+        with urlopen(comfy_lane_request(lane, "/queue"), timeout=10) as response:
+            state = json.loads(response.read().decode("utf-8") or "{}")
+    except Exception:
+        return None
+    if prompt_id in _queue_entry_ids(state.get("queue_pending")):
+        return "pending"
+    if prompt_id in _queue_entry_ids(state.get("queue_running")):
+        return "running"
+    return None
+
+
+# How long a cancel waits for the backend to actually let go before answering.
+# Kept under the studio's own cancel timeout so the honest verdict gets back
+# rather than the caller giving up and inventing one.
+CANCEL_VERIFY_SECONDS = float(os.environ.get("ZIMG_CANCEL_VERIFY_SECONDS", "8") or 8)
+CANCEL_VERIFY_POLL_SECONDS = 0.5
+
+
+def interrupt_comfy_prompt(prompt_id, verify_seconds=None):
+    """Stop one Comfy prompt across every lane, and report whether it ACTUALLY
+    stopped.
+
+    A pending prompt is deleted from the queue and is gone immediately. A
+    running one can only be asked: Comfy checks for an interrupt at node and
+    sampler-step boundaries, so a prompt still inside a long non-interruptible
+    stretch — loading a 17k-step video model, say — keeps the GPU until it
+    reaches the next checkpoint. That can be minutes.
+
+    This used to return True the moment a lane ACCEPTED the /interrupt POST,
+    which is a receipt, not a death certificate. The studio showed "cancelled"
+    instantly, the next generation queued behind a job that was still running,
+    and the wait looked like the cancel had done nothing. So after asking, poll
+    the lane until the prompt leaves its queue.
+
+    Returns {'acknowledged', 'stopped', 'lane', 'state'} where `stopped` means
+    the prompt is verifiably off the queue and `state` is where it was last
+    seen ('pending', 'running', or None for never-found).
+    """
     pid = str(prompt_id or "")
+    result = {"acknowledged": False, "stopped": False, "lane": "", "state": None}
     if not pid:
-        return False
+        return result
+    deadline = time.monotonic() + (CANCEL_VERIFY_SECONDS if verify_seconds is None else float(verify_seconds))
 
-    def entry_ids(entries):
-        # Queue entries are [number, prompt_id, prompt, extra, outputs] tuples;
-        # only the id is read, so prompt redaction does not matter here.
-        return {str(item[1]) for item in (entries or []) if isinstance(item, (list, tuple)) and len(item) > 1}
-
-    acknowledged = False
     seen_bases = set()
     for lane, base in COMFY_LANES.items():
         if base in seen_bases:
             continue
         seen_bases.add(base)
-        try:
-            with urlopen(comfy_lane_request(lane, "/queue"), timeout=10) as response:
-                state = json.loads(response.read().decode("utf-8") or "{}")
-        except Exception:
+        state = _lane_queue_state(lane, pid)
+        if state is None:
             continue
+        result.update(lane=lane, state=state)
         try:
-            if pid in entry_ids(state.get("queue_pending")):
+            if state == "pending":
                 body = json.dumps({"delete": [pid]}).encode("utf-8")
                 with urlopen(comfy_lane_request(lane, "/queue", data=body, method="POST", content_type="application/json"), timeout=10):
-                    acknowledged = True
-            elif pid in entry_ids(state.get("queue_running")):
+                    result["acknowledged"] = True
+            else:
                 with urlopen(comfy_lane_request(lane, "/interrupt", data=b"{}", method="POST", content_type="application/json"), timeout=10):
-                    acknowledged = True
+                    result["acknowledged"] = True
         except Exception:
             continue
-    return acknowledged
+        # Verify: a delete is effective at once, an interrupt may not be.
+        while True:
+            if _lane_queue_state(lane, pid) is None:
+                result["stopped"] = True
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(CANCEL_VERIFY_POLL_SECONDS)
+        return result
+
+    # Never found on any lane: nothing of ours is holding a GPU, which is the
+    # same end state the caller wanted. Distinguished from a verified stop by
+    # `acknowledged` staying False.
+    result["stopped"] = True
+    return result
 
 
 def cancel_generation_job(jid):
@@ -2265,13 +2384,38 @@ def cancel_generation_job(jid):
             interrupted = True
         except Exception:
             pass
+    stopped = interrupted
+    state = None
     if active and not interrupted and not comfy_prompt_id:
         # A native job between subprocess stages: no live process to kill right
-        # now, but the runner aborts at its next cancel-flag checkpoint.
+        # now, but the runner aborts at its next cancel-flag checkpoint. Asked,
+        # not confirmed — same distinction the Comfy path makes below.
         interrupted = True
+        stopped = False
     if not interrupted:
-        interrupted = interrupt_comfy_prompt(comfy_prompt_id or jid)
-    return {"ok": True, "id": jid, "known": rec is not None, "interrupted": bool(interrupted)}
+        pid = comfy_prompt_id or jid
+        outcome = interrupt_comfy_prompt(pid)
+        interrupted = bool(outcome["acknowledged"])
+        stopped = bool(outcome["stopped"])
+        state = outcome["state"]
+        # A deliberate cancel is not a failure. Recording it as one leaves the
+        # route (and everything downstream that reads it) claiming the
+        # generation broke, which is both wrong and alarming in History.
+        # No-ops for an id with no route (a local job), so no guard needed.
+        update_comfy_prompt_route(
+            pid, status="cancelled", cancelled_at=datetime.now(timezone.utc).isoformat(),
+        )
+    return {
+        "ok": True,
+        "id": jid,
+        "known": rec is not None,
+        # Receipt: the backend accepted the request to stop.
+        "interrupted": bool(interrupted),
+        # Verdict: the job is verifiably no longer holding the backend. False
+        # means it is still winding down and the next job WILL queue behind it.
+        "stopped": bool(stopped),
+        **({"backend_state": state} if state else {}),
+    }
 
 
 def delete_output_everywhere(value):
@@ -2791,6 +2935,12 @@ def _prompt_body_client_id(body):
 
 
 BIGLOVE_KLEIN3_BASE_BUCKET = (1024, 1536)
+# A requested canvas is honored as a PIXEL BUDGET around that bucket (the edit
+# adopts the reference's aspect afterwards), clamped to the range Klein 9B stays
+# coherent and in-memory over: ~0.26MP for a fast draft, ~2MP for a final. The
+# ceiling is deliberately below the 24 GB per-job reservation's comfort limit.
+BIGLOVE_KLEIN3_MIN_PIXELS = 512 * 512
+BIGLOVE_KLEIN3_MAX_PIXELS = 1152 * 1728
 # FLUX.2 Klein conditions on up to 4 reference images (the Swift engine's
 # Flux2Config.maxReferenceImages for every klein variant, matching BFL's
 # editing docs). Every reference cap on this route reads this one number.
@@ -2822,25 +2972,52 @@ def normalize_biglove_klein3_steps(value):
     return 2 if steps <= 2 else 4
 
 
-def snap_biglove_klein3_resolution(width, height):
-    """Snap BigLoveKlein3 MXFP8 native runs to the known-good ~1.5MP bucket.
+def orient_biglove_klein3_bucket(width, height):
+    """The known-good ~1.5MP trained bucket, oriented to a requested shape.
 
     The reference workflow metadata uses ImageScaleToTotalPixels at 1.5 MP and
     lands near 1024x1504. The model page's closest recommended trained bucket is
-    1024x1536, so the native fast path now uses that exact bucket instead of
-    arbitrary full-resolution workflow sizes.
+    1024x1536, so the native fast path uses that exact bucket instead of
+    arbitrary full-resolution workflow sizes. Callers that cannot trust the
+    requested size (a Comfy graph whose EmptyLatentImage is still the stock
+    512x512 while an ImageScaleToTotalPixels node sets the real canvas) pin
+    themselves here rather than treating that size as a budget.
+    """
+    bucket_w, bucket_h = BIGLOVE_KLEIN3_BASE_BUCKET
+    try:
+        landscape = float(width) > float(height)
+    except (TypeError, ValueError):
+        landscape = False
+    return (bucket_h, bucket_w) if landscape else (bucket_w, bucket_h)
+
+
+def snap_biglove_klein3_resolution(width, height):
+    """Resolve a BigLoveKlein3 native canvas from a requested pixel budget.
+
+    This used to pin EVERY native run to the trained bucket, which silently
+    threw away the caller's resolution — the studio's Resolution control and the
+    registry's advertised width/height inputs did nothing on Apple Silicon, so
+    an edit could be neither run cheap for a draft nor pushed for a final (the
+    portable Comfy lane honored them all along). The bucket is still what an
+    unspecified request lands on; a requested size is now honored as a pixel
+    BUDGET, scaled off the bucket and clamped to the supported range. Aspect is
+    not taken from the request: an edit reshapes this budget onto the
+    reference's own aspect afterwards.
     """
     try:
-        requested_w = max(1, int(round(float(width))))
-        requested_h = max(1, int(round(float(height))))
-    except Exception:
-        requested_w, requested_h = BIGLOVE_KLEIN3_BASE_BUCKET
-    bucket_w, bucket_h = BIGLOVE_KLEIN3_BASE_BUCKET
-    # Preserve landscape orientation if a landscape workflow hits this path, but
-    # the intended BigLoveKlein3 edit workflow is portrait and uses 1024x1536.
-    if requested_w > requested_h:
-        return bucket_h, bucket_w
-    return bucket_w, bucket_h
+        requested_w = int(round(float(width)))
+        requested_h = int(round(float(height)))
+    except (TypeError, ValueError):
+        requested_w = requested_h = 0
+    if requested_w <= 0 or requested_h <= 0:
+        return orient_biglove_klein3_bucket(requested_w, requested_h)
+    bucket_w, bucket_h = orient_biglove_klein3_bucket(requested_w, requested_h)
+    budget = min(BIGLOVE_KLEIN3_MAX_PIXELS, max(BIGLOVE_KLEIN3_MIN_PIXELS, requested_w * requested_h))
+    scale = (budget / float(bucket_w * bucket_h)) ** 0.5
+    return (
+        _round_to_multiple(bucket_w * scale, multiple=32),
+        _round_to_multiple(bucket_h * scale, multiple=32),
+    )
 
 
 def _reshape_dims_to_image_aspect(image_path, width, height, *, multiple=32):
@@ -6107,6 +6284,26 @@ def detect_native_mlx_ltx_prompt(body):
     }
 
 
+def _studio_lane_from_comfy_prompt_body(body):
+    try:
+        data = json.loads(
+            body.decode('utf-8', errors='replace')
+            if isinstance(body, (bytes, bytearray)) else body
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ''
+    if not isinstance(data, dict):
+        return ''
+    extra_data = data.get('extra_data') if isinstance(data.get('extra_data'), dict) else {}
+    extra_pnginfo = extra_data.get('extra_pnginfo') if isinstance(extra_data.get('extra_pnginfo'), dict) else {}
+    return str(
+        data.get('studio_lane')
+        or extra_pnginfo.get('studioLane')
+        or extra_pnginfo.get('studio_lane')
+        or ''
+    ).strip()[:512]
+
+
 def detect_native_mlx_biglove_prompt(body):
     """Return a native MLX job extracted from a Comfy API prompt, or None.
 
@@ -6188,7 +6385,10 @@ def detect_native_mlx_biglove_prompt(body):
     height_value = _resolve_prompt_number(nodes_by_id, latent_inputs.get('height'), _resolve_prompt_number(nodes_by_id, scheduler_inputs.get('height'), 512))
     requested_width = int_quality_option({'width': width_value}, 'width', 512)
     requested_height = int_quality_option({'height': height_value}, 'height', 512)
-    bucket_width, bucket_height = snap_biglove_klein3_resolution(requested_width, requested_height)
+    # A graph's latent size is not a resolution request — it is usually the
+    # stock 512x512 next to an ImageScaleToTotalPixels node that sets the real
+    # canvas. Take the shape from it and the size from the trained bucket.
+    bucket_width, bucket_height = orient_biglove_klein3_bucket(requested_width, requested_height)
     width, height = _cap_native_mx_dimensions(bucket_width, bucket_height)
 
     return {
@@ -6329,6 +6529,232 @@ def embed_workflow_text_chunk(png_path, workflow):
     return False
 
 
+def _klein_request_fingerprint(prompt, image_paths, options=None, *, mode='edit', extra=None):
+    """Hash the inputs that affect a Klein render without retaining the prompt.
+
+    Inline uploads receive a fresh staged filename for every HTTP request, so
+    paths cannot identify retries. Hashing the bytes is what lets a 27-request
+    retry storm collapse back into the one render the caller intended.
+    """
+    digest = hashlib.sha256()
+
+    def add_part(label, value):
+        payload = str(value).encode('utf-8', errors='surrogatepass')
+        digest.update(label.encode('ascii') + b'\0' + len(payload).to_bytes(8, 'big') + payload)
+
+    add_part('version', 'klein-admission-v1')
+    add_part('mode', mode)
+    add_part('prompt', prompt or '')
+    canonical_options = {
+        key: value for key, value in dict(options or {}).items()
+        if key != 'image_paths'
+    }
+    add_part(
+        'options',
+        json.dumps(canonical_options, sort_keys=True, separators=(',', ':'), default=str),
+    )
+    if extra is not None:
+        add_part('extra', json.dumps(extra, sort_keys=True, separators=(',', ':'), default=str))
+    for image_path in image_paths:
+        path = Path(str(image_path)).expanduser()
+        try:
+            with path.open('rb') as handle:
+                image_digest = hashlib.sha256()
+                for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                    image_digest.update(chunk)
+            add_part('image', image_digest.hexdigest())
+        except OSError:
+            # Validation and the user-facing error still happen in the runner.
+            # Including the unresolved input in the private digest keeps two
+            # different missing paths from incorrectly sharing one job.
+            add_part('missing-image', str(path.resolve()))
+    return digest.hexdigest()
+
+
+def _register_klein_job(job_id, fingerprint, record):
+    """Register one job or return the equivalent job already in flight."""
+    with jobs_lock:
+        existing_job_id = klein_inflight_jobs.get(fingerprint)
+        existing = jobs.get(existing_job_id) if existing_job_id else None
+        if existing and existing.get('status') in {'queued', 'running'}:
+            existing['coalesced_requests'] = int(existing.get('coalesced_requests') or 0) + 1
+            jobs[existing_job_id] = existing
+            return existing_job_id
+        if existing_job_id:
+            klein_inflight_jobs.pop(fingerprint, None)
+        jobs[job_id] = record
+        klein_inflight_jobs[fingerprint] = job_id
+    return job_id
+
+
+def _studio_generation_lane_key(media_type, options=None):
+    media = str(media_type or '').strip().lower()
+    if media not in {'image', 'video'}:
+        raise ValueError(f'unsupported generation media type: {media_type}')
+    raw = str(dict(options or {}).get('studio_lane') or 'legacy-clients').strip()
+    # Callers choose this value, so keep the scheduler key bounded and opaque.
+    scoped = f'{media}:{raw[:512]}'
+    return hashlib.sha256(scoped.encode('utf-8', errors='replace')).hexdigest()
+
+
+def _drain_studio_generation_lane(lane_key):
+    """Run one tab's submitted jobs in FIFO order, then discard the lane."""
+    while True:
+        with studio_generation_lanes_lock:
+            lane = studio_generation_lanes.get(lane_key)
+            if not lane or not lane['pending']:
+                studio_generation_lanes.pop(lane_key, None)
+                return
+            runner, args = lane['pending'].pop(0)
+        try:
+            runner(*args)
+        except Exception as error:
+            # Generation runners normally persist their own terminal error. An
+            # unexpected escape must not kill the lane and strand every job
+            # queued behind it.
+            print(
+                f"[studio-queue] {getattr(runner, '__name__', 'generation')} failed: {error}",
+                file=sys.stderr,
+            )
+
+
+def start_studio_generation_thread(media_type, options, runner, args):
+    """Start one queued generation worker in the caller's app-tab lane."""
+    lane_key = _studio_generation_lane_key(media_type, options)
+    with studio_generation_lanes_lock:
+        lane = studio_generation_lanes.get(lane_key)
+        if lane is None:
+            lane = {'pending': [], 'worker': None}
+            studio_generation_lanes[lane_key] = lane
+        lane['pending'].append((runner, args))
+        if lane['worker'] is None:
+            lane['worker'] = threading.Thread(
+                target=_drain_studio_generation_lane,
+                args=(lane_key,),
+                daemon=True,
+            )
+            lane['worker'].start()
+        return lane['worker']
+
+
+def _record_klein_admission_error(job_id, error):
+    with jobs_lock:
+        rec = dict(jobs.get(job_id) or {'id': job_id, 'created_at': now_iso()})
+        cancelled = isinstance(error, NativeJobCancelled)
+        rec.update({
+            'prompt': PRIVATE_PROMPT_LABEL,
+            'status': 'cancelled' if cancelled else 'error',
+            'finished_at': now_iso(),
+            'error': 'Cancelled by the owner' if cancelled else str(error),
+            'progress_phase': 'cancelled' if cancelled else 'error',
+        })
+        jobs[job_id] = rec
+    append_history(rec)
+
+
+def _run_admitted_klein_job(job_id, fingerprint, runner, args):
+    """Queue within one tab lane, then reserve global memory before model load."""
+    reservation = 0
+    try:
+        reservation = _acquire_klein_memory_reservation(job_id)
+        runner(*args)
+    except Exception as error:
+        _record_klein_admission_error(job_id, error)
+    finally:
+        _release_klein_memory_reservation(reservation)
+        with jobs_lock:
+            if klein_inflight_jobs.get(fingerprint) == job_id:
+                klein_inflight_jobs.pop(fingerprint, None)
+
+
+def _available_memory_bytes():
+    """Best-effort memory available for a new model load.
+
+    macOS's `memory_pressure` accounts for reclaimable/compressed unified
+    memory more accurately than raw free pages. Other platforms use POSIX
+    available pages when exposed; an unknown reading does not reject a job.
+    """
+    if sys.platform == 'darwin':
+        try:
+            output = subprocess.check_output(
+                ['memory_pressure', '-Q'], text=True, timeout=5,
+                stderr=subprocess.DEVNULL,
+            )
+            total_match = re.search(r'The system has\s+(\d+)', output)
+            free_match = re.search(r'memory free percentage:\s*(\d+(?:\.\d+)?)%', output, re.I)
+            if total_match and free_match:
+                return int(int(total_match.group(1)) * float(free_match.group(1)) / 100.0)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        return None
+    try:
+        return int(os.sysconf('SC_PAGE_SIZE')) * int(os.sysconf('SC_AVPHYS_PAGES'))
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _klein_memory_limits():
+    try:
+        headroom_gb = float(os.environ.get('ZIMG_KLEIN_MIN_AVAILABLE_MEMORY_GB', '24'))
+    except ValueError:
+        headroom_gb = 24.0
+    try:
+        job_gb = float(os.environ.get('ZIMG_KLEIN_JOB_MEMORY_GB', '24'))
+    except ValueError:
+        job_gb = 24.0
+    # Do not allow a typo or stale environment override to silently remove the
+    # safety margin. Klein 9B reached ~16.6 GiB RSS in the incident snapshot.
+    headroom_gb = max(20.0, min(headroom_gb, 64.0))
+    job_gb = max(20.0, min(job_gb, 64.0))
+    return int(headroom_gb * 1024 ** 3), int(job_gb * 1024 ** 3)
+
+
+def _acquire_klein_memory_reservation(job_id):
+    """Atomically reserve memory across tab lanes, waiting instead of overloading.
+
+    The reservation closes the race where two tabs both observe ample memory
+    before either child process has allocated its model. If macOS cannot report
+    pressure, only one unknown-size Klein reservation is admitted at a time.
+    """
+    global klein_reserved_memory_bytes
+    headroom, reservation = _klein_memory_limits()
+    try:
+        wait_seconds = float(os.environ.get('ZIMG_KLEIN_MEMORY_WAIT_SECONDS', '600'))
+    except ValueError:
+        wait_seconds = 600.0
+    deadline = time.monotonic() + max(30.0, min(wait_seconds, 3600.0))
+    while True:
+        if native_job_cancel_requested(job_id):
+            raise NativeJobCancelled(f'job {job_id} was cancelled while queued')
+        available = _available_memory_bytes()
+        with klein_memory_condition:
+            safe = (
+                klein_reserved_memory_bytes == 0
+                if available is None
+                else available - klein_reserved_memory_bytes >= headroom + reservation
+            )
+            if safe:
+                klein_reserved_memory_bytes += reservation
+                return reservation
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                available_text = 'unknown' if available is None else f'{available / 1024 ** 3:.1f} GiB'
+                raise RuntimeError(
+                    'timed out waiting for safe unified-memory headroom for Klein 9B '
+                    f'(available: {available_text})'
+                )
+            klein_memory_condition.wait(timeout=min(2.0, remaining))
+
+
+def _release_klein_memory_reservation(reservation):
+    global klein_reserved_memory_bytes
+    if not reservation:
+        return
+    with klein_memory_condition:
+        klein_reserved_memory_bytes = max(0, klein_reserved_memory_bytes - int(reservation))
+        klein_memory_condition.notify_all()
+
+
 def queue_native_mlx_biglove_job(prompt, image_path, options, workflow=None):
     if not supports_native_mlx_biglove_route():
         raise RuntimeError(f"native MLX BigLove route is not available for accelerator profile {accelerator_profile()}")
@@ -6344,30 +6770,40 @@ def queue_native_mlx_biglove_job(prompt, image_path, options, workflow=None):
     if len(uploaded_images) > 1:
         options['image_paths'] = [str(p) for p in uploaded_images]
     job_id = uuid.uuid4().hex[:12]
-    with jobs_lock:
-        jobs[job_id] = {
-            "id": job_id,
-            "prompt": PRIVATE_PROMPT_LABEL,
-            "comfy_prompt": _comfy_history_prompt_tuple(job_id, workflow),
-            "status": "queued",
-            "backend": "mlx-mxfp8-bigloves-klein3-edit",
-            "created_at": now_iso(),
-            "options": {
-                **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths'}},
-                **({'reference_images': len(uploaded_images)} if len(uploaded_images) > 1 else {}),
-                **({'lora_count': len(options.get('loras') or [])} if options.get('loras') else {}),
-            },
-            "source": "comfy-prompt-intercept",
-        }
-    t = threading.Thread(target=run_mlx_klein3_edit, args=(job_id, prompt, uploaded_image, options or {}, workflow), daemon=True)
-    t.start()
+    fingerprint = _klein_request_fingerprint(prompt, uploaded_images, options)
+    record = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "comfy_prompt": _comfy_history_prompt_tuple(job_id, workflow),
+        "status": "queued",
+        "backend": "mlx-mxfp8-bigloves-klein3-edit",
+        "created_at": now_iso(),
+        "options": {
+            **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths', 'studio_lane'}},
+            **({'reference_images': len(uploaded_images)} if len(uploaded_images) > 1 else {}),
+            **({'lora_count': len(options.get('loras') or [])} if options.get('loras') else {}),
+        },
+        "source": "comfy-prompt-intercept",
+    }
+    registered_job_id = _register_klein_job(job_id, fingerprint, record)
+    if registered_job_id != job_id:
+        return registered_job_id
+    args = (job_id, prompt, uploaded_image, options or {}, workflow)
+    start_studio_generation_thread(
+        'image', options, _run_admitted_klein_job,
+        (job_id, fingerprint, run_mlx_klein3_edit, args),
+    )
     return job_id
 
 def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None):
     started = now_iso()
     options = options or {}
-    requested_width = int_quality_option(options, 'requested_width', int_quality_option(options, 'width', 512))
-    requested_height = int_quality_option(options, 'requested_height', int_quality_option(options, 'height', 512))
+    with jobs_lock:
+        queued_rec = jobs.get(job_id) or {}
+    # 0 means "no size asked for" and lands on the trained bucket — the old 512
+    # fallback would now read as a request for a 0.26MP draft.
+    requested_width = int_quality_option(options, 'requested_width', int_quality_option(options, 'width', 0))
+    requested_height = int_quality_option(options, 'requested_height', int_quality_option(options, 'height', 0))
     target_width = int_quality_option(options, 'width', requested_width)
     target_height = int_quality_option(options, 'height', requested_height)
     bucket_width, bucket_height = snap_biglove_klein3_resolution(target_width, target_height)
@@ -6389,7 +6825,8 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
         "comfy_prompt": _comfy_history_prompt_tuple(job_id, workflow),
         "status": "running",
         "backend": "mlx-mxfp8-bigloves-klein3-edit",
-        "created_at": started,
+        "created_at": queued_rec.get("created_at") or started,
+        "started_at": started,
         "outputs": [],
         "options": {
             "width": width,
@@ -6397,8 +6834,10 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
             "steps": steps,
             "guidance": guidance,
             "seed": seed,
-            "requested_width": requested_width,
-            "requested_height": requested_height,
+            # Only when the caller actually named a size — 0 is "took the
+            # model's own canvas", which `width`/`height` already report.
+            **({"requested_width": requested_width} if requested_width > 0 else {}),
+            **({"requested_height": requested_height} if requested_height > 0 else {}),
             **({'reference_images': len(reference_images)} if len(reference_images) > 1 else {}),
             **({'lora_count': len(native_loras)} if native_loras else {}),
         },
@@ -6407,8 +6846,12 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
         "progress": 0,
         "step_progress": 0,
         "progress_phase": "queued",
+        **({'coalesced_requests': queued_rec['coalesced_requests']} if queued_rec.get('coalesced_requests') else {}),
     }
     with jobs_lock:
+        latest = jobs.get(job_id) or {}
+        if latest.get('coalesced_requests'):
+            rec['coalesced_requests'] = latest['coalesced_requests']
         jobs[job_id] = rec
     try:
         if not supports_native_mlx_biglove_route():
@@ -6628,34 +7071,42 @@ def queue_klein_character_sheet(prompt, reference_images, options, views, preset
     if reference_images:
         options['image_paths'] = [str(Path(p)) for p in reference_images]
     job_id = uuid.uuid4().hex[:12]
-    with jobs_lock:
-        jobs[job_id] = {
-            "id": job_id,
-            "prompt": PRIVATE_PROMPT_LABEL,
-            "comfy_prompt": _comfy_history_prompt_tuple(job_id, backend=KLEIN_CHARACTER_SHEET_BACKEND),
-            "status": "queued",
-            "created_at": now_iso(),
-            "backend": KLEIN_CHARACTER_SHEET_BACKEND,
-            "mode": "character-sheet",
-            "options": {
-                **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths'}},
-                **({'reference_images': len(reference_images)} if len(reference_images) > 1 else {}),
-                **({'lora_count': len(options.get('loras') or [])} if options.get('loras') else {}),
-            },
-            "character_sheet": {
-                **({'preset': preset} if preset else {}),
-                "views": [view["id"] for view in views],
-                "labels": [view["label"] for view in views],
-                "total": len(views),
-                "completed": 0,
-            },
-        }
-    t = threading.Thread(
-        target=run_klein_character_sheet,
-        args=(job_id, prompt, reference_images, options, views, preset),
-        daemon=True,
+    fingerprint = _klein_request_fingerprint(
+        prompt,
+        reference_images,
+        options,
+        mode='character-sheet',
+        extra={'preset': preset, 'views': views},
     )
-    t.start()
+    record = {
+        "id": job_id,
+        "prompt": PRIVATE_PROMPT_LABEL,
+        "comfy_prompt": _comfy_history_prompt_tuple(job_id, backend=KLEIN_CHARACTER_SHEET_BACKEND),
+        "status": "queued",
+        "created_at": now_iso(),
+        "backend": KLEIN_CHARACTER_SHEET_BACKEND,
+        "mode": "character-sheet",
+        "options": {
+            **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths', 'studio_lane'}},
+            **({'reference_images': len(reference_images)} if len(reference_images) > 1 else {}),
+            **({'lora_count': len(options.get('loras') or [])} if options.get('loras') else {}),
+        },
+        "character_sheet": {
+            **({'preset': preset} if preset else {}),
+            "views": [view["id"] for view in views],
+            "labels": [view["label"] for view in views],
+            "total": len(views),
+            "completed": 0,
+        },
+    }
+    registered_job_id = _register_klein_job(job_id, fingerprint, record)
+    if registered_job_id != job_id:
+        return registered_job_id
+    args = (job_id, prompt, reference_images, options, views, preset)
+    start_studio_generation_thread(
+        'image', options, _run_admitted_klein_job,
+        (job_id, fingerprint, run_klein_character_sheet, args),
+    )
     return job_id
 
 
@@ -6668,6 +7119,8 @@ def run_klein_character_sheet(job_id, prompt, reference_images, options=None, vi
     started = now_iso()
     options = options or {}
     views = views or []
+    with jobs_lock:
+        queued_rec = jobs.get(job_id) or {}
     requested_width = int_quality_option(options, 'requested_width', int_quality_option(options, 'width', 1024))
     requested_height = int_quality_option(options, 'requested_height', int_quality_option(options, 'height', 1536))
     # Every tile shares one canvas — the trained portrait bucket. Reshaping to
@@ -6687,7 +7140,8 @@ def run_klein_character_sheet(job_id, prompt, reference_images, options=None, vi
         "status": "running",
         "backend": KLEIN_CHARACTER_SHEET_BACKEND,
         "mode": "character-sheet",
-        "created_at": started,
+        "created_at": queued_rec.get("created_at") or started,
+        "started_at": started,
         "outputs": [],
         "options": {
             "width": width,
@@ -6712,8 +7166,12 @@ def run_klein_character_sheet(job_id, prompt, reference_images, options=None, vi
         "progress": 0,
         "step_progress": 0,
         "progress_phase": "queued",
+        **({'coalesced_requests': queued_rec['coalesced_requests']} if queued_rec.get('coalesced_requests') else {}),
     }
     with jobs_lock:
+        latest = jobs.get(job_id) or {}
+        if latest.get('coalesced_requests'):
+            rec['coalesced_requests'] = latest['coalesced_requests']
         jobs[job_id] = rec
     staging_dir = None
     view_outputs = []
@@ -6841,6 +7299,7 @@ def queue_native_mlx_ltx_job(native, workflow=None):
     if not spec:
         raise RuntimeError(f"unknown native MLX LTX variant: {variant}")
     options = dict(native.get('options') or {})
+    native = {**native, 'options': options}
     operation = str(native.get('operation') or 'generate')
     native_keyframes = native.get('images') if isinstance(native.get('images'), list) else []
     native_loras = _native_ltx_loras(options.get('loras') or [])
@@ -6892,8 +7351,8 @@ def queue_native_mlx_ltx_job(native, workflow=None):
             },
             "source": "comfy-prompt-intercept",
         }
-    t = threading.Thread(target=run_native_mlx_ltx_video, args=(job_id, native, workflow), daemon=True)
-    t.start()
+    start_studio_generation_thread(
+        'video', options, run_native_mlx_ltx_video, (job_id, native, workflow))
     return job_id
 
 
@@ -9923,6 +10382,12 @@ class Handler(BaseHTTPRequestHandler):
             native_ltx = detect_native_mlx_ltx_prompt(body)
             if native_ltx:
                 try:
+                    studio_lane = _studio_lane_from_comfy_prompt_body(body)
+                    if studio_lane:
+                        native_ltx['options'] = {
+                            **dict(native_ltx.get('options') or {}),
+                            'studio_lane': studio_lane,
+                        }
                     workflow = _mobile_prompt_workflow_from_body(body)
                     job_id = queue_native_mlx_ltx_job(native_ltx, workflow)
                     return self.send_json({
@@ -9939,6 +10404,12 @@ class Handler(BaseHTTPRequestHandler):
             native = detect_native_mlx_biglove_prompt(body)
             if native:
                 try:
+                    studio_lane = _studio_lane_from_comfy_prompt_body(body)
+                    if studio_lane:
+                        native['options'] = {
+                            **dict(native.get('options') or {}),
+                            'studio_lane': studio_lane,
+                        }
                     workflow = _mobile_prompt_workflow_from_body(body)
                     job_id = queue_native_mlx_biglove_job(native['prompt'], native['image_path'], native.get('options') or {}, workflow)
                     return self.send_json({
@@ -10584,7 +11055,7 @@ class Handler(BaseHTTPRequestHandler):
                     content_length = 0
                 form = MultipartForm(self.rfile.read(content_length) if content_length > 0 else b'', ctype)
                 prompt = str(form.getfirst("prompt", "")).strip()
-                for key in ['backend', 'width', 'height', 'steps', 'cfg', 'guidance', 'seed', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px']:
+                for key in ['backend', 'width', 'height', 'steps', 'cfg', 'guidance', 'seed', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'studio_lane']:
                     if key in form:
                         data[key] = form.getfirst(key)
                 image_item = form['image'] if 'image' in form else None
@@ -10617,7 +11088,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "prompt required"}, 400)
             options = {}
             if isinstance(data, dict):
-                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'sampler_name', 'scheduler', 'negative_prompt', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'couple_mode', 'couple_shared', 'couple_split', 'couple_direction', 'couple_pair']:
+                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'sampler_name', 'scheduler', 'negative_prompt', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'couple_mode', 'couple_shared', 'couple_split', 'couple_direction', 'couple_pair', 'studio_lane']:
                     if key in data:
                         options[key] = data.get(key)
                 _normalize_couple_options(options)
@@ -10649,8 +11120,8 @@ class Handler(BaseHTTPRequestHandler):
                         "backend": "comfy-api-image",
                         "options": {k: v for k, v in options.items() if k not in ('negative_prompt', 'workflow_file', 'loras')},
                     }
-                t = threading.Thread(target=run_comfy_api_image, args=(job_id, prompt, options), daemon=True)
-                t.start()
+                start_studio_generation_thread(
+                    'image', options, run_comfy_api_image, (job_id, prompt, options))
                 return self.send_json({
                     "id": job_id,
                     "status": "queued",
@@ -10697,12 +11168,10 @@ class Handler(BaseHTTPRequestHandler):
                             "mode": "inpaint",
                             "options": {k: v for k, v in options.items() if k != 'negative_prompt'},
                         }
-                    t = threading.Thread(
-                        target=run_comfy_krea2_inpaint,
-                        args=(job_id, prompt, uploaded_image, mask_path, options),
-                        daemon=True,
+                    start_studio_generation_thread(
+                        'image', options, run_comfy_krea2_inpaint,
+                        (job_id, prompt, uploaded_image, mask_path, options),
                     )
-                    t.start()
                     return self.send_json({
                         "id": job_id,
                         "status": "queued",
@@ -10728,12 +11197,10 @@ class Handler(BaseHTTPRequestHandler):
                             "mode": "outpaint",
                             "options": {k: v for k, v in options.items() if k != 'negative_prompt'},
                         }
-                    t = threading.Thread(
-                        target=run_comfy_krea2_outpaint,
-                        args=(job_id, prompt, uploaded_image, options, outpaint_req),
-                        daemon=True,
+                    start_studio_generation_thread(
+                        'image', options, run_comfy_krea2_outpaint,
+                        (job_id, prompt, uploaded_image, options, outpaint_req),
                     )
-                    t.start()
                     return self.send_json({
                         "id": job_id,
                         "status": "queued",
@@ -10758,12 +11225,10 @@ class Handler(BaseHTTPRequestHandler):
                             "mode": "identity-edit" if uploaded_image else "text-to-image",
                             "options": {k: v for k, v in options.items() if k != 'negative_prompt'},
                         }
-                    t = threading.Thread(
-                        target=run_comfy_krea2_strength_hunt,
-                        args=(job_id, prompt, uploaded_image, options, hunt),
-                        daemon=True,
+                    start_studio_generation_thread(
+                        'image', options, run_comfy_krea2_strength_hunt,
+                        (job_id, prompt, uploaded_image, options, hunt),
                     )
-                    t.start()
                     return self.send_json({
                         "id": job_id,
                         "status": "queued",
@@ -10783,12 +11248,10 @@ class Handler(BaseHTTPRequestHandler):
                         "mode": "identity-edit" if uploaded_image else "text-to-image",
                         "options": {k: v for k, v in options.items() if k != 'negative_prompt'},
                     }
-                t = threading.Thread(
-                    target=run_comfy_krea2_identity,
-                    args=(job_id, prompt, uploaded_image, options),
-                    daemon=True,
+                start_studio_generation_thread(
+                    'image', options, run_comfy_krea2_identity,
+                    (job_id, prompt, uploaded_image, options),
                 )
-                t.start()
                 return self.send_json({
                     "id": job_id,
                     "status": "queued",
@@ -10872,16 +11335,18 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = uuid.uuid4().hex[:12]
                 with jobs_lock:
                     jobs[job_id] = {"id": job_id, "prompt": PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": now_iso(), "backend": "comfy-bigloves-klein3-edit", "options": {k: v for k, v in options.items() if k != 'negative_prompt'}}
-                t = threading.Thread(target=run_comfy_klein3_edit, args=(job_id, prompt, uploaded_image, options), daemon=True)
-                t.start()
+                start_studio_generation_thread(
+                    'image', options, run_comfy_klein3_edit,
+                    (job_id, prompt, uploaded_image, options),
+                )
                 return self.send_json({"id": job_id, "status": "queued", "backend": "comfy-bigloves-klein3-edit", "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
             req_loras = data.get('loras') if isinstance(data, dict) else None
             loras = resolve_lora_selection(req_loras, current_base_models()) if req_loras is not None else load_selected_loras()
             job_id = uuid.uuid4().hex[:12]
             with jobs_lock:
                 jobs[job_id] = {"id": job_id, "prompt": PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": now_iso(), "loras": loras, "options": {k: v for k, v in options.items() if k != 'negative_prompt'}}
-            t = threading.Thread(target=run_generation, args=(job_id, prompt, loras, options), daemon=True)
-            t.start()
+            start_studio_generation_thread(
+                'image', options, run_generation, (job_id, prompt, loras, options))
             if parsed.path == "/generate":
                 return self.send_text(f"<meta http-equiv='refresh' content='0; url=/job/{job_id}?token={TOKEN}'>Queued job {job_id}. Opening live status page...", 202)
             return self.send_json({"id": job_id, "status": "queued", "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)

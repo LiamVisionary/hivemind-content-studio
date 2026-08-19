@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -305,12 +306,46 @@ function backendToken() {
   }
 }
 
+// base64url DER SPKI, mirroring the gateway's own validator so a malformed
+// header is ignored here rather than travelling on to be rejected there.
+const SPKI_B64URL_RE = /^[A-Za-z0-9_-]{100,4000}$/;
+
+// The key the CURRENT call should seal to, when the caller supplied one of its
+// own. A fresh MCP server is built per HTTP request, but tool handlers reach
+// requestJson() through many layers of async — async-local storage carries the
+// caller's identity down without threading it through every tool signature.
+const requesterContext = new AsyncLocalStorage();
+
+export function normalizedRequesterPub(value) {
+  const text = String(value || '').trim();
+  return SPKI_B64URL_RE.test(text) ? text : '';
+}
+
+export function runWithRequester(pub, fn) {
+  const normalized = normalizedRequesterPub(pub);
+  return normalized ? requesterContext.run({ pub: normalized }, fn) : fn();
+}
+
+// Exposed for the requester-context test; the precedence it encodes is the
+// difference between a clip belonging to its generator and belonging to us.
+export function __testRequesterPublicKey() {
+  return requesterPublicKey();
+}
+
 function requesterPublicKey() {
   // The requesting client's public key (base64url SPKI), presented with every
   // gateway call. Remote Comfy lanes seal generated media to this key, and the
   // gateway scopes history/status for keyed jobs to the same presenter —
   // possession of the matching decrypt key, not machine locality, grants
   // access to results. Optional: without it, jobs seal to the owner vault.
+  //
+  // A caller that presents its OWN key wins over this process's configured
+  // identity. That ordering is the whole point: a browser generating through
+  // this sidecar must have its media sealed to THAT BROWSER, not to the shared
+  // agent key this process happens to hold. The env fallback below is for
+  // agent-initiated calls, which present nothing and should seal to the agent.
+  const scoped = requesterContext.getStore();
+  if (scoped?.pub) return scoped.pub;
   if (process.env.MEDIA_STUDIO_E2E_PUB) return process.env.MEDIA_STUDIO_E2E_PUB.trim();
   const pubPath = process.env.MEDIA_STUDIO_E2E_PUB_FILE;
   if (!pubPath) return '';
@@ -443,6 +478,14 @@ function publicWorkflow(workflow) {
     ...(workflow.prompt_contract ? { prompt_contract: workflow.prompt_contract } : {}),
     ...(workflow.ingredient_inputs ? { ingredient_inputs: workflow.ingredient_inputs } : {}),
     ...(Array.isArray(workflow.aspect_ratios) ? { aspect_ratios: workflow.aspect_ratios } : {}),
+    // Capacity facts, published so the studio can refuse an impossible run in
+    // the picker instead of letting it fail at submit. Both are needed to work
+    // out a ceiling: the budget gives the pixel-frames, the grid says which
+    // frame counts the graph can actually sample.
+    ...(workflow.frame_grid ? { frame_grid: workflow.frame_grid } : {}),
+    ...(Number(workflow.motion_reference_budget?.max_reference_pixel_frames) > 0
+      ? { motion_reference_max_reference_pixel_frames: Number(workflow.motion_reference_budget.max_reference_pixel_frames) }
+      : {}),
   };
 }
 
@@ -949,6 +992,99 @@ const REF_VIDEO_MAX_PIXELS = 768 * 1344;
 // 25% slow and drag every gesture with it. Re-encode to a true 24 fps, hold the
 // model card's 15s ceiling, and land inside the reference-frame budget above.
 // Audio is kept only when the caller wants the clip's own soundtrack in.
+// A reference VIDEO is trimmed to the generated clip's own length, so its
+// tokens grow WITH the clip and ride every sampling step; reference PICTURES
+// cost a flat amount however long the clip is. That difference is the whole
+// budget. Measured 2026-08-13 on a rented 5090 (31.36GiB usable) in MiniMax H3
+// reference mode at 1216x704, nine pictures + a voice clip throughout:
+//
+//   with the motion clip     124f (5.2s) peak 20.89GiB  OK
+//                            141f (5.9s) peak 29.63GiB  OK   <- 94% of the card
+//                            158f (6.6s)                OUT OF MEMORY
+//   without it               158f (6.6s) peak 14.97GiB  OK
+//                            192f (8.0s) peak 15.44GiB  OK
+//
+// 0.51GiB per frame with the motion clip against 0.014GiB per frame without —
+// 36x. That reading was taken on a different allocator and no longer holds —
+// see `motion_reference_budget.measured` in the registry for the 2026-08-15
+// re-measurement, where the per-reference-frame cost is roughly 0.9GiB across
+// 48->243 frames. What survives from it is the SHAPE of the rule, not the
+// number: a motion clip is the expensive kind of reference, and pictures are
+// flat cost however long the clip is.
+//
+// The budget is spent on the EFFECTIVE reference length, which the node defines
+// as min(the reference's own length, the clip's length):
+//
+//   if frames.shape[0] > frame_count: frames = frames[:frame_count]
+//                                        — comfy_extras/nodes_minimax_h3.py
+//
+// So a reference LONGER than the clip is trimmed down to it and the clip's
+// length is what costs; a reference SHORTER than the clip keeps its own length
+// and costs that much whatever the clip does. The old guard only modelled the
+// first case, so it capped the clip even when a two-second reference made the
+// full duration range affordable.
+//
+// The measured budget lives on the workflow rather than here, because the
+// STUDIO has to know it too: this guard is the backstop, not the user
+// experience. A duration that cannot render should never be offered in the
+// picker, and the only way the picker and the guard agree is if they read the
+// same number. A workflow with no measured budget is not guarded — an
+// unmeasured card is not the same as a card that cannot do it.
+function motionReferencePixelFrameBudget(workflow) {
+  const budget = Number(workflow?.motion_reference_budget?.max_reference_pixel_frames);
+  return budget > 0 ? budget : null;
+}
+
+// The longest grid-legal stretch of motion reference this canvas can carry, or
+// null when the workflow has no measured budget. Shared by the guard below and
+// by the capability the studio picker reads, so both quote the same ceiling.
+function motionReferenceFrameCeiling(workflow, width, height) {
+  const budget = motionReferencePixelFrameBudget(workflow);
+  if (!budget || !(width > 0 && height > 0)) return null;
+  return gridFrameCountAtMost(workflow, Math.floor(budget / (width * height)));
+}
+
+function assertMotionReferenceFitsTheCard(workflow, settings) {
+  // A COUNT, not the staged names: this has to be answerable before anything is
+  // staged, and how many motion clips are attached is the only part that
+  // matters. Staging one just to learn it was never going to fit is the whole
+  // bug this guard exists to avoid.
+  if (!(Number(settings.referenceVideoCount) > 0)) return;
+  const width = Number(settings.width);
+  const height = Number(settings.height);
+  const frames = Number(settings.frames);
+  if (!(width > 0 && height > 0 && frames > 0)) return;
+  const ceiling = motionReferenceFrameCeiling(workflow, width, height);
+  if (!ceiling) return;
+  // An unknown reference length is treated as long, because a reference at or
+  // beyond the clip's length is the expensive case and guessing the cheap one
+  // would let an over-budget run through.
+  const referenceFrames = Number(settings.referenceVideoFrames) > 0
+    ? Number(settings.referenceVideoFrames)
+    : Infinity;
+  const effectiveFrames = Math.min(referenceFrames, frames);
+  if (effectiveFrames <= ceiling) return;
+  const rate = Number(settings.frameRate) || 24;
+  const seconds = (value) => (value / rate).toFixed(1);
+  const error = new Error(
+    `a ${seconds(frames)}s clip at ${width}x${height} does not fit this card alongside a reference `
+    + `video that long: the reference is trimmed to the clip's own length, so together they carry `
+    + `${effectiveFrames} reference frames and the limit here is ${ceiling} (${seconds(ceiling)}s). `
+    + `Either shorten the clip to ${seconds(ceiling)}s, use a reference video of ${seconds(ceiling)}s `
+    + `or less — a shorter reference keeps its own length, so it costs less and leaves the full `
+    + `duration range open — or drop the reference video. Reference pictures cost the same whatever `
+    + `the length.`,
+  );
+  // Survives machine-private redaction. This message is made of the card's
+  // capacity and the canvas the caller already chose — frame counts, a
+  // duration, a pixel size. It carries no prompt text and no media, which is
+  // what redaction exists to protect. Without the flag the studio receives a
+  // bare "MediaStudioError" and the one thing the user could act on is the one
+  // thing that gets stripped.
+  error.machineSafe = true;
+  throw error;
+}
+
 // Aspect-preserving downscale into REF_VIDEO_MAX_PIXELS, never an upscale, both
 // axes even (yuv420p needs it). Written as an ffmpeg expression rather than
 // probed dimensions so one filter is right for portrait, landscape and square.
@@ -1366,6 +1502,17 @@ function normalizedGridFrameCount(workflow, value) {
   const floor = offset > 0 ? offset : modulus;
   const raw = Math.max(floor, Number.isFinite(numeric) ? Math.round(numeric) : floor);
   return raw + ((((offset - (raw % modulus)) % modulus) + modulus) % modulus);
+}
+
+// The largest lattice point that does NOT exceed `value`. A CAP has to snap
+// down: normalizedGridFrameCount snaps up, so quoting it as a limit would name
+// a length up to modulus-1 frames past the one that fits.
+function gridFrameCountAtMost(workflow, value) {
+  const snappedUp = normalizedGridFrameCount(workflow, value);
+  if (snappedUp === undefined) return Math.max(1, Math.floor(Number(value) || 0));
+  if (snappedUp <= value) return snappedUp;
+  const modulus = Math.round(Number(workflow.frame_grid.modulus));
+  return Math.max(snappedUp - modulus, normalizedGridFrameCount(workflow, 1));
 }
 
 // Chained runs snap to the NEAREST lattice point instead of up: the sampled
@@ -2214,6 +2361,7 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
       extra_data: {
         extra_pnginfo: {
           workflow: mobileWorkflow,
+          ...(args.studio_lane ? { studioLane: args.studio_lane } : {}),
         },
       },
     },
@@ -2290,6 +2438,53 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   const targetWidth = positiveInt(argOrDefault(args, defaults, 'width'), defaults.width, { min: 64, max: 4096 });
   const targetHeight = positiveInt(argOrDefault(args, defaults, 'height'), defaults.height, { min: 64, max: 4096 });
   assertWorkflowAspectRatio(workflow, targetWidth, targetHeight);
+  // Refuse an impossible clip BEFORE a single byte is staged. The authoritative
+  // check further down runs against the built graph — but by then every
+  // reference picture and motion clip has been fetched, decoded, re-encoded to
+  // 24 fps and written into the lane's input directory. That is twenty-odd
+  // seconds of work for a run that was never going to start, and the user
+  // watches a progress bar for all of it.
+  //
+  // Nothing the check needs is unknown this early: the canvas, the requested
+  // length and whether a motion clip is attached all arrive with the request.
+  // Motion-context chaining is the one path that rewrites the canvas later, so
+  // it is left to the authoritative check rather than guessed at here.
+  const suppliedReferenceVideos = Array.isArray(args.reference_videos)
+    ? args.reference_videos.filter(Boolean)
+    : [];
+  const chainsFromMotionContext = args.motion_context_path !== undefined
+    || args.motion_context_base64 !== undefined
+    || args.motion_context_url !== undefined;
+  if (suppliedReferenceVideos.length && !chainsFromMotionContext) {
+    const preflightFrameRate = Number(args.frame_rate ?? defaults.frame_rate ?? 24) || 24;
+    const preflightDuration = positiveFloat(
+      args.duration_seconds ?? args.params?.duration_seconds,
+      defaults.duration_seconds || 4,
+      { min: 1 / 24, max: 30 },
+    );
+    const explicitPreflightFrames = args.frames ?? args.params?.frames;
+    const preflightFrames = explicitPreflightFrames !== undefined
+      ? positiveInt(explicitPreflightFrames, 0, { min: 1, max: 100000 })
+      : normalizedGridFrameCount(workflow, Math.round(preflightDuration * preflightFrameRate));
+    // The LONGEST attached reference decides the cost, and only a caller-sent
+    // hint is available this early — probing the sources would mean fetching
+    // and decoding them, which is the work this pre-flight exists to skip. No
+    // hint means "assume long", so the guard stays safe; the authoritative
+    // check below re-runs against the real staged durations either way.
+    const hintedReferenceFrames = suppliedReferenceVideos
+      .map((entry) => Number(entry?.duration_seconds) * preflightFrameRate)
+      .filter((value) => Number.isFinite(value) && value > 0);
+    assertMotionReferenceFitsTheCard(workflow, {
+      referenceVideoCount: suppliedReferenceVideos.length,
+      referenceVideoFrames: hintedReferenceFrames.length === suppliedReferenceVideos.length
+        ? Math.max(...hintedReferenceFrames)
+        : 0,
+      width: targetWidth,
+      height: targetHeight,
+      frames: preflightFrames,
+      frameRate: preflightFrameRate,
+    });
+  }
   const ingredientSheet = await ingredientSheetFromArgs(args, workflow, {
     width: targetWidth,
     height: targetHeight,
@@ -2486,6 +2681,15 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     if (stagedVideos.length) {
       settings.referenceVideoNames = stagedVideos.map((item) => item.name);
       settings.referenceVideoAudio = stagedVideos.map((item) => item.audio);
+      // Measured off the NORMALIZED file, which is already 24 fps and already
+      // held to the model card's 15s ceiling, so this is the frame count the
+      // node will actually load. The longest one sets the cost.
+      const stagedFrames = stagedVideos
+        .map((item) => Number(stagedMediaDuration(item.name)) * (Number(defaults.frame_rate) || 24))
+        .filter((value) => Number.isFinite(value) && value > 0);
+      settings.referenceVideoFrames = stagedFrames.length === stagedVideos.length
+        ? Math.max(...stagedFrames)
+        : 0;
     }
   }
   // Reference audio: voice/music cloning through the same autogrow contract.
@@ -2703,6 +2907,15 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
       };
     }
   }
+  // The authoritative check, against the dimensions and frame count the graph
+  // will actually sample. The pre-flight at the top of this function catches
+  // the same thing before any staging cost; this one covers the paths that
+  // rewrite the canvas after the fact (motion-context chaining).
+  assertMotionReferenceFitsTheCard(workflow, {
+    ...settings,
+    referenceVideoCount: settings.referenceVideoNames?.length || 0,
+    referenceVideoFrames: settings.referenceVideoFrames || 0,
+  });
   settings.extensionFrames = normalizedLtxExtensionFrames(settings.durationSeconds, settings.frameRate);
   const usesIngredientConditioning = workflow.prompt_contract?.type === 'ltx23-ingredients';
   if (usesIngredientConditioning) {
@@ -2825,6 +3038,7 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     extraPngInfo.nativeMlxLtx = editorWorkflow.extra.nativeMlxLtx;
   }
 
+  if (args.studio_lane) extraPngInfo.studioLane = args.studio_lane;
   return {
     spec: {
       id: workflow.id,
@@ -3406,6 +3620,7 @@ function buildServer() {
     description: 'Queue a registered video workflow. If workflow_id is omitted, the default local video workflow is used.',
     inputSchema: {
       workflow_id: z.string().optional().describe(`Registered workflow id. Defaults to ${defaultVideoWorkflowId()}. Use media_list_workflows to discover options.`),
+      studio_lane: z.string().max(512).optional().describe('Opaque app-tab queue lane. Jobs from one lane run in order; different tabs and media studios remain independent.'),
       prompt: z.string().min(1).optional().describe('Optional positive video prompt. Long natural-language prompts are preserved without a client-side character cap.'),
       reference_description: z.string().optional().describe('Ingredients IC-LoRA only: panel-by-panel description of the reference sheet. Omit only when prompt already contains the required Reference Sheet Description and Target Description headings.'),
       ingredient_images: z.array(z.object({
@@ -3456,6 +3671,12 @@ function buildServer() {
         video_base64: z.string().optional(),
         video_url: z.string().optional(),
         use_audio: z.boolean().optional(),
+        duration_seconds: z.number().positive().max(3600).optional().describe(
+          'This clip\'s own length, if the caller already knows it. Purely an optimisation: a reference is '
+          + 'trimmed to min(its own length, the generated clip\'s), so this decides whether the run fits, and '
+          + 'sending it lets an over-budget request be refused before anything is staged rather than after '
+          + 'every reference has been fetched and re-encoded. Omit it and the clip is assumed long until the '
+          + 'real file is measured on staging.'),
       })).max(3).optional().describe(
         'MiniMax H3 Reference mode: up to three MOTION reference videos, in order — video N is the prompt\'s '
         + '<Video N>. Carries how a body moves: gesture style, posture, mannerisms, facial expressiveness. How '
@@ -3685,7 +3906,13 @@ async function startHttp({ host, port }) {
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     try {
       await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      // Everything this request does — including the gateway calls that decide
+      // who the generated media is sealed to — runs as the caller that asked
+      // for it. Absent or malformed header falls back to this process's key.
+      await runWithRequester(
+        req.headers['x-e2e-requester-pub'],
+        () => transport.handleRequest(req, res, req.body),
+      );
       res.on('close', () => {
         transport.close();
         server.close();
@@ -3760,7 +3987,24 @@ async function main() {
   await startStdio();
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+// Only start a server when this file IS the program. Importing it (the
+// requester-context test does) must not silently bring up a stdio MCP server
+// that never returns.
+// Compared through realpath, not URL equality: the supervisor may launch this
+// through a symlinked path, and a false negative here means the sidecar never
+// starts at all.
+const invokedDirectly = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
+  }
+})();
+
+if (invokedDirectly) {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}

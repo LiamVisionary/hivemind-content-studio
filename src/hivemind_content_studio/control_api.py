@@ -22,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -48,11 +49,12 @@ from .canvas_history import (
 from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brain, plan_with_local_brain
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
 from .lanes import LANE_MATRIX
-from . import local_llm, media_posters, prompt_profiles
+from . import comfy_lanes, local_llm, media_posters, prompt_profiles
 from .manifest import load_manifest, write_manifest
 from .machine_privacy import machine_operation_receipt, machine_run_receipt
 from .media_catalog import media_catalog
 from .media_studio import (
+    normalized_requester_pub,
     cancel_video as run_media_studio_video_cancel,
     check_video as run_media_studio_video_check,
     finish_video as run_media_studio_video_finish,
@@ -64,6 +66,24 @@ from .hivemindos_oauth import oauth_provider_status, start_oauth_login
 from .orchestrator import ContentOrchestrator
 from .prompt_history import PromptHistoryStore
 from .providers import provider_report, providers_for
+from .account_gate import account_gate_html
+from .account_scope import AccountWorkspaces, NoAccountInScope, bootstrap_accounts
+from .accounts import (
+    ACCOUNT_COOKIE,
+    SESSION_SECONDS,
+    Account,
+    AccountAccess,
+    AccountStore,
+    LoginThrottle,
+    RelyingParty,
+    WebAuthnError,
+    authentication_options,
+    is_legacy_password_hash,
+    registration_options,
+    verify_assertion,
+    verify_password,
+    verify_registration,
+)
 from .private_access import (
     OWNER_SESSION_SECONDS,
     OwnerAccess,
@@ -73,13 +93,11 @@ from .private_access import (
     e2e_media_sidecar,
     encrypt_private_media,
     is_private_text_file,
-    owner_unlock_html,
     private_media_exists,
     private_media_sidecar,
     read_e2e_envelope,
     read_private_media,
     read_private_text,
-    read_vault_public_key,
     seal_private_media_e2e,
     write_private_text,
 )
@@ -113,6 +131,52 @@ class OwnerUnlockBody(BaseModel):
     password: str
 
 
+class AccountUnlockBody(BaseModel):
+    account_id: int
+    password: str
+
+
+class AccountCreateBody(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    password: str = ""
+
+
+class AccountRenameBody(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+
+
+class PasskeyChallengeBody(BaseModel):
+    # Absent for a discoverable sign-in, where the passkey itself names the
+    # workspace and the browser picks which one to offer.
+    account_id: int | None = None
+
+
+class PasskeyRegisterBody(BaseModel):
+    credential_id: str = Field(max_length=1024)
+    # SPKI DER from the browser's own PublicKeyCredential.getPublicKey(), which
+    # is why this server needs no CBOR/COSE parser (see accounts.py).
+    public_key: str = Field(max_length=4096)
+    algorithm: int
+    client_data_json: str = Field(max_length=8192)
+    label: str = Field(default="", max_length=60)
+    # Whether this credential can produce a PRF secret, i.e. whether it is able
+    # to unlock the vault itself rather than only prove who is at the keyboard.
+    prf: bool = False
+
+
+class VaultPrfWrapBody(BaseModel):
+    # None removes the enrolment (the passkey still signs you in, it just no
+    # longer carries a copy of the wrapped master key).
+    wrapped_mk: str | None = Field(default=None, max_length=4096)
+
+
+class PasskeyAssertionBody(BaseModel):
+    credential_id: str = Field(max_length=1024)
+    client_data_json: str = Field(max_length=8192)
+    authenticator_data: str = Field(max_length=8192)
+    signature: str = Field(max_length=4096)
+
+
 class ConfirmDeleteBody(BaseModel):
     confirm: bool = False
 
@@ -142,6 +206,10 @@ class PromptHelperLoadBody(BaseModel):
 
 class PromptHelperUnloadBody(BaseModel):
     modelId: str
+
+
+class LaneFreeBody(BaseModel):
+    lane: str
 
 
 class PromptHelperGenerateBody(BaseModel):
@@ -246,6 +314,7 @@ class MediaStudioReferenceVideoBody(BaseModel):
 class MediaStudioVideoBody(BaseModel):
     prompt: str = ""
     workflow_id: str = ""
+    studio_lane: str = Field(default="", max_length=512)
     reference_description: str = ""
     ingredient_images: list[MediaStudioIngredientImageBody] = []
     # MiniMax H3 Reference mode: discrete character/subject pictures carried into
@@ -587,6 +656,20 @@ def _read_private_media(
     return read_private_media(path, scope=scope, cipher=cipher)
 
 
+E2E_REQUESTER_HEADER = "X-E2E-Requester-Pub"
+
+
+def _requester_pub(request: Request) -> str:
+    """The caller's own E2E public key, if it presented one.
+
+    A browser that holds a device key sends it here, and this server does
+    nothing with it but pass it on: generated media is sealed to that key by
+    the gateway, so a clip belongs to the device that asked for it rather than
+    to whichever process happened to relay the request. Absent header means the
+    caller has no key of its own and the owner vault is the only recipient."""
+    return normalized_requester_pub(request.headers.get(E2E_REQUESTER_HEADER))
+
+
 def _e2e_envelope_response(envelope: bytes) -> Response:
     """Serve a client-only E2E envelope verbatim. The browser detects it via
     X-E2E-Media/Content-Type and decrypts with the vault private key; the server
@@ -844,21 +927,64 @@ def build_control_app(
     )
     configure_private_cipher(cipher)
     access = owner_access or OwnerAccess.from_runtime(cipher)
-    vault_db_path = Path(runs.store.path).parent / "owner-vault.sqlite3"
+    state_dir = Path(runs.store.path).parent
+
+    # ── accounts ──────────────────────────────────────────────────────────────
+    # Every account's data lives in its own subtree with its own zero-knowledge
+    # vault (account_scope.py). Nothing below may reach a store without first
+    # naming an account, which is why the resolvers are functions rather than
+    # the module-level singletons they replaced: an unset scope raises instead
+    # of quietly serving account 1's library to whoever asked.
+    account_store = AccountStore(state_dir / "accounts.sqlite3")
+    workspaces = AccountWorkspaces(state_dir, cipher=cipher)
+    # The owner account inherits whatever password the studio was already
+    # configured with — env hash in production, injected hash under test — so
+    # `access` stays the single source of truth for it rather than this module
+    # reading the environment a second time and drifting from it.
+    owner_account = bootstrap_accounts(
+        store=account_store, state_dir=state_dir, legacy_password_hash=access.password_hash,
+        # An injected canvas store is already open on a path its owner chose;
+        # migrating that file would leave the connection pointing at nothing.
+        skip_migration=("canvas-history.sqlite3",) if canvas_history is not None else (),
+    )
+    account_access = AccountAccess(signing_secret=cipher.derive("account-session-v1"))
+    login_throttle = LoginThrottle()
+    # Set per request by the middleware below; never defaulted.
+    current_account: ContextVar[Account | None] = ContextVar("current_account", default=None)
+
+    def scoped_account() -> Account:
+        account = current_account.get()
+        if account is None:
+            raise NoAccountInScope("This state is account-scoped and nobody is signed in")
+        return account
+
+    def scoped_account_id() -> int:
+        return scoped_account().id
+
+    def vault() -> VaultStore:
+        return workspaces.vault(scoped_account_id())
+
+    def prompt_history() -> PromptHistoryStore:
+        return workspaces.prompt_history(scoped_account_id())
+
+    def studio_state() -> StudioStateStore:
+        return workspaces.studio_state(scoped_account_id())
+
+    def canvas_store() -> CanvasHistoryStore:
+        return canvas_history or workspaces.canvas_history(scoped_account_id())
+
+    def references_root() -> Path:
+        return workspaces.paths(scoped_account_id()).references_root
+
+    def outputs_root() -> Path:
+        return workspaces.paths(scoped_account_id()).outputs_root
 
     def _vault_public_key() -> str | None:
-        """Owner vault RSA public key (SPKI) for client-only E2E sealing, or None
-        until the owner has created a vault in-browser. No secret is involved."""
-        return read_vault_public_key(vault_db_path)
-
-    # Prompt text is sealed to the owner vault (client-only E2E) when a vault
-    # exists — never readable by a process holding only the Keychain key.
-    prompt_history = PromptHistoryStore(
-        Path(runs.store.path).parent / "prompt-history.sqlite3", cipher=cipher, vault_key=_vault_public_key
-    )
-    studio_state = StudioStateStore(Path(runs.store.path).parent / "studio-state.sqlite3", cipher=cipher)
-    vault = VaultStore(vault_db_path)
-    canvas_store = canvas_history or CanvasHistoryStore(Path(runs.store.path).parent / "canvas-history.sqlite3", cipher=cipher)
+        """The SIGNED-IN account's vault public key for server-side sealing, or
+        None until they have created a vault in-browser. Resolving this per
+        request is what stops one person's output being sealed to another
+        person's key — the seal target follows the session, not the process."""
+        return workspaces.vault_public_key(scoped_account_id())
     canvas_gateway = CanvasGatewayClient()
     fetch_canvas_history = canvas_history_fetcher or canvas_gateway.history
     fetch_canvas_media = canvas_media_fetcher or canvas_gateway.media
@@ -877,9 +1003,10 @@ def build_control_app(
     unlock_failures: dict[str, deque[float]] = defaultdict(deque)
     repository_root = Path(__file__).resolve().parents[2]
     open_gen_dist = repository_root / "packages/open-generative-ai/dist"
+    # Staging for external tools (ComfyUI reads plaintext from here and the
+    # sweeper removes it). Deliberately NOT per-account: nothing durable lives
+    # here, and the files are named by mkstemp rather than being addressable.
     media_studio_input_root = Path(runs.store.path).parent / "uploads" / "media-studio"
-    media_studio_reference_root = Path(runs.store.path).parent / "uploads" / "media-studio-references"
-    media_studio_output_root = Path(runs.store.path).parent / "generated" / "media-studio"
     generation_timings = GenerationTimings(Path(runs.store.path).parent / "generation-timings.jsonl")
     ingredients_sheet_compositor = repository_root / "packages/media-gateway/bin/compose-ingredients-sheet.py"
     # The unified studio frontend (packages/open-generative-ai, Vite build) is
@@ -896,9 +1023,15 @@ def build_control_app(
         user_prompt: str = "",
         composer: dict[str, Any] | None = None,
     ) -> None:
-        """History capture never blocks or fails a production run."""
+        """History capture never blocks or fails a production run.
+
+        The suppression also covers NoAccountInScope: a run reaching here from a
+        machine route has no workspace to file the prompt under, and dropping
+        the history entry is the correct outcome — far better than writing one
+        person's prompt into whichever library happened to be first.
+        """
         with contextlib.suppress(Exception):
-            prompt_history.record(
+            prompt_history().record(
                 prompt=(draft.concept or "").strip() or user_prompt or draft.title,
                 user_prompt=user_prompt,
                 title=draft.title,
@@ -924,22 +1057,70 @@ def build_control_app(
         finally:
             draft_path.unlink(missing_ok=True)
 
+    # Routes the sign-in screen itself must reach before anyone is signed in.
+    # Deliberately a small, exact set: everything else stays behind the gate.
+    _GATE_ROUTES = frozenset({
+        "/api/accounts",
+        "/api/accounts/unlock",
+        "/api/accounts/webauthn/authenticate/options",
+        "/api/accounts/webauthn/authenticate",
+    })
+
+    def _machine_token_presented(request: Request) -> bool:
+        """A caller holding the control or operator bearer token.
+
+        Agents and the MCP reach the studio this way, with no browser session.
+        They act for the person who owns the machine, so they resolve to the
+        OWNER workspace — which is what they already reached when there was only
+        one. Stated here rather than falling out of a default, because the same
+        code path decides whose vault an agent's output gets sealed to.
+        """
+        header = request.headers.get("authorization", "")
+        supplied = header.removeprefix("Bearer ").strip()
+        if not supplied:
+            return False
+        return any(
+            len(token) >= 12 and hmac.compare_digest(supplied, token)
+            for token in (configured_control_token, configured_operator_token)
+        )
+
     @app.middleware("http")
-    async def enforce_owner_boundary(request: Request, call_next):
-        is_owner = access.valid(request.cookies.get(access.cookie_name))
-        request.state.is_owner = is_owner
-        if not is_owner and not _machine_route_allowed(request.url.path, request.method):
-            if request.method in {"GET", "HEAD"} and (
-                request.url.path == "/" or "text/html" in request.headers.get("accept", "")
-            ):
-                response = HTMLResponse(owner_unlock_html(), status_code=200)
+    async def enforce_account_boundary(request: Request, call_next):
+        signed_in = account_access.account_id(request.cookies.get(ACCOUNT_COOKIE))
+        # A cookie for a workspace that has since been deleted proves nothing.
+        account = account_store.get(signed_in) if signed_in else None
+        request.state.account = account
+        request.state.is_owner = account is not None
+        # Machine callers get the owner workspace for STORAGE scope only; they
+        # are still not `request.state.account`, so every owner-gated route goes
+        # on refusing them exactly as before.
+        scope = account or (account_store.get(owner_account.id) if _machine_token_presented(request) else None)
+        token = current_account.set(scope)
+        try:
+            allowed = (
+                account is not None
+                or request.url.path in _GATE_ROUTES
+                or _machine_route_allowed(request.url.path, request.method)
+            )
+            if not allowed:
+                if request.method in {"GET", "HEAD"} and (
+                    request.url.path == "/" or "text/html" in request.headers.get("accept", "")
+                ):
+                    # A STANDALONE page, deliberately not the React shell: the
+                    # app bundle lives under /assets, which is gated, so a shell
+                    # served here would load a script that 401s and render
+                    # nothing. Keeping the gate self-contained also means an
+                    # unauthenticated visitor is never handed the application.
+                    response = HTMLResponse(account_gate_html(), status_code=200)
+                else:
+                    response = JSONResponse(
+                        {"detail": "Sign in to a workspace", "privacy": "account-locked"},
+                        status_code=401,
+                    )
             else:
-                response = JSONResponse(
-                    {"detail": "Owner password required", "privacy": "owner-locked"},
-                    status_code=401,
-                )
-        else:
-            response = await call_next(request)
+                response = await call_next(request)
+        finally:
+            current_account.reset(token)
         response.headers.setdefault("Cache-Control", "no-store")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -959,10 +1140,26 @@ def build_control_app(
         require_control(request, authorization)
 
     def require_owner(request: Request) -> None:
-        if not bool(getattr(request.state, "is_owner", False)):
-            raise HTTPException(status_code=401, detail="Owner password required")
+        """Any signed-in workspace. Named for the 60-odd routes that already
+        depend on it; what it now proves is "some account", and WHICH account is
+        what the scoped resolvers above answer."""
+        if getattr(request.state, "account", None) is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
 
-    register_gpu_rental_routes(app, require_owner)
+    def require_owner_account(request: Request) -> None:
+        """The owner workspace specifically.
+
+        GPU rentals spend real money against machine-wide provider keys and
+        attach lanes the whole studio shares, so they are not per-workspace
+        state — a second workspace must not be able to rent on the owner's card.
+        """
+        account = getattr(request.state, "account", None)
+        if account is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        if not account.is_owner:
+            raise HTTPException(status_code=403, detail="Only the owner workspace can manage GPU rentals")
+
+    register_gpu_rental_routes(app, require_owner_account)
 
     def owner_visible(request: Request, value: dict[str, Any]) -> dict[str, Any]:
         return value if bool(getattr(request.state, "is_owner", False)) else machine_run_receipt(value)
@@ -975,8 +1172,8 @@ def build_control_app(
         if not encoded_name or "/" in encoded_name or "?" in encoded_name or "#" in encoded_name:
             raise ValueError("Media reference is invalid")
         name = urllib.parse.unquote(encoded_name)
-        reference = (media_studio_reference_root / name).resolve()
-        reference_root = media_studio_reference_root.resolve()
+        reference = (references_root() / name).resolve()
+        reference_root = references_root().resolve()
         # A sealed (.e2e) reference cannot be staged server-side — this host holds
         # no key. The client decrypts it in-browser and re-sends it as base64.
         if reference.is_relative_to(reference_root) and e2e_media_exists(reference):
@@ -998,33 +1195,14 @@ def build_control_app(
     def healthz() -> dict:
         return {"ok": True, "service": "hivemind-content-studio", "owner_lock": True}
 
-    @app.get("/api/owner/session")
-    def owner_session(request: Request) -> dict:
-        return {
-            "ok": True,
-            "unlocked": bool(getattr(request.state, "is_owner", False)),
-            "expires_in_seconds": OWNER_SESSION_SECONDS,
-        }
+    # ── accounts: the sign-in gate ────────────────────────────────────────────
 
-    @app.post("/api/owner/unlock")
-    def owner_unlock(body: OwnerUnlockBody, request: Request) -> JSONResponse:
-        address = request.client.host if request.client else "unknown"
-        now = time.monotonic()
-        failures = unlock_failures[address]
-        while failures and now - failures[0] > 60:
-            failures.popleft()
-        if len(failures) >= 8:
-            raise HTTPException(status_code=429, detail="Too many unlock attempts")
-        if not access.password_matches(body.password):
-            failures.append(now)
-            raise HTTPException(status_code=401, detail="Wrong password")
-        failures.clear()
-        response = JSONResponse({"ok": True, "expires_in_seconds": access.session_seconds})
+    def _sign_in(response: JSONResponse, request: Request, account: Account) -> JSONResponse:
         forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
         response.set_cookie(
-            access.cookie_name,
-            access.issue(),
-            max_age=access.session_seconds,
+            ACCOUNT_COOKIE,
+            account_access.issue(account.id),
+            max_age=account_access.session_seconds,
             httponly=True,
             secure=request.url.scheme == "https" or forwarded == "https",
             samesite="strict",
@@ -1032,14 +1210,243 @@ def build_control_app(
         )
         return response
 
+    def _relying_party(request: Request) -> RelyingParty:
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        return RelyingParty.for_request(
+            host=request.headers.get("host", ""),
+            scheme=forwarded or request.url.scheme,
+        )
+
+    def _throttle_key(request: Request, account_id: int | None) -> str:
+        address = request.client.host if request.client else "unknown"
+        return f"{address}:{account_id if account_id is not None else 'any'}"
+
+    def _guard_throttle(key: str) -> None:
+        wait = login_throttle.retry_after(key)
+        if wait > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many attempts. Try again in {int(wait) + 1}s.",
+                headers={"Retry-After": str(int(wait) + 1)},
+            )
+
+    @app.get("/api/accounts")
+    def list_accounts(request: Request) -> dict:
+        """The picker's tile grid — reachable before sign-in by design.
+
+        Only what a tile needs: name, colour, and which sign-in methods exist.
+        No hashes, no credential ids, nothing that helps an attacker offline.
+        """
+        account = getattr(request.state, "account", None)
+        return {
+            "ok": True,
+            "accounts": [entry.public() for entry in account_store.list_accounts()],
+            "signed_in_as": account.id if account else None,
+            "expires_in_seconds": SESSION_SECONDS,
+        }
+
+    @app.post("/api/accounts/unlock")
+    def unlock_account(body: AccountUnlockBody, request: Request) -> JSONResponse:
+        key = _throttle_key(request, body.account_id)
+        _guard_throttle(key)
+        account = account_store.get(body.account_id)
+        stored = account_store.password_hash(body.account_id) if account else None
+        if account is None or not verify_password(stored, body.password):
+            login_throttle.fail(key)
+            # One message for both cases: which workspaces have which passwords
+            # is not something a failed attempt should teach anyone.
+            raise HTTPException(status_code=401, detail="Wrong password")
+        login_throttle.success(key)
+        # An owner still carrying the legacy SHA-256 digest is upgraded to
+        # scrypt the moment they prove they know the password.
+        if is_legacy_password_hash(stored):
+            account_store.set_password(account.id, body.password)
+        return _sign_in(
+            JSONResponse({"ok": True, "account": account.public(),
+                          "expires_in_seconds": account_access.session_seconds}),
+            request, account,
+        )
+
+    @app.post("/api/accounts/sign-out")
+    def sign_out() -> JSONResponse:
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(ACCOUNT_COOKIE, path="/", samesite="strict")
+        return response
+
+    @app.post("/api/accounts", status_code=201)
+    def create_account(body: AccountCreateBody, request: Request) -> JSONResponse:
+        """Add a workspace.
+
+        Only the owner may do this. A studio that let anyone at the sign-in
+        screen add a workspace would hand an intruder a foothold on the machine
+        — and the picker is reachable unauthenticated.
+        """
+        account = getattr(request.state, "account", None)
+        if account is None or not account.is_owner:
+            raise HTTPException(status_code=403, detail="Only the owner workspace can add workspaces")
+        try:
+            created = account_store.create(name=body.name, password=body.password or None)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        workspaces.paths(created.id)
+        return JSONResponse({"ok": True, "account": created.public()}, status_code=201)
+
+    @app.delete("/api/accounts/{account_id}")
+    def delete_account(account_id: int, request: Request) -> dict:
+        actor = getattr(request.state, "account", None)
+        if actor is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        target = account_store.get(account_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="No such workspace")
+        # You may delete your own workspace; the owner may delete any other. The
+        # owner workspace itself cannot be deleted — it is the recovery path.
+        if target.is_owner:
+            raise HTTPException(status_code=400, detail="The owner workspace cannot be deleted")
+        if actor.id != target.id and not actor.is_owner:
+            raise HTTPException(status_code=403, detail="You can only delete your own workspace")
+        account_store.delete(target.id)
+        workspaces.destroy(target.id)
+        return {"ok": True, "deleted": target.id}
+
+    @app.post("/api/accounts/{account_id}/rename")
+    def rename_account(account_id: int, body: AccountRenameBody, request: Request) -> dict:
+        actor = getattr(request.state, "account", None)
+        if actor is None or (actor.id != account_id and not actor.is_owner):
+            raise HTTPException(status_code=403, detail="You can only rename your own workspace")
+        try:
+            return {"ok": True, "account": account_store.rename(account_id, body.name).public()}
+        except (ValueError, LookupError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # ── accounts: passkeys ────────────────────────────────────────────────────
+
+    @app.post("/api/accounts/webauthn/register/options")
+    def passkey_register_options(request: Request) -> dict:
+        """Registration is only ever offered INSIDE a signed-in session, which
+        is what lets us accept the client's SPKI without parsing attestation:
+        whoever is adding the key has already proved they own the workspace."""
+        account = getattr(request.state, "account", None)
+        if account is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        return {"ok": True, "publicKey": registration_options(
+            store=account_store, account=account, party=_relying_party(request)
+        )}
+
+    @app.post("/api/accounts/webauthn/register")
+    def passkey_register(body: PasskeyRegisterBody, request: Request) -> dict:
+        account = getattr(request.state, "account", None)
+        if account is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        try:
+            verify_registration(
+                store=account_store, account_id=account.id, party=_relying_party(request),
+                credential_id=body.credential_id, public_key=body.public_key,
+                algorithm=body.algorithm, client_data_json=body.client_data_json,
+                label=body.label, prf=body.prf,
+            )
+        except (WebAuthnError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "passkeys": account_store.list_passkeys(account.id)}
+
+    @app.get("/api/accounts/webauthn/passkeys")
+    def list_passkeys(request: Request) -> dict:
+        account = getattr(request.state, "account", None)
+        if account is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        return {"ok": True, "passkeys": account_store.list_passkeys(account.id)}
+
+    @app.delete("/api/accounts/webauthn/passkeys/{credential_id:path}")
+    def delete_passkey(credential_id: str, request: Request) -> dict:
+        account = getattr(request.state, "account", None)
+        if account is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        if not account_store.delete_passkey(account.id, credential_id):
+            raise HTTPException(status_code=404, detail="No such passkey on this workspace")
+        return {"ok": True, "passkeys": account_store.list_passkeys(account.id)}
+
+    @app.post("/api/accounts/webauthn/authenticate/options")
+    def passkey_authenticate_options(body: PasskeyChallengeBody, request: Request) -> dict:
+        """Unauthenticated by necessity — this is the sign-in itself.
+
+        With no account_id the browser offers whichever passkey it holds for
+        this site and the assertion names the workspace, which is what makes a
+        tile openable with a fingerprint and no password.
+        """
+        account = account_store.get(body.account_id) if body.account_id else None
+        if body.account_id and account is None:
+            raise HTTPException(status_code=404, detail="No such workspace")
+        return {"ok": True, "publicKey": authentication_options(
+            store=account_store, party=_relying_party(request), account=account
+        )}
+
+    @app.post("/api/accounts/webauthn/authenticate")
+    def passkey_authenticate(body: PasskeyAssertionBody, request: Request) -> JSONResponse:
+        key = _throttle_key(request, None)
+        _guard_throttle(key)
+        try:
+            account_id = verify_assertion(
+                store=account_store, party=_relying_party(request),
+                credential_id=body.credential_id, client_data_json=body.client_data_json,
+                authenticator_data=body.authenticator_data, signature=body.signature,
+            )
+        except WebAuthnError as exc:
+            login_throttle.fail(key)
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        account = account_store.get(account_id)
+        if account is None:
+            raise HTTPException(status_code=401, detail="That passkey's workspace no longer exists")
+        login_throttle.success(key)
+        return _sign_in(
+            JSONResponse({"ok": True, "account": account.public(),
+                          "expires_in_seconds": account_access.session_seconds}),
+            request, account,
+        )
+
+    # Kept so an old tab, a bookmark or the fallback lock page still works; both
+    # now speak to the owner workspace rather than a studio-wide password.
+    @app.get("/api/owner/session")
+    def owner_session(request: Request) -> dict:
+        account = getattr(request.state, "account", None)
+        return {
+            "ok": True,
+            "unlocked": account is not None,
+            "account": account.public() if account else None,
+            "expires_in_seconds": OWNER_SESSION_SECONDS,
+        }
+
+    @app.post("/api/owner/unlock")
+    def owner_unlock(body: OwnerUnlockBody, request: Request) -> JSONResponse:
+        key = _throttle_key(request, owner_account.id)
+        _guard_throttle(key)
+        account = account_store.get(owner_account.id)
+        stored = account_store.password_hash(owner_account.id) if account else None
+        if account is None or not verify_password(stored, body.password):
+            login_throttle.fail(key)
+            raise HTTPException(status_code=401, detail="Wrong password")
+        login_throttle.success(key)
+        if is_legacy_password_hash(stored):
+            account_store.set_password(account.id, body.password)
+        return _sign_in(
+            JSONResponse({"ok": True, "expires_in_seconds": account_access.session_seconds}),
+            request, account,
+        )
+
     @app.post("/api/owner/lock")
     def owner_lock() -> JSONResponse:
         response = JSONResponse({"ok": True})
+        response.delete_cookie(ACCOUNT_COOKIE, path="/", samesite="strict")
         response.delete_cookie(access.cookie_name, path="/", samesite="strict")
         return response
 
-    @app.get("/", include_in_schema=False)
-    def index() -> Response:
+    def _studio_shell() -> Response:
+        """The React shell, served signed-in or not.
+
+        The workspace picker and the passkey sign-in card are part of the same
+        bundle, so the shell has to load before anyone has a session; it shows
+        the gate and calls /api/accounts for the tiles. No account-scoped data
+        is in the shell itself — only the app that will go and ask for it.
+        """
         unified_index = open_gen_dist / "index.html"
         if unified_index.is_file():
             # Inject the studio marker so the frontend knows it is running as
@@ -1067,6 +1474,10 @@ def build_control_app(
             "Run <code>npm --prefix packages/open-generative-ai run vite:build</code>.</p>",
             status_code=503,
         )
+
+    @app.get("/", include_in_schema=False)
+    def index() -> Response:
+        return _studio_shell()
 
     @app.get("/api/catalog")
     def catalog() -> dict:
@@ -1283,6 +1694,21 @@ def build_control_app(
         except local_llm.LocalLlmError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {**freed, **local_llm.runtime().snapshot()}
+
+    # A lane holding a finished job's models is the thing that makes the next
+    # local generation wait (or, at the gateway's admission check, time out), so
+    # the studios surface it and offer Comfy's own /free. Owner-gated: this
+    # reaches into the machine's running services.
+    @app.get("/api/lanes/memory", dependencies=[Depends(require_owner)])
+    def lanes_memory() -> dict:
+        return comfy_lanes.snapshot()
+
+    @app.post("/api/lanes/free", dependencies=[Depends(require_owner)])
+    def lanes_free(body: LaneFreeBody) -> dict:
+        try:
+            return comfy_lanes.free_lane(body.lane)
+        except comfy_lanes.LaneError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/prompt-helper/unload", dependencies=[Depends(require_owner)])
     def prompt_helper_unload(body: PromptHelperUnloadBody) -> dict:
@@ -1636,14 +2062,14 @@ def build_control_app(
     @app.get("/api/studio-state/{state_key}", dependencies=[Depends(require_owner)])
     def get_studio_state(state_key: str) -> dict:
         try:
-            return {"ok": True, "state": studio_state.get(state_key)}
+            return {"ok": True, "state": studio_state().get(state_key)}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
     @app.put("/api/studio-state/{state_key}", dependencies=[Depends(require_owner)])
     def put_studio_state(state_key: str, body: StudioStateBody) -> dict:
         try:
-            studio_state.put(state_key, body.state)
+            studio_state().put(state_key, body.state)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return {"ok": True}
@@ -1651,30 +2077,52 @@ def build_control_app(
     @app.delete("/api/studio-state/{state_key}", dependencies=[Depends(require_owner)])
     def delete_studio_state(state_key: str) -> dict:
         try:
-            return {"ok": True, "removed": studio_state.delete(state_key)}
+            return {"ok": True, "removed": studio_state().delete(state_key)}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
     # ── owner vault (client-side E2E; server stores only ciphertext/wrapped keys) ──
     @app.get("/api/vault/identity", dependencies=[Depends(require_owner)])
     def get_vault_identity() -> dict:
-        identity = vault.get_identity()
+        identity = vault().get_identity()
         return {"ok": True, "exists": identity is not None, "identity": identity}
 
     @app.put("/api/vault/identity", dependencies=[Depends(require_owner)])
     def put_vault_identity(body: VaultIdentityBody) -> dict:
         try:
-            vault.put_identity(body.identity, allow_replace=body.allow_replace)
+            vault().put_identity(body.identity, allow_replace=body.allow_replace)
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return {"ok": True}
 
+    @app.put("/api/vault/prf/{credential_id:path}", dependencies=[Depends(require_owner)])
+    def put_vault_prf_wrap(credential_id: str, body: VaultPrfWrapBody) -> dict:
+        """Enrol a passkey as a way to UNWRAP this workspace's master key.
+
+        The browser derives a key from the authenticator's PRF secret, wraps the
+        master key with it, and sends the result. This server sees only that
+        ciphertext — it has never held the PRF secret, so this route adds an
+        unlock path without adding a decryption capability here.
+        """
+        if not account_store.get_passkey(credential_id):
+            raise HTTPException(status_code=404, detail="No such passkey")
+        if int(account_store.get_passkey(credential_id)["account_id"]) != scoped_account_id():
+            raise HTTPException(status_code=403, detail="That passkey belongs to another workspace")
+        try:
+            vault().set_prf_wrap(credential_id, body.wrapped_mk)
+        except LookupError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        account_store.set_passkey_prf(credential_id, body.wrapped_mk is not None)
+        return {"ok": True}
+
     @app.get("/api/vault/blob/{namespace}/{blob_key}", dependencies=[Depends(require_owner)])
     def get_vault_blob(namespace: str, blob_key: str) -> dict:
         try:
-            ciphertext = vault.get_blob(namespace, blob_key)
+            ciphertext = vault().get_blob(namespace, blob_key)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return {"ok": True, "ciphertext": ciphertext}
@@ -1682,7 +2130,7 @@ def build_control_app(
     @app.put("/api/vault/blob/{namespace}/{blob_key}", dependencies=[Depends(require_owner)])
     def put_vault_blob(namespace: str, blob_key: str, body: VaultBlobBody) -> dict:
         try:
-            vault.put_blob(namespace, blob_key, body.ciphertext)
+            vault().put_blob(namespace, blob_key, body.ciphertext)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return {"ok": True}
@@ -1690,25 +2138,25 @@ def build_control_app(
     @app.delete("/api/vault/blob/{namespace}/{blob_key}", dependencies=[Depends(require_owner)])
     def delete_vault_blob(namespace: str, blob_key: str) -> dict:
         try:
-            return {"ok": True, "removed": vault.delete_blob(namespace, blob_key)}
+            return {"ok": True, "removed": vault().delete_blob(namespace, blob_key)}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
     @app.get("/api/simple/prompts", dependencies=[Depends(require_owner)])
     def list_prompts(favorites: bool = False, limit: int = 200) -> dict:
-        return {"ok": True, "prompts": prompt_history.list(favorites_only=favorites, limit=limit)}
+        return {"ok": True, "prompts": prompt_history().list(favorites_only=favorites, limit=limit)}
 
     @app.post("/api/simple/prompts/{prompt_id}/favorite", dependencies=[Depends(require_owner)])
     def favorite_prompt(prompt_id: str, body: FavoriteBody) -> dict:
         try:
-            return {"ok": True, "prompt": prompt_history.set_favorite(prompt_id, body.favorite)}
+            return {"ok": True, "prompt": prompt_history().set_favorite(prompt_id, body.favorite)}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
 
     @app.delete("/api/simple/prompts/{prompt_id}", dependencies=[Depends(require_owner)])
     def delete_prompt(prompt_id: str) -> dict:
         try:
-            prompt_history.delete(prompt_id)
+            prompt_history().delete(prompt_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return {"ok": True}
@@ -1858,9 +2306,9 @@ def build_control_app(
                 "url": url,
                 "media_url": url,
             }
-        _remove_media_studio_qa_artifacts(result.get("qa"), media_studio_output_root)
+        _remove_media_studio_qa_artifacts(result.get("qa"), outputs_root())
         output = Path(str(result.get("output") or "")).expanduser().resolve()
-        root = media_studio_output_root.resolve()
+        root = outputs_root().resolve()
         if not output.is_relative_to(root) or not _private_media_exists(output):
             raise RuntimeError("Media Studio returned an unavailable output")
         # Prefer client-only E2E sealing (vault public key) so this host holds no
@@ -1912,8 +2360,10 @@ def build_control_app(
                 aspect_ratio=body.aspect_ratio,
                 resolution=body.resolution,
                 workflow_id=body.workflow_id.strip() or None,
+                studio_lane=body.studio_lane.strip(),
                 loras=loras,
-                output_dir=media_studio_output_root,
+                output_dir=outputs_root(),
+                requester_pub=_requester_pub(request),
             )
         except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
             detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
@@ -1958,7 +2408,11 @@ def build_control_app(
                 run_media_studio_video_finish,
                 job_id,
                 uploaded_names=list(entry.get("uploaded_names") or []),
-                output_dir=media_studio_output_root,
+                output_dir=outputs_root(),
+                # Poll as the browser that started it: a keyed job is readable
+                # only by its own requester, so the key is part of the job's
+                # identity here, not a per-request detail.
+                requester_pub=str(entry.get("requester_pub") or ""),
             )
             # A cancel that landed while the finisher was blocked in the thread
             # is terminal — don't resurrect the entry as done or error.
@@ -2005,6 +2459,7 @@ def build_control_app(
                 aspect_ratio=body.aspect_ratio,
                 resolution=body.resolution,
                 workflow_id=body.workflow_id.strip() or None,
+                studio_lane=body.studio_lane.strip(),
                 seed=body.seed,
                 denoise=body.denoise,
                 negative_prompt=body.negative_prompt,
@@ -2015,6 +2470,7 @@ def build_control_app(
                 spectrum=body.spectrum,
                 steps=body.steps,
                 loras=loras,
+                requester_pub=_requester_pub(request),
             )
         except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
             detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
@@ -2038,6 +2494,10 @@ def build_control_app(
             "work_units": work_units,
             "estimate_seconds": estimate_seconds,
             "uploaded_names": list(queued.get("uploaded_names") or []),
+            # Held for the life of the job: the background finisher polls long
+            # after this request is gone, and a keyed job only answers to the
+            # requester that started it.
+            "requester_pub": _requester_pub(request),
         }
         asyncio.get_running_loop().create_task(_finish_media_studio_video_job(job_id))
         return {
@@ -2060,7 +2520,13 @@ def build_control_app(
         if entry["status"] == "running":
             state = None
             with contextlib.suppress(Exception):
-                state = await asyncio.to_thread(run_media_studio_video_check, job_id)
+                # Progress for a keyed job is readable only by its requester —
+                # taken from the registry, not this request, so a poll from a
+                # second tab still reports the job it started.
+                state = await asyncio.to_thread(
+                    run_media_studio_video_check, job_id,
+                    requester_pub=str(entry.get("requester_pub") or ""),
+                )
             if state:
                 progress = state.get("progress")
                 if state.get("progress_total"):
@@ -2096,13 +2562,37 @@ def build_control_app(
         finished job) so the studio can unblock the UI regardless — this is also the
         escape hatch for a job whose output never resolved a URL and hung 'running'."""
         entry = media_studio_video_jobs.get(job_id)
-        interrupted = False
+        outcome: dict[str, Any] = {"interrupted": False, "stopped": False, "backend_state": None}
         with contextlib.suppress(Exception):
-            interrupted = bool(run_media_studio_video_cancel(job_id))
+            # Cancel as the job's own requester — the gateway will not act on a
+            # keyed job for anyone else.
+            result = run_media_studio_video_cancel(
+                job_id, requester_pub=str((entry or {}).get("requester_pub") or ""),
+            )
+            # A bool is what older builds of cancel_video returned.
+            outcome = result if isinstance(result, dict) else {
+                "interrupted": bool(result), "stopped": bool(result), "backend_state": None,
+            }
         if entry is not None:
             entry["status"] = "cancelled"
             entry["detail"] = "Cancelled by the owner."
-        return {"ok": True, "status": "cancelled", "known": entry is not None, "interrupted": interrupted}
+        stopped = bool(outcome.get("stopped"))
+        return {
+            "ok": True,
+            "status": "cancelled",
+            "known": entry is not None,
+            "interrupted": bool(outcome.get("interrupted")),
+            # The job is off the UI either way, but the BACKEND may still be
+            # winding down — and while it is, the next generation queues behind
+            # it. Saying so is the difference between "cancelled" and a studio
+            # that looks like it ignored the cancel.
+            "stopped": stopped,
+            **({"backend_state": outcome["backend_state"]} if outcome.get("backend_state") else {}),
+            **({} if stopped else {
+                "detail": "Still stopping: the backend finishes its current step before it can let go. "
+                          "A new generation will queue behind it until then.",
+            }),
+        }
 
     @app.get("/api/media-studio/gateway/{output_name}", response_class=Response, dependencies=[Depends(require_owner)])
     def media_studio_gateway_media(output_name: str) -> Response:
@@ -2247,9 +2737,9 @@ def build_control_app(
         if len(body) > max_bytes:
             raise HTTPException(status_code=413, detail=f"Media reference is too large; max {max_bytes // 1024 // 1024} MB")
 
-        media_studio_reference_root.mkdir(parents=True, exist_ok=True)
+        references_root().mkdir(parents=True, exist_ok=True)
         name = f"reference-{secrets.token_hex(16)}{suffix}"
-        reference = (media_studio_reference_root / name).resolve()
+        reference = (references_root() / name).resolve()
         reference.write_bytes(body)
         # Build the thumbnail NOW, while the plaintext is still here. Once sealed
         # the host can never read this file again, so this is the only moment a
@@ -2300,8 +2790,8 @@ def build_control_app(
         never readable by this host afterwards.
         """
         name = Path(filename).name
-        reference = (media_studio_reference_root / name).resolve()
-        root = media_studio_reference_root.resolve()
+        reference = (references_root() / name).resolve()
+        root = references_root().resolve()
         if name != filename or not reference.is_relative_to(root) or media_posters.is_poster_name(name):
             raise HTTPException(status_code=404, detail="Reference not found")
         if not (_private_media_exists(reference) or e2e_media_exists(reference)):
@@ -2330,8 +2820,8 @@ def build_control_app(
     @app.get("/api/media-studio/references/{filename}", dependencies=[Depends(require_owner)])
     def media_studio_reference(filename: str, request: Request) -> Response:
         name = Path(filename).name
-        reference = (media_studio_reference_root / name).resolve()
-        root = media_studio_reference_root.resolve()
+        reference = (references_root() / name).resolve()
+        root = references_root().resolve()
         if name != filename or not reference.is_relative_to(root):
             raise HTTPException(status_code=404, detail="Reference image not found")
         # Client-only E2E envelope (re-sealed reference): serve verbatim for the
@@ -2351,8 +2841,8 @@ def build_control_app(
     @app.delete("/api/media-studio/references/{filename}", dependencies=[Depends(require_owner)])
     def delete_media_studio_reference(filename: str) -> dict:
         name = Path(filename).name
-        reference = (media_studio_reference_root / name).resolve()
-        root = media_studio_reference_root.resolve()
+        reference = (references_root() / name).resolve()
+        root = references_root().resolve()
         if name != filename or not reference.is_relative_to(root):
             raise HTTPException(status_code=404, detail="Reference image not found")
         removed = False
@@ -2373,7 +2863,7 @@ def build_control_app(
         # the picker even when the browser's composer state is empty (fresh browser,
         # cleared state). Each stays E2E: the URL points at the .e2e envelope route,
         # which the browser decrypts for display — this host never decrypts them.
-        root = media_studio_reference_root
+        root = references_root()
         newest: dict[str, float] = {}
         # Posters live beside their reference and are NOT references themselves —
         # listing one would offer the user a thumbnail as if it were a picture
@@ -2433,8 +2923,8 @@ def build_control_app(
     @app.get("/api/media-studio/generated/{filename}", dependencies=[Depends(require_owner)])
     def media_studio_generated_video(filename: str, request: Request) -> Response:
         name = Path(filename).name
-        output = (media_studio_output_root / name).resolve()
-        root = media_studio_output_root.resolve()
+        output = (outputs_root() / name).resolve()
+        root = outputs_root().resolve()
         if name != filename or not output.is_relative_to(root):
             raise HTTPException(status_code=404, detail="Generated video not found")
         # Client-only E2E envelope: serve verbatim, the browser decrypts.
@@ -2470,10 +2960,10 @@ def build_control_app(
         sync_error = ""
         if page <= 1:
             try:
-                canvas_store.sync(fetch_canvas_history())
+                canvas_store().sync(fetch_canvas_history())
             except RuntimeError as exc:
                 sync_error = str(exc)
-        result = canvas_store.page(
+        result = canvas_store().page(
             page=page,
             page_size=limit if limit is not None else page_size,
             file_format=format,
@@ -2492,7 +2982,7 @@ def build_control_app(
     @app.get("/api/canvas/history/{history_id}/workflow", dependencies=[Depends(require_owner)])
     def canvas_output_workflow(history_id: str) -> dict:
         try:
-            output_name = canvas_store.output_name(history_id)
+            output_name = canvas_store().output_name(history_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Canvas output not found") from None
         try:
@@ -2508,7 +2998,7 @@ def build_control_app(
     @app.post("/api/canvas/history/{history_id}/provenance", dependencies=[Depends(require_owner)])
     def remember_canvas_provenance(history_id: str, body: CanvasProvenanceBody) -> dict:
         try:
-            metadata = canvas_store.remember_provenance(history_id, models=body.models, seeds=body.seeds)
+            metadata = canvas_store().remember_provenance(history_id, models=body.models, seeds=body.seeds)
         except KeyError:
             raise HTTPException(status_code=404, detail="Canvas output not found") from None
         return {"ok": True, **metadata}
@@ -2518,27 +3008,36 @@ def build_control_app(
         if not body.confirm:
             raise HTTPException(status_code=400, detail="Permanent deletion requires confirm=true")
         try:
-            output_name = canvas_store.output_name(history_id)
+            output_name = canvas_store().output_name(history_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Canvas output not found") from None
         try:
             result = delete_canvas_output(output_name)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from None
-        removed_rows = canvas_store.delete(history_id)
+        removed_rows = canvas_store().delete(history_id)
         return {"ok": True, "removed_history_rows": removed_rows, **result}
 
     @app.get("/api/canvas/history/{history_id}/media", response_class=Response, dependencies=[Depends(require_owner)])
-    def canvas_output_media(history_id: str) -> Response:
+    def canvas_output_media(history_id: str, request: Request) -> Response:
         try:
-            output_name = canvas_store.output_name(history_id)
+            output_name = canvas_store().output_name(history_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Canvas output not found") from None
         try:
-            content, media_type = fetch_canvas_media(output_name)
+            # Presenting the caller's key is what selects the envelope: a device
+            # that generated this clip gets the copy sealed to itself, everyone
+            # else gets the owner's. Without it a device-sealed output would
+            # only ever come back in a form the browser cannot open.
+            content, media_type = fetch_canvas_media(output_name, requester_pub=_requester_pub(request))
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from None
-        return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, no-store"})
+        headers = {"Cache-Control": "private, no-store"}
+        if "hivemind.e2e" in (media_type or ""):
+            # Mirror the gateway so the browser's E2E detection works off the
+            # header it already looks for, not only the content type.
+            headers["X-E2E-Media"] = "1"
+        return Response(content=content, media_type=media_type, headers=headers)
 
     @app.get(
         "/api/runs/{run_id}/artifacts/{artifact_id}",

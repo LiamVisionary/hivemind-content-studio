@@ -92,6 +92,62 @@ test('a dead tunnel still holds its routing position', async () => {
   assert.equal(isRoutingLeader(alive, [dead, alive]), false);
 });
 
+test('a pending switch reads as done before the server says so', async () => {
+  const { isRoutingLeader, withSelection } = await import('../src/lib/rentedMachines.js');
+  // Selecting is a round-trip, and until it lands the picker used to keep
+  // pointing at the machine you just switched AWAY from — so the click read as
+  // a no-op and got made again. This is the answer rendered on the click,
+  // mirroring the priority the server writes (max + 1).
+  const a = { rental_id: 7, attached: true, priority: 1, models_served: ['minimax_h3'] };
+  const b = { rental_id: 8, attached: true, priority: 4, models_served: ['minimax_h3'] };
+  const idle = { rental_id: 9, attached: false, priority: 0, models_served: ['minimax_h3'] };
+
+  const switched = withSelection([a, b, idle], 7);
+  assert.equal(isRoutingLeader(switched.find((m) => m.rental_id === 7), switched), true);
+  assert.equal(isRoutingLeader(switched.find((m) => m.rental_id === 8), switched), false);
+  assert.deepEqual([a.priority, b.priority], [1, 4], 'the live list is not mutated');
+
+  // Selecting a machine that is only idle attaches it too — the optimistic
+  // view has to say so, or the row would still read "switch" while it lands.
+  const attached = withSelection([a, b, idle], 9);
+  assert.equal(isRoutingLeader(attached.find((m) => m.rental_id === 9), attached), true);
+});
+
+test('a refresh forced by a switch is never answered by a request that predates it', async () => {
+  const { rentedMachinesState, notifyRentedMachinesChanged } = await import('../src/lib/rentedMachines.js');
+  // The studios poll on a timer AND refresh on every attachment change. If the
+  // forced read joined a poll that started before the switch, it would report
+  // the old machine as leading and nothing would correct it for a full poll
+  // interval — the switch would look like it had silently reverted.
+  const machine = (rental_id, priority) => ({
+    managed: true, attached: true, tunnel_alive: true, phase: 'ready', rental_id, priority,
+  });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let served = [machine(7, 2), machine(8, 1)];
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests += 1;
+    if (requests === 1) await gate;
+    const rentals = served;
+    return { ok: true, json: async () => ({ rentals }) };
+  };
+
+  const poll = rentedMachinesState({ force: true });   // in flight, pre-switch
+  served = [machine(7, 2), machine(8, 3)];             // the switch lands
+  notifyRentedMachinesChanged();
+  const afterSwitch = rentedMachinesState({ force: true });
+  release();
+
+  const state = await afterSwitch;
+  await poll;
+  assert.equal(requests, 2, 'the stale request cannot answer a post-change read');
+  assert.deepEqual(state.live.map((m) => m.priority), [2, 3], 'the switch is visible');
+  const settled = await rentedMachinesState();
+  assert.deepEqual(settled.live.map((m) => m.priority), [2, 3],
+    'and the stale response must not overwrite it on the way in');
+});
+
 test('ties break the same way the server orders them', async () => {
   const { attachedOrder } = await import('../src/lib/rentedMachines.js');
   // gpu_rentals sorts by (-priority, string key); a UI that broke ties

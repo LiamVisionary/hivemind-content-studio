@@ -80,6 +80,16 @@ def test_video_tool_accepts_negative_prompt_before_building_workflow():
     assert "negative_prompt: z.string().max(2000).optional()" in video_tool
 
 
+def test_video_tool_carries_the_app_tab_lane_to_the_gateway():
+    source = MCP_SOURCE.read_text(encoding="utf-8")
+    video_tool = source.split("server.registerTool('media_generate_video'", 1)[1]
+    video_schema = video_tool.split("}, tool(async (args) =>", 1)[0]
+
+    assert "studio_lane: z.string().max(512).optional()" in video_schema
+    assert "...(args.studio_lane ? { studioLane: args.studio_lane } : {})" in source
+    assert "if (args.studio_lane) extraPngInfo.studioLane = args.studio_lane" in source
+
+
 def test_video_loras_have_native_mlx_and_comfy_graph_parity():
     source = MCP_SOURCE.read_text(encoding="utf-8")
     video_tool = source.split("server.registerTool('media_generate_video'", 1)[1]
@@ -1419,7 +1429,7 @@ def _model_chain(graph):
         node = upstream[0]
 
 
-def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False):
+def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False, return_body=False):
     """Run the real MCP against a capture backend and return the posted graph.
 
     The MCP is a separate node process with its own registry loading, staging
@@ -1439,7 +1449,7 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
             if "prompt" in body:
-                captures.append(body["prompt"])
+                captures.append(body)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -1508,7 +1518,21 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
         assert not captures, "the MCP submitted a graph it should have refused"
         return reply
     assert captures, "the MCP posted no graph"
-    return captures[0]
+    return captures[0] if return_body else captures[0]["prompt"]
+
+
+def test_video_mcp_submission_preserves_the_app_tab_lane(tmp_path):
+    body = _capture_video_graph(
+        tmp_path,
+        "ltx23-regular-fp8",
+        {
+            "prompt": "slow camera move",
+            "studio_lane": "video:window-a:4",
+        },
+        return_body=True,
+    )
+
+    assert body["extra_data"]["extra_pnginfo"]["studioLane"] == "video:window-a:4"
 
 
 # A 1x1 PNG: enough for staging, nothing to decode.
@@ -1921,6 +1945,51 @@ def test_reference_video_refuses_a_clip_shorter_than_the_model_card_allows(tmp_p
     assert "at least 2 seconds" in reply
 
 
+def test_a_long_clip_with_a_motion_reference_is_refused_before_it_is_staged(tmp_path):
+    """The node trims a reference to min(its own length, the clip's length), so
+    the budget is spent on that EFFECTIVE length rather than on the clip's.
+
+    Re-measured 2026-08-15 on a rented 5090 (32607MiB) under ComfyUI 0.32.0 with
+    the cudaMallocAsync allocator, H3 reference mode at 704x1216 with nine
+    pictures and a voice clip: 48, 96, 158 and 243 effective reference frames all
+    ran (27.88-30.06GiB); 305 ran out of memory. The failure used to arrive three
+    minutes in as a CUDA allocator dump, and the first version of this guard
+    over-corrected by capping the CLIP whenever any reference was attached."""
+    # A SHORT reference keeps its own length, so it costs only that and leaves
+    # the whole duration range open. This 3s clip against a 15s render is the
+    # case the first version of this guard refused outright.
+    short = _write_test_video(tmp_path / "motion-short.mp4", seconds=3, fps=24)
+    _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(short), "duration_seconds": 3}]})
+
+    # A reference at or beyond the clip's length is trimmed down to it, so the
+    # CLIP becomes the thing that has to fit — and 15s does not.
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]},
+        expect_refusal=True)
+    assert "does not fit" in reply
+    # The refusal has to name the length that DOES fit, not merely say no — and
+    # name the shorter-reference lever, which is the one that keeps the range.
+    assert "243" in reply and "10.1s" in reply
+    assert "reference video of 10.1s or less" in reply
+
+
+def test_the_same_long_clip_is_allowed_without_a_motion_reference(tmp_path):
+    """The cap is on reference VIDEO, not on duration: nine pictures cost a flat
+    amount however long the clip is, so the full range stays available."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+        "reference_images": [{"image_base64": _TINY_PNG}],
+    })
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362, "15s on the 17k+5 grid"
+
+
 def test_reference_video_refuses_more_clips_than_it_has_slots(tmp_path):
     source = _write_test_video(tmp_path / "many.mp4", seconds=3, fps=24)
     reply = _capture_video_graph(
@@ -2121,3 +2190,161 @@ def test_autogrow_reference_slots_are_zero_indexed_like_comfyui_names_them() -> 
     # Each video slot's audio link must carry the same ordinal as the video.
     for index, slot in enumerate(workflow["reference_video_slots"]):
         assert slot["audio_link"]["input"].endswith(f"_{index}")
+
+
+# The motion-reference ceiling exists in two places on purpose: the registry is
+# the source of truth, and media_catalog mirrors it so a DEGRADED catalog still
+# refuses a length the card cannot render. Two copies can drift, so pin them.
+def test_motion_reference_budget_mirror_matches_the_registry():
+    from hivemind_content_studio.media_catalog import (
+        _H3_FRAME_GRID,
+        _H3_FRAME_RATE,
+        _H3_MOTION_REFERENCE_PIXEL_FRAMES,
+        _built_in_video_models_with_limits,
+    )
+
+    registry = json.loads(WORKFLOW_REGISTRY.read_text())
+    h3 = next(w for w in registry["workflows"] if w["id"] == "minimax-h3")
+    assert h3["motion_reference_budget"]["max_reference_pixel_frames"] == _H3_MOTION_REFERENCE_PIXEL_FRAMES
+    assert h3["frame_grid"] == _H3_FRAME_GRID
+    assert h3["defaults"]["frame_rate"] == _H3_FRAME_RATE
+
+    # Reference mode is a SEPARATE workflow reached by routing, and it is the
+    # one that actually stages motion clips — the budget has to reach it, which
+    # it does by inheritance. A tier that lost it would offer 15s again.
+    for workflow in _resolved_registry_workflows(registry):
+        if workflow["id"].startswith("minimax-h3"):
+            assert workflow["motion_reference_budget"]["max_reference_pixel_frames"] == _H3_MOTION_REFERENCE_PIXEL_FRAMES
+
+    # And the fallback list the studio gets when the registry cannot be read
+    # carries the ceiling rather than silently restoring the full range.
+    fallback = {model.id: model for model in _built_in_video_models_with_limits()}
+    assert fallback["minimax-h3"].motion_reference_max_seconds["high|9:16"] == round(243 / 24, 3)
+    # Non-minimax workflows have no measured budget and keep the full range.
+    assert fallback["ltx23-eros-dmd-v12"].motion_reference_max_seconds is None
+
+
+def _call_mcp_tool(name: str, arguments: dict) -> str:
+    """Run the real MCP over HTTP with machine-private redaction ON."""
+    mcp_port = _free_port()
+    env = {
+        **os.environ,
+        "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
+        "MEDIA_STUDIO_TOKEN": "test-token",
+        "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "1",
+    }
+    process = subprocess.Popen(
+        ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
+        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(process.stderr.read())
+            try:
+                with socket.create_connection(("127.0.0.1", mcp_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("Media Studio MCP did not start")
+        request = Request(
+            f"http://127.0.0.1:{mcp_port}/mcp",
+            data=json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }).encode(),
+            headers={
+                "authorization": "Bearer test-token",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=30) as response:
+            return response.read().decode("utf-8")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+# A clip that cannot render must be refused BEFORE its references are staged.
+# The authoritative check runs against the built graph, by which point every
+# picture and motion clip has been fetched, decoded and re-encoded to 24 fps —
+# twenty-odd seconds of work, with a progress bar, for a run that was never
+# going to start. The reference path below does not exist: if staging ran first
+# the failure would be about the missing file, so getting the capacity message
+# back is what proves the ordering.
+def test_an_impossible_motion_reference_clip_is_refused_before_anything_is_staged():
+    missing = "/nonexistent/never-staged-because-the-preflight-refused-first.mp4"
+    body = _call_mcp_tool("media_generate_video", {
+        "workflow_id": "minimax-h3-reference",
+        "prompt": "x",
+        "width": 704,
+        "height": 1216,
+        "duration_seconds": 15,
+        # A reference as long as the clip: the node trims it to the clip, so the
+        # clip's own 15s is what has to fit, and it does not.
+        "reference_videos": [{"video_path": missing, "use_audio": False, "duration_seconds": 15}],
+    })
+
+    # The reason survives machine-private redaction, because it is the card's
+    # capacity and the canvas the caller already chose — no prompt, no media.
+    assert "does not fit this card" in body, body[:400]
+    assert "10.1s" in body
+    # Never reached the staging step, so it cannot have complained about the file.
+    assert "never-staged-because" not in body
+
+
+def test_a_short_motion_reference_leaves_the_full_duration_range_open():
+    """The bug this rule was rewritten for: a two-second reference on a 15s
+    render. The node keeps a short reference at its own length, so it costs only
+    that — but the first guard capped the clip whenever ANY reference was
+    attached, and refused this outright."""
+    body = _call_mcp_tool("media_generate_video", {
+        "workflow_id": "minimax-h3-reference",
+        "prompt": "x",
+        "width": 704,
+        "height": 1216,
+        "duration_seconds": 15,
+        "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False, "duration_seconds": 2}],
+    })
+    assert "does not fit this card" not in body, body[:400]
+
+
+def test_an_unmeasured_reference_is_treated_as_long():
+    """No duration hint means the pre-flight cannot know the clip is short, and
+    guessing short would let an over-budget run through to a three-minute OOM.
+    It assumes long; the authoritative check re-runs on the real staged file."""
+    body = _call_mcp_tool("media_generate_video", {
+        "workflow_id": "minimax-h3-reference",
+        "prompt": "x",
+        "width": 704,
+        "height": 1216,
+        "duration_seconds": 15,
+        "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False}],
+    })
+    assert "does not fit this card" in body, body[:400]
+
+
+def test_a_motion_reference_clip_that_fits_is_not_refused_and_redaction_still_holds():
+    # 5s at the same canvas is inside the measured budget, so the guard must let
+    # it through — an over-eager cap would be its own bug. It then fails on the
+    # missing file, which is both the proof it reached staging AND the proof
+    # that machine-private redaction is untouched: an ordinary failure still
+    # arrives as a bare MediaStudioError, naming neither the path nor the job.
+    body = _call_mcp_tool("media_generate_video", {
+        "workflow_id": "minimax-h3-reference",
+        "prompt": "x",
+        "width": 704,
+        "height": 1216,
+        "duration_seconds": 5,
+        "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False}],
+    })
+    assert "does not fit this card" not in body, body[:400]
+    assert "MediaStudioError" in body
+    assert "/nonexistent/clip.mp4" not in body

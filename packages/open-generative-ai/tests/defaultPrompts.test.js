@@ -353,3 +353,36 @@ test('the fight starter keeps every rule it was bought with', async () => {
     assert.doesNotMatch(prompt, /\b(she|her|hers|he|him|his)\b/i,
         'pronouns are replaced by <Subject N>, which is both generic and what H3 asks for');
 });
+
+// The versus starter is the only one whose ENVIRONMENT is a reference too, and
+// the only one with a voice nobody on screen owns. Both are easy to "tidy" back
+// into the shape the brief arrived in, which is the shape that fails.
+test('the versus starter keeps the arena and the announcer bound to labels', async () => {
+    const { DEFAULT_PROMPTS } = await import('../src/lib/defaultPrompts.js');
+    const entry = DEFAULT_PROMPTS.find((item) => item.id === 'versus-fight-h3');
+    assert.ok(entry, 'the versus starter ships');
+    const prompt = entry.parts[0].prompt;
+
+    // Each attachment is claimed by a subject, in the order the user attaches
+    // them — the arena included, because a place with no retention marker is
+    // redecorated on the first shot change.
+    assert.match(prompt, /<Subject 1> is the fighter shown in <Picture 1>/);
+    assert.match(prompt, /<Subject 2> is the fighter shown in <Picture 2>/);
+    assert.match(prompt, /<Subject 3> is the fighting arena shown in <Picture 3>/);
+    assert.match(prompt, /<Subject 3>: fully_preserved/);
+
+    // An unbound voice comes back as a generic read, so the announcer is a
+    // subject with a speaker id and every line is spoken by that id.
+    assert.match(prompt, /<Subject 4> is an off-screen arcade announcer[^\n]*speaks as S1/);
+    for (const line of prompt.matchAll(/([^\n]{0,40})<d>/g)) {
+        assert.match(line[1], /\(S1\) says: $/, 'every spoken line carries the announcer id');
+    }
+    // Non-verbal human sound in the soundscape has no id to carry it either.
+    const soundscape = prompt.split('overall_soundscape:\n')[1].split('\n\n')[0];
+    assert.doesNotMatch(soundscape, /\b(exhale|grunt|gasp|breath|laugh|yelp|scream|announcer|voice)/i);
+
+    // The HUD is an overlay, or the health bars are built into the arena.
+    assert.match(prompt, /composited ON TOP of the photographic image/);
+    // A fist that never retracts follows its target around the frame.
+    assert.match(prompt, /rebounds instantly back to guard/);
+});

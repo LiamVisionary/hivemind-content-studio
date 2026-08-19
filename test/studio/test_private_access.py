@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -38,7 +39,7 @@ def _locked_client(
         private_cipher=cipher,
         canvas_history=canvas_history,
         canvas_history_fetcher=lambda: list(canvas_records or []),
-        canvas_media_fetcher=lambda _name: (b"synthetic-private-media", "image/png"),
+        canvas_media_fetcher=lambda _name, **_: (b"synthetic-private-media", "image/png"),
         canvas_workflow_fetcher=canvas_workflow_fetcher,
         canvas_delete_fetcher=canvas_delete_fetcher,
     )
@@ -53,8 +54,12 @@ def test_outer_lock_hides_shell_assets_prompt_tools_and_artifacts(tmp_path: Path
 
     page = client.get("/")
     assert page.status_code == 200
-    assert "Hivemind Content Studio is locked" in page.text
+    # The gate is a STANDALONE page, not the studio shell: the app bundle lives
+    # under the gated /assets, so serving the shell here would both 401 its own
+    # script and hand the application to anyone who can reach the port.
+    assert "Who's working?" in page.text
     assert 'id="studio-shell"' not in page.text
+    assert 'id="app"' not in page.text
     assert client.get("/assets/studio.js").status_code == 401
     assert client.get("/api/simple/prompts").status_code == 401
     assert client.post("/api/simple/plan", json={}).status_code == 401
@@ -92,12 +97,18 @@ def test_owner_unlock_uses_same_password_and_24_hour_browser_session(tmp_path: P
     assert unlocked.json()["expires_in_seconds"] == 24 * 60 * 60
     assert "HttpOnly" in unlocked.headers["set-cookie"]
     assert "SameSite=strict" in unlocked.headers["set-cookie"]
-    assert 'id="studio-shell"' in client.get("/").text
-    assert client.get("/assets/studio.js").status_code == 200
+    shell = client.get("/").text
+    assert 'id="app"' in shell
+    # The bundle name is content-hashed, so read it out of the shell rather than
+    # pinning it. (The old fixed /assets/studio.js was the retired vanilla
+    # studio's, and only kept answering here while the built dist was stale.)
+    bundle = re.search(r'src="\.?(/assets/index-[^"]+\.js)"', shell)
+    assert bundle, shell
+    assert client.get(bundle.group(1)).status_code == 200
     assert client.get("/api/simple/prompts").status_code == 200
 
     assert client.post("/api/owner/lock").status_code == 200
-    assert "Hivemind Content Studio is locked" in client.get("/").text
+    assert "Who's working?" in client.get("/").text
 
 
 def test_canvas_history_import_is_owner_only_metadata_only_and_source_preserving(tmp_path: Path, monkeypatch) -> None:
@@ -273,6 +284,36 @@ def test_canvas_history_indexes_e2e_only_outputs_and_purges_sealed_locator_rows(
         assert connection.execute(
             "SELECT COUNT(*) FROM canvas_history WHERE history_id = 'canvas_polluted'"
         ).fetchone()[0] == 0
+
+
+def test_canvas_history_ignores_the_second_recipient_envelope_beside_an_output(tmp_path: Path) -> None:
+    """A dual-sealed generation is ONE generation, however many keys can open it.
+
+    An agent-submitted job — a rental harvest, or any local job with a
+    requesting agent — lands two envelopes for the same media: the owner's
+    <name>.e2e and the agent's <name>.agent-<fp>.e2e beside it. Only the
+    owner's is a generation this studio can show; the agent's copy is sealed to
+    a key this host does not hold, so surfacing it would mean a second tile for
+    the same clip that nothing here could ever decrypt.
+    """
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    logical = "cmf-41eecc4f-minimax_h3_00001_.mp4"
+    fingerprint = "b8c09d11fbfe53e0c2de8857adc7e6f2"
+    (output_root / f"{logical}.e2e").write_bytes(b"owner-envelope")
+    (output_root / f"{logical}.agent-{fingerprint}.e2e").write_bytes(b"agent-envelope")
+
+    records = CanvasGatewayClient(output_roots=[output_root]).filesystem_history()
+
+    assert [Path(record["outputs"][0]).name for record in records] == [logical]
+
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    store = CanvasHistoryStore(tmp_path / "canvas.sqlite3", cipher=cipher)
+    store.sync(records)
+    items = store.page(page=1, page_size=10)["items"]
+    assert len(items) == 1
+    assert items[0]["media_type"] == "video/mp4"
+    assert items[0]["encrypted_at_rest"] is True
 
 
 def test_canvas_history_pages_deduplicated_outputs_and_filters_by_file_format(tmp_path: Path) -> None:

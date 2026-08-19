@@ -189,6 +189,188 @@ export async function unlockWithRecoveryKey(identity, recoveryKeyText) {
     return true;
 }
 
+// ── passkey unlock ───────────────────────────────────────────────────────────
+//
+// A passkey signs a challenge; it does not hand over a secret. So proving WHO
+// you are and being able to DECRYPT are two different problems, and only one of
+// them is solved by the assertion. Two ways to close the gap, in preference
+// order:
+//
+//   1. The WebAuthn PRF extension. The authenticator derives a stable 32-byte
+//      secret from (credential, salt) and never reveals the seed. We stretch it
+//      into an AES key and wrap the master key with it, so Face ID genuinely
+//      decrypts. Requires Safari 18+/Chrome 116+ and an authenticator that
+//      supports it — hence the fallback.
+//   2. A device wrap. After ONE password unlock, the master key is wrapped to
+//      this browser's non-extractable device key (deviceIdentity.js) and kept
+//      in IndexedDB. A later passkey assertion authorises using it. Honest
+//      framing: here the biometric guards the door, not the key — anyone who
+//      can run script in an unlocked OS profile could unwrap it. It is strictly
+//      better than a passphrase in sessionStorage and strictly worse than PRF.
+//
+// The password and recovery code remain the only paths that work on a device
+// that has never been unlocked before.
+
+import { deviceIdentity } from './deviceIdentity.js';
+
+const DEVICE_DB = 'hivemind-device-identity';
+const DEVICE_STORE = 'keys';
+const deviceWrapKey = (accountId) => `vault-mk-wrap-v1:${accountId}`;
+
+// HKDF rather than using the PRF bytes directly: the extension's output is a
+// MAC over our salt, not a uniformly-random AES key, and binding the label here
+// means the same secret used for anything else later cannot collide with this.
+async function keyFromPrfSecret(prfSecret) {
+    const base = await subtle.importKey('raw', prfSecret, 'HKDF', false, ['deriveKey']);
+    return subtle.deriveKey(
+        {
+            name: 'HKDF',
+            hash: 'SHA-256',
+            salt: new Uint8Array(0),
+            info: new TextEncoder().encode('hivemind-content-studio/vault-prf/v1'),
+        },
+        base,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['wrapKey', 'unwrapKey'],
+    );
+}
+
+// Enrolment needs an EXTRACTABLE master key to wrap, and the session handle is
+// deliberately not one — `completeUnlock` re-imports it non-extractable so a
+// bug elsewhere cannot export it. So enrolling re-derives from the passphrase
+// instead of the module keeping a wrappable copy alive for its whole lifetime.
+// That is not merely a workaround: adding a new way to unlock the vault SHOULD
+// require proving you can already unlock it.
+async function extractableMasterKey(identity, passphrase) {
+    const passKey = await deriveWrappingKey(passphrase, fromB64url(identity.salt));
+    return unwrapMasterKey(passKey, identity.wrapped_mk_pass);
+}
+
+/**
+ * Wrap the master key under a passkey's PRF secret, for the server to store.
+ * Returns null when the passphrase is wrong.
+ */
+export async function wrapMasterKeyForPrf(identity, passphrase, prfSecret) {
+    if (!subtle) throw new Error('WebCrypto unavailable');
+    let mk;
+    try {
+        mk = await extractableMasterKey(identity, passphrase);
+    } catch {
+        return null;
+    }
+    return wrapMasterKey(await keyFromPrfSecret(prfSecret), mk);
+}
+
+/** Unlock from a passkey's PRF secret. False when this key is not enrolled. */
+export async function unlockWithPrf(identity, credentialId, prfSecret) {
+    if (!subtle) throw new Error('WebCrypto unavailable');
+    let wraps;
+    try {
+        wraps = JSON.parse(identity.wrapped_mk_prf || '{}');
+    } catch {
+        return false;
+    }
+    const blob = wraps[credentialId];
+    if (!blob) return false;
+    let mk;
+    try {
+        mk = await unwrapMasterKey(await keyFromPrfSecret(prfSecret), blob);
+    } catch {
+        return false;
+    }
+    await completeUnlock(identity, mk);
+    return true;
+}
+
+// ── device wrap (fallback when the authenticator has no PRF) ─────────────────
+
+function openDeviceDb() {
+    return new Promise((resolve, reject) => {
+        if (!globalThis.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
+        const request = indexedDB.open(DEVICE_DB, 1);
+        request.onupgradeneeded = () => {
+            if (!request.result.objectStoreNames.contains(DEVICE_STORE)) {
+                request.result.createObjectStore(DEVICE_STORE);
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+function deviceRecord(mode, key, value) {
+    return openDeviceDb().then((db) => new Promise((resolve, reject) => {
+        const transaction = db.transaction(DEVICE_STORE, mode);
+        const store = transaction.objectStore(DEVICE_STORE);
+        const request = mode === 'readwrite' ? store.put(value, key) : store.get(key);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    }));
+}
+
+/**
+ * Keep an unlockable copy of the master key on THIS browser.
+ *
+ * Sealed to the device's own non-extractable RSA key, so the stored blob is
+ * useless if copied off the machine — but usable by script in this origin,
+ * which is the limitation the module comment above states plainly.
+ */
+export async function rememberOnThisDevice(identity, passphrase, accountId) {
+    if (!subtle) throw new Error('WebCrypto unavailable');
+    let mk;
+    try {
+        mk = await extractableMasterKey(identity, passphrase);
+    } catch {
+        return false;
+    }
+    // Null in a browser with no IndexedDB (private windows, some embedded
+    // webviews). There is simply nowhere to remember it, which is a "no" rather
+    // than a crash — the password path still works.
+    const identityKeys = await deviceIdentity();
+    if (!identityKeys?.keyPair) return false;
+    const raw = await subtle.exportKey('raw', mk);
+    const sealed = await subtle.encrypt({ name: 'RSA-OAEP' }, identityKeys.keyPair.publicKey, raw);
+    await deviceRecord('readwrite', deviceWrapKey(accountId), toB64url(sealed));
+    return true;
+}
+
+/** Unlock from this browser's remembered copy. False when there is none. */
+export async function unlockWithDevice(identity, accountId) {
+    if (!subtle) throw new Error('WebCrypto unavailable');
+    let stored;
+    try {
+        stored = await deviceRecord('readonly', deviceWrapKey(accountId));
+    } catch {
+        return false;
+    }
+    if (!stored) return false;
+    try {
+        const identityKeys = await deviceIdentity();
+        if (!identityKeys?.keyPair) return false;
+        const raw = await subtle.decrypt({ name: 'RSA-OAEP' }, identityKeys.keyPair.privateKey, fromB64url(stored));
+        const mk = await subtle.importKey(
+            'raw', raw, { name: 'AES-GCM', length: 256 }, true,
+            ['encrypt', 'decrypt', 'unwrapKey'],
+        );
+        await completeUnlock(identity, mk);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** Drop this browser's remembered copy (sign out of the device, not the account). */
+export async function forgetThisDevice(accountId) {
+    const db = await openDeviceDb();
+    return new Promise((resolve) => {
+        const transaction = db.transaction(DEVICE_STORE, 'readwrite');
+        transaction.objectStore(DEVICE_STORE).delete(deviceWrapKey(accountId));
+        transaction.oncomplete = () => resolve(true);
+        transaction.onerror = () => resolve(false);
+    });
+}
+
 // ── blob encryption (client-authored data) ───────────────────────────────────
 export async function encryptJson(value) {
     if (!unlocked) throw new Error('Vault is locked');

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import time
 from pathlib import Path
 
@@ -141,11 +142,16 @@ def test_studio_shell_and_static_assets_are_served(tmp_path: Path, monkeypatch) 
     page = client.get("/")
 
     assert page.status_code == 200
-    assert 'id="studio-shell"' in page.text
-    assert '/assets/studio.css' in page.text
-    assert '/assets/studio.js' in page.text
-    assert client.get("/assets/studio.css").headers["content-type"].startswith("text/css")
-    assert "javascript" in client.get("/assets/studio.js").headers["content-type"]
+    # The Vite shell: main.jsx mounts on #app, and the bundles are content-hashed,
+    # so this reads the names out of the page rather than pinning them. The old
+    # fixed studio.css/studio.js pair belonged to the retired vanilla studio and
+    # outlived it here only because the built dist on disk was stale.
+    assert 'id="app"' in page.text
+    script = re.search(r'src="\.?(/assets/index-[^"]+\.js)"', page.text)
+    stylesheet = re.search(r'href="\.?(/assets/index-[^"]+\.css)"', page.text)
+    assert script and stylesheet, page.text
+    assert "javascript" in client.get(script.group(1)).headers["content-type"]
+    assert client.get(stylesheet.group(1)).headers["content-type"].startswith("text/css")
 
 
 def test_catalog_drives_lanes_and_provider_choices(tmp_path: Path, monkeypatch) -> None:
@@ -216,7 +222,7 @@ def test_unified_tool_surfaces_are_discoverable_without_checkout_paths(tmp_path:
 
 def test_media_studio_video_is_owner_visible_but_machine_callers_receive_only_a_receipt(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
-    output_path = tmp_path / "generated" / "media-studio" / "mock-ltx.mp4"
+    output_path = tmp_path / "accounts" / "1" / "generated" / "media-studio" / "mock-ltx.mp4"
 
     def fake_generate(**kwargs):
         captured.update(kwargs)
@@ -322,7 +328,7 @@ def test_media_studio_video_is_owner_visible_but_machine_callers_receive_only_a_
 
 
 def test_media_studio_video_job_flow_survives_long_generations(tmp_path: Path, monkeypatch) -> None:
-    output_path = tmp_path / "generated" / "media-studio" / "mock-eros.mp4"
+    output_path = tmp_path / "accounts" / "1" / "generated" / "media-studio" / "mock-eros.mp4"
     started: dict = {}
     finish_calls: dict = {}
 
@@ -341,7 +347,7 @@ def test_media_studio_video_job_flow_survives_long_generations(tmp_path: Path, m
     monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_finish", fake_finish)
     check_calls = {"count": 0}
 
-    def fake_check(job_id):
+    def fake_check(job_id, **_):
         check_calls["count"] += 1
         if check_calls["count"] <= 2:
             return {"status": "running", "failed": False, "error": "", "video_url": "", "progress": 0.4}
@@ -359,6 +365,7 @@ def test_media_studio_video_job_flow_survives_long_generations(tmp_path: Path, m
         json={
             "prompt": "slow push in",
             "workflow_id": "ltx23-eros-fast",
+            "studio_lane": "video:window-a:2",
             "image_base64": f"data:image/png;base64,{encoded}",
             "duration_seconds": 2,
             "resolution": "high",
@@ -373,6 +380,7 @@ def test_media_studio_video_job_flow_survives_long_generations(tmp_path: Path, m
     assert queued_payload == {"ok": True, "job_id": "job-eros-1", "status": "running"}
     # The staged control-api input copy is removed as soon as the job is queued.
     assert not Path(started["image_path"]).exists()
+    assert started["studio_lane"] == "video:window-a:2"
 
     payload: dict = {}
     for _ in range(100):
@@ -414,7 +422,7 @@ def test_media_studio_video_cancel_interrupts_the_backend_and_stays_cancelled(tm
         finish_gate.wait(timeout=5)
         raise RuntimeError("Media Studio job failed: cancelled")
 
-    def fake_cancel(job_id):
+    def fake_cancel(job_id, **_):
         cancel_calls.append(job_id)
         return True
 
@@ -432,7 +440,11 @@ def test_media_studio_video_cancel_interrupts_the_backend_and_stays_cancelled(tm
 
     cancelled = client.post("/api/media-studio/video/job/job-cancel-1/cancel")
     assert cancelled.status_code == 200
-    assert cancelled.json() == {"ok": True, "status": "cancelled", "known": True, "interrupted": True}
+    # `stopped` is the verdict that matters to the studio: the backend is
+    # verifiably free, so the next generation will not queue behind this one.
+    assert cancelled.json() == {
+        "ok": True, "status": "cancelled", "known": True, "interrupted": True, "stopped": True,
+    }
     assert cancel_calls == ["job-cancel-1"]
 
     # Let the blocked finisher finish failing; it must not overwrite the
@@ -593,7 +605,7 @@ def test_media_studio_video_job_flow_returns_gateway_proxy_for_e2e_sealed_output
 
 def test_media_studio_ingredients_rehydrates_encrypted_reference_views_without_timeline_input(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
-    output_path = tmp_path / "generated" / "media-studio" / "ingredients.mp4"
+    output_path = tmp_path / "accounts" / "1" / "generated" / "media-studio" / "ingredients.mp4"
 
     def fake_generate(**kwargs):
         captured.update(kwargs)
@@ -640,7 +652,7 @@ def test_media_studio_ingredients_rehydrates_encrypted_reference_views_without_t
 
 def test_media_studio_ingredients_rehydrates_start_frame_and_views_together(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
-    output_path = tmp_path / "generated" / "media-studio" / "ingredients-start.mp4"
+    output_path = tmp_path / "accounts" / "1" / "generated" / "media-studio" / "ingredients-start.mp4"
 
     def fake_generate(**kwargs):
         captured.update(kwargs)
@@ -683,7 +695,7 @@ def test_media_studio_ingredients_rehydrates_start_frame_and_views_together(tmp_
     assert not Path(captured["image_path"]).exists()
     assert all(not Path(item["image_path"]).exists() for item in captured["ingredient_images"])
     for reference in references:
-        encrypted = tmp_path / "uploads" / "media-studio-references" / f"{Path(reference).name}.zenc"
+        encrypted = tmp_path / "accounts" / "1" / "uploads" / "media-studio-references" / f"{Path(reference).name}.zenc"
         assert encrypted.is_file()
 
 
@@ -734,7 +746,7 @@ def test_media_studio_ingredients_preview_uses_encrypted_views_and_the_generatio
 
 def test_encrypted_media_reference_survives_reload_and_is_staged_only_for_generation(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
-    output_path = tmp_path / "generated" / "media-studio" / "reference-video.mp4"
+    output_path = tmp_path / "accounts" / "1" / "generated" / "media-studio" / "reference-video.mp4"
 
     def fake_generate(**kwargs):
         captured.update(kwargs)
@@ -766,7 +778,7 @@ def test_encrypted_media_reference_survives_reload_and_is_staged_only_for_genera
     assert upload_payload["encrypted_at_rest"] is True
     reference_url = upload_payload["url"]
     assert reference_url.startswith("/api/media-studio/references/reference-")
-    reference_path = tmp_path / "uploads" / "media-studio-references" / Path(reference_url).name
+    reference_path = tmp_path / "accounts" / "1" / "uploads" / "media-studio-references" / Path(reference_url).name
     encrypted_path = reference_path.with_name(f"{reference_path.name}.zenc")
     assert not reference_path.exists()
     assert encrypted_path.is_file()
@@ -817,7 +829,7 @@ def test_encrypted_media_reference_survives_reload_and_is_staged_only_for_genera
 
 def test_encrypted_video_reference_flows_directly_into_extension_generation(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
-    output_path = tmp_path / "generated" / "media-studio" / "extension.mp4"
+    output_path = tmp_path / "accounts" / "1" / "generated" / "media-studio" / "extension.mp4"
 
     def fake_generate(**kwargs):
         captured.update(kwargs)
@@ -852,7 +864,7 @@ def test_encrypted_video_reference_flows_directly_into_extension_generation(tmp_
     assert captured["image_path"] is None
     assert captured["video_mode"] == "extend"
     assert not Path(captured["video_path"]).exists()
-    encrypted_path = tmp_path / "uploads" / "media-studio-references" / f"{Path(reference_url).name}.zenc"
+    encrypted_path = tmp_path / "accounts" / "1" / "uploads" / "media-studio-references" / f"{Path(reference_url).name}.zenc"
     assert encrypted_path.is_file()
 
 
@@ -1704,7 +1716,7 @@ def test_video_task_survives_every_hop_unchanged(tmp_path: Path, monkeypatch) ->
 
     seen: dict[str, object] = {}
 
-    def fake_client(_descriptor):
+    def fake_client(_descriptor, _requester_pub=""):
         class _C:
             def call_tool(self, _name, arguments, **_kwargs):
                 seen.update(arguments)
@@ -2011,8 +2023,10 @@ def test_video_timing_signature_separates_chain_mode() -> None:
     assert "chain" in chained[0]
 
 
-def _reference_store(tmp_path: Path) -> Path:
-    return tmp_path / "uploads" / "media-studio-references"
+def _reference_store(tmp_path: Path, account_id: int = 1) -> Path:
+    """References live under the signed-in account's own subtree now, so a
+    second workspace's uploads are not even in the same directory."""
+    return tmp_path / "accounts" / str(account_id) / "uploads" / "media-studio-references"
 
 
 def test_reference_upload_builds_a_sealed_poster_so_a_thumbnail_is_not_the_whole_asset(

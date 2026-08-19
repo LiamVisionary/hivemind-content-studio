@@ -648,6 +648,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         cfg: Number(body.cfgScale ?? body.guidance_scale ?? body.guidance ?? selected.defaultGuidance ?? 1),
         seed: body.seed ?? -1,
       };
+      if (body.studio_lane) payload.studio_lane = String(body.studio_lane).slice(0, 512);
       if (selected.backend) payload.backend = selected.backend;
       if (selected.workflowFile) payload.workflow_file = selected.workflowFile;
       if (Array.isArray(body.loras)) payload.loras = body.loras;

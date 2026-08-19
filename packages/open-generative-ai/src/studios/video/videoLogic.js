@@ -211,6 +211,93 @@ export const durationsFor = (s, id) => {
   return s.imageMode ? getDurationsForI2VModel(id) : getDurationsForModel(id);
 };
 
+// The node trims a MOTION reference to min(its own length, the clip's length)
+// — `frames[:frame_count]` in comfy_extras/nodes_minimax_h3.py — and the card's
+// budget is spent on that effective length. Two consequences the picker has to
+// model, and the second is the one the old rule missed:
+//
+//   reference >= clip   the reference is cut down to the clip, so the CLIP is
+//                       what has to fit and the duration range is capped
+//   reference <  clip   the reference keeps its own (shorter) length, costs
+//                       only that, and the full duration range stays open
+//
+// The old rule capped the clip whenever ANY motion reference was attached, so
+// dropping in a two-second clip still pinned the slider at ~6s. The ceiling is
+// published per canvas by the catalog (motion_reference_max_seconds).
+//
+// Returns null when the limit does not apply — no motion reference, a reference
+// already inside the ceiling, or a workflow with no measured budget. An
+// UNMEASURED card is not a card that cannot do it, so those keep the full range
+// rather than being guessed at.
+export const motionReferenceLimitFor = (s, id) => {
+  const videos = Array.isArray(s.referenceVideos) ? s.referenceVideos.filter((item) => item?.url) : [];
+  if (!videos.length) return null;
+  const limits = getHivemindVideoModelById(id)?.motionReferenceMaxSeconds;
+  if (!limits || typeof limits !== 'object') return null;
+  // The server falls back to the standard tier for an unset resolution, so the
+  // lookup has to agree or the picker would quote a ceiling from a canvas the
+  // run will not use.
+  const tier = String(s.resolution || 'standard').trim().toLowerCase() || 'standard';
+  const maxSeconds = Number(limits[`${tier}|${String(s.ar || '').trim()}`]);
+  if (!Number.isFinite(maxSeconds)) return null;
+  // The LONGEST attached reference decides. A duration we have not measured yet
+  // counts as long, matching the server: guessing it short would offer a length
+  // the run then refuses.
+  const measured = videos.map((item) => Number(item?.durationSeconds)).filter((value) => value > 0);
+  const longest = measured.length === videos.length ? Math.max(...measured) : Infinity;
+  if (longest <= maxSeconds) return null;
+  return {
+    maxSeconds,
+    referenceVideoCount: videos.length,
+    longestReferenceSeconds: Number.isFinite(longest) ? longest : null,
+  };
+};
+
+// A reference clip's own length, read from its metadata. Needed because the
+// ceiling above depends on it, and a reference can arrive from a file drop, a
+// cast or a saved persona — so it is measured where they all land rather than
+// at each attach point.
+export const probeVideoDurationSeconds = (url) => new Promise((resolve) => {
+  if (!url || typeof document === 'undefined') return resolve(0);
+  const video = document.createElement('video');
+  let settled = false;
+  const finish = (value) => {
+    if (settled) return;
+    settled = true;
+    video.removeAttribute('src');
+    resolve(Number.isFinite(value) && value > 0 ? value : 0);
+  };
+  // A codec the browser half-supports would otherwise never fire either event,
+  // leaving the duration unknown forever — which reads as "long" and silently
+  // pins the slider.
+  const timer = setTimeout(() => finish(0), 8000);
+  video.preload = 'metadata';
+  video.muted = true;
+  video.addEventListener('loadedmetadata', () => { clearTimeout(timer); finish(Number(video.duration)); });
+  video.addEventListener('error', () => { clearTimeout(timer); finish(0); });
+  video.src = url;
+});
+
+// The durations that will actually render, given everything else selected.
+// Never empty when the model offers any: if not even the shortest fits, the
+// canvas itself is the problem, and blanking the control would hide that.
+export const availableDurationsFor = (s, id) => {
+  const durations = durationsFor(s, id);
+  const limit = motionReferenceLimitFor(s, id);
+  if (!limit) return durations;
+  const fits = durations.filter((value) => Number(value) <= limit.maxSeconds);
+  return fits.length ? fits : durations.slice(0, 1);
+};
+
+// Pull a selected duration back onto the list above. Returns the same value
+// when it already fits, so callers can assign unconditionally.
+export const clampDurationToMotionReference = (s, id) => {
+  const available = availableDurationsFor(s, id);
+  if (!available.length) return s.duration;
+  if (available.some((value) => Number(value) === Number(s.duration))) return s.duration;
+  return available.reduce((best, value) => (Number(value) > Number(best) ? value : best), available[0]);
+};
+
 export const resolutionsFor = (s, id) => {
   // Local Media Studio workflows render at aspect buckets; High requests the
   // larger bucket (~2.5x pixels) — synthetic list, old line 394.

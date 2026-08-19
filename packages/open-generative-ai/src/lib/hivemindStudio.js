@@ -1,4 +1,5 @@
 import { decryptMedia } from './e2eVault.js';
+import { deviceRequesterHeaders } from './deviceIdentity.js';
 import { ensureVaultReady } from './vaultSession.js';
 import {
     hivemindVideoModelId,
@@ -202,6 +203,15 @@ export function mapHivemindWorkflowModels(catalog) {
             ? Array.from({ length: 15 }, (_, second) => second + 1)
             : [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         defaultDuration: Number(workflow.default_duration_seconds) || 4,
+        // Longest clip each canvas can render with a MOTION reference attached,
+        // keyed "<tier>|<aspect>". A reference video is trimmed to the clip's
+        // own length, so it costs more the longer the clip is — 36x per frame
+        // against a still — which collapses H3's honest 15s range to under 6s.
+        // Null for workflows with no measured budget: unmeasured is not the
+        // same as impossible, so those keep the full range.
+        motionReferenceMaxSeconds: workflow.motion_reference_max_seconds && typeof workflow.motion_reference_max_seconds === 'object'
+            ? workflow.motion_reference_max_seconds
+            : null,
         // Registered sampling-step default — distinguishes a full-step lane
         // (H3's 15) from a distilled turbo build (4-8), and labels the studio's
         // step presets truthfully.
@@ -537,6 +547,14 @@ export async function generateHivemindVideo(params) {
         .map(async (item) => ({
             video_base64: await mediaSourceToDataUrl(item.url, 'video'),
             use_audio: Boolean(item.useAudio),
+            // The clip's own length, so the gateway can refuse an over-budget
+            // run before it stages anything. A reference is trimmed to
+            // min(its own length, the clip's), so this is what decides the
+            // cost. Omitted when unmeasured, which the gateway reads as "long"
+            // and re-checks against the real file after staging either way.
+            ...(Number(item.durationSeconds) > 0
+                ? { duration_seconds: Number(item.durationSeconds) }
+                : {}),
         })));
     // LTX 2.3 supports text-to-video: a prompt alone is enough. Only a completely
     // empty request (no prompt and no media) is rejected.
@@ -553,6 +571,9 @@ export async function generateHivemindVideo(params) {
     const requestBody = JSON.stringify({
         prompt: params.prompt || '',
         workflow_id: workflowId,
+        ...(String(params.studio_lane || '').trim()
+            ? { studio_lane: String(params.studio_lane).trim().slice(0, 512) }
+            : {}),
         ...(String(params.referenceDescription || '').trim()
             ? { reference_description: String(params.referenceDescription).trim() }
             : {}),
@@ -599,11 +620,16 @@ export async function generateHivemindVideo(params) {
             : {}),
         ...(Array.isArray(params.loras) && params.loras.length ? { loras: params.loras } : {}),
     });
+    // Present this device's key on the submit: the gateway seals the finished
+    // media to whoever asked for it, so without this the clip is sealed to
+    // whichever server process relayed the request and this browser can never
+    // open its own generation.
+    const requesterHeaders = await deviceRequesterHeaders();
     const postJson = async (path) => {
         const response = await fetch(path, {
             method: 'POST',
             credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...requesterHeaders },
             body: requestBody,
         });
         const data = await response.json().catch(() => ({}));

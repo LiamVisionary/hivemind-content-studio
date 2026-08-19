@@ -51,6 +51,14 @@ test('search matches by character name and by series', async () => {
     const office = searchH3Characters('OFFICE');
     assert.ok(office.some((e) => e.name === 'Michael Scott'));
     assert.equal(searchH3Characters('zzzz-no-such').length, 0);
+    // The fuller `prompt` name is searchable too — it is the one people type,
+    // while the row itself stays labelled with the short catalog name.
+    assert.ok(searchH3Characters('Leon S. Kennedy').some((e) => e.name === 'Leon Kennedy'));
+    assert.ok(searchH3Characters('Amicia de Rune').some((e) => e.name === 'Amicia'));
+    assert.ok(searchH3Characters('Knuckles the Echidna').some((e) => e.name === 'Knuckles'));
+    // Doom's two eras are separate entries: the name is what picks the armour.
+    const doom = searchH3Characters('doom').map((e) => e.name);
+    assert.ok(doom.includes('Doomguy') && doom.includes('Doom Slayer'));
 });
 
 test('grouping preserves catalog order', async () => {

@@ -9,10 +9,11 @@
 //               the one-shot handoffs (rented mode, workflow-selected events).
 //   active    — front tab AND the visible page: owns the prompt-insert bridge.
 //   apiRef    — the studio publishes {snapshot(), isBusy()} here for Copy/Close.
+//   studioLane — opaque per-app/per-tab id used only for local generation queues.
 import { useEffect, useRef, useState } from 'react';
 import { getLang } from '../lib/i18n.js';
 import {
-  addTab, closeTab, consumeSeed, insertTabAfter, newTabState, selectTab,
+  addTab, closeTab, consumeSeed, insertTabAfter, newTabState, selectTab, studioLaneId,
 } from '../lib/studioTabs.js';
 import { Icon } from '../ui/icons.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
@@ -73,11 +74,16 @@ function TabChip({ index, on, onSelect, onDuplicate, onClose, closable }) {
   );
 }
 
-export function StudioTabs({ Studio, active = true }) {
+export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
   const [state, setState] = useState(newTabState);
   const [closeConfirm, setCloseConfirm] = useState(null); // id of a busy tab awaiting confirmation
   // Per-tab api handles, keyed by the (never-reused) tab id.
   const apisRef = useRef(new Map());
+  const instanceIdRef = useRef(null);
+  if (!instanceIdRef.current) {
+    instanceIdRef.current = globalThis.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
 
   const apiFor = (id) => {
     if (!apisRef.current.has(id)) apisRef.current.set(id, { current: null });
@@ -140,7 +146,13 @@ export function StudioTabs({ Studio, active = true }) {
         const front = tab.id === state.activeId;
         return (
           <div key={tab.id} className={front ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-            <Studio active={active && front} tabActive={front} seed={tab.seed} apiRef={apiFor(tab.id)} />
+            <Studio
+              active={active && front}
+              tabActive={front}
+              seed={tab.seed}
+              apiRef={apiFor(tab.id)}
+              studioLane={studioLaneId(studioType, instanceIdRef.current, tab.id)}
+            />
           </div>
         );
       })}

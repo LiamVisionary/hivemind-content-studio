@@ -40,7 +40,7 @@ def test_studio_state_roundtrip_is_owner_only_and_encrypted_at_rest(tmp_path: Pa
     assert client.get("/api/studio-state/opengen-composer").json()["state"] == draft
     assert client.get("/api/studio-state/absent-key").json()["state"] == {}
 
-    with sqlite3.connect(tmp_path / "studio-state.sqlite3") as connection:
+    with sqlite3.connect(tmp_path / "accounts" / "1" / "studio-state.sqlite3") as connection:
         stored = [row[0] for row in connection.execute("SELECT value FROM studio_state")]
     assert stored and all(value.startswith(ENCRYPTED_PREFIX) for value in stored)
     assert all("private composer draft" not in value for value in stored)

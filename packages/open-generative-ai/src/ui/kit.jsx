@@ -560,9 +560,94 @@ export function Tabs({ tabs, value, onChange, className = '' }) {
 
 /* ---------------- Studio layout ---------------- */
 
+// The composer bar, and — when the studio says what a dropped file should mean
+// there — a drop target of its own.
+//
+// Everywhere else in the app, dragging in a picture or a clip restores the
+// settings that made it (app/OutputRestoreDropZone.jsx). Over the box you write
+// the shot in, that is the wrong reading: what you dropped is an INPUT. The
+// window-level restore zone stands down for anything inside
+// [data-studio-composer], and this is what wears that mark — the whole bar
+// rather than the inner card, so the margins beside a centred composer are not
+// quietly a different feature.
+//
+// The kit stays dependency-free: the studio supplies what it accepts, what to
+// say, and what to do with it.
+//   drop = { accepts(dataTransfer, target), hint(dataTransfer) | string,
+//            onDrop(dataTransfer), busy }
+function ComposerSlot({ drop, children }) {
+  const [over, setOver] = useState(false);
+  const [hint, setHint] = useState('');
+  // dragenter/dragleave fire for every child element, so a plain boolean
+  // flickers as the pointer crosses the buttons. Count enters instead.
+  const depthRef = useRef(0);
+  const active = typeof drop?.onDrop === 'function';
+  const accepts = (event) => active
+    && (typeof drop.accepts !== 'function' || drop.accepts(event.dataTransfer, event.target));
+  const hintFor = (dataTransfer) => (typeof drop?.hint === 'function' ? drop.hint(dataTransfer) : (drop?.hint || ''));
+  const busy = Boolean(drop?.busy);
+  const showing = over || busy;
+
+  const handlers = active
+    ? {
+      onDragEnter: (event) => {
+        if (!accepts(event)) return;
+        event.preventDefault();
+        depthRef.current += 1;
+        setHint(hintFor(event.dataTransfer));
+        setOver(true);
+      },
+      onDragOver: (event) => {
+        if (!accepts(event)) return;
+        event.preventDefault(); // required to allow a drop
+        try { event.dataTransfer.dropEffect = 'copy'; } catch { /* non-critical */ }
+      },
+      onDragLeave: () => {
+        depthRef.current = Math.max(0, depthRef.current - 1);
+        if (!depthRef.current) setOver(false);
+      },
+      onDrop: (event) => {
+        depthRef.current = 0;
+        setOver(false);
+        if (!accepts(event)) return;
+        event.preventDefault();
+        // Keeps the drop off the window-level restore zone even before its own
+        // [data-studio-composer] guard gets a look at it.
+        event.stopPropagation();
+        drop.onDrop(event.dataTransfer);
+      },
+    }
+    : {};
+
+  return (
+    <div
+      {...(active ? { 'data-studio-composer': '' } : {})}
+      {...handlers}
+      className={cx(
+        'relative shrink-0 border-t bg-bg1/80 p-3 backdrop-blur-sm transition-colors',
+        showing ? 'border-honey' : 'border-line1',
+      )}
+    >
+      {children}
+      {showing ? (
+        <div
+          className="pointer-events-none absolute inset-0 z-30 grid place-items-center border-2 border-dashed border-honey bg-bg0/90"
+          role={busy ? 'status' : undefined}
+          aria-live={busy ? 'polite' : undefined}
+        >
+          <span className="flex items-center gap-2 text-sm font-medium text-honey">
+            {busy ? <Spinner size={14} className="text-honey" /> : null}
+            {busy ? 'Attaching…' : hint}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // Workspace-first studio frame: left params panel, main canvas, optional bottom composer.
 // On < lg the panel collapses into a toggleable sheet.
-export function StudioLayout({ panel, panelTitle = 'Settings', composer, children }) {
+export function StudioLayout({ panel, panelTitle = 'Settings', composer, composerDrop, children }) {
   const [panelOpen, setPanelOpen] = useState(false);
   return (
     <div className="relative flex min-h-0 flex-1">
@@ -593,7 +678,7 @@ export function StudioLayout({ panel, panelTitle = 'Settings', composer, childre
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
-        {composer ? <div className="shrink-0 border-t border-line1 bg-bg1/80 p-3 backdrop-blur-sm">{composer}</div> : null}
+        {composer ? <ComposerSlot drop={composerDrop}>{composer}</ComposerSlot> : null}
       </div>
     </div>
   );

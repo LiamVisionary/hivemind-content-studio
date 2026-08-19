@@ -3,11 +3,11 @@
 // in — and each state that is not "live" needs the action that fixes it, not a
 // spinner. Attaching is instant now (the gateway re-reads its lane registry per
 // request), so there is no "connecting…" phase to narrate.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button, Spinner } from '../ui/kit.jsx';
 import { getLang } from '../lib/i18n.js';
 import { api } from '../hub/hubData.js';
-import { isRoutingLeader, notifyRentedMachinesChanged } from '../lib/rentedMachines.js';
+import { isRoutingLeader, notifyRentedMachinesChanged, withSelection } from '../lib/rentedMachines.js';
 
 const zh = () => getLang() === 'zh-CN';
 
@@ -26,18 +26,27 @@ function seconds(machine) {
 // With more than one ready machine, "which box does this run on?" is a real
 // question with a real answer — the gateway routes to the highest-priority
 // attachment whose models match. This is that answer, and the switch for it.
-function MachinePicker({ machines, all, busy, onSelect }) {
+//
+// `machines`/`all` arrive already carrying the pending switch (see
+// withSelection), so the highlight moves on the click rather than on the
+// response. Only the row being switched TO shows a spinner, and no row is ever
+// disabled while one is in flight: changing your mind mid-request is a normal
+// thing to do, and greying the whole list out was most of what made this feel
+// broken — every click landed on dead controls for as long as the round-trip
+// took, with nothing on screen admitting the first one had registered.
+function MachinePicker({ machines, all, pendingId, onSelect }) {
   return (
     <div className="flex flex-col gap-1">
       <small className="text-[11px] text-ink3">{zh() ? '运行于' : 'Run on'}</small>
       {machines.map((machine) => {
         const leading = isRoutingLeader(machine, all);
+        const pending = machine.rental_id === pendingId;
         const dead = machine.attached && !machine.tunnel_alive;
         return (
           <button
             key={machine.rental_id}
             type="button"
-            disabled={busy || leading}
+            disabled={leading && !pending}
             onClick={() => onSelect(machine)}
             className={`flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors ${
               leading ? 'border-honey/50 bg-honey-tint' : 'border-line1 bg-bg1 hover:border-line2'
@@ -49,13 +58,21 @@ function MachinePicker({ machines, all, busy, onSelect }) {
             <span className="text-[11px] text-ink1">{machine.gpu || 'GPU'}</span>
             <span className="font-mono text-[11px] text-ink3">${(machine.usd_per_hour || 0).toFixed(3)}/hr</span>
             {seconds(machine) ? <span className="text-[11px] text-ink3">{seconds(machine)}</span> : null}
-            <span className="ml-auto text-[10px] uppercase tracking-[0.06em] text-ink3">
-              {leading
-                ? (zh() ? '使用中' : 'in use')
-                : dead
-                  ? (zh() ? '重新连接' : 'reconnect')
-                  : (zh() ? '切换' : 'switch')}
-            </span>
+            {/* The spinner REPLACES the status word rather than joining it: any
+                wider label reflows the row (a "switching" caption wrapped the
+                GPU name onto a second line), and a row that jumps on the click
+                is the jank this whole panel is meant to stop showing. */}
+            {pending
+              ? <Spinner size={10} className="ml-auto shrink-0 text-honey" />
+              : (
+                <span className="ml-auto text-[10px] uppercase tracking-[0.06em] text-ink3">
+                  {leading
+                    ? (zh() ? '使用中' : 'in use')
+                    : dead
+                      ? (zh() ? '重新连接' : 'reconnect')
+                      : (zh() ? '切换' : 'switch')}
+                </span>
+              )}
           </button>
         );
       })}
@@ -66,6 +83,11 @@ function MachinePicker({ machines, all, busy, onSelect }) {
 export function RentedSourceStatus({ engine: s, page }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // The machine the user asked for, held until the server list agrees. Clearing
+  // it when the POST resolves is not enough: the refreshed list lands a second
+  // or two later, so the highlight would snap back to the old machine and then
+  // forward again — the flicker reads as the click having failed.
+  const [chosen, setChosen] = useState(null);
   const live = s.rentedMachines || [];
   const provisioning = s.rentedProvisioning || [];
   const idle = s.rentedIdle || [];
@@ -86,12 +108,44 @@ export function RentedSourceStatus({ engine: s, page }) {
     }
   };
 
-  // Every machine that could serve THIS studio, whatever state it is in.
-  const usable = [...live, ...idle, ...broken]
+  // Every machine that could serve THIS studio, whatever state it is in —
+  // shown as it will be once a pending switch lands, so the click is answered
+  // by the picker itself and not by a network round-trip.
+  const known = [...live, ...idle, ...broken];
+  const all = chosen === null ? known : withSelection(known, chosen);
+  const usable = all
     .filter((machine) => !page || (machine.studio_pages || []).includes(page))
     .sort((a, b) => Number(b.attached) - Number(a.attached)
       || (b.priority || 0) - (a.priority || 0)
       || String(a.rental_id).localeCompare(String(b.rental_id)));
+
+  // Reality caught up (or the machine went away): stop overriding it, so a
+  // switch made in another tab is not masked by a stale local guess.
+  const settled = chosen !== null && (() => {
+    const machine = known.find((m) => m.rental_id === chosen);
+    return !machine || isRoutingLeader(machine, known);
+  })();
+  useEffect(() => {
+    if (chosen === null) return undefined;
+    if (settled) { setChosen(null); return undefined; }
+    // A switch the refreshed list never confirms — another surface picked a
+    // different machine in the meantime — must not spin forever.
+    const timer = setTimeout(() => setChosen(null), 15000);
+    return () => clearTimeout(timer);
+  }, [chosen, settled]);
+
+  const select = (machine) => {
+    if (chosen === machine.rental_id) return;
+    setChosen(machine.rental_id);
+    setError('');
+    api(`/api/gpu-rentals/${machine.rental_id}/select`, { method: 'POST' })
+      .then(() => notifyRentedMachinesChanged())
+      .catch((err) => {
+        setError(err.message || String(err));
+        // Drop the optimistic order: the machine that was leading still is.
+        setChosen((current) => (current === machine.rental_id ? null : current));
+      });
+  };
 
   if (usable.length > 1) {
     const rate = live.reduce((total, m) => total + (m.usd_per_hour || 0), 0);
@@ -99,9 +153,9 @@ export function RentedSourceStatus({ engine: s, page }) {
       <div className="flex flex-col gap-1.5">
         <MachinePicker
           machines={usable}
-          all={[...live, ...idle, ...broken]}
-          busy={busy}
-          onSelect={(machine) => attach(machine, '/select')}
+          all={all}
+          pendingId={settled ? null : chosen}
+          onSelect={select}
         />
         <small className="text-[11px] text-ink3">
           {zh()

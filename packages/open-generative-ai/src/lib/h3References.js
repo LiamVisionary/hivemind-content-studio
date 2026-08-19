@@ -349,3 +349,136 @@ export function referenceLabels({ images = [], videos = [], audios = [] } = {}) 
   audios.forEach(() => labels.audios.push(`<Audio ${(audioOrdinal += 1)}>`));
   return labels;
 }
+
+// ── The reference budget ─────────────────────────────────────────────────────
+//
+// H3 rations references four different ways at once, and only one of them
+// (how many of each kind) was ever visible here. The other three are the ones
+// that actually bite, because nothing in the UI counted them:
+//
+//   1. TWELVE references total, across every kind. Nine pictures and three
+//      clips is exactly twelve; switch a clip's soundtrack on and you are at
+//      thirteen, because a split soundtrack is its own reference.
+//   2. THREE audio clips — and a split soundtrack is one of them. Three videos
+//      with sound on therefore spend the entire audio allowance before a single
+//      voice clip is attached.
+//   3. Each clip runs 2–15 seconds.
+//   4. Fifteen seconds is the TOTAL for a kind, not a per-clip allowance. This
+//      is the one people miss: three 15-second clips is 45 seconds and three
+//      times over, so three clips only fit at about five seconds each.
+//
+// And a split soundtrack spends from BOTH duration totals at once — a
+// 12-second video with its audio on uses 12 of the 15 video seconds AND 12 of
+// the 15 audio seconds, leaving 3 seconds of audio for everything else.
+//
+// Sourced from the Fantastic MiniMax H3 Prompt Builder's documented limits
+// (MIT, Adudeguyman) — the rules are the donation; the implementation is ours.
+//
+// Advisory ONLY, deliberately. Nothing here removes a reference for you:
+// dropping one renumbers every label after it, which would silently invalidate
+// <Picture N>/<Video N>/<Audio N> tags already written into the prompt. The
+// fix is a trim, which Clip Prep does without spending a slot.
+export const H3_REFERENCE_LIMITS = {
+  totalReferences: 12,
+  audioClips: 3,
+  clipSecondsMin: 2,
+  clipSecondsMax: 15,
+  typeSecondsTotal: 15,
+};
+
+const round1 = (value) => Math.round((Number(value) || 0) * 10) / 10;
+
+// `durations` maps a reference url to its measured length in seconds. Anything
+// missing is simply not counted — a budget that guessed would be worse than one
+// that admits it has not measured yet, so `measured` reports the coverage.
+export function referenceBudgetReport({
+  images = [], videos = [], audios = [], durations = {},
+} = {}) {
+  const lengthOf = (item) => {
+    const value = Number(durations[referenceUrl(item)]);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  };
+
+  const soundtracks = videos.filter((item) => item?.useAudio).length;
+  // A soundtrack is its own reference and its own audio clip, which is the
+  // whole reason a "9 pictures + 3 videos" row can be over budget.
+  const total = images.length + videos.length + audios.length + soundtracks;
+  const audioClips = audios.length + soundtracks;
+
+  let videoSeconds = 0;
+  let audioSeconds = 0;
+  let measured = 0;
+  let unmeasured = 0;
+  const clips = [];
+
+  for (const item of videos) {
+    const seconds = lengthOf(item);
+    if (seconds == null) { unmeasured += 1; } else {
+      measured += 1;
+      videoSeconds += seconds;
+      // Double-spend: the same seconds are billed to the audio total too.
+      if (item?.useAudio) audioSeconds += seconds;
+      clips.push({ kind: 'videos', url: referenceUrl(item), seconds: round1(seconds) });
+    }
+  }
+  for (const item of audios) {
+    const seconds = lengthOf(item);
+    if (seconds == null) { unmeasured += 1; } else {
+      measured += 1;
+      audioSeconds += seconds;
+      clips.push({ kind: 'audios', url: referenceUrl(item), seconds: round1(seconds) });
+    }
+  }
+
+  const problems = [];
+  if (total > H3_REFERENCE_LIMITS.totalReferences) {
+    problems.push({ code: 'over-total', count: total, limit: H3_REFERENCE_LIMITS.totalReferences, soundtracks });
+  }
+  if (audioClips > H3_REFERENCE_LIMITS.audioClips) {
+    problems.push({ code: 'over-audio-clips', count: audioClips, limit: H3_REFERENCE_LIMITS.audioClips, soundtracks });
+  }
+  // Audio is never the only thing attached — it has nothing to attach TO.
+  if (audioClips > 0 && images.length === 0 && videos.length === 0) {
+    problems.push({ code: 'audio-without-visual', count: audioClips });
+  }
+  for (const clip of clips) {
+    if (clip.seconds < H3_REFERENCE_LIMITS.clipSecondsMin) {
+      problems.push({ code: 'clip-too-short', ...clip, limit: H3_REFERENCE_LIMITS.clipSecondsMin });
+    } else if (clip.seconds > H3_REFERENCE_LIMITS.clipSecondsMax) {
+      problems.push({ code: 'clip-too-long', ...clip, limit: H3_REFERENCE_LIMITS.clipSecondsMax });
+    }
+  }
+  if (round1(videoSeconds) > H3_REFERENCE_LIMITS.typeSecondsTotal) {
+    problems.push({ code: 'over-video-seconds', seconds: round1(videoSeconds), limit: H3_REFERENCE_LIMITS.typeSecondsTotal });
+  }
+  if (round1(audioSeconds) > H3_REFERENCE_LIMITS.typeSecondsTotal) {
+    problems.push({
+      code: 'over-audio-seconds',
+      seconds: round1(audioSeconds),
+      limit: H3_REFERENCE_LIMITS.typeSecondsTotal,
+      // Naming the double-spend is the difference between "trim the voice clip"
+      // and the actual fix, which is often "switch a soundtrack off".
+      soundtracks,
+    });
+  }
+
+  return {
+    counts: {
+      total,
+      limit: H3_REFERENCE_LIMITS.totalReferences,
+      pictures: images.length,
+      videos: videos.length,
+      audioClips,
+      soundtracks,
+    },
+    seconds: {
+      video: round1(videoSeconds),
+      audio: round1(audioSeconds),
+      limit: H3_REFERENCE_LIMITS.typeSecondsTotal,
+    },
+    measured,
+    unmeasured,
+    problems,
+    ok: problems.length === 0,
+  };
+}

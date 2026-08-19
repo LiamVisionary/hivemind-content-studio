@@ -107,7 +107,7 @@ export const hubState = {
     aspectRatio: '', runtimeSeconds: '', privacy: '', maxCost: '0',
     voiceEnabled: true, voiceDelivery: '', voiceId: '',
     subtitlesEnabled: true, subtitlePosition: 'bottom', subtitleSize: '56',
-    mediaSource: 'pexels', videoCount: '3', clipDuration: '3',
+    mediaSource: 'pexels', mediaRoute: 'automatic', videoCount: '3', clipDuration: '3',
     publishCaption: '', publishCta: '', platforms: [], providerRoles: {},
     operatorToken: '',
   },
@@ -339,8 +339,8 @@ export function routePickerProviders(kind) {
   }));
 }
 
-export function selectedRoutePickerItem(kind) {
-  const route = parseRoute(hubState.routes[kind]);
+export function selectedRoutePickerItem(kind, value) {
+  const route = parseRoute(value ?? hubState.routes[kind]);
   if (route.provider === 'automatic') return null;
   for (const provider of routePickerProviders(kind)) {
     const model = provider.models.find((candidate) => candidate.value === routeValue(route.provider, route.model, route.auth));
@@ -1468,6 +1468,35 @@ export function setWorkflow(patch) {
   notifyHub();
 }
 
+// Where a faceless short's visuals come from. The first group searches a stock
+// library; the last two render them with our own connected models, which is why
+// they carry a route (the same provider/model pairs the Image and Video studios
+// offer, across local, API, OAuth, and attached rentals).
+export const MEDIA_SOURCE_OPTIONS = [
+  { value: 'pexels', label: 'Pexels', group: 'Stock footage' },
+  { value: 'pixabay', label: 'Pixabay', group: 'Stock footage' },
+  { value: 'coverr', label: 'Coverr', group: 'Stock footage' },
+  { value: 'local', label: 'Owned local media', group: 'Owned' },
+  { value: 'studio-image', label: 'Generate stills with our models', group: 'Generated' },
+  { value: 'studio-video', label: 'Generate clips with our models', group: 'Generated' },
+];
+
+const MEDIA_SOURCE_KINDS = { 'studio-image': 'image', 'studio-video': 'video' };
+
+// 'image' | 'video' for a generated source, '' for stock and owned media.
+export function mediaSourceKind(mediaSource) {
+  return MEDIA_SOURCE_KINDS[String(mediaSource || '')] || '';
+}
+
+export function isGeneratedMediaSource(mediaSource) {
+  return Boolean(mediaSourceKind(mediaSource));
+}
+
+export function setMediaRoute(value) {
+  hubState.workflow.mediaRoute = value;
+  notifyHub();
+}
+
 export function setProviderRole(role, value) {
   if (value) hubState.workflow.providerRoles[role] = value;
   else delete hubState.workflow.providerRoles[role];
@@ -1557,6 +1586,11 @@ export function draftPayload() {
     },
     faceless: {
       media_source: w.mediaSource,
+      // Only a generated source has a route; sending one for Pexels would imply
+      // a model choice the stock search never makes.
+      ...(isGeneratedMediaSource(w.mediaSource)
+        ? { media_route: parseRoute(w.mediaRoute) }
+        : {}),
       count: Number(w.videoCount),
       clip_duration_seconds: Number(w.clipDuration),
     },
@@ -1603,6 +1637,7 @@ export function duplicateRun(runId) {
   w.subtitlePosition = brief.subtitles?.position || 'bottom';
   w.subtitleSize = String(brief.subtitles?.font_size || 56);
   w.mediaSource = brief.media_source || 'pexels';
+  w.mediaRoute = savedRouteValue(mediaSourceKind(w.mediaSource) || 'video', brief.media_route) || 'automatic';
   w.videoCount = String(brief.count || 1);
   w.clipDuration = String(brief.clip_duration_seconds || 5);
   const publish = run.publish || brief.publish || {};

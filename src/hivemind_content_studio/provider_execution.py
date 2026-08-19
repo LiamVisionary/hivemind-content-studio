@@ -19,6 +19,7 @@ from .generation import (
     record_generated_asset,
 )
 from .manifest import load_manifest
+from .media_studio import generate_image as generate_media_studio_image
 from .media_studio import generate_video as generate_media_studio_video
 from .private_access import (
     private_media_exists,
@@ -43,6 +44,7 @@ class ProviderExecutors:
         muapi: Generator = generate_muapi_asset,
         hivemindos_hosted: Generator = generate_hosted_media_asset,
         media_studio: Generator = generate_media_studio_video,
+        media_studio_image: Generator = generate_media_studio_image,
         openai_image: Generator = generate_openai_image_asset,
         openai_oauth_image: Generator = generate_openai_oauth_image_asset,
         xai_imagine: Generator = generate_xai_imagine_asset,
@@ -52,6 +54,7 @@ class ProviderExecutors:
         self.muapi = muapi
         self.hivemindos_hosted = hivemindos_hosted
         self.media_studio = media_studio
+        self.media_studio_image = media_studio_image
         self.openai_image = openai_image
         self.openai_oauth_image = openai_oauth_image
         self.xai_imagine = xai_imagine
@@ -67,11 +70,15 @@ class ProviderExecutors:
             "xai-imagine-api",
             "xai-imagine-oauth",
         )
+        # The Media Studio MCP fronts local ComfyUI, fleet machines, and attached
+        # rentals behind one registry, so it serves both roles: "comfyui" is the
+        # catalog's name for that route, "media-studio-mcp" the transport's.
+        local_media = ("comfyui", "media-studio-mcp")
         executors = {
             ("generate_keyframes", provider): lambda manifest, authorization=None, selected=provider: self.generate_keyframes(manifest, selected, authorization=authorization)
-            for provider in providers
+            for provider in (*providers, *local_media)
         }
-        for provider in (*providers, "media-studio-mcp"):
+        for provider in (*providers, *local_media):
             executors[("animate_scenes", provider)] = lambda manifest, authorization=None, selected=provider: self.animate_scenes(manifest, selected, authorization=authorization)
         return executors
 
@@ -226,7 +233,7 @@ class ProviderExecutors:
                 maximum_debit_usd=maximum_debit_usd,
                 idempotency_key=f"{run_id}:{kind}:{scene}:{model}",
             )
-        if provider == "media-studio-mcp" and kind == "motion":
+        if provider in {"media-studio-mcp", "comfyui"} and kind == "motion":
             workflow_id = str(
                 _role_options(options, kind).get("workflow_id")
                 or options.get("workflow_id")
@@ -234,11 +241,44 @@ class ProviderExecutors:
                 or options.get("model")
                 or ""
             ).strip()
+            # A scene keyframe anchors the clip when one exists. Without it this
+            # is a text-to-video request, which the registry's t2v workflows
+            # accept — refusing outright would strand every lane that generates
+            # motion straight from a prompt.
+            try:
+                source_path = self._source_path(manifest, scene, staged)
+            except ValueError:
+                source_path = None
             return self.media_studio(
-                image_path=self._source_path(manifest, scene, staged),
+                image_path=source_path,
                 prompt=prompt,
+                aspect_ratio=aspect_ratio,
                 duration_seconds=float(request.get("duration_seconds") or 4),
                 workflow_id=workflow_id or None,
+                studio_lane=str(_role_options(options, kind).get("studio_lane") or options.get("studio_lane") or ""),
+                output_dir=output_dir,
+            )
+        if provider in {"media-studio-mcp", "comfyui"} and kind == "keyframe":
+            # Local ComfyUI, a fleet machine, or an attached rental — the lane is
+            # whatever the Media Studio registry currently fronts, so one branch
+            # covers all three avenues.
+            role_options = _role_options(options, kind)
+            workflow_id = str(
+                role_options.get("workflow_id")
+                or options.get("workflow_id")
+                or role_options.get("model")
+                or options.get("model")
+                or ""
+            ).strip()
+            return self.media_studio_image(
+                prompt=prompt,
+                workflow_id=workflow_id or None,
+                backend=str(role_options.get("backend") or options.get("backend") or ""),
+                aspect_ratio=aspect_ratio,
+                resolution=str(role_options.get("resolution") or options.get("image_resolution") or ""),
+                negative_prompt=str(request.get("negative_prompt") or options.get("negative_prompt") or ""),
+                seed=generation_options.get("seed") if isinstance(generation_options.get("seed"), int) else None,
+                loras=options.get("loras") if isinstance(options.get("loras"), list) else None,
                 output_dir=output_dir,
             )
         raise ValueError(f"No manifest executor exists for {provider!r} and {kind!r}")

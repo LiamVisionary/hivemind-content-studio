@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from functools import lru_cache
 from typing import Literal
 
 from .providers import provider_report
@@ -32,6 +33,16 @@ class MediaModel:
     reference_slots: dict | None = None
     aspect_ratios: tuple[str, ...] = ()
     default_duration_seconds: float | None = None
+    # Longest stretch of MOTION REFERENCE each canvas can carry, keyed
+    # "<tier>|<aspect>" (see motion_reference_duration_limits). The node trims a
+    # reference video to min(its own length, the clip's length), so a reference
+    # at or beyond the clip's length makes the CLIP the thing that has to fit,
+    # while a shorter reference costs only its own length and leaves the full
+    # duration range open. The studio drops the unreachable durations from its
+    # picker instead of letting the run fail at submit. Empty for workflows with
+    # no measured budget — unmeasured is not the same as impossible, so those
+    # keep the full range.
+    motion_reference_max_seconds: dict | None = None
     # The workflow's registered sampling-step default. Lets the studio label its
     # step presets truthfully ("Standard (15 steps)") and tell a full-step lane
     # from a distilled one (a turbo build's 4-8 steps must not get a 32-step
@@ -178,8 +189,42 @@ MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
 _last_live_media_studio_models: tuple[MediaModel, ...] = ()
 
 
+# MiniMax H3's measured motion-reference budget and frame lattice, mirrored from
+# the workflow registry (minimax-h3.motion_reference_budget / frame_grid).
+# Duplicated ON PURPOSE: the built-in list is what the studio gets when the
+# registry cannot be read, and a fallback that dropped this ceiling would
+# silently put back the 15s range the card cannot render — the exact shape of
+# the last degradation bug, where the fallback list quietly stripped H3
+# reference mode. test_media_studio_mcp_contract pins these equal to the
+# registry, so the two cannot drift apart unnoticed.
+_H3_MOTION_REFERENCE_PIXEL_FRAMES = 704 * 1216 * 243
+_H3_FRAME_GRID = {"modulus": 17, "offset": 5}
+_H3_FRAME_RATE = 24
+
+
+@lru_cache(maxsize=1)
+def _built_in_video_models_with_limits() -> tuple[MediaModel, ...]:
+    """The built-in list with the measured capacity limits filled in.
+
+    A degraded catalog still has to refuse a length the card cannot render.
+    """
+    from .media_studio import motion_reference_duration_limits
+
+    limits = motion_reference_duration_limits({
+        "motion_reference_max_reference_pixel_frames": _H3_MOTION_REFERENCE_PIXEL_FRAMES,
+        "frame_grid": _H3_FRAME_GRID,
+        "defaults": {"frame_rate": _H3_FRAME_RATE},
+    })
+    if not limits:
+        return BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS
+    return tuple(
+        replace(model, motion_reference_max_seconds=limits) if model.family == "minimax" else model
+        for model in BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS
+    )
+
+
 def _media_studio_fallback_models() -> tuple[MediaModel, ...]:
-    return _last_live_media_studio_models or BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS
+    return _last_live_media_studio_models or _built_in_video_models_with_limits()
 
 
 def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel, ...], bool]:
@@ -198,7 +243,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
         # 30s); the remembered registry above keeps the answer honest.
         return _media_studio_fallback_models(), False
     try:
-        from .media_studio import list_media_studio_workflows
+        from .media_studio import list_media_studio_workflows, motion_reference_duration_limits
 
         workflows = list_media_studio_workflows("video")
     except Exception:
@@ -225,6 +270,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
             reference_slots=dict(workflow.get("reference_slots")) if isinstance(workflow.get("reference_slots"), dict) else None,
             aspect_ratios=tuple(str(value) for value in workflow.get("aspect_ratios", []) if str(value).strip()),
             default_duration_seconds=float(defaults["duration_seconds"]) if defaults.get("duration_seconds") is not None else None,
+            motion_reference_max_seconds=motion_reference_duration_limits(workflow) or None,
             default_steps=float(defaults["steps"]) if defaults.get("steps") is not None else None,
             beta=bool(workflow.get("beta")),
             routing_only=bool(workflow.get("routing_only")),

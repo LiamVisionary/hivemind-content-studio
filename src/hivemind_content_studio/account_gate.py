@@ -1,0 +1,468 @@
+"""The sign-in gate: a Netflix-style workspace picker with passkeys first.
+
+Standalone on purpose. The studio's React bundle lives under `/assets`, which is
+gated, so a gate built inside the app would load a script that 401s and render
+nothing — and it would hand the whole application to anyone who can reach the
+port. This page is self-contained: it talks only to `/api/accounts` and the
+WebAuthn routes, all of which are reachable before sign-in by design and none of
+which return anything an attacker can work on offline.
+
+Layout is adapted from Mix-Studio's profile gate (`public/index.html`'s
+"profile gate (sign-in, Netflix-style)" block and the `.profile-tiles` /
+`.profile-avatar-lg` rules in `public/style.css`, GPL-3.0 — see
+THIRD_PARTY_NOTICES.md), restyled onto the palette the previous lock screen
+used. What is NOT from the donor is everything behind it: their profiles are a
+`profileId` column over shared plaintext with an optional PIN, and these are
+separate accounts with separate zero-knowledge vaults.
+
+## The handoff, and what it costs
+
+Unlocking the vault needs key material the SERVER must never see, so the gate
+passes it to the app through tab-scoped `sessionStorage` with a short expiry —
+the same mechanism (and the same key) the previous owner lock screen already
+used for the passphrase. Two shapes go through it:
+
+  * password sign-in hands over the passphrase, exactly as before;
+  * passkey sign-in hands over the WebAuthn PRF secret when the authenticator
+    produced one, which is what lets Face ID actually decrypt rather than merely
+    open the door.
+
+Both are readable by any script running in this origin for the life of the tab.
+That is a real exposure and it is why the window is short and the storage is
+per-tab; it is not worse than the status quo, and the alternative — asking for
+the passphrase again inside the app after already proving identity — is what
+made people reuse a weak one.
+"""
+
+from __future__ import annotations
+
+# The PRF salt is fixed per account and derived from a constant label, so the
+# same passkey yields the same secret on every sign-in and on every device that
+# syncs it. Changing this string would strand every PRF-wrapped vault.
+PRF_SALT_LABEL = "hivemind-content-studio/vault-prf/v1"
+
+_STYLE = """
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#0c0c0e;color:#f2f2f3;
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+main{width:min(860px,100%);display:grid;gap:28px;justify-items:center}
+.mark{width:40px;height:40px;display:grid;place-items:center;border-radius:10px;background:rgba(246,178,27,.12);color:#f6b21b}
+.eyebrow{margin:0;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:#f6b21b;text-align:center}
+h1{margin:6px 0 0;font-size:28px;font-weight:650;letter-spacing:-0.02em;text-align:center}
+p.lede{margin:8px 0 0;color:#a3a3ac;font-size:13px;line-height:1.55;text-align:center;max-width:44ch}
+.tiles{display:flex;flex-wrap:wrap;gap:22px;justify-content:center;padding:0;margin:0;list-style:none}
+.tile{display:grid;gap:10px;justify-items:center;background:none;border:0;padding:0;cursor:pointer;font:inherit;color:inherit}
+.avatar{width:118px;height:118px;border-radius:14px;display:grid;place-items:center;font-size:40px;font-weight:600;
+  color:#0c0c0e;border:3px solid transparent;transition:border-color .16s,transform .16s}
+.tile:hover .avatar,.tile:focus-visible .avatar{border-color:#f2f2f3;transform:scale(1.05)}
+.tile:focus-visible{outline:none}
+.tile-name{font-size:14px;color:#a3a3ac;transition:color .16s}
+.tile:hover .tile-name,.tile:focus-visible .tile-name{color:#f2f2f3}
+.badge{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#6f6f78}
+.c-amber{background:linear-gradient(140deg,#f6b21b,#d98a08)}
+.c-violet{background:linear-gradient(140deg,#a78bfa,#7c5cf0)}
+.c-teal{background:linear-gradient(140deg,#5eead4,#14b8a6)}
+.c-rose{background:linear-gradient(140deg,#fda4af,#f43f5e)}
+.c-sky{background:linear-gradient(140deg,#7dd3fc,#0ea5e9)}
+.c-lime{background:linear-gradient(140deg,#bef264,#84cc16)}
+.card{width:min(400px,100%);display:grid;gap:14px;padding:30px;border:1px solid rgba(255,255,255,.08);border-radius:14px;
+  background:#111114;box-shadow:0 24px 64px -24px rgba(0,0,0,.75)}
+.card h2{margin:0;font-size:19px;font-weight:640;letter-spacing:-0.01em}
+.card .who{display:flex;align-items:center;gap:12px}
+.card .who .avatar{width:46px;height:46px;border-radius:10px;font-size:19px;border-width:0}
+button{min-height:46px;border:0;border-radius:10px;font:600 14px inherit;cursor:pointer;transition:background .15s,border-color .15s}
+.primary{background:#f6b21b;color:#1a1205;display:flex;align-items:center;justify-content:center;gap:9px}
+.primary:hover{background:#ffc94a}
+.primary:disabled{opacity:.55;cursor:default}
+.secondary{background:#17171b;color:#f2f2f3;border:1px solid rgba(255,255,255,.1)}
+.secondary:hover{border-color:rgba(255,255,255,.22)}
+.divider{display:flex;align-items:center;gap:12px;color:#6f6f78;font-size:11px;text-transform:uppercase;letter-spacing:.12em}
+.divider::before,.divider::after{content:"";flex:1;height:1px;background:rgba(255,255,255,.1)}
+form{display:grid;gap:10px}
+label{display:grid;gap:6px;font-size:12px;font-weight:500;color:#a3a3ac}
+input{width:100%;height:44px;padding:0 14px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:#17171b;
+  color:#f2f2f3;font:inherit;font-size:14px;outline:0;transition:border-color .15s}
+input:hover{border-color:rgba(255,255,255,.16)}
+input:focus{border-color:rgba(246,178,27,.6);box-shadow:0 0 0 3px rgba(246,178,27,.14)}
+.error{min-height:18px;color:#f26d5f;font-size:12px}
+.back{background:none;border:0;color:#6f6f78;font:inherit;font-size:12px;cursor:pointer;padding:4px;min-height:0}
+.back:hover{color:#a3a3ac}
+[hidden]{display:none !important}
+@media (prefers-reduced-motion:reduce){.avatar,.tile-name{transition:none}.tile:hover .avatar{transform:none}}
+"""
+
+_SCRIPT = r"""
+const PRF_SALT_LABEL = "__PRF_SALT_LABEL__";
+const HANDOFF_KEY = 'hivemind.ownerPassphrase.once';
+const VAULT_HINT_KEY = 'hivemind.vaultUnlock.once';
+const HANDOFF_MS = 24 * 60 * 60 * 1000;
+
+const el = (id) => document.getElementById(id);
+const b64url = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer)))
+  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64url = (text) => {
+  const padded = String(text).replace(/-/g, '+').replace(/_/g, '/');
+  const binary = atob(padded + '==='.slice((padded.length + 3) % 4));
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+};
+
+async function api(path, body) {
+  const response = await fetch(path, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || 'That did not work. Try again.');
+  return payload;
+}
+
+// The PRF salt has to be identical on every device that unlocks this vault, so
+// it is derived from a constant label plus the account id — never from
+// anything device-local.
+async function prfSalt(accountId) {
+  const material = new TextEncoder().encode(`${PRF_SALT_LABEL}:${accountId}`);
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', material));
+}
+
+function handOff(accountId, { passphrase, prf, credentialId }) {
+  const expiresAt = Date.now() + HANDOFF_MS;
+  if (passphrase) {
+    sessionStorage.setItem(HANDOFF_KEY, JSON.stringify({ password: passphrase, expiresAt }));
+  }
+  // credentialId travels with the PRF secret because the wrapped master key is
+  // stored per credential — the secret alone does not say which wrap it opens.
+  sessionStorage.setItem(VAULT_HINT_KEY, JSON.stringify({
+    accountId, method: prf ? 'passkey-prf' : (passphrase ? 'password' : 'passkey'),
+    prf: prf || null, credentialId: credentialId || null, expiresAt,
+  }));
+}
+
+let accounts = [];
+let chosen = null;
+
+function initial(name) {
+  return (String(name || '?').trim()[0] || '?').toUpperCase();
+}
+
+function renderTiles() {
+  const list = el('tiles');
+  list.replaceChildren();
+  for (const account of accounts) {
+    const tile = document.createElement('button');
+    tile.className = 'tile';
+    tile.type = 'button';
+    tile.setAttribute('aria-label', `Open ${account.name}`);
+    const avatar = document.createElement('span');
+    avatar.className = `avatar c-${account.colour || 'amber'}`;
+    avatar.textContent = initial(account.name);
+    const name = document.createElement('span');
+    name.className = 'tile-name';
+    name.textContent = account.name;
+    tile.append(avatar, name);
+    if (account.has_passkey) {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = 'Passkey';
+      tile.append(badge);
+    }
+    tile.addEventListener('click', () => choose(account));
+    list.append(tile);
+  }
+}
+
+function choose(account) {
+  chosen = account;
+  el('picker').hidden = true;
+  el('signin').hidden = false;
+  el('who-avatar').className = `avatar c-${account.colour || 'amber'}`;
+  el('who-avatar').textContent = initial(account.name);
+  el('who-name').textContent = account.name;
+  el('error').textContent = '';
+  el('password').value = '';
+  el('enrol').hidden = true;
+  el('signin-body').hidden = false;
+  // Passkey is ALWAYS the headline action, even before this workspace has one:
+  // the shape of the screen should not change depending on how far through
+  // setup you happen to be. Without one enrolled the button explains that a
+  // password is needed this once, and offers to fix that immediately after.
+  el('passkey-label').textContent = account.has_passkey ? 'Unlock with passkey' : 'Set up a passkey';
+  el('password-form').hidden = !account.has_password;
+  el('divider').hidden = !account.has_password;
+  if (account.has_passkey) el('passkey').focus(); else el('password').focus();
+}
+
+function back() {
+  chosen = null;
+  el('signin').hidden = true;
+  el('picker').hidden = false;
+}
+
+function fail(message) {
+  el('error').textContent = message;
+  el('passkey').disabled = false;
+}
+
+async function signInWithPasskey(account) {
+  if (!window.PublicKeyCredential) {
+    fail('This browser has no passkey support. Use your password below.');
+    return;
+  }
+  if (account && !account.has_passkey) {
+    fail('This workspace has no passkey yet. Sign in with your password once and you can add one.');
+    el('password').focus();
+    return;
+  }
+  el('passkey').disabled = true;
+  el('error').textContent = '';
+  try {
+    const { publicKey } = await api('/api/accounts/webauthn/authenticate/options',
+      { account_id: account ? account.id : null });
+    const salt = await prfSalt(account ? account.id : 0);
+    const credential = await navigator.credentials.get({
+      publicKey: {
+        ...publicKey,
+        challenge: unb64url(publicKey.challenge),
+        allowCredentials: (publicKey.allowCredentials || []).map((entry) => ({
+          ...entry, id: unb64url(entry.id),
+        })),
+        // Where the authenticator supports it, this returns a stable secret we
+        // can unwrap the vault master key with. Where it does not, the results
+        // are simply absent and the app falls back to the device-wrapped copy.
+        extensions: { prf: { eval: { first: salt } } },
+      },
+    });
+    if (!credential) { fail('No passkey was offered.'); return; }
+    const results = credential.getClientExtensionResults?.() || {};
+    const secret = results.prf && results.prf.results && results.prf.results.first;
+    const payload = await api('/api/accounts/webauthn/authenticate', {
+      credential_id: credential.id,
+      client_data_json: b64url(credential.response.clientDataJSON),
+      authenticator_data: b64url(credential.response.authenticatorData),
+      signature: b64url(credential.response.signature),
+    });
+    handOff(payload.account.id, {
+      prf: secret ? b64url(secret) : null,
+      credentialId: credential.id,
+    });
+    location.reload();
+  } catch (error) {
+    if (error && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {
+      fail('Passkey sign-in was cancelled.');
+      return;
+    }
+    fail(error.message || 'Passkey sign-in failed.');
+  }
+}
+
+async function signInWithPassword(event) {
+  event.preventDefault();
+  el('error').textContent = '';
+  const password = el('password').value;
+  let payload;
+  try {
+    payload = await api('/api/accounts/unlock', { account_id: chosen.id, password });
+  } catch (error) {
+    fail(error.message || 'Wrong password.');
+    return;
+  }
+  // Signed in. Before handing over, offer to make the NEXT sign-in a passkey —
+  // this is the only moment we hold both a proven session and the passphrase,
+  // which is exactly what enrolling against the vault needs.
+  if (!chosen.has_passkey && window.PublicKeyCredential) {
+    pendingPassword = password;
+    el('signin-body').hidden = true;
+    el('enrol').hidden = false;
+    return;
+  }
+  handOff(payload.account.id, { passphrase: password });
+  location.reload();
+}
+
+let pendingPassword = null;
+
+function finishWithPassword(extra = {}) {
+  handOff(chosen.id, { passphrase: pendingPassword, ...extra });
+  location.reload();
+}
+
+/**
+ * Register a passkey for this workspace, then immediately take one PRF reading.
+ *
+ * The reading matters: the vault master key can only be wrapped by code that
+ * holds it, which lives in the app bundle, not here. So the gate registers the
+ * credential and passes the PRF secret forward with the passphrase, and the app
+ * does the wrap on its next boot — no second biometric prompt later.
+ */
+async function addPasskey() {
+  el('enrol-error').textContent = '';
+  el('enrol-add').disabled = true;
+  try {
+    const { publicKey } = await api('/api/accounts/webauthn/register/options');
+    const salt = await prfSalt(chosen.id);
+    const created = await navigator.credentials.create({
+      publicKey: {
+        ...publicKey,
+        challenge: unb64url(publicKey.challenge),
+        user: { ...publicKey.user, id: unb64url(publicKey.user.id) },
+        excludeCredentials: (publicKey.excludeCredentials || []).map((entry) => ({
+          ...entry, id: unb64url(entry.id),
+        })),
+        extensions: { prf: { eval: { first: salt } } },
+      },
+    });
+    if (!created) throw new Error('No passkey was created.');
+    const spki = created.response.getPublicKey && created.response.getPublicKey();
+    if (!spki) throw new Error('This authenticator uses a key type the studio cannot read.');
+    const extensions = created.getClientExtensionResults?.() || {};
+    const prfCapable = Boolean(extensions.prf && (extensions.prf.enabled || extensions.prf.results));
+    await api('/api/accounts/webauthn/register', {
+      credential_id: created.id,
+      public_key: b64url(spki),
+      algorithm: created.response.getPublicKeyAlgorithm(),
+      client_data_json: b64url(created.response.clientDataJSON),
+      label: 'This device',
+      prf: prfCapable,
+    });
+
+    // One assertion now, purely to read the PRF secret out.
+    let secret = null;
+    if (prfCapable) {
+      try {
+        const options = await api('/api/accounts/webauthn/authenticate/options', { account_id: chosen.id });
+        const assertion = await navigator.credentials.get({
+          publicKey: {
+            ...options.publicKey,
+            challenge: unb64url(options.publicKey.challenge),
+            allowCredentials: (options.publicKey.allowCredentials || []).map((entry) => ({
+              ...entry, id: unb64url(entry.id),
+            })),
+            extensions: { prf: { eval: { first: salt } } },
+          },
+        });
+        const results = assertion?.getClientExtensionResults?.() || {};
+        secret = results.prf?.results?.first || null;
+      } catch {
+        // No PRF reading available: the app falls back to the device wrap,
+        // which still gives a password-free unlock on this browser.
+        secret = null;
+      }
+    }
+    finishWithPassword({ prf: secret ? b64url(secret) : null, credentialId: created.id });
+  } catch (error) {
+    el('enrol-add').disabled = false;
+    if (error && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {
+      el('enrol-error').textContent = 'Passkey setup was cancelled.';
+      return;
+    }
+    el('enrol-error').textContent = error.message || 'Could not add a passkey.';
+  }
+}
+
+async function start() {
+  try {
+    const payload = await api('/api/accounts');
+    accounts = payload.accounts || [];
+  } catch {
+    el('lede').textContent = 'This studio is not reachable right now.';
+    return;
+  }
+  renderTiles();
+  // One workspace and nothing to choose between: go straight to its sign-in.
+  if (accounts.length === 1) choose(accounts[0]);
+  el('quick-passkey').hidden = !accounts.some((account) => account.has_passkey);
+}
+
+el('passkey').addEventListener('click', () => signInWithPasskey(chosen));
+el('quick-passkey').addEventListener('click', () => signInWithPasskey(null));
+el('password-form').addEventListener('submit', signInWithPassword);
+el('back').addEventListener('click', back);
+el('enrol-add').addEventListener('click', addPasskey);
+el('enrol-skip').addEventListener('click', () => finishWithPassword());
+start();
+"""
+
+_KEY_GLYPH = (
+    '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M15.5 8.5a4 4 0 1 0-3.9 4L9 15.1V17H7v2H4.9L3 17.1v-2.2l6.1-6.1a4 4 0 0 0 6.4-.3z"/>'
+    '<circle cx="16.5" cy="7.5" r="1"/></svg>'
+)
+
+_HIVE_GLYPH = (
+    '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    ' stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5 20 7v10l-8 4.5L4 17V7l8-4.5z"/>'
+    '<path d="M12 8.2 15.4 10v4L12 15.8 8.6 14v-4L12 8.2z" fill="currentColor" stroke="none"/></svg>'
+)
+
+
+def account_gate_html() -> str:
+    """The whole gate: picker, passkey-first sign-in, password underneath."""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Hivemind Content Studio</title>
+  <style>{_STYLE}</style>
+</head>
+<body>
+  <main>
+    <div id="picker">
+      <div style="display:grid;justify-items:center;gap:6px;margin-bottom:26px">
+        <div class="mark" aria-hidden="true">{_HIVE_GLYPH}</div>
+        <p class="eyebrow">Hivemind Content Studio</p>
+        <h1>Who's working?</h1>
+        <p class="lede" id="lede">Each workspace keeps its own library, and its own encryption key.
+          Nothing in one can be opened from another.</p>
+      </div>
+      <ul class="tiles" id="tiles"></ul>
+      <div style="display:grid;justify-items:center;margin-top:26px">
+        <button class="back" id="quick-passkey" type="button" hidden>Use a passkey instead</button>
+      </div>
+    </div>
+
+    <section class="card" id="signin" hidden aria-labelledby="signin-title">
+      <div class="who">
+        <span class="avatar" id="who-avatar" aria-hidden="true"></span>
+        <div>
+          <h2 id="signin-title">Sign in</h2>
+          <p class="lede" style="text-align:left;margin:2px 0 0" id="who-name"></p>
+        </div>
+      </div>
+
+      <div id="signin-body" style="display:grid;gap:14px">
+        <button class="primary" id="passkey" type="button" style="width:100%">
+          {_KEY_GLYPH}<span id="passkey-label">Unlock with passkey</span>
+        </button>
+
+        <div class="divider" id="divider"><span>or</span></div>
+
+        <form id="password-form">
+          <label>Password
+            <input id="password" type="password" autocomplete="current-password" required>
+          </label>
+          <button class="secondary" type="submit">Unlock with password</button>
+        </form>
+      </div>
+
+      <div id="enrol" hidden style="display:grid;gap:12px">
+        <p class="lede" style="text-align:left;margin:0">Signed in. Add a passkey so next time this
+          workspace opens with Touch ID or Face ID instead of a password.</p>
+        <button class="primary" id="enrol-add" type="button">{_KEY_GLYPH}<span>Add a passkey</span></button>
+        <button class="secondary" id="enrol-skip" type="button">Not now</button>
+        <p class="error" id="enrol-error" role="alert"></p>
+      </div>
+
+      <p class="error" id="error" role="alert"></p>
+      <div style="display:grid;justify-items:center">
+        <button class="back" id="back" type="button">Choose a different workspace</button>
+      </div>
+    </section>
+  </main>
+  <script>{_SCRIPT.replace("__PRF_SALT_LABEL__", PRF_SALT_LABEL)}</script>
+</body>
+</html>"""

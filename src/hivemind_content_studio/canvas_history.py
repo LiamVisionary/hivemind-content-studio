@@ -464,7 +464,7 @@ class CanvasGatewayClient:
                 continue
         return records
 
-    def media(self, output_name: str) -> tuple[bytes, str]:
+    def media(self, output_name: str, *, requester_pub: str = "") -> tuple[bytes, str]:
         logical_path = Path(output_name).expanduser().resolve()
         exact_output = any(
             logical_path == root or root in logical_path.parents
@@ -475,10 +475,12 @@ class CanvasGatewayClient:
             if exact_output
             else f"/image/{urllib.parse.quote(logical_path.name)}"
         )
-        request = urllib.request.Request(
-            f"{self.base_url}{route}",
-            headers={"Authorization": f"Bearer {self._token()}", "Accept": "image/*,video/*,audio/*"},
-        )
+        headers = {"Authorization": f"Bearer {self._token()}", "Accept": "image/*,video/*,audio/*"}
+        pub = str(requester_pub or "").strip()
+        if pub:
+            # The gateway serves whichever envelope matches the presented key.
+            headers["X-E2E-Requester-Pub"] = pub
+        request = urllib.request.Request(f"{self.base_url}{route}", headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
                 return response.read(), response.headers.get_content_type()

@@ -26,6 +26,16 @@ def load_app():
     return app
 
 
+def open_sealed_envelope(path, key_path):
+    """The plaintext inside an enc:v1 envelope, via the real unseal helper.
+
+    Sealing is only worth asserting on with real keys: a mocked cipher cannot
+    show that one recipient's key opens its envelope and not the other's."""
+    import media_unseal
+    envelope = json.loads(Path(path).read_text(encoding='utf-8'))
+    return media_unseal.unseal(envelope, media_unseal.load_private_key(key_path))
+
+
 class ZImageAppTests(unittest.TestCase):
     def test_ltx_mlx_runtime_prefers_persistent_checkout_over_temp(self):
         app = load_app()
@@ -2006,6 +2016,7 @@ class ZImageAppTests(unittest.TestCase):
                         f'http://127.0.0.1:{server.server_port}/api/generate',
                         data=json.dumps({
                             'backend': 'mlx-mxfp8-bigloves-klein3-edit',
+                            'studio_lane': 'image:window-a:2',
                             'prompt': 'reference sheet of the subject',
                             'image_base64': 'data:image/png;base64,' + base64.b64encode(b'front').decode(),
                             'images_base64': [
@@ -2031,6 +2042,7 @@ class ZImageAppTests(unittest.TestCase):
                     server_thread.join(timeout=2)
 
             self.assertEqual(payload['id'], 'job-multi-ref')
+            self.assertEqual(captured['options']['studio_lane'], 'image:window-a:2')
             refs = captured['options']['image_paths']
             self.assertEqual(len(refs), 4)
             self.assertEqual(str(captured['image_path']), refs[0])
@@ -2062,11 +2074,6 @@ class ZImageAppTests(unittest.TestCase):
             'agent_key': agent_key, 'agent_spki': agent_spki,
         }
 
-    def _open_envelope(self, path, key_path):
-        import media_unseal
-        envelope = json.loads(Path(path).read_text(encoding='utf-8'))
-        return media_unseal.unseal(envelope, media_unseal.load_private_key(key_path))
-
     def test_agent_dual_seal_gives_each_recipient_its_own_openable_envelope(self):
         app = load_app()
         with TemporaryDirectory() as td:
@@ -2092,13 +2099,13 @@ class ZImageAppTests(unittest.TestCase):
                 # Distinct envelopes (fresh DEK + IV each), same plaintext.
                 self.assertNotEqual(owner_envelope.read_bytes(), agent_envelope.read_bytes())
                 expected = b'\x89PNG\r\n\x1a\n' + b'pixels-that-only-a-key-holder-sees'
-                self.assertEqual(self._open_envelope(owner_envelope, fx['owner_key']), expected)
-                self.assertEqual(self._open_envelope(agent_envelope, fx['agent_key']), expected)
+                self.assertEqual(open_sealed_envelope(owner_envelope, fx['owner_key']), expected)
+                self.assertEqual(open_sealed_envelope(agent_envelope, fx['agent_key']), expected)
                 # Neither key opens the other's envelope.
                 with self.assertRaises(Exception):
-                    self._open_envelope(owner_envelope, fx['agent_key'])
+                    open_sealed_envelope(owner_envelope, fx['agent_key'])
                 with self.assertRaises(Exception):
-                    self._open_envelope(agent_envelope, fx['owner_key'])
+                    open_sealed_envelope(agent_envelope, fx['owner_key'])
 
     def test_agent_dual_seal_only_touches_jobs_that_registered_a_key(self):
         app = load_app()
@@ -3011,6 +3018,413 @@ class ZImageAppTests(unittest.TestCase):
             index = cmd.index(str(ref.resolve()))
             self.assertEqual(cmd[index - 1], '--images')
 
+    def test_native_mlx_biglove_queue_coalesces_duplicate_inflight_edits(self):
+        app = load_app()
+        started = app.threading.Event()
+        release = app.threading.Event()
+        calls = []
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            calls.append(job_id)
+            started.set()
+            release.wait(2)
+
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            refs = []
+            for index in range(27):
+                ref = root / f'media-studio-inline-{index}.jpg'
+                ref.write_bytes(b'the exact same staged image')
+                refs.append(ref)
+
+            try:
+                with patch.object(app, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app, 'jobs', {}) as jobs:
+                    job_ids = [
+                        app.queue_native_mlx_biglove_job(
+                            'same edit prompt', ref, {'width': 1120, 'height': 1408})
+                        for ref in refs
+                    ]
+                    self.assertTrue(started.wait(1))
+
+                    self.assertEqual(len(set(job_ids)), 1)
+                    self.assertEqual(calls, [job_ids[0]])
+                    self.assertEqual(jobs[job_ids[0]]['coalesced_requests'], 26)
+            finally:
+                release.set()
+
+    def test_generate_api_coalesces_the_27_request_klein_retry_storm(self):
+        app = load_app()
+        started = app.threading.Event()
+        release = app.threading.Event()
+        calls = []
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            calls.append(job_id)
+            started.set()
+            release.wait()
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir()
+            server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+            server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+            payload = json.dumps({
+                'backend': 'mlx-mxfp8-bigloves-klein3-edit',
+                'studio_lane': 'image:window-a:1',
+                'prompt': 'same edit prompt',
+                'image_base64': 'data:image/jpeg;base64,' + base64.b64encode(b'the exact same staged image').decode(),
+                'width': 1120,
+                'height': 1408,
+            }).encode('utf-8')
+            try:
+                with patch.object(app, 'TOKEN', 'test-token'), \
+                     patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
+                     patch.object(app, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app, 'jobs', {}) as jobs:
+                    server_thread.start()
+                    job_ids = []
+                    for _index in range(27):
+                        request = app.Request(
+                            f'http://127.0.0.1:{server.server_port}/api/generate',
+                            data=payload,
+                            headers={
+                                'Authorization': 'Bearer test-token',
+                                'Content-Type': 'application/json',
+                            },
+                            method='POST',
+                        )
+                        with app.urlopen(request, timeout=5) as response:
+                            self.assertEqual(response.status, 202)
+                            job_ids.append(json.loads(response.read().decode('utf-8'))['id'])
+
+                    self.assertTrue(started.wait(1))
+                    self.assertEqual(len(set(job_ids)), 1)
+                    self.assertEqual(calls, [job_ids[0]])
+                    self.assertEqual(jobs[job_ids[0]]['coalesced_requests'], 26)
+                    self.assertEqual(len(list(input_dir.glob('media-studio-inline-*'))), 27)
+            finally:
+                release.set()
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+    def test_generate_api_queues_non_klein_images_in_the_studio_lane(self):
+        app = load_app()
+        captured = {}
+
+        def fake_start(media_type, options, runner, args):
+            captured.update(
+                media_type=media_type,
+                options=dict(options),
+                runner=runner,
+                args=args,
+            )
+            return None
+
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        try:
+            with patch.object(app, 'TOKEN', 'test-token'), \
+                 patch.object(app, 'jobs', {}), \
+                 patch.object(app, 'start_studio_generation_thread', side_effect=fake_start):
+                server_thread.start()
+                request = app.Request(
+                    f'http://127.0.0.1:{server.server_port}/api/generate',
+                    data=json.dumps({
+                        'backend': 'comfy-api-image',
+                        'studio_lane': 'image:window-a:3',
+                        'prompt': 'a non-Klein request',
+                    }).encode('utf-8'),
+                    headers={
+                        'Authorization': 'Bearer test-token',
+                        'Content-Type': 'application/json',
+                    },
+                    method='POST',
+                )
+                with app.urlopen(request, timeout=5) as response:
+                    payload = json.loads(response.read().decode('utf-8'))
+                    self.assertEqual(response.status, 202)
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+        self.assertEqual(payload['backend'], 'comfy-api-image')
+        self.assertEqual(captured['media_type'], 'image')
+        self.assertEqual(captured['options']['studio_lane'], 'image:window-a:3')
+        self.assertIs(captured['runner'], app.run_comfy_api_image)
+        self.assertEqual(captured['args'][0], payload['id'])
+
+    def test_native_mlx_biglove_queue_serializes_distinct_edits(self):
+        app = load_app()
+        first_started = app.threading.Event()
+        second_started = app.threading.Event()
+        release_first = app.threading.Event()
+        both_finished = app.threading.Event()
+        calls = []
+        calls_lock = app.threading.Lock()
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            with calls_lock:
+                calls.append(job_id)
+                call_number = len(calls)
+            if call_number == 1:
+                first_started.set()
+                release_first.wait(2)
+            else:
+                second_started.set()
+                both_finished.set()
+
+        with TemporaryDirectory() as td:
+            ref = Path(td) / 'source.jpg'
+            ref.write_bytes(b'image')
+            try:
+                with patch.object(app, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app, 'jobs', {}):
+                    first_id = app.queue_native_mlx_biglove_job('first edit', ref, {})
+                    self.assertTrue(first_started.wait(1))
+                    second_id = app.queue_native_mlx_biglove_job('second edit', ref, {})
+
+                    self.assertNotEqual(first_id, second_id)
+                    self.assertFalse(second_started.wait(0.2))
+                    release_first.set()
+                    self.assertTrue(both_finished.wait(1))
+                    self.assertEqual(calls, [first_id, second_id])
+            finally:
+                release_first.set()
+
+    def test_native_mlx_biglove_queue_allows_distinct_tab_lanes_to_overlap(self):
+        app = load_app()
+        both_started = app.threading.Event()
+        release = app.threading.Event()
+        calls = []
+        calls_lock = app.threading.Lock()
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            with calls_lock:
+                calls.append((job_id, options['studio_lane']))
+                if len(calls) == 2:
+                    both_started.set()
+            release.wait(2)
+
+        with TemporaryDirectory() as td:
+            ref = Path(td) / 'source.jpg'
+            ref.write_bytes(b'image')
+            try:
+                with patch.object(app, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app, 'jobs', {}):
+                    first_id = app.queue_native_mlx_biglove_job(
+                        'first tab', ref, {'studio_lane': 'image:window-a:1'})
+                    second_id = app.queue_native_mlx_biglove_job(
+                        'second tab', ref, {'studio_lane': 'image:window-a:2'})
+
+                    self.assertTrue(both_started.wait(1))
+                    self.assertEqual({job_id for job_id, _lane in calls}, {first_id, second_id})
+                    self.assertEqual(
+                        {lane for _job_id, lane in calls},
+                        {'image:window-a:1', 'image:window-a:2'},
+                    )
+            finally:
+                release.set()
+
+    def test_native_mlx_biglove_does_not_coalesce_identical_edits_across_tabs(self):
+        app = load_app()
+        both_started = app.threading.Event()
+        release = app.threading.Event()
+        calls = []
+        calls_lock = app.threading.Lock()
+
+        def fake_run(job_id, prompt, image_path, options, workflow):
+            with calls_lock:
+                calls.append((job_id, options['studio_lane']))
+                if len(calls) == 2:
+                    both_started.set()
+            release.wait(2)
+
+        with TemporaryDirectory() as td:
+            ref = Path(td) / 'source.jpg'
+            ref.write_bytes(b'identical image')
+            try:
+                with patch.object(app, 'supports_native_mlx_biglove_route', return_value=True), \
+                     patch.object(app, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app, 'run_mlx_klein3_edit', side_effect=fake_run), \
+                     patch.object(app, 'jobs', {}):
+                    first_id = app.queue_native_mlx_biglove_job(
+                        'same edit', ref, {'studio_lane': 'image:window-a:1'})
+                    second_id = app.queue_native_mlx_biglove_job(
+                        'same edit', ref, {'studio_lane': 'image:window-a:2'})
+
+                    self.assertNotEqual(first_id, second_id)
+                    self.assertTrue(both_started.wait(1))
+            finally:
+                release.set()
+
+    def test_generation_lane_serializes_non_klein_image_backends_in_one_tab(self):
+        app = load_app()
+        first_started = app.threading.Event()
+        second_started = app.threading.Event()
+        release_first = app.threading.Event()
+        calls = []
+
+        def first_runner():
+            calls.append('comfy-api-image')
+            first_started.set()
+            release_first.wait(2)
+
+        def second_runner():
+            calls.append('krea2')
+            second_started.set()
+
+        try:
+            app.start_studio_generation_thread(
+                'image', {'studio_lane': 'image:window-a:1'}, first_runner, ())
+            self.assertTrue(first_started.wait(1))
+            second = app.start_studio_generation_thread(
+                'image', {'studio_lane': 'image:window-a:1'}, second_runner, ())
+
+            self.assertFalse(second_started.wait(0.2))
+            release_first.set()
+            second.join(timeout=1)
+            self.assertTrue(second_started.is_set())
+            self.assertEqual(calls, ['comfy-api-image', 'krea2'])
+        finally:
+            release_first.set()
+
+    def test_generation_lanes_keep_tabs_and_media_studios_independent(self):
+        app = load_app()
+        all_started = app.threading.Event()
+        release = app.threading.Event()
+        calls = []
+        calls_lock = app.threading.Lock()
+
+        def runner(label):
+            with calls_lock:
+                calls.append(label)
+                if len(calls) == 3:
+                    all_started.set()
+            release.wait(2)
+
+        try:
+            threads = [
+                app.start_studio_generation_thread(
+                    'image', {'studio_lane': 'window-a:1'}, runner, ('image-tab-1',)),
+                app.start_studio_generation_thread(
+                    'image', {'studio_lane': 'window-a:2'}, runner, ('image-tab-2',)),
+                app.start_studio_generation_thread(
+                    'video', {'studio_lane': 'window-a:1'}, runner, ('video-tab-1',)),
+            ]
+
+            self.assertTrue(all_started.wait(1))
+            self.assertEqual(set(calls), {'image-tab-1', 'image-tab-2', 'video-tab-1'})
+        finally:
+            release.set()
+            for thread in locals().get('threads', []):
+                thread.join(timeout=1)
+
+    def test_native_mlx_ltx_queue_serializes_video_jobs_in_one_tab(self):
+        app = load_app()
+        first_started = app.threading.Event()
+        second_started = app.threading.Event()
+        release_first = app.threading.Event()
+        calls = []
+
+        def fake_run(job_id, native, workflow):
+            calls.append((job_id, native['options']['studio_lane']))
+            if len(calls) == 1:
+                first_started.set()
+                release_first.wait(2)
+            else:
+                second_started.set()
+
+        def native(prompt):
+            return {
+                'variant': 'regular-q8-distilled',
+                'prompt': prompt,
+                'images': [],
+                'options': {
+                    'width': 768,
+                    'height': 448,
+                    'frames': 97,
+                    'frame_rate': 24,
+                    'seed': 42,
+                    'studio_lane': 'video:window-a:1',
+                },
+            }
+
+        try:
+            with patch.object(app, 'supports_native_mlx_ltx_route', return_value=True), \
+                 patch.object(app, 'run_native_mlx_ltx_video', side_effect=fake_run), \
+                 patch.object(app, 'jobs', {}):
+                first_id = app.queue_native_mlx_ltx_job(native('first'))
+                self.assertTrue(first_started.wait(1))
+                second_id = app.queue_native_mlx_ltx_job(native('second'))
+
+                self.assertFalse(second_started.wait(0.2))
+                release_first.set()
+                self.assertTrue(second_started.wait(1))
+                self.assertEqual(
+                    calls,
+                    [
+                        (first_id, 'video:window-a:1'),
+                        (second_id, 'video:window-a:1'),
+                    ],
+                )
+        finally:
+            release_first.set()
+
+    def test_comfy_prompt_body_exposes_the_opaque_studio_lane(self):
+        app = load_app()
+        body = json.dumps({
+            'prompt': {},
+            'extra_data': {
+                'extra_pnginfo': {
+                    'studioLane': 'video:window-a:7',
+                },
+            },
+        }).encode('utf-8')
+
+        self.assertEqual(
+            app._studio_lane_from_comfy_prompt_body(body),
+            'video:window-a:7',
+        )
+
+    def test_native_mlx_biglove_memory_reservations_close_parallel_start_race(self):
+        app = load_app()
+        gib = 1024 ** 3
+        second_admitted = app.threading.Event()
+        jobs = {
+            'job-1': {'id': 'job-1', 'status': 'queued'},
+            'job-2': {'id': 'job-2', 'status': 'queued'},
+        }
+
+        with patch.object(app, 'jobs', jobs), \
+             patch.object(app, '_available_memory_bytes', return_value=60 * gib):
+            first = app._acquire_klein_memory_reservation('job-1')
+
+            def admit_second():
+                reservation = app._acquire_klein_memory_reservation('job-2')
+                second_admitted.set()
+                app._release_klein_memory_reservation(reservation)
+
+            thread = app.threading.Thread(target=admit_second, daemon=True)
+            thread.start()
+            try:
+                self.assertFalse(second_admitted.wait(0.2))
+                app._release_klein_memory_reservation(first)
+                self.assertTrue(second_admitted.wait(1))
+            finally:
+                app._release_klein_memory_reservation(first)
+                thread.join(timeout=1)
+
     def test_mxfp8_biglove_multi_lora_stack_string_uses_native_route_with_lora_payload(self):
         app = load_app()
         with TemporaryDirectory() as td:
@@ -3768,14 +4182,21 @@ class CancelGenerationJobTests(unittest.TestCase):
             def read(self):
                 return self._payload
 
+        dequeued = []
+
         def fake_urlopen(request, timeout=None):
             url = request.full_url
             calls.append((request.get_method(), url, request.data))
             if url.endswith('/queue') and request.get_method() == 'GET':
+                # A deleted prompt really is gone from the next read; the cancel
+                # verifies that rather than trusting the POST's 200.
+                pending = [] if dequeued else [[2, 'pending-prompt']]
                 return FakeResponse(json.dumps({
                     'queue_running': [[1, 'running-prompt']],
-                    'queue_pending': [[2, 'pending-prompt']],
+                    'queue_pending': pending,
                 }).encode('utf-8'))
+            if url.endswith('/queue'):
+                dequeued.append(True)
             return FakeResponse(b'{}')
 
         with patch.object(app, 'jobs', {}), patch.object(app, 'native_job_procs', {}), \
@@ -3783,6 +4204,8 @@ class CancelGenerationJobTests(unittest.TestCase):
              patch.object(app, 'urlopen', side_effect=fake_urlopen):
             result = app.cancel_generation_job('pending-prompt')
         self.assertTrue(result['interrupted'])
+        # Dequeued is immediate and verifiable — this one really is stopped.
+        self.assertTrue(result['stopped'])
         deletes = [c for c in calls if c[0] == 'POST' and c[1].endswith('/queue')]
         self.assertEqual(len(deletes), 1)
         self.assertEqual(json.loads(deletes[0][2].decode('utf-8')), {'delete': ['pending-prompt']})
@@ -3799,22 +4222,36 @@ class CancelGenerationJobTests(unittest.TestCase):
             def read(self):
                 return self._payload
 
+        interrupted_at = []
+
         def fake_urlopen(request, timeout=None):
             url = request.full_url
             calls.append((request.get_method(), url))
             if url.endswith('/queue') and request.get_method() == 'GET':
+                # Comfy honours an interrupt at the next checkpoint, so the
+                # prompt is still running on the read immediately after the
+                # POST and gone on the one after that.
+                running = [] if len(interrupted_at) > 1 else [[1, 'running-prompt']]
+                if interrupted_at:
+                    interrupted_at.append(True)
                 return FakeResponse(json.dumps({
-                    'queue_running': [[1, 'running-prompt']],
+                    'queue_running': running,
                     'queue_pending': [],
                 }).encode('utf-8'))
+            if url.endswith('/interrupt'):
+                interrupted_at.append(True)
             return FakeResponse(b'{}')
 
         with patch.object(app, 'jobs', {}), patch.object(app, 'native_job_procs', {}), \
              patch.object(app, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app, 'CANCEL_VERIFY_POLL_SECONDS', 0.01), \
              patch.object(app, 'urlopen', side_effect=fake_urlopen):
             result = app.cancel_generation_job('running-prompt')
         self.assertTrue(result['interrupted'])
         self.assertIn(('POST', 'http://comfy.test/interrupt'), calls)
+        # Waited for the prompt to actually leave the queue before saying so.
+        self.assertTrue(result['stopped'])
+        self.assertEqual(result['backend_state'], 'running')
 
     def test_cancel_of_a_finished_or_unknown_job_is_a_noop(self):
         app = load_app()
@@ -4104,6 +4541,7 @@ class RemoteComfyLaneTests(unittest.TestCase):
                  patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
                  patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
                  patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', False), \
                  patch.object(app, '_seal_file_with_helper', side_effect=fake_seal), \
                  patch.object(app, 'urlopen', side_effect=fake_urlopen):
                 app.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
@@ -4122,6 +4560,203 @@ class RemoteComfyLaneTests(unittest.TestCase):
                 self.assertEqual(app.comfy_prompt_route(pid)['status'], 'harvested')
                 self.assertIn('/view?', fetched[0])
                 self.assertIn('filename=video_00001_.mp4', fetched[0])
+
+    def _harvest_keypairs(self, root):
+        """Real RSA keys for the harvest path, as media_unseal would mint them.
+
+        Fakes would prove nothing here: the claim under test is that two
+        independent private keys each open their own envelope and neither opens
+        the other's, which only real crypto can show.
+        """
+        import media_unseal
+
+        owner_key = Path(root) / 'owner.pem'
+        agent_key = Path(root) / 'agent.pem'
+        return {
+            'owner_key': owner_key, 'owner_spki': media_unseal.generate_keypair(owner_key),
+            'agent_key': agent_key, 'agent_spki': media_unseal.generate_keypair(agent_key),
+        }
+
+    def _harvest_urlopen(self, payload, fetched):
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return payload
+
+        def fake_urlopen(request, timeout=None):
+            fetched.append(request.full_url)
+            return FakeResponse()
+
+        return fake_urlopen
+
+    def test_remote_harvest_gives_the_owner_and_the_agent_each_an_openable_envelope(self):
+        """A rental job an agent submitted must not lock the owner out.
+
+        The harvest sealed to a single recipient — the requester — so an
+        agent-submitted job came back as media the owner's own studio could
+        never open: the History tile failed to decrypt and Download saved the
+        enc:v1 JSON with an .mp4 name. The owner's envelope now keeps the plain
+        <name>.e2e path every reader already looks for, and the agent keeps its
+        access through its own <name>.agent-<fp>.e2e alongside it.
+        """
+        app = load_app()
+        pid = 'remote-prompt-dual'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        payload = b'MP4BYTES-that-only-a-key-holder-sees'
+        fetched = []
+
+        with TemporaryDirectory() as tmp:
+            keys = self._harvest_keypairs(tmp)
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app, 'vault_public_key_spki', return_value=keys['owner_spki']), \
+                 patch.object(app, 'urlopen', side_effect=self._harvest_urlopen(payload, fetched)):
+                app.record_comfy_prompt_route(pid, 'rental', requester_spki=keys['agent_spki'])
+                harvested = app.harvest_remote_comfy_outputs(pid, history)
+                self.assertEqual(app.comfy_prompt_route(pid)['status'], 'harvested')
+
+            logical = out_dir / harvested[0]
+            owner_envelope = app.e2e_envelope_path_for(logical)
+            agent_envelope = app.agent_envelope_path_for(
+                logical, app.requester_fingerprint(keys['agent_spki']))
+
+            # Exactly two envelopes and no plaintext: the owner's at the path
+            # History reads, the agent's beside it.
+            self.assertEqual(
+                sorted(p.name for p in out_dir.iterdir()),
+                sorted([owner_envelope.name, agent_envelope.name]))
+            self.assertEqual(list(state_dir.glob('.remote-harvest-*')), [])
+            # Distinct envelopes (fresh DEK + IV each), same fetched bytes.
+            self.assertNotEqual(owner_envelope.read_bytes(), agent_envelope.read_bytes())
+            self.assertEqual(open_sealed_envelope(owner_envelope, keys['owner_key']), payload)
+            self.assertEqual(open_sealed_envelope(agent_envelope, keys['agent_key']), payload)
+            # Neither key opens the other's envelope.
+            with self.assertRaises(Exception):
+                open_sealed_envelope(owner_envelope, keys['agent_key'])
+            with self.assertRaises(Exception):
+                open_sealed_envelope(agent_envelope, keys['owner_key'])
+
+    def test_history_shows_one_tile_for_a_dual_sealed_output(self):
+        """Two recipients, one generation.
+
+        The harvest now drops a second envelope beside the owner's, in the same
+        shared output dir the file-fallback history walks. The agent's copy is
+        sealed to a key this host does not hold, so listing it would offer the
+        owner a tile their browser could never decrypt — the very symptom the
+        dual seal exists to remove."""
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            out_dir.mkdir()
+            logical = out_dir / 'cmf-41eecc4f-minimax_h3_00001_.mp4'
+            fingerprint = 'b8c09d11fbfe53e0c2de8857adc7e6f2'
+            app.e2e_envelope_path_for(logical).write_text('{"ciphertext":"owner"}')
+            app.agent_envelope_path_for(logical, fingerprint).write_text('{"ciphertext":"agent"}')
+            with patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app, 'OUT_DIR', out_dir), \
+                 patch.object(app, '_workflow_index_records', {}):
+                records = app.output_file_records()
+        self.assertEqual([r['outputs'] for r in records], [[str(logical.resolve())]])
+
+    def test_remote_harvest_writes_one_envelope_when_there_is_no_second_recipient(self):
+        """No owner vault, and an owner-initiated job, each keep one envelope.
+
+        Without a vault there is nobody to seal a second copy to, so the
+        requester's single envelope stays exactly as it was; and a job the
+        owner started themselves never presents a requester key, so it must not
+        grow a stray agent envelope in the shared output dir.
+        """
+        app = load_app()
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        sealed = []
+
+        def fake_seal(spki, source, envelope, media_name):
+            sealed.append((spki, Path(envelope).name))
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        for label, owner_spki, requester_spki, expected_spki in (
+            ('no-vault', None, self.SPKI, self.SPKI),
+            ('owner-job', self.OTHER_SPKI, None, self.OTHER_SPKI),
+        ):
+            with self.subTest(case=label), TemporaryDirectory() as tmp:
+                sealed.clear()
+                out_dir = Path(tmp) / 'output'
+                state_dir = Path(tmp) / 'state'
+                pid = f'remote-prompt-single-{label}'
+                patches = self._route_state(app, tmp)
+                with patches, \
+                     patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                     patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                     patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                     patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                     patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                     patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                     patch.object(app, 'vault_public_key_spki', return_value=owner_spki), \
+                     patch.object(app, '_seal_file_with_helper', side_effect=fake_seal), \
+                     patch.object(app, 'urlopen', side_effect=self._harvest_urlopen(b'MP4BYTES', [])):
+                    app.record_comfy_prompt_route(pid, 'rental', requester_spki=requester_spki)
+                    harvested = app.harvest_remote_comfy_outputs(pid, history)
+
+                self.assertEqual(sealed, [(expected_spki, harvested[0] + '.e2e')])
+                self.assertEqual([p.name for p in out_dir.iterdir()], [harvested[0] + '.e2e'])
+
+    def test_remote_harvest_keeps_the_agent_copy_when_the_owner_copy_is_the_one_at_risk(self):
+        """A failed second seal may never cost the owner their only copy.
+
+        The agent's envelope is a convenience; the owner's is the generation.
+        So the owner seals first, and a failure sealing the agent copy is
+        logged and swallowed — the harvest still completes and still records
+        the output, exactly as the local path behaves.
+        """
+        app = load_app()
+        pid = 'remote-prompt-agent-fails'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        agent_fp = app.requester_fingerprint(self.SPKI)
+
+        def fake_seal(spki, source, envelope, media_name):
+            if spki == self.SPKI:
+                raise RuntimeError('seal helper exited 1')
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app, 'vault_public_key_spki', return_value=self.OTHER_SPKI), \
+                 patch.object(app, '_seal_file_with_helper', side_effect=fake_seal), \
+                 patch.object(app, 'urlopen', side_effect=self._harvest_urlopen(b'MP4BYTES', [])):
+                app.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                harvested = app.harvest_remote_comfy_outputs(pid, history)
+                # The output is still recorded, so the scrub that follows can run.
+                self.assertEqual(app.comfy_prompt_route(pid)['status'], 'harvested')
+
+            self.assertEqual([p.name for p in out_dir.iterdir()], [harvested[0] + '.e2e'])
+            self.assertNotIn(agent_fp, ''.join(p.name for p in out_dir.iterdir()))
+            self.assertEqual(list(state_dir.glob('.remote-harvest-*')), [])
 
     def test_scrub_deletes_remote_files_and_drops_history(self):
         app = load_app()
@@ -4741,3 +5376,182 @@ class RemoteComfyLaneTests(unittest.TestCase):
         self.assertIn('view flaked', route['error'])
         self.assertEqual(len(scrubs), 1)
         self.assertTrue(scrubs[0][1]['inputs_only'])
+
+
+class BigLoveKlein3ResolutionTests(unittest.TestCase):
+    """The native Klein lane used to pin every edit to its 1.5MP bucket, so the
+    studio's Resolution control and the registry's advertised width/height did
+    nothing on Apple Silicon. A requested canvas is now a pixel budget."""
+
+    def test_unspecified_size_still_lands_on_the_trained_bucket(self):
+        app = load_app()
+        self.assertEqual(app.snap_biglove_klein3_resolution(0, 0), app.BIGLOVE_KLEIN3_BASE_BUCKET)
+        self.assertEqual(app.snap_biglove_klein3_resolution(None, None), app.BIGLOVE_KLEIN3_BASE_BUCKET)
+        self.assertEqual(app.snap_biglove_klein3_resolution('', ''), app.BIGLOVE_KLEIN3_BASE_BUCKET)
+
+    def test_requested_budget_scales_the_bucket_and_stays_on_the_grid(self):
+        app = load_app()
+        for width, height in ((512, 768), (768, 1152), (1152, 1728)):
+            with self.subTest(width=width, height=height):
+                out_w, out_h = app.snap_biglove_klein3_resolution(width, height)
+                self.assertEqual((out_w, out_h), (width, height))
+                self.assertEqual((out_w % 32, out_h % 32), (0, 0))
+        # The budget is what carries over, not the requested shape: a square
+        # request keeps its pixel count on the bucket's 2:3 canvas, which the
+        # edit then reshapes onto the reference's own aspect.
+        out_w, out_h = app.snap_biglove_klein3_resolution(1024, 1024)
+        self.assertAlmostEqual(out_w * out_h, 1024 * 1024, delta=60_000)
+        self.assertLess(out_w, out_h)
+
+    def test_budget_is_clamped_to_the_supported_range(self):
+        app = load_app()
+        tiny_w, tiny_h = app.snap_biglove_klein3_resolution(64, 96)
+        self.assertGreaterEqual(tiny_w * tiny_h, app.BIGLOVE_KLEIN3_MIN_PIXELS * 0.95)
+        huge_w, huge_h = app.snap_biglove_klein3_resolution(4096, 4096)
+        self.assertLessEqual(huge_w * huge_h, app.BIGLOVE_KLEIN3_MAX_PIXELS * 1.05)
+
+    def test_landscape_requests_keep_their_orientation(self):
+        app = load_app()
+        out_w, out_h = app.snap_biglove_klein3_resolution(1536, 1024)
+        self.assertGreater(out_w, out_h)
+
+    def test_a_comfy_graph_latent_is_a_shape_not_a_budget(self):
+        app = load_app()
+        # The stock 512x512 EmptyLatentImage next to an ImageScaleToTotalPixels
+        # node must not be read as a request for a 0.26MP draft.
+        self.assertEqual(app.orient_biglove_klein3_bucket(512, 512), app.BIGLOVE_KLEIN3_BASE_BUCKET)
+        bucket_w, bucket_h = app.BIGLOVE_KLEIN3_BASE_BUCKET
+        self.assertEqual(app.orient_biglove_klein3_bucket(1024, 512), (bucket_h, bucket_w))
+
+
+class CancelHonestyTests(unittest.TestCase):
+    """Cancelling reports what actually happened, not what was requested.
+
+    The old code answered True as soon as a lane accepted the /interrupt POST.
+    On a rented box loading a video model that acceptance means nothing for
+    minutes: the GPU stays busy, the next generation queues behind it, and the
+    studio has already said "cancelled". These pin the distinction.
+    """
+
+    @staticmethod
+    def _queue_responder(calls, still_running):
+        class FakeResponse:
+            def __init__(self, payload=b'{}'):
+                self._payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return self._payload
+
+        def fake_urlopen(request, timeout=None):
+            url = request.full_url
+            calls.append((request.get_method(), url))
+            if url.endswith('/queue') and request.get_method() == 'GET':
+                running = [[1, 'stuck-prompt']] if still_running() else []
+                return FakeResponse(json.dumps({
+                    'queue_running': running, 'queue_pending': [],
+                }).encode('utf-8'))
+            return FakeResponse()
+
+        return fake_urlopen
+
+    def test_a_prompt_that_will_not_die_yet_is_reported_as_not_stopped(self):
+        # The exact shape of the reported bug: accepted, but still holding the
+        # backend when the verification window runs out.
+        app = load_app()
+        calls = []
+        with patch.object(app, 'jobs', {}), patch.object(app, 'native_job_procs', {}), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app, 'CANCEL_VERIFY_SECONDS', 0.05), \
+             patch.object(app, 'CANCEL_VERIFY_POLL_SECONDS', 0.01), \
+             patch.object(app, 'urlopen', side_effect=self._queue_responder(calls, lambda: True)):
+            result = app.cancel_generation_job('stuck-prompt')
+        self.assertTrue(result['interrupted'], 'the backend did accept the request')
+        self.assertFalse(result['stopped'], 'but it never let go — the caller must not claim it did')
+        self.assertEqual(result['backend_state'], 'running')
+
+    def test_the_verification_window_is_bounded(self):
+        # A backend that never lets go must not hang the cancel request; the
+        # studio's own call has a timeout and would report a failed cancel.
+        app = load_app()
+        calls = []
+        started = time.monotonic()
+        with patch.object(app, 'jobs', {}), patch.object(app, 'native_job_procs', {}), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app, 'CANCEL_VERIFY_SECONDS', 0.2), \
+             patch.object(app, 'CANCEL_VERIFY_POLL_SECONDS', 0.01), \
+             patch.object(app, 'urlopen', side_effect=self._queue_responder(calls, lambda: True)):
+            app.cancel_generation_job('stuck-prompt')
+        self.assertLess(time.monotonic() - started, 3.0)
+
+    def test_a_prompt_on_no_lane_at_all_counts_as_stopped(self):
+        # Nothing of ours is holding a GPU, which is the end state the caller
+        # wanted — but it was never asked for, so `interrupted` stays False.
+        app = load_app()
+        calls = []
+        with patch.object(app, 'jobs', {}), patch.object(app, 'native_job_procs', {}), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app, 'urlopen', side_effect=self._queue_responder(calls, lambda: False)):
+            result = app.cancel_generation_job('never-here')
+        self.assertFalse(result['interrupted'])
+        self.assertTrue(result['stopped'])
+
+    def test_cancelling_a_remote_prompt_marks_its_route_cancelled_not_errored(self):
+        # A deliberate cancel recorded as an error shows up in History as a
+        # broken generation, and the watcher then reports a failure that never
+        # happened.
+        app = load_app()
+        calls = []
+        routes = {'remote-prompt': {'lane': 'default', 'remote': True, 'status': 'submitted'}}
+        with patch.object(app, 'jobs', {}), patch.object(app, 'native_job_procs', {}), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://comfy.test'}), \
+             patch.object(app, '_comfy_prompt_routes', routes), \
+             patch.object(app, '_comfy_prompt_routes_loaded', True), \
+             patch.object(app, '_persist_comfy_prompt_routes_locked', lambda: None), \
+             patch.object(app, 'CANCEL_VERIFY_POLL_SECONDS', 0.01), \
+             patch.object(app, 'urlopen', side_effect=self._queue_responder(calls, lambda: False)):
+            app.cancel_generation_job('remote-prompt')
+        self.assertEqual(routes['remote-prompt']['status'], 'cancelled')
+        self.assertTrue(routes['remote-prompt'].get('cancelled_at'))
+
+    def test_the_watcher_stops_waiting_on_a_cancelled_prompt(self):
+        # A prompt cancelled while PENDING is deleted from the queue and never
+        # reaches history, so the watcher would otherwise sit through its whole
+        # timeout and then record a spurious "did not finish" error.
+        app = load_app()
+        routes = {'gone': {'lane': 'default', 'remote': True, 'status': 'cancelled'}}
+        with patch.object(app, '_comfy_prompt_routes', routes), \
+             patch.object(app, '_comfy_prompt_routes_loaded', True), \
+             patch.object(app, '_persist_comfy_prompt_routes_locked', lambda: None), \
+             patch.object(app, '_fetch_lane_history', lambda *a, **k: None), \
+             patch.object(app, '_record_lane_progress', lambda *a, **k: None):
+            started = time.monotonic()
+            result = app.watch_remote_comfy_prompt('gone', poll_seconds=0.01, timeout_seconds=30)
+        self.assertLess(time.monotonic() - started, 3.0, 'must not wait out the timeout')
+        self.assertEqual(result['status'], 'cancelled')
+        self.assertNotIn('error', result)
+
+    def test_an_interrupted_prompt_is_not_relabelled_a_failure(self):
+        # Comfy records an interrupted run in history as status_str "error",
+        # identical to a real failure. Only our own record of having asked for
+        # it tells them apart.
+        app = load_app()
+        routes = {'stopped-prompt': {'lane': 'default', 'remote': True, 'status': 'cancelled'}}
+        history = {'status': {'status_str': 'error', 'completed': False}}
+        scrubbed = []
+        with patch.object(app, '_comfy_prompt_routes', routes), \
+             patch.object(app, '_comfy_prompt_routes_loaded', True), \
+             patch.object(app, '_persist_comfy_prompt_routes_locked', lambda: None), \
+             patch.object(app, '_fetch_lane_history', lambda *a, **k: history), \
+             patch.object(app, '_harvest_comfy_workflow_envelopes', lambda: None), \
+             patch.object(app, 'scrub_remote_comfy_prompt', lambda *a, **k: scrubbed.append(a[0])):
+            result = app.watch_remote_comfy_prompt('stopped-prompt', poll_seconds=0.01, timeout_seconds=5)
+        self.assertEqual(result['status'], 'cancelled')
+        self.assertNotIn('error', result)
+        # Still cleaned up: a cancelled job's staged inputs are nobody's asset.
+        self.assertEqual(scrubbed, ['stopped-prompt'])

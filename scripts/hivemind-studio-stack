@@ -219,11 +219,19 @@ PY
   kill_port "$CONTENT_STUDIO_PORT"
   sleep 2
 
+  # FLUX2_CLEAR_CACHE_EVERY_N_STEPS is NOT cosmetic: the server's own default is
+  # 0 (never clear), and a process that lives across many edits then accumulates
+  # an MLX buffer cache that costs more than the model reload it saves. Measured
+  # 2026-08-14, Klein 9B @ 4 steps, same reference: at 1.57 MP the never-clear
+  # server ran 66.5s mean (n=5) — SLOWER than the 55.8s cold CLI (n=3) it was
+  # meant to beat — while clearing every 2 steps landed 52.6s (n=3). At 0.61 MP:
+  # 20.0s vs 35.7s cold on the same hot machine.
   if [ "${ZIMG_ENABLE_FLUX2_SERVER:-0}" = "1" ]; then
     cd "$FLUX2_SERVER_DIR" || return 1
       FLUX2_MODEL="${FLUX2_MODEL:-klein9B}" \
     FLUX2_TRANSFORMER_PATH="${FLUX2_TRANSFORMER_PATH:-$COMFY/models/diffusion_models/BigLoveKlein3_mxfp8_swift_mapped_mlx.safetensors}" \
     FLUX2_TRANSFORMER_QUANT="${FLUX2_TRANSFORMER_QUANT:-bf16}" \
+    FLUX2_CLEAR_CACHE_EVERY_N_STEPS="${FLUX2_CLEAR_CACHE_EVERY_N_STEPS:-2}" \
 	    FLUX2_SERVER_PORT="$FLUX2_SERVER_PORT" MLX_METAL_PATH="$HOME/comfy/Flux2CLI-v2.1.0/mlx.metallib" "$FLUX2_SERVER_BIN" \
 	      >> "$PRIV/z-image-flux2-server.log" 2>&1 &
 	    local pid="$!"
@@ -496,6 +504,8 @@ PY
   cd "$CONTENT_STUDIO" || return 1
   HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+	  COMFY_LANES="$comfy_lanes" \
+  COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   hive-env-run -- uv run content-studio-api \
     >> "$PRIV/hivemind-content-studio.log" 2>&1 &
   pid="$!"
@@ -736,6 +746,10 @@ launch_stop() {
 }
 
 status() {
+  # Read the same overlay `supervise` runs with, or every flag below reports the
+  # pre-overlay default: with the Flux2 server forced on in stack-local.env this
+  # printed "server default: 0" next to a live listener on 8791.
+  load_stack_local_env >/dev/null 2>&1
   echo "LaunchAgent:"
   launchctl print "$DOMAIN/$LABEL" 2>/dev/null | sed -n '1,20p' || echo "  not loaded"
   echo

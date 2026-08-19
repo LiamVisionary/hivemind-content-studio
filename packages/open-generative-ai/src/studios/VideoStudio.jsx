@@ -34,6 +34,7 @@ import { CharacterMenu } from './video/CharacterMenu.jsx';
 import { CastMenu } from './video/CastMenu.jsx';
 import { applyCharacterToPrompt } from '../lib/h3Characters.js';
 import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
+import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 // joinClips itself is imported dynamically inside joinChainFrom — it carries
@@ -71,7 +72,7 @@ import {
 import { t, tf, aspectRatioName } from '../lib/i18n.js';
 
 import { registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
-import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
+import { basenameOf, rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { useMediaSrc } from '../hooks/hooks.js';
 import { Icon } from '../ui/icons.jsx';
@@ -86,9 +87,20 @@ import { StudioLayout } from '../ui/kit.jsx';
 import { UploadPicker } from './UploadPicker.jsx';
 import { FrameSlotsPicker } from './video/FrameSlotsPicker.jsx';
 import { ReferencesMenu } from './video/ReferencesMenu.jsx';
+import {
+  composerFrameHint, composerReferenceHint, describeReferenceAttachment, describeReferenceRejection,
+} from './video/referenceKinds.js';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
-import { withReferenceTags } from '../lib/h3References.js';
+import { referenceKindForFile, referenceKindsInDrag, withReferenceTags } from '../lib/h3References.js';
+import { promoteOutputToReference } from '../lib/outputToReference.js';
+import {
+  attachDroppedReferences,
+  dragCarriesDroppable,
+  droppedOutputPayload,
+  referenceKindForOutput,
+  referenceUploader,
+} from '../lib/referenceDrop.js';
 import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
 import { LoraSection } from './image/LoraSection.jsx';
 import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
@@ -104,6 +116,7 @@ import {
   activeVideoTask, headSwapReadiness, isLtxFamilyModel, isMinimaxFamilyModel, slotLabelsFor,
   sourceVideoSwitchCost, videoRequestPlan, videoTasksFor,
   aspectRatiosFor, durationsFor, resolutionsFor, modesFor, qualitiesFor, effectNamesFor,
+  motionReferenceLimitFor, availableDurationsFor, clampDurationToMotionReference, probeVideoDurationSeconds,
   deriveControlVisibility, deriveExtendBanner, derivePromptUi,
   applyRestoredPreferences, applyGenerationContext,
   startFrameSelectedTransition, startFrameClearedTransition, clearVideoUploadTransition,
@@ -246,6 +259,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     lastSeed: null,
     // history + dialogs
     generationHistory: loadStudioGenerationHistory('video_history').map(redactPrivateHistoryEntry),
+    // A file dropped on the composer is uploading into a reference slot. The
+    // composer's own overlay reports it — a 100 MB clip going up in silence
+    // reads as a drop that did nothing.
+    composerAttaching: false,
     authOpen: false,
     authRetry: null,
     civitaiOpen: false,
@@ -275,13 +292,15 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   return engine;
 }
 
-export function VideoStudio({ active = true, tabActive = true, seed = null, apiRef = null } = {}) {
+export function VideoStudio({ active = true, tabActive = true, seed = null, apiRef = null, studioLane = '' } = {}) {
   const engineRef = useRef(null);
   // The seed is read once, at mount — StudioTabs clears it afterwards, so every
   // later "am I the original tab?" question reads the captured value.
   const seedRef = useRef(seed);
   if (!engineRef.current) engineRef.current = createEngine(seedRef.current || undefined);
   const s = engineRef.current;
+  const generationQueueRef = useRef(null);
+  if (!generationQueueRef.current) generationQueueRef.current = createStudioGenerationQueue();
   const [, setTick] = useState(0);
   const mountedRef = useRef(true);
   const bump = () => { if (mountedRef.current) setTick((n) => n + 1); };
@@ -392,8 +411,18 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
 
   /* ---------------- setup transitions ---------------- */
 
+  // A motion reference collapses the duration range — it is trimmed to the
+  // clip's own length, so it costs more the longer the clip is. Whenever the
+  // canvas or the references change, pull the selected duration back onto what
+  // can actually render: a 10s chosen before the reference was attached would
+  // otherwise survive silently and die on the card minutes into the run.
+  const withDurationThatFits = (setup) => {
+    const duration = clampDurationToMotionReference(setup, setup.modelId);
+    return Number(duration) === Number(setup.duration) ? setup : { ...setup, duration };
+  };
+
   const commit = (nextSetup, { persist = true } = {}) => {
-    s.setup = nextSetup;
+    s.setup = withDurationThatFits(nextSetup);
     if (persist) persistVideoPreferences();
     bump();
   };
@@ -585,7 +614,10 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   };
 
   const onReferenceVideosChange = (items) => {
-    s.setup = { ...s.setup, referenceVideos: (Array.isArray(items) ? items : []).filter((item) => item?.url) };
+    s.setup = withDurationThatFits({
+      ...s.setup,
+      referenceVideos: (Array.isArray(items) ? items : []).filter((item) => item?.url),
+    });
     bump();
   };
 
@@ -602,7 +634,9 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   // personas bring. Applying one without the other is how a prompt ends up
   // addressing a <Picture 7> that was never attached.
   const applyCast = ({ prompt, images, videos, audios, persona }) => {
-    s.setup = {
+    // A cast can bring motion clips with it, which collapses the duration
+    // range the same way attaching one by hand does.
+    s.setup = withDurationThatFits({
       ...s.setup,
       prompt,
       referenceImageUrls: images,
@@ -611,7 +645,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       // The rows only still ARE one saved character when the cast is that one
       // persona; anything else and the name would be a lie about what is loaded.
       persona: persona?.name ? { id: persona.id || '', name: persona.name } : null,
-    };
+    });
     updateComposerDraft({ prompt });
     bump();
     const total = images.length + videos.length + audios.length;
@@ -1490,7 +1524,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
 
   /* ---------------- generation ---------------- */
 
-  const generate = async () => {
+  const generateNow = async () => {
     // Rented mode promises WHERE this runs — refuse rather than quietly
     // falling back to this Mac's GPU.
     if (s.setup.rentedOnly
@@ -1618,6 +1652,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         s.lastSeed = resolvedSeed;
         const localParams = {
           model: setup.modelId,
+          studio_lane: studioLane,
           workflow_id: workflowIdFromHivemindModelId(setup.modelId),
           prompt: prompt || '',
           aspect_ratio: matchStartFrameAr ? '' : setup.ar,
@@ -1750,7 +1785,12 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
 
       // ─── Local Wan2GP ──────────────────────────────────────────────────────
       if (isWan2gpLocal) {
-        const localParams = { model: setup.modelId, prompt: prompt || '', aspect_ratio: setup.ar };
+        const localParams = {
+          model: setup.modelId,
+          prompt: prompt || '',
+          aspect_ratio: setup.ar,
+          studio_lane: studioLane,
+        };
         if (setup.imageMode && setup.imageUrl) localParams.image = setup.imageUrl;
         const res = await localAI.generate(localParams);
         if (res && res.url) {
@@ -1859,6 +1899,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       bump();
     }
   };
+  const generate = () => generationQueueRef.current.enqueue(generateNow);
 
   // Cancel / reset the in-flight generation. Aborts the poll immediately, forwards
   // a best-effort interrupt to whichever backend is running the job, and ALWAYS
@@ -1869,7 +1910,22 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     // 1) Stop the client poll loop right away.
     try { s.abortController?.abort(); } catch { /* no-op */ }
     // 2) Best-effort backend interrupt (local Media Studio job + wan2gp/localAI).
-    if (jobId) void cancelHivemindVideoJob(jobId);
+    //    The reply distinguishes "accepted" from "actually let go": a Comfy
+    //    prompt part-way through loading a video model keeps the GPU until it
+    //    reaches a checkpoint, and the next generation queues behind it. Saying
+    //    "Generation cancelled" during that window is what made cancelling look
+    //    like it did nothing, so wait for the verdict before claiming one.
+    if (jobId) {
+      void cancelHivemindVideoJob(jobId).then((result) => {
+        if (result?.stopped === false) {
+          toast.loading(zh()
+            ? '正在停止：租用机器需完成当前步骤才能释放，新的生成会排在其后。'
+            : 'Still stopping — the machine finishes its current step before it frees up. A new generation will queue behind it.');
+        } else {
+          toast.success(zh() ? '已取消生成。' : 'Generation cancelled.');
+        }
+      });
+    }
     try { localAI.cancelGeneration?.(); } catch { /* not all runtimes support it */ }
     // 3) Reset local generation state unconditionally.
     if (jobId) removePendingJob(jobId);
@@ -1879,7 +1935,9 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     s.generating = false;
     s.generateError = '';
     bump();
-    toast.success(zh() ? '已取消生成。' : 'Generation cancelled.');
+    // With a job id the toast comes from the backend's verdict above; without
+    // one there is nothing to stop and the reset IS the whole cancel.
+    if (!jobId) toast.success(zh() ? '已取消生成。' : 'Generation cancelled.');
   };
 
   /* ---------------- hivemind catalog + window events ---------------- */
@@ -2229,7 +2287,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         // persisting, so s.persistedVideoPreferences can be stale here.
         persistedVideoPreferences: currentVideoPreferences(),
       }),
-      isBusy: () => Boolean(s.generating),
+      isBusy: () => Boolean(s.generating || generationQueueRef.current.pending),
     };
     return () => { apiRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2268,6 +2326,36 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     if (ingredientSignature) void refreshIngredientSheetPreview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ingredientSignature]);
+
+  // Measure any motion reference we have not measured yet. The duration decides
+  // whether the clip's own length is capped at all (a reference shorter than
+  // the card's ceiling leaves the full range open), and references arrive from
+  // file drops, casts and saved personas alike — so they are measured here,
+  // where all three land, rather than at each attach point. Until a reference
+  // is measured it counts as long, so the picker errs toward the safe cap.
+  const unmeasuredReferenceVideos = (s.setup.referenceVideos || [])
+    .filter((item) => item?.url && !(Number(item.durationSeconds) > 0))
+    .map((item) => item.url)
+    .join('\n');
+  useEffect(() => {
+    if (!unmeasuredReferenceVideos) return;
+    let cancelled = false;
+    void (async () => {
+      const urls = unmeasuredReferenceVideos.split('\n');
+      const measured = await Promise.all(urls.map((url) => probeVideoDurationSeconds(url)));
+      if (cancelled) return;
+      const byUrl = new Map(urls.map((url, index) => [url, measured[index]]));
+      const next = (s.setup.referenceVideos || []).map((item) => (
+        byUrl.get(item?.url) > 0 ? { ...item, durationSeconds: byUrl.get(item.url) } : item
+      ));
+      // Straight through withDurationThatFits: measuring a reference can REMOVE
+      // a cap (a short clip frees the range) as easily as impose one.
+      s.setup = withDurationThatFits({ ...s.setup, referenceVideos: next });
+      bump();
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unmeasuredReferenceVideos]);
 
   // Load LoRAs when the active LoRA workflow changes and the section is open.
   const loraWorkflowId = currentVideoLoraModel()?.workflowId || '';
@@ -2388,7 +2476,14 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   // the frame exactly, so the fixed aspect-ratio selector is overridden.
   const startFrameArMatchAvailable = ltxFramesVisible && Boolean(s.setup.imageUrl);
   const arMatchedToFrame = startFrameArMatchAvailable && s.setup.matchStartFrameAr;
-  const durationOptions = durationsFor(s.setup, s.setup.modelId);
+  // A motion reference is trimmed to the clip's own length, so it costs more
+  // the longer the clip is and the duration range collapses while one is
+  // attached. Offer only what will actually render: the run used to be accepted
+  // and then die minutes later on the card, after the references were staged.
+  const motionLimit = motionReferenceLimitFor(s.setup, s.setup.modelId);
+  const durationOptions = availableDurationsFor(s.setup, s.setup.modelId);
+  const fullDurationOptions = durationsFor(s.setup, s.setup.modelId);
+  const durationCapped = Boolean(motionLimit) && durationOptions.length < fullDurationOptions.length;
   const resolutionOptions = resolutionsFor(s.setup, s.setup.modelId);
   const qualityOptions = qualitiesFor(s.setup, s.catalogs, s.setup.modelId);
   const modeOptions = modesFor(s.setup.modelId);
@@ -2607,9 +2702,13 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             minimaxSelected ? (
               <Field
                 label={zh() ? '时长' : 'Duration'}
-                hint={zh()
-                  ? '最长 15 秒 — 模型约在 15 秒内保持人物与场景一致，因此不提供更长时长。'
-                  : 'Up to 15s — the model keeps people and scenes consistent for about 15 seconds, so longer takes are not offered.'}
+                hint={durationCapped
+                  ? (zh()
+                    ? `最长 ${durationOptions[durationOptions.length - 1]} 秒 — 动作参考会被裁剪到成片长度，因此长参考会把成片也限制在同样长度。改用 ${motionLimit.maxSeconds.toFixed(1)} 秒以内的动作参考，它会保留自身长度、占用更少显存，完整时长即可恢复；移除动作参考同样可以。参考图片无论多长都是固定开销。`
+                    : `Up to ${durationOptions[durationOptions.length - 1]}s — a motion reference is trimmed to the clip's own length, so a long reference caps the clip at the same length. Use a motion reference of ${motionLimit.maxSeconds.toFixed(1)}s or less and it keeps its own length instead, costing less and opening the full range. Removing it works too. Reference pictures cost the same whatever the length.`)
+                  : (zh()
+                    ? '最长 15 秒 — 模型约在 15 秒内保持人物与场景一致，因此不提供更长时长。'
+                    : 'Up to 15s — the model keeps people and scenes consistent for about 15 seconds, so longer takes are not offered.')}
               >
                 <Slider
                   min={Number(durationOptions[0]) || 1}
@@ -2941,6 +3040,163 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     </>
   );
 
+  /* ---------------- composer drops ---------------- */
+
+  // Dropping a picture, a clip or a voice note ON THE COMPOSER attaches it as
+  // an input rather than restoring the settings of whatever made it — that is
+  // what the rest of the window is for. Which slot it lands in follows from
+  // what the file is, and from what this model actually has: a workflow with
+  // reference rows files them by kind; anything else takes a picture as its
+  // start frame and a clip as its source video.
+  const referenceLimits = () => ({
+    images: referenceEntry?.referenceSlots?.images || 9,
+    audios: referenceEntry?.referenceSlots?.audios || 3,
+    videos: referenceEntry?.referenceSlots?.videos || 3,
+  });
+  const attachedReferences = () => ({
+    images: Array.isArray(s.setup.referenceImageUrls) ? s.setup.referenceImageUrls : [],
+    videos: Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : [],
+    audios: Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : [],
+  });
+
+  const attachDroppedToReferenceRows = async (files) => {
+    const current = attachedReferences();
+    const { added, rejected } = await attachDroppedReferences({
+      files,
+      taken: { images: current.images.length, videos: current.videos.length, audios: current.audios.length },
+      limits: referenceLimits(),
+      upload: referenceUploader(uploadFnForFrame),
+    });
+    if (added.images.length) onCharacterRefsChange([...current.images, ...added.images.map((item) => item.url)]);
+    if (added.videos.length) {
+      onReferenceVideosChange([...current.videos, ...added.videos.map((item) => ({ ...item, useAudio: false }))]);
+    }
+    if (added.audios.length) onReferenceAudiosChange([...current.audios, ...added.audios]);
+    for (const rejection of rejected) {
+      if (rejection.error) console.error('[VideoStudio] composer drop upload failed:', rejection.error);
+      toast.error(describeReferenceRejection(rejection));
+    }
+    // The rows are behind a closed panel, so the drop has to say where it went.
+    const summary = describeReferenceAttachment({
+      images: added.images.length,
+      videos: added.videos.length,
+      audios: added.audios.length,
+    });
+    if (summary) toast.success(summary);
+  };
+
+  // No reference rows on this model: a picture is the shot's first frame, a
+  // clip is the source video (the same path its own button takes, confirms and
+  // all), and a voice clip has nowhere to go — say so rather than swallow it.
+  const attachDroppedToFrames = async (files) => {
+    const picture = files.find((file) => referenceKindForFile(file) === 'images');
+    const clip = files.find((file) => referenceKindForFile(file) === 'videos');
+    if (picture) {
+      const uploaded = await referenceUploader(uploadFnForFrame)('images', picture);
+      onStartFrameChange([uploaded.url]);
+      toast.success(zh() ? '已设为起始帧' : 'Attached as the start frame');
+    }
+    if (clip) await handleVideoFile(clip);
+    for (const file of files) {
+      if (file === picture || file === clip) continue;
+      toast.error(describeReferenceRejection({
+        name: file.name,
+        code: referenceKindForFile(file) ? 'full' : 'unsupported',
+        kind: referenceKindForFile(file),
+        limit: 1,
+      }));
+    }
+  };
+
+  const handleComposerFiles = async (files) => {
+    if (!files.length) return;
+    // Same gate the pickers use, with the same retry continuation: the files
+    // are attached once a key is saved.
+    if (frameRequiresApiKey() && !localStorage.getItem('muapi_key')) {
+      s.authRetry = () => { void handleComposerFiles(files); };
+      s.authOpen = true;
+      bump();
+      return;
+    }
+    s.composerAttaching = true;
+    bump();
+    try {
+      if (referenceEntry) await attachDroppedToReferenceRows(files);
+      else await attachDroppedToFrames(files);
+    } catch (err) {
+      console.error('[VideoStudio] composer drop failed:', err);
+      toast.error(err?.message || (zh() ? '附加失败' : 'Could not attach that.'));
+    } finally {
+      s.composerAttaching = false;
+      bump();
+    }
+  };
+
+  // An output dragged out of the strip carries a URL, not bytes. It goes up the
+  // same way an imported persona's media does — decrypted in the browser, then
+  // re-uploaded and re-sealed as a reference of its own.
+  const handleComposerOutput = async (payload) => {
+    const kind = referenceKindForOutput(payload);
+    s.composerAttaching = true;
+    bump();
+    try {
+      const current = attachedReferences();
+      const limits = referenceLimits();
+      if (!referenceEntry) {
+        if (kind !== 'images') {
+          toast.error(zh() ? '该模型只接受起始帧图片' : 'This model takes a picture as its start frame.');
+          return;
+        }
+        onStartFrameChange([await promoteOutputToReference(payload.url)]);
+        toast.success(zh() ? '已设为起始帧' : 'Attached as the start frame');
+        return;
+      }
+      if (current[kind].length >= limits[kind]) {
+        toast.error(describeReferenceRejection({
+          name: basenameOf(payload.url),
+          code: 'full',
+          kind,
+          limit: limits[kind],
+        }));
+        return;
+      }
+      const mediaKind = kind === 'images' ? 'image' : (kind === 'videos' ? 'video' : 'audio');
+      const url = await promoteOutputToReference(payload.url, { kind: mediaKind });
+      const name = basenameOf(payload.url);
+      if (kind === 'images') onCharacterRefsChange([...current.images, url]);
+      else if (kind === 'videos') onReferenceVideosChange([...current.videos, { url, name, useAudio: false }]);
+      else onReferenceAudiosChange([...current.audios, { url, name }]);
+      toast.success(describeReferenceAttachment({
+        images: kind === 'images' ? 1 : 0,
+        videos: kind === 'videos' ? 1 : 0,
+        audios: kind === 'audios' ? 1 : 0,
+      }));
+    } catch (err) {
+      console.error('[VideoStudio] composer output drop failed:', err);
+      toast.error(err?.message || (zh() ? '附加失败' : 'Could not attach that.'));
+    } finally {
+      s.composerAttaching = false;
+      bump();
+    }
+  };
+
+  const composerDrop = {
+    busy: s.composerAttaching,
+    // An UploadPicker inside the composer keeps its own drop; without this the
+    // file would be attached twice, once by each.
+    accepts: (dataTransfer, target) => dragCarriesDroppable(dataTransfer)
+      && !target?.closest?.('[data-upload-picker]'),
+    hint: (dataTransfer) => (referenceEntry
+      ? composerReferenceHint(referenceKindsInDrag(dataTransfer))
+      : composerFrameHint(referenceKindsInDrag(dataTransfer))),
+    onDrop: (dataTransfer) => {
+      const files = Array.from(dataTransfer?.files || []);
+      if (files.length) { void handleComposerFiles(files); return; }
+      const payload = droppedOutputPayload(dataTransfer);
+      if (payload) void handleComposerOutput(payload);
+    },
+  };
+
   /* ---------------- composer ---------------- */
 
   const composer = (
@@ -3181,7 +3437,12 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
-      <StudioLayout panel={panel} panelTitle={zh() ? '视频设置' : 'Video settings'} composer={composer}>
+      <StudioLayout
+        panel={panel}
+        panelTitle={zh() ? '视频设置' : 'Video settings'}
+        composer={composer}
+        composerDrop={composerDrop}
+      >
         <div className="flex flex-col gap-4 p-4 md:p-5">
           {s.generateError ? (
             <div className="flex items-start justify-between gap-3 rounded-md border border-danger/40 bg-danger-tint px-3.5 py-3">

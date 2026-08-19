@@ -11,20 +11,37 @@ import {
     createVaultIdentity,
     isVaultUnlocked,
     lockVault,
+    rememberOnThisDevice,
+    unlockWithDevice,
     unlockWithPassphrase,
+    unlockWithPrf,
+    wrapMasterKeyForPrf,
 } from './e2eVault.js';
 
 const PASSPHRASE_KEY = 'hivemind.ownerPassphrase.once';
+// What the sign-in gate recorded about HOW this session was opened. A passkey
+// sign-in leaves no passphrase behind, so without this the app would have a
+// valid session and a permanently locked vault.
+const VAULT_HINT_KEY = 'hivemind.vaultUnlock.once';
 let readyPromise = null;
 
-function readOwnerPassphrase() {
+function readHandoff(key) {
     try {
-        const parsed = JSON.parse(sessionStorage.getItem(PASSPHRASE_KEY) || 'null');
-        if (parsed && parsed.password && (!parsed.expiresAt || parsed.expiresAt > Date.now())) {
-            return String(parsed.password);
-        }
+        const parsed = JSON.parse(sessionStorage.getItem(key) || 'null');
+        if (parsed && (!parsed.expiresAt || parsed.expiresAt > Date.now())) return parsed;
     } catch { /* absent or malformed */ }
     return null;
+}
+
+function readOwnerPassphrase() {
+    const parsed = readHandoff(PASSPHRASE_KEY);
+    return parsed?.password ? String(parsed.password) : null;
+}
+
+function fromB64url(text) {
+    const padded = String(text).replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(padded + '==='.slice((padded.length + 3) % 4));
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
 async function fetchIdentity() {
@@ -41,10 +58,62 @@ function announceRecoveryKey(recoveryKey) {
     } catch { /* no window (tests) */ }
 }
 
+/**
+ * Unlock a vault the way this session was signed in.
+ *
+ * Order matters and is not arbitrary: the PRF secret is the only one of the
+ * three that the authenticator itself protects, so it is tried first; the
+ * device wrap is the fallback for authenticators without PRF; the passphrase is
+ * last because it is the only one present on a device that has never been used
+ * before, and re-deriving it costs 600k PBKDF2 iterations.
+ */
+async function unlockExisting(identity, hint, passphrase) {
+    if (hint?.prf && hint.credentialId) {
+        if (await unlockWithPrf(identity, hint.credentialId, fromB64url(hint.prf))) return true;
+    }
+    if (hint?.accountId && await unlockWithDevice(identity, hint.accountId)) return true;
+    if (passphrase && await unlockWithPassphrase(identity, passphrase)) {
+        // Having proved the passphrase, leave a device-wrapped copy behind so
+        // the NEXT sign-in on this browser can be a passkey with no password —
+        // which is the whole point of the passkey-first gate.
+        if (hint?.accountId) {
+            await rememberOnThisDevice(identity, passphrase, hint.accountId).catch(() => false);
+        }
+        // The gate can register a passkey and read its PRF secret, but it
+        // cannot wrap the master key — that code is here. Finish the enrolment
+        // now, while both the passphrase and the secret are in hand, so the
+        // user is never prompted for a second biometric later.
+        await enrolPrfWrap(identity, hint, passphrase).catch(() => false);
+        return true;
+    }
+    return false;
+}
+
+async function enrolPrfWrap(identity, hint, passphrase) {
+    if (!hint?.prf || !hint.credentialId) return false;
+    let existing = {};
+    try {
+        existing = JSON.parse(identity.wrapped_mk_prf || '{}');
+    } catch { /* treat unreadable as absent and re-enrol */ }
+    if (existing[hint.credentialId]) return false;
+    const wrapped = await wrapMasterKeyForPrf(identity, passphrase, fromB64url(hint.prf));
+    if (!wrapped) return false;
+    const response = await fetch(`/api/vault/prf/${encodeURIComponent(hint.credentialId)}`, {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wrapped_mk: wrapped }),
+    });
+    return response.ok;
+}
+
 async function bootstrap() {
     if (!isHivemindStudioEnabled()) return false;
     const passphrase = readOwnerPassphrase();
-    if (!passphrase) return false; // not unlocked in this browser; caller falls back to no-persist
+    const hint = readHandoff(VAULT_HINT_KEY);
+    // A passkey sign-in has no passphrase but does have a hint; either alone is
+    // enough to try, neither means this browser was never unlocked.
+    if (!passphrase && !hint) return false;
     let payload;
     try {
         payload = await fetchIdentity();
@@ -52,8 +121,11 @@ async function bootstrap() {
         return false;
     }
     if (payload.exists && payload.identity) {
-        return unlockWithPassphrase(payload.identity, passphrase);
+        return unlockExisting(payload.identity, hint, passphrase);
     }
+    // A vault can only be CREATED from a passphrase: there is nothing yet for a
+    // passkey to have been enrolled against.
+    if (!passphrase) return false;
     // First run: create the vault and register only its wrapped/public material.
     const { identity, recoveryKey } = await createVaultIdentity(passphrase);
     const put = await fetch('/api/vault/identity', {

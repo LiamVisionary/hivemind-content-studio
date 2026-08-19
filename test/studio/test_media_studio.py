@@ -233,12 +233,12 @@ def test_in_flight_remote_job_takes_status_and_progress_from_the_private_record(
     from hivemind_content_studio import media_studio
 
     monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
-    monkeypatch.setattr(media_studio, "_client", lambda descriptor: object())
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor, *_pub: object())
     monkeypatch.setattr(media_studio, "_result_json", lambda _call: {"ok": False, "error": "MediaStudioError", "status": 404})
-    monkeypatch.setattr(media_studio, "_client", lambda descriptor: type("C", (), {"call_tool": lambda *a, **k: None})())
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor, *_pub: type("C", (), {"call_tool": lambda *a, **k: None})())
     monkeypatch.setattr(
         media_studio, "_private_json",
-        lambda descriptor, path: {"id": "p1", "status": "running", "progress": 0.45, "backend": "comfy-remote"},
+        lambda descriptor, path, *_pub: {"id": "p1", "status": "running", "progress": 0.45, "backend": "comfy-remote"},
     )
 
     state = media_studio.check_video("p1")
@@ -251,19 +251,19 @@ def test_step_counters_surface_only_when_the_backend_measures_them(monkeypatch) 
     from hivemind_content_studio import media_studio
 
     monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
-    monkeypatch.setattr(media_studio, "_client", lambda descriptor: type("C", (), {"call_tool": lambda *a, **k: None})())
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor, *_pub: type("C", (), {"call_tool": lambda *a, **k: None})())
     monkeypatch.setattr(media_studio, "_result_json", lambda _call: {"ok": False, "status": 404})
 
     monkeypatch.setattr(
         media_studio, "_private_json",
-        lambda descriptor, path: {"status": "running", "progress": 0.36, "progress_step": 6, "progress_total": 15},
+        lambda descriptor, path, *_pub: {"status": "running", "progress": 0.36, "progress_step": 6, "progress_total": 15},
     )
     measured = media_studio.check_video("p3")
     assert (measured["progress_step"], measured["progress_total"]) == (6, 15)
 
     # A backend without counters must not invent them: the label would imply a
     # precision the time-based bar does not have.
-    monkeypatch.setattr(media_studio, "_private_json", lambda descriptor, path: {"status": "running"})
+    monkeypatch.setattr(media_studio, "_private_json", lambda descriptor, path, *_pub: {"status": "running"})
     assert "progress_step" not in media_studio.check_video("p4")
 
 
@@ -271,11 +271,11 @@ def test_finished_remote_job_resolves_the_sealed_output_url(monkeypatch) -> None
     from hivemind_content_studio import media_studio
 
     monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
-    monkeypatch.setattr(media_studio, "_client", lambda descriptor: type("C", (), {"call_tool": lambda *a, **k: None})())
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor, *_pub: type("C", (), {"call_tool": lambda *a, **k: None})())
     monkeypatch.setattr(media_studio, "_result_json", lambda _call: {"ok": False, "error": "MediaStudioError", "status": 404})
     monkeypatch.setattr(
         media_studio, "_private_json",
-        lambda descriptor, path: {
+        lambda descriptor, path, *_pub: {
             "id": "p2", "status": "success",
             "image_urls": ["/image/cmf-p2-clip.mp4"],
         },
@@ -309,6 +309,62 @@ def test_native_execution_errors_surface_the_node_but_not_its_inputs() -> None:
     message = _comfy_history_error(history)
     assert message == "UNETLoader node 6 failed — model is missing"
     assert "private prompt" not in message
+
+
+def test_an_out_of_memory_failure_names_the_control_the_user_actually_has() -> None:
+    """The raw allocator dump is bookkeeping, truncated mid-sentence at 400 chars.
+
+    Its own advice is about batch_size, which this studio does not expose. What
+    actually blows the budget is clip length: measured 2026-08-13 on a 5090 in
+    MiniMax H3 reference mode at 1216x704 with nine pictures, a motion clip and
+    a voice clip, 141 frames (5.9s) peaked at 29.63GiB of 31.36 and 158 frames
+    (6.6s) ran out — while the duration slider goes to 15s."""
+    history = {
+        "p": {
+            "status": {
+                "status_str": "error",
+                "messages": [[
+                    "execution_error",
+                    {
+                        "node_id": "14",
+                        "node_type": "SamplerCustomAdvanced",
+                        "exception_type": "OutOfMemoryError",
+                        "exception_message": (
+                            "Allocation on device 0 would exceed allowed memory. (out of memory) "
+                            "Currently allocated : 28.69 GiB Requested : 7.29 GiB "
+                            "Device limit : 31.36 GiB Free (according to CUDA): 29.94 MiB "
+                            "This error means you ran out of memory on your GPU. TIPS: If the "
+                            "workflow worked before you might have accidentally set the "
+                            "batch_size to a large number."
+                        ),
+                    },
+                ]],
+            },
+        }
+    }
+    message = _comfy_history_error(history)
+    assert "ran out of memory" in message
+    assert "7.29 GiB" in message, "the shortfall is the one number worth keeping"
+    assert "shorter duration" in message
+    # The knob the raw text recommends does not exist in this studio.
+    assert "batch_size" not in message
+
+
+def test_a_non_memory_failure_is_still_reported_verbatim() -> None:
+    """Only OOM is translated; everything else keeps its own reason."""
+    history = {
+        "p": {
+            "status": {
+                "status_str": "error",
+                "messages": [[
+                    "execution_error",
+                    {"node_id": "6", "node_type": "UNETLoader",
+                     "exception_message": "model is missing"},
+                ]],
+            },
+        }
+    }
+    assert _comfy_history_error(history) == "UNETLoader node 6 failed — model is missing"
 
 
 def test_a_successful_history_reports_no_error() -> None:
@@ -791,8 +847,14 @@ def test_video_generation_forwards_the_grain_cleanup_choice(tmp_path: Path, monk
     monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
     monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
 
-    start_video(prompt="a slow push in", duration_seconds=2, denoise="strong")
+    start_video(
+        prompt="a slow push in",
+        duration_seconds=2,
+        denoise="strong",
+        studio_lane="video:window-a:2",
+    )
     assert captured["denoise"] == "strong"
+    assert captured["studio_lane"] == "video:window-a:2"
 
     start_video(prompt="a slow push in", duration_seconds=2)
     assert "denoise" not in captured
@@ -974,3 +1036,49 @@ def test_start_video_refuses_motion_context_plus_source_video(tmp_path: Path, mo
             prompt="x",
             duration_seconds=2,
         )
+
+
+# A reference VIDEO is trimmed to the generated clip's own length, so its cost
+# grows with the clip and rides every sampling step; reference PICTURES cost a
+# flat amount however long the clip is. Measured 2026-08-13 on a rented 5090 in
+# MiniMax H3 reference mode at 1216x704: 141 frames (5.9s) peaked at 29.63GiB of
+# 31.36 and 158 frames (6.6s) ran out — 36x per frame against a still. The
+# studio publishes this ceiling so an impossible length is never offered; before
+# it did, the run was accepted and died minutes later on an allocator dump.
+def test_motion_reference_ceiling_matches_the_measured_card_limit():
+    from hivemind_content_studio.media_studio import (
+        _VIDEO_TIER_DIMENSIONS,
+        motion_reference_duration_limits,
+    )
+
+    workflow = {
+        "motion_reference_max_reference_pixel_frames": 704 * 1216 * 243,
+        "frame_grid": {"modulus": 17, "offset": 5},
+        "defaults": {"frame_rate": 24},
+    }
+    limits = motion_reference_duration_limits(workflow)
+
+    # The canvas the measurement was taken on, both orientations: 243 frames.
+    assert limits["high|16:9"] == round(243 / 24, 3)
+    assert limits["high|9:16"] == round(243 / 24, 3)
+    # Every ceiling sits on the graph's own 17k+5 lattice — a cap that snapped
+    # UP would name a length that does not actually fit.
+    for seconds in limits.values():
+        assert round(seconds * 24) % 17 == 5
+    # ...and none of them exceeds the budget at its own canvas.
+    for key, seconds in limits.items():
+        tier, aspect = key.split("|")
+        width, height = _VIDEO_TIER_DIMENSIONS[tier][aspect]
+        assert width * height * round(seconds * 24) <= workflow["motion_reference_max_reference_pixel_frames"]
+    # The native tier costs more per frame, so it buys less time.
+    assert limits["max|16:9"] < limits["high|16:9"] < limits["standard|16:9"]
+
+
+def test_motion_reference_ceiling_is_absent_without_a_measured_budget():
+    from hivemind_content_studio.media_studio import motion_reference_duration_limits
+
+    # An UNMEASURED card is not a card that cannot do it: with no budget the
+    # studio must keep the full duration range rather than guess a ceiling.
+    assert motion_reference_duration_limits({"frame_grid": {"modulus": 17, "offset": 5}}) == {}
+    assert motion_reference_duration_limits({"motion_reference_max_reference_pixel_frames": 0}) == {}
+    assert motion_reference_duration_limits({"motion_reference_max_reference_pixel_frames": "lots"}) == {}

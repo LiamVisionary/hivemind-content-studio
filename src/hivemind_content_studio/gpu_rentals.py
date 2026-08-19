@@ -1,11 +1,18 @@
-"""Owner-gated GPU rentals: provision studio ComfyUI boxes on Vast.ai.
+"""Owner-gated GPU rentals: provision studio ComfyUI boxes on rented hardware.
 
-Drives the owner's own Vast account directly (VAST_API_KEY from the shared
-hive env) — distinct from the hosted customer billing gateway, which meters
-credits server-side. Tier presets, offer filters, the provisioning bootstrap,
-and the model set all mirror the CUDA validation runs recorded in
-packages/gpu-rentals/ (2026-07-31): datacenter+verified RTX 5090 boxes,
+Drives the owner's own marketplace accounts directly (VAST_API_KEY,
+RUNPOD_API_KEY from the shared hive env) — distinct from the hosted customer
+billing gateway, which meters credits server-side. Tier presets, offer filters,
+the provisioning bootstrap, and the model set all mirror the CUDA validation
+runs recorded in packages/gpu-rentals/ (2026-07-31): verified RTX 5090 boxes,
 weights pulled from the private R2 bucket via short-lived presigned URLs.
+
+WHERE the box comes from lives in rental_providers/; this module owns what runs
+on it. The division is not cosmetic — the offer filters here encode measured
+failures (a container too small to hold the weights has its ComfyUI killed
+mid-job, a half-power SKU sold under a full-power name generates slower for
+more money), so they rank every marketplace's offers rather than each
+marketplace ranking its own.
 
 Safety rail: this module only ever destroys instances whose label carries
 STUDIO_LABEL_PREFIX. The hosted billing worker rents `hivemind-rental-gpur_*`
@@ -19,6 +26,7 @@ import gzip
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import signal
@@ -27,6 +35,7 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,15 +43,47 @@ from urllib.parse import quote
 
 import requests
 
-# Vast is mid-migration to /api/v1 and deprecating v0 per-endpoint. Probed
-# 2026-08-05: instances LIST is v1-only (v0 returns deprecated_endpoint), but
-# bundles search, asks create, and instance DELETE exist ONLY on v0 (v1 404s).
-# Paths below therefore carry their own version prefix.
-VAST_API_BASE = "https://console.vast.ai/api"
+from . import rental_providers
+from .rental_providers import (
+    Instance,
+    LaunchSpec,
+    Offer,
+    OfferQuery,
+    ProviderError,
+    RentalRef,
+)
+# Importing these registers them; the registry order is the order the Machines
+# view shops in, so Vast (where every benchmark was measured) comes first.
+from .rental_providers import vast as _vast_provider  # noqa: F401
+from .rental_providers import runpod as _runpod_provider  # noqa: F401
+
 CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 R2_BUCKET = "hivemind-rental-models"
 STUDIO_LABEL_PREFIX = "hivemind-studio-gpur-"
 COMFY_IMAGE = "vastai/comfy:@vastai-automatic-tag"
+# The same image, pinned. `@vastai-automatic-tag` is Vast's own placeholder —
+# it resolves a CUDA build against the host's driver at launch and means
+# nothing to any other registry client, so RunPod needs a concrete tag.
+#
+# The layout our provisioning script depends on is portable and was verified
+# from the published image config on 2026-08-14: a conda venv at /venv/main and
+# ComfyUI cloned under /opt. What is NOT portable is the entrypoint
+# (/opt/instance-tools/bin/entrypoint.sh, Vast's own bootstrap), which is why
+# the RunPod provider replaces it — see rental_providers/runpod.bootstrap_command.
+#
+# cuda-12.9 (torch cu128) rather than the cuda-13.2 build: it is the lower
+# driver requirement of the two, and our int8_convrot and nvfp4 paths have
+# only ever been measured on Vast hosts. Which build is FASTER on Blackwell is
+# an open question here — the one measurement we have confounds it with
+# different hardware — so this is the conservative pick, not an informed one,
+# and it is overridable without a deploy for exactly that reason.
+RUNPOD_COMFY_IMAGE = os.environ.get(
+    "HIVEMIND_RUNPOD_COMFY_IMAGE", "vastai/comfy:v0.32.0-cuda-12.9-py312"
+)
+
+
+def comfy_image_for(provider_key: str) -> str:
+    return RUNPOD_COMFY_IMAGE if provider_key == "runpod" else COMFY_IMAGE
 # Progress beacon: the box serves /progress.json on this (published) port so
 # the Machines view can render truthful provisioning phases. ComfyUI itself
 # stays bound to 127.0.0.1 — only the beacon is exposed.
@@ -149,6 +190,15 @@ _H3_KJNODES_COMMIT = "35e5956193769d18a13136cdedb73a36a05c73e6"
 # latent picture path. Patches apply on first node execution only, so plain H3
 # jobs on the same box are untouched.
 _H3_MOTION_CONTEXT_COMMIT = "c140ae99b8c38f782ebd8564c267b42aacade6a4"
+
+# Krea2's text encoder node. NOT a ComfyUI core node and not part of INT8-Fast:
+# it is a separate pack, and without it every Krea2 graph the studio compiles is
+# rejected outright with "Node 'TextEncodeKrea2' not found" — the box provisions
+# perfectly, ComfyUI comes up, and the first generation 400s. Found 2026-08-15 by
+# running an actual generation on a freshly rented box; it had been missing from
+# the image and video tiers on EVERY provider, which is the kind of gap only a
+# real end-to-end render can surface. Pinned for the same reason as the H3 nodes.
+_KREA2_TEXT_ENCODER_COMMIT = "fb84ab5444b1ec0048e0d38b7450b137eee9c5bc"
 
 # Sol-Attn: NVlabs sparse attention as a Triton kernel, chained onto sage rather
 # than replacing it. Measured on a rented 5090 (5s @ 960x544, warm, one seed):
@@ -334,6 +384,17 @@ TIERS: dict[str, dict[str, Any]] = {
         # 21GB transformer + 15.7GB encoder. 32GB runs it (the box trades
         # encoder residency for reload time); 96GB holds both at once.
         "min_vram_gb": 32,
+        # ComfyUI stages weights in system RAM and streams them to the card, so
+        # the DiT (20.0GB) and the text encoder (15.0GB) have to fit HOST-side
+        # too. Below this a box cannot render even a short clip; above it, how
+        # LONG a clip fits is a function of the lane's own RAM, which is why
+        # this is a floor and not the whole story — see lane_max_frames().
+        # Measured 2026-08-13: a 29.2GiB container rendered a 5s reference clip
+        # and had its ComfyUI process KILLED outright on a 10s one, system RAM
+        # peaking at 27.12GiB. 32 keeps those boxes rentable for the durations
+        # they can actually survive rather than turning the tier off entirely
+        # (no offer on the live market clears 48).
+        "min_ram_gb": 32,
         # nvfp4 text encoder: Blackwell only, and specifically sm_120.
         "gpu_sm": {120},
         "disk_gb": 120,
@@ -399,12 +460,15 @@ STACK_LAUNCHER = Path.home() / ".local/bin/zimage-stack"
 TUNNEL_BASE_PORT = 18300
 
 
-class GpuRentalError(RuntimeError):
-    """Raised for Vast/Cloudflare API failures and rental policy violations."""
+class GpuRentalError(ProviderError):
+    """Raised for Cloudflare API failures and rental policy violations.
 
-    def __init__(self, message: str, status_code: int = 502) -> None:
-        super().__init__(message)
-        self.status_code = status_code
+    Subclasses ProviderError so a marketplace failure raised inside
+    rental_providers/ and a policy refusal raised here are caught by one
+    `except` at the route boundary and keep their own status codes. Every
+    caller that used to catch GpuRentalError must now catch ProviderError —
+    otherwise a Vast 429 would escape as a 500 instead of the 502 it is.
+    """
 
 
 def _env(name: str) -> str:
@@ -412,47 +476,6 @@ def _env(name: str) -> str:
     if not value:
         raise GpuRentalError(f"{name} is not configured in the environment", status_code=503)
     return value
-
-
-# One pooled session for every Vast call. Each bare requests.request() opened a
-# fresh TLS connection, and opening the Machines view makes three to five of
-# them (instances, balance, a bundles search per tier) — on a high-latency link
-# that handshake WAS the page load. urllib3's pool is thread-safe, which is what
-# FastAPI's sync-route threadpool needs.
-_vast_session = requests.Session()
-
-
-def _vast_request(method: str, path: str, payload: dict | None = None) -> dict:
-    response = _vast_session.request(
-        method,
-        f"{VAST_API_BASE}{path}",
-        json=payload,
-        headers={"Authorization": f"Bearer {_env('VAST_API_KEY')}"},
-        timeout=_REQUEST_TIMEOUT,
-    )
-    try:
-        body = response.json()
-    except ValueError:
-        body = {}
-    if response.status_code == 429 or body.get("error") == "HTTPTooManyRequests":
-        # The relaxation loop plus every tier querying at once can burst past
-        # Vast's limiter; it tells us how long to wait, then succeeds.
-        time.sleep(float(body.get("retry_after") or 2))
-        response = _vast_session.request(
-            method,
-            f"{VAST_API_BASE}{path}",
-            json=payload,
-            headers={"Authorization": f"Bearer {_env('VAST_API_KEY')}"},
-            timeout=_REQUEST_TIMEOUT,
-        )
-        try:
-            body = response.json()
-        except ValueError:
-            body = {}
-    if response.status_code >= 400 or body.get("error"):
-        detail = body.get("msg") or body.get("error") or response.text[:200]
-        raise GpuRentalError(f"Vast API {method} {path} failed: {detail}", status_code=502)
-    return body
 
 
 # --- R2 presigning (SigV4 query auth, stdlib only) -------------------------
@@ -940,12 +963,53 @@ def _onstart_script(tier: str) -> str:
             "git clone -q --depth 1 https://github.com/BobJohnson24/ComfyUI-INT8-Fast "
             "/workspace/ComfyUI/custom_nodes/ComfyUI-INT8-Fast || true"
         )
+    # Every tier that serves Krea2 needs its text encoder node. Fetched by SHA
+    # rather than at HEAD: an unpinned node build is what the H3 stack was
+    # burned by, and the failure mode here is the same shape (the graph either
+    # loads or the whole prompt is rejected).
+    if "Krea 2" in (spec.get("lora_base_models") or []):
+        target = "/workspace/ComfyUI/custom_nodes/ComfyUI-Krea2TextEncoder"
+        lines += [
+            f"git clone -q https://github.com/ethanfel/ComfyUI-Krea2TextEncoder {target} || true",
+            f"git -C {target} fetch -q --depth 1 origin {_KREA2_TEXT_ENCODER_COMMIT} "
+            f"&& git -C {target} checkout -q {_KREA2_TEXT_ENCODER_COMMIT} "
+            f'|| {{ beacon error 0 "Krea2 text encoder node unavailable"; exit 1; }}',
+        ]
     if spec.get("needs_h3_stack"):
         lines += [
             # Smart-memory retention holds the H3 TE (15.7G) + DiT (21G) in
             # system RAM at once; a 31GB box thrashes to death mid-sample
             # (2026-08-04). Under 48GB, trade TE reload time for residency.
-            "if (( $(awk '/MemTotal/{printf \"%d\", $2/1048576}' /proc/meminfo) < 48 ));"
+            #
+            # Read the CGROUP limit, not /proc/meminfo: inside a Vast container
+            # meminfo reports the HOST's RAM, so a box sold in eighths of a
+            # 503GB machine answered "503" while actually capped at 171GiB, and
+            # this test skipped the flag the container needed. Measured on two
+            # live rentals 2026-08-13. memory.max reads "max" when the container
+            # is uncapped, and cgroup v1 keeps the value under a different path;
+            # fall back to meminfo for both rather than guess a number.
+            'CG=$(cat /sys/fs/cgroup/memory.max 2>/dev/null'
+            ' || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)',
+            'case "$CG" in *[!0-9]*|"") '
+            'RAM_GB=$(awk \'/MemTotal/{printf "%d", $2/1048576}\' /proc/meminfo);; '
+            '*) RAM_GB=$((CG/1073741824));; esac',
+            # A cgroup limit far above the host is the "uncapped" sentinel, not
+            # a real allowance; take whichever of the two is smaller.
+            'MEM_GB=$(awk \'/MemTotal/{printf "%d", $2/1048576}\' /proc/meminfo)',
+            '[ "$RAM_GB" -gt "$MEM_GB" ] && RAM_GB=$MEM_GB',
+            # Refuse a box too small to hold the weights AT ALL, before pulling
+            # 40GB onto it. The offer-side floor (min_ram_gb) works from
+            # cpu_ram x gpu_frac, which is an estimate — measured 2026-08-13 it
+            # read 30.5 against a real 29.2GiB limit on one box and 63 against
+            # 171GiB on another. This runs on the box itself, so it is the
+            # authoritative check; the listing filter only saves the rental fee.
+            f'if [ "$RAM_GB" -lt {TIERS["minimax"]["min_ram_gb"]} ]; then',
+            '  beacon error 0 "this box gives the container only ${RAM_GB}GB of system RAM;'
+            f' MiniMax H3 stages a 20GB transformer and a 15GB encoder through it and needs'
+            f' {TIERS["minimax"]["min_ram_gb"]}GB — destroy this machine and rent another"',
+            "  exit 1",
+            "fi",
+            'if [ "$RAM_GB" -lt 48 ];'
             ' then EXTRA_ARGS="$EXTRA_ARGS --disable-smart-memory"; fi',
             f"if ! git -C /workspace/ComfyUI merge-base --is-ancestor {_H3_COMFY_COMMIT} HEAD 2>/dev/null; then",
             "  git -C /workspace/ComfyUI fetch -q --depth 200 origin master",
@@ -1099,6 +1163,26 @@ def tier_min_down_mbps(tier: str) -> int:
     return int(tier_download_gb(tier) * 8 * 1000 / TARGET_DOWNLOAD_SECONDS)
 
 
+def tier_disk_gb(tier: str) -> int:
+    """Disk to provision for this tier, INCLUDING its registered user LoRAs.
+
+    The one number every provider sizes its disk from, and the reason it is a
+    function rather than TIERS[tier]["disk_gb"]: the tier constant covers the
+    curated serving set only. Registered LoRAs already grow tier_download_gb
+    (and through it the bandwidth floor), so before this existed the volume a
+    box downloaded could grow without limit while the disk it downloaded onto
+    stayed fixed — the LoRA flow was single-source everywhere EXCEPT the place
+    that decides whether the bytes fit.
+
+    That failure is not theoretical and not graceful: measured on a live pod
+    2026-08-15 (a 20GB volume against an 80GB expectation), a full disk stops
+    the download mid-file and the box provisions to an error having billed for
+    the whole attempt.
+    """
+    lora_gb = sum(float(entry.get("size_gb") or 2.0) for entry in rental_loras_for_tier(tier))
+    return int(TIERS[tier]["disk_gb"] + math.ceil(lora_gb))
+
+
 def _gpu_names_for(tier: str, gpu_class: str | None) -> list[str]:
     classes = [gpu_class] if gpu_class else tier_gpu_classes(tier)
     return [name for key in classes for name in GPU_CLASSES[key]["gpu_names"]]
@@ -1125,57 +1209,91 @@ def gpu_class_for_name(gpu_name: str) -> str | None:
 UNDERPOWERED_DLPERF_RATIO = 0.7
 
 
-def _underpowered(offer: dict) -> bool:
+def _underpowered(offer: Offer) -> bool:
     """True when a host's own benchmark is far below its class median."""
-    key = gpu_class_for_name(str(offer.get("gpu_name") or ""))
+    key = gpu_class_for_name(offer.gpu_name)
     if key is None:
         return False
-    dlperf = float(offer.get("dlperf") or 0)
     # Unbenchmarked hosts are not evidence of anything; leave them to price
-    # ranking rather than hiding offers for a missing field.
-    if dlperf <= 0:
+    # ranking rather than hiding offers for a missing field. That covers every
+    # RunPod offer, which publishes no per-host benchmark at all.
+    if not offer.dlperf:
         return False
-    return dlperf < GPU_CLASSES[key]["dlperf"] * UNDERPOWERED_DLPERF_RATIO
+    return offer.dlperf < GPU_CLASSES[key]["dlperf"] * UNDERPOWERED_DLPERF_RATIO
 
 
-def _offer_query(tier: str, min_down_mbps: int | None = None, gpu_class: str | None = None) -> dict:
+def _starved_of_ram(tier: str, offer: Offer) -> bool:
+    """True when the container could not hold this tier's weights in system RAM.
+
+    ComfyUI stages weights in system RAM and streams them to VRAM, so the host
+    side has to hold them whatever the card is. Measured 2026-08-13: a 29.2GiB
+    H3 box rendered a 5s reference clip (21.05GiB VRAM peak) but the ComfyUI
+    PROCESS WAS KILLED on a 10s one, system RAM peaking at 27.12GiB before it
+    went — the job did not fail, the server died. Nothing checked this before,
+    which is how that box came to be rented at all.
+
+    Only H3 has been measured, so only H3 states a min_ram_gb. Every other tier
+    falls back to its VRAM floor, which is a bound rather than a guess: the
+    weights that have to fit on the card are staged through host RAM to get
+    there, so a container with less system RAM than the tier needs VRAM cannot
+    load them however the sampler behaves. Before this fallback existed the
+    image and video tiers declared no floor at all, and once the datacenter
+    constraint came off the Vast query, cheapest-first ranking led with 6-8GB
+    containers for a workload that stages 21GB of weights.
+    """
     spec = TIERS[tier]
-    names = _gpu_names_for(tier, gpu_class)
-    return {
-        "verified": {"eq": True},
-        "rentable": {"eq": True},
-        "datacenter": {"eq": True},
-        # One query covers the whole ladder: three per-class queries per tier
-        # would triple the calls behind a view that already polls, and Vast
-        # rate-limits. Results are grouped by class afterwards.
-        "gpu_name": {"eq": names[0]} if len(names) == 1 else {"in": names},
-        "num_gpus": {"eq": 1},
-        "reliability2": {"gt": 0.99},
-        "inet_down": {"gt": tier_min_down_mbps(tier) if min_down_mbps is None else min_down_mbps},
-        "disk_space": {"gt": spec["disk_gb"]},
-        "type": "on-demand",
-        "order": [["dph_total", "asc"]],
-        # Price-ordered and truncated, so this has to exceed the whole
-        # qualifying market or the priciest rung reads as sold out when it is
-        # merely past the cut. Measured 2026-08-08: 49 verified datacenter
-        # single-GPU offers across every card we list.
-        "limit": 60,
-    }
+    floor = spec.get("min_ram_gb") or spec["min_vram_gb"]
+    if not floor:
+        return False
+    # A listing that does not say is not evidence of a small box; leave it to
+    # price ranking rather than hiding offers over an absent value.
+    if not offer.ram_gb:
+        return False
+    return offer.ram_gb < floor
 
 
-def _offer_dto(offer: dict) -> dict:
+def _offer_query(tier: str, min_down_mbps: int | None = None,
+                 gpu_class: str | None = None) -> OfferQuery:
+    """What to shop for, in provider-neutral terms.
+
+    One query covers the tier's whole GPU ladder: three per-class queries per
+    tier would triple the calls behind a view that already polls, and Vast
+    rate-limits. Results are grouped by class afterwards.
+    """
+    spec = TIERS[tier]
+    return OfferQuery(
+        gpu_names=_gpu_names_for(tier, gpu_class),
+        min_disk_gb=tier_disk_gb(tier),
+        min_down_mbps=tier_min_down_mbps(tier) if min_down_mbps is None else min_down_mbps,
+        # Same floor _starved_of_ram applies to the results — see there for why
+        # the VRAM figure is a sound fallback where nothing was measured.
+        min_ram_gb=spec.get("min_ram_gb") or spec["min_vram_gb"],
+    )
+
+
+def _offer_dto(offer: Offer) -> dict:
     return {
-        "offer_id": offer.get("id"),
-        "gpu": offer.get("gpu_name"),
-        "gpu_class": gpu_class_for_name(str(offer.get("gpu_name") or "")),
-        "vram_mb": offer.get("gpu_ram"),
+        # Provider-scoped, because two marketplaces can and do hand out the
+        # same integer. The renting call routes on this.
+        "offer_id": offer.offer_id,
+        "provider": offer.provider,
+        "provider_label": rental_providers.get(offer.provider).label,
+        "gpu": offer.gpu_name,
+        "gpu_class": gpu_class_for_name(offer.gpu_name),
+        "vram_mb": offer.vram_mb,
+        # The container's share, not the machine's headline RAM. Surfaced so
+        # the Machines view can show the number that decides whether a box can
+        # hold the weights at all.
+        "ram_gb": round(offer.ram_gb, 1) if offer.ram_gb else None,
         # This host's own benchmark, not the class median — the two diverge by
         # 2x across SKUs sold under one gpu_name, so the offer has to carry it.
-        "dlperf": round(float(offer["dlperf"]), 1) if offer.get("dlperf") else None,
-        "usd_per_hour": round(float(offer.get("dph_total") or 0), 4),
-        "down_mbps": offer.get("inet_down"),
-        "reliability": offer.get("reliability2"),
-        "geolocation": offer.get("geolocation"),
+        "dlperf": offer.dlperf,
+        "usd_per_hour": offer.usd_per_hour,
+        "down_mbps": offer.down_mbps,
+        "reliability": offer.reliability,
+        "geolocation": offer.geolocation,
+        # Shown, not filtered on: see the provider's own query builder.
+        "datacenter": offer.datacenter,
     }
 
 
@@ -1189,26 +1307,13 @@ def _fetch_beacon(url: str) -> dict | None:
         return None
 
 
-def _mapped_port(instance: dict, container_port: int) -> str | None:
-    entries = (instance.get("ports") or {}).get(f"{container_port}/tcp") or [{}]
-    return entries[0].get("HostPort")
+# Port maps and SSH endpoints are resolved by the provider now (an SSH endpoint
+# in particular is provider-shaped: Vast usually hands out a proxy host rather
+# than the box's own IP, RunPod publishes a direct mapping), and arrive on
+# Instance.ports / Instance.ssh.
 
 
-def _ssh_endpoint(instance: dict) -> tuple[str, str] | None:
-    """SSH endpoint for the instance: direct 22/tcp mapping when the host
-    publishes one, else Vast's SSH proxy (ssh_host/ssh_port) — API-created
-    instances usually only get the proxy, and -L tunneling works over both."""
-    direct_port = _mapped_port(instance, 22)
-    ip = instance.get("public_ipaddr")
-    if direct_port and ip:
-        return ip, str(direct_port)
-    host, port = instance.get("ssh_host"), instance.get("ssh_port")
-    if host and port:
-        return str(host), str(port)
-    return None
-
-
-# How long a managed box may sit in Vast's "loading" state with its container's
+# How long a managed box may sit in a "loading" state with its container's
 # SSH port still closed before we call it wedged rather than slow. Measured
 # 2026-08-11: a healthy first-time rental opens that port within a few minutes
 # even when the image pull is cold; the box that burned an hour never opened it
@@ -1234,7 +1339,7 @@ def _container_ssh_open(endpoint: tuple[str, str] | None, timeout: float = 3.0) 
         return False
 
 
-def _boot_stall(instance: dict, endpoint: tuple[str, str] | None) -> dict | None:
+def _boot_stall(instance: Instance, endpoint: tuple[str, str] | None) -> dict | None:
     """A provisioning record for a box whose container never came up.
 
     Returns None while the box is merely booting - most are - and a terminal
@@ -1243,7 +1348,7 @@ def _boot_stall(instance: dict, endpoint: tuple[str, str] | None) -> dict | None
     a failure, because nothing that could write one was ever started, so the
     operator waits on a hopeful progress step while the meter runs.
     """
-    started = instance.get("start_date")
+    started = instance.started_at
     if not started:
         return None
     waited = time.time() - float(started)
@@ -1262,21 +1367,23 @@ def _boot_stall(instance: dict, endpoint: tuple[str, str] | None) -> dict | None
     }
 
 
-def _instance_dto(instance: dict, probe: bool = False) -> dict:
-    label = instance.get("label") or ""
+def _instance_dto(instance: Instance, probe: bool = False) -> dict:
+    label = instance.label
     managed = label.startswith(STUDIO_LABEL_PREFIX)
-    endpoint = _ssh_endpoint(instance)
-    ip = instance.get("public_ipaddr")
-    actual = instance.get("actual_status")
+    endpoint = instance.ssh
+    ip = instance.public_ip
+    ref = instance.ref
 
-    # Truthful lifecycle phase. Vast reports intended_status="running" from the
-    # moment a contract exists — never surface that as a machine state.
+    # Truthful lifecycle phase. The provider has already collapsed its API's
+    # states to booting/running/stopped; what it CANNOT know is whether our
+    # stack came up inside the container, which is what the beacon below adds.
+    # Every marketplace calls a box "running" from the moment the host accepts
+    # the contract, long before the image is unpacked.
     provision = None
-    stopped = str(instance.get("cur_state") or "").lower() in {"stopped", "exited"} or actual in {"exited", "stopped"}
-    if stopped:
+    if instance.state == "stopped":
         # Disk (and every downloaded model) survives; resume skips the pull.
         phase = "paused"
-    elif actual in (None, "", "created", "loading"):
+    elif instance.state == "booting":
         phase = "booting"
         # ...unless it has been "booting" long past the point where a container
         # would exist. Escalating to "error" is what puts it in front of the
@@ -1287,8 +1394,8 @@ def _instance_dto(instance: dict, probe: bool = False) -> dict:
         if stall:
             phase = "error"
             provision = stall
-    elif actual == "running" and managed:
-        beacon_port = _mapped_port(instance, BEACON_PORT)
+    elif instance.state == "running" and managed:
+        beacon_port = instance.ports.get(BEACON_PORT)
         beacon = _fetch_beacon(f"http://{ip}:{beacon_port}/progress.json") if (probe and ip and beacon_port) else None
         if beacon:
             step = beacon.get("step")
@@ -1303,15 +1410,15 @@ def _instance_dto(instance: dict, probe: bool = False) -> dict:
             phase = "provisioning"
             provision = {"step": "booting", "done": 0, "total": None,
                          "detail": "Container up, waiting for the provisioning beacon"}
-    elif actual == "running":
+    elif instance.state == "running":
         phase = "running"
     else:
-        phase = actual or "unknown"
+        phase = instance.state or "unknown"
 
-    attachment = _read_attachments().get(str(instance.get("id"))) if managed else None
+    attachment = _read_attachments().get(str(ref)) if managed else None
     tier = _tier_from_label(label) if managed else None
     gpu_class = (
-        _gpu_class_from_label(label) or gpu_class_for_name(str(instance.get("gpu_name") or ""))
+        _gpu_class_from_label(label) or gpu_class_for_name(str(instance.gpu_name or ""))
         if managed
         else None
     )
@@ -1319,7 +1426,11 @@ def _instance_dto(instance: dict, probe: bool = False) -> dict:
         estimate_generation_seconds(tier, gpu_class) if tier and gpu_class else (None, None)
     )
     return {
-        "rental_id": instance.get("id"),
+        # Provider-scoped ("vast:47390808"). Every route, registry key and
+        # pidfile downstream keys on this string.
+        "rental_id": str(ref),
+        "provider": instance.provider,
+        "provider_label": rental_providers.get(instance.provider).label,
         "label": label,
         "managed": managed,
         "tier": tier,
@@ -1328,33 +1439,34 @@ def _instance_dto(instance: dict, probe: bool = False) -> dict:
         "reference_job": TIERS[tier]["reference_job"] if tier else None,
         "seconds_per_generation": seconds,
         "estimate_basis": basis,
-        "status": actual or instance.get("intended_status") or "unknown",
+        "status": instance.state or "unknown",
         "phase": phase,
         "provision": provision,
         "attached": bool(attachment),
         # Higher wins when several attached machines serve the same models —
         # the studios' machine picker writes this.
         "priority": (attachment or {}).get("priority", 0),
-        "pending_reattach": bool(_read_paused_state().get(str(instance.get("id")), {}).get("pending_reattach")),
+        "pending_reattach": bool(_read_paused_state().get(str(ref), {}).get("pending_reattach")),
         # The forward, not the process: a live ssh with a dead forward reads as
         # healthy to a pid check and hides the only fact that matters here.
-        "tunnel_alive": bool(attachment and _tunnel_carrying_traffic(instance.get("id"))),
+        "tunnel_alive": bool(attachment and _tunnel_carrying_traffic(ref)),
         "models_served": (attachment or {}).get("needles")
         or TIERS.get(_tier_from_label(label), {}).get("lane_needles", []),
         "studio_pages": (attachment or {}).get("studio_pages")
         or TIERS.get(_tier_from_label(label), {}).get("studio_pages", []),
-        "gpu": instance.get("gpu_name"),
+        "gpu": instance.gpu_name,
         # The physical host, not the rental. A rental is gone once destroyed;
         # the machine that wedged it is still in the market tomorrow, so this
-        # is what a failure has to be remembered against.
-        "machine_id": instance.get("machine_id"),
-        "usd_per_hour": round(float(instance.get("dph_total") or 0), 4),
-        # What a paused box costs: Vast keeps billing the disk only.
-        "paused_usd_per_hour": round(float(instance.get("storage_total_cost") or 0), 4),
-        "disk_gb": instance.get("disk_space"),
-        "started_at": instance.get("start_date"),
-        "uptime_hours": round(max(0.0, (time.time() - instance["start_date"]) / 3600), 2)
-        if instance.get("start_date")
+        # is what a failure has to be remembered against. None on providers
+        # that do not expose it.
+        "machine_id": instance.machine_id,
+        "usd_per_hour": instance.usd_per_hour,
+        # What a paused box costs: the disk keeps billing.
+        "paused_usd_per_hour": instance.paused_usd_per_hour,
+        "disk_gb": instance.disk_gb,
+        "started_at": instance.started_at,
+        "uptime_hours": round(max(0.0, (time.time() - instance.started_at) / 3600), 2)
+        if instance.started_at
         else None,
         "ssh_command": f"ssh -p {endpoint[1]} root@{endpoint[0]} -L 18188:localhost:18188"
         if endpoint
@@ -1365,11 +1477,50 @@ def _instance_dto(instance: dict, probe: bool = False) -> dict:
 
 # --- public operations ------------------------------------------------------
 
-_offer_cache: dict[str, tuple[float, list[dict], int]] = {}
+_offer_cache: dict[str, tuple[float, list[Offer], int]] = {}
 OFFER_CACHE_SECONDS = 45
 
 
-def _search_offers(tier: str, prefer: str = "balanced", gpu_class: str | None = None) -> tuple[list[dict], int]:
+def _require_a_marketplace() -> list:
+    """The configured providers, or a 503 saying so.
+
+    "No marketplace is set up" and "every marketplace is sold out" render
+    identically once the offers list is empty, and they need opposite
+    responses from the user — one is a missing API key, the other is a market
+    to wait out. An unconfigured studio used to say so plainly because the
+    single Vast key raised on use; keep that.
+    """
+    providers = rental_providers.configured_providers()
+    if not providers:
+        names = " or ".join(f"{p.label} ({p.key.upper()}_API_KEY)"
+                            for p in rental_providers.all_providers())
+        raise GpuRentalError(
+            f"no GPU marketplace is configured — set {names} in the environment",
+            status_code=503,
+        )
+    return providers
+
+
+def _provider_offers(query: OfferQuery) -> list[Offer]:
+    """Shop every configured marketplace and pool the results.
+
+    A provider that fails is skipped, not fatal. With one marketplace a
+    credentials or rate-limit error WAS the answer; with two, letting it
+    propagate would blank a Machines view that the other provider could still
+    have filled. Total absence of providers is still fatal (see above) — it is
+    the case that cannot be waited out.
+    """
+    offers: list[Offer] = []
+    for provider in _require_a_marketplace():
+        try:
+            offers.extend(provider.search_offers(query))
+        except ProviderError:
+            continue
+    return offers
+
+
+def _search_offers(tier: str, prefer: str = "balanced",
+                   gpu_class: str | None = None) -> tuple[list[Offer], int]:
     """Offers for a tier, across its whole GPU ladder unless one is named.
 
     prefer="balanced" (default) requires a link fast enough to fetch the tier
@@ -1385,16 +1536,39 @@ def _search_offers(tier: str, prefer: str = "balanced", gpu_class: str | None = 
     if cached and time.time() - cached[0] < OFFER_CACHE_SECONDS:
         return cached[1], cached[2]
     floor = 500 if prefer == "cheapest" else tier_min_down_mbps(tier)
-    for candidate_floor in (floor, floor // 2, 500):
-        body = _vast_request("POST", "/v0/bundles/", _offer_query(tier, candidate_floor, gpu_class))
-        offers = body.get("offers") or []
-        if offers:
+    # dict.fromkeys: prefer="cheapest" starts AT 500, so the plain tuple asked
+    # the same question twice on the way down.
+    ladder = list(dict.fromkeys((floor, floor // 2, 500)))
+    fallback: tuple[list[Offer], int] | None = None
+    for candidate_floor in ladder:
+        offers = _provider_offers(_offer_query(tier, candidate_floor, gpu_class))
+        if not offers:
+            continue
+        if fallback is None:
+            fallback = (offers, candidate_floor)
+        # Relax on what can actually be RENTED, not on what the API returned.
+        # This loop used to stop at the first non-empty response, and the
+        # filters that run afterwards — min_ram_gb, the half-power SKU drop,
+        # the bad-machine cooldown — could then empty it again with no way
+        # back. That is how the MiniMax rung came to report "no offers" off a
+        # response carrying five: all five were fractional boxes too small to
+        # hold H3's weights, and the lower floors that would have found whole
+        # machines were never tried. Ranking is pure, so testing it here costs
+        # nothing but the extra query, and only on the path that would
+        # otherwise have shown the user an empty rung.
+        if _rank_offers(tier, offers, limit=1):
             _offer_cache[key] = (time.time(), offers, candidate_floor)
             return offers, candidate_floor
+    if fallback is not None:
+        # Every floor came back unrentable. Return the strictest non-empty set
+        # anyway: the caller renders an empty rung either way, and this keeps
+        # min_down_mbps honest about which floor produced it.
+        _offer_cache[key] = (time.time(), fallback[0], fallback[1])
+        return fallback
     return [], 500
 
 
-def _rank_offers(tier: str, offers: list[dict], limit: int = 8) -> list[dict]:
+def _rank_offers(tier: str, offers: list[Offer], limit: int = 8) -> list[dict]:
     download_gb = tier_download_gb(tier)
     bad_machines = recent_bad_machine_ids()
     dtos = []
@@ -1406,12 +1580,23 @@ def _rank_offers(tier: str, offers: list[dict], limit: int = 8) -> list[dict]:
         # And drop hosts that already failed us today. Cheapest-first ranking
         # otherwise walks straight back onto the machine that just wasted an
         # hour, because nothing about its listing changed when it wedged.
-        if offer.get("machine_id") in bad_machines:
+        # machine_id is None on providers that do not expose the physical host
+        # (RunPod), and `None in bad_machines` is False, so this correctly does
+        # nothing there rather than blocking every offer at once.
+        if offer.machine_id is not None and offer.machine_id in bad_machines:
+            continue
+        # And drop boxes whose container cannot hold the tier's weights in
+        # system RAM. This one is not a preference: the box does not render a
+        # worse clip, its ComfyUI is killed mid-job. See _starved_of_ram.
+        if _starved_of_ram(tier, offer):
             continue
         dto = _offer_dto(offer)
-        down = float(offer.get("inet_down") or 0)
-        # What the user actually waits for: the model pull on THIS host.
-        dto["setup_minutes"] = round(download_gb * 8 * 1000 / down / 60, 1) if down else None
+        # What the user actually waits for: the model pull on THIS host. None
+        # where the provider does not publish a link speed — an unknown wait,
+        # not a zero one.
+        dto["setup_minutes"] = (
+            round(download_gb * 8 * 1000 / offer.down_mbps / 60, 1) if offer.down_mbps else None
+        )
         dtos.append(dto)
     # The FLOOR already guarantees every candidate starts fast enough, so
     # rank by price inside that set. Ranking by time first paid 38% more
@@ -1454,9 +1639,9 @@ def rental_plan(tier: str, prefer: str = "balanced") -> dict:
     spec = TIERS[tier]
     offers, floor = _search_offers(tier, prefer)
     classes = tier_gpu_classes(tier)
-    grouped: dict[str, list[dict]] = {key: [] for key in classes}
+    grouped: dict[str, list[Offer]] = {key: [] for key in classes}
     for offer in offers:
-        key = gpu_class_for_name(str(offer.get("gpu_name") or ""))
+        key = gpu_class_for_name(offer.gpu_name)
         if key in grouped:
             grouped[key].append(offer)
 
@@ -1531,58 +1716,116 @@ def rental_plan(tier: str, prefer: str = "balanced") -> dict:
     }
 
 
-_balance_cache: dict[str, Any] = {"at": 0.0, "value": None}
+# Keyed by provider: two marketplaces, two balances, two independent caches.
+_balance_cache: dict[str, dict] = {}
 BALANCE_CACHE_SECONDS = 30
 # A machine we cannot fund for this long is a machine that dies mid-session:
-# Vast stops instances once the balance runs past its threshold.
+# marketplaces stop instances once the balance runs past its threshold.
 MIN_FUNDED_HOURS = 1.0
 # Ceiling on one rent request. Not a technical limit — a guard on a stepper
 # that spends real money per click.
 MAX_BATCH_MACHINES = 8
 
 
-def account_balance() -> dict:
-    """Vast credit, and what the machines already running are burning.
+def account_balance(provider_key: str) -> dict:
+    """One marketplace's credit.
 
-    Foreign instances count: the hosted billing gateway rents on this same
-    account, so its burn is real money this account no longer has."""
-    if _balance_cache["value"] is not None and time.time() - _balance_cache["at"] < BALANCE_CACHE_SECONDS:
-        return _balance_cache["value"]
-    # v0 only — /v1/users/current/ 404s (Vast's migration is per-endpoint).
-    body = _vast_request("GET", "/v0/users/current/")
-    value = {"credit": round(float(body.get("credit") or 0.0), 4)}
-    _balance_cache.update(at=time.time(), value=value)
+    Per provider and never summed. Vast credit cannot pay for a RunPod pod, so
+    a combined figure would authorize rentals the account behind them cannot
+    fund — which does not fail loudly, it produces a box that provisions
+    (billed) and then dies partway through the session.
+    """
+    cached = _balance_cache.get(provider_key)
+    if cached and time.time() - cached["at"] < BALANCE_CACHE_SECONDS:
+        return cached["value"]
+    value = {"credit": rental_providers.get(provider_key).credit()}
+    _balance_cache[provider_key] = {"at": time.time(), "value": value}
     return value
 
 
-def _running_burn(instances: list[dict]) -> float:
-    return round(sum(
-        float(i.get("dph_total") or 0)
-        for i in instances
-        if str(i.get("cur_state") or "").lower() not in {"stopped", "exited"}
-    ), 4)
+def _running_burn(instances: list[Instance]) -> float:
+    return round(sum(i.usd_per_hour for i in instances if i.state != "stopped"), 4)
 
 
-def account_state() -> dict:
-    """Credit, current burn, and how long the credit lasts at that burn."""
-    body = _vast_request("GET", "/v1/instances/")
-    instances = body.get("instances") or []
-    credit = account_balance()["credit"]
-    burn = _running_burn(instances)
+def _all_instances() -> list[Instance]:
+    """Every rental on every configured marketplace.
+
+    A provider that fails is skipped rather than fatal, for the same reason as
+    _provider_offers: one broken key must not hide the machines that ARE
+    running and billing on the other provider. That is the one place where
+    swallowing an error is safer than raising it — an unlisted machine is an
+    unkillable machine.
+    """
+    instances: list[Instance] = []
+    for provider in _require_a_marketplace():
+        try:
+            instances.extend(provider.list_instances())
+        except ProviderError:
+            continue
+    return instances
+
+
+def account_state(instances: list[Instance] | None = None) -> dict:
+    """Credit and burn, per marketplace and in total.
+
+    `hours_remaining` is the MINIMUM across providers, not a figure derived
+    from the totals: the machines that die first are the ones on whichever
+    account runs dry first, and averaging that away would report a comfortable
+    runway right up until half the fleet stops.
+    """
+    if instances is None:
+        instances = _all_instances()
+    per_provider = []
+    for provider in rental_providers.configured_providers():
+        mine = [i for i in instances if i.provider == provider.key]
+        burn = _running_burn(mine)
+        try:
+            credit = account_balance(provider.key)["credit"]
+        except ProviderError:
+            credit = None
+        per_provider.append({
+            "provider": provider.key,
+            "label": provider.label,
+            "credit_url": provider.credit_url,
+            "credit": credit,
+            "usd_per_hour_running": burn,
+            "hours_remaining": round(credit / burn, 1) if credit is not None and burn > 0 else None,
+            "machines_running": sum(1 for i in mine if i.state != "stopped"),
+        })
+    runways = [p["hours_remaining"] for p in per_provider if p["hours_remaining"] is not None]
+    credits = [p["credit"] for p in per_provider if p["credit"] is not None]
     return {
-        "credit": credit,
-        "usd_per_hour_running": burn,
-        "hours_remaining": round(credit / burn, 1) if burn > 0 else None,
-        "machines_running": sum(
-            1 for i in instances if str(i.get("cur_state") or "").lower() not in {"stopped", "exited"}
-        ),
+        # Total money on deposit across marketplaces. Spendable only where it
+        # sits, which is why `providers` below is the one the UI should show
+        # before it offers to rent anything.
+        "credit": round(sum(credits), 4) if credits else None,
+        "usd_per_hour_running": round(sum(p["usd_per_hour_running"] for p in per_provider), 4),
+        "hours_remaining": min(runways) if runways else None,
+        "machines_running": sum(p["machines_running"] for p in per_provider),
+        "providers": per_provider,
     }
 
 
+def _probe_instances(instances: list[Instance]) -> list[dict]:
+    """DTOs for every instance, probed concurrently.
+
+    A probed DTO is almost entirely network wait: the box's provisioning beacon
+    (1.5s ceiling) and an HTTP round-trip through the SSH tunnel (1.5s ceiling).
+    Serially, the machine list therefore cost the SUM of every machine's waits —
+    and the studios poll this endpoint, so renting a second box made the whole
+    Rented panel slower. Measured 2026-08-13 with two live boxes: 2.0s serial
+    against 1.6s together (the slowest box alone), and the gap grows with each
+    machine. Ordering is preserved; the DTO builder only reads shared state.
+    """
+    if len(instances) < 2:
+        return [_instance_dto(i, probe=True) for i in instances]
+    with ThreadPoolExecutor(max_workers=min(8, len(instances))) as pool:
+        return list(pool.map(lambda i: _instance_dto(i, probe=True), instances))
+
+
 def list_rentals() -> dict:
-    body = _vast_request("GET", "/v1/instances/")
-    instances = [_instance_dto(i, probe=True) for i in (body.get("instances") or [])]
-    raw = body.get("instances") or []
+    raw = _all_instances()
+    instances = _probe_instances(raw)
     # Free: the DTOs are already in hand, so the box that failed provisioning
     # goes away on the same poll that noticed it rather than billing until
     # someone reads the screen.
@@ -1590,14 +1833,14 @@ def list_rentals() -> dict:
               if not entry.get("destroy_error")}
     if reaped:
         instances = [dto for dto in instances if dto["rental_id"] not in reaped]
-        raw = [i for i in raw if i.get("id") not in reaped]
-    burn = _running_burn(raw)
+        raw = [i for i in raw if str(i.ref) not in reaped]
     # Never let a balance hiccup take down the machine list — it is the view
     # that tells the user what they are paying for.
     try:
-        credit = account_balance()["credit"]
-    except GpuRentalError:
-        credit = None
+        account = account_state(raw)
+    except ProviderError:
+        account = {"credit": None, "usd_per_hour_running": _running_burn(raw),
+                   "hours_remaining": None, "machines_running": 0, "providers": []}
     # Tier keys ride along so the Machines view discovers tiers instead of
     # hardcoding them (minimax was invisible for exactly that reason).
     return {
@@ -1607,42 +1850,49 @@ def list_rentals() -> dict:
         # box would just vanish from the list and the user would be left with a
         # smaller balance and no account of where it went.
         "failures": recent_rental_failures(),
-        "account": {
-            "credit": credit,
-            "usd_per_hour_running": burn,
-            "hours_remaining": round(credit / burn, 1) if credit is not None and burn > 0 else None,
-        },
+        "account": account,
     }
 
 
-def _assert_affordable(count: int, usd_per_hour: float) -> None:
-    """Refuse rentals the credit cannot fund for an hour.
+def _assert_affordable(provider_key: str, count: int, usd_per_hour: float) -> None:
+    """Refuse rentals THIS marketplace's credit cannot fund for an hour.
 
-    Vast stops an instance once the balance crosses its threshold, so renting
-    past the credit does not fail loudly — it produces a box that provisions
-    (billed) and then dies partway through the session. Checked against the
-    burn ALREADY running, including the billing gateway's own instances,
-    because they draw on the same balance."""
+    Marketplaces stop an instance once the balance crosses its threshold, so
+    renting past the credit does not fail loudly — it produces a box that
+    provisions (billed) and then dies partway through the session. Checked
+    against the burn ALREADY running on that same account, including the
+    billing gateway's own instances, because they draw on the same balance.
+
+    Per provider, not against the total: the aggregate credit in account_state
+    spans two marketplaces that cannot pay each other's bills, so checking a
+    RunPod rental against a pile of Vast credit would wave through exactly the
+    rental this guard exists to stop.
+    """
+    provider = rental_providers.get(provider_key)
     try:
         state = account_state()
-    except GpuRentalError:
+    except ProviderError:
         return  # Never block a rental because the balance call itself failed.
-    needed = round((state["usd_per_hour_running"] + usd_per_hour * count) * MIN_FUNDED_HOURS, 2)
-    if state["credit"] >= needed:
+    mine = next((p for p in state["providers"] if p["provider"] == provider_key), None)
+    if not mine or mine["credit"] is None:
         return
-    running = state["machines_running"]
+    needed = round((mine["usd_per_hour_running"] + usd_per_hour * count) * MIN_FUNDED_HOURS, 2)
+    if mine["credit"] >= needed:
+        return
+    running = mine["machines_running"]
     raise GpuRentalError(
-        f"${state['credit']:.2f} credit is not enough to run "
+        f"${mine['credit']:.2f} {provider.label} credit is not enough to run "
         f"{count} more machine{'s' if count > 1 else ''} at ${usd_per_hour:.3f}/hr"
         + (f" alongside the {running} already running" if running else "")
-        + f" — {MIN_FUNDED_HOURS:.0f}h needs ${needed:.2f}. Add credit at vast.ai or rent fewer.",
+        + f" — {MIN_FUNDED_HOURS:.0f}h needs ${needed:.2f}. "
+        f"Add credit at {provider.credit_url} or rent fewer.",
         status_code=402,
     )
 
 
 def create_rental(
     tier: str,
-    offer_id: int | None = None,
+    offer_id: str | int | None = None,
     prefer: str = "balanced",
     gpu_class: str | None = None,
     count: int = 1,
@@ -1665,34 +1915,38 @@ def create_rental(
     # prove the key exists BEFORE the money starts (the onstart below embeds it).
     rental_public_key()
 
-    # Always search, even when the caller pinned an offer. Vast asks go stale
-    # within SECONDS, so a UI-supplied offer_id is by definition older than the
-    # click that sent it — the search is what stocks the fallbacks (and, for a
-    # batch, the other machines' slots). The pin is still tried FIRST below:
-    # it is a preference, not a constraint, because failing outright because
-    # one ask evaporated is a dead end, not safety.
+    # Always search, even when the caller pinned an offer. Marketplace asks go
+    # stale within SECONDS, so a UI-supplied offer_id is by definition older
+    # than the click that sent it — the search is what stocks the fallbacks
+    # (and, for a batch, the other machines' slots). The pin is still tried
+    # FIRST below: it is a preference, not a constraint, because failing
+    # outright because one ask evaporated is a dead end, not safety.
     ranked = _rank_offers(tier, _search_offers(tier, prefer, gpu_class)[0],
                           limit=max(8, count * 3))
-    preferred = [int(offer_id)] if offer_id is not None else []
-    fresh = [o["offer_id"] for o in ranked if o.get("offer_id") not in preferred]
+    # Candidates are (provider, native offer id). A bare id from an older
+    # client still parses, as Vast.
+    pinned = RentalRef.parse(offer_id) if offer_id is not None else None
+    preferred = [pinned] if pinned else []
+    fresh = [
+        RentalRef(dto["provider"], dto["offer_id"])
+        for dto in ranked
+        if not pinned or (dto["provider"], dto["offer_id"]) != (pinned.provider, pinned.native)
+    ]
     if not preferred and not fresh:
         raise GpuRentalError("no offers currently match the tier filters", status_code=409)
-    # Cheapest quote in the qualifying set. Absent only when the caller pinned
-    # an offer the search no longer returns, in which case there is no price to
-    # check against and the pin is tried on trust.
-    quote = next((o["usd_per_hour"] for o in ranked), None)
+    # Cheapest quote in the qualifying set, and the account it would be spent
+    # from. Absent only when the caller pinned an offer the search no longer
+    # returns, in which case there is no price to check against and the pin is
+    # tried on trust.
+    quote = next(iter(ranked), None)
     if quote is not None:
-        _assert_affordable(count, quote)
+        _assert_affordable(quote["provider"], count, quote["usd_per_hour"])
 
     onstart = _onstart_script(tier)
 
-    def _ask_evaporated(exc: GpuRentalError) -> bool:
-        text = str(exc)
-        return "no_such_ask" in text or "not available" in text
-
     state: dict[str, Any] = {"tried": 0, "last_error": None}
-    # One offer per machine: a Vast ask is a slot, so renting the same one
-    # twice in a batch is how you ask for N machines and get one.
+    # One offer per machine: a marketplace ask is a slot, so renting the same
+    # one twice in a batch is how you ask for N machines and get one.
     remaining = preferred + fresh
     created: list[dict] = []
 
@@ -1700,28 +1954,32 @@ def create_rental(
         rented = None
         while remaining and rented is None:
             candidate = remaining.pop(0)
+            provider = rental_providers.get(candidate.provider)
             label = f"{STUDIO_LABEL_PREFIX}{tier}-{gpu_class}-{uuid.uuid4().hex[:8]}"
             state["tried"] += 1
             try:
-                body = _vast_request("PUT", f"/v0/asks/{candidate}/", {
-                    "client_id": "me",
-                    "image": COMFY_IMAGE,
-                    "disk": TIERS[tier]["disk_gb"],
-                    "label": label,
-                    "onstart": onstart,
-                    "runtype": "ssh",
-                    # Publish only the beacon port; ComfyUI stays on loopback.
-                    "env": {f"-p {BEACON_PORT}:{BEACON_PORT}": "1"},
-                })
-            except GpuRentalError as exc:
-                if not _ask_evaporated(exc):
+                native_id = provider.create(LaunchSpec(
+                    image=comfy_image_for(candidate.provider),
+                    disk_gb=tier_disk_gb(tier),
+                    label=label,
+                    onstart=onstart,
+                    # Publish only the beacon; ComfyUI stays on loopback.
+                    expose_ports=[BEACON_PORT],
+                    offer_id=candidate.native,
+                    gpu_names=_gpu_names_for(tier, gpu_class),
+                    min_ram_gb=TIERS[tier].get("min_ram_gb") or TIERS[tier]["min_vram_gb"],
+                    min_down_mbps=tier_min_down_mbps(tier),
+                ))
+            except ProviderError as exc:
+                if not provider.ask_evaporated(exc):
                     if created:
                         break  # Machines are already billing; report, don't raise.
                     raise
                 state["last_error"] = exc
                 continue
-            rented = {"rental_id": body.get("new_contract"), "label": label,
-                      "tier": tier, "gpu_class": gpu_class, "offer_id": candidate}
+            rented = {"rental_id": str(RentalRef(candidate.provider, native_id)),
+                      "provider": candidate.provider, "label": label,
+                      "tier": tier, "gpu_class": gpu_class, "offer_id": candidate.native}
             created.append(rented)
         if rented is None:
             break
@@ -1793,9 +2051,21 @@ def _write_attachments(attachments: dict[str, dict]) -> None:
     )
 
 
-def _tunnel_pid(rental_id: int) -> int | None:
+def _tunnel_slug(ref: RentalRef) -> str:
+    """Filename-safe form of a rental ref.
+
+    "vast:47390808" -> "vast-47390808". A colon is legal in a POSIX filename
+    but is the path separator in Finder's presentation layer and in plenty of
+    tooling, and these pidfiles are read by hand when a tunnel misbehaves.
+    Bare Vast ids written before refs existed slugged to themselves, so old
+    pidfiles keep resolving.
+    """
+    return str(ref).replace(":", "-")
+
+
+def _tunnel_pid(ref: RentalRef) -> int | None:
     try:
-        pid = int((_tunnel_dir() / f"{rental_id}.pid").read_text().strip())
+        pid = int((_tunnel_dir() / f"{_tunnel_slug(ref)}.pid").read_text().strip())
         os.kill(pid, 0)
         return pid
     except Exception:
@@ -1820,7 +2090,7 @@ def _lane_answers(port: int, timeout: float = 1.5) -> bool:
         return False
 
 
-def _tunnel_carrying_traffic(rental_id: int, timeout: float = 1.5) -> bool:
+def _tunnel_carrying_traffic(ref: RentalRef, timeout: float = 1.5) -> bool:
     """Is the lane actually usable, not merely the ssh process alive?
 
     Three layers of this have now been wrong, each one a smaller version of the
@@ -1837,14 +2107,14 @@ def _tunnel_carrying_traffic(rental_id: int, timeout: float = 1.5) -> bool:
     true — while a submitted job sat rendering nothing. Nobody found out until
     a person asked why there was no clip.
     """
-    attachment = _read_attachments().get(str(rental_id)) or {}
+    attachment = _read_attachments().get(str(ref)) or {}
     port = attachment.get("local_port")
     if not port:
         return False
     return _lane_answers(int(port), timeout=timeout)
 
 
-def _spawn_tunnel(rental_id: int, ip: str, ssh_port: str, local_port: int) -> int:
+def _spawn_tunnel(ref: RentalRef, ip: str, ssh_port: str, local_port: int) -> int:
     if not RENTAL_SSH_KEY.exists():
         raise GpuRentalError(f"rental SSH key missing at {RENTAL_SSH_KEY}", status_code=503)
     _tunnel_dir().mkdir(parents=True, exist_ok=True)
@@ -1857,14 +2127,14 @@ def _spawn_tunnel(rental_id: int, ip: str, ssh_port: str, local_port: int) -> in
          "-L", f"{local_port}:localhost:18188"],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
-        stderr=(_tunnel_dir() / f"{rental_id}.log").open("ab"),
+        stderr=(_tunnel_dir() / f"{_tunnel_slug(ref)}.log").open("ab"),
     )
-    (_tunnel_dir() / f"{rental_id}.pid").write_text(str(proc.pid))
-    _await_tunnel(rental_id, proc, local_port)
+    (_tunnel_dir() / f"{_tunnel_slug(ref)}.pid").write_text(str(proc.pid))
+    _await_tunnel(ref, proc, local_port)
     return proc.pid
 
 
-def _await_tunnel(rental_id: int, proc: subprocess.Popen, local_port: int, timeout: float = 20.0) -> None:
+def _await_tunnel(ref: RentalRef, proc: subprocess.Popen, local_port: int, timeout: float = 20.0) -> None:
     """Fail the attach if the tunnel never carries traffic.
 
     ssh forks, so Popen succeeding says nothing: a rejected key exits a moment
@@ -1884,8 +2154,8 @@ def _await_tunnel(rental_id: int, proc: subprocess.Popen, local_port: int, timeo
     forward_opened = False
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            reason = _tunnel_failure_reason(rental_id)
-            _kill_tunnel(rental_id)
+            reason = _tunnel_failure_reason(ref)
+            _kill_tunnel(ref)
             raise GpuRentalError(
                 f"SSH tunnel to the machine failed: {reason}", status_code=502
             )
@@ -1895,7 +2165,7 @@ def _await_tunnel(rental_id: int, proc: subprocess.Popen, local_port: int, timeo
             with socket.create_connection(("127.0.0.1", local_port), timeout=1):
                 forward_opened = True
         time.sleep(0.5)
-    _kill_tunnel(rental_id)
+    _kill_tunnel(ref)
     if forward_opened:
         raise GpuRentalError(
             f"The SSH tunnel opened but the machine's ComfyUI did not answer within "
@@ -1905,17 +2175,17 @@ def _await_tunnel(rental_id: int, proc: subprocess.Popen, local_port: int, timeo
         )
     raise GpuRentalError(
         f"SSH tunnel to the machine did not come up within {int(timeout)}s "
-        f"({_tunnel_failure_reason(rental_id)})",
+        f"({_tunnel_failure_reason(ref)})",
         status_code=504,
     )
 
 
-def _tunnel_failure_reason(rental_id: int) -> str:
+def _tunnel_failure_reason(ref: RentalRef) -> str:
     """ssh's last stderr line, which is where the actual cause lives."""
     try:
         lines = [
             line.strip()
-            for line in (_tunnel_dir() / f"{rental_id}.log").read_text(errors="replace").splitlines()
+            for line in (_tunnel_dir() / f"{_tunnel_slug(ref)}.log").read_text(errors="replace").splitlines()
             if line.strip() and not line.startswith("Warning: Permanently added")
         ]
     except OSError:
@@ -1934,8 +2204,8 @@ def _tunnel_failure_reason(rental_id: int) -> str:
     return "no output from ssh"
 
 
-def _kill_tunnel(rental_id: int) -> None:
-    pid = _tunnel_pid(rental_id)
+def _kill_tunnel(ref: RentalRef) -> None:
+    pid = _tunnel_pid(ref)
     if pid:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -1943,7 +2213,7 @@ def _kill_tunnel(rental_id: int) -> None:
             pass
     for suffix in ("pid", "log"):
         try:
-            (_tunnel_dir() / f"{rental_id}.{suffix}").unlink()
+            (_tunnel_dir() / f"{_tunnel_slug(ref)}.{suffix}").unlink()
         except OSError:
             pass
 
@@ -1978,27 +2248,64 @@ def _gpu_class_from_label(label: str) -> str | None:
     return parts[1] if len(parts) > 1 and parts[1] in GPU_CLASSES else None
 
 
-def attach_rental(rental_id: int, *, select: bool = False) -> dict:
-    body = _vast_request("GET", "/v1/instances/")
-    match = next((i for i in body.get("instances") or [] if i.get("id") == rental_id), None)
+def _find_instance(ref: RentalRef) -> Instance:
+    """The named rental, from its own provider only.
+
+    Asking one marketplace about another's id would 404 at best; at worst two
+    marketplaces hand out the same integer and we act on the wrong box.
+    """
+    provider = rental_providers.get(ref.provider)
+    match = next((i for i in provider.list_instances() if i.native_id == ref.native), None)
     if match is None:
-        raise GpuRentalError(f"instance {rental_id} not found on the account", status_code=404)
+        raise GpuRentalError(f"instance {ref} not found on the account", status_code=404)
+    return match
+
+
+def _lane_port(ref: RentalRef) -> int:
+    """A stable local port for this rental's tunnel.
+
+    Numeric ids keep `int % 500` so every Vast machine attached before rental
+    refs existed lands on the port it is already tunnelled through — changing
+    it would strand a live lane. Anything else hashes, deterministically
+    (hash() is salted per process and would move the port across restarts).
+    """
+    if ref.native.isdigit():
+        return TUNNEL_BASE_PORT + (int(ref.native) % 500)
+    digest = hashlib.sha256(str(ref).encode()).digest()
+    return TUNNEL_BASE_PORT + (int.from_bytes(digest[:4], "big") % 500)
+
+
+def _lane_name(ref: RentalRef) -> str:
+    """The gateway-facing lane name.
+
+    Vast keeps the bare `rental<id>` form it has always had — the name is
+    written into COMFY_LANES and COMFY_LANE_RULES, so renaming it would
+    re-route every attached machine mid-session. Other providers carry their
+    key, which is also what keeps two marketplaces' identical ids apart.
+    """
+    return f"rental{ref.native}" if ref.provider == "vast" else f"rental{ref.provider}-{ref.native}"
+
+
+def attach_rental(rental_id: str | int, *, select: bool = False) -> dict:
+    ref = RentalRef.parse(rental_id)
+    match = _find_instance(ref)
     dto = _instance_dto(match, probe=True)
     if not dto["managed"]:
         raise GpuRentalError("only studio-managed machines can be attached", status_code=409)
     if dto["phase"] != "ready":
         raise GpuRentalError(f"machine is not ready yet (phase: {dto['phase']})", status_code=409)
-    endpoint = _ssh_endpoint(match)
+    endpoint = match.ssh
     if endpoint is None:
         raise GpuRentalError("instance has no SSH endpoint yet", status_code=409)
     ip, ssh_port = endpoint
 
     tier = _tier_from_label(dto["label"])
-    local_port = TUNNEL_BASE_PORT + (rental_id % 500)
-    if _tunnel_pid(rental_id) is None:
-        _spawn_tunnel(rental_id, ip, ssh_port, local_port)
+    local_port = _lane_port(ref)
+    lane = _lane_name(ref)
+    if _tunnel_pid(ref) is None:
+        _spawn_tunnel(ref, ip, ssh_port, local_port)
     attachments = _read_attachments()
-    existing = attachments.get(str(rental_id)) or {}
+    existing = attachments.get(str(ref)) or {}
     # Selecting puts this machine ahead of every other attachment; a plain
     # attach keeps whatever standing it already had (re-attaching a machine
     # after a dropped tunnel must not silently steal routing from the one the
@@ -2007,8 +2314,8 @@ def attach_rental(rental_id: int, *, select: bool = False) -> dict:
         priority = max((a.get("priority") or 0) for a in attachments.values()) + 1 if attachments else 1
     else:
         priority = existing.get("priority") or 0
-    attachments[str(rental_id)] = {
-        "lane": f"rental{rental_id}",
+    attachments[str(ref)] = {
+        "lane": lane,
         "local_port": local_port,
         "needles": TIERS[tier]["lane_needles"],
         "tier": tier,
@@ -2018,58 +2325,82 @@ def attach_rental(rental_id: int, *, select: bool = False) -> dict:
     }
     _write_attachments(attachments)
     paused = _read_paused_state()
-    if paused.pop(str(rental_id), None) is not None:
+    if paused.pop(str(ref), None) is not None:
         _write_paused_state(paused)
     # No restart: the gateway re-reads this registry per request (see
     # refresh_comfy_lanes in packages/media-gateway/app.py), so the lane is live
     # as soon as the file lands. Restarting to add a routing rule killed
     # in-flight generations and made "use this machine" a 30-second event.
-    return {"rental_id": rental_id, "attached": True, "lane": f"rental{rental_id}",
+    return {"rental_id": str(ref), "attached": True, "lane": lane,
             "restarting_stack": False, "studio_pages": TIERS[tier]["studio_pages"],
             "priority": priority}
 
 
-def select_rental(rental_id: int) -> dict:
+def select_rental(rental_id: str | int) -> dict:
     """Make this the machine that runs generations for the models it serves.
 
     Attaching several machines is legitimate — different workloads, different
     lanes — but two that serve the SAME models are a race the user has to be
     able to settle. This is that settlement: attach if needed, then move to
-    the front of the first-match lane rules."""
+    the front of the first-match lane rules.
+
+    Switching between machines that are ALREADY attached is the common case,
+    and it rewrites exactly one integer in a local file. Going through
+    attach_rental for that cost a marketplace round-trip plus a beacon fetch
+    and a tunnel probe — 2.0s measured with two boxes on 2026-08-13 — which is
+    a long time to hold a click that changes nothing on the far end. Nothing is
+    skipped: the lane, port, needles and tier were settled at attach time, the
+    tunnel is only ever respawned when its pid is gone (attach_rental applies
+    the same test), and the gateway re-reads the registry per request.
+    """
+    ref = RentalRef.parse(rental_id)
+    attachments = _read_attachments()
+    existing = attachments.get(str(ref))
+    if existing and _tunnel_pid(ref) is not None:
+        priority = max((a.get("priority") or 0) for a in attachments.values()) + 1
+        attachments[str(ref)] = {**existing, "priority": priority}
+        _write_attachments(attachments)
+        paused = _read_paused_state()
+        if paused.pop(str(ref), None) is not None:
+            _write_paused_state(paused)
+        return {"rental_id": str(ref), "attached": True,
+                "lane": existing.get("lane") or _lane_name(ref),
+                "restarting_stack": False,
+                "studio_pages": existing.get("studio_pages") or [],
+                "priority": priority}
     return attach_rental(rental_id, select=True)
 
 
-def detach_rental(rental_id: int, *, restart: bool = False) -> dict:
+def detach_rental(rental_id: str | int, *, restart: bool = False) -> dict:
     """Drop the tunnel and the lane. The gateway notices on its next request.
 
     `restart` stays as an escape hatch for an operator who has changed the env
     overlay itself (that IS launcher-sourced), but nothing in the normal attach
     or destroy path uses it any more."""
-    _kill_tunnel(rental_id)
+    ref = RentalRef.parse(rental_id)
+    _kill_tunnel(ref)
     attachments = _read_attachments()
-    removed = attachments.pop(str(rental_id), None)
+    removed = attachments.pop(str(ref), None)
     _write_attachments(attachments)
     if removed and restart:
         _schedule_stack_restart()
-    return {"rental_id": rental_id, "attached": False, "restarting_stack": bool(removed and restart)}
+    return {"rental_id": str(ref), "attached": False,
+            "restarting_stack": bool(removed and restart)}
 
 
-def _managed_instance(rental_id: int) -> dict:
-    body = _vast_request("GET", "/v1/instances/")
-    match = next((i for i in body.get("instances") or [] if i.get("id") == rental_id), None)
-    if match is None:
-        raise GpuRentalError(f"instance {rental_id} not found on the account", status_code=404)
-    if not str(match.get("label") or "").startswith(STUDIO_LABEL_PREFIX):
+def _managed_instance(ref: RentalRef) -> Instance:
+    match = _find_instance(ref)
+    if not match.label.startswith(STUDIO_LABEL_PREFIX):
         raise GpuRentalError(
-            f"instance {rental_id} is not managed by the studio — refusing", status_code=409)
+            f"instance {ref} is not managed by the studio — refusing", status_code=409)
     return match
 
 
-# A box whose provisioning failed will never serve a generation, but Vast bills
-# it exactly like one that works — from creation until it is destroyed, and
-# there is no refund anywhere in this path. Left alone it burns money forever,
-# and the Machines view has to be OPEN for anyone to notice, so the reaper runs
-# on a timer too. The grace window exists so the failure is not destroyed the
+# A box whose provisioning failed will never serve a generation, but it bills
+# exactly like one that works — from creation until it is destroyed, and there
+# is no refund anywhere in this path. Left alone it burns money forever, and the
+# Machines view has to be OPEN for anyone to notice, so the reaper runs on a
+# timer too. The grace window exists so the failure is not destroyed the
 # instant it appears; the reason is recorded before the box goes away, because
 # after that there is nothing left to ask.
 PROVISION_FAILURE_GRACE_SECONDS = int(os.environ.get("HIVEMIND_RENTAL_REAP_GRACE", "60"))
@@ -2220,38 +2551,41 @@ def recent_bad_machine_ids(within_seconds: float = BAD_MACHINE_COOLDOWN_SECONDS)
     return bad | _shared_bad_machine_ids()
 
 
-def pause_rental(rental_id: int) -> dict:
+def pause_rental(rental_id: str | int) -> dict:
     """Stop the box but KEEP its disk: models stay downloaded, so resuming
-    skips the whole model pull. Vast bills storage only while stopped.
+    skips the whole model pull. Both marketplaces bill storage only while
+    stopped.
 
     Attachment is torn down first (a tunnel to a stopped box is a dead lane)
     but remembered, so resume can restore studio routing automatically.
     """
-    _managed_instance(rental_id)
-    was_attached = str(rental_id) in _read_attachments()
-    detach_rental(rental_id, restart=was_attached)
-    _vast_request("PUT", f"/v0/instances/{rental_id}/", {"state": "stopped"})
+    ref = RentalRef.parse(rental_id)
+    _managed_instance(ref)
+    was_attached = str(ref) in _read_attachments()
+    detach_rental(ref, restart=was_attached)
+    rental_providers.get(ref.provider).pause(ref.native)
     paused = _read_paused_state()
-    paused[str(rental_id)] = {"was_attached": was_attached, "paused_at": time.time()}
+    paused[str(ref)] = {"was_attached": was_attached, "paused_at": time.time()}
     _write_paused_state(paused)
-    return {"rental_id": rental_id, "paused": True, "was_attached": was_attached}
+    return {"rental_id": str(ref), "paused": True, "was_attached": was_attached}
 
 
-def resume_rental(rental_id: int) -> dict:
-    """Start a paused box. Vast re-runs onstart, which is idempotent: the
-    model downloads all skip (files present), so it goes straight to
+def resume_rental(rental_id: str | int) -> dict:
+    """Start a paused box. The provisioning script re-runs and is idempotent:
+    the model downloads all skip (files present), so it goes straight to
     launching ComfyUI. Routing is restored if it was attached when paused.
     """
-    _managed_instance(rental_id)
-    _vast_request("PUT", f"/v0/instances/{rental_id}/", {"state": "running"})
+    ref = RentalRef.parse(rental_id)
+    _managed_instance(ref)
+    rental_providers.get(ref.provider).resume(ref.native)
     paused = _read_paused_state()
-    entry = paused.pop(str(rental_id), {})
+    entry = paused.pop(str(ref), {})
     if entry.get("was_attached"):
         # Cleared by attach_rental once the tunnel is actually back up; the
         # Machines view watches this and re-attaches when the box reports ready.
-        paused[str(rental_id)] = {"pending_reattach": True}
+        paused[str(ref)] = {"pending_reattach": True}
     _write_paused_state(paused)
-    return {"rental_id": rental_id, "resuming": True,
+    return {"rental_id": str(ref), "resuming": True,
             "will_reattach": bool(entry.get("was_attached"))}
 
 
@@ -2271,24 +2605,22 @@ def _write_paused_state(state: dict) -> None:
     _paused_state_path().write_text(json.dumps(state, indent=1))
 
 
-def destroy_rental(rental_id: int) -> dict:
-    body = _vast_request("GET", "/v1/instances/")
-    match = next((i for i in body.get("instances") or [] if i.get("id") == rental_id), None)
-    if match is None:
-        raise GpuRentalError(f"instance {rental_id} not found on the account", status_code=404)
-    label = match.get("label") or ""
+def destroy_rental(rental_id: str | int) -> dict:
+    ref = RentalRef.parse(rental_id)
+    match = _find_instance(ref)
+    label = match.label
     if not label.startswith(STUDIO_LABEL_PREFIX):
         raise GpuRentalError(
-            f"instance {rental_id} ({label or 'no label'}) is not managed by the studio — refusing to destroy",
+            f"instance {ref} ({label or 'no label'}) is not managed by the studio — refusing to destroy",
             status_code=409,
         )
     # Never leave routing pointed at a dead box: tear down any attachment
     # (tunnel + overlay entry) before the instance goes away. No stack restart
     # is involved any more — the gateway re-reads the attachment registry per
     # request, so the lane is gone the moment this returns.
-    detach_rental(rental_id)
-    _vast_request("DELETE", f"/v0/instances/{rental_id}/")
-    return {"rental_id": rental_id, "destroyed": True, "restarting_stack": False}
+    detach_rental(ref)
+    rental_providers.get(ref.provider).destroy(ref.native)
+    return {"rental_id": str(ref), "destroyed": True, "restarting_stack": False}
 
 
 # How often the reaper sweeps when nobody has the Machines view open. Long,
@@ -2304,9 +2636,7 @@ def _reaper_loop() -> None:
     while True:
         time.sleep(delay)
         try:
-            body = _vast_request("GET", "/v1/instances/")
-            raw = body.get("instances") or []
-            managed = [i for i in raw if str(i.get("label") or "").startswith(STUDIO_LABEL_PREFIX)]
+            managed = [i for i in _all_instances() if i.label.startswith(STUDIO_LABEL_PREFIX)]
             # Probe the beacon only for studio boxes: the phase this turns on
             # is the whole reason for the sweep.
             for entry in reap_failed_rentals([_instance_dto(i, probe=True) for i in managed]):
@@ -2314,7 +2644,8 @@ def _reaper_loop() -> None:
                       f"(${entry['usd_spent']:.2f} spent): {entry['reason']}", flush=True)
             delay = REAPER_INTERVAL_SECONDS if managed else REAPER_IDLE_INTERVAL_SECONDS
         except Exception:
-            # A Vast hiccup must not kill the sweeper for the process lifetime.
+            # A marketplace hiccup must not kill the sweeper for the process
+            # lifetime.
             delay = REAPER_INTERVAL_SECONDS
 
 
@@ -2325,21 +2656,25 @@ def register_gpu_rental_routes(app, require_owner) -> None:
     def _guard(fn, *args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except GpuRentalError as exc:
+        except ProviderError as exc:
+            # ProviderError, not GpuRentalError: a marketplace failure raised
+            # inside rental_providers/ is the base class, and catching only the
+            # subclass would turn a Vast 429 into an unhandled 500.
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @app.on_event("startup")
     def _start_rental_reaper() -> None:
-        # Warm the Vast connection off the request path. The first call in a
-        # fresh process pays DNS + TLS to console.vast.ai — measured at ~7s
-        # against a ~0.2s median once the pool is established — and the user
-        # who eats it is whoever opens Machines first after a stack restart,
-        # staring at a view that looks broken. Also primes the balance cache.
+        # Warm each marketplace connection off the request path. The first
+        # call in a fresh process pays DNS + TLS — measured at ~7s against a
+        # ~0.2s median once the pool is established — and the user who eats it
+        # is whoever opens Machines first after a stack restart, staring at a
+        # view that looks broken. Also primes the balance caches.
         def _warm() -> None:
-            try:
-                account_balance()
-            except Exception:
-                pass  # no key, no network: the real request will report it
+            for provider in rental_providers.configured_providers():
+                try:
+                    account_balance(provider.key)
+                except Exception:
+                    pass  # no key, no network: the real request will report it
 
         threading.Thread(target=_warm, name="gpu-rental-warm", daemon=True).start()
         if not RENTAL_AUTOREAP:
@@ -2391,38 +2726,45 @@ def register_gpu_rental_routes(app, require_owner) -> None:
     def gpu_rentals_create(payload: dict = Body(default={})) -> dict:
         tier = str(payload.get("tier") or "image")
         offer_id = payload.get("offer_id")
+        # A pinned offer needs its marketplace attached: two providers hand out
+        # independent id spaces and nothing stops them colliding on an integer.
+        # Clients that send a bare id (and older ones that only ever could) are
+        # read as Vast by RentalRef.
+        provider = payload.get("provider")
+        if offer_id is not None and provider and ":" not in str(offer_id):
+            offer_id = f"{provider}:{offer_id}"
         prefer = str(payload.get("prefer") or "balanced")
         gpu_class = payload.get("gpu_class") or None
         count = payload.get("count") or 1
         return _guard(
             create_rental,
             tier,
-            int(offer_id) if offer_id is not None else None,
+            str(offer_id) if offer_id is not None else None,
             prefer,
             str(gpu_class) if gpu_class else None,
             int(count),
         )
 
     @app.delete("/api/gpu-rentals/{rental_id}", dependencies=[Depends(require_owner)])
-    def gpu_rentals_destroy(rental_id: int) -> dict:
+    def gpu_rentals_destroy(rental_id: str) -> dict:
         return _guard(destroy_rental, rental_id)
 
     @app.post("/api/gpu-rentals/{rental_id}/pause", dependencies=[Depends(require_owner)])
-    def gpu_rentals_pause(rental_id: int) -> dict:
+    def gpu_rentals_pause(rental_id: str) -> dict:
         return _guard(pause_rental, rental_id)
 
     @app.post("/api/gpu-rentals/{rental_id}/resume", dependencies=[Depends(require_owner)])
-    def gpu_rentals_resume(rental_id: int) -> dict:
+    def gpu_rentals_resume(rental_id: str) -> dict:
         return _guard(resume_rental, rental_id)
 
     @app.post("/api/gpu-rentals/{rental_id}/attach", dependencies=[Depends(require_owner)])
-    def gpu_rentals_attach(rental_id: int) -> dict:
+    def gpu_rentals_attach(rental_id: str) -> dict:
         return _guard(attach_rental, rental_id)
 
     @app.delete("/api/gpu-rentals/{rental_id}/attach", dependencies=[Depends(require_owner)])
-    def gpu_rentals_detach(rental_id: int) -> dict:
+    def gpu_rentals_detach(rental_id: str) -> dict:
         return _guard(detach_rental, rental_id)
 
     @app.post("/api/gpu-rentals/{rental_id}/select", dependencies=[Depends(require_owner)])
-    def gpu_rentals_select(rental_id: int) -> dict:
+    def gpu_rentals_select(rental_id: str) -> dict:
         return _guard(select_rental, rental_id)

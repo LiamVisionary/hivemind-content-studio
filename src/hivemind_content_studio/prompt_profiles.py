@@ -199,13 +199,24 @@ subject_definitions:
   the movement it carries and say who inherits it: "<Video 1> is a motion reference:
   quick punctuating hand gestures and lively expressiveness, inherited by <Subject 1>."
 summary:
-  One paragraph: what the target clip is, and which references drive it. When audio
-  references are present, include the task-type marker — [audio reuse] or
-  [audio reference] — and cite the <Audio N> labels.
+  One paragraph: what the target clip is, and which references drive it. Include the
+  task type: [keyframe completion] when a picture is pinned as the first or last frame,
+  otherwise [reference generation]. When audio references are present, add the audio
+  task-type marker too — [audio reuse] or [audio reference] — and cite the <Audio N>
+  labels.
 retention_analysis:
   One line per label, each ending in exactly one marker, then why in a clause.
   Pictures, subjects and videos use fully_preserved, partially_preserved,
-  attribute_transfer or weak_reference. Audio labels use the copy family instead:
+  attribute_transfer or weak_reference. Pick by the role the picture is playing:
+  a pinned first or last frame is fully_preserved; a setting the shot inherits is
+  partially_preserved; one feature moved onto a subject (a garment, a hairstyle, a
+  material) is attribute_transfer; composition, look, style and storyboard panels are
+  weak_reference. attribute_transfer is a retention marker only — it never becomes the
+  summary's task type, which stays [reference generation].
+  A picture that merely shows what a character LOOKS LIKE gets no <Picture N> line of
+  its own: cite it inside that subject's definition instead. Standalone picture lines
+  are for pictures playing a role in their own right.
+  Audio labels use the copy family instead:
   fully_copy (words and voice reperformed), partially_copy, reference (timbre guides
   new dialogue without copying the signal) or weak_reference.
   A newly invented plot beat is not a loss of fidelity; do not mark it as one.
@@ -469,11 +480,26 @@ def _reference_inventory_clause(references: dict | None) -> str:
         audio_ordinal += 1
         lines.append(f"- <Audio {audio_ordinal}> is a standalone voice or music clip.")
     body = "\n".join(lines)
+    # A soundtrack is its own reference AND one of H3's three audio clips, so a
+    # full row can be over budget while every per-kind count still looks legal.
+    # The writer is told because the fix is often a prompt decision — leaning on
+    # one fewer reference — not just a trim in the panel.
+    soundtracks = sum(1 for video in videos if bool((video or {}).get("useAudio")))
+    total = images + len(videos) + audios + soundtracks
+    budget = ""
+    if total > 12 or (audios + soundtracks) > 3:
+        budget = (
+            f"\nThis run is over H3's reference budget ({total} references against 12"
+            f", {audios + soundtracks} audio clips against 3)."
+            " Write the prompt for the labels listed above anyway — renumbering them here"
+            " would not match what the graph sends."
+        )
     return (
         "\n\nThe run carries exactly these references, in this order — write these labels and no "
         "others, and give every one of them a line in subject_definitions and retention_analysis:\n"
         f"{body}\n"
         "Do not refer to a label that is not on this list; there is nothing attached for it."
+        f"{budget}"
     )
 
 

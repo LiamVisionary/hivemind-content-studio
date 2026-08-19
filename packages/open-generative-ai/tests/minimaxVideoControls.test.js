@@ -113,3 +113,122 @@ test('the persisted steps override round-trips within sane bounds', async () => 
     assert.equal(steps('32'), null, 'a string is not a step count');
     assert.equal(steps(undefined), null);
 });
+
+// A motion reference (a reference VIDEO) is trimmed to the generated clip's own
+// length, so its cost grows with the clip and rides every sampling step, while
+// reference PICTURES cost a flat amount however long the clip is. Measured at
+// 36x per frame on a rented 5090, which turns H3's honest 15s range into under
+// 6s the moment a motion clip is attached. The studio used to offer all 15
+// anyway: the run was accepted, staged its references, and died minutes later
+// on a CUDA allocator dump that reached the browser as a bare MediaStudioError.
+// A motion reference (a reference VIDEO) is trimmed to the generated clip's own
+// length, so its cost grows with the clip and rides every sampling step, while
+// reference PICTURES cost a flat amount however long the clip is. Measured at
+// 36x per frame on a rented 5090, which turns H3's honest 15s range into under
+// 6s the moment a motion clip is attached. The studio used to offer all 15
+// anyway: the run was accepted, staged its references, and died minutes later
+// on a CUDA allocator dump that reached the browser as a bare MediaStudioError.
+//
+// The ceiling is computed server-side from the registry budget and the tier
+// tables, then published per canvas. videoLogic must read it through the SAME
+// module instance that holds the loaded context, so the studio and the guard
+// quote one number.
+test('a motion reference caps the duration range at the measured ceiling', async () => {
+    const restore = stubBrowserGlobals();
+    const originalFetch = global.fetch;
+    const response = (ok, body) => ({ ok, json: async () => body });
+    global.fetch = async (url) => {
+        if (String(url).startsWith('/api/simple/prompts')) return response(true, { prompts: [] });
+        return response(true, catalogWith([
+            {
+                id: 'minimax-h3',
+                label: 'MiniMax H3',
+                family: 'minimax',
+                accepts: ['prompt'],
+                defaults: {},
+                aspect_ratios: ['9:16', '16:9'],
+                default_duration_seconds: 5,
+                // Server-computed from the registry budget and the tier tables.
+                motion_reference_max_seconds: { 'high|9:16': 10.125, 'max|9:16': 8.0, 'standard|9:16': 25.0 },
+            },
+            { id: 'minimax-h3-turbo', label: 'Turbo', family: 'minimax', accepts: ['prompt'], defaults: {}, aspect_ratios: ['9:16'] },
+        ]));
+    };
+    try {
+        // No ?test= query: videoLogic imports hivemindStudio itself, and a
+        // second module instance would hold an empty context.
+        const studio = await import('../src/lib/hivemindStudio.js');
+        const logic = await import('../src/studios/video/videoLogic.js');
+        const context = await studio.loadHivemindStudioContext({ refresh: true });
+        const [h3, turbo] = context.videoModels;
+        assert.equal(h3.motionReferenceMaxSeconds['high|9:16'], 10.125, 'the capability reaches the client');
+        assert.equal(turbo.motionReferenceMaxSeconds, null, 'no measured budget, no capability');
+
+        const setup = (extra) => ({ modelId: h3.id, ar: '9:16', resolution: 'High', duration: 15, referenceVideos: [], ...extra });
+        const clip = (seconds) => ({ url: `blob:motion-${seconds}`, durationSeconds: seconds });
+
+        // No motion reference: the full range, untouched.
+        assert.equal(logic.motionReferenceLimitFor(setup(), h3.id), null);
+        assert.equal(logic.availableDurationsFor(setup(), h3.id).length, 15);
+
+        // A SHORT reference keeps its own length, so it costs only that and the
+        // whole range stays open. This is the case the first rule got wrong: it
+        // capped the clip whenever any reference was attached, so dropping in a
+        // 2s clip still pinned the slider.
+        const short = setup({ referenceVideos: [clip(2)] });
+        assert.equal(logic.motionReferenceLimitFor(short, h3.id), null);
+        assert.equal(logic.availableDurationsFor(short, h3.id).length, 15);
+        assert.equal(logic.clampDurationToMotionReference(short, h3.id), 15);
+
+        // A reference at or beyond the clip's length is trimmed down to it, so
+        // the CLIP becomes the thing that has to fit: 11s and up stop being
+        // offered against the 10.125s ceiling.
+        const long = setup({ referenceVideos: [clip(15)] });
+        assert.equal(logic.motionReferenceLimitFor(long, h3.id).maxSeconds, 10.125);
+        assert.deepEqual(logic.availableDurationsFor(long, h3.id), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert.equal(logic.clampDurationToMotionReference(long, h3.id), 10);
+        assert.equal(logic.clampDurationToMotionReference({ ...long, duration: 3 }, h3.id), 3);
+
+        // The LONGEST attached reference decides — a short one alongside it
+        // cannot buy back the range.
+        const mixed = setup({ referenceVideos: [clip(2), clip(15)] });
+        assert.equal(logic.motionReferenceLimitFor(mixed, h3.id).maxSeconds, 10.125);
+
+        // An UNMEASURED reference counts as long, matching the gateway: guessing
+        // it short would offer a length the run then refuses.
+        const unmeasured = setup({ referenceVideos: [{ url: 'blob:unmeasured' }] });
+        assert.equal(logic.motionReferenceLimitFor(unmeasured, h3.id).maxSeconds, 10.125);
+
+        // A reference PICTURE costs the same whatever the length, so it must
+        // never narrow anything: only videos carry the per-frame cost.
+        assert.equal(logic.motionReferenceLimitFor(setup({ referenceImageUrls: ['blob:pic'] }), h3.id), null);
+
+        // The ceiling follows the canvas: the native tier costs more per frame.
+        assert.deepEqual(logic.availableDurationsFor({ ...long, resolution: 'Max' }, h3.id), [1, 2, 3, 4, 5, 6, 7, 8]);
+        // An unset resolution must resolve the way the SERVER resolves it
+        // (standard), or the studio would quote a ceiling from a canvas the run
+        // will not actually use.
+        assert.equal(logic.motionReferenceLimitFor({ ...long, resolution: '' }, h3.id), null,
+            'the standard tier carries 25s of reference, so a 15s clip needs no cap');
+
+        // An unmeasured workflow keeps the full range: not knowing the ceiling
+        // is not the same as knowing the run cannot happen.
+        const onTurbo = { modelId: turbo.id, ar: '9:16', resolution: 'High', duration: 12, referenceVideos: [clip(15)] };
+        assert.equal(logic.motionReferenceLimitFor(onTurbo, turbo.id), null);
+        assert.equal(logic.availableDurationsFor(onTurbo, turbo.id).length, 15);
+    } finally {
+        global.fetch = originalFetch;
+        restore();
+    }
+
+    const videoStudio = fs.readFileSync(path.join(__dirname, '../src/studios/VideoStudio.jsx'), 'utf8');
+    // The slider's ceiling is the FILTERED list, so an impossible length is not
+    // merely discouraged — it cannot be expressed.
+    assert.match(videoStudio, /const durationOptions = availableDurationsFor\(/);
+    // Attaching a reference re-clamps: the setup funnel, plus the three writes
+    // that bypass it — a hand-attached clip, a cast that brings its own, and the
+    // effect that measures a clip's duration. That last one matters in the other
+    // direction: learning a reference is SHORT has to give the range back.
+    assert.match(videoStudio, /s\.setup = withDurationThatFits\(nextSetup\)/);
+    assert.equal((videoStudio.match(/withDurationThatFits\(\{/g) || []).length, 3, 'every non-commit setup write re-clamps');
+});

@@ -55,7 +55,7 @@ Manifest schema v2 assigns every artifact a stable id, SHA-256, byte size, MIME 
 | Module | Owns | Does not own |
 |---|---|---|
 | `hivemind_content_studio` | durable runs, manifests, intents, providers, planning, MCP adapters, approvals, evaluation, experiments, publishing | donor rendering internals |
-| `app` | faceless scripts, LocalTTS adapter, stock retrieval, subtitles, MoviePy/FFmpeg rendering | publishing or global provider selection |
+| `app` | faceless scripts, LocalTTS adapter, stock retrieval, subtitles, MoviePy/FFmpeg rendering | publishing, global provider selection, or which models render the visuals |
 | `auto_clipper` | long-form ingestion, clipping, clip-specific rights data, monetization matches | global publisher implementation |
 | `skills/shared` | Shared Brain agent playbooks and provider operating knowledge | executable business logic |
 | `skills/vendor/clueso-ai` | pinned upstream Clueso workflows, audit provenance, and namespaced policy adapters | provider selection, approvals, credentials, or publishing authority |
@@ -75,6 +75,31 @@ full-height embedded package surfaces; they do not own a second canonical run
 store. The desktop shell forwards only the allowlisted OpenGen local-inference
 IPC methods to the Explore frame. Browser mode reaches the same local engine
 through the loopback OpenGen bridge without exposing the gateway token.
+
+### Faceless visuals come from the same routes as the studios
+
+A faceless short can source its visuals three ways: a stock library (Pexels,
+Pixabay, Coverr), a folder of owned media, or **our own connected models**. The
+last option is what makes the lane a first-class studio surface rather than a
+stock-footage tool, and it reuses existing machinery end to end rather than
+adding a parallel path:
+
+1. The Planner's media source offers `studio-image` and `studio-video`. Picking
+   either reveals the same route picker the Image and Video studios use, so
+   local ComfyUI, a fleet machine, an attached rental, a cloud API, and an OAuth
+   account all appear with their real availability.
+2. `studio_drafts` records the choice as `media_route` and mirrors the model into
+   `provider_options[provider][keyframe|motion]`, the contract the executors
+   already read. It is deliberately **not** written to `providers["stock"]`: an
+   image or video model does not fill the stock-library role.
+3. `faceless_media` turns the brief into beats (scenes, then search terms, then
+   the narration split into sentences), writes them as the standard
+   `keyframe-requests` / `motion-requests` artifacts, and runs them through
+   `ProviderExecutors`. No per-provider code lives in the faceless path.
+4. Rendered assets are staged into `storage/local_videos`, the only directory
+   `video.preprocess_video` will resolve, and handed to the engine as
+   `video_source="local"` with `video_materials`. Nothing upstream is modified,
+   which is what keeps the engine mergeable with `harry0703/MoneyPrinterTurbo`.
 
 `GET /api/runtime` remains a bounded operator diagnostic. It reports the one
 native surface, internal engines/gateways, and Liam-fork/upstream provenance.

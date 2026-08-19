@@ -125,6 +125,36 @@ test('Media Studio generation reuses a persisted reference without fetching its 
     }
 });
 
+test('Media Studio forwards the app-tab video queue lane', async () => {
+    const { generateHivemindVideo } = await loadReferences();
+    const originalFetch = global.fetch;
+    const requests = [];
+    global.fetch = async (url, options) => {
+        requests.push({ url, options });
+        return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, job_id: 'job-lane', url: '/generated/lane.mp4' }),
+        };
+    };
+
+    try {
+        await generateHivemindVideo({
+            model: 'hivemind-media:ltx23-regular-fast',
+            prompt: 'gentle camera move',
+            duration: 3,
+            studio_lane: 'video:window-a:2',
+        });
+
+        assert.equal(requests.length, 1);
+        assert.equal(requests[0].url, '/api/media-studio/video/start');
+        const body = JSON.parse(requests[0].options.body);
+        assert.equal(body.studio_lane, 'video:window-a:2');
+    } finally {
+        global.fetch = originalFetch;
+    }
+});
+
 test('Media Studio sends several encrypted ingredient references without turning them into frame anchors', async () => {
     const { generateHivemindVideo } = await loadReferences();
     const originalFetch = global.fetch;

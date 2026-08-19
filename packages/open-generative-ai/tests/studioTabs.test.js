@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
     IMAGE_TAB_FIELDS, VIDEO_TAB_FIELDS,
     addTab, closeTab, cloneTabValue, consumeSeed, insertTabAfter,
-    newTabState, selectTab, snapshotTabFields,
+    newTabState, selectTab, snapshotTabFields, studioLaneId,
 } from '../src/lib/studioTabs.js';
 
 /* ---------------- tab list ---------------- */
@@ -16,6 +16,13 @@ test('a studio opens with exactly one tab, and that tab restores persisted setti
     // pending jobs and adopts the composer draft. Every other tab must have one.
     assert.equal(state.tabs[0].seed, null);
     assert.equal(state.activeId, state.tabs[0].id);
+});
+
+test('scheduler lanes queue one tab without coupling other tabs or studios', () => {
+    assert.equal(studioLaneId('image', 'window-a', 1), studioLaneId('image', 'window-a', 1));
+    assert.notEqual(studioLaneId('image', 'window-a', 1), studioLaneId('image', 'window-a', 2));
+    assert.notEqual(studioLaneId('image', 'window-a', 1), studioLaneId('video', 'window-a', 1));
+    assert.notEqual(studioLaneId('image', 'window-a', 1), studioLaneId('image', 'window-b', 1));
 });
 
 test('a new tab is seeded fresh and becomes active', () => {

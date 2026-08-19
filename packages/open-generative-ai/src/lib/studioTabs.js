@@ -25,6 +25,16 @@ export function newTabState() {
   return { tabs: [{ id: 1, seed: null }], activeId: 1, nextId: 2 };
 }
 
+// Opaque scheduler lane sent with local generations. The app-instance token
+// prevents Tab 1 in another browser window from sharing a queue; studio type
+// keeps Image Tab 1 independent from Video Tab 1.
+export function studioLaneId(studioType, instanceId, tabId) {
+  const kind = String(studioType || 'studio').replace(/[^a-z0-9_-]/gi, '').slice(0, 24) || 'studio';
+  const instance = String(instanceId || 'instance').replace(/[^a-z0-9_-]/gi, '').slice(0, 80) || 'instance';
+  const tab = Number.isSafeInteger(Number(tabId)) ? Number(tabId) : 0;
+  return `${kind}:${instance}:${tab}`;
+}
+
 export function addTab(state, seed = null) {
   const id = state.nextId;
   return { tabs: [...state.tabs, { id, seed }], activeId: id, nextId: id + 1 };

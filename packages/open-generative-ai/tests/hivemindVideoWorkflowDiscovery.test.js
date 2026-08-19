@@ -101,6 +101,10 @@ test('video workflow discovery recovers after an owner-session startup race', as
             // No registered steps default in this fixture; a full-step lane
             // (e.g. MiniMax H3's 15) enables the refinement presets.
             defaultSteps: null,
+            // No measured motion-reference budget in this fixture, so the
+            // duration range is not narrowed: only a workflow that HAS one
+            // (MiniMax H3) drops the lengths a motion clip cannot render.
+            motionReferenceMaxSeconds: null,
             tags: ['video', 'workflow', 'local'],
         });
         assert.equal(updates.length, 2);

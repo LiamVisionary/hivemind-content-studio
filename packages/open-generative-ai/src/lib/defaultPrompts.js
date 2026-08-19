@@ -351,6 +351,61 @@ Night street room tone with distant traffic and a faint electrical hum from the 
 non_diegetic_music:
 none`;
 
+// An arcade match where BOTH fighters and the arena come from your own
+// pictures. Liam's brief (2026-08-15), rewritten into reference mode's six
+// sections: it arrived in the three-field format with "@image 1 as the first
+// fighter's identity" notes bolted on in front, and a picture-driven brief that
+// never writes <Picture N> conditions on nothing — the labels ARE how the
+// attachments reach the graph.
+//
+// Three things the brief left implicit that the format does not let you leave
+// implicit. The arena is a <Subject> exactly like the fighters are, because a
+// place is reusable content and only a retention marker holds its architecture
+// and palette through a shot change. The announcer is a subject with a speaker
+// id, because a voice written with no id is unbound and comes back as a generic
+// male read that has nothing to do with the one described. And the HUD is
+// stated to be an overlay composited on top of the picture, or health bars get
+// built into the set as signage.
+//
+// The rebound clause is carried over from the fight starter above, where it was
+// bought with a failed take: a fist that never retracts follows its target
+// around the frame.
+const VERSUS_FIGHT_H3 = `subject_definitions:
+<Subject 1> is the fighter shown in <Picture 1>: [DESCRIBE FIGHTER 1 FROM YOUR OWN PICTURE — face, skin, hair, build, wardrobe, footwear]. <Subject 1> fights from the left of frame and never speaks.
+<Subject 2> is the fighter shown in <Picture 2>: [DESCRIBE FIGHTER 2 FROM YOUR OWN PICTURE — face, skin, hair, build, wardrobe, footwear]. <Subject 2> fights from the right of frame and never speaks.
+Both fighters are rendered as photoreal live-action, real human skin texture and hair, shot on camera — not illustrated, not stylised, not a game engine render.
+<Subject 3> is the fighting arena shown in <Picture 3>: [DESCRIBE THE ARENA FROM YOUR OWN PICTURE — architecture and materials, what stands at its edges, the light sources and their direction, the colour palette, the air and weather in it]. It is the only location the fight happens in.
+<Subject 4> is an off-screen arcade announcer, never seen and heard only: a deep, resonant, energetic male voice with the clipped attack of a fighting-game callout. <Subject 4> speaks as S1 and is the only voice in the clip.
+
+summary:
+A cinematic live-action arcade fighting-game match in one continuous fifteen-second stretch: a versus card introduces <Subject 1> and <Subject 2>, the picture wipes through into <Subject 3>, a health-bar HUD drops in, the announcer counts the match in, and the two fight a real exchange in the arena. <Picture 1> and <Picture 2> drive who the fighters are and <Picture 3> drives where they fight; every pose, angle and action is new.
+
+retention_analysis:
+<Subject 1>: fully_preserved — the same face, hair, build and wardrobe in every shot and at every distance, unchanged by the versus card, the arena light or the motion blur.
+<Subject 2>: fully_preserved — the same face, hair, build and wardrobe in every shot and at every distance.
+<Subject 3>: fully_preserved — the arena's architecture, materials, edges, light sources, colour palette and atmosphere stay as the picture shows them for every frame after the wipe.
+<Picture 1>: fully_preserved — <Subject 1>'s face, hair and wardrobe carry into the clip; its own background, framing and pose do not.
+<Picture 2>: fully_preserved — <Subject 2>'s face, hair and wardrobe carry into the clip; its own background, framing and pose do not.
+<Picture 3>: fully_preserved — the environment carries into the clip as the place the fight happens, and the camera is free to shoot it from angles the picture never shows.
+
+detailed_description:
+Cinematic live-action photoreal footage throughout, shot on camera with real depth of field, real motion blur on fast limbs, real skin texture and real fabric movement. The fighting-game graphics — the versus card, the word plates and the health-bar HUD — are clean overlays composited ON TOP of the photographic image, never signage or structures built into the set.
+[Shot 1] A symmetrical versus card: <Subject 1> stands in the left half of the frame turned toward the centre and <Subject 2> stands in the right half turned toward the centre, both head to toe against a dark graphic backdrop with hard rim light down their near edges. Each holds a controlled aggressive stance, chest rising and falling, eyes locked across the gap on the other. The camera pushes in slowly and steadily along the centre line. A large glowing "VS" sits exactly between them and flares in sharp bursts that throw light across both fighters.
+[Shot 2] At 00:03.000, a fast directional wipe crosses the frame on a white impact flash and the versus card is gone: a wide establishing shot of <Subject 3>, the whole arena readable from edge to edge with its own depth, haze and light. <Subject 1> stands on the left of the arena and <Subject 2> on the right, a clear fighting distance apart, both settling into convincing ready stances on the arena floor.
+[Shot 3] At 00:05.000, the HUD drops in along the top of the frame: a horizontal health bar above <Subject 1> on the left and a matching one above <Subject 2> on the right, both full. The fighters hold their marks while the camera tracks laterally between them at a steady walking pace, holding the symmetry. A large centred "READY" plate lands between them. <Subject 4> (S1) says: <d>[English] Ready!</d> Both fighters tense and shift their weight forward onto the front foot.
+[Shot 4] At 00:07.000, the "READY" plate snaps into a larger "FIGHT" plate on one hard graphic hit, the camera shakes briefly and both fighters break from their marks and charge for the centre. <Subject 4> (S1) says: <d>[English] Fight!</d>
+[Shot 5] At 00:07.700, a low-angle tracking shot runs with them as the distance closes. <Subject 1> throws the first attack at <Subject 2>'s head and chest. <Subject 2> blocks it clean on a raised forearm and the force visibly travels through the blocking arm and shoulder, driving <Subject 2> back half a step.
+[Shot 6] At 00:09.000, a fast three-quarter close shot. <Subject 2> turns the blocked arm over and counters immediately; <Subject 1> leans and steps off the line so the strike passes through empty air, then pivots straight back to face <Subject 2>. The camera arcs a long way around the pair, fast, keeping both faces and both full bodies readable.
+[Shot 7] At 00:10.500, the exchange accelerates into a compact combination: <Subject 1> attacks in a rapid run of punches and kicks while <Subject 2> blocks, parries and gives ground across the arena floor. Every strike that connects rebounds instantly back to guard rather than resting on the other fighter, and every one changes the spacing between them. The camera cuts precisely on the impacts, alternating wide, medium and close.
+[Shot 8] At 00:12.500, <Subject 2> takes the momentum and lands a heavy counter that drives <Subject 1> back several steps, the fist snapping back to guard on the frame of contact. The camera tracks <Subject 1> back fast, then swings around to hold both fighters in profile. <Subject 1>'s health bar drops by a short visible amount.
+[Shot 9] At 00:14.000, both fighters re-engage at once and rush the centre. The camera pushes hard toward the collision point as their attacks meet in the middle of the frame; a fraction of a second of slow motion holds the contact, then normal speed resumes. The clip ends with both still standing in <Subject 3>, facing each other in stance, shoulders heaving, the HUD still on screen.
+
+overall_soundscape:
+The arena tone of <Subject 3> under everything — the ambience the place implies and the hum of its own light sources. Sharp electronic impacts and a rising synthetic sweep across the versus card and the wipe, and a hard graphic hit as each HUD element lands. Footsteps and skidding on the arena floor, fabric snapping on fast limbs, the dull slap of a blocked strike and the deeper crack of one that lands, a low whoosh where an attack misses, and a short concussive thump under the camera shake.
+
+non_diegetic_music:
+A high-energy cinematic fighting-game score: deep percussion and tense electronic pulses under the versus card, building fast through the count-in, then breaking into driving drums, aggressive bass, electronic percussion and dramatic orchestral accents on the call to fight. It holds a fast tempo across the combat and intensifies into the final exchange.`;
+
 export const DEFAULT_PROMPTS = Object.freeze([
   Object.freeze({
     id: 'korean-home-video-seedance-25',
@@ -505,6 +560,22 @@ export const DEFAULT_PROMPTS = Object.freeze([
       label: 'Whole clip',
       durationSeconds: 8,
       prompt: FIGHT_TWO_HANDED_H3,
+    })],
+  }),
+  Object.freeze({
+    id: 'versus-fight-h3',
+    idea: 'versus-fight',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-reference',
+    name: 'Arcade versus match',
+    summary: 'Versus card into a real fight, both fighters and the arena from photos',
+    requires: 'a photo of each fighter and a photo of the arena, attached as reference pictures',
+    note: 'Reference mode: attach the three pictures IN THIS ORDER — fighter 1, fighter 2, arena — which is what makes them <Picture 1>, <Picture 2> and <Picture 3>. Set duration to 15s and the aspect ratio to 16:9, and fill in the three [DESCRIBE …] brackets from your own pictures; the model is looking at what you attached. The beats are timed to 15.0s exactly, so if you add or cut action, adjust the At MM:SS.mmm stamps to match — overrunning the clip makes the model compress, and compressing reorders.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 15,
+      prompt: VERSUS_FIGHT_H3,
     })],
   }),
   Object.freeze({

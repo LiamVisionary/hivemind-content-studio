@@ -30,18 +30,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { AuthModal } from '../../dialogs/AuthModal.jsx';
+import { ClipPrepDialog } from '../../dialogs/ClipPrepDialog.jsx';
+import { measureAll, peekMediaDuration } from '../../lib/mediaDuration.js';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import {
   motionReferenceWarning,
   referenceAttachIndex,
-  referenceDropBlock,
-  referenceKindForFile,
   referenceKindsInDrag,
   referenceLabels,
+  referenceBudgetReport,
   referenceRowKeys,
+  referenceUrl,
   unscriptedTimeWarning,
   withReferenceTags,
 } from '../../lib/h3References.js';
+import {
+  attachDroppedReferences,
+  referenceUploader,
+} from '../../lib/referenceDrop.js';
 import {
   backfillHivemindReferencePoster,
   fetchHivemindReferences,
@@ -52,48 +58,16 @@ import { peekResolvedMediaSrc, resolveMediaSrc, revokeResolvedMedia } from '../.
 import { captureImagePoster, captureVideoPoster } from '../../lib/mediaPoster.js';
 import { warmReferencePosters } from '../../lib/referencePosterWarmup.js';
 import { muapi } from '../../lib/muapi.js';
-import { getUploadHistory, saveUpload } from '../../lib/uploadHistory.js';
+import { getUploadHistory } from '../../lib/uploadHistory.js';
 import { useDismissable } from '../../ui/Menu.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
 import { PersonaBar } from './PersonaBar.jsx';
 import { ReferenceThumb } from './ReferenceThumb.jsx';
+import { KIND_META, describeReferenceRejection } from './referenceKinds.js';
 import { zh } from './videoLogic.js';
 
 const KINDS = ['images', 'videos', 'audios'];
-
-const KIND_META = {
-  images: {
-    accept: 'image/*',
-    label: () => (zh() ? '图片参考' : 'Image references'),
-    add: () => (zh() ? '添加图片参考' : 'Add image reference'),
-    tag: (index) => `<Picture ${index + 1}>`,
-    icon: 'image',
-    hint: () => (zh()
-      ? '主体、服装、场景、风格。'
-      : 'Subjects, clothing, environments, style.'),
-  },
-  videos: {
-    accept: 'video/*',
-    label: () => (zh() ? '动作参考' : 'Motion references'),
-    add: () => (zh() ? '添加视频参考' : 'Add video reference'),
-    tag: (index) => `<Video ${index + 1}>`,
-    icon: 'film',
-    hint: () => (zh()
-      ? '动作方式：手势幅度、体态、神情。提示词里 <Video N> 的 retention_analysis 决定是照搬动作还是只借用其举止。2-15 秒。'
-      : "How a body moves: gesture, posture, mannerisms, expressiveness. The <Video N> retention_analysis tag in your prompt decides whether the motion is copied or only its manner is borrowed. 2-15s."),
-  },
-  audios: {
-    accept: 'audio/*',
-    label: () => (zh() ? '声音参考' : 'Voice references'),
-    add: () => (zh() ? '添加声音参考' : 'Add voice reference'),
-    tag: (index) => `<Audio ${index + 1}>`,
-    icon: 'mic',
-    hint: () => (zh()
-      ? '克隆音色与语气。每段 2-15 秒，合计 15 秒，且不能作为唯一参考。'
-      : 'Clones a voice — timbre and delivery. 2-15s each, 15s combined, and never the only reference.'),
-  },
-};
 
 function fileLabel(item) {
   const name = String(item?.name || '').trim();
@@ -133,7 +107,7 @@ function AudioRowPreview({ url }) {
   );
 }
 
-function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio }) {
+function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio, onPrep }) {
   const meta = KIND_META[kind];
   const url = typeof item === 'string' ? item : item?.url;
   const name = fileLabel(item);
@@ -177,6 +151,19 @@ function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, o
           {zh() ? '含原声' : 'sound'}
         </button>
       ) : null}
+      {kind === 'videos' && onPrep ? (
+        <button
+          type="button"
+          onClick={onPrep}
+          aria-label={zh() ? '裁剪压缩该片段' : 'Trim and compress this clip'}
+          title={zh()
+            ? '在本机裁剪、压缩这段参考——更短更小的参考会释放完整的生成时长'
+            : 'Trim, crop and compress this reference on this device — a shorter, smaller reference frees the full generation range'}
+          className="grid h-6 w-6 shrink-0 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+        >
+          <Icon name="sliders" size={12} />
+        </button>
+      ) : null}
       <button
         type="button"
         onClick={onRemove}
@@ -192,7 +179,7 @@ function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, o
 
 export function ReferenceSection({
   kind, items, limit, labels, onAdd, onRemove, onToggleAudio, busy, recent, onPickRecent,
-  dropTarget, onWriteTags, posters = {}, onPosterCaptured,
+  dropTarget, onWriteTags, posters = {}, onPosterCaptured, onPrep,
 }) {
   const meta = KIND_META[kind];
   const full = items.length >= limit;
@@ -236,6 +223,7 @@ export function ReferenceSection({
           onPosterCaptured={onPosterCaptured}
           onRemove={() => onRemove(index)}
           onToggleAudio={() => onToggleAudio?.(index)}
+          onPrep={onPrep ? () => onPrep(index) : null}
         />
       ))}
       <button
@@ -314,6 +302,11 @@ export function ReferencesMenu({
   disabled = false,
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
+  // Which video reference row Clip Prep is open on, or -1 for closed.
+  const [prepIndex, setPrepIndex] = useState(-1);
+  // Measured lengths of the attached clips, keyed by url. Metadata-only reads,
+  // so this costs a container header per reference rather than a decode.
+  const [durations, setDurations] = useState({});
   const [busyKind, setBusyKind] = useState('');
   const [authOpen, setAuthOpen] = useState(false);
   const [recent, setRecent] = useState({ images: [], videos: [], audios: [] });
@@ -437,6 +430,36 @@ export function ReferencesMenu({
   const motionWarning = motionReferenceWarning({ prompt, videos });
   const timeWarning = unscriptedTimeWarning({ prompt, durationSeconds, videos, audios });
   const total = images.length + videos.length + audios.length;
+  // H3 rations references four ways at once; only the per-kind count was ever
+  // visible here. See referenceBudgetReport for what the other three are.
+  const budget = referenceBudgetReport({ images, videos, audios, durations });
+
+  // Measure whatever is newly attached. Keyed on the url LIST rather than the
+  // arrays themselves — those are rebuilt every render, and depending on them
+  // would remeasure forever. Toggling a soundtrack changes the budget but not
+  // any duration, so it deliberately does not appear here.
+  const clipUrlKey = [...videos, ...audios].map(referenceUrl).join('|');
+  useEffect(() => {
+    const entries = [
+      ...videos.map((item) => ({ url: referenceUrl(item), kind: 'videos' })),
+      ...audios.map((item) => ({ url: referenceUrl(item), kind: 'audios' })),
+    ].filter((entry) => entry.url);
+    // Anything already measured this session is free; only the rest is work.
+    const known = {};
+    for (const entry of entries) {
+      const cached = peekMediaDuration(entry.url);
+      if (cached != null) known[entry.url] = cached;
+    }
+    if (Object.keys(known).length) setDurations((prev) => ({ ...prev, ...known }));
+    const pending = entries.filter((entry) => peekMediaDuration(entry.url) == null);
+    if (!pending.length) return undefined;
+    let alive = true;
+    void measureAll(pending, (url, seconds) => {
+      if (alive) setDurations((prev) => ({ ...prev, [url]: seconds }));
+    });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clipUrlKey]);
 
   const emit = (kind, next) => onChange[kind]?.(next);
 
@@ -472,16 +495,13 @@ export function ReferencesMenu({
     }
   };
 
+  // The shared uploader (composer drops use the same one), wrapped in this
+  // panel's per-row busy state.
+  const upload = referenceUploader(doUpload);
   const uploadInto = async (kind, file) => {
     setBusyKind(kind);
     try {
-      const uploaded = await doUpload(file);
-      const url = typeof uploaded === 'string' ? uploaded : uploaded?.url;
-      if (!url) throw new Error('Upload returned no URL');
-      // Only pictures join the shared upload history — it backs the picture
-      // grids elsewhere in the studio, which cannot render a clip.
-      if (kind === 'images') saveUpload({ uploadedUrl: url, name: file.name });
-      return { url, name: file.name };
+      return await upload(kind, file);
     } finally {
       setBusyKind('');
     }
@@ -500,8 +520,8 @@ export function ReferencesMenu({
   };
 
   // Dropping anywhere in the panel files each item in ITS row — you never have
-  // to hit a target. The counts are tracked locally because several files can
-  // land in one drop, before React has re-rendered with the first one attached.
+  // to hit a target. Same routing the composer uses (lib/referenceDrop.js), so
+  // a file lands in the same row and is refused in the same words either way.
   const handleDrop = async (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -512,52 +532,20 @@ export function ReferencesMenu({
       setAuthOpen(true);
       return;
     }
-    const taken = { images: images.length, videos: videos.length, audios: audios.length };
-    const added = { images: [], videos: [], audios: [] };
-    // Each rejection carries WHY. Three unrelated failures — an unsupported
-    // file, a full row, and a server refusal (too large, too short, bad codec)
-    // — used to collapse into one "Not usable as a reference", so a clip the
-    // server had explained perfectly well came back unexplained. The single-file
-    // picker always surfaced err.message; only this path threw it away.
-    const rejected = [];
-    for (const file of files) {
-      const kind = referenceKindForFile(file);
-      const block = referenceDropBlock({ kind, taken: taken[kind], limit: limits[kind] });
-      if (block === 'unsupported') {
-        rejected.push({ name: file.name, reason: zh() ? '不是图片、视频或音频文件' : 'not a picture, clip or voice file' });
-        continue;
-      }
-      if (block === 'full') {
-        rejected.push({
-          name: file.name,
-          reason: zh()
-            ? `${KIND_META[kind].label()}已满（上限 ${limits[kind]}）`
-            : `the ${KIND_META[kind].label()} row is full (${limits[kind]} max)`,
-        });
-        continue;
-      }
-      taken[kind] += 1;
-      try {
-        added[kind].push(await uploadInto(kind, file));
-      } catch (err) {
-        console.error('[ReferencesMenu] dropped upload failed:', err);
-        // The server states its cap but cannot state YOUR file's size, and "max
-        // 100 MB" is only actionable next to the number it is being compared to.
-        const megabytes = file.size ? ` (${(file.size / 1024 / 1024).toFixed(1)} MB)` : '';
-        rejected.push({
-          name: file.name,
-          reason: `${err?.message || (zh() ? '上传失败' : 'upload failed')}${megabytes}`,
-        });
-        taken[kind] -= 1;
-      }
-    }
+    const { added, rejected } = await attachDroppedReferences({
+      files,
+      taken: { images: images.length, videos: videos.length, audios: audios.length },
+      limits,
+      upload: uploadInto,
+    });
     if (added.images.length) emit('images', [...images, ...added.images.map((item) => item.url)]);
     if (added.videos.length) {
       emit('videos', [...videos, ...added.videos.map((item) => ({ ...item, useAudio: false }))]);
     }
     if (added.audios.length) emit('audios', [...audios, ...added.audios]);
-    for (const { name, reason } of rejected) {
-      toast.error(zh() ? `${name}：${reason}` : `${name} — ${reason}`);
+    for (const rejection of rejected) {
+      if (rejection.error) console.error('[ReferencesMenu] dropped upload failed:', rejection.error);
+      toast.error(describeReferenceRejection(rejection));
     }
   };
 
@@ -660,8 +648,57 @@ export function ReferencesMenu({
               onToggleAudio={(index) => emit('videos', videos.map((item, i) => (
                 i === index ? { ...item, useAudio: !item.useAudio } : item
               )))}
+              onPrep={kind === 'videos' ? (index) => setPrepIndex(index) : null}
             />
           ))}
+          {/* The reference budget. Advisory by design: nothing here removes a
+              reference, because dropping one renumbers every label after it and
+              would silently invalidate tags already written into the prompt.
+              The fix is almost always a trim, which costs no slot at all. */}
+          {budget.counts.total ? (
+            <div className={cx(
+              'rounded-md border px-2 py-1.5 text-[10px] leading-snug',
+              budget.ok ? 'border-line1 bg-bg2 text-ink3' : 'border-danger bg-bg2 text-ink2',
+            )}>
+              <span className="font-mono">
+                {budget.counts.total}/{budget.counts.limit} {zh() ? '个参考' : 'refs'}
+                {' · '}
+                {budget.counts.audioClips}/3 {zh() ? '音频' : 'audio'}
+                {budget.seconds.video ? ` · ${budget.seconds.video}/${budget.seconds.limit}s video` : ''}
+                {budget.seconds.audio ? ` · ${budget.seconds.audio}/${budget.seconds.limit}s audio` : ''}
+              </span>
+              {budget.unmeasured ? (
+                <span className="text-ink3">
+                  {zh() ? ` · ${budget.unmeasured} 个待测量` : ` · measuring ${budget.unmeasured}`}
+                </span>
+              ) : null}
+              {budget.problems.map((problem) => (
+                <span key={`${problem.code}${problem.url || ''}`} className="mt-1 block text-danger">
+                  {problem.code === 'over-total' && (zh()
+                    ? `超出 ${problem.count}/${problem.limit} 个参考${problem.soundtracks ? `（含 ${problem.soundtracks} 条自带原声，各占一个名额）` : ''}。`
+                    : `${problem.count} references attached; H3 takes ${problem.limit}.${problem.soundtracks ? ` ${problem.soundtracks} of them ${problem.soundtracks === 1 ? 'is a' : 'are'} split soundtrack${problem.soundtracks === 1 ? '' : 's'}, which counts as its own reference — switching one off gives a slot back.` : ''}`)}
+                  {problem.code === 'over-audio-clips' && (zh()
+                    ? `音频参考 ${problem.count} 个，上限 3 个（自带原声也算）。`
+                    : `${problem.count} audio clips; H3 takes 3 — and a clip's split soundtrack is one of them.`)}
+                  {problem.code === 'audio-without-visual' && (zh()
+                    ? '声音参考不能单独发送，至少还需要一张图片或一段视频。'
+                    : 'Audio cannot be sent on its own — attach at least one picture or clip alongside it.')}
+                  {problem.code === 'clip-too-short' && (zh()
+                    ? `有片段只有 ${problem.seconds} 秒，最短 ${problem.limit} 秒。`
+                    : `A clip runs ${problem.seconds}s; the minimum is ${problem.limit}s.`)}
+                  {problem.code === 'clip-too-long' && (zh()
+                    ? `有片段长 ${problem.seconds} 秒，单段上限 ${problem.limit} 秒——用 ✂ 裁剪。`
+                    : `A clip runs ${problem.seconds}s; ${problem.limit}s is the per-clip maximum — trim it with ✂.`)}
+                  {problem.code === 'over-video-seconds' && (zh()
+                    ? `视频参考合计 ${problem.seconds} 秒，上限 ${problem.limit} 秒（这是所有片段的总和，不是每段的额度）。`
+                    : `Video references total ${problem.seconds}s against a ${problem.limit}s budget — that ${problem.limit}s is the total across every clip, not a per-clip allowance.`)}
+                  {problem.code === 'over-audio-seconds' && (zh()
+                    ? `音频合计 ${problem.seconds} 秒，上限 ${problem.limit} 秒${problem.soundtracks ? '。自带原声会同时占用视频与音频两份时长' : ''}。`
+                    : `Audio totals ${problem.seconds}s against a ${problem.limit}s budget.${problem.soundtracks ? ' A split soundtrack spends from the video AND audio totals at once, so switching one off frees the most.' : ''}`)}
+                </span>
+              ))}
+            </div>
+          ) : null}
           {timeWarning ? (
             <p className="rounded-md border border-honey/40 bg-honey-tint px-2 py-1.5 text-[10px] leading-snug text-honey">
               {timeWarning.kind === 'no-line'
@@ -696,6 +733,42 @@ export function ReferencesMenu({
         <AuthModal
           onClose={() => setAuthOpen(false)}
           onSaved={() => { setAuthOpen(false); openPicker(pendingKindRef.current); }}
+        />
+      ) : null}
+
+      {/* Clip Prep works on the row it was opened from. The prepared blob is
+          uploaded like any other reference, so it is sealed on the way in and
+          the row keeps pointing at a real reference rather than a local blob:
+          URL that dies with the tab. A grabbed FRAME becomes a picture row
+          instead — the same trim is usually where the start image comes from. */}
+      {prepIndex >= 0 && videos[prepIndex] ? (
+        <ClipPrepDialog
+          sourceUrl={referenceUrl(videos[prepIndex])}
+          sourceName={fileLabel(videos[prepIndex])}
+          clipSeconds={durationSeconds}
+          onClose={() => setPrepIndex(-1)}
+          onApply={async ({ kind, blob, name }) => {
+            const index = prepIndex;
+            setPrepIndex(-1);
+            try {
+              const file = new File([blob], name, { type: blob.type });
+              if (kind === 'image') {
+                const uploaded = await uploadInto('images', file);
+                attach('images', uploaded.url, uploaded.name);
+                return;
+              }
+              const uploaded = await uploadInto('videos', file);
+              // Replace in place so the reference keeps its <Video N> label and
+              // its soundtrack switch — renumbering the rows under someone who
+              // only trimmed a clip would silently repoint their prompt.
+              emit('videos', videos.map((item, i) => (
+                i === index ? { ...item, url: uploaded.url, name: uploaded.name } : item
+              )));
+            } catch (err) {
+              console.error('[ReferencesMenu] prepared clip upload failed:', err);
+              toast.error(`${zh() ? '片段上传失败' : 'Prepared clip upload failed'}: ${err.message}`);
+            }
+          }}
         />
       ) : null}
     </div>

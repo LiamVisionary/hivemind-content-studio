@@ -3,26 +3,28 @@
 // gallery/viewer, or a file dragged from disk) to its recorded generation context and
 // hands that to the target studio through the existing loadStudioSetup bridge.
 //
-// Coexistence: reference-image drops onto an UploadPicker keep their existing behavior
-// — a drop whose target is inside [data-upload-picker] is ignored here and handled by
-// the picker's own onDrop. The overlay is pointer-events-none so the real drop target
-// (and therefore that guard) is preserved.
+// Coexistence: this is the whole window EXCEPT the places where a dropped file is an
+// INPUT rather than a past run. Two of them: an UploadPicker (and the References
+// panel, which wears the same mark), and the studio composer — the box you write the
+// shot in, where a drop attaches the file as an image/motion/voice reference instead
+// (ui/kit.jsx ComposerSlot). A drop inside either is ignored here and handled there.
+// The overlay is pointer-events-none so the real drop target (and therefore that
+// guard) is preserved.
 import { useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { loadStudioSetup } from './promptTarget.js';
 import { basenameOf, resolveGenerationSetup, warmGenerationSetupLookup } from '../lib/generationSetupStore.js';
+import { HIVEMIND_OUTPUT_DRAG_TYPE, dragCarriesDroppable } from '../lib/referenceDrop.js';
 import { Spinner, cx } from '../ui/kit.jsx';
 
-const CUSTOM_TYPE = 'application/x-hivemind-output';
+const CUSTOM_TYPE = HIVEMIND_OUTPUT_DRAG_TYPE;
 
-function dragHasPayload(dataTransfer) {
-  if (!dataTransfer) return false;
-  const types = Array.from(dataTransfer.types || []);
-  return types.includes(CUSTOM_TYPE) || types.includes('Files');
-}
+const dragHasPayload = dragCarriesDroppable;
 
-function isUploadPickerTarget(target) {
-  return Boolean(target && typeof target.closest === 'function' && target.closest('[data-upload-picker]'));
+// The regions that own their own drops. Nothing here fires inside them.
+function isInputDropTarget(target) {
+  if (!target || typeof target.closest !== 'function') return false;
+  return Boolean(target.closest('[data-upload-picker]') || target.closest('[data-studio-composer]'));
 }
 
 function sectionFromMediaType(mediaType, basename) {
@@ -164,7 +166,7 @@ export function OutputRestoreDropZone() {
     const reset = () => { depthRef.current = 0; setPhase('idle'); };
     const setDragging = (on) => setPhase((prev) => (on ? 'dragging' : (prev === 'restoring' ? prev : 'idle')));
     const onDragEnter = (e) => {
-      if (!dragHasPayload(e.dataTransfer) || isUploadPickerTarget(e.target)) return;
+      if (!dragHasPayload(e.dataTransfer) || isInputDropTarget(e.target)) return;
       depthRef.current += 1;
       setDragging(true);
       // Unlock the vault during the drag so the expensive key derivation is already
@@ -172,7 +174,7 @@ export function OutputRestoreDropZone() {
       warmGenerationSetupLookup();
     };
     const onDragOver = (e) => {
-      if (!dragHasPayload(e.dataTransfer) || isUploadPickerTarget(e.target)) return;
+      if (!dragHasPayload(e.dataTransfer) || isInputDropTarget(e.target)) return;
       e.preventDefault(); // required to allow a drop
       try { e.dataTransfer.dropEffect = 'copy'; } catch { /* non-critical */ }
     };
@@ -182,8 +184,8 @@ export function OutputRestoreDropZone() {
       if (depthRef.current === 0) setDragging(false);
     };
     const onDrop = (e) => {
-      // Let the UploadPicker keep reference-image drops (its own onDrop handles them).
-      if (isUploadPickerTarget(e.target)) { reset(); return; }
+      // The pickers and the composer keep their own drops (their onDrop handles them).
+      if (isInputDropTarget(e.target)) { reset(); return; }
       if (!dragHasPayload(e.dataTransfer)) return;
       e.preventDefault();
       const dt = e.dataTransfer;

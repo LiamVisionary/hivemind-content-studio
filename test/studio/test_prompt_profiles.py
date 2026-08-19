@@ -839,3 +839,60 @@ def test_a_non_ugc_prompt_is_never_checked_for_polish(
     })
     assert response.json()["warnings"] == []
     assert "UGC" not in captured_system[0]
+
+
+def test_picture_roles_carry_a_marker_decision_rule():
+    """Listing the four retention markers is not the same as saying which to use.
+
+    The markers were always named; what decided a reference's fate — which one a
+    given picture ROLE takes — was left to the model to guess.
+    """
+    body = prompt_profiles.system_prompt(
+        "minimax-h3-reference",
+        references={"images": 2, "videos": [], "audios": 0},
+    )
+    for role, marker in [
+        ("first or last frame", "fully_preserved"),
+        ("setting", "partially_preserved"),
+        ("attribute_transfer", "attribute_transfer"),
+        ("storyboard", "weak_reference"),
+    ]:
+        assert role in body, f"{role} role is described"
+        assert marker in body
+
+    # attribute_transfer is a retention marker, never a summary task type.
+    assert "attribute_transfer is a retention marker only" in body
+    # The visual task types, which previously only existed for audio.
+    assert "[keyframe completion]" in body
+    assert "[reference generation]" in body
+    # A picture that only shows a likeness belongs inside the subject's line.
+    assert "no <Picture N> line of" in body
+
+
+def test_the_writer_is_told_when_a_run_is_over_the_reference_budget():
+    """A split soundtrack is its own reference AND one of the three audio clips.
+
+    Nine pictures plus three clips is exactly twelve; switch the soundtracks on
+    and the run is at seventeen with five audio clips, while every per-kind count
+    still looks legal on its own.
+    """
+    over = prompt_profiles.system_prompt(
+        "minimax-h3-reference",
+        references={
+            "images": 9,
+            "videos": [{"useAudio": True}, {"useAudio": True}, {"useAudio": True}],
+            "audios": 2,
+        },
+    )
+    assert "over H3's reference budget" in over
+    assert "17 references against 12" in over
+    assert "5 audio clips against 3" in over
+    # It must NOT renumber: the labels have to match what the graph sends.
+    assert "renumbering them here" in over
+
+    # A run within budget says nothing about it at all.
+    fine = prompt_profiles.system_prompt(
+        "minimax-h3-reference",
+        references={"images": 2, "videos": [{"useAudio": True}], "audios": 1},
+    )
+    assert "reference budget" not in fine

@@ -7,6 +7,7 @@ from pathlib import Path
 from app.models.schema import VideoParams
 from app.services import task
 
+from .faceless_media import generate_faceless_materials, is_studio_media_source
 from .manifest import add_artifact, load_manifest, write_manifest
 from .private_access import encrypt_private_media, read_private_json
 
@@ -18,6 +19,15 @@ def render_faceless(manifest_path: str | Path) -> dict:
         raise ValueError("Manifest lane must be faceless")
     params_path = _artifact_path(manifest, "faceless-params")
     params = VideoParams(**read_private_json(params_path))
+
+    # A generated source renders its own visuals first, then hands them to the
+    # engine as owned local material. Everything else (stock search, a folder of
+    # owned files) reaches the engine exactly as upstream expects.
+    brief = manifest.get("brief") if isinstance(manifest.get("brief"), dict) else {}
+    if is_studio_media_source(brief.get("media_source")):
+        params.video_source = "local"
+        params.video_materials = generate_faceless_materials(path)
+
     result = task.start(manifest["run_id"], params, stop_at="video")
     if not isinstance(result, dict) or not result.get("videos"):
         raise RuntimeError("MoneyPrinterTurbo did not return final video paths")

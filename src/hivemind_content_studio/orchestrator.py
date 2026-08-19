@@ -195,6 +195,30 @@ class ContentOrchestrator:
                         "arguments": {"run_id": run_id},
                         "reason": "Performance evidence is needed to close the learning loop.",
                     }])
+            elif step == "render" and state["lane"] == "faceless":
+                # The faceless engine is local and owns its whole render. Blocking
+                # here used to mean a run created in the studio sat waiting for an
+                # agent to invoke a tool by hand; it runs directly instead. When
+                # the brief renders its own visuals, the route's provider does the
+                # generation inside this step.
+                if "final-video" not in roles:
+                    from .faceless import render_faceless
+                    from .faceless_media import is_studio_media_source, selected_provider
+
+                    brief = manifest.get("brief") if isinstance(manifest.get("brief"), dict) else {}
+                    provider = (
+                        selected_provider(brief)
+                        if is_studio_media_source(brief.get("media_source"))
+                        else "moneyprinterturbo"
+                    )
+                    self._execute_local_generation(
+                        run_id,
+                        provider=provider,
+                        intent="render_faceless_content",
+                        kind="video",
+                        artifact_key="videos",
+                        executor=lambda: render_faceless(manifest_path),
+                    )
             elif step in {"render", "clip"}:
                 return self._block(run_id, step, "awaiting_agent", [{
                     "intent": step,
@@ -216,12 +240,15 @@ class ContentOrchestrator:
         *,
         provider: str,
         executor: Callable[[], dict[str, Any]],
+        intent: str = "generate_keyframes",
+        kind: str = "image",
+        artifact_key: str = "frames",
     ) -> dict[str, Any]:
         attempt = GenerationAttempt.start(
             self.store,
             run_id=run_id,
-            intent="generate_keyframes",
-            kind="image",
+            intent=intent,
+            kind=kind,
             provider=provider,
             model="automatic",
             monotonic=self.monotonic,
@@ -232,8 +259,8 @@ class ContentOrchestrator:
         except Exception as exc:
             attempt.fail(exc)
             raise
-        frames = result.get("frames") if isinstance(result.get("frames"), list) else []
-        attempt.complete(model=str(result.get("model") or "automatic"), artifact_count=len(frames))
+        artifacts = result.get(artifact_key) if isinstance(result.get(artifact_key), list) else []
+        attempt.complete(model=str(result.get("model") or "automatic"), artifact_count=len(artifacts))
         return result
 
     def _block(self, run_id: str, step: str, status: str, actions: list[dict[str, Any]]) -> str:

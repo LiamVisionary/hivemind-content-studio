@@ -19,9 +19,10 @@ import {
 import {
   addScene, addSimpleImages, attachmentRole, buildRunGenerationCards, capabilityNote,
   clearLoadedCanvasSetup, createSimpleRun, createWorkflowRun, hubState, insertPromptIntoComposer,
-  lane, providerLabel, providerRolesForLane, registerHubFocus, registerThreadScroller,
+  lane, MEDIA_SOURCE_OPTIONS, mediaSourceKind, providerLabel, providerRolesForLane,
+  registerHubFocus, registerThreadScroller,
   removeScene, removeSimpleImage, ROUTE_AUTH_SECTIONS, routePickerMatches, routePickerProviders,
-  runTitle, selectedRoutePickerItem, setComposer, setProviderRole, setRouteValue,
+  runTitle, selectedRoutePickerItem, setComposer, setMediaRoute, setProviderRole, setRouteValue,
   setSelectedLane, setSelectedRunId, setStudioMode, setWorkflow, STUDIO_MODES, submitSimplePrompt,
   TEMPLATE_CATEGORY_LABELS, titleCase, togglePlatform, updateScene, useHub,
 } from '../hubData.js';
@@ -29,6 +30,15 @@ import { GenerationCard } from '../components/GenerationCard.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 
 const MODE_OPTIONS = Object.entries(STUDIO_MODES).map(([value, mode]) => ({ value, label: mode.label }));
+
+// Grouped once at module scope so the select keeps a stable option order —
+// "Stock footage" / "Owned" / "Generated" is the decision the user is making.
+const MEDIA_SOURCE_GROUPS = Object.entries(
+  MEDIA_SOURCE_OPTIONS.reduce((groups, option) => {
+    (groups[option.group] ||= []).push(option);
+    return groups;
+  }, {}),
+);
 
 function openRun(runId) {
   setSelectedRunId(runId);
@@ -40,11 +50,15 @@ function openRun(runId) {
 /* Route picker (labelled chip + grouped menu)                        */
 /* ------------------------------------------------------------------ */
 
-function RoutePickerList({ kind, close }) {
+// `value`/`onChange` let a caller bind the picker to something other than the
+// simple-mode route for that kind — the faceless media route stores its own
+// selection on the workflow form while reusing this exact control.
+function RoutePickerList({ kind, close, value, onChange }) {
   const [query, setQuery] = useState('');
   useHub();
   const providers = routePickerProviders(kind);
-  const current = hubState.routes[kind];
+  const current = value ?? hubState.routes[kind];
+  const commit = onChange ?? ((next) => setRouteValue(kind, next));
   const q = query.trim().toLowerCase();
 
   return (
@@ -64,7 +78,7 @@ function RoutePickerList({ kind, close }) {
       </div>
 
       {kind !== 'brain' ? (
-        <MenuItem selected={current === 'automatic'} onClick={() => { setRouteValue(kind, 'automatic'); close(); }}>
+        <MenuItem selected={current === 'automatic'} onClick={() => { commit('automatic'); close(); }}>
           Automatic — the brain chooses
         </MenuItem>
       ) : null}
@@ -84,7 +98,7 @@ function RoutePickerList({ kind, close }) {
                 selected={model.value === current}
                 disabled={model.disabled}
                 title={model.disabled ? model.disabledReason : undefined}
-                onClick={() => { setRouteValue(kind, model.value); close(); }}
+                onClick={() => { commit(model.value); close(); }}
               >
                 {model.label}
               </MenuItem>
@@ -99,9 +113,9 @@ function RoutePickerList({ kind, close }) {
   );
 }
 
-function RoutePicker({ kind, label, icon }) {
+function RoutePicker({ kind, label, icon, route, onRouteChange, up = true }) {
   useHub();
-  const selected = selectedRoutePickerItem(kind);
+  const selected = selectedRoutePickerItem(kind, route);
   const providers = routePickerProviders(kind);
   const value = selected
     ? `${selected.provider.label} · ${selected.model.label}`
@@ -110,14 +124,14 @@ function RoutePicker({ kind, label, icon }) {
       : 'Automatic';
   return (
     <Menu
-      up
+      up={up}
       width="w-[340px]"
       panelClassName="max-h-[min(440px,60vh)]"
       trigger={(open, toggle) => (
         <ChipButton icon={icon} label={label} value={value} active={open} onClick={toggle} disabled={kind === 'brain' && !providers.length} />
       )}
     >
-      {(close) => <RoutePickerList kind={kind} close={close} />}
+      {(close) => <RoutePickerList kind={kind} close={close} value={route} onChange={onRouteChange} />}
     </Menu>
   );
 }
@@ -684,25 +698,50 @@ function AdvancedForm({ titleRef }) {
               <Field label="Tone" className="md:col-span-2"><TextInput maxLength={500} placeholder="Direct, warm, cinematic, dry…" value={w.tone} onChange={(e) => setWorkflow({ tone: e.target.value })} /></Field>
             </div>
             {selected?.supports.media_source ? (
-              <div className="grid gap-3 md:grid-cols-3">
-                <Field label="Media source">
-                  <NativeSelect value={w.mediaSource} onChange={(e) => setWorkflow({ mediaSource: e.target.value })}>
-                    <option value="pexels">Pexels</option>
-                    <option value="pixabay">Pixabay</option>
-                    <option value="local">Owned local media</option>
-                  </NativeSelect>
-                </Field>
-                <Field label="Batch count">
-                  <NativeSelect value={w.videoCount} onChange={(e) => setWorkflow({ videoCount: e.target.value })}>
-                    {[1, 2, 3, 4, 5].map((n) => <option key={n} value={String(n)}>{n}</option>)}
-                  </NativeSelect>
-                </Field>
-                <Field label="Clip cadence">
-                  <NativeSelect value={w.clipDuration} onChange={(e) => setWorkflow({ clipDuration: e.target.value })}>
-                    {[2, 3, 4, 5, 6, 8].map((n) => <option key={n} value={String(n)}>{n} seconds</option>)}
-                  </NativeSelect>
-                </Field>
-              </div>
+              <>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <Field label="Media source">
+                    <NativeSelect value={w.mediaSource} onChange={(e) => setWorkflow({ mediaSource: e.target.value })}>
+                      {MEDIA_SOURCE_GROUPS.map(([group, options]) => (
+                        <optgroup key={group} label={group}>
+                          {options.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </NativeSelect>
+                  </Field>
+                  <Field label="Batch count">
+                    <NativeSelect value={w.videoCount} onChange={(e) => setWorkflow({ videoCount: e.target.value })}>
+                      {[1, 2, 3, 4, 5].map((n) => <option key={n} value={String(n)}>{n}</option>)}
+                    </NativeSelect>
+                  </Field>
+                  <Field label="Clip cadence">
+                    <NativeSelect value={w.clipDuration} onChange={(e) => setWorkflow({ clipDuration: e.target.value })}>
+                      {[2, 3, 4, 5, 6, 8].map((n) => <option key={n} value={String(n)}>{n} seconds</option>)}
+                    </NativeSelect>
+                  </Field>
+                </div>
+                {mediaSourceKind(w.mediaSource) ? (
+                  <div className="flex flex-col gap-2 rounded-lg border border-line1 bg-bg2/50 p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <RoutePicker
+                        up={false}
+                        kind={mediaSourceKind(w.mediaSource)}
+                        icon={mediaSourceKind(w.mediaSource) === 'video' ? 'video' : 'image'}
+                        label={mediaSourceKind(w.mediaSource) === 'video' ? 'Clip model' : 'Still model'}
+                        route={w.mediaRoute}
+                        onRouteChange={setMediaRoute}
+                      />
+                    </div>
+                    <p className="text-xs text-ink3">
+                      {mediaSourceKind(w.mediaSource) === 'video'
+                        ? 'One generated clip per beat. Same models as the Video studio — local, API, or an attached rental.'
+                        : 'One generated still per beat, animated into the timeline. Same models as the Image studio — local, API, or an attached rental.'}
+                    </p>
+                  </div>
+                ) : null}
+              </>
             ) : null}
           </section>
 

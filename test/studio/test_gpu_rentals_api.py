@@ -11,6 +11,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hivemind_content_studio import gpu_rentals
+from hivemind_content_studio.rental_providers import RentalRef
+from hivemind_content_studio.rental_providers import runpod as runpod_provider
+from hivemind_content_studio.rental_providers import vast as vast_provider
 from hivemind_content_studio.approval_ledger import ApprovalLedger
 from hivemind_content_studio.control_api import build_control_app
 from hivemind_content_studio.orchestrator import ContentOrchestrator
@@ -41,14 +44,38 @@ def _isolated_media_state(tmp_path: Path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _vast_is_the_only_marketplace(monkeypatch):
+    """This file drives Vast. Nothing here may reach a second marketplace.
+
+    Not an env var, because clearing one does not hold: build_control_app
+    re-applies the shared hive env, so a RUNPOD key deleted before _client()
+    is back by the time an offer search runs — which is exactly what happened,
+    and the suite quietly made live RunPod API calls and ranked their real
+    prices into these assertions. Disabling the provider is the seam that
+    cannot be undone from underneath. test_rental_providers.py is where two
+    marketplaces at once is covered.
+    """
+    monkeypatch.setattr(runpod_provider.RunPodProvider, "configured", lambda self: False)
+
+
+@pytest.fixture(autouse=True)
 def _funded_account(monkeypatch):
     """Renting checks the credit first. That is its own seam so the tests
     about renting do not all have to fake a bank balance; the tests about the
     credit gate override this."""
-    monkeypatch.setattr(gpu_rentals, "account_state", lambda: {
+    funded = {
         "credit": 500.0, "usd_per_hour_running": 0.0,
         "hours_remaining": None, "machines_running": 0,
-    })
+        # Per marketplace, because that is what the affordability gate checks:
+        # Vast credit cannot pay a RunPod bill, so the aggregate above is not
+        # what authorizes a rental.
+        "providers": [{
+            "provider": "vast", "label": "Vast.ai", "credit_url": "vast.ai",
+            "credit": 500.0, "usd_per_hour_running": 0.0,
+            "hours_remaining": None, "machines_running": 0,
+        }],
+    }
+    monkeypatch.setattr(gpu_rentals, "account_state", lambda *_args, **_kw: funded)
 
 
 STUDIO_LABEL = f"{gpu_rentals.STUDIO_LABEL_PREFIX}image-abc123"
@@ -76,14 +103,36 @@ def _client(tmp_path: Path, monkeypatch, *, unlock: bool = True) -> TestClient:
     return client
 
 
+def _vast_instance(raw: dict):
+    """A raw Vast listing as the studio now sees it.
+
+    The provider normalizes API shapes into an Instance before anything in
+    gpu_rentals touches them, so a DTO test that hand-built a dict would be
+    testing a shape that no longer reaches the code under test. Going through
+    the real normalizer keeps these tests honest about Vast's own field names.
+    """
+    return vast_provider.VastProvider()._instance(raw)
+
+
 def _fake_vast(monkeypatch, handler) -> list[tuple[str, str, dict | None]]:
+    """Fake the Vast marketplace at its HTTP boundary.
+
+    Patched on the provider module rather than on gpu_rentals: the transport
+    moved there when a second marketplace arrived, and this is still the right
+    seam — everything above it (tier filters, ranking, provisioning, attach) is
+    the code under test, and everything below it is Vast's server.
+    """
     calls: list[tuple[str, str, dict | None]] = []
 
     def fake(method: str, path: str, payload: dict | None = None) -> dict:
         calls.append((method, path, payload))
         return handler(method, path, payload)
 
-    monkeypatch.setattr(gpu_rentals, "_vast_request", fake)
+    monkeypatch.setattr(vast_provider, "request", fake)
+    # A key has to LOOK present or the provider reports itself unconfigured and
+    # is skipped before the fake is ever reached. RunPod is held off by the
+    # _vast_is_the_only_marketplace fixture, not by an env var.
+    monkeypatch.setenv("VAST_API_KEY", "test-vast-key")
     return calls
 
 
@@ -98,7 +147,9 @@ def test_gpu_rental_routes_require_owner(tmp_path: Path, monkeypatch) -> None:
 def test_offers_filters_and_shape(tmp_path: Path, monkeypatch) -> None:
     def handler(method, path, payload):
         assert (method, path) == ("POST", "/v0/bundles/")
-        assert payload["datacenter"] == {"eq": True}
+        # Verified, but NOT datacenter-only — that key closed the H3 rung
+        # against a market with dozens of boxes in it. See _offer_query.
+        assert "datacenter" not in payload
         assert payload["verified"] == {"eq": True}
         # One query covers the tier's whole GPU ladder — three per-class
         # queries per tier would triple the calls behind a polling view.
@@ -112,12 +163,131 @@ def test_offers_filters_and_shape(tmp_path: Path, monkeypatch) -> None:
     body = client.get("/api/gpu-rentals/offers?tier=image").json()
     assert body["tier"] == "image"
     assert body["offers"][0] == {
-        "offer_id": 1, "gpu": "RTX 5090", "gpu_class": "rtx5090", "vram_mb": 32607,
+        "offer_id": "1", "provider": "vast", "provider_label": "Vast.ai",
+        "gpu": "RTX 5090", "gpu_class": "rtx5090", "vram_mb": 32607,
         "usd_per_hour": 0.402, "down_mbps": 755.0, "reliability": 0.9942,
         "geolocation": "South Korea, KR", "dlperf": None,
         # Time to first generation on THIS host, from the tier's download volume.
         "setup_minutes": 4.6,
+        # A listing with no cpu_ram says nothing about the box; None, not 0.
+        "ram_gb": None,
+        # Reported so the view can label hosting type, not filtered on.
+        "datacenter": False,
     }
+
+
+def test_offer_ram_is_the_containers_share_not_the_machines(tmp_path: Path, monkeypatch) -> None:
+    """A headline 145GB host sold in eighths hands the container ~18GB.
+
+    On a search offer cpu_ram is the whole machine and gpu_frac is the slice
+    this rental buys. Reporting the headline is how a box with 17.7GiB of
+    usable RAM read as a 141GB machine."""
+    # The eighth of a 141GB machine that started all this. It no longer reaches
+    # the DTO — every tier now has a RAM floor and 17.7GiB clears none of them —
+    # so the arithmetic is pinned on the function itself.
+    assert round(vast_provider._offer_ram_gb({"cpu_ram": 145088, "gpu_frac": 0.125}), 1) == 17.7
+
+    def handler(method, path, payload):
+        # A 503GB machine, also sold in eighths: ~63GiB, not 503.
+        return {"offers": [{"id": 1, "gpu_name": "RTX 5090", "dph_total": 0.62, "inet_down": 9000,
+                            "cpu_ram": 515815, "gpu_frac": 0.125}]}
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    offer = client.get("/api/gpu-rentals/offers?tier=image").json()["offers"][0]
+    assert offer["ram_gb"] == 63.0
+
+
+def test_offers_drop_boxes_that_cannot_hold_the_weights_in_system_ram(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """MiniMax H3 stages a 20GB DiT and a 15GB encoder through system RAM.
+
+    Measured 2026-08-13 on a rented 5090 whose container had 29.2GiB: a 5s
+    reference clip rendered (21.05GiB VRAM peak), and a 10s one KILLED the
+    ComfyUI process outright, system RAM peaking at 27.12GiB. The job did not
+    fail — the server died — so this is a hard drop, not a ranking preference.
+    Tiers without a min_ram_gb are unaffected."""
+    def handler(method, path, payload):
+        return {"offers": [
+            # 141GB machine sold in eighths: 17.7GiB, nowhere near enough.
+            {"id": 20, "gpu_name": "RTX 5090", "dph_total": 0.62, "inet_down": 9000,
+             "cpu_ram": 145088, "gpu_frac": 0.125},
+            # Whole 30.5GiB machine — the exact size that died.
+            {"id": 21, "gpu_name": "RTX 5090", "dph_total": 0.70, "inet_down": 9000,
+             "cpu_ram": 31196, "gpu_frac": 1.0},
+            {"id": 22, "gpu_name": "RTX 5090", "dph_total": 0.95, "inet_down": 9000,
+             "cpu_ram": 515815, "gpu_frac": 0.125},
+        ]}
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    minimax = client.get("/api/gpu-rentals/offers?tier=minimax").json()["offers"]
+    assert [o["offer_id"] for o in minimax] == ["22"], "only the 62.9GiB box can hold H3"
+    # The image tier states no measured floor, so it falls back to its VRAM
+    # floor (24GB): the 17.7GiB eighth still cannot stage the weights, but the
+    # 30.5GiB box that was too small for H3 is fine for Krea2.
+    image = client.get("/api/gpu-rentals/offers?tier=image").json()["offers"]
+    assert {o["offer_id"] for o in image} == {"21", "22"}
+
+
+def test_hosting_type_is_reported_not_required(tmp_path: Path, monkeypatch) -> None:
+    """Datacenter is a label on an offer, not a condition of seeing one.
+
+    Requiring it cut the verified single-GPU 5090 market from 45 offers to 9
+    (measured live 2026-08-14), and those 9 are datacenter *because* they are
+    big machines sold in fractions — so on the H3 tier the RAM guard then
+    dropped every one of them and the rung read as sold out."""
+    def handler(method, path, payload):
+        assert "datacenter" not in payload
+        return {"offers": [
+            {"id": 50, "gpu_name": "RTX 5090", "dph_total": 0.44, "inet_down": 9000,
+             "cpu_ram": 63800, "gpu_frac": 1.0, "hosting_type": 0},
+            {"id": 51, "gpu_name": "RTX 5090", "dph_total": 0.67, "inet_down": 9000,
+             "cpu_ram": 63800, "gpu_frac": 1.0, "hosting_type": 1},
+        ]}
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    offers = client.get("/api/gpu-rentals/offers?tier=minimax").json()["offers"]
+    # Both survive, and cheapest-first still leads with the non-datacenter box.
+    assert [(o["offer_id"], o["datacenter"]) for o in offers] == [("50", False), ("51", True)]
+
+
+def test_a_rung_the_post_filters_empty_relaxes_instead_of_reporting_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A non-empty RESPONSE is not a rentable rung.
+
+    The search used to stop at the first floor Vast answered at all. On the H3
+    tier that answer was five fractional boxes too small to hold the weights,
+    min_ram_gb emptied the rung afterwards, and the lower floors — where the
+    whole machines are — were never asked."""
+    floor = gpu_rentals.tier_min_down_mbps("minimax")
+    asked: list[int] = []
+
+    def handler(method, path, payload):
+        want = payload["inet_down"]["gt"]
+        asked.append(want)
+        if want == floor:
+            # Fast links, but eighths of a 141GB machine: 17.7GiB each.
+            return {"offers": [
+                {"id": 30 + i, "gpu_name": "RTX 5090", "dph_total": 0.62,
+                 "inet_down": 9000, "cpu_ram": 145088, "gpu_frac": 0.125}
+                for i in range(5)
+            ]}
+        # Slower link, whole machine — the one that can actually be rented.
+        return {"offers": [{"id": 40, "gpu_name": "RTX 5090", "dph_total": 0.44,
+                            "inet_down": 1929, "cpu_ram": 63800, "gpu_frac": 1.0}]}
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    body = client.get("/api/gpu-rentals/offers?tier=minimax").json()
+    assert asked[0] == floor, "the strict floor is still tried first"
+    assert len(asked) > 1, "a rung emptied by the post-filters must try a lower floor"
+    assert [o["offer_id"] for o in body["offers"]] == ["40"]
+    # And the floor it reports is the one that actually produced the offers.
+    assert body["min_down_mbps"] == floor // 2
 
 
 def test_offers_drop_half_power_skus_sold_under_the_same_name(tmp_path: Path, monkeypatch) -> None:
@@ -142,12 +312,12 @@ def test_offers_drop_half_power_skus_sold_under_the_same_name(tmp_path: Path, mo
     client = _client(tmp_path, monkeypatch)
     offers = client.get("/api/gpu-rentals/offers?tier=minimax").json()["offers"]
     ids = [offer["offer_id"] for offer in offers]
-    assert 10 not in ids, "half-power Max-Q must not be offered as a PRO 6000"
-    assert 11 in ids
+    assert "10" not in ids, "half-power Max-Q must not be offered as a PRO 6000"
+    assert "11" in ids
     # A merely slower-than-median host of the right SKU still qualifies, and an
     # unbenchmarked one is not evidence of anything.
-    assert 12 in ids and 13 in ids
-    assert next(o for o in offers if o["offer_id"] == 11)["dlperf"] == 278.9
+    assert "12" in ids and "13" in ids
+    assert next(o for o in offers if o["offer_id"] == "11")["dlperf"] == 278.9
 
 
 def test_offers_skip_a_host_that_just_failed_us(tmp_path: Path, monkeypatch) -> None:
@@ -175,8 +345,8 @@ def test_offers_skip_a_host_that_just_failed_us(tmp_path: Path, monkeypatch) -> 
     client = _client(tmp_path, monkeypatch)
     offers = client.get("/api/gpu-rentals/offers?tier=minimax").json()["offers"]
     ids = [offer["offer_id"] for offer in offers]
-    assert 20 not in ids, "the machine that just failed must not be the top pick again"
-    assert ids == [21]
+    assert "20" not in ids, "the machine that just failed must not be the top pick again"
+    assert ids == ["21"]
 
     # The cooldown expires: a host with one bad day is not blacklisted forever.
     gpu_rentals._write_failure_state({
@@ -186,7 +356,7 @@ def test_offers_skip_a_host_that_just_failed_us(tmp_path: Path, monkeypatch) -> 
     })
     gpu_rentals._offer_cache.clear()
     ids = [o["offer_id"] for o in client.get("/api/gpu-rentals/offers?tier=minimax").json()["offers"]]
-    assert 20 in ids
+    assert "20" in ids
 
 
 def test_the_shared_blocklist_is_merged_but_never_blocks_renting(tmp_path: Path, monkeypatch) -> None:
@@ -241,12 +411,11 @@ def test_a_box_that_never_boots_its_container_is_called_out(tmp_path: Path, monk
 
     # Freshly booting: slow is not stalled, whatever the port says.
     monkeypatch.setattr(gpu_rentals, "_container_ssh_open", lambda *_a, **_k: False)
-    dto = gpu_rentals._instance_dto({**booting, "start_date": time.time() - 60}, probe=True)
+    dto = gpu_rentals._instance_dto(_vast_instance({**booting, "start_date": time.time() - 60}), probe=True)
     assert dto["phase"] == "booting"
 
     # Past the deadline with the port still shut: terminal, and it says why.
-    dto = gpu_rentals._instance_dto(
-        {**booting, "start_date": time.time() - gpu_rentals.BOOT_STALL_SECONDS - 60}, probe=True)
+    dto = gpu_rentals._instance_dto(_vast_instance({**booting, "start_date": time.time() - gpu_rentals.BOOT_STALL_SECONDS - 60}), probe=True)
     assert dto["phase"] == "error", "a container that never came up is not still booting"
     assert "never started this container" in dto["provision"]["detail"]
     assert "destroy it and rent again" in dto["provision"]["detail"]
@@ -255,8 +424,7 @@ def test_a_box_that_never_boots_its_container_is_called_out(tmp_path: Path, monk
 
     # Same age, but the container did come up — it is provisioning, not wedged.
     monkeypatch.setattr(gpu_rentals, "_container_ssh_open", lambda *_a, **_k: True)
-    dto = gpu_rentals._instance_dto(
-        {**booting, "start_date": time.time() - gpu_rentals.BOOT_STALL_SECONDS - 60}, probe=True)
+    dto = gpu_rentals._instance_dto(_vast_instance({**booting, "start_date": time.time() - gpu_rentals.BOOT_STALL_SECONDS - 60}), probe=True)
     assert dto["phase"] == "booting"
 
 
@@ -408,7 +576,7 @@ def test_create_uses_cheapest_offer_and_provisioning_onstart(tmp_path: Path, mon
     client = _client(tmp_path, monkeypatch)
     response = client.post("/api/gpu-rentals", json={"tier": "image"})
     assert response.status_code == 201
-    assert response.json()["rental_id"] == 4242
+    assert response.json()["rental_id"] == "vast:4242"
     assert [c[1] for c in calls] == ["/v0/bundles/", "/v0/asks/77/"]
 
 
@@ -467,10 +635,10 @@ def test_renting_a_batch_takes_a_distinct_offer_for_each_machine(tmp_path: Path,
     body = client.post("/api/gpu-rentals", json={"tier": "image", "count": 3}).json()
 
     assert rented == ["/v0/asks/1/", "/v0/asks/2/", "/v0/asks/3/"]
-    assert [r["rental_id"] for r in body["rentals"]] == [1001, 1002, 1003]
+    assert [r["rental_id"] for r in body["rentals"]] == ["vast:1001", "vast:1002", "vast:1003"]
     assert body["requested"] == 3
     # Single-machine callers keep the flat shape they have always had.
-    assert body["rental_id"] == 1001
+    assert body["rental_id"] == "vast:1001"
     # Each machine carries its own label, or the studio cannot tell them apart.
     assert len({r["label"] for r in body["rentals"]}) == 3
 
@@ -497,8 +665,12 @@ def test_renting_is_refused_when_the_credit_cannot_fund_an_hour(tmp_path: Path, 
     """Vast stops instances once the balance runs out, so overspending does not
     fail loudly — it provisions (billed) and dies mid-session."""
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
-    monkeypatch.setattr(gpu_rentals, "account_state", lambda: {
-        "credit": 1.20, "usd_per_hour_running": 0.40, "hours_remaining": 3.0, "machines_running": 1})
+    monkeypatch.setattr(gpu_rentals, "account_state", lambda *_a, **_k: {
+        "credit": 1.20, "usd_per_hour_running": 0.40, "hours_remaining": 3.0, "machines_running": 1,
+        # The gate reads the marketplace the offer belongs to, not the total.
+        "providers": [{"provider": "vast", "label": "Vast.ai", "credit_url": "vast.ai",
+                       "credit": 1.20, "usd_per_hour_running": 0.40,
+                       "hours_remaining": 3.0, "machines_running": 1}]})
     calls = _fake_vast(monkeypatch, lambda m, p, b: {"offers": [
         {"id": 1, "dph_total": 1.47, "gpu_name": "RTX PRO 6000 WS"}]})
     client = _client(tmp_path, monkeypatch)
@@ -507,7 +679,9 @@ def test_renting_is_refused_when_the_credit_cannot_fund_an_hour(tmp_path: Path, 
 
     assert response.status_code == 402
     detail = response.json()["detail"]
-    assert "$1.20 credit" in detail and "2 more machines" in detail
+    # Names the marketplace: with two accounts in play, "$1.20 credit" alone
+    # does not say which one is short.
+    assert "$1.20 Vast.ai credit" in detail and "2 more machines" in detail
     assert "already running" in detail, "the burn already on the account is what makes it unaffordable"
     # Refused BEFORE any money moved.
     assert [c[1] for c in calls] == ["/v0/bundles/"]
@@ -528,6 +702,10 @@ def test_the_credit_check_never_blocks_a_rental_on_its_own_failure(tmp_path: Pat
 
 def test_account_state_reports_burn_and_runway(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.undo()  # the funded-account fixture stubs the very thing under test
+    # undo() drops EVERY patch this test has, including the autouse fixture
+    # that holds the second marketplace off — without this line the balance
+    # under test is summed with a live RunPod account over the network.
+    monkeypatch.setattr(runpod_provider.RunPodProvider, "configured", lambda self: False)
 
     def handler(method, path, payload):
         if path == "/v0/users/current/":
@@ -545,6 +723,13 @@ def test_account_state_reports_burn_and_runway(tmp_path: Path, monkeypatch) -> N
     assert body["usd_per_hour_running"] == 1.87
     assert body["machines_running"] == 2
     assert body["hours_remaining"] == 5.3
+    # Broken out per marketplace as well, because the totals cannot authorize a
+    # rental: credit is only spendable where it sits.
+    assert body["providers"] == [{
+        "provider": "vast", "label": "Vast.ai", "credit_url": "vast.ai",
+        "credit": 9.87, "usd_per_hour_running": 1.87,
+        "hours_remaining": 5.3, "machines_running": 2,
+    }]
 
 
 def test_labels_carry_the_gpu_class_and_older_ones_still_parse(tmp_path: Path, monkeypatch) -> None:
@@ -762,6 +947,31 @@ def test_every_tier_provisions_the_privacy_layer(tier: str, monkeypatch) -> None
     assert probe.index("privacy layer failed to load") < probe.index("beacon ready")
 
 
+@pytest.mark.parametrize("tier", ["image", "video"])
+def test_every_krea2_tier_installs_its_text_encoder_node(tier: str, monkeypatch) -> None:
+    """TextEncodeKrea2 is a separate custom node, not ComfyUI core and not part
+    of INT8-Fast. Without it ComfyUI comes up perfectly and then rejects the
+    whole prompt with "Node 'TextEncodeKrea2' not found" — so the box looks
+    healthy right up to the first generation.
+
+    Found 2026-08-15 by rendering on a freshly rented box; it had been missing
+    on every provider. Pinned by SHA for the same reason the H3 nodes are.
+    """
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
+    script = gpu_rentals._onstart_script(tier)
+    assert "ComfyUI-Krea2TextEncoder" in script
+    assert gpu_rentals._KREA2_TEXT_ENCODER_COMMIT in script, "an unpinned node build is the H3 trap"
+    # And it fails provisioning loudly rather than serving a box that cannot
+    # run the one workflow the tier exists for.
+    assert "Krea2 text encoder node unavailable" in script
+
+
+def test_the_h3_tier_does_not_carry_krea2_nodes(monkeypatch) -> None:
+    """H3 serves no Krea2 graph, and the onstart has a hard size ceiling."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
+    assert "ComfyUI-Krea2TextEncoder" not in gpu_rentals._onstart_script("minimax")
+
+
 def test_h3_custom_nodes_are_pinned_not_cloned_at_head(tmp_path: Path, monkeypatch) -> None:
     # Cloning custom nodes at HEAD broke every H3 job on 2026-08-07: upstream
     # Spectrum dc6e1b3 changed a default the registered graph is tuned against.
@@ -800,8 +1010,10 @@ def test_destroy_managed_instance(tmp_path: Path, monkeypatch) -> None:
 
     _fake_vast(monkeypatch, handler)
     client = _client(tmp_path, monkeypatch)
+    # A bare id from an older client still routes to Vast; the response speaks
+    # the provider-scoped form from here on.
     assert client.delete("/api/gpu-rentals/5").json() == {
-        "rental_id": 5, "destroyed": True, "restarting_stack": False,
+        "rental_id": "vast:5", "destroyed": True, "restarting_stack": False,
     }
 
 
@@ -839,14 +1051,34 @@ def test_presign_r2_get_is_deterministic_sigv4(monkeypatch) -> None:
     assert "X-Amz-Signature=" in url
 
 
-def test_missing_vast_key_maps_to_503(tmp_path: Path, monkeypatch) -> None:
+def test_no_marketplace_configured_maps_to_503(tmp_path: Path, monkeypatch) -> None:
+    """"Nothing is set up" and "everything is sold out" must not look alike.
+
+    Both render as an empty machine list, and they need opposite responses
+    from the user — one is a missing API key, the other is a market to wait
+    out. Now that a provider with no key is skipped rather than raising, the
+    total-absence case has to say so explicitly or it degrades into silence.
+    """
     client = _client(tmp_path, monkeypatch)
-    # build_control_app re-applies the shared hive env, so clear the key AFTER
+    # build_control_app re-applies the shared hive env, so clear the keys AFTER
     # the app is built to simulate an unconfigured machine.
-    monkeypatch.delenv("VAST_API_KEY", raising=False)
+    for key in ("VAST_API_KEY", "RUNPOD_API_KEY", "RUNPOD_MANAGEMENT_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
     response = client.get("/api/gpu-rentals")
     assert response.status_code == 503
-    assert "VAST_API_KEY" in response.json()["detail"]
+    detail = response.json()["detail"]
+    # Names every marketplace it could have used, not just the first.
+    assert "VAST_API_KEY" in detail and "RUNPOD_API_KEY" in detail
+
+
+def test_one_configured_marketplace_is_enough(tmp_path: Path, monkeypatch) -> None:
+    """A missing RunPod key must not take Vast's machines off the screen."""
+    def handler(method, path, payload):
+        return {"instances": []}
+
+    _fake_vast(monkeypatch, handler)  # sets VAST_API_KEY, clears the RunPod ones
+    client = _client(tmp_path, monkeypatch)
+    assert client.get("/api/gpu-rentals").status_code == 200
 
 
 def test_phase_booting_not_running_while_loading(tmp_path: Path, monkeypatch) -> None:
@@ -958,7 +1190,10 @@ def test_attach_writes_overlay_and_spawns_tunnel(tmp_path: Path, monkeypatch) ->
     # registry per request, and restarting to add a routing rule killed
     # in-flight generations and made "use this machine" a 30-second wait.
     assert body["attached"] is True and body["restarting_stack"] is False
-    assert spawned == {"rid": 7, "ip": "9.9.9.9", "port": "41000", "lport": gpu_rentals.TUNNEL_BASE_PORT + 7}
+    assert spawned == {"rid": RentalRef("vast", "7"), "ip": "9.9.9.9", "port": "41000",
+                       # Numeric ids keep `int % 500`, so a machine attached
+                       # before rental refs existed stays on its own port.
+                       "lport": gpu_rentals.TUNNEL_BASE_PORT + 7}
     assert restarts == []
     env = (tmp_path / "media-state/rental-lanes.env").read_text()
     assert 'RENTAL_COMFY_LANES="rental7=http://127.0.0.1:18307"' in env
@@ -1024,15 +1259,15 @@ def test_selecting_a_machine_puts_its_lane_first(tmp_path: Path, monkeypatch) ->
     client.post("/api/gpu-rentals/8/attach")
 
     registry = tmp_path / "media-state/rental-lanes.json"
-    assert list(json.loads(registry.read_text())) == ["7", "8"]
+    assert list(json.loads(registry.read_text())) == ["vast:7", "vast:8"]
 
     assert client.post("/api/gpu-rentals/8/select").json()["attached"] is True
 
-    assert list(json.loads(registry.read_text())) == ["8", "7"], "the selected machine leads"
+    assert list(json.loads(registry.read_text())) == ["vast:8", "vast:7"], "the selected machine leads"
     env = (tmp_path / "media-state/rental-lanes.env").read_text()
     assert 'RENTAL_COMFY_LANE_RULES="rental8=minimax_h3;rental7=minimax_h3"' in env
     rentals = {r["rental_id"]: r for r in client.get("/api/gpu-rentals").json()["rentals"]}
-    assert rentals[8]["priority"] > rentals[7]["priority"]
+    assert rentals["vast:8"]["priority"] > rentals["vast:7"]["priority"]
 
 
 def test_reattaching_does_not_steal_the_selection(tmp_path: Path, monkeypatch) -> None:
@@ -1047,7 +1282,78 @@ def test_reattaching_does_not_steal_the_selection(tmp_path: Path, monkeypatch) -
     client.post("/api/gpu-rentals/7/attach")
 
     registry = tmp_path / "media-state/rental-lanes.json"
-    assert list(json.loads(registry.read_text())) == ["8", "7"]
+    assert list(json.loads(registry.read_text())) == ["vast:8", "vast:7"]
+
+
+def test_switching_between_attached_machines_touches_nothing_remote(tmp_path: Path, monkeypatch) -> None:
+    """Switching is a local file write, and it has to cost like one.
+
+    Routing the common case through attach_rental meant a Vast round-trip plus
+    a beacon fetch and a tunnel probe (2.0s measured with two live boxes) to
+    change one integer — the click sat there long enough to be clicked again.
+    """
+    _two_ready_instances(monkeypatch, tmp_path)
+    client = _client(tmp_path, monkeypatch)
+    client.post("/api/gpu-rentals/7/attach")
+    client.post("/api/gpu-rentals/8/attach")
+
+    calls = _fake_vast(monkeypatch, lambda m, p, b: pytest.fail(f"switching called Vast: {m} {p}"))
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda url: pytest.fail("switching probed the beacon"))
+    monkeypatch.setattr(gpu_rentals, "_tunnel_carrying_traffic",
+                        lambda *_a, **_k: pytest.fail("switching probed the tunnel"))
+
+    body = client.post("/api/gpu-rentals/7/select").json()
+
+    assert calls == [], "an attached machine already has a lane; nothing to ask Vast"
+    assert body["attached"] is True and body["lane"] == "rental7"
+    assert body["studio_pages"] == ["video"]
+    registry = tmp_path / "media-state/rental-lanes.json"
+    assert list(json.loads(registry.read_text())) == ["vast:7", "vast:8"], "the selected machine leads"
+
+
+def test_switching_to_a_machine_whose_tunnel_died_still_reconnects_it(tmp_path: Path, monkeypatch) -> None:
+    """The shortcut is only valid while the tunnel process is there. Without
+    that guard, picking a machine whose ssh had exited would quietly put a lane
+    nobody can reach at the front of the routing rules."""
+    _two_ready_instances(monkeypatch, tmp_path)
+    client = _client(tmp_path, monkeypatch)
+    client.post("/api/gpu-rentals/7/attach")
+    client.post("/api/gpu-rentals/8/attach")
+
+    monkeypatch.setattr(gpu_rentals, "_tunnel_pid",
+                        lambda ref: None if ref.native == "7" else 4321)
+    spawned: list[int] = []
+    monkeypatch.setattr(gpu_rentals, "_spawn_tunnel", lambda rid, *a: spawned.append(rid))
+
+    assert client.post("/api/gpu-rentals/7/select").json()["attached"] is True
+
+    assert spawned == [RentalRef("vast", "7")], "a dead tunnel has to be respawned, not just reordered"
+    registry = tmp_path / "media-state/rental-lanes.json"
+    assert list(json.loads(registry.read_text())) == ["vast:7", "vast:8"]
+
+
+def test_the_machine_list_probes_every_box_at_once(tmp_path: Path, monkeypatch) -> None:
+    """Probes are network waits, so serially the list cost their SUM — and the
+    studios poll it, which made renting a second box slow down the first one's
+    panel. The barrier below only clears if both boxes are probed together; a
+    serial pass deadlocks on it and times out."""
+    import threading
+
+    _two_ready_instances(monkeypatch, tmp_path)
+    barrier = threading.Barrier(2, timeout=5)
+
+    def beacon(url):
+        barrier.wait()
+        return {"step": "ready", "done": 4, "total": 4, "detail": ""}
+
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", beacon)
+    client = _client(tmp_path, monkeypatch)
+
+    rentals = client.get("/api/gpu-rentals").json()["rentals"]
+
+    assert [r["rental_id"] for r in rentals] == ["vast:7", "vast:8"], "concurrency must not reorder the list"
+    assert all(r["phase"] == "ready" for r in rentals)
 
 
 def test_attach_fails_loudly_when_the_tunnel_is_refused(tmp_path: Path, monkeypatch) -> None:
@@ -1076,7 +1382,7 @@ def test_attach_fails_loudly_when_the_tunnel_is_refused(tmp_path: Path, monkeypa
             return 255
 
     def fake_popen(*args, **kwargs):
-        log = gpu_rentals._tunnel_dir() / "7.log"
+        log = gpu_rentals._tunnel_dir() / "vast-7.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(
             "Warning: Permanently added '[ssh5.vast.ai]:23124' (ED25519) to the list of known hosts.\n"
@@ -1110,7 +1416,7 @@ def test_detach_clears_overlay(tmp_path: Path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch)
     client.post("/api/gpu-rentals/7/attach")
     body = client.delete("/api/gpu-rentals/7/attach").json()
-    assert body["attached"] is False and killed == [7]
+    assert body["attached"] is False and killed == [RentalRef("vast", "7")]
     assert 'RENTAL_COMFY_LANES=""' in (tmp_path / "media-state/rental-lanes.env").read_text()
 
 
@@ -1185,7 +1491,7 @@ def test_create_fails_over_stale_asks(tmp_path: Path, monkeypatch) -> None:
     _fake_vast(monkeypatch, handler)
     client = _client(tmp_path, monkeypatch)
     body = client.post("/api/gpu-rentals", json={"tier": "image"}).json()
-    assert body["rental_id"] == 99 and body["offer_id"] == 3
+    assert body["rental_id"] == "vast:99" and body["offer_id"] == "3"
 
 
 def test_create_falls_back_to_fresh_search_when_the_pinned_offer_evaporated(tmp_path: Path, monkeypatch) -> None:
@@ -1204,8 +1510,8 @@ def test_create_falls_back_to_fresh_search_when_the_pinned_offer_evaporated(tmp_
     calls = _fake_vast(monkeypatch, handler)
     client = _client(tmp_path, monkeypatch)
     body = client.post("/api/gpu-rentals", json={"tier": "minimax", "offer_id": 999}).json()
-    assert body["rental_id"] == 7001
-    assert body["offer_id"] == 41, "should rent the fresh cheapest, not the stale pin"
+    assert body["rental_id"] == "vast:7001"
+    assert body["offer_id"] == "41", "should rent the fresh cheapest, not the stale pin"
     # ONE search up front (it also prices the credit check and stocks the
     # fallbacks a multi-machine batch needs), the pinned ask first, then the
     # fresh candidate.
@@ -1227,7 +1533,7 @@ def test_create_does_not_retry_the_pinned_offer_in_the_fresh_list(tmp_path: Path
     _fake_vast(monkeypatch, handler)
     client = _client(tmp_path, monkeypatch)
     body = client.post("/api/gpu-rentals", json={"tier": "image", "offer_id": 50}).json()
-    assert body["offer_id"] == 51
+    assert body["offer_id"] == "51"
     assert attempts == ["/v0/asks/50/", "/v0/asks/51/"], "the dead pin must not be tried twice"
 
 
@@ -1266,7 +1572,7 @@ def test_offer_search_derives_a_bandwidth_floor_from_the_tier_volume(tmp_path: P
     assert floors[0] == gpu_rentals.tier_min_down_mbps("minimax") > 1000
     assert body["download_gb"] == gpu_rentals.tier_download_gb("minimax")
     # Cheapest first inside the qualifying set; both carry a setup estimate.
-    assert body["offers"][0]["offer_id"] == 1
+    assert body["offers"][0]["offer_id"] == "1"
     assert body["offers"][0]["usd_per_hour"] < body["offers"][1]["usd_per_hour"]
     assert all(o["setup_minutes"] is not None for o in body["offers"])
 
@@ -1296,6 +1602,7 @@ def test_offer_search_is_cached_so_three_tiers_do_not_trip_the_rate_limiter(tmp_
     assert len(calls) == 1, "repeat tier lookups must be served from cache"
 
 
+@pytest.mark.marketplace_transport
 def test_vast_rate_limit_is_retried_once(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(gpu_rentals.time, "sleep", lambda _s: None)
     attempts = {"n": 0}
@@ -1319,14 +1626,14 @@ def test_vast_rate_limit_is_retried_once(tmp_path: Path, monkeypatch) -> None:
         return _Resp(200, {"instances": []})
 
     # Patch the pooled SESSION, not requests.request: every Vast call goes
-    # through _vast_session so the TLS connection is reused (a bare
+    # through the provider's pooled session so the TLS connection is reused (a bare
     # requests.request per call was most of the Machines view's load time).
     # Patching the module function here silently let this test hit the real API.
-    monkeypatch.setattr(gpu_rentals, "_vast_session", SimpleNamespace(request=fake_request))
+    monkeypatch.setattr(vast_provider, "_session", SimpleNamespace(request=fake_request))
     monkeypatch.setenv("VAST_API_KEY", "test-key")
     client = _client(tmp_path, monkeypatch)
     assert client.get("/api/gpu-rentals").status_code == 200
-    assert urls.count(f"{gpu_rentals.VAST_API_BASE}/v1/instances/") == 2, (
+    assert urls.count(f"{vast_provider.API_BASE}/v1/instances/") == 2, (
         "a rate-limited call should be retried, not surfaced as an error"
     )
 
@@ -1351,7 +1658,7 @@ def test_the_reaper_runs_on_a_timer_not_only_when_someone_is_watching(
     # It sleeps before its first sweep, so building the app costs no Vast call.
 
 
-def _failed_dto(rental_id: int = 31, uptime: float = 0.5) -> dict:
+def _failed_dto(rental_id: str = "vast:31", uptime: float = 0.5) -> dict:
     """A DTO shaped like one whose beacon reported a terminal provisioning error."""
     return {
         "rental_id": rental_id, "managed": True, "phase": "error",
@@ -1379,7 +1686,7 @@ def test_a_box_that_failed_provisioning_is_destroyed_after_the_grace_window(
 
     monkeypatch.setattr(gpu_rentals, "PROVISION_FAILURE_GRACE_SECONDS", 0)
     recorded = gpu_rentals.reap_failed_rentals([_failed_dto()])
-    assert destroyed == [31]
+    assert destroyed == ["vast:31"]
     assert len(recorded) == 1
     entry = recorded[0]
     # The beacon's reason has to outlive the machine: once it is destroyed
@@ -1388,7 +1695,7 @@ def test_a_box_that_failed_provisioning_is_destroyed_after_the_grace_window(
     assert entry["progress"] == "10/11"
     # And what it cost, since the credit is simply gone.
     assert entry["usd_spent"] == pytest.approx(0.46)
-    assert gpu_rentals.recent_rental_failures()[0]["rental_id"] == 31
+    assert gpu_rentals.recent_rental_failures()[0]["rental_id"] == "vast:31"
 
 
 def test_reaping_a_failure_takes_its_host_out_of_the_running(tmp_path: Path, monkeypatch) -> None:
@@ -1466,14 +1773,14 @@ def test_a_failed_destroy_is_recorded_and_does_not_break_the_list(
     recorded = gpu_rentals.reap_failed_rentals([_failed_dto()])
     assert recorded[0]["destroy_error"] == "vast is down"
     # Still failed, so the next sweep tries again rather than forgetting it.
-    assert "31" in gpu_rentals._read_failure_state()["seen"]
+    assert "vast:31" in gpu_rentals._read_failure_state()["seen"]
 
 
 def test_pause_detaches_then_stops_keeping_the_disk(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
     monkeypatch.setattr(gpu_rentals, "_kill_tunnel", lambda rid: None)
     monkeypatch.setattr(gpu_rentals, "_schedule_stack_restart", lambda: None)
-    monkeypatch.setattr(gpu_rentals, "_read_attachments", lambda: {"21": {"lane": "rental21"}})
+    monkeypatch.setattr(gpu_rentals, "_read_attachments", lambda: {"vast:21": {"lane": "rental21"}})
     monkeypatch.setattr(gpu_rentals, "_write_attachments", lambda a: None)
 
     def handler(method, path, payload):
@@ -1486,14 +1793,14 @@ def test_pause_detaches_then_stops_keeping_the_disk(tmp_path: Path, monkeypatch)
     _fake_vast(monkeypatch, handler)
     client = _client(tmp_path, monkeypatch)
     body = client.post("/api/gpu-rentals/21/pause").json()
-    assert body == {"rental_id": 21, "paused": True, "was_attached": True}
+    assert body == {"rental_id": "vast:21", "paused": True, "was_attached": True}
     # Resume must know to restore routing.
-    assert gpu_rentals._read_paused_state()["21"]["was_attached"] is True
+    assert gpu_rentals._read_paused_state()["vast:21"]["was_attached"] is True
 
 
 def test_resume_starts_and_flags_reattach(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
-    gpu_rentals._write_paused_state({"21": {"was_attached": True}})
+    gpu_rentals._write_paused_state({"vast:21": {"was_attached": True}})
 
     def handler(method, path, payload):
         if method == "GET":
@@ -1505,7 +1812,7 @@ def test_resume_starts_and_flags_reattach(tmp_path: Path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch)
     body = client.post("/api/gpu-rentals/21/resume").json()
     assert body["resuming"] is True and body["will_reattach"] is True
-    assert gpu_rentals._read_paused_state()["21"]["pending_reattach"] is True
+    assert gpu_rentals._read_paused_state()["vast:21"]["pending_reattach"] is True
 
 
 def test_paused_instance_reports_paused_phase_and_storage_cost(tmp_path: Path, monkeypatch) -> None:
@@ -1549,7 +1856,7 @@ def test_balanced_takes_the_cheapest_host_that_clears_the_floor(tmp_path: Path, 
     _fake_vast(monkeypatch, handler)
     client = _client(tmp_path, monkeypatch)
     offers = client.get("/api/gpu-rentals/offers?tier=minimax").json()["offers"]
-    assert offers[0]["offer_id"] == 2
+    assert offers[0]["offer_id"] == "2"
     assert offers[0]["usd_per_hour"] == 0.669
 
 
@@ -1566,7 +1873,7 @@ def test_rent_honours_the_preference(tmp_path: Path, monkeypatch) -> None:
     _fake_vast(monkeypatch, handler)
     client = _client(tmp_path, monkeypatch)
     body = client.post("/api/gpu-rentals", json={"tier": "minimax", "prefer": "cheapest"}).json()
-    assert body["rental_id"] == 8001
+    assert body["rental_id"] == "vast:8001"
     assert floors == [500]
 
 
@@ -1786,7 +2093,7 @@ def test_a_lane_whose_far_end_is_dead_is_not_reported_alive(tmp_path: Path, monk
     That is how a killed ComfyUI kept every reading green.
     """
     monkeypatch.setattr(gpu_rentals, "_read_attachments",
-                        lambda: {"7": {"local_port": 19490}})
+                        lambda: {"vast:7": {"local_port": 19490}})
 
     class _Response:
         def __init__(self, ok):
@@ -1794,22 +2101,22 @@ def test_a_lane_whose_far_end_is_dead_is_not_reported_alive(tmp_path: Path, monk
 
     # The far end answers: healthy.
     monkeypatch.setattr(gpu_rentals.requests, "get", lambda *a, **k: _Response(True))
-    assert gpu_rentals._tunnel_carrying_traffic(7) is True
+    assert gpu_rentals._tunnel_carrying_traffic(RentalRef("vast", "7")) is True
 
     # The forward accepts but the far end resets — the exact shape of the bug.
     def _reset(*_args, **_kwargs):
         raise ConnectionResetError(54, "Connection reset by peer")
 
     monkeypatch.setattr(gpu_rentals.requests, "get", _reset)
-    assert gpu_rentals._tunnel_carrying_traffic(7) is False
+    assert gpu_rentals._tunnel_carrying_traffic(RentalRef("vast", "7")) is False
 
     # The far end is up but unhealthy (5xx): still not usable.
     monkeypatch.setattr(gpu_rentals.requests, "get", lambda *a, **k: _Response(False))
-    assert gpu_rentals._tunnel_carrying_traffic(7) is False
+    assert gpu_rentals._tunnel_carrying_traffic(RentalRef("vast", "7")) is False
 
     # No attachment at all → nothing to be alive.
     monkeypatch.setattr(gpu_rentals, "_read_attachments", lambda: {})
-    assert gpu_rentals._tunnel_carrying_traffic(7) is False
+    assert gpu_rentals._tunnel_carrying_traffic(RentalRef("vast", "7")) is False
 
 
 def test_attach_separates_a_dead_forward_from_a_dead_comfyui(tmp_path: Path, monkeypatch) -> None:

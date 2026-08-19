@@ -39,7 +39,7 @@ export const H3_CHARACTERS = Object.freeze([
   { name: 'Link', series: 'The Legend of Zelda', medium: 'game', year: 1986 },
   { name: 'Princess Zelda', series: 'The Legend of Zelda', medium: 'game', year: 1986 },
   { name: 'Ganondorf', series: 'The Legend of Zelda', medium: 'game', year: 1998 },
-  { name: 'Leon Kennedy', series: 'Resident Evil', medium: 'game', year: 1998 },
+  { name: 'Leon Kennedy', series: 'Resident Evil', prompt: 'Leon S. Kennedy', medium: 'game', year: 1998 },
   { name: 'Claire Redfield', series: 'Resident Evil', medium: 'game', year: 1998 },
   { name: 'Jill Valentine', series: 'Resident Evil', medium: 'game', year: 1996 },
   { name: 'Ada Wong', series: 'Resident Evil', medium: 'game', year: 1998 },
@@ -77,8 +77,12 @@ export const H3_CHARACTERS = Object.freeze([
   { name: 'Master Chief', series: 'Halo', medium: 'game', year: 2001 },
   { name: 'Aloy', series: 'Horizon', medium: 'game', year: 2017 },
   { name: 'Doomguy', series: 'Doom', medium: 'game', year: 1993 },
+  // Same marine, but the name picks the era: 1993 is the sprite-era green
+  // armour, 2016 the Praetor suit. Both are worth having as separate entries
+  // because the source clause is the whole of what H3 retrieves.
+  { name: 'Doom Slayer', series: 'Doom', prompt: 'the Doom Slayer', medium: 'game', year: 2016, filled: true },
   { name: 'Senua', series: 'Hellblade', medium: 'game', year: 2017 },
-  { name: 'Amicia', series: 'A Plague Tale', medium: 'game', year: 2019 },
+  { name: 'Amicia', series: 'A Plague Tale', prompt: 'Amicia de Rune', medium: 'game', year: 2019 },
   { name: 'Sam Porter Bridges', series: 'Death Stranding', medium: 'game', year: 2019, actor: 'Norman Reedus' },
   { name: 'Amelie', series: 'Death Stranding', medium: 'game', year: 2019, actor: 'Lindsay Wagner' },
   { name: 'Peter Parker', series: "Marvel's Spider-Man", medium: 'game', year: 2018, hint: 'Game suit confirmed' },
@@ -280,11 +284,18 @@ export function characterVoiceText(entry) {
 }
 
 // Name + series substring match; empty query returns the whole catalog.
+//
+// The `prompt` override is searched too, because it is the fuller name and
+// therefore the one a person is likely to type: the row displays "Amicia" and
+// "Leon Kennedy", but "Amicia de Rune", "Leon S. Kennedy", "Knuckles the
+// Echidna" and "the T-800 Terminator" are what they are actually called.
 export function searchH3Characters(query) {
   const q = String(query || '').trim().toLowerCase();
   if (!q) return H3_CHARACTERS;
   return H3_CHARACTERS.filter((entry) => (
-    entry.name.toLowerCase().includes(q) || entry.series.toLowerCase().includes(q)
+    entry.name.toLowerCase().includes(q)
+    || entry.series.toLowerCase().includes(q)
+    || (entry.prompt || '').toLowerCase().includes(q)
   ));
 }
 

@@ -156,16 +156,26 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
   }, [plan, rung]);
 
   const hourly = rung?.usd_per_hour || 0;
-  const credit = account?.credit;
+  // The marketplace this rung would actually be rented from — the rungs are
+  // ranked cheapest-first across every provider, so the cheapest offer is the
+  // one the server will take, and its account is the one that has to fund it.
+  // account.credit is a SUM across marketplaces and cannot authorize anything:
+  // Vast credit does not pay a RunPod bill.
+  const source = rung?.offers?.[0]?.provider;
+  const purse = (account?.providers || []).find((p) => p.provider === source)
+    || (account?.providers || [])[0]
+    || null;
+  const credit = purse ? purse.credit : account?.credit;
+  const running = (purse ? purse.usd_per_hour_running : account?.usd_per_hour_running) || 0;
   // What is left after the machines ALREADY running take their hour — the same
   // sum the server refuses on, so the stepper cannot offer a batch that would
   // come back as a payment error.
-  const spare = credit != null ? credit - (account?.usd_per_hour_running || 0) : null;
+  const spare = credit != null ? credit - running : null;
   const affordable = hourly && spare != null
     ? Math.max(0, Math.min(MAX_BATCH, Math.floor(spare / hourly)))
     : MAX_BATCH;
   const machines = Math.min(count, Math.max(1, affordable));
-  const runway = hourly && credit != null ? credit / (hourly * machines + (account?.usd_per_hour_running || 0)) : null;
+  const runway = hourly && credit != null ? credit / (hourly * machines + running) : null;
 
   return (
     <Card className="flex flex-col gap-4 p-4">
@@ -260,7 +270,7 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
               variant="ghost"
               disabled={busy || machines >= Math.max(1, affordable)}
               onClick={() => setCount(machines + 1)}
-              title={machines >= affordable ? 'Your Vast credit will not cover another machine for an hour' : ''}
+              title={machines >= affordable ? `Your ${purse?.label || 'marketplace'} credit will not cover another machine for an hour` : ''}
             >
               +
             </Button>
@@ -269,7 +279,7 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
         {hourly ? (
           <small className="text-[12px] text-ink3">
             ${(hourly * machines).toFixed(3)}/hr total
-            {runway ? ` · ~${runway.toFixed(runway < 10 ? 1 : 0)}h on $${credit.toFixed(2)} credit` : ''}
+            {runway ? ` · ~${runway.toFixed(runway < 10 ? 1 : 0)}h on $${credit.toFixed(2)} ${purse?.label || ''} credit` : ''}
           </small>
         ) : null}
         <span className="ml-auto" />
@@ -291,7 +301,8 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
       </div>
       {affordable < 1 && credit != null ? (
         <small className="text-[11px] text-warn">
-          ${credit.toFixed(2)} credit will not fund a {rung?.label} for an hour — add credit at vast.ai or pick a cheaper rung.
+          ${credit.toFixed(2)} {purse?.label} credit will not fund a {rung?.label} for an hour — add credit at{' '}
+          {purse?.credit_url || 'vast.ai'} or pick a cheaper rung.
         </small>
       ) : null}
     </Card>
@@ -487,7 +498,10 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
           </Button>
         )}
       </div>
-      <small className="font-mono text-[11px] text-ink3">{machine.label || `id ${machine.rental_id}`}</small>
+      <small className="font-mono text-[11px] text-ink3">
+        {machine.provider_label ? `${machine.provider_label} · ` : ''}
+        {machine.label || `id ${machine.rental_id}`}
+      </small>
       {machine.managed && paused && (
         <small className="text-[12px] text-ink3">
           Paused — models stay on the disk{machine.disk_gb ? ` (${machine.disk_gb}GB)` : ''}; resuming skips the
@@ -635,7 +649,7 @@ export function GpuMachinesView({ active }) {
   const applyAttachment = async (machine, method) => {
     setAttachBusyId(machine.rental_id);
     try {
-      const body = await api(`/api/gpu-rentals/${machine.rental_id}/attach`, { method });
+      const body = await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}/attach`, { method });
       if (body.restarting_stack) {
         setApplyingId(machine.rental_id);
         await waitForStackReturn();
@@ -657,7 +671,7 @@ export function GpuMachinesView({ active }) {
     if (!machine.attached || !machine.tunnel_alive || !isRoutingLeader(machine, rentals || [])) {
       setAttachBusyId(machine.rental_id);
       try {
-        const body = await api(`/api/gpu-rentals/${machine.rental_id}/select`, { method: 'POST' });
+        const body = await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}/select`, { method: 'POST' });
         if (body.restarting_stack) {
           setApplyingId(machine.rental_id);
           await waitForStackReturn();
@@ -683,7 +697,7 @@ export function GpuMachinesView({ active }) {
   const pauseMachine = async (machine) => {
     setAttachBusyId(machine.rental_id);
     try {
-      await api(`/api/gpu-rentals/${machine.rental_id}/pause`, { method: 'POST' });
+      await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}/pause`, { method: 'POST' });
       await refresh(false);
       notifyRentedMachinesChanged();
     } catch (err) {
@@ -696,7 +710,7 @@ export function GpuMachinesView({ active }) {
   const resumeMachine = async (machine) => {
     setAttachBusyId(machine.rental_id);
     try {
-      await api(`/api/gpu-rentals/${machine.rental_id}/resume`, { method: 'POST' });
+      await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}/resume`, { method: 'POST' });
       await refresh(false);
     } catch (err) {
       setError(err.message);
@@ -710,7 +724,7 @@ export function GpuMachinesView({ active }) {
     if (!window.confirm(`Destroy ${machine.label}? This is irreversible; the box and its disk are deleted.`)) return;
     setDestroyingId(machine.rental_id);
     try {
-      const body = await api(`/api/gpu-rentals/${machine.rental_id}`, { method: 'DELETE' });
+      const body = await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}`, { method: 'DELETE' });
       // Destroying an ATTACHED machine restarts the stack to drop its lane, so
       // wait for the studio to come back before refreshing — otherwise the
       // refresh fires into a server that is going down and the destroy reads
@@ -806,15 +820,17 @@ export function GpuMachinesView({ active }) {
             <section className="flex flex-col gap-3">
               <div className="flex flex-wrap items-baseline gap-3">
                 <SectionLabel>Active machines</SectionLabel>
-                {account?.credit != null && (
-                  <small className="text-[12px] text-ink3">
-                    <b className="font-mono text-ink2">${account.credit.toFixed(2)}</b> Vast credit
-                    {account.usd_per_hour_running
-                      ? ` · burning $${account.usd_per_hour_running.toFixed(3)}/hr${
-                        account.hours_remaining ? ` · ~${account.hours_remaining}h left` : ''}`
-                      : ' · nothing running'}
-                  </small>
-                )}
+                {(account?.providers || [])
+                  .filter((p) => p.credit != null)
+                  .map((p) => (
+                    <small key={p.provider} className="text-[12px] text-ink3">
+                      <b className="font-mono text-ink2">${p.credit.toFixed(2)}</b> {p.label} credit
+                      {p.usd_per_hour_running
+                        ? ` · burning $${p.usd_per_hour_running.toFixed(3)}/hr${
+                          p.hours_remaining ? ` · ~${p.hours_remaining}h left` : ''}`
+                        : ' · nothing running'}
+                    </small>
+                  ))}
               </div>
               {rentals?.length ? (
                 <div className="flex flex-col gap-3">

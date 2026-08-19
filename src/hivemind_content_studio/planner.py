@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from .config import load_config
+from .faceless_media import is_studio_media_source
 from .manifest import add_artifact, create_manifest, write_manifest
 from .private_access import read_private_text, write_private_json, write_private_text
 
@@ -237,12 +238,17 @@ def _plan_static_text_ad(run_dir: Path, brief: dict[str, Any], manifest: dict[st
 def _plan_faceless(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -> None:
     voice = brief.get("voice") if isinstance(brief.get("voice"), dict) else {}
     subtitles = brief.get("subtitles") if isinstance(brief.get("subtitles"), dict) else {}
+    media_source = str(brief.get("media_source") or "pexels").strip().lower() or "pexels"
     payload = {
         "video_subject": brief.get("subject") or brief.get("title") or brief.get("goal") or "",
         "video_script": brief.get("script") or "",
         "video_terms": brief.get("search_terms") or [],
         "video_aspect": brief.get("aspect_ratio") or "9:16",
-        "video_source": brief.get("media_source") or "pexels",
+        # A generated source is not something the engine can search for. It
+        # renders first, then feeds the results in as owned local material, so
+        # the params written here already say "local" and render_faceless fills
+        # video_materials in before the engine runs.
+        "video_source": "local" if is_studio_media_source(media_source) else media_source,
         "voice_name": voice.get("voice_id") or "",
         "subtitle_enabled": subtitles.get("enabled", True),
         "video_count": int(brief.get("count") or 1),
