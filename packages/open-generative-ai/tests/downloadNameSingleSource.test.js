@@ -219,8 +219,6 @@ test('no video player offers the browser its own download path', () => {
             const full = path.join(dir, item.name);
             if (item.isDirectory()) { walk(full); continue; }
             if (!/\.(jsx?|tsx?)$/.test(item.name)) continue;
-            // src/components and src/views hold the retired vanilla-JS UI.
-            if (/\/(components|views)\//.test(full)) continue;
             const source = fs.readFileSync(full, 'utf8');
             for (const tag of source.match(/<video\b[^>]*>/gs) || []) {
                 if (/\bcontrols\b/.test(tag) && !/controlsList=["'][^"']*nodownload/.test(tag)) {

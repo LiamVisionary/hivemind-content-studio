@@ -6,6 +6,7 @@ import json
 import re
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +17,19 @@ from hivemind_content_studio.control_api import _write_inline_video, build_contr
 from hivemind_content_studio.orchestrator import ContentOrchestrator
 from hivemind_content_studio.private_access import ENCRYPTED_PREFIX, OwnerAccess, PrivateFieldCipher, read_private_text
 from hivemind_content_studio.run_store import RunStore
+
+def _assert_proxied(url: str, expected_path: str, expected_params: dict[str, str] | None = None) -> None:
+    """The forwarded URL, compared the way the upstream will actually read it.
+
+    The proxy passes the query string through untouched, so whether a space
+    arrives as "+" or "%20" is the HTTP client's choice and not a product
+    behaviour — parse_qs normalises both to a space.
+    """
+    parsed = urlparse(url)
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == expected_path
+    got = {key: values[0] for key, values in parse_qs(parsed.query).items()}
+    assert got == (expected_params or {})
+
 
 
 def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, ContentOrchestrator, ApprovalLedger]:
@@ -196,9 +210,11 @@ def test_simple_catalog_combines_safe_hivemind_brains_and_media_capabilities(tmp
     gpt_image = next(item for item in catalog["media"]["image"] if item["id"] == "openai-gpt-image")
     assert next(model for model in gpt_image["models"] if model["id"] == "gpt-image-1.5")["max_reference_images"] == 16
     media_studio = next(item for item in catalog["media"]["video"] if item["id"] == "media-studio-mcp")
-    # ltx23-eros-exact was retired with its exact-v1-merged-q8 model directory.
-    assert {model["id"] for model in media_studio["models"]} >= {"ltx23-eros-fast", "ltx23-eros-v14-dmd"}
-    assert next(model for model in media_studio["models"] if model["id"] == "ltx23-eros-fast")["label"] == "LTX 2.3 Eros Fast"
+    # ltx23-eros-exact was retired with its exact-v1-merged-q8 model directory, and
+    # ltx23-eros-fast was superseded by the v1.4 DMD build — the MCP alias map now
+    # resolves `fast` to ltx23-eros-v14-dmd, so that is the shipped Eros default.
+    assert {model["id"] for model in media_studio["models"]} >= {"ltx23-eros-v14-dmd"}
+    assert next(model for model in media_studio["models"] if model["id"] == "ltx23-eros-v14-dmd")["label"] == "LTX 2.3 Eros v1.4 DMD"
     seedance = next(item for item in catalog["media"]["video"] if item["id"] == "muapi")
     assert next(model for model in seedance["models"] if model["id"] == "seedance-v2.0-t2v")["max_reference_images"] is None
     assert any(template["id"] == "ugc-product-ad-15s" for template in catalog["templates"])
@@ -1478,7 +1494,7 @@ def test_opengen_bridge_proxy_forwards_the_query_string(tmp_path: Path, monkeypa
 
     response = client.get("/local-ai/loras/ltx23-eros-dmd", params={"baseModels": "LTXV"})
     assert response.status_code == 200
-    assert seen["url"] == "http://127.0.0.1:8794/local-ai/loras/ltx23-eros-dmd?baseModels=LTXV"
+    _assert_proxied(seen["url"], "http://127.0.0.1:8794/local-ai/loras/ltx23-eros-dmd", {"baseModels": "LTXV"})
 
     # No query -> no stray "?" appended.
     client.get("/local-ai/models")
@@ -1517,7 +1533,7 @@ def test_opengen_bridge_proxy_exposes_the_lora_update_and_cancel_routes(tmp_path
 
     # Update availability, with the workflow's base models carried through.
     assert client.get("/local-ai/lora-updates", params={"baseModels": "Krea 2"}).status_code == 200
-    assert seen["url"] == "http://127.0.0.1:8794/local-ai/lora-updates?baseModels=Krea%202"
+    _assert_proxied(seen["url"], "http://127.0.0.1:8794/local-ai/lora-updates", {"baseModels": "Krea 2"})
 
     # Cancelling a download is a DELETE on the job route.
     assert client.delete("/local-ai/civitai-download/abc123").status_code == 200
@@ -1562,7 +1578,7 @@ def test_opengen_bridge_proxy_exposes_the_model_manager_routes(tmp_path: Path, m
     assert seen["url"] == "http://127.0.0.1:8794/local-ai/library"
 
     assert client.get("/local-ai/civitai-search", params={"query": "krea 2", "types": "LORA"}).status_code == 200
-    assert seen["url"] == "http://127.0.0.1:8794/local-ai/civitai-search?query=krea%202&types=LORA"
+    _assert_proxied(seen["url"], "http://127.0.0.1:8794/local-ai/civitai-search", {"query": "krea 2", "types": "LORA"})
 
     assert client.get("/local-ai/civitai-base-models").status_code == 200
     assert seen["url"] == "http://127.0.0.1:8794/local-ai/civitai-base-models"

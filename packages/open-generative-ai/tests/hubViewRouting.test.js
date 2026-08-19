@@ -3,19 +3,35 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-// Regression: the create view carries data-studio-mode for CSS, so a bare
-// $$('[data-studio-mode]') in selectNativeStudioMode also matched the VIEW
-// element and re-added `is-active` to it when boot() finished — stacking the
-// create view over whichever hub view (History, Runs, …) the user had open.
-test('hub studio-mode highlighting can never activate the create view', () => {
-    const hub = fs.readFileSync(path.join(__dirname, '../src/views/hub/hubApp.js'), 'utf8');
+// Regression, carried over from the retired vanilla hub (src/views/hub/hubApp.js,
+// deleted 2026-08): the create view carries data-studio-mode for CSS, so a bare
+// $$('[data-studio-mode]') in selectNativeStudioMode also matched the VIEW element
+// and re-added `is-active` to it — stacking the create view over whichever hub
+// view (History, Runs, …) the user had open.
+//
+// The React hub cannot reproduce that by construction, and this test pins the
+// construction rather than the old symptom: every view's `active` is derived from
+// ONE value, so two of them can never be active at once. A future refactor that
+// gave a view its own independent activation flag is exactly what would bring the
+// stacking bug back, and that is what this catches.
+test('hub view activation is derived from a single current value', () => {
+    const layer = fs.readFileSync(path.join(__dirname, '../src/hub/HubLayer.jsx'), 'utf8');
 
-    // The CSS contract keeps the mode on the view element…
-    assert.match(hub, /createView\.dataset\.studioMode = selected;/);
-    // …so the button-highlight query MUST be scoped to the tab strip.
-    assert.match(hub, /\$\$\('#native-studio-modes \[data-studio-mode\]'\)\.forEach/);
-    assert.doesNotMatch(hub, /\$\$\('\[data-studio-mode\]'\)/);
+    // One source of truth for which view is showing.
+    assert.match(layer, /const current = visible \? view : null;/);
 
-    // And view activation stays exclusive: one toggle pass over every .view.
-    assert.match(hub, /\$\$\('\.view'\)\.forEach\(\(item\) => item\.classList\.toggle\('is-active', item\.dataset\.view === selected\)\);/);
+    // Every rendered view compares against it — no view carries its own flag.
+    const activations = [...layer.matchAll(/<(\w+View)\s+active=\{([^}]+)\}/g)];
+    assert.ok(activations.length >= 6, `expected the hub's views, saw ${activations.length}`);
+    for (const [, name, expression] of activations) {
+        assert.match(
+            expression.trim(),
+            /^current === '[a-z]+'$/,
+            `${name} must derive active from current, got: ${expression.trim()}`,
+        );
+    }
+
+    // And the view names are distinct, so no two can be true together.
+    const keys = activations.map(([, , expression]) => expression.trim());
+    assert.equal(new Set(keys).size, keys.length, 'two views share an activation key');
 });

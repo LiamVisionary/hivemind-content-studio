@@ -1,4 +1,4 @@
-// Hub shared data layer — ported from src/views/hub/hubApp.js (logic only; the
+// Hub shared data layer — ported from the retired vanilla hub (logic only; the
 // DOM rendering moved into React views under src/hub/views). Module-level
 // singletons (bridge state, polling, owner passphrase) live here so React
 // remounts can never reset them. Every fetch route, payload shape, storage key,

@@ -561,8 +561,13 @@ def test_video_generation_routes_source_video_to_ltx_extension(tmp_path: Path, m
 
     class Client:
         def call_tool(self, name, arguments, **_kwargs):
-            captured.update(arguments)
-            assert name == descriptor.tool
+            # generate_video is start_video + finish_video now, and finish_video
+            # only receives a job id, so it ALWAYS polls job_tool at least once.
+            # Only the generate call's arguments are the ones under test — the
+            # poll's {"id", "include_urls"} would otherwise clobber them.
+            assert name in {descriptor.tool, descriptor.job_tool}
+            if name == descriptor.tool:
+                captured.update(arguments)
             return {
                 "content": [{
                     "type": "text",
@@ -630,8 +635,13 @@ def test_video_generation_forwards_ingredient_views_without_start_frame(tmp_path
 
     class Client:
         def call_tool(self, name, arguments, **_kwargs):
-            captured.update(arguments)
-            assert name == descriptor.tool
+            # generate_video is start_video + finish_video now, and finish_video
+            # only receives a job id, so it ALWAYS polls job_tool at least once.
+            # Only the generate call's arguments are the ones under test — the
+            # poll's {"id", "include_urls"} would otherwise clobber them.
+            assert name in {descriptor.tool, descriptor.job_tool}
+            if name == descriptor.tool:
+                captured.update(arguments)
             return {"content": [{"type": "text", "text": json.dumps({
                 "job": {"id": "ingredients-job", "status": "success", "media_urls": ["http://127.0.0.1:8788/image/ingredients.mp4"]},
             })}]}
@@ -735,8 +745,13 @@ def test_video_generation_forwards_high_resolution_dimensions(tmp_path: Path, mo
 
     class Client:
         def call_tool(self, name, arguments, **_kwargs):
-            captured.update(arguments)
-            assert name == descriptor.tool
+            # generate_video is start_video + finish_video now, and finish_video
+            # only receives a job id, so it ALWAYS polls job_tool at least once.
+            # Only the generate call's arguments are the ones under test — the
+            # poll's {"id", "include_urls"} would otherwise clobber them.
+            assert name in {descriptor.tool, descriptor.job_tool}
+            if name == descriptor.tool:
+                captured.update(arguments)
             return {"content": [{"type": "text", "text": json.dumps({
                 "job": {"id": "high-res-job", "status": "success", "media_urls": ["http://127.0.0.1:8788/image/high.mp4"]},
             })}]}
@@ -783,8 +798,13 @@ def test_video_generation_forwards_start_frame_with_ingredient_views(tmp_path: P
 
     class Client:
         def call_tool(self, name, arguments, **_kwargs):
-            captured.update(arguments)
-            assert name == descriptor.tool
+            # generate_video is start_video + finish_video now, and finish_video
+            # only receives a job id, so it ALWAYS polls job_tool at least once.
+            # Only the generate call's arguments are the ones under test — the
+            # poll's {"id", "include_urls"} would otherwise clobber them.
+            assert name in {descriptor.tool, descriptor.job_tool}
+            if name == descriptor.tool:
+                captured.update(arguments)
             return {"content": [{"type": "text", "text": json.dumps({
                 "job": {"id": "ingredients-start-job", "status": "success", "media_urls": ["http://127.0.0.1:8788/image/ingredients.mp4"]},
             })}]}
@@ -982,8 +1002,13 @@ def test_start_video_uploads_and_forwards_the_motion_context_clip(tmp_path: Path
 
     class Client:
         def call_tool(self, name, arguments, **_kwargs):
-            captured.update(arguments)
-            assert name == descriptor.tool
+            # generate_video is start_video + finish_video now, and finish_video
+            # only receives a job id, so it ALWAYS polls job_tool at least once.
+            # Only the generate call's arguments are the ones under test — the
+            # poll's {"id", "include_urls"} would otherwise clobber them.
+            assert name in {descriptor.tool, descriptor.job_tool}
+            if name == descriptor.tool:
+                captured.update(arguments)
             return {
                 "content": [{
                     "type": "text",
