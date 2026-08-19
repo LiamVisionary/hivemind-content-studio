@@ -254,23 +254,15 @@ max_queued_tasks = 100
 # Cross-platform Publishing / 跨平台发布
 # -----------------------------------------------------------------------------
 
-# Upload-Post can publish generated videos to TikTok, Instagram, and YouTube.
-# Create an account and API key at https://upload-post.com/
-# API documentation: https://docs.upload-post.com/
-upload_post_enabled = false
-upload_post_api_key = ""
-upload_post_username = ""
-# Available values: "tiktok", "instagram", "youtube".
-upload_post_platforms = ["tiktok", "instagram"]
-# Automatically publish successful video outputs after generation.
-upload_post_auto_upload = false
-# YouTube privacy: "public", "unlisted", or "private".
-upload_post_youtube_privacy_status = "public"
-# Maximum number of running and queued cross-post jobs per process. When the
-# limit is reached, video generation still succeeds and only cross-posting is
-# rejected.
-# Cross-post jobs run in the current process and are not resumed after restart.
-upload_post_max_pending_tasks = 10
+# Publishing is NOT configured here, and nothing is posted at render time.
+# Every outward post goes through the approval-gated publisher
+# (src/hivemind_content_studio/publishing.py), which handles both Postiz and
+# Upload-Post and refuses to publish a run that is not approved.
+#
+# It is configured by environment variable, not by this file:
+#   UPLOAD_POST_API_URL, UPLOAD_POST_API_KEY, UPLOAD_POST_USERNAME
+#   POSTIZ_URL, POSTIZ_API_KEY, POSTIZ_INTEGRATION_<PLATFORM>
+#   CONTENT_STUDIO_ENABLE_LIVE_PUBLISH=true  (plus a per-run confirmation token)
 
 # =============================================================================
 # Whisper Subtitles / Whisper 字幕

@@ -297,13 +297,6 @@ def _build_uploaded_file_path(uploaded_file, target_dir, allowed_extensions, pre
 
 def _initialize_session_state():
     """集中初始化跨 rerun 保留的页面状态。"""
-    if not st.session_state.get("cross_post_recovery_checked"):
-        # WebUI 可以不经过 FastAPI 独立运行，因此也需要在首次会话初始化时处理
-        # 进程重启留下的发布状态。恢复失败时不写标记，后续 rerun 会再次尝试。
-        recovered = tm.recover_interrupted_cross_posts()
-        if recovered is not None:
-            st.session_state["cross_post_recovery_checked"] = True
-
     saved_ui_language = config.ui.get("language", "")
     browser_locale = st.context.locale
     initial_ui_language = utils.resolve_ui_language(
@@ -614,7 +607,6 @@ def _collect_task_summaries(limit=20):
             "task_id": task_id,
             "subject": subject,
             "state": task.get("state"),
-            "cross_post_state": task.get("cross_post_state"),
             "progress": int(task.get("progress", 0) or 0),
             "mtime": os.path.getmtime(task_path)
             if os.path.isdir(task_path)

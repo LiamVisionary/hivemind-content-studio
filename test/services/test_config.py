@@ -60,10 +60,21 @@ class TestConfigPersistence:
         assert provider is not None
         assert provider.resolve_model_name("") == "kimi-k3"
 
-    def test_upload_post_settings_belong_to_app_section(self):
-        """发布配置必须位于 app 节点，确保示例文件与运行时读取路径一致。"""
+    def test_render_time_publishing_settings_never_return(self):
+        """发布配置不属于渲染配置。Render-time publishing stays removed.
+
+        The upstream v1.3.4 merge reintroduced app/services/upload_post.py and
+        wired cross-posting into the end of the render pipeline, which bypassed
+        the approval ledger entirely: one TOML boolean was enough to post
+        generated video straight to TikTok and Instagram. Publishing now lives
+        only in src/hivemind_content_studio/publishing.py, which refuses any run
+        that is not approved and is configured by environment variable.
+
+        This asserts the config surface of that bypass cannot come back with the
+        next upstream catchup.
+        """
         example_config = self._load_example_config()
-        upload_post_keys = {
+        banned = {
             "upload_post_enabled",
             "upload_post_api_key",
             "upload_post_username",
@@ -73,8 +84,9 @@ class TestConfigPersistence:
             "upload_post_max_pending_tasks",
         }
 
-        assert upload_post_keys <= example_config["app"].keys()
-        assert upload_post_keys.isdisjoint(example_config.get("ui", {}).keys())
+        for section in ("app", "ui"):
+            present = banned & example_config.get(section, {}).keys()
+            assert not present, f"render-time publishing keys are back in [{section}]: {sorted(present)}"
 
     def test_save_config_uses_parseable_atomic_output(self):
         """

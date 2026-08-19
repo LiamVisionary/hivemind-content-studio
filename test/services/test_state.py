@@ -129,8 +129,8 @@ class TestMemoryState(unittest.TestCase):
 
         patched = state.patch_task(
             "task-1",
-            cross_post_state=const.CROSS_POST_STATE_COMPLETE,
-            cross_post_results=[{"success": True}],
+            warnings=["bgm_failed"],
+            failed_stage="none",
         )
 
         self.assertTrue(patched)
@@ -141,8 +141,8 @@ class TestMemoryState(unittest.TestCase):
                 "state": const.TASK_STATE_COMPLETE,
                 "progress": 100,
                 "videos": ["final.mp4"],
-                "cross_post_state": const.CROSS_POST_STATE_COMPLETE,
-                "cross_post_results": [{"success": True}],
+                "warnings": ["bgm_failed"],
+                "failed_stage": "none",
             },
         )
         self.assertFalse(state.patch_task("missing", value="ignored"))
@@ -227,14 +227,14 @@ class TestRedisState(unittest.TestCase):
         self.assertTrue(
             state.patch_task(
                 "task:0",
-                cross_post_state=const.CROSS_POST_STATE_FAILED,
-                cross_post_error="upload failed",
+                failed_stage="render",
+                error="render failed",
             )
         )
         task = state.get_task("task:0")
         self.assertEqual(task["progress"], 0)
-        self.assertEqual(task["cross_post_state"], const.CROSS_POST_STATE_FAILED)
-        self.assertEqual(task["cross_post_error"], "upload failed")
+        self.assertEqual(task["failed_stage"], "render")
+        self.assertEqual(task["error"], "render failed")
         self.assertFalse(state.patch_task("missing", value="ignored"))
 
     @unittest.skipUnless(
@@ -262,7 +262,7 @@ class TestRedisState(unittest.TestCase):
                 barrier.wait()
                 state.patch_task(
                     task_id,
-                    cross_post_state=const.CROSS_POST_STATE_COMPLETE,
+                    warnings=["bgm_failed"],
                 )
 
             def delete_task():

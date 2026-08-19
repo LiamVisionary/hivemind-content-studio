@@ -448,8 +448,6 @@ _APP_SECRET_DEFAULTS = {
     "aimlapi_api_key": "",
     "evolink_api_key": "",
     "pollinations_api_key": "",
-    "upload_post_api_key": "",
-    "upload_post_username": "",
 }
 _AZURE_SECRET_DEFAULTS = {"speech_key": "", "speech_region": ""}
 _SILICONFLOW_SECRET_DEFAULTS = {"api_key": ""}

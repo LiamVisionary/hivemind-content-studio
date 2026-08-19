@@ -40,22 +40,6 @@ class TestVideoControllerHelpers(unittest.TestCase):
                     expected,
                 )
 
-    def test_fastapi_startup_recovers_interrupted_cross_posts(self):
-        """API 进程启动时必须执行一次发布遗留状态恢复。"""
-        from app import asgi
-        from app.services import task as task_service
-
-        with patch.object(
-            task_service, "recover_interrupted_cross_posts"
-        ) as recover:
-            async def run_lifespan():
-                async with asgi.application_lifespan(asgi.app):
-                    pass
-
-            asyncio.run(run_lifespan())
-
-        recover.assert_called_once_with()
-
     def test_sanitize_upload_filename_rejects_empty_name(self):
         """空文件名和目录占位符不能进入服务端存储路径。"""
         for filename in ("", ".", "..", "/"):
@@ -178,7 +162,7 @@ class TestVideoControllerTasks(unittest.TestCase):
         with patch.object(
             video_controller.sm.state,
             "get_all_tasks",
-            return_value=([{"id": "task-1", "cross_post_owner": "internal"}], 21),
+            return_value=([{"id": "task-1"}], 21),
         ) as get_all:
             response = video_controller.get_all_tasks(
                 self._request(), page=2, page_size=10
@@ -211,7 +195,6 @@ class TestVideoControllerTasks(unittest.TestCase):
                 state=const.TASK_STATE_COMPLETE,
                 videos=[video_path],
                 combined_videos=[video_path],
-                cross_post_owner="localhost:123:internal",
             )
             with patch.dict(config.app, {"endpoint": ""}):
                 response = video_controller.get_task(
@@ -222,8 +205,6 @@ class TestVideoControllerTasks(unittest.TestCase):
                 response["data"]["videos"],
                 [f"/tasks/{task_id}/final-1.mp4"],
             )
-            self.assertNotIn("cross_post_owner", response["data"])
-            self.assertIn("cross_post_owner", sm.state.get_task(task_id))
             self.assertEqual(sm.state.get_task(task_id)["videos"], [video_path])
         finally:
             sm.state.delete_task(task_id)
@@ -254,7 +235,6 @@ class TestVideoControllerTasks(unittest.TestCase):
         """OpenAPI 模型示例必须覆盖发布成功和生成失败两种状态。"""
         examples = TaskQueryResponse.model_json_schema()["examples"]
 
-        self.assertEqual(examples[0]["data"]["cross_post_state"], "complete")
         self.assertEqual(examples[1]["data"]["failed_stage"], "audio")
         self.assertTrue(examples[1]["data"]["error"])
 
@@ -262,25 +242,18 @@ class TestVideoControllerTasks(unittest.TestCase):
             "TaskStatusData"
         ]
         self.assertIn("failed_stage", task_data_schema["properties"])
-        self.assertIn("cross_post_state", task_data_schema["properties"])
 
         list_schema = TaskListResponse.model_json_schema()
         self.assertIn("TaskListData", list_schema["$defs"])
         self.assertIn("TaskStatusData", list_schema["$defs"])
 
-    def test_delete_rejects_generation_and_cross_posting_tasks(self):
-        """生成中和发布中的任务都在读取目录，删除接口必须返回 409。"""
+    def test_delete_rejects_generating_tasks(self):
+        """生成中的任务仍在读取目录，删除接口必须返回 409。"""
         busy_tasks = (
             {
                 "task_id": "generating-task",
                 "state": const.TASK_STATE_PROCESSING,
                 "progress": 30,
-            },
-            {
-                "task_id": "publishing-task",
-                "state": const.TASK_STATE_COMPLETE,
-                "progress": 100,
-                "cross_post_state": const.CROSS_POST_STATE_PROCESSING,
             },
         )
 
@@ -304,7 +277,6 @@ class TestVideoControllerTasks(unittest.TestCase):
             "task_id": "completed-task",
             "state": const.TASK_STATE_COMPLETE,
             "progress": 100,
-            "cross_post_state": const.CROSS_POST_STATE_COMPLETE,
         }
 
         with patch.object(

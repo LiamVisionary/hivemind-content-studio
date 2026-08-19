@@ -91,10 +91,15 @@ def _resolve_path_within_directory(base_dir: str, unsafe_path: str, request_id: 
 
 
 def _public_task_data(task: dict) -> dict:
-    """复制任务状态并移除仅用于服务端进程协调的内部字段。"""
-    public_task = dict(task)
-    public_task.pop("cross_post_owner", None)
-    return public_task
+    """返回任务状态的公开副本。
+
+    A copy, not the stored dict: this is the seam where server-only fields are
+    dropped before a task reaches a client. It holds nothing today — the last
+    internal field, cross_post_owner, went with render-time publishing — but
+    handing back the stored object directly is exactly how that field leaked,
+    so the boundary stays.
+    """
+    return dict(task)
 
 
 def _task_file_to_uri(file: str, endpoint: str, task_dir: str, request_id: str) -> str:
@@ -284,8 +289,7 @@ def delete_video(request: Request, task_id: str = Path(..., description="Task ID
         if tm.is_task_busy(task):
             logger.warning(
                 f"refuse to delete busy task, request_id: {request_id}, "
-                f"task_id: {task_id}, state: {task.get('state')}, "
-                f"cross_post_state: {task.get('cross_post_state')}"
+                f"task_id: {task_id}, state: {task.get('state')}"
             )
             raise HttpException(
                 task_id=task_id,
