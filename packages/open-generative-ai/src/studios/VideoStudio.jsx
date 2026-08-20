@@ -36,6 +36,7 @@ import { applyCharacterToPrompt } from '../lib/h3Characters.js';
 import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
+import { peekMediaDuration } from '../lib/mediaDuration.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 // joinClips itself is imported dynamically inside joinChainFrom — it carries
 // mediabunny, which should not weigh down the studio chunk until a join runs.
@@ -92,7 +93,12 @@ import {
 } from './video/referenceKinds.js';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
-import { referenceKindForFile, referenceKindsInDrag, withReferenceTags } from '../lib/h3References.js';
+import {
+  referenceKindForFile,
+  referenceKindsInDrag,
+  referenceUrl,
+  withReferenceTags,
+} from '../lib/h3References.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import {
   attachDroppedReferences,
@@ -3717,10 +3723,18 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
           || s.setup.modelId}
         // How many of each are attached, so the labels it writes are the labels
         // the graph will actually carry.
+        // Measured lengths ride along so the writer knows what the motion
+        // actually covers. peekMediaDuration reads the cache ReferencesMenu
+        // filled when the panel measured these; anything unmeasured comes back
+        // null and the server treats it as unmeasured rather than as zero.
         references={refsArmed ? {
           images: (s.setup.referenceImageUrls || []).length,
-          videos: (s.setup.referenceVideos || []).map((item) => ({ useAudio: Boolean(item?.useAudio) })),
+          videos: (s.setup.referenceVideos || []).map((item) => ({
+            useAudio: Boolean(item?.useAudio),
+            seconds: peekMediaDuration(referenceUrl(item)),
+          })),
           audios: (s.setup.referenceAudios || []).length,
+          audioSeconds: (s.setup.referenceAudios || []).map((item) => peekMediaDuration(referenceUrl(item))),
         } : null}
         mediaType="video"
         hasFirstFrame={Boolean(s.setup.imageUrl)}

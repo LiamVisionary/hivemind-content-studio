@@ -210,6 +210,12 @@ _KREA2_TEXT_ENCODER_COMMIT = "fb84ab5444b1ec0048e0d38b7450b137eee9c5bc"
 # provisioning script in packages/gpu-rentals.
 _H3_SOLATTN_COMMIT = "842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc"
 
+# H3 Studio turns the same H3 weights this lane already carries into a STILL
+# image generator (FL2VA/REF2VA), which is what the minimax-h3-image lane runs.
+# Pinned to the audited tag: it is alpha and its route surface has changed
+# between commits, and the strip below is written against exactly this one.
+_H3_STUDIO_TAG = "v0.1.0-alpha.20"
+
 # lane_needles: lowercase substrings matched by the media-gateway's
 # COMFY_LANE_RULES against graph class names + model file inputs — attach
 # routes generations that reference these models to the rented box.
@@ -1054,6 +1060,34 @@ def _onstart_script(tier: str) -> str:
             "[ -f /workspace/ComfyUI/custom_nodes/comfyui-kjnodes/requirements.txt ] && "
             "/venv/main/bin/pip install -q -r /workspace/ComfyUI/custom_nodes/comfyui-kjnodes/requirements.txt",
             "/venv/main/bin/pip install -q sageattention",
+            # H3 Studio, stripped. The upstream pack registers SIXTEEN routes on
+            # ComfyUI's PromptServer, which has no authentication — among them
+            # POST /h3studio/dependencies/pdd/install, which runs a git clone.
+            # Anything that can reach the Comfy port could install code on this
+            # box. We drive the Director's widgets over the MCP and never load
+            # its frontend, so the entire HTTP surface is dead weight: the seven
+            # register_*_routes() calls in extension.py and the history route in
+            # __init__.py are deleted, WEB_DIRECTORY is dropped so no JS is
+            # served at all, and web/ (13MB of demo art) is removed with it.
+            # The install_*() correctness fixes are deliberately KEPT — they
+            # patch prompt/reference/PNG integrity, not the UI.
+            "git clone -q --depth 1 --branch " + _H3_STUDIO_TAG + " "
+            "https://github.com/thaakeno/ComfyUI-MiniMax-H3-Studio "
+            "/workspace/ComfyUI/custom_nodes/ComfyUI-MiniMax-H3-Studio || true",
+            "H3S=/workspace/ComfyUI/custom_nodes/ComfyUI-MiniMax-H3-Studio",
+            "sed -i -E '/^register_[a-z_]*routes\\(\\)$/d' $H3S/h3studio/extension.py",
+            "sed -i -E '/register_fast_history_restore_route/d' $H3S/__init__.py",
+            "sed -i -E '/^WEB_DIRECTORY/d' $H3S/__init__.py",
+            "sed -i -E 's/, \"WEB_DIRECTORY\"//' $H3S/__init__.py",
+            "rm -rf $H3S/web",
+            # Telemetry off by BOTH switches: the env var does not survive a
+            # child process env, so the sentinel file is the one that holds.
+            "touch $H3S/.h3studio-telemetry-disabled",
+            # Fail loudly rather than serving a box with live install routes.
+            "grep -qE '^register_[a-z_]*routes\\(\\)$' $H3S/h3studio/extension.py && "
+            "{ beacon error 0 \"H3 Studio route strip failed\"; exit 1; } || true",
+            "[ -f $H3S/requirements.txt ] && "
+            "/venv/main/bin/pip install -q -r $H3S/requirements.txt || true",
         ]
     files = []
     lines.append('beacon downloading 0 "Starting model downloads"')

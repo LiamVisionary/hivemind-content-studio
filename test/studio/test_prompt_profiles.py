@@ -896,3 +896,66 @@ def test_the_writer_is_told_when_a_run_is_over_the_reference_budget():
         references={"images": 2, "videos": [{"useAudio": True}], "audios": 1},
     )
     assert "reference budget" not in fine
+
+
+def test_measured_reference_lengths_reach_the_writer():
+    """Counts alone cannot say what the borrowed movement actually covers."""
+    body = prompt_profiles.system_prompt(
+        "minimax-h3-reference",
+        duration_seconds=10,
+        references={
+            "images": 1,
+            "videos": [{"useAudio": False, "seconds": 3}],
+            "audios": 1,
+            "audioSeconds": [4],
+        },
+    )
+    assert "<Video 1> is a motion reference. It runs 3s." in body
+    assert "<Audio 1> is a standalone voice or music clip. It runs 4s." in body
+
+    # A motion reference shorter than the shot only drives its opening, so the
+    # writer is told to carry the movement past where the reference stops —
+    # otherwise the action goes static for the remainder.
+    assert "shorter than the 10s clip" in body
+    assert "Carry the motion on in your own words" in body
+
+    # A reference that covers the whole clip says nothing about coverage.
+    covered = prompt_profiles.system_prompt(
+        "minimax-h3-reference",
+        duration_seconds=4,
+        references={"images": 1, "videos": [{"useAudio": False, "seconds": 8}], "audios": 0},
+    )
+    assert "Carry the motion on" not in covered
+
+
+def test_unmeasured_reference_lengths_are_never_printed_as_zero():
+    """A file the browser could not demux has NO length, not a length of zero."""
+    for missing in (None, 0, -2, "abc", {}):
+        body = prompt_profiles.system_prompt(
+            "minimax-h3-reference",
+            duration_seconds=10,
+            references={"images": 1, "videos": [{"useAudio": False, "seconds": missing}], "audios": 0},
+        )
+        assert "<Video 1> is a motion reference." in body
+        assert "runs 0s" not in body, f"{missing!r} was printed as a measurement"
+        assert "It runs" not in body
+        # And an unmeasured clip must not claim to be shorter than the shot.
+        assert "Carry the motion on" not in body
+
+
+def test_seconds_budget_counts_a_split_soundtrack_twice():
+    """A split soundtrack spends from the video AND audio second budgets."""
+    body = prompt_profiles.system_prompt(
+        "minimax-h3-reference",
+        duration_seconds=12,
+        references={
+            "images": 1,
+            "videos": [{"useAudio": True, "seconds": 12}],
+            "audios": 1,
+            "audioSeconds": [5],
+        },
+    )
+    # 12s video is inside the 15s video budget on its own...
+    assert "of video against 15s" not in body
+    # ...but its soundtrack plus the 5s clip is 17s of audio.
+    assert "17s of audio against 15s" in body

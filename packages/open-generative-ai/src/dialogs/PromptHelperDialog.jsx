@@ -193,11 +193,20 @@ export function PromptHelperDialog({
                 // Reference mode: how many of each are attached, and which
                 // clips bring their own soundtrack (each of those takes an
                 // <Audio N> label of its own, before its <Video N>).
+                // Measured lengths ride along with the counts: a motion clip
+                // shorter than the shot only drives its opening, and the writer
+                // has to be told to carry the movement past where it runs out.
                 references: references && (references.images || references.videos?.length || references.audios)
                   ? {
                     images: Number(references.images) || 0,
-                    videos: (references.videos || []).map((item) => ({ useAudio: Boolean(item?.useAudio) })),
+                    videos: (references.videos || []).map((item) => ({
+                      useAudio: Boolean(item?.useAudio),
+                      seconds: Number(item?.seconds) > 0 ? Number(item.seconds) : null,
+                    })),
                     audios: Number(references.audios) || 0,
+                    audioSeconds: (references.audioSeconds || []).map(
+                      (value) => (Number(value) > 0 ? Number(value) : null),
+                    ),
                   }
                   : undefined,
                 durationSeconds: durationSeconds || null,

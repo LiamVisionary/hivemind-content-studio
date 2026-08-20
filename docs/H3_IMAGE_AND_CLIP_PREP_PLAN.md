@@ -41,9 +41,23 @@ already forced a fork once.
 | `GET /h3studio/thumbnail` | **safe** — `_safe_image_path()` resolves then asserts the path is under input/output/temp |
 | `GET /h3studio/loras` | **safe** — enumerates `folder_paths.get_filename_list("loras")` only |
 
-**Action:** fork at the pinned tag, delete `dependency_web.py`, `llama_cpp_dependency.py`,
-`history_library.py` route registration and `face_refine/setup.py` route registration. Keep the two
-guarded GETs. Pin telemetry off (`H3STUDIO_TELEMETRY=0` *and* the `.h3studio-telemetry-disabled`
+> **Correction (2026-08-19).** The first pass of this audit read only the modules GitHub code search
+> surfaced and undercounted. A full clone shows **sixteen** routes across **eight** modules, not six
+> across four: `dependency_web.py`, `llama_cpp_dependency.py`, `history_library.py`,
+> `face_refine/setup.py`, `web_routes.py`, `runtime_web.py`, `comfy_compat.py` and
+> `history_fast_restore.py`. The extra ones are status/capability reads plus
+> `/h3studio/history/{item,library,rebuild}`. The verdict is unchanged and the remedy got simpler:
+> every registration happens in one place, so ALL of it goes rather than a chosen four.
+
+**Action (implemented in `gpu_rentals.py`):** clone the pinned tag and strip the whole HTTP surface
+rather than a subset. All seven `register_*_routes()` calls sit together at `h3studio/extension.py`
+140-146 and the eighth is `register_fast_history_restore_route()` in `__init__.py`, so a two-line sed
+removes every route; `WEB_DIRECTORY` is dropped so no frontend is served at all, and `web/` (13 MB of
+demo art) goes with it. We drive the Director's widgets over the MCP and never load its UI, so the
+routes were only ever liability. The `install_*()` calls are deliberately KEPT — they patch
+prompt/reference/PNG integrity, not the UI. The strip ends with a `grep` that fails the box loudly if
+any registration survived, because a silently-unstripped pack is the failure worth catching. Pin
+telemetry off (`H3STUDIO_TELEMETRY=0` *and* the `.h3studio-telemetry-disabled`
 sentinel file — belt and braces, since the env var does not survive a launchd child env; see
 `stack-env-vars-need-stack-local-env`). Models are stocked via our own R2 flow, so the installer
 endpoints are pure loss anyway.
@@ -171,6 +185,37 @@ format, the `<Subject N>`/`<Picture N>` split and the audio copy family. What it
 The captioning kit is **deferred**, not rejected: it is a LoRA-dataset prepper (trim to MMH3 training
 parameters, LLM captioning with per-dataset instructions). Real value, but it belongs to the training
 pipeline rather than the studio, and nothing in the studio consumes it today.
+
+## Phase 2 progress (2026-08-19)
+
+**Landed:** the stripped-fork provisioning, in `gpu_rentals.py`'s H3 (`minimax`) tier — clone at
+`v0.1.0-alpha.20`, remove every route registration, drop `WEB_DIRECTORY` and `web/`, disable telemetry
+by both switches, then a guard that fails the box if any registration survived. Verified: the strip
+applied to a real clone leaves `__init__.py` and `extension.py` parsing with zero registrations, and
+the minimax onstart measures **14,029 / 16,384 bytes — 2,355 to spare** against Vast's cap.
+
+**The blocker for the workflow itself.** `H3_Studio_Unified_Image.json` cannot be converted to API
+format by reading it, because its sampler is not a node — it is a **ComfyUI subgraph**
+(`5930b00d-…`), and API format has no subgraph concept. Expanded, that one box is six nodes:
+
+```
+H3StudioContextSamplingPreset ─ model/sampler/sigmas
+BasicGuider ─ RandomNoise ─ SamplerCustomAdvanced ─ H3StudioDecode ─ H3StudioFrameSelector
+```
+
+So the real API graph is ten nodes, not five: Loader → Director → Condition → (those six) → SaveImage.
+The full link map is recorded in the session notes.
+
+Writing that graph by hand is the wrong move: several of these nodes build `INPUT_TYPES` dynamically
+(the Director alone carries 61 widgets, and its per-reference inputs are generated in a loop), so
+static analysis gives names that *look* right and are not. The correct source is ComfyUI's own
+`/object_info`, which reports the exact schema of every registered node. That needs the stripped pack
+loaded in a ComfyUI — either the local one on :8188 (needs a restart) or the first rented box.
+
+**Still to do:** generate the API graph from `/object_info`; register `minimax-h3-image`
+(`media_type: image`, `beta: true`) in the MCP registry; wire it into the React ImageStudio reusing
+`h3References.js`; stock the W4A8 FL2VA/REF2VA weights, the 32B encoder and the H3 VAE to R2; verify
+on a rental.
 
 ## Phase 2 — `minimax-h3-image` lane
 

@@ -445,7 +445,25 @@ _PREVIOUS_PROMPT_LIMIT = 2400
 
 
 
-def _reference_inventory_clause(references: dict | None) -> str:
+def _coerce_seconds(value: Any) -> float:
+    """A measured clip length, or 0.0 when the studio has not measured it.
+
+    Zero means UNMEASURED, never "zero seconds long": the browser reads these
+    from container metadata and a file it cannot demux simply has no answer.
+    Treating a missing measurement as a real one would put a false "runs 0s"
+    into the instruction."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return seconds if seconds > 0 else 0.0
+
+
+def _reference_seconds(item: Any) -> float:
+    return _coerce_seconds((item or {}).get("seconds")) if isinstance(item, dict) else 0.0
+
+
+def _reference_inventory_clause(references: dict | None, duration_seconds: float | None = None) -> str:
     """Name every label the graph will carry, in the model's own order.
 
     The order is not per-kind: a reference video's own soundtrack takes an
@@ -467,18 +485,33 @@ def _reference_inventory_clause(references: dict | None) -> str:
         span = "<Picture 1>" if images == 1 else f"<Picture 1> through <Picture {images}>"
         lines.append(f"- {images} reference picture{'s' if images != 1 else ''}: {span}.")
     audio_ordinal = 0
+    clip = float(duration_seconds) if duration_seconds and duration_seconds > 0 else 0.0
+    short_motion: list[str] = []
     for index, video in enumerate(videos, start=1):
         with_sound = bool((video or {}).get("useAudio"))
+        seconds = _reference_seconds(video)
         if with_sound:
             audio_ordinal += 1
             lines.append(
                 f"- <Audio {audio_ordinal}> is the soundtrack of <Video {index}> "
                 "(numbered before it, because that is the order the model reads them in)."
             )
-        lines.append(f"- <Video {index}> is a motion reference.")
-    for _ in range(audios):
+        length = f" It runs {seconds:g}s." if seconds else ""
+        lines.append(f"- <Video {index}> is a motion reference.{length}")
+        # A motion reference shorter than the shot only drives its opening. The
+        # writer has to invent the rest, and saying so is the difference between
+        # a clip that keeps moving and one that goes static once the reference
+        # runs out.
+        if seconds and clip and seconds < clip - 0.5:
+            short_motion.append(f"<Video {index}> ({seconds:g}s)")
+    audio_seconds = references.get("audioSeconds") or []
+    if not isinstance(audio_seconds, list):
+        audio_seconds = []
+    for position in range(audios):
         audio_ordinal += 1
-        lines.append(f"- <Audio {audio_ordinal}> is a standalone voice or music clip.")
+        seconds = _coerce_seconds(audio_seconds[position] if position < len(audio_seconds) else None)
+        length = f" It runs {seconds:g}s." if seconds else ""
+        lines.append(f"- <Audio {audio_ordinal}> is a standalone voice or music clip.{length}")
     body = "\n".join(lines)
     # A soundtrack is its own reference AND one of H3's three audio clips, so a
     # full row can be over budget while every per-kind count still looks legal.
@@ -486,20 +519,45 @@ def _reference_inventory_clause(references: dict | None) -> str:
     # one fewer reference — not just a trim in the panel.
     soundtracks = sum(1 for video in videos if bool((video or {}).get("useAudio")))
     total = images + len(videos) + audios + soundtracks
+    # A split soundtrack spends from the video AND audio second budgets at once.
+    video_seconds = sum(_reference_seconds(video) for video in videos)
+    audio_total = sum(
+        _reference_seconds(video) for video in videos if bool((video or {}).get("useAudio"))
+    ) + sum(_coerce_seconds(value) for value in audio_seconds)
+
+    over: list[str] = []
+    if total > 12:
+        over.append(f"{total} references against 12")
+    if (audios + soundtracks) > 3:
+        over.append(f"{audios + soundtracks} audio clips against 3")
+    if video_seconds > 15:
+        over.append(f"{video_seconds:g}s of video against 15s")
+    if audio_total > 15:
+        over.append(f"{audio_total:g}s of audio against 15s")
+
     budget = ""
-    if total > 12 or (audios + soundtracks) > 3:
+    if over:
         budget = (
-            f"\nThis run is over H3's reference budget ({total} references against 12"
-            f", {audios + soundtracks} audio clips against 3)."
+            f"\nThis run is over H3's reference budget ({'; '.join(over)})."
             " Write the prompt for the labels listed above anyway — renumbering them here"
             " would not match what the graph sends."
+        )
+
+    coverage = ""
+    if short_motion:
+        names = ", ".join(short_motion)
+        coverage = (
+            f"\n{names} " + ("is" if len(short_motion) == 1 else "are")
+            + f" shorter than the {clip:g}s clip, so the borrowed movement runs out before the shot"
+            " ends. Carry the motion on in your own words for the remainder rather than letting the"
+            " action go static — describe what the subject does after the reference stops."
         )
     return (
         "\n\nThe run carries exactly these references, in this order — write these labels and no "
         "others, and give every one of them a line in subject_definitions and retention_analysis:\n"
         f"{body}\n"
         "Do not refer to a label that is not on this list; there is nothing attached for it."
-        f"{budget}"
+        f"{coverage}{budget}"
     )
 
 
@@ -562,7 +620,7 @@ def system_prompt(
                 "That is the established scene. Carry its characters, wardrobe, location, art style, "
                 "colour palette and lens into your prompt, and change only what the idea asks for."
             )
-    reference_clause = _reference_inventory_clause(references)
+    reference_clause = _reference_inventory_clause(references, duration_seconds)
     if reference_clause and profile == "minimax-h3-reference":
         system += reference_clause
     if character_notes and profile.startswith("minimax-h3"):
