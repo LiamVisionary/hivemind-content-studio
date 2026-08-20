@@ -1212,8 +1212,12 @@ def build_control_app(
 
     def _relying_party(request: Request) -> RelyingParty:
         forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        # Behind the tailnet proxy the Host header is the upstream target, not
+        # the name in the browser's address bar — and the RP id must match what
+        # the browser sees, or every passkey ceremony is refused client-side.
+        forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
         return RelyingParty.for_request(
-            host=request.headers.get("host", ""),
+            host=forwarded_host or request.headers.get("host", ""),
             scheme=forwarded or request.url.scheme,
         )
 

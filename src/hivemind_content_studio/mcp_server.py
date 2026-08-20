@@ -15,6 +15,7 @@ from .capability_router import CapabilityPolicy, CapabilityRouter
 from .doctor import collect_checks
 from .evaluation import record_semantic_evaluation as save_semantic_evaluation
 from .evaluation import semantic_preflight
+from .diagnostics import build_baseline, diagnose_performance, vanity_leak
 from .experiments import ingest_performance_batch, recommend_next_variant
 from .generation import (
     generate_higgsfield_cloud_asset,
@@ -264,6 +265,40 @@ def build_mcp_server():
     def ingest_content_metrics(run_id: str, entries: list[dict]) -> dict:
         """Idempotently ingest outcome/spend/retention evidence keyed by external ids."""
         return machine_operation_receipt({"ok": True, "run_id": run_id, **ingest_performance_batch(_manifest_for_run(run_id), entries)})
+
+    @mcp.tool()
+    def diagnose_content_bottleneck(run_ids: list[str], roas_target: float = 0.0) -> dict:
+        """Name the first funnel stage underperforming this operator's own measured band.
+
+        Verdicts and next tests cross the boundary; observed views, revenue, and manifest
+        paths do not. Fix the named stage before scaling creative above it.
+        """
+        if not run_ids:
+            raise ValueError("At least one run_id is required")
+        paths = {run_id: _manifest_for_run(run_id) for run_id in run_ids}
+        baseline = build_baseline(list(paths.values()))
+        target = roas_target if roas_target > 0 else None
+        diagnoses = {}
+        for run_id, manifest_path in paths.items():
+            diagnosis = diagnose_performance(manifest_path, baseline=baseline, roas_target=target)
+            diagnoses[run_id] = {
+                "bottleneck": diagnosis["bottleneck"],
+                "ladder_id": diagnosis["ladder_id"],
+                "suspect": diagnosis["suspect"],
+                "next_test": diagnosis["next_test"],
+                "stage_verdicts": {stage["stage"]: stage["verdict"] for stage in diagnosis["stages"]},
+            }
+        vanity_run_ids: list[str] = []
+        if baseline["measured_runs"]:
+            by_path = {str(manifest_path): run_id for run_id, manifest_path in paths.items()}
+            vanity_run_ids = [by_path[item["manifest"]] for item in vanity_leak(list(paths.values()))["vanity_runs"]]
+        return {
+            "ok": True,
+            "privacy": "machine-redacted",
+            "calibration": {"source": baseline["source"], "measured_runs": baseline["measured_runs"], "roas_target": target},
+            "diagnoses": diagnoses,
+            "vanity_run_ids": vanity_run_ids,
+        }
 
     @mcp.tool()
     def recommend_content_variant(run_ids: list[str], change_dimension: str, candidate_value: Any) -> dict:

@@ -176,6 +176,11 @@ const server = http2.createSecureServer({
     if (name.startsWith(':') || HOP_BY_HOP.has(name)) continue;
     headers[name] = value;
   }
+  // WebAuthn derives the relying-party id from the host the BROWSER sees, so
+  // the original authority must survive the host rewrite below or passkeys
+  // registered through this proxy bind to 127.0.0.1 and every ceremony fails.
+  const originalHost = req.headers[':authority'] || req.headers.host || '';
+  if (originalHost) headers['x-forwarded-host'] = originalHost;
   headers.host = routeTargetUrl.host;
   headers['x-forwarded-proto'] = 'https';
   const remote = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : '';

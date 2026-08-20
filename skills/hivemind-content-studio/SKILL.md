@@ -19,7 +19,7 @@ Use the MCP run engine as the primary contract. Use the CLI for operator work or
 8. Run deterministic semantic preflight, then record structured semantic evaluation with per-scene failures and regeneration instructions.
 9. Request separate rights/claims run approval before publishing. An agent may request approval but cannot approve or deny it.
 10. Dry-run publishing. Live publishing still requires the approved manifest, enabled live-publish policy, and explicit outward-action gate.
-11. Ingest idempotent outcome entries with external IDs, spend, retention, conversions, and revenue. Change one measured creative dimension per recommended child variant.
+11. Ingest idempotent outcome entries with external IDs, spend, retention, conversions, and revenue. Call `diagnose_content_bottleneck` before proposing a variant: it names the first funnel stage (reach, retention, intent, conversion, economics) that falls below this operator's own measured band, and flags runs whose share of views far exceeds their share of conversions. Fix the named stage instead of scaling creative above a broken downstream link, then change one measured creative dimension per recommended child variant.
 12. Read `studio://telemetry/generations` or call `get_generation_telemetry` when choosing between providers, estimating completion time, or investigating failures. Use aggregate timing and success evidence; never infer quality from speed alone.
 
 ## Lanes

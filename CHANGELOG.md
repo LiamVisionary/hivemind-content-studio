@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-20 14:16:49 +0800 — The studio names the broken funnel stage instead of leaving operators to read ratios
+
+- Status: Uncommitted
+- User-facing result: `hivemind-content-studio metrics diagnose <manifest...>` and the new `diagnose_content_bottleneck` MCP tool walk reach -> retention -> intent -> conversion -> economics over metrics the studio already records and name the first stage that underperforms, with the evidence and the next controlled test. A portfolio call also ranks vanity leaks: runs taking a large share of the portfolio's views while returning a much smaller share of its conversions.
+- Calibration: Every band comes from the operator's own measured runs (portfolio medians, tunable `--underperformance`), plus an optional explicit `--roas-target`. The creator-network view bands that circulate as growth advice are vendor claims and are deliberately not encoded; a run without comparable history returns `unknown` rather than a verdict. Stage ids match the shared creator-rewards diagnostic ladder (CRD01-CRD05) so a studio diagnosis and a campaign brief use one vocabulary.
+- Privacy boundary: The MCP tool returns stage verdicts, ladder ids, suspects, next tests, and run ids only. Observed views, revenue, and manifest paths stay local to the CLI, asserted by a test that serializes the tool's real response and fails on either.
+- Verification: New `test/studio/test_diagnostics.py` passes 7/7, including the MCP redaction boundary exercised through `call_tool`; the complete studio suite passes 633/633; a scratch three-run portfolio through the real CLI flagged the 180k-view/3-conversion run as `intent` (CRD03) and as the only vanity leak.
+- Intended commit message: `feat: diagnose the first underperforming funnel stage`
+
 ## 2026-07-16 16:55:34 -0400 — Video progress clears the composer and completion ping unlocks reliably
 
 - Status: Uncommitted

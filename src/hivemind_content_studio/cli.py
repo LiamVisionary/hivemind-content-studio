@@ -16,6 +16,7 @@ from .config import load_config
 from .doctor import collect_checks
 from .intent_service import ContentIntentService
 from .manifest import approve_manifest, load_manifest
+from .diagnostics import diagnose_performance, diagnose_portfolio
 from .metrics import record_metrics, summarize_metrics
 from .media_studio import generate_video as generate_media_studio_video, list_media_studio_tools, media_studio_status
 from .generation import generate_higgsfield_cloud_asset, generate_higgsfield_consumer_asset, generate_muapi_asset, record_generated_asset
@@ -266,6 +267,11 @@ def build_parser() -> argparse.ArgumentParser:
     summary = metrics_sub.add_parser("summary")
     summary.add_argument("manifest")
     summary.set_defaults(func=cmd_metrics_summary)
+    diagnose = metrics_sub.add_parser("diagnose", help="Name the first underperforming funnel stage")
+    diagnose.add_argument("manifests", nargs="+")
+    diagnose.add_argument("--roas-target", type=float, help="Break-even ROAS; defaults to the portfolio median")
+    diagnose.add_argument("--underperformance", type=float, default=0.5, help="Share of the operator's own median that still counts as passing")
+    diagnose.set_defaults(func=cmd_metrics_diagnose)
     return parser
 
 
@@ -600,6 +606,15 @@ def cmd_metrics_record(args: argparse.Namespace) -> int:
 
 def cmd_metrics_summary(args: argparse.Namespace) -> int:
     print(json.dumps(summarize_metrics(args.manifest), indent=2))
+    return 0
+
+
+def cmd_metrics_diagnose(args: argparse.Namespace) -> int:
+    if len(args.manifests) == 1:
+        result = diagnose_performance(args.manifests[0], roas_target=args.roas_target, underperformance=args.underperformance)
+    else:
+        result = diagnose_portfolio(args.manifests, roas_target=args.roas_target, underperformance=args.underperformance)
+    print(json.dumps(result, indent=2))
     return 0
 
 

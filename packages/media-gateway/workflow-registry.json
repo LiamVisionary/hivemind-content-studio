@@ -1428,6 +1428,25 @@
         "route",
         "adherence",
         "reference_images"
+      ],
+      "max_reference_images": 9,
+      "reference_slots": {
+        "images": 9,
+        "videos": 0,
+        "audios": 0
+      },
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 8
+      },
+      "aspect_ratios": [
+        "1:1",
+        "4:5",
+        "3:4",
+        "16:9",
+        "9:16",
+        "4:3"
       ]
     }
   ]

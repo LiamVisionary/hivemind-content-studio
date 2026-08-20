@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 
 const DEFAULT_ASPECT_RATIOS = ['1:1', '4:3', '3:4', '16:9', '9:16'];
 
@@ -104,11 +105,29 @@ function loadHostedWorkflowModels(registryPath) {
   }));
 }
 
+// Registry image lanes come in two shapes. `image-backend` is a Python builder
+// that assembles the graph server-side. `comfy-api-image` is a ready API-format
+// ComfyUI graph shipped beside the registry — the same thing auto-workflow
+// discovery exposes for user drop-ins, except registered rather than found, so
+// it can carry a title, capabilities and reference slots instead of being
+// inferred from the file. Both end up as one image model in /local-ai/models.
 function loadHostedImageModels(registryPath) {
   const data = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  const workflowsDir = path.join(path.dirname(registryPath), 'workflows');
   return registryItems(data)
-    .filter((workflow) => workflow && workflow.media_type === 'image' && workflow.builder === 'image-backend')
-    .map(toHostedImageModel);
+    .filter((workflow) => workflow && workflow.media_type === 'image'
+      && (workflow.builder === 'image-backend' || workflow.builder === 'comfy-api-image'))
+    .map((workflow) => {
+      const model = toHostedImageModel(workflow);
+      if (workflow.builder !== 'comfy-api-image') return model;
+      // run_comfy_api_image executes the graph named here; without an absolute
+      // path the gateway would look for it relative to its own cwd.
+      model.backend = 'comfy-api-image';
+      model.workflowFile = path.isAbsolute(String(workflow.workflow_file || ''))
+        ? String(workflow.workflow_file)
+        : path.join(workflowsDir, String(workflow.workflow_file || ''));
+      return model;
+    });
 }
 
 module.exports = {

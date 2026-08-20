@@ -232,8 +232,24 @@ Runtime proof of the strip, on the local box: every one of the sixteen routes an
 `pdd/install` POST returns the same 405 a made-up path does — so it is ComfyUI's generic reply, not a
 live handler. Nothing appeared in `custom_nodes/` from calling it.
 
-**Still to do:** wire the lane into the React ImageStudio reusing `h3References.js`; stock the W4A8
-FL2VA/REF2VA weights, the 32B encoder and the H3 VAE to R2; verify a real render on a rental.
+**Studio wiring (done).** `/local-ai/models` merges registry image lanes with auto-discovered
+drop-ins, but its registry loader only accepted `builder: image-backend` — a Python builder that
+assembles a graph server-side, which this lane does not have. It now also accepts
+`builder: comfy-api-image`, resolving `workflow_file` to an absolute path beside the registry. That
+makes the registry a first-class home for a ready API graph, which is what auto-discovery already
+does for user drop-ins — registered rather than inferred, so the lane carries a real title,
+capabilities and its nine reference slots instead of being guessed from the filename.
+
+Auto-discovery could not have surfaced this graph anyway: it recognises `KSampler`/`SaveImage` and
+reads the prompt from a text node behind `sampler.inputs.positive`. H3's prompt lives on the Director
+and its sampler is `SamplerCustomAdvanced`, so the drop-in path would have skipped it silently.
+
+Verified on the live route after a stack restart: the lane returns `type: image`,
+`backend: comfy-api-image`, `maxReferenceImages: 9`, an absolute graph path that exists, and it
+passes ImageStudio's own discovery filter alongside the other image models.
+
+**Still to do:** stock the W4A8 FL2VA/REF2VA weights, the 32B encoder and the H3 VAE to R2; verify a
+real render on a rental. Everything up to the GPU is done.
 
 ## Phase 2 — `minimax-h3-image` lane
 

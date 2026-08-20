@@ -24,6 +24,7 @@ def test_agent_first_mcp_exposes_durable_runs_intents_assets_and_evidence() -> N
         "apply_content_run_approval",
         "record_semantic_evaluation",
         "ingest_content_metrics",
+        "diagnose_content_bottleneck",
         "recommend_content_variant",
     } <= tools
 

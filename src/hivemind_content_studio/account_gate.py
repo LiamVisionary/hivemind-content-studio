@@ -85,7 +85,8 @@ input{width:100%;height:44px;padding:0 14px;border:1px solid rgba(255,255,255,.0
   color:#f2f2f3;font:inherit;font-size:14px;outline:0;transition:border-color .15s}
 input:hover{border-color:rgba(255,255,255,.16)}
 input:focus{border-color:rgba(246,178,27,.6);box-shadow:0 0 0 3px rgba(246,178,27,.14)}
-.error{min-height:18px;color:#f26d5f;font-size:12px}
+.error{margin:0;color:#f26d5f;font-size:12px;line-height:1.5}
+.error:empty{display:none}
 .back{background:none;border:0;color:#6f6f78;font:inherit;font-size:12px;cursor:pointer;padding:4px;min-height:0}
 .back:hover{color:#a3a3ac}
 [hidden]{display:none !important}
@@ -139,6 +140,14 @@ function handOff(accountId, { passphrase, prf, credentialId }) {
   }));
 }
 
+// "Don't ask again" for the post-sign-in passkey offer. Deliberately
+// localStorage, not the account: passkeys are per-device, so declining on a
+// shared desktop should not silence the offer on a phone.
+const offerHiddenKey = (accountId) => `hivemind.passkeyOffer.hidden.${accountId}`;
+function passkeyOfferHidden(accountId) {
+  try { return localStorage.getItem(offerHiddenKey(accountId)) === '1'; } catch { return false; }
+}
+
 let accounts = [];
 let chosen = null;
 
@@ -183,13 +192,13 @@ function choose(account) {
   el('password').value = '';
   el('enrol').hidden = true;
   el('signin-body').hidden = false;
-  // Passkey is ALWAYS the headline action, even before this workspace has one:
-  // the shape of the screen should not change depending on how far through
-  // setup you happen to be. Without one enrolled the button explains that a
-  // password is needed this once, and offers to fix that immediately after.
-  el('passkey-label').textContent = account.has_passkey ? 'Unlock with passkey' : 'Set up a passkey';
+  // The passkey button only appears once this workspace HAS one. Registration
+  // needs an open session, so before then the button could only refuse — the
+  // offer to create a passkey comes right after a password sign-in instead,
+  // which is the one moment enrolment can actually succeed.
+  el('passkey').hidden = !account.has_passkey;
   el('password-form').hidden = !account.has_password;
-  el('divider').hidden = !account.has_password;
+  el('divider').hidden = !account.has_password || !account.has_passkey;
   if (account.has_passkey) el('passkey').focus(); else el('password').focus();
 }
 
@@ -270,7 +279,7 @@ async function signInWithPassword(event) {
   // Signed in. Before handing over, offer to make the NEXT sign-in a passkey —
   // this is the only moment we hold both a proven session and the passphrase,
   // which is exactly what enrolling against the vault needs.
-  if (!chosen.has_passkey && window.PublicKeyCredential) {
+  if (!chosen.has_passkey && window.PublicKeyCredential && !passkeyOfferHidden(chosen.id)) {
     pendingPassword = password;
     el('signin-body').hidden = true;
     el('enrol').hidden = false;
@@ -299,7 +308,9 @@ async function addPasskey() {
   el('enrol-error').textContent = '';
   el('enrol-add').disabled = true;
   try {
-    const { publicKey } = await api('/api/accounts/webauthn/register/options');
+    // The empty body matters: api() sends GET without one, and a GET here
+    // falls through the POST-only route into the static mount's 404.
+    const { publicKey } = await api('/api/accounts/webauthn/register/options', {});
     const salt = await prfSalt(chosen.id);
     const created = await navigator.credentials.create({
       publicKey: {
@@ -379,7 +390,12 @@ el('quick-passkey').addEventListener('click', () => signInWithPasskey(null));
 el('password-form').addEventListener('submit', signInWithPassword);
 el('back').addEventListener('click', back);
 el('enrol-add').addEventListener('click', addPasskey);
-el('enrol-skip').addEventListener('click', () => finishWithPassword());
+el('enrol-skip').addEventListener('click', () => {
+  if (el('enrol-hide').checked) {
+    try { localStorage.setItem(offerHiddenKey(chosen.id), '1'); } catch {}
+  }
+  finishWithPassword();
+});
 start();
 """
 
@@ -454,6 +470,10 @@ def account_gate_html() -> str:
           workspace opens with Touch ID or Face ID instead of a password.</p>
         <button class="primary" id="enrol-add" type="button">{_KEY_GLYPH}<span>Add a passkey</span></button>
         <button class="secondary" id="enrol-skip" type="button">Not now</button>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#6f6f78;cursor:pointer">
+          <input type="checkbox" id="enrol-hide" style="width:auto;height:auto;margin:0;accent-color:#f6b21b">
+          Don't ask again on this device
+        </label>
         <p class="error" id="enrol-error" role="alert"></p>
       </div>
 

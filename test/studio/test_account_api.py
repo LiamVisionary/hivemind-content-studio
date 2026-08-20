@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -236,6 +237,31 @@ def test_registration_options_are_bound_to_the_signed_in_workspace(client):
     # The user handle is a digest of the account id, never the name in clear.
     expected = hashlib.sha256(f"hivemind-account-{second}".encode("utf-8")).digest()[:16]
     assert options["user"]["id"] == __import__("base64").urlsafe_b64encode(expected).decode().rstrip("=")
+
+
+def test_the_relying_party_follows_the_browsers_host_through_the_proxy(client):
+    """The tailnet proxy rewrites Host to its upstream target, so without the
+    forwarded host the RP id comes out as 127.0.0.1 and the browser refuses:
+    'The relying party ID is not a registrable domain suffix of, nor equal to
+    the current domain.'"""
+    _sign_in(client, 1, OWNER_PASSWORD)
+    response = client.post("/api/accounts/webauthn/register/options", headers={
+        "x-forwarded-host": "studio.tailnet.example:8789",
+        "x-forwarded-proto": "https",
+    })
+    assert response.json()["publicKey"]["rp"]["id"] == "studio.tailnet.example"
+
+
+def test_the_gate_asks_for_registration_options_with_a_post(client):
+    """The gate's api() helper sends GET when no body is passed, and a GET to
+    this POST-only path falls through to the root static mount, whose bare 404
+    surfaced as 'Not Found' on the Add-a-passkey card. Every call the gate
+    script makes to it must therefore carry a body."""
+    gate = client.get("/", headers={"accept": "text/html"})
+    calls = re.findall(r"api\('/api/accounts/webauthn/register/options'(.)", gate.text)
+    assert calls, "the gate script no longer registers passkeys?"
+    assert all(next_char == "," for next_char in calls), \
+        "a bodiless api() call goes out as GET and 404s against the static mount"
 
 
 def test_a_sign_in_challenge_is_offered_without_a_session(client):
