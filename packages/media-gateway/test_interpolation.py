@@ -100,7 +100,7 @@ class InterpolationRouteTest(unittest.TestCase):
             make_test_clip(clip, frames=8, fps=8)
             with patch.object(app, "COMFY_OUTPUT_DIR", out_dir), \
                  patch.object(app, "jobs", {}), \
-                 patch.object(app, "encrypt_outputs", side_effect=lambda paths: [str(p) for p in paths]), \
+                 patch.object(app, "encrypt_outputs", side_effect=lambda paths, job_id=None: [str(p) for p in paths]), \
                  patch.object(app, "append_history", side_effect=lambda rec: None):
                 app.run_video_interpolation("testjob01", clip, {"factor": 2})
                 rec = app.jobs["testjob01"]

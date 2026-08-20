@@ -98,7 +98,9 @@ class EpisodeRouteTest(unittest.TestCase):
             staged.write_bytes(b"joined-episode-bytes")
             sealed = []
 
-            def fake_encrypt(paths):
+            # encrypt_outputs takes job_id so the seal can be scoped to the run;
+            # the double has to accept it or the runner fails inside the try.
+            def fake_encrypt(paths, job_id=None):
                 # Stand in for the real seal: prove the runner hands it the
                 # written output and records what comes back.
                 for path in paths:

@@ -248,6 +248,45 @@ Verified on the live route after a stack restart: the lane returns `type: image`
 `backend: comfy-api-image`, `maxReferenceImages: 9`, an absolute graph path that exists, and it
 passes ImageStudio's own discovery filter alongside the other image models.
 
+### Retraction: the "tile seam" defect does not exist (2026-08-20)
+
+Commit `397764c` recorded, under "Known, not fixed", faint horizontal seams in flat sky and sea
+attributed to the tiled VAE decode. **That was wrong. There is no seam, and nobody should spend time
+fixing it.** The claim came from reading a downscaled preview by eye and never being checked.
+
+Measured on the render itself, detrending each row with a 6th-order fit and looking at what survives:
+
+| Region | Residual sigma | Seam candidates |
+| --- | --- | --- |
+| Empty sky, x 0-800 | **0.22 levels** | none |
+| Empty sky, x 1240-1632 | **0.13 levels** | none |
+| Open sea, x 0-420 | **0.67 levels** | none |
+
+Those are fractions of a single 8-bit level. The flat areas are clean.
+
+Two things produced the illusion, and both are worth knowing because they are easy to repeat:
+
+1. **The horizon.** A row-difference scan flagged rows 319-322 at z=43. That is the sea meeting the
+   sky — real content, and the strongest edge in the frame.
+2. **The subject.** A column scan then flagged x=1024 in "both sky and sea", which looked like
+   damning confirmation because 1024 is a power-of-two tile boundary. But the sampled band spanned
+   x 824-1224, and *the man is standing there*. It was measuring his hat. A control point at x=850
+   also showed a false +12.5-level "step", and an apparent +47-level step at x=1024 turned out to be
+   the sky's own sunrise gradient (+45.6 over the same span).
+
+The lesson generalises: on a scene with content, a discontinuity test must run on regions verified
+empty first, and must compare against the LOCAL gradient rather than a global threshold.
+
+What does exist, at x40 amplification: a faint regular texture in the sky at 160px and 200px pitch
+plus a 2px component, amplitude **sigma 0.22 levels, peak-to-peak 1.24**. About a quarter of one
+8-bit level, matching no tile stride, invisible at any normal viewing. Not actionable.
+
+**Tile seams are untested, not disproven.** The graph runs `tiling_mode: "Auto"`, and at 1.51 MP on a
+32 GB card Auto near-certainly declined to tile — there were no tiles to seam. The Director allows up
+to ~8.5 MP, so if this lane is pushed to 4 MP or 8 MP the question reopens. Re-check with the method
+above: pick a region with no subject in it, detrend per row, and look for a residual spike that stands
+out against that region's own sigma.
+
 **Still to do:** stock the W4A8 FL2VA/REF2VA weights, the 32B encoder and the H3 VAE to R2; verify a
 real render on a rental. Everything up to the GPU is done.
 

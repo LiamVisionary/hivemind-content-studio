@@ -128,6 +128,19 @@ SCHEMA: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        3,
+        """
+        ALTER TABLE clips ADD COLUMN llm_score REAL;
+        ALTER TABLE clips ADD COLUMN llm_reason TEXT;
+        ALTER TABLE clips ADD COLUMN hook_title TEXT;
+        ALTER TABLE clips ADD COLUMN caption TEXT;
+
+        ALTER TABLE runs ADD COLUMN category TEXT;
+        ALTER TABLE runs ADD COLUMN semantics_status TEXT;
+        ALTER TABLE runs ADD COLUMN semantics_error TEXT;
+        """,
+    ),
 ]
 
 
@@ -223,15 +236,16 @@ def create_run(
     style: str,
     output_dir: str,
     podcli_command: str | None,
+    category: str | None = None,
 ) -> int:
     now = utc_now()
     cur = conn.execute(
         """
         INSERT INTO runs
-            (source_id, top_n, style, output_dir, podcli_command, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (source_id, top_n, style, output_dir, podcli_command, category, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (source_id, top_n, style, output_dir, podcli_command, now, now),
+        (source_id, top_n, style, output_dir, podcli_command, category, now, now),
     )
     conn.commit()
     return int(cur.lastrowid)
@@ -292,6 +306,56 @@ def add_clip(
     conn.commit()
     row = conn.execute("SELECT id FROM clips WHERE run_id = ? AND slug = ?", (run_id, slug)).fetchone()
     return int(row["id"] if row else cur.lastrowid)
+
+
+def list_clips(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM clips WHERE run_id = ? ORDER BY id", (run_id,)).fetchall()
+
+
+def set_clip_semantics(
+    conn: sqlite3.Connection,
+    clip_id: int,
+    *,
+    llm_score: float | None = None,
+    llm_reason: str | None = None,
+    hook_title: str | None = None,
+    caption: str | None = None,
+) -> None:
+    """Write the semantic layer's output onto a clip.
+
+    Only non-None fields are written, so re-ranking does not wipe a hook that a
+    later title pass already produced, and vice versa.
+    """
+    assignments: list[str] = []
+    values: list[Any] = []
+    for column, value in (
+        ("llm_score", llm_score),
+        ("llm_reason", llm_reason),
+        ("hook_title", hook_title),
+        ("caption", caption),
+    ):
+        if value is None:
+            continue
+        assignments.append(f"{column} = ?")
+        values.append(value)
+    if not assignments:
+        return
+    values.append(clip_id)
+    conn.execute(f"UPDATE clips SET {', '.join(assignments)} WHERE id = ?", values)
+    conn.commit()
+
+
+def set_run_semantics(
+    conn: sqlite3.Connection,
+    run_id: int,
+    status: str,
+    error: str | None = None,
+) -> None:
+    conn.execute(
+        "UPDATE runs SET semantics_status = ?, semantics_error = ?, updated_at = ? WHERE id = ?",
+        (status, error, utc_now(), run_id),
+    )
+    conn.commit()
 
 
 def resolve_clip_ids(conn: sqlite3.Connection, run_id: int, requested: Iterable[str]) -> list[int]:

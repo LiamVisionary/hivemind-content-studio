@@ -657,3 +657,87 @@
 - zhouxiaoka/autoclip
   - Decision: inspected
   - Reason: user-pinned donor; MIT, 6532 stars, 1271 forks, last push 2026-06-03
+## 2026-08-20T07:16:23.516712+00:00 - shared-brain
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: hive-brain
+- Decision: selected
+- Reason: hive-brain recall 'clip scoring hook title generation short form virality rubric' --scope full-vault --limit 6
+
+### Candidates
+- Skills/content-rewards-viral-app-campaign/SKILL.md
+  - Decision: selected
+  - Reason: existing 6-axis clippability rubric (clippable, result-driven, desire-to-know, repeatable, controversy/tension, conversion path) becomes the rubric spine instead of the donor's B-station rubric
+- Intake/App Virality Case Study.md
+  - Decision: inspected
+  - Reason: hook/demo/CTA framing, no extractable code
+## 2026-08-20T07:16:23.558274+00:00 - local-search
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: current-project
+- Decision: selected
+- Reason: established project way check before adding any LLM helper
+
+### Candidates
+- src/hivemind_content_studio/local_llm.py
+  - Decision: selected
+  - Reason: LocalLlmRuntime.chat is the established unpaid local LLM path; no new client
+- app/services/llm.py
+  - Decision: selected-donor
+  - Reason: _generate_response provider-generic cloud fallback
+- src/auto_clipper/transcripts.py
+  - Decision: inspected
+  - Reason: our uniform word-timing split already equals the donor's; no gain there
+## 2026-08-20T07:16:23.604757+00:00 - audit
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: audit-candidate-repo
+- Decision: selected
+- Reason: inert clone audited at ~/.codex/hive-assimilate/candidates/zhouxiaoka-autoclip
+
+### Candidates
+- zhouxiaoka/autoclip@17100c0
+  - Decision: selected-donor
+  - Reason: repo-wide BLOCK was 3 false positives (rm -rf /var/lib/apt/lists/* in Dockerfile); selected-path audit of backend/pipeline, prompt, llm_client.py, shared_config.py, backend/tests returned high=0 medium=0 low=0
+## 2026-08-20T07:17:43.718281+00:00 - assimilation-manifest
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: selected-github-code
+- Decision: assimilated
+- Assimilated: zhouxiaoka/autoclip@17100c0:backend/pipeline/step3_scoring.py => src/auto_clipper/rerank.py, zhouxiaoka/autoclip@17100c0:backend/pipeline/step4_title.py => src/auto_clipper/titles.py, zhouxiaoka/autoclip@17100c0:backend/utils/llm_client.py => src/auto_clipper/llm_json.py, zhouxiaoka/autoclip@17100c0:backend/core/shared_config.py => src/auto_clipper/prompts.py, zhouxiaoka/autoclip@17100c0:prompt/推荐理由.txt => presets/prompts/clip-rerank.txt, zhouxiaoka/autoclip@17100c0:prompt/标题生成.txt => presets/prompts/clip-title.txt, zhouxiaoka/autoclip@17100c0:prompt/knowledge => presets/prompts/knowledge, zhouxiaoka/autoclip@17100c0:backend/pipeline/step1_outline.py => src/auto_clipper/outline.py, zhouxiaoka/autoclip@17100c0:backend/pipeline/step2_timeline.py => src/auto_clipper/timeline.py, zhouxiaoka/autoclip@17100c0:backend/pipeline/step5_clustering.py => src/auto_clipper/collections.py
+- Verification: Wrote ASSIMILATION.autoclip.json with 10 entries and custom_code_assessment=balanced.
+## 2026-08-20T07:17:59.176847+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: failed
+- Reason: ASSIMILATION.autoclip.json: Entry 1 target_path does not exist: /Users/liam/comfy/hivemind-content-studio/src/auto_clipper/rerank.py
+## 2026-08-20T07:18:09.636398+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: below-threshold
+- Reason: Expected fail: ASSIMILATION.autoclip.json is a scoping manifest, all 10 entries status=planned, no target path written yet. Re-verify when phase 1 lands (rerank.py, titles.py, llm_json.py, prompts.py + presets/prompts).
+## 2026-08-20T07:18:09.689645+00:00 - final
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: hive-assimilate
+- Decision: selected
+- Reason: Scope delivered: docs/AUTOCLIP_ASSIMILATION_PLAN.md + ASSIMILATION.autoclip.json. No code landed this pass.
+## 2026-08-20T07:42:01.677473+00:00 - verification
+
+- Request: Integrate every commercially permissible feature from BlackMixture/Mix-Studio into hivemind-content-studio
+- Source: BlackMixture/Mix-Studio
+- Query: `LTX Director silent audio — CUDA control`
+- Decision: passed
+- Reason: Root cause is Apple Silicon (MPS), not the model, the configuration, or our port. LTX 2.3 joint audio-video generation produces real audio on CUDA and digital silence on MPS.
+- Verification: Rented an RTX A6000 on Vast and ran the IDENTICAL control graph at the SAME ComfyUI commit (2a0e30e9) with the SAME weights (checkpoint 28606c5b... and encoder 60216ce9... both sha256-verified byte-identical to the local copies, confirmed independently on the box) and the same prompt/seed/steps. Mac (MPS): peak 1/32767, rms 0.1, 0.6 percent non-zero, 27,415-byte FLAC. A6000 (CUDA): peak 11,998, rms 3,216, 100 percent non-zero, 316,330-byte FLAC. Instance destroyed; no instances remain; throwaway SSH key deleted from the account. Total spend about 3.19 USD of Vast credit.
+- Note: Scope is wider than Director: every LTX 2.3 AV path through ComfyUI on this Mac returns silent audio. The working local audio path is the MLX eros lane, a different runtime.
+- Note: LTX Director is fully usable today through the rental lane, which already stocks both weights in R2. CUDA was also 4-5x faster: 42s vs 170-210s for the same 73-frame control.
+- Note: Rental gotchas hit: the vast ComfyUI template serves on port 18188 (not 8188) as the repo's own validated scripts already assumed; its image ships ComfyUI 0.7.0 which predates the LTX AV nodes, so the box had to be checked out to our exact commit; a shallow clone needs 'git fetch --depth 1 origin <sha>' before checkout; and nohup alone does not survive the SSH exit, so ComfyUI needs tmux.
+## 2026-08-20T07:53:43.889226+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.autoclip.phase1.json: 7 concrete reuse entries, 7 substantive

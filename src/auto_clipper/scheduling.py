@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from . import db
 from .config import Config
+from .titles import caption_for_clip
 from hivemind_content_studio.publishing import PostizPublisher, build_postiz_payload, integration_id_for, write_json
 
 
@@ -36,7 +37,7 @@ def schedule_run(
             payload = build_postiz_payload(
                 platform=platform,
                 integration_id=integration_id,
-                caption=str(clip["transcript_excerpt"] or clip["rationale"] or "Approved clip"),
+                caption=caption_for_clip(clip),
                 media=[{"path": clip["output_path"]}] if clip["output_path"] else [],
                 scheduled_at=scheduled_at.isoformat(),
             )
@@ -55,7 +56,7 @@ def schedule_run(
                         payload = build_postiz_payload(
                             platform=platform,
                             integration_id=integration_id,
-                            caption=str(clip["transcript_excerpt"] or clip["rationale"] or "Approved clip"),
+                            caption=caption_for_clip(clip),
                             media=[{"id": media["id"], "path": media["path"]}],
                             scheduled_at=scheduled_at.isoformat(),
                         )

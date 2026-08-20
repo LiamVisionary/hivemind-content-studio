@@ -16,14 +16,22 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import db
+from . import db, rerank, titles
 from .config import Config
 from .transcripts import prepare_podcli_transcript
 
 CAPTION_STYLES = {"branded", "branded-legacy", "hormozi", "karaoke", "subtle"}
 
 
-def render_run(conn, cfg: Config, source_id: int, *, top: int, style: str) -> int:
+def render_run(
+    conn,
+    cfg: Config,
+    source_id: int,
+    *,
+    top: int,
+    style: str,
+    category: str | None = None,
+) -> int:
     if style not in CAPTION_STYLES:
         raise ValueError(f"Unsupported style {style!r}. Choose one of: {', '.join(sorted(CAPTION_STYLES))}")
     source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
@@ -46,11 +54,13 @@ def render_run(conn, cfg: Config, source_id: int, *, top: int, style: str) -> in
         style=style,
         output_dir=str(output_dir),
         podcli_command=" ".join(shlex.quote(part) for part in command),
+        category=category,
     )
 
     if os.environ.get("AUTO_CLIPPER_FAKE_RENDER") == "1":
         _fake_clips(conn, run_id, output_dir, top)
         db.set_run_status(conn, run_id, "rendered")
+        enrich_run(conn, cfg, run_id, output_dir=output_dir, category=category)
         return run_id
 
     if not is_podcli_available(cfg):
@@ -71,7 +81,32 @@ def render_run(conn, cfg: Config, source_id: int, *, top: int, style: str) -> in
 
     created = import_podcli_outputs(conn, run_id, output_dir, result.stdout)
     db.set_run_status(conn, run_id, "rendered" if created else "rendered_no_clips")
+    if created:
+        enrich_run(conn, cfg, run_id, output_dir=output_dir, category=category)
     return run_id
+
+
+def enrich_run(
+    conn,
+    cfg: Config,
+    run_id: int,
+    *,
+    output_dir: Path,
+    category: str | None = None,
+) -> dict[str, dict]:
+    """Score the candidates and write their hooks.
+
+    Runs after the render is already recorded as `rendered`, and both steps
+    swallow their own failures, so a missing or broken LLM can never cost us a
+    render we already paid for.
+    """
+    ranked = rerank.rerank_run(
+        conn, cfg, run_id, category=category, output_dir=output_dir
+    )
+    written = titles.generate_titles(
+        conn, cfg, run_id, category=category, output_dir=output_dir
+    )
+    return {"rerank": ranked, "titles": written}
 
 
 def build_command(

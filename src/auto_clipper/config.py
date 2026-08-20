@@ -35,6 +35,9 @@ class Config:
     postiz_url: str
     postiz_api_key: str | None
     postiz_enable_write: bool
+    # Defaulted so existing call sites and fixtures that build a Config by hand
+    # keep working; load_config always passes it explicitly.
+    prompts_dir: Path = Path("presets/prompts")
 
     @property
     def obsidian_output_dir(self) -> Path:
@@ -68,6 +71,11 @@ def load_config(path: Path | None = None) -> Config:
     if not db_path.is_absolute():
         db_path = project_root / db_path
 
+    prompts_raw = os.environ.get("AUTO_CLIPPER_PROMPTS_DIR") or raw.get("prompts_dir")
+    prompts_dir = Path(prompts_raw).expanduser() if prompts_raw else project_root / "presets" / "prompts"
+    if not prompts_dir.is_absolute():
+        prompts_dir = project_root / prompts_dir
+
     vault_raw = os.environ.get("OBSIDIAN_VAULT_PATH") or raw.get("vault_path") or DEFAULT_VAULT
     vault_path = Path(vault_raw).expanduser()
     obsidian_folder = os.environ.get("AUTO_CLIPPER_OBSIDIAN_FOLDER") or raw.get(
@@ -90,6 +98,7 @@ def load_config(path: Path | None = None) -> Config:
         postiz_url=(os.environ.get("POSTIZ_URL") or raw.get("postiz_url", "http://localhost:4007/api")).rstrip("/"),
         postiz_api_key=os.environ.get("POSTIZ_API_KEY") or raw.get("postiz_api_key"),
         postiz_enable_write=_bool_env("CONTENT_STUDIO_ENABLE_LIVE_PUBLISH", False),
+        prompts_dir=prompts_dir,
     )
 
 

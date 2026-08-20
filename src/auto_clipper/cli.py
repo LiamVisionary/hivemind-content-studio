@@ -50,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("source_id", type=int)
     render.add_argument("--top", type=int, default=5)
     render.add_argument("--style", default="branded")
+    render.add_argument(
+        "--category",
+        default=None,
+        help="Prompt overlay for the semantic pass (e.g. business, knowledge, opinion, speech)",
+    )
     render.set_defaults(func=cmd_render)
 
     approve = sub.add_parser("approve", help="Approve selected clips and mark rights as approved")
@@ -123,10 +128,18 @@ def cmd_ingest(args) -> int:
 def cmd_render(args) -> int:
     cfg = load_config()
     conn = db.init_db(cfg.db_path)
-    run_id = render_run(conn, cfg, args.source_id, top=args.top, style=args.style)
+    run_id = render_run(
+        conn, cfg, args.source_id, top=args.top, style=args.style, category=args.category
+    )
     note = write_run_note(conn, cfg, run_id)
+    run = conn.execute("SELECT semantics_status, semantics_error FROM runs WHERE id = ?", (run_id,)).fetchone()
     print(f"rendered run_id={run_id}")
     print(f"obsidian_note={note}")
+    print(f"semantics={run['semantics_status'] or 'not_run'}")
+    if run["semantics_error"]:
+        # Surfaced, not raised: the clips rendered either way, and the reviewer
+        # should know the ordering they are about to read is unscored.
+        print(f"semantics_error={run['semantics_error']}")
     return 0
 
 

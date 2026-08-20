@@ -38,12 +38,20 @@ def main() -> None:
         return {"source_id": source_id, "obsidian_note": str(note) if note else None}
 
     @mcp.tool()
-    def render(source_id: int, top: int = 5, style: str = "branded") -> dict:
+    def render(source_id: int, top: int = 5, style: str = "branded", category: str = "") -> dict:
         cfg = load_config()
         conn = db.init_db(cfg.db_path)
-        run_id = render_run(conn, cfg, source_id, top=top, style=style)
+        run_id = render_run(conn, cfg, source_id, top=top, style=style, category=category or None)
         note = write_run_note(conn, cfg, run_id)
-        return {"run_id": run_id, "obsidian_note": str(note)}
+        run = conn.execute(
+            "SELECT semantics_status, semantics_error FROM runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        return {
+            "run_id": run_id,
+            "obsidian_note": str(note),
+            "semantics_status": run["semantics_status"] or "not_run",
+            "semantics_error": run["semantics_error"],
+        }
 
     @mcp.tool()
     def approve(run_id: int, clips: str, reviewer: str = "liam", rights_note: str = "Manual approval.") -> dict:

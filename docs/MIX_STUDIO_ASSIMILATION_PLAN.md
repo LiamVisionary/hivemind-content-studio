@@ -172,11 +172,18 @@ Verdicts from a full sweep of both codebases (2026-08-10; see ASSIMILATION_LOG.m
   the checkpoint (4,728 audio tensors in the transformer, incl. `scale_shift_table_a2v_ca_audio`, plus
   `audio_vae` + `vocoder`); the audio VAE (loads and decodes with no missing-key warnings);
   `LTXAVModel.forward` (accepts the combined AV tensor and derives `a_timestep`).
-  Leading remaining hypothesis: the audio timestep / nested-latent sampling path under this ComfyUI +
-  MPS build. `LTX2AudioLatentNormalizingSampling` was checked and is a quality patch, not a prerequisite.
-  **Decisive next test:** run control graph #3 unchanged on a rented CUDA box — the donor validated this
-  exact configuration on NVIDIA, so that separates "this machine/MPS" from "model/config" outright.
-  **Remaining:** the multi-track timeline UI, and the audio question above.
+  **ROOT CAUSE FOUND 2026-08-20 — it is MPS, not the model, the config or our port.** The identical
+  control graph was run on a rented RTX A6000 (Vast, ~$3 of credit) at the SAME ComfyUI commit
+  (2a0e30e9) with the SAME weights (both sha256-verified byte-identical to the local copies) and the
+  same prompt/seed/steps. Only the platform differed:
+    Mac (MPS):   peak 1/32767, rms 0.1, 0.6% non-zero,   27,415-byte FLAC  -> silence
+    A6000 (CUDA): peak 11,998,  rms 3,216, 100% non-zero, 316,330-byte FLAC -> real audio
+  LTX 2.3 joint audio-video generation is therefore broken on Apple Silicon and correct on CUDA. This
+  applies to EVERY LTX 2.3 AV path through ComfyUI on this Mac, not just Director. It also means LTX
+  Director is fully usable today through the rental lane, which already stocks both weights in R2.
+  CUDA render was also 4-5x faster: 42s vs 170-210s for the same 73-frame control.
+  **Remaining:** the multi-track timeline UI. Audio on Apple Silicon is an upstream MPS defect,
+  not something this port can fix — render LTX Director on a rental when the clip needs sound.
 
 ### Phase 4 — library/ops, needs privacy-aware redesign (their design assumes plaintext server storage)
 - Library search / folders / user groups / trash-with-recovery / ZIP export: rebuild client-side over

@@ -16,7 +16,7 @@ brief/source
 It consolidates three owned systems without making three parallel pipelines:
 
 - **MoneyPrinterTurbo** is the faceless rendering engine: scripts, stock/local media, LocalTTS, subtitles, and FFmpeg/MoviePy assembly.
-- **Auto Clipper** is the long-form ingestion and clipping engine: transcripts, clip candidates, rights gates, approvals, Postiz planning, and monetization matching.
+- **Auto Clipper** is the long-form ingestion and clipping engine: transcripts, clip candidates, LLM re-rank and hook generation, rights gates, approvals, Postiz planning, and monetization matching.
 - **AI Animation Factory** is the animation planning contract: briefs, scenes, image/motion prompts, voice lines, music briefs, and reproducible run artifacts.
 - **Hivemind Content Studio** is the only orchestration, provider, manifest, approval, and publishing layer.
 
@@ -225,7 +225,16 @@ Two MCP servers are included. `content-studio-mcp` is the primary agent contract
 - `studio://runs/{run_id}/next-actions`
 
 - `content-studio-mcp`: unified durable workflows; it can request approval but cannot approve or deny its own request.
-- `auto-clipper-mcp`: focused compatibility surface for existing clipping agents.
+- `auto-clipper-mcp`: focused compatibility surface for existing clipping agents. Its `render` tool takes an
+  optional `category` (`business`, `knowledge`, `opinion`, `speech`, `entertainment`, `experience`,
+  `content_review`) that selects a scoring-prompt overlay from `presets/prompts/`, and returns
+  `semantics_status` alongside the run id.
+
+After Podcli renders, an LLM pass scores each candidate and writes its hook and caption
+(`clips.llm_score`, `llm_reason`, `hook_title`, `caption`); the Obsidian run note lists clips best-first so
+the reviewer reads them in ranked order. The pass **ranks but never deletes** — the approval gate remains
+the only filter — and it fails open, so a missing model costs a render nothing. Set `AUTO_CLIPPER_LLM` to
+`auto` (default: an already-loaded local model, else the cloud provider), `local`, `cloud`, or `off`.
 
 The optional operator console is secondary and starts locally with `hive-env-run -- uv run content-studio-api`. It reads the same state store; authenticated mutations require `CONTENT_STUDIO_CONTROL_TOKEN`.
 
