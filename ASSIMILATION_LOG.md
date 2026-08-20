@@ -646,3 +646,14 @@
 - Source: verify-assimilation-manifest
 - Decision: passed
 - Reason: ASSIMILATION.mix-studio.json: 34 concrete reuse entries, 24 substantive
+## 2026-08-20T07:12:54.556986+00:00 - triage
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: user-pinned
+- Selected backbone: local-project:hivemind-content-studio (src/auto_clipper stays the backbone)
+- Note: Gap confirmed by source read: our clip selection is fully delegated to Podcli; Postiz caption is transcript_excerpt or rationale or 'Approved clip'
+
+### Candidates
+- zhouxiaoka/autoclip
+  - Decision: inspected
+  - Reason: user-pinned donor; MIT, 6532 stars, 1271 forks, last push 2026-06-03

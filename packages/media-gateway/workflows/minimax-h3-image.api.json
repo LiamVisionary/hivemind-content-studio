@@ -10,7 +10,7 @@
       "text_encoder": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
       "video_vae": "minimax_h3_video_vae_fp16.safetensors",
       "image_vae": "Disabled - original H3 video VAE only",
-      "image_analyzer": "Fast \u00b7 Qwen3.5 2B",
+      "image_analyzer": "Disabled",
       "prompt_writer": "Same as image analyzer"
     }
   },
@@ -37,7 +37,7 @@
       "enhance_mode": "compile_only",
       "adherence": 0.85,
       "route": "auto",
-      "sampling_profile": "lightx_v1_fl2v_8",
+      "sampling_profile": "base_balanced_12",
       "frame_profile": "recommended_5",
       "analyzer_model": "",
       "studio_state": "",

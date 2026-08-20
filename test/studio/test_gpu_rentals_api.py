@@ -1111,8 +1111,11 @@ def test_phase_provisioning_with_beacon_progress(tmp_path: Path, monkeypatch) ->
     rental = client.get("/api/gpu-rentals").json()["rentals"][0]
     assert seen["url"] == "http://1.2.3.4:28189/progress.json"
     assert rental["phase"] == "provisioning"
+    # stale_seconds 0: this reading came off the box just now, not out of the
+    # last-good cache that keeps a missed poll from rewinding the ladder.
     assert rental["provision"] == {"step": "downloading", "done": 3, "total": 6,
-                                   "detail": "gemma_3_12B_it_fp8_scaled.safetensors"}
+                                   "detail": "gemma_3_12B_it_fp8_scaled.safetensors",
+                                   "stale_seconds": 0}
 
 
 def test_phase_ready_from_beacon(tmp_path: Path, monkeypatch) -> None:
@@ -1891,7 +1894,12 @@ def test_minimax_tier_ships_the_turbo_lora(tmp_path: Path, monkeypatch) -> None:
     # Public HF weights need a redirect-following curl; the R2 presigned URLs do not.
     assert "curl -sfL" in script
     # The tier's bandwidth floor must account for the public bytes too.
-    assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(43.3, abs=0.2)
+    # 43.3 -> 66.0 when the still-image lane landed: H3 Studio is built against
+    # Kijai's W4A8 pruned pair (11.7 + 11.0 GB), which is a different
+    # quantisation from the int8_convrot FL2VA the video lane converts itself,
+    # and REF2VA has no video-lane equivalent at all. One rented box serves both
+    # studio pages, so both weight sets ship.
+    assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(66.0, abs=0.2)
 
 
 # --- rental LoRA registry ---------------------------------------------------
@@ -2152,3 +2160,155 @@ def test_attach_separates_a_dead_forward_from_a_dead_comfyui(tmp_path: Path, mon
     # And a lane that answers attaches without complaint.
     monkeypatch.setattr(gpu_rentals, "_lane_answers", lambda port, timeout=1.0: True)
     gpu_rentals._await_tunnel(7, _Proc(), 19490, timeout=0.6)
+
+
+def _running_box(**over) -> dict:
+    """A managed studio box that Vast reports running, beacon port published."""
+    return {
+        "id": 48183103,
+        "label": f"{gpu_rentals.STUDIO_LABEL_PREFIX}minimax-rtx5090-38fe4e13",
+        "actual_status": "running",
+        "public_ipaddr": "38.87.238.254",
+        "machine_id": 141928,
+        "start_date": time.time() - 600,
+        "ports": {f"{gpu_rentals.BEACON_PORT}/tcp": [{"HostPort": "43798"}]},
+        **over,
+    }
+
+
+def test_a_missed_beacon_poll_does_not_rewind_the_progress_ladder(monkeypatch) -> None:
+    """A poll that times out is a missed reading, not a state.
+
+    2026-08-20, rental vast:48183103: the beacon is a single-threaded
+    `python3 -m http.server` on a box saturating its own uplink pulling models
+    over 8 ranged connections per file. Measured mid-download, 21 of 24 polls
+    got nothing within 8s while the box was working perfectly. The old code
+    answered every miss with step "booting", so the studio's ladder rewound to
+    "Booting host" and a box that was 3/5 through its models looked like it had
+    started over.
+    """
+    gpu_rentals._BEACON_CACHE.clear()
+    live = {"step": "downloading", "done": 3, "total": 5, "detail": "the 21GB transformer"}
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: live)
+    dto = gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)
+    assert dto["provision"]["step"] == "downloading"
+    assert dto["provision"]["done"] == 3
+    assert dto["provision"]["stale_seconds"] == 0
+
+    # Now every poll misses. The box has not moved backwards; we simply cannot
+    # hear it, and the reading we have is the one to show.
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: None)
+    dto = gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)
+    assert dto["provision"]["step"] == "downloading", "a timed-out poll must not rewind to booting"
+    assert dto["provision"]["done"] == 3
+    assert dto["phase"] == "provisioning"
+
+    # A box we have genuinely never heard from is still reported as booting:
+    # there is nothing remembered to show, and that IS what is happening.
+    gpu_rentals._BEACON_CACHE.clear()
+    dto = gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)
+    assert dto["provision"]["step"] == "booting"
+
+
+def test_a_failed_beacon_reading_survives_the_polls_that_miss_it(monkeypatch) -> None:
+    """The reaper reads the beacon through the same timeout as the studio.
+
+    This is what made the flicker expensive rather than cosmetic. A host whose
+    network dies kills the model downloads AND the beacon together, so the box
+    that most needs reaping is the one least able to answer. On 2026-08-20 the
+    error reading existed for five minutes before a poll happened to land in
+    one of the box's brief responsive windows; miss it and reap_failed_rentals
+    sees "provisioning", not "error", and the dead box bills at $0.487/hr.
+    """
+    gpu_rentals._BEACON_CACHE.clear()
+    died = {"step": "error", "done": 3, "total": 5,
+            "detail": "download failed at 3/5: minimax_h3_fl2va_pruned_int8_convrot.safetensors"}
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: died)
+    assert gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)["phase"] == "error"
+
+    # The box stops answering entirely — as a network-dead box does. The
+    # verdict it already gave us stands.
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: None)
+    dto = gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)
+    assert dto["phase"] == "error", "a box that reported failure must stay reapable once it goes quiet"
+    assert "download failed at 3/5" in dto["provision"]["detail"]
+
+
+def test_a_box_that_goes_permanently_quiet_is_reaped_not_billed(monkeypatch) -> None:
+    """Silence is not failure — until it is.
+
+    A healthy box starves its beacon for minutes at a stretch while pulling
+    models at full speed, so a short quiet spell must never destroy one. A box
+    that never comes back is a dead host, and the container still running is
+    exactly why nothing else notices.
+    """
+    gpu_rentals._BEACON_CACHE.clear()
+    working = {"step": "downloading", "done": 3, "total": 5, "detail": "the 21GB transformer"}
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: working)
+    gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)
+
+    # Quiet for a few minutes: busy, not dead. Destroying this box would throw
+    # away the models it has already pulled and the money they cost.
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: None)
+    gpu_rentals._BEACON_CACHE["vast:48183103"]["at"] = time.time() - 240
+    assert gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)["phase"] == "provisioning"
+
+    # Quiet past the deadline: terminal, and it says why.
+    gpu_rentals._BEACON_CACHE["vast:48183103"]["at"] = time.time() - gpu_rentals.BEACON_SILENCE_SECONDS - 60
+    dto = gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)
+    assert dto["phase"] == "error"
+    assert "went quiet at downloading" in dto["provision"]["detail"]
+    assert "destroy it and rent again" in dto["provision"]["detail"]
+    assert dto["machine_id"] == 141928, "the reaper blacklists the HOST, so it has to survive"
+
+
+def test_a_ready_box_is_never_destroyed_over_a_quiet_status_file(monkeypatch) -> None:
+    """The beacon has done its job by the time the box is serving.
+
+    Guard on the one way this escalation could be catastrophic: reaping a
+    working machine. A ready box answers for itself through its tunnel and its
+    ComfyUI; its provisioning status file is finished business.
+    """
+    gpu_rentals._BEACON_CACHE.clear()
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda *_a, **_k: {"step": "ready", "done": 5, "total": 5, "detail": ""})
+    assert gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)["phase"] == "ready"
+
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: None)
+    gpu_rentals._BEACON_CACHE["vast:48183103"]["at"] = time.time() - gpu_rentals.BEACON_SILENCE_SECONDS * 5
+    dto = gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)
+    assert dto["phase"] == "ready", "a working machine must never be reaped for a quiet beacon"
+
+
+def test_restarting_the_stack_does_not_read_as_silence(monkeypatch) -> None:
+    """The cache is in-memory, so a restart forgets what it had heard.
+
+    Without a floor at process start, restarting the stack next to a box that
+    is 20 minutes into a legitimately slow download would count all 20 minutes
+    as silence and destroy it on the first sweep — turning a routine restart
+    into a way to lose rentals.
+    """
+    gpu_rentals._BEACON_CACHE.clear()
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: None)
+    monkeypatch.setattr(gpu_rentals, "_PROCESS_STARTED", time.time() - 30)
+    old = _running_box(start_date=time.time() - gpu_rentals.BEACON_SILENCE_SECONDS * 3)
+    dto = gpu_rentals._instance_dto(_vast_instance(old), probe=True)
+    assert dto["phase"] == "provisioning", "silence cannot predate our ability to hear it"
+
+    # Once THIS process has been listening long enough, the verdict lands.
+    monkeypatch.setattr(gpu_rentals, "_PROCESS_STARTED",
+                        time.time() - gpu_rentals.BEACON_SILENCE_SECONDS - 60)
+    dto = gpu_rentals._instance_dto(_vast_instance(old), probe=True)
+    assert dto["phase"] == "error"
+    assert "never reported in" in dto["provision"]["detail"]
+
+
+def test_a_box_with_no_published_beacon_port_is_not_judged_on_silence(monkeypatch) -> None:
+    """With nowhere to ask, "no answer" says nothing about the box."""
+    gpu_rentals._BEACON_CACHE.clear()
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: None)
+    monkeypatch.setattr(gpu_rentals, "_PROCESS_STARTED",
+                        time.time() - gpu_rentals.BEACON_SILENCE_SECONDS - 60)
+    no_ports = _running_box(ports={}, start_date=time.time() - gpu_rentals.BEACON_SILENCE_SECONDS * 3)
+    dto = gpu_rentals._instance_dto(_vast_instance(no_ports), probe=True)
+    assert dto["phase"] == "provisioning", "a missing port map is not a dead host"

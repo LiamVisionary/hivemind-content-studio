@@ -311,6 +311,9 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
 
 // Provisioning lifecycle in on-box beacon order. `phase` "booting" precedes
 // beacon contact; after that the beacon's `step` drives the active row.
+// Below this, a stale reading is just poll jitter and saying so is noise.
+const STALE_BEACON_NOTICE_S = 45;
+
 const PROVISION_STEPS = [
   { key: 'booting', label: 'Booting host' },
   { key: 'installing', label: 'Installing the ComfyUI stack' },
@@ -378,6 +381,16 @@ function ProvisionStepper({ machine }) {
           </div>
         );
       })}
+      {/* A remembered reading must not pose as a live one. The box goes quiet
+          for minutes at a time while it saturates its uplink pulling models,
+          so silence alone is not a failure — but the operator should be able
+          to tell "still working" from "last thing we heard". */}
+      {!failed && p?.stale_seconds > STALE_BEACON_NOTICE_S ? (
+        <small className="mt-0.5 text-[11px] text-warn">
+          No contact with the box for {formatSeconds(p.stale_seconds)} — showing its last known
+          progress. Normal while it is pulling models at full speed.
+        </small>
+      ) : null}
     </div>
   );
 }

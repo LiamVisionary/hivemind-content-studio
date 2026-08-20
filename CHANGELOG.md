@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-20 15:10:00 +0800 — A rental that stops answering is reaped instead of billed behind "Booting host"
+
+- Status: Uncommitted
+- User-facing result: The Machines view no longer rewinds to "Booting host" when a provisioning poll times out; it shows the box's last known step and, past 45s, says how long contact has been lost. A managed box that Vast reports running but that has answered nothing for 15 minutes is now called an error and reaped, the way a container that never boots already was.
+- Root cause: `_fetch_beacon` gave the on-box beacon 1.5s, and `_instance_dto` answered every miss with `step: "booting"`. The beacon is a single-threaded `python3 -m http.server` on a box saturating its own uplink over 8 ranged connections per file, so misses were the norm, not the exception. Measured on rental vast:48183103 mid-download: it answered in 0.54s when it answered, but 21 of 24 polls got nothing within 8s. The cosmetic half was the rewinding ladder. The expensive half was that `reap_failed_rentals` reads through the same timeout, so a host whose network dies — killing the downloads and the beacon together — reported `provisioning`, not `error`, and kept billing. vast:48183103 died at 3/5 on the 21GB transformer and was only destroyed because a poll happened to land in one of its brief responsive windows.
+- Guards: A `ready` box is never reaped over a quiet status file — it answers through its tunnel and its ComfyUI. Silence is measured from process start when the in-memory cache has nothing, so restarting the stack beside a slow download cannot destroy it. A box with no published beacon port is not judged on silence at all.
+- Verification: 6 new tests in `test/studio/test_gpu_rentals_api.py` cover the rewind, the surviving error reading, the silence escalation and its three guards; that file passes 111/111 and the complete studio suite passes 639/639. Live: a replacement 5090 (vast:48186258) provisioned through the patched path 0/7 -> ready in 3m05s with zero rewinds. The staleness path itself was exercised by tests, not by that box — its beacon answered every poll.
+- Intended commit message: `fix: reap a rental whose beacon dies instead of billing it`
+
 ## 2026-08-20 14:16:49 +0800 — The studio names the broken funnel stage instead of leaving operators to read ratios
 
 - Status: Uncommitted

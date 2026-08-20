@@ -161,6 +161,32 @@ _MINIMAX_PUBLIC_FILES = [
         "minimax_h3_turbo_v4_step600_ema.safetensors",
         0.78,
     ),
+    # The still-image lane (minimax-h3-image). H3 Studio is built against
+    # Kijai's W4A8 pruned pair, NOT the int8_convrot FL2VA we convert ourselves
+    # for the video lane — same model, different quantisation, and the pack's
+    # sampling profiles are tuned to these. They are public, so the box pulls
+    # them straight from HuggingFace rather than round-tripping ~23GB through
+    # R2. REF2VA has no video-lane equivalent at all: it is the reference path
+    # that makes @Image1..@Image9 work.
+    #
+    # This adds ~23GB to every H3 box, video-only ones included. That is
+    # deliberate: one rented box now serves both studio pages (the tier's
+    # studio_pages carries video AND image), so a box that could not run a
+    # still would be a box the studio has to refuse work to.
+    (
+        "https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/main/"
+        "minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
+        "diffusion_models",
+        "minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
+        11.7,
+    ),
+    (
+        "https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/main/"
+        "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors",
+        "diffusion_models",
+        "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors",
+        11.0,
+    ),
 ]
 # Pinned like every other node on the box. 2026-08-07 HEAD; ships
 # h3_silu_temb_grid.safetensors, the silu(t_emb) grid the loader needs.
@@ -1331,14 +1357,61 @@ def _offer_dto(offer: Offer) -> dict:
     }
 
 
+# A provisioning box saturates its own uplink: the models are pulled over
+# DOWNLOAD_CONNECTIONS ranged connections per file, every file at once, while
+# the beacon is a single-threaded `python3 -m http.server`. Measured 2026-08-20
+# on rental vast:48183103 mid-download: the beacon answered in 0.54s when it
+# answered at all, but 21 of 24 polls got nothing within 8s. A 1.5s budget
+# therefore missed most reads on exactly the boxes worth watching.
+BEACON_TIMEOUT_SECONDS = float(os.environ.get("HIVEMIND_RENTAL_BEACON_TIMEOUT", "4.0"))
+
+# Last successful beacon read per rental, so a missed poll reports the box's
+# last known state instead of erasing it. Keyed by str(RentalRef); entries go
+# when the rental does. Written from the polling path and the reaper thread —
+# a plain dict is enough, both only ever replace whole values.
+_BEACON_CACHE: dict[str, dict] = {}
+
+# Floor for "we have never heard from this box": silence cannot predate our
+# ability to hear it. See _beacon_silence.
+_PROCESS_STARTED = time.time()
+
+
 def _fetch_beacon(url: str) -> dict | None:
     """Best-effort read of the box's provisioning beacon; None while unreachable."""
     try:
-        response = requests.get(url, timeout=1.5)
+        response = requests.get(url, timeout=BEACON_TIMEOUT_SECONDS)
         data = response.json()
         return data if isinstance(data, dict) and data.get("step") else None
     except Exception:
         return None
+
+
+def _remember_beacon(rental_id: str, beacon: dict) -> dict:
+    _BEACON_CACHE[rental_id] = {"beacon": beacon, "at": time.time()}
+    return beacon
+
+
+def _last_beacon(rental_id: str) -> tuple[dict | None, float]:
+    """The last reading we got from this box, and how long ago it arrived."""
+    entry = _BEACON_CACHE.get(rental_id)
+    if not entry:
+        return None, 0.0
+    return entry["beacon"], time.time() - float(entry["at"])
+
+
+def _forget_beacon(rental_id: str) -> None:
+    _BEACON_CACHE.pop(str(rental_id), None)
+
+
+# How long a managed box that is RUNNING may leave us with no beacon contact
+# before we call it dead rather than busy. Deliberately generous: a healthy box
+# under a full-speed download goes quiet for minutes at a time (see the
+# measurement above), and destroying one of those would throw away real
+# progress and real money. What this catches is the box that never comes back —
+# the failure mode where the host's network dies, which kills the downloads and
+# the beacon together, and which otherwise bills at the full hourly rate
+# forever behind a hopeful "Booting host".
+BEACON_SILENCE_SECONDS = int(os.environ.get("HIVEMIND_RENTAL_BEACON_SILENCE_SECONDS", "900"))
 
 
 # Port maps and SSH endpoints are resolved by the provider now (an SSH endpoint
@@ -1401,6 +1474,55 @@ def _boot_stall(instance: Instance, endpoint: tuple[str, str] | None) -> dict | 
     }
 
 
+def _beacon_silence(instance: Instance, step: str | None, stale: float | None) -> dict | None:
+    """A provisioning record for a running box that has stopped answering.
+
+    The counterpart to _boot_stall for a box that DID come up: its container is
+    running, so nothing above notices, but the host's network has died and
+    taken the model downloads and the beacon with it. 2026-08-20 (rental
+    vast:48183103) is the case this exists for - the downloads failed at 3/5
+    and the box only got reaped because a poll happened to land in one of its
+    brief responsive windows. Miss that window and it bills at the full rate
+    behind a progress step that will never advance.
+
+    Returns None while the box is merely busy, which is the common case: a
+    healthy download saturates the uplink and starves the single-threaded
+    beacon for minutes at a stretch.
+    """
+    # A box that finished provisioning is not judged on its beacon: it has a
+    # tunnel and a ComfyUI to answer for it, and destroying a working machine
+    # over a quiet status file is far more expensive than the bill this saves.
+    if step == "ready" or step == "error":
+        return None
+    if step is None:
+        # Never heard from it at all - measure from the moment it started, or
+        # from the moment THIS process started if that is later. The cache is
+        # in-memory, so every restart forgets what it had heard; without the
+        # floor, restarting the stack next to a box that is 20 min into a
+        # legitimately slow download would read as 20 min of silence and
+        # destroy it on the first sweep.
+        started = instance.started_at
+        if not started:
+            return None
+        quiet = time.time() - max(float(started), _PROCESS_STARTED)
+        what = "never reported in"
+    else:
+        quiet = float(stale or 0.0)
+        what = f"went quiet at {step}"
+    if quiet < BEACON_SILENCE_SECONDS:
+        return None
+    return {
+        "step": "error",
+        "done": 0,
+        "total": None,
+        "stale_seconds": int(quiet),
+        "detail": (
+            f"the box {what} and has not answered for {int(quiet // 60)} min while the host "
+            f"reports it running. That is a dead host - destroy it and rent again."
+        ),
+    }
+
+
 def _instance_dto(instance: Instance, probe: bool = False) -> dict:
     label = instance.label
     managed = label.startswith(STUDIO_LABEL_PREFIX)
@@ -1430,20 +1552,47 @@ def _instance_dto(instance: Instance, probe: bool = False) -> dict:
             provision = stall
     elif instance.state == "running" and managed:
         beacon_port = instance.ports.get(BEACON_PORT)
-        beacon = _fetch_beacon(f"http://{ip}:{beacon_port}/progress.json") if (probe and ip and beacon_port) else None
+        # Only a box we could actually reach for is judged on its silence: with
+        # no published port there is nowhere to ask, and "the provider has not
+        # surfaced the port map yet" must not read the same as "the host died".
+        asked = bool(probe and ip and beacon_port)
+        beacon = _fetch_beacon(f"http://{ip}:{beacon_port}/progress.json") if asked else None
+        # A miss is not a state. Falling back to step "booting" rewound the
+        # studio's ladder to "Booting host" every time a poll timed out, so a
+        # box that was 3/5 through its models looked like it had started over —
+        # and, far worse, a box whose beacon said "error" read as "provisioning"
+        # to the reaper below, which then left it billing. Serve the last thing
+        # the box actually told us, aged, until it has been quiet long enough
+        # to call dead.
+        stale = 0.0
+        if beacon:
+            _remember_beacon(str(ref), beacon)
+        else:
+            beacon, stale = _last_beacon(str(ref))
         if beacon:
             step = beacon.get("step")
             phase = "ready" if step == "ready" else "error" if step == "error" else "provisioning"
             provision = {
-                "step": beacon.get("step"),
+                "step": step,
                 "done": beacon.get("done"),
                 "total": beacon.get("total"),
                 "detail": beacon.get("detail") or "",
+                # Surfaced so the studio can say "lost contact" rather than
+                # presenting a remembered reading as a live one.
+                "stale_seconds": int(stale) if stale else 0,
             }
+            silence = _beacon_silence(instance, step, stale) if asked else None
+            if silence:
+                phase = "error"
+                provision = silence
         else:
             phase = "provisioning"
-            provision = {"step": "booting", "done": 0, "total": None,
+            provision = {"step": "booting", "done": 0, "total": None, "stale_seconds": 0,
                          "detail": "Container up, waiting for the provisioning beacon"}
+            silence = _beacon_silence(instance, None, None) if asked else None
+            if silence:
+                phase = "error"
+                provision = silence
     elif instance.state == "running":
         phase = "running"
     else:
@@ -2654,6 +2803,8 @@ def destroy_rental(rental_id: str | int) -> dict:
     # request, so the lane is gone the moment this returns.
     detach_rental(ref)
     rental_providers.get(ref.provider).destroy(ref.native)
+    # The remembered reading dies with the box it described.
+    _forget_beacon(str(ref))
     return {"rental_id": str(ref), "destroyed": True, "restarting_stack": False}
 
 
