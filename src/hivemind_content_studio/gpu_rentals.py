@@ -416,7 +416,7 @@ TIERS: dict[str, dict[str, Any]] = {
         "reference_job": "5s clip @960×544, video + audio",
         "public_models": _MINIMAX_PUBLIC_FILES,
         "lane_needles": ["minimax_h3"],
-        "studio_pages": ["video"],
+        "studio_pages": ["video", "image"],
         # Civitai's base-model category for H3 add-on LoRAs (style/character/
         # motion — distinct from the turbo LoRA baked into the serving set) is
         # exactly "MiniMax H3".

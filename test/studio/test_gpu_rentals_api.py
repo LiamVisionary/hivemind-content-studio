@@ -1307,7 +1307,9 @@ def test_switching_between_attached_machines_touches_nothing_remote(tmp_path: Pa
 
     assert calls == [], "an attached machine already has a lane; nothing to ask Vast"
     assert body["attached"] is True and body["lane"] == "rental7"
-    assert body["studio_pages"] == ["video"]
+    # The H3 lane serves both pages: minimax-h3-image runs on the same rented box,
+    # matched by the same lane_needles as the video graphs.
+    assert body["studio_pages"] == ["video", "image"]
     registry = tmp_path / "media-state/rental-lanes.json"
     assert list(json.loads(registry.read_text())) == ["vast:7", "vast:8"], "the selected machine leads"
 

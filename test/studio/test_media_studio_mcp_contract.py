@@ -2213,7 +2213,9 @@ def test_motion_reference_budget_mirror_matches_the_registry():
     # one that actually stages motion clips — the budget has to reach it, which
     # it does by inheritance. A tier that lost it would offer 15s again.
     for workflow in _resolved_registry_workflows(registry):
-        if workflow["id"].startswith("minimax-h3"):
+        # VIDEO lanes only: minimax-h3-image shares the id prefix but is a still
+        # lane with no motion references, so it carries no budget by design.
+        if workflow["id"].startswith("minimax-h3") and workflow.get("media_type") == "video":
             assert workflow["motion_reference_budget"]["max_reference_pixel_frames"] == _H3_MOTION_REFERENCE_PIXEL_FRAMES
 
     # And the fallback list the studio gets when the registry cannot be read

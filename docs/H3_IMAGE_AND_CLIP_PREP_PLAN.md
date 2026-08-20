@@ -212,10 +212,28 @@ static analysis gives names that *look* right and are not. The correct source is
 `/object_info`, which reports the exact schema of every registered node. That needs the stripped pack
 loaded in a ComfyUI — either the local one on :8188 (needs a restart) or the first rented box.
 
-**Still to do:** generate the API graph from `/object_info`; register `minimax-h3-image`
-(`media_type: image`, `beta: true`) in the MCP registry; wire it into the React ImageStudio reusing
-`h3References.js`; stock the W4A8 FL2VA/REF2VA weights, the 32B encoder and the H3 VAE to R2; verify
-on a rental.
+**Resolved (2026-08-19).** The stripped pack was installed into the local ComfyUI on :8188 and
+`/object_info` gave the real schemas. Two of them contradicted static analysis outright —
+`H3StudioLoader` has **seven** required inputs, not the four the source read suggested — which is
+exactly why the graph was not hand-written.
+
+`packages/media-gateway/workflows/minimax-h3-image.api.json` is the resulting ten-node graph, and it
+**validates against a live ComfyUI**: POSTing it to `/prompt` returns errors on nothing but the four
+model filenames in node 1, which are absent from this Mac. ComfyUI validates by walking back from the
+output node, so every input name, link and type across nodes 2-10 — the whole expanded subgraph — was
+checked and passed.
+
+Registered as `minimax-h3-image` (`media_type: image`, `beta: true`, `builder: comfy-api-image`). No
+new rental lane was needed: the graph references `minimax_h3_*` weights and the H3 tier's existing
+`lane_needles: ["minimax_h3"]` already route it to the rented box. That tier's `studio_pages` gains
+`image` alongside `video`.
+
+Runtime proof of the strip, on the local box: every one of the sixteen routes answers 404, and the
+`pdd/install` POST returns the same 405 a made-up path does — so it is ComfyUI's generic reply, not a
+live handler. Nothing appeared in `custom_nodes/` from calling it.
+
+**Still to do:** wire the lane into the React ImageStudio reusing `h3References.js`; stock the W4A8
+FL2VA/REF2VA weights, the 32B encoder and the H3 VAE to R2; verify a real render on a rental.
 
 ## Phase 2 — `minimax-h3-image` lane
 

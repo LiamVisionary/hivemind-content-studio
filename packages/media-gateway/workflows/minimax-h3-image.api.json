@@ -1,0 +1,199 @@
+{
+  "1": {
+    "class_type": "H3StudioLoader",
+    "_meta": {
+      "title": "H3 models"
+    },
+    "inputs": {
+      "fl2va_model": "minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
+      "ref2va_model": "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors",
+      "text_encoder": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "video_vae": "minimax_h3_video_vae_fp16.safetensors",
+      "image_vae": "Disabled - original H3 video VAE only",
+      "image_analyzer": "Fast \u00b7 Qwen3.5 2B",
+      "prompt_writer": "Same as image analyzer"
+    }
+  },
+  "2": {
+    "class_type": "H3StudioDirector",
+    "_meta": {
+      "title": "Director"
+    },
+    "inputs": {
+      "mode": "image",
+      "prompt": "",
+      "resolution": "Custom",
+      "aspect_ratio": "1:1",
+      "width": 1024,
+      "height": 1024,
+      "seconds": 5.0,
+      "fps": 24.0,
+      "advanced": false,
+      "keyframe_role": "first",
+      "ref_image_size": "2k",
+      "reference_mention_mode": "index",
+      "megapixels": 1.5,
+      "seed": 0,
+      "enhance_mode": "compile_only",
+      "adherence": 0.85,
+      "route": "auto",
+      "sampling_profile": "lightx_v1_fl2v_8",
+      "frame_profile": "recommended_5",
+      "analyzer_model": "",
+      "studio_state": "",
+      "h3_bundle": [
+        "1",
+        0
+      ]
+    }
+  },
+  "3": {
+    "class_type": "H3StudioCondition",
+    "_meta": {
+      "title": "Condition"
+    },
+    "inputs": {
+      "h3_bundle": [
+        "1",
+        0
+      ],
+      "studio_context": [
+        "2",
+        0
+      ]
+    }
+  },
+  "4": {
+    "class_type": "H3StudioContextSamplingPreset",
+    "_meta": {
+      "title": "Sampling preset"
+    },
+    "inputs": {
+      "model": [
+        "3",
+        0
+      ],
+      "studio_context": [
+        "2",
+        0
+      ]
+    }
+  },
+  "5": {
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "Noise"
+    },
+    "inputs": {
+      "noise_seed": [
+        "2",
+        5
+      ]
+    }
+  },
+  "6": {
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "Guider"
+    },
+    "inputs": {
+      "model": [
+        "4",
+        0
+      ],
+      "conditioning": [
+        "3",
+        2
+      ]
+    }
+  },
+  "7": {
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "Sample"
+    },
+    "inputs": {
+      "noise": [
+        "5",
+        0
+      ],
+      "guider": [
+        "6",
+        0
+      ],
+      "sampler": [
+        "4",
+        1
+      ],
+      "sigmas": [
+        "4",
+        2
+      ],
+      "latent_image": [
+        "3",
+        3
+      ]
+    }
+  },
+  "8": {
+    "class_type": "H3StudioDecode",
+    "_meta": {
+      "title": "Decode"
+    },
+    "inputs": {
+      "samples": [
+        "7",
+        0
+      ],
+      "vae": [
+        "3",
+        4
+      ],
+      "tiling_mode": "Auto",
+      "tile_size": 256,
+      "tile_overlap": 64,
+      "tile_batch": "Auto"
+    }
+  },
+  "9": {
+    "class_type": "H3StudioFrameSelector",
+    "_meta": {
+      "title": "Pick the still"
+    },
+    "inputs": {
+      "frames": [
+        "8",
+        0
+      ],
+      "recommended_index": [
+        "8",
+        3
+      ],
+      "strategy": "decode_recommended",
+      "manual_index": 0,
+      "skip_first_frames": 0,
+      "candidate_start": 0.0,
+      "candidate_end": 1.0,
+      "similarity_weight": 0.6,
+      "top_k": 4,
+      "emit_candidate_batch": false
+    }
+  },
+  "10": {
+    "class_type": "H3StudioSaveImage",
+    "_meta": {
+      "title": "Save"
+    },
+    "inputs": {
+      "images": [
+        "9",
+        0
+      ],
+      "studio_context": [
+        "2",
+        0
+      ],
+      "filename_prefix": "H3"
+    }
+  }
+}
