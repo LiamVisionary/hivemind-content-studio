@@ -5,6 +5,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1593,6 +1594,84 @@ def test_minimax_h3_maps_all_four_frame_modes(tmp_path, start, end, expect_first
     loaders = [n for n in graph.values() if n["class_type"] == "LoadImage"]
     assert len(loaders) == int(expect_first) + int(expect_last)
     assert all(n["inputs"]["image"] for n in loaders), "a staged loader must carry a filename"
+
+
+def _oriented_heic_bytes():
+    """A 120x80 HEIC — red left half, blue right half — stored with EXIF
+    orientation 6 (rotate 90° clockwise to display), the way a portrait iPhone
+    photo is written. Shown correctly it is 80x120 with red on top."""
+    pillow_heif = pytest.importorskip("pillow_heif")
+    pillow_heif.register_heif_opener()
+    image = Image.new("RGB", (120, 80), (255, 0, 0))
+    image.paste((0, 0, 255), (60, 0, 120, 80))
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    buffer = io.BytesIO()
+    image.save(buffer, format="HEIF", exif=exif.tobytes(), quality=90)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("delivery", ["data_url", "raw_base64", "image_path"])
+def test_heic_references_are_staged_as_upright_jpegs(tmp_path, monkeypatch, delivery):
+    """An iPhone photo arrives as HEIC. Every lane opens staged pictures through
+    ComfyUI's LoadImage, i.e. plain Pillow, which cannot read HEIC — so the MCP
+    has to store it as a JPEG, orientation baked into the pixels so the lane and
+    the caller agree which way is up, however the bytes arrive: a data URL, bare
+    base64 (no mime to go on, only the ftyp brand), or an absolute local path."""
+    # The MCP transcodes with the project venv; in a bare worktree that falls
+    # back to a python without Pillow, so point it at the interpreter running
+    # this test, which has pillow-heif as a declared dependency.
+    monkeypatch.setenv("MEDIA_STUDIO_PYTHON", sys.executable)
+    heic = _oriented_heic_bytes()
+    if delivery == "data_url":
+        arguments = {"image_base64": "data:image/heic;base64," + base64.b64encode(heic).decode()}
+    elif delivery == "raw_base64":
+        arguments = {"image_base64": base64.b64encode(heic).decode()}
+    else:
+        source = tmp_path / "IMG_0001.HEIC"
+        source.write_bytes(heic)
+        arguments = {"image_path": str(source)}
+
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a courier waits on a platform", **arguments})
+
+    loader = next(n for n in graph.values() if n["class_type"] == "LoadImage")
+    staged_name = loader["inputs"]["image"]
+    assert staged_name.endswith(".jpg"), staged_name
+    with Image.open(tmp_path / "input" / staged_name) as image:
+        assert image.format == "JPEG"
+        # Upright: the portrait orientation is in the pixels now, not in a tag
+        # a decoder may or may not honour.
+        assert image.size == (80, 120)
+        assert image.getexif().get(0x0112) in (None, 1)
+        rgb = image.convert("RGB")
+        top, bottom = rgb.getpixel((40, 10)), rgb.getpixel((40, 110))
+    assert top[0] > 200 and top[2] < 60, f"red should be on top after the rotation, got {top}"
+    assert bottom[2] > 200 and bottom[0] < 60, f"blue should be below after the rotation, got {bottom}"
+    staged = [path.name for path in (tmp_path / "input").iterdir()]
+    assert not [name for name in staged if name.lower().endswith((".heic", ".heif"))], staged
+
+
+def test_a_heic_that_cannot_be_converted_is_refused_not_staged_raw(tmp_path, monkeypatch):
+    """Before this, the raw .heic was written and the lane failed at LoadImage
+    with a stripped error. The refusal has to happen here, carry the decoder's
+    reason, and leave nothing behind for Comfy to choke on."""
+    fake_python = tmp_path / "python-without-heif"
+    fake_python.write_text("#!/bin/sh\necho 'no HEIF decoder here' >&2\nexit 3\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    monkeypatch.setenv("MEDIA_STUDIO_PYTHON", str(fake_python))
+    heic = _oriented_heic_bytes()
+
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3",
+        {"prompt": "a courier waits on a platform",
+         "image_base64": "data:image/heic;base64," + base64.b64encode(heic).decode()},
+        expect_refusal=True,
+    )
+
+    assert "HEIC/HEIF image could not be converted to JPEG" in reply
+    assert "no HEIF decoder here" in reply
+    input_dir = tmp_path / "input"
+    assert not input_dir.exists() or not list(input_dir.iterdir())
 
 
 def test_video_workflows_roll_a_fresh_seed_when_the_caller_omits_one(tmp_path):
