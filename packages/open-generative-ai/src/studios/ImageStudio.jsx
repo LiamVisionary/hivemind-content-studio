@@ -871,13 +871,17 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
   // one imperfect detail) written into the prompt as an idempotent block, so
   // dealing a new cast replaces it rather than stacking. Only the deal number
   // lives in state; the text is derived from it. Passing null clears.
-  const applyUgc = (index) => {
-    const variant = Number.isInteger(index) ? ugcVariantAt(index) : null;
+  const applyUgc = (index, roomIndex = null) => {
+    const variant = Number.isInteger(index) ? ugcVariantAt(index, roomIndex) : null;
     const prompt = applyUgcFirstFrame(s.prompt, variant);
     s.prompt = prompt;
     // Kept when clearing, so turning UGC back on deals the NEXT cast instead of
-    // restarting the cycle at the one you just used.
-    if (variant) s.ugcVariantIndex = variant.index;
+    // restarting the cycle at the one you just used. The room is dealt on its
+    // own number so the same face can be shot in a different place.
+    if (variant) {
+      s.ugcVariantIndex = variant.index;
+      s.ugcRoomIndex = variant.roomIndex;
+    }
     // A first frame for a phone-selfie clip is portrait. Said out loud in the menu.
     if (variant && ugcVerticalAvailable()) s.selectedAr = '9:16';
     updateComposerDraft({ prompt });
@@ -2687,6 +2691,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
             mode="image"
             active={hasUgcFirstFrame(s.prompt)}
             variantIndex={Number.isInteger(s.ugcVariantIndex) ? s.ugcVariantIndex : null}
+            roomIndex={Number.isInteger(s.ugcRoomIndex) ? s.ugcRoomIndex : null}
             verticalAvailable={ugcVerticalAvailable()}
             onArm={applyUgc}
           />

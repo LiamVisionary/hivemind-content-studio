@@ -111,19 +111,98 @@ const VIDEO_CLOSING = 'End unresolved — no payoff, no lesson, no slogan.';
 const IMAGE_OPENING = 'Ultra realistic iPhone front camera selfie.';
 const IMAGE_CLOSING = 'no text, no captions, 9:16.';
 
-/** The cast for arm number `index`, cycling without repeating a pairing soon. */
-export function ugcVariantAt(index) {
+/**
+ * The cast for arm number `index`, cycling without repeating a pairing soon.
+ *
+ * `roomIndex` deals the PLACE separately from the person. When references or a
+ * persona already decide who is on camera, the invented person is dead weight
+ * but the room, light and beats are still the whole point — so those have to be
+ * re-dealable on their own. Left null the two move together, exactly as before.
+ */
+export function ugcVariantAt(index, roomIndex = null) {
   const n = Math.max(0, Math.floor(Number(index) || 0));
+  const r = Number.isInteger(roomIndex) && roomIndex >= 0 ? roomIndex : n;
   const person = UGC_PEOPLE[n % UGC_PEOPLE.length];
-  const room = UGC_ROOMS[n % UGC_ROOMS.length];
+  const room = UGC_ROOMS[r % UGC_ROOMS.length];
   // Two beats or three, alternating, taken from a window that walks the bank —
-  // so consecutive arms share at most one gesture.
-  const count = 2 + (n % 2);
+  // so consecutive arms share at most one gesture. Keyed to the ROOM deal, so
+  // re-dealing the place also varies the performance when the face is pinned.
+  const count = 2 + (r % 2);
   const beats = [];
   for (let step = 0; step < count; step += 1) {
-    beats.push(UGC_BEATS[(n * 2 + step) % UGC_BEATS.length]);
+    beats.push(UGC_BEATS[(r * 2 + step) % UGC_BEATS.length]);
   }
-  return { index: n, person, room, beats: Object.freeze(beats) };
+  return { index: n, roomIndex: r, person, room, beats: Object.freeze(beats) };
+}
+
+/**
+ * Who the clip is of — resolved from what the composer actually holds.
+ *
+ * UGC mode used to answer this by itself: it dealt a person and wrote them into
+ * the prompt as a hard description. That is right for a text-to-video batch and
+ * wrong for every other case, because a described "man in his early 30s" beats
+ * an attached reference picture of somebody else — H3 renders the words. So the
+ * dealt person is now the LAST resort, taken only when nothing else on the
+ * composer says who is on camera (2026-08-13).
+ *
+ * Priority is most-specific-first: a cast defines subjects explicitly, a persona
+ * names the references, bare references at least pin the face, a start frame is
+ * the face. `invents` is what the UI reads to decide whether "deal a different
+ * person" is a meaningful button.
+ */
+export function ugcSubject({
+  castNames = [],
+  personaName = '',
+  referenceImages = 0,
+  startFrame = false,
+} = {}) {
+  const names = (Array.isArray(castNames) ? castNames : []).map((n) => String(n || '').trim()).filter(Boolean);
+  if (names.length) return { kind: 'cast', names: Object.freeze(names), count: 0, invents: false };
+  const persona = String(personaName || '').trim();
+  const pictures = Math.max(0, Math.floor(Number(referenceImages) || 0));
+  if (pictures > 0) {
+    return {
+      kind: persona ? 'persona' : 'reference',
+      names: Object.freeze(persona ? [persona] : []),
+      count: pictures,
+      invents: false,
+    };
+  }
+  if (startFrame) return { kind: 'frame', names: Object.freeze([]), count: 0, invents: false };
+  return { kind: 'dealt', names: Object.freeze([]), count: 0, invents: true };
+}
+
+/**
+ * The subject sentences for a brief. Everything below them — room, light, phone
+ * mic, timeline, beats — is identical whoever is on camera; this is the only
+ * part that changes, and the only part that could ever contradict a reference.
+ */
+function subjectLines(cast, subject) {
+  const where = cast.room.place;
+  const name = subject?.names?.length ? subject.names.join(' and ') : '';
+  switch (subject?.kind) {
+    case 'cast':
+      return [
+        `Subject: the subjects defined above (${name}), ${where}.`,
+        'Do not re-describe them. Their appearance is already fixed by the subject definitions and the reference pictures.',
+      ];
+    case 'persona':
+    case 'reference':
+      return [
+        `Subject: the person in the reference pictures${name ? ` (${name})` : ''}, ${where}.`,
+        'Their face, hair, build, age and clothing come from the references. Do not invent an appearance for them, '
+          + 'and do not change their gender.',
+      ];
+    case 'frame':
+      return [
+        `Subject: the person in the first frame, ${where}.`,
+        'Match the first frame exactly — same face, same hair, same clothing.',
+      ];
+    default:
+      // Nothing attached: the dealt person IS the answer, and inventing one
+      // specific human beats describing a type.
+      return [`Subject: ${cast.person}, ${where}.`];
+  }
 }
 
 /** 3 -> "0:03". Whole seconds only; every boundary below lands on one. */
@@ -184,13 +263,13 @@ export function readUgcScript(prompt) {
 }
 
 /** The UGC block for a video prompt: cast, framing, timeline, beats. */
-export function ugcVideoBrief(variant, { durationSeconds, script } = {}) {
+export function ugcVideoBrief(variant, { durationSeconds, script, subject } = {}) {
   const cast = variant || ugcVariantAt(0);
   const { room } = cast;
   const { hookEnd, ctaStart, seconds, hasBody } = ugcTimeline(durationSeconds);
   const lines = [
     VIDEO_OPENING,
-    `Subject: ${cast.person}, ${room.place}. Match the reference frame exactly.`,
+    ...subjectLines(cast, subject || ugcSubject()),
     `Place: ${room.light}. ${room.detail}`,
     'Camera: handheld front-camera selfie, chest-up, natural micro shakes, 9:16.',
     `Audio: phone-mic voice with room tone and one ambient sound event — ${room.sound}. No music.`,
@@ -265,12 +344,40 @@ export function hasUgcFirstFrame(prompt) {
  * Passing a null variant strips. Re-arming keeps whatever script the old block
  * held, so dealing a new cast never costs the words.
  */
-export function applyUgcVideoBrief(prompt, variant, { durationSeconds } = {}) {
+export function applyUgcVideoBrief(prompt, variant, { durationSeconds, subject } = {}) {
   const script = readUgcScript(prompt);
   const base = stripUgcVideoBrief(prompt);
   if (!variant) return base;
-  const block = ugcVideoBrief(variant, { durationSeconds, script });
+  const block = ugcVideoBrief(variant, { durationSeconds, script, subject });
   return base ? `${base}\n\n${block}` : block;
+}
+
+// Which of the four bindings the block in this prompt is written against.
+// 'persona' and 'reference' collapse to one — the name in the sentence is
+// cosmetic, the binding is the same — so this is directly comparable with
+// ugcSubjectBinding() below to tell whether an armed block has gone stale.
+const SUBJECT_LINE = /^Subject: (.+)$/m;
+
+export function ugcSubjectBinding(kind) {
+  return kind === 'persona' ? 'reference' : (kind || null);
+}
+
+/**
+ * The binding of the UGC block already in this prompt, or null if there is none.
+ *
+ * Needed because arming and attaching happen in either order: a block armed
+ * before the references were added still says "a man in his early 30s", and
+ * nothing about the prompt itself makes that visible. The composer compares
+ * this against the live one and offers to re-bind rather than silently
+ * rewriting text the user may have edited.
+ */
+export function readUgcSubjectBinding(prompt) {
+  if (!hasUgcVideoBrief(prompt)) return null;
+  const line = SUBJECT_LINE.exec(String(prompt || ''))?.[1]?.trim() || '';
+  if (line.startsWith('the subjects defined above')) return 'cast';
+  if (line.startsWith('the person in the reference pictures')) return 'reference';
+  if (line.startsWith('the person in the first frame')) return 'frame';
+  return 'dealt';
 }
 
 /** Arm (or clear) the realism stack on an image prompt. */

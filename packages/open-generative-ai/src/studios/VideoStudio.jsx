@@ -42,7 +42,14 @@ import { collectChainClips, missingChainParent } from '../lib/chainLineage.js';
 import { chainKey, chainTimelineModel } from '../lib/chainTimeline.js';
 import { ChainTimeline } from './video/ChainTimeline.jsx';
 import { armChainPrompt } from '../lib/chainPrompt.js';
-import { applyUgcVideoBrief, hasUgcVideoBrief, ugcVariantAt } from '../lib/ugcMode.js';
+import {
+  applyUgcVideoBrief,
+  hasUgcVideoBrief,
+  readUgcSubjectBinding,
+  ugcSubject,
+  ugcSubjectBinding,
+  ugcVariantAt,
+} from '../lib/ugcMode.js';
 import { UgcMenu } from './UgcMenu.jsx';
 import { restoredHistoryEntry } from '../lib/restoredOutput.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
@@ -89,6 +96,7 @@ import { ReferencesMenu } from './video/ReferencesMenu.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
 import { withReferenceTags } from '../lib/h3References.js';
+import { parseSixSections } from '../lib/castPrompt.js';
 import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
 import { LoraSection } from './image/LoraSection.jsx';
 import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
@@ -481,16 +489,42 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     bump();
   };
 
+  // Who the UGC brief should say is on camera, read off the composer as it
+  // stands. UGC used to answer this itself by dealing a person and writing them
+  // in as a hard description — which quietly beat every reference attached
+  // beside it, because H3 renders the words: a persona of a woman came back as
+  // "a man in his early 30s with two-day stubble" (2026-08-13). The dealt person
+  // is now the fallback for when genuinely nothing else says who this is.
+  const ugcSubjectNow = () => {
+    const sections = parseSixSections(s.setup.prompt);
+    // A cast has already written subject_definitions, and it addresses them by
+    // label — so does the rest of the prompt, so the brief should too.
+    const castNames = sections?.subject_definitions
+      ? [...new Set(String(sections.subject_definitions).match(/<Subject \d+>/g) || [])]
+      : [];
+    return ugcSubject({
+      castNames,
+      personaName: s.setup.persona?.name || '',
+      // Only count pictures this model is actually going to be conditioned on.
+      referenceImages: videoRequestPlan(s.setup).sendReferenceImages
+        ? (s.setup.referenceImageUrls || []).filter(Boolean).length
+        : 0,
+      startFrame: Boolean(s.setup.imageUrl),
+    });
+  };
+
   // UGC mode — same idempotent-block contract as the phrases above, with one
   // difference that matters: re-dealing the cast KEEPS the script already
-  // written into the block, because varying the person/room/light/beats while
-  // the words stay put is exactly how a batch is made. Passing null clears.
-  // Only the deal number lives in setup; the block is derived from it and the
-  // clip length, so nothing prompt-like reaches the plaintext settings store.
-  const applyUgc = (index) => {
-    const variant = Number.isInteger(index) ? ugcVariantAt(index) : null;
+  // written into the block, because varying the room/light/beats while the
+  // words stay put is exactly how a batch is made. Passing null clears.
+  // Only the deal numbers live in setup; the block is derived from them, the
+  // clip length and the subject, so nothing prompt-like reaches the plaintext
+  // settings store.
+  const applyUgc = (index, roomIndex = null) => {
+    const variant = Number.isInteger(index) ? ugcVariantAt(index, roomIndex) : null;
     const prompt = applyUgcVideoBrief(s.setup.prompt, variant, {
       durationSeconds: Number(s.setup.duration) || null,
+      subject: ugcSubjectNow(),
     });
     // A UGC clip is a phone held in portrait. Switching here rather than
     // leaving it to the user, and said out loud in the menu.
@@ -501,6 +535,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       // Kept when clearing, so turning UGC back on deals the NEXT cast instead
       // of restarting the cycle at the one you just used.
       ugcVariantIndex: variant ? variant.index : s.setup.ugcVariantIndex ?? null,
+      ugcRoomIndex: variant ? variant.roomIndex : s.setup.ugcRoomIndex ?? null,
       ar: variant && vertical ? '9:16' : s.setup.ar,
     };
     updateComposerDraft({ prompt });
@@ -3108,7 +3143,15 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             mode="video"
             active={hasUgcVideoBrief(s.setup.prompt)}
             variantIndex={Number.isInteger(s.setup.ugcVariantIndex) ? s.setup.ugcVariantIndex : null}
+            roomIndex={Number.isInteger(s.setup.ugcRoomIndex) ? s.setup.ugcRoomIndex : null}
             durationSeconds={Number(s.setup.duration) || null}
+            subject={ugcSubjectNow()}
+            // Arming and attaching happen in either order, and a block written
+            // before the references went on still describes an invented person.
+            // Comparing the two bindings is what makes that visible instead of
+            // silently overriding the reference at render time.
+            stale={hasUgcVideoBrief(s.setup.prompt)
+              && readUgcSubjectBinding(s.setup.prompt) !== ugcSubjectBinding(ugcSubjectNow().kind)}
             verticalAvailable={aspectRatiosFor(s.setup, s.setup.modelId).includes('9:16')}
             onArm={applyUgc}
           />

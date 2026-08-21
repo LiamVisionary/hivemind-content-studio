@@ -401,6 +401,18 @@ once — and let the performance be imperfect: a hesitation, a gaze break, a shi
 weight.
 - Use the behavioural beats named in the brief, and no others."""
 
+# The composer half of this is ugcSubject() in src/lib/ugcMode.js, which stopped
+# writing an invented person into the brief when references are attached. The
+# helper has to be told the same thing, or it puts one back: "one real person
+# filming themselves" reads as an invitation to describe one, and a described
+# person beats an attached picture of somebody else — a persona of a woman came
+# back as a man in his early 30s (2026-08-13).
+_UGC_REFERENCE_CLAUSE = """
+- The person on camera is ALREADY FIXED by the reference pictures. Describe what they \
+do, never what they look like: no age, no gender, no hair, no build, no face, and no \
+clothing beyond what the clip itself changes. If you write an appearance here it \
+overrides the references and the clip comes back as somebody else."""
+
 # H3 renders a score if it is asked for one, and scored UGC is instantly an ad.
 _UGC_H3_CLAUSE = """
 - non_diegetic_music must be exactly N/A. A UGC clip has no score.
@@ -524,6 +536,8 @@ def system_prompt(
             system += _UGC_IMAGE_CLAUSE
         else:
             system += _UGC_CLAUSE
+            if isinstance(references, dict) and int(references.get("images") or 0) > 0:
+                system += _UGC_REFERENCE_CLAUSE
             if profile.startswith("minimax-h3"):
                 system += _UGC_H3_CLAUSE
     if continuation and profile.startswith("minimax-h3"):

@@ -728,6 +728,36 @@ def test_a_ugc_first_frame_gets_the_image_stack_not_the_clip_rules() -> None:
     assert "phone microphone" not in system
 
 
+def test_ugc_with_reference_pictures_forbids_describing_the_person() -> None:
+    """The composer stops writing an invented person into the brief once
+    references are attached; the helper has to stop putting one back.
+
+    "One real person filming themselves" reads as an invitation to describe
+    one, and a described person beats an attached picture of somebody else —
+    a persona of a woman came back as a man in his early 30s (2026-08-13).
+    """
+    refs = {"images": 4, "videos": [], "audios": 1}
+    bound = prompt_profiles.system_prompt("minimax-h3-reference", ugc=True, references=refs)
+    assert "ALREADY FIXED by the reference pictures" in bound
+    assert "no age, no gender" in bound
+    # Still a UGC clip in every other respect.
+    assert "SPEECH IS REQUIRED here, overriding the default above" in bound
+
+    # Nothing attached: inventing one specific person is exactly right, and the
+    # prohibition would leave the helper with nobody to describe at all.
+    unbound = prompt_profiles.system_prompt("minimax-h3-t2v", ugc=True)
+    assert "ALREADY FIXED by the reference pictures" not in unbound
+    assert prompt_profiles.system_prompt(
+        "minimax-h3-reference", ugc=True, references={"images": 0, "videos": [], "audios": 2},
+    ).count("ALREADY FIXED") == 0
+
+    # And it is a UGC rule, not a reference rule — an ordinary reference prompt
+    # still describes its subjects, because that is how H3 is conditioned.
+    assert "ALREADY FIXED by the reference pictures" not in prompt_profiles.system_prompt(
+        "minimax-h3-reference", references=refs,
+    )
+
+
 def test_ugc_off_leaves_every_profile_exactly_as_it_was() -> None:
     for profile in ("minimax-h3-t2v", "ltx-video", "ltx-eros-scene-script", "image"):
         assert prompt_profiles.system_prompt(profile) == prompt_profiles.system_prompt(profile, ugc=False)

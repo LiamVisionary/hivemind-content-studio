@@ -12,8 +12,11 @@ import {
   hasUgcFirstFrame,
   hasUgcVideoBrief,
   readUgcScript,
+  readUgcSubjectBinding,
   ugcClock,
   ugcFirstFramePrompt,
+  ugcSubject,
+  ugcSubjectBinding,
   ugcTimeline,
   ugcVariantAt,
   ugcVideoBrief,
@@ -165,4 +168,147 @@ test('whether UGC is on is read from the prompt, not a flag beside it', () => {
   const framed = applyUgcFirstFrame('idea', ugcVariantAt(0));
   assert.equal(hasUgcFirstFrame(framed), true);
   assert.equal(hasUgcFirstFrame(armed), false, 'the video block is not a first frame');
+});
+
+// ---------------------------------------------------------------------------
+// Who is on camera.
+//
+// UGC used to answer this itself, always, by dealing an invented person and
+// writing them into the prompt as a hard description. H3 renders the words, so
+// that description beat every reference picture attached beside it: a persona
+// of a woman came back as "a man in his early 30s with two-day stubble"
+// (reported 2026-08-13). The dealt person is now the last resort.
+// ---------------------------------------------------------------------------
+
+test('the dealt person is used only when nothing else says who is on camera', () => {
+  assert.equal(ugcSubject().kind, 'dealt');
+  assert.equal(ugcSubject().invents, true);
+  assert.equal(ugcSubject({ startFrame: true }).kind, 'frame');
+  assert.equal(ugcSubject({ referenceImages: 4 }).kind, 'reference');
+  assert.equal(ugcSubject({ referenceImages: 4, personaName: 'Cheryl' }).kind, 'persona');
+  // Most specific wins: a cast defines its subjects outright, and it brings the
+  // references with it, so it must not be read as a bare pile of pictures.
+  assert.equal(
+    ugcSubject({ castNames: ['<Subject 1>'], referenceImages: 4, personaName: 'Cheryl' }).kind,
+    'cast',
+  );
+  // Anything that resolves to something attached must not offer to invent.
+  for (const args of [{ startFrame: true }, { referenceImages: 1 }, { castNames: ['<Subject 1>'] }]) {
+    assert.equal(ugcSubject(args).invents, false, `${JSON.stringify(args)} still offered to invent someone`);
+  }
+});
+
+test('a reference-bound brief never describes a person of its own', () => {
+  // The whole defect in one assertion: deal 1 is a woman, deal 2 is a man, and
+  // neither may appear in the prompt when a reference already decides.
+  const bound = [
+    ugcSubject({ referenceImages: 4 }),
+    ugcSubject({ referenceImages: 4, personaName: 'Cheryl' }),
+    ugcSubject({ castNames: ['<Subject 1>', '<Subject 2>'] }),
+    ugcSubject({ startFrame: true }),
+  ];
+  for (const subject of bound) {
+    for (let deal = 0; deal < UGC_PEOPLE.length; deal += 1) {
+      const brief = ugcVideoBrief(ugcVariantAt(deal), { durationSeconds: 8, subject });
+      assert.ok(
+        !brief.includes(UGC_PEOPLE[deal]),
+        `${subject.kind} brief still described the dealt person on deal ${deal}`,
+      );
+    }
+  }
+});
+
+test('a reference-bound brief keeps the room, the light, the sound and the beats', () => {
+  // Identity is the only thing references take over. Everything UGC is actually
+  // for has to survive, or arming it with a persona would be a no-op.
+  const cast = ugcVariantAt(2);
+  const brief = ugcVideoBrief(cast, { durationSeconds: 15, subject: ugcSubject({ referenceImages: 3 }) });
+  assert.ok(brief.includes(cast.room.place));
+  assert.ok(brief.includes(cast.room.light));
+  assert.ok(brief.includes(cast.room.detail));
+  assert.ok(brief.includes(cast.room.sound));
+  cast.beats.forEach((beat) => assert.ok(brief.includes(beat)));
+  assert.ok(brief.includes('HOOK 0:00–0:03'));
+});
+
+test('a bound brief names its source and forbids inventing an appearance', () => {
+  const persona = ugcVideoBrief(ugcVariantAt(1), {
+    durationSeconds: 8,
+    subject: ugcSubject({ referenceImages: 4, personaName: 'Cheryl' }),
+  });
+  assert.match(persona, /^Subject: the person in the reference pictures \(Cheryl\), /m);
+  assert.match(persona, /do not change their gender/);
+
+  const cast = ugcVideoBrief(ugcVariantAt(1), {
+    durationSeconds: 8,
+    subject: ugcSubject({ castNames: ['<Subject 1>', '<Subject 2>'] }),
+  });
+  assert.match(cast, /^Subject: the subjects defined above \(<Subject 1> and <Subject 2>\), /m);
+  assert.match(cast, /Do not re-describe them/);
+});
+
+test('the dangling "match the reference frame" line is gone unless there IS a frame', () => {
+  // It was written for the image-first-frame flow and shipped unconditionally,
+  // so a plain text-to-video UGC prompt told the model to match a frame that
+  // did not exist, and a reference-mode one pointed it at the wrong thing.
+  const dealt = ugcVideoBrief(ugcVariantAt(0), { durationSeconds: 8 });
+  assert.ok(!/reference frame/i.test(dealt));
+  assert.ok(!/first frame/i.test(dealt));
+  const framed = ugcVideoBrief(ugcVariantAt(0), {
+    durationSeconds: 8,
+    subject: ugcSubject({ startFrame: true }),
+  });
+  assert.match(framed, /Match the first frame exactly/);
+});
+
+test('the binding of an armed block can be read back off the prompt', () => {
+  // Arming and attaching happen in either order, so the composer has to be able
+  // to tell that the block in the prompt predates the references beside it.
+  const cases = [
+    [ugcSubject(), 'dealt'],
+    [ugcSubject({ referenceImages: 2 }), 'reference'],
+    [ugcSubject({ referenceImages: 2, personaName: 'Cheryl' }), 'reference'],
+    [ugcSubject({ castNames: ['<Subject 1>'] }), 'cast'],
+    [ugcSubject({ startFrame: true }), 'frame'],
+  ];
+  for (const [subject, expected] of cases) {
+    const armed = applyUgcVideoBrief('idea', ugcVariantAt(3), { durationSeconds: 8, subject });
+    assert.equal(readUgcSubjectBinding(armed), expected, `${subject.kind} read back wrong`);
+    // What the composer compares against, so the two must agree by construction.
+    assert.equal(ugcSubjectBinding(subject.kind), expected);
+  }
+  assert.equal(readUgcSubjectBinding('a prompt with no UGC in it'), null);
+  assert.equal(readUgcSubjectBinding(''), null);
+});
+
+test('re-binding a block to a reference keeps the script that was written into it', () => {
+  // The stale-block fix must not cost the words — the script is the expensive
+  // part and the binding is the cheap one.
+  const dealt = applyUgcVideoBrief('', ugcVariantAt(0), { durationSeconds: 15 })
+    .replace(UGC_HOOK_PLACEHOLDER, 'no but the WEIRD part is')
+    .replace(UGC_BODY_PLACEHOLDER, 'like I genuinely thought it was broken');
+  assert.equal(readUgcSubjectBinding(dealt), 'dealt');
+
+  const rebound = applyUgcVideoBrief(dealt, ugcVariantAt(0), {
+    durationSeconds: 15,
+    subject: ugcSubject({ referenceImages: 4, personaName: 'Cheryl' }),
+  });
+  assert.equal(readUgcSubjectBinding(rebound), 'reference');
+  assert.equal(readUgcScript(rebound).hook, 'no but the WEIRD part is');
+  assert.equal(readUgcScript(rebound).body, 'like I genuinely thought it was broken');
+  assert.ok(!rebound.includes(UGC_PEOPLE[0]), 'the invented person survived the re-bind');
+});
+
+test('the room deals on its own number so a pinned face can change location', () => {
+  // With the person fixed by a reference, the room, light and beats are the only
+  // variation left in a batch — so they have to move without the person moving.
+  const a = ugcVariantAt(0, 0);
+  const b = ugcVariantAt(0, 1);
+  assert.equal(a.person, b.person);
+  assert.notEqual(a.room, b.room);
+  assert.notDeepEqual(a.beats, b.beats);
+  assert.equal(b.index, 0);
+  assert.equal(b.roomIndex, 1);
+  // Omitted, the two still move together exactly as they always did.
+  assert.deepEqual(ugcVariantAt(5), ugcVariantAt(5, 5));
 });

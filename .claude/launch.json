@@ -4,43 +4,90 @@
     {
       "name": "content-studio",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "uvicorn", "--factory", "hivemind_content_studio.control_api:build_control_app", "--host", "127.0.0.1", "--port", "8768"],
+      "runtimeArgs": [
+        "run",
+        "uvicorn",
+        "--factory",
+        "hivemind_content_studio.control_api:build_control_app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8768"
+      ],
       "port": 8768
     },
     {
       "name": "open-generative-ai",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "packages/open-generative-ai", "run", "vite:dev"],
+      "runtimeArgs": [
+        "--prefix",
+        "packages/open-generative-ai",
+        "run",
+        "vite:dev"
+      ],
       "port": 5173
     },
     {
       "name": "open-generative-ai-alt",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "packages/open-generative-ai", "run", "vite:dev", "--", "--port", "5273", "--strictPort"],
+      "runtimeArgs": [
+        "--prefix",
+        "packages/open-generative-ai",
+        "run",
+        "vite:dev",
+        "--",
+        "--port",
+        "5273",
+        "--strictPort"
+      ],
       "port": 5273
     },
     {
       "name": "open-generative-ai-alt2",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "packages/open-generative-ai", "run", "vite:dev", "--", "--port", "5373", "--strictPort"],
+      "runtimeArgs": [
+        "--prefix",
+        "packages/open-generative-ai",
+        "run",
+        "vite:dev",
+        "--",
+        "--port",
+        "5373",
+        "--strictPort"
+      ],
       "port": 5373
     },
     {
       "name": "open-generative-ai-alt4",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "packages/open-generative-ai", "run", "vite:dev", "--", "--port", "5673", "--strictPort"],
+      "runtimeArgs": [
+        "--prefix",
+        "packages/open-generative-ai",
+        "run",
+        "vite:dev",
+        "--",
+        "--port",
+        "5673",
+        "--strictPort"
+      ],
       "port": 5673
     },
     {
       "name": "open-generative-ai-dist",
       "runtimeExecutable": "sh",
-      "runtimeArgs": ["-c", "cd packages/open-generative-ai && npx vite preview --port 4273 --strictPort"],
+      "runtimeArgs": [
+        "-c",
+        "cd packages/open-generative-ai && npx vite preview --port 4273 --strictPort"
+      ],
       "port": 4273
     },
     {
       "name": "open-generative-ai-rental-fixture",
       "runtimeExecutable": "sh",
-      "runtimeArgs": ["-c", "OPENGEN_API_PROXY=http://127.0.0.1:8999 npm --prefix packages/open-generative-ai run vite:dev -- --port 5573 --strictPort"],
+      "runtimeArgs": [
+        "-c",
+        "OPENGEN_API_PROXY=http://127.0.0.1:8999 npm --prefix packages/open-generative-ai run vite:dev -- --port 5573 --strictPort"
+      ],
       "port": 5573
     }
   ]
