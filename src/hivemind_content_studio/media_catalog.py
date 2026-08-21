@@ -189,15 +189,16 @@ MEDIA_MODEL_MATRIX: tuple[MediaProviderModels, ...] = (
 _last_live_media_studio_models: tuple[MediaModel, ...] = ()
 
 
-# MiniMax H3's measured motion-reference budget and frame lattice, mirrored from
-# the workflow registry (minimax-h3.motion_reference_budget / frame_grid).
+# MiniMax H3's measured packed-row budget and frame lattice, mirrored from the
+# workflow registry (minimax-h3.motion_reference_budget / frame_grid). The unit
+# is rows of the whole DiT sequence — see motion_reference_duration_limits.
 # Duplicated ON PURPOSE: the built-in list is what the studio gets when the
 # registry cannot be read, and a fallback that dropped this ceiling would
 # silently put back the 15s range the card cannot render — the exact shape of
 # the last degradation bug, where the fallback list quietly stripped H3
 # reference mode. test_media_studio_mcp_contract pins these equal to the
 # registry, so the two cannot drift apart unnoticed.
-_H3_MOTION_REFERENCE_PIXEL_FRAMES = 704 * 1216 * 243
+_H3_MOTION_REFERENCE_PACKED_ROWS = 85_000
 _H3_FRAME_GRID = {"modulus": 17, "offset": 5}
 _H3_FRAME_RATE = 24
 
@@ -211,7 +212,7 @@ def _built_in_video_models_with_limits() -> tuple[MediaModel, ...]:
     from .media_studio import motion_reference_duration_limits
 
     limits = motion_reference_duration_limits({
-        "motion_reference_max_reference_pixel_frames": _H3_MOTION_REFERENCE_PIXEL_FRAMES,
+        "motion_reference_max_packed_rows": _H3_MOTION_REFERENCE_PACKED_ROWS,
         "frame_grid": _H3_FRAME_GRID,
         "defaults": {"frame_rate": _H3_FRAME_RATE},
     })
