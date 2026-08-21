@@ -472,7 +472,8 @@ function publicWorkflow(workflow) {
     defaults: publicWorkflowDefaults(workflow.id),
     ...(workflow.beta ? { beta: true } : {}),
     // Reached by routing, never picked by hand: the studio sends a run here
-    // when references are attached to the family's normal tier.
+    // when references are attached to the family's normal tier, and the MCP
+    // routes an agent's reference_* call here the same way (routeReferenceArguments).
     ...(workflow.routing_only ? { routing_only: true } : {}),
     ...(workflow.prompt_helper ? { prompt_helper: workflow.prompt_helper } : {}),
     ...(workflow.prompt_contract ? { prompt_contract: workflow.prompt_contract } : {}),
@@ -2368,16 +2369,76 @@ async function buildLtxErosPromptBody(args = {}, workflow) {
   };
 }
 
+// The reference_* arguments a call actually carries. An empty list is the
+// same as leaving the argument out.
+const REFERENCE_ARGUMENT_KEYS = ['reference_images', 'reference_videos', 'reference_audios'];
+function suppliedReferenceArguments(args = {}) {
+  return REFERENCE_ARGUMENT_KEYS.filter((key) => Array.isArray(args[key]) && args[key].length);
+}
+
+function workflowTakesReferences(workflow) {
+  return ['reference_image_slots', 'reference_video_slots', 'reference_audio_slots']
+    .some((key) => Array.isArray(workflow?.[key]) && workflow[key].length);
+}
+
+// The reference-mode sibling of a workflow: the first workflow of the same
+// media type and family with reference slots wired. This is the server-side
+// twin of the studio's referenceWorkflowForHivemindModel — same family, first
+// in catalog order — so an agent calling the MCP and a user in the composer
+// land on the same graph. minimax-h3-reference inherits minimax-h3 (same
+// family, same lane, same weights) and is routing_only: it is only ever
+// reached this way, never picked.
+function referenceSiblingWorkflow(workflow, registry) {
+  const family = String(workflow?.family || '').trim().toLowerCase();
+  if (!family) return null;
+  return Object.values(registry).find((entry) => entry.id !== workflow.id
+    && entry.media_type === workflow.media_type
+    && String(entry.family || '').trim().toLowerCase() === family
+    && workflowTakesReferences(entry)) || null;
+}
+
+// reference_* on a workflow with no reference slots used to be dropped on the
+// floor: every staging pass below is gated on the workflow's slots, so a
+// minimax-h3 call with reference_images rendered plain text-to-video with no
+// error and no hint (2026-08-21, rented lane — ComfyUI served the reference
+// node from cache on a reseeded resubmission, proving no loader was in its
+// ancestry, and several probes were read against the wrong graph). Such a call
+// now goes where the studio would have sent it, or is refused by name.
+function routeReferenceArguments(workflow, args, registry) {
+  const supplied = suppliedReferenceArguments(args);
+  if (!supplied.length || workflowTakesReferences(workflow)) return { workflow, routed: null };
+  const sibling = referenceSiblingWorkflow(workflow, registry);
+  if (sibling) return { workflow: sibling, routed: { from: workflow.id, for: supplied } };
+  const error = new Error(
+    `workflow ${workflow.id} takes no ${supplied.join(' / ')}: it has no reference slots, and no workflow `
+    + `in its family (${workflow.family || 'none'}) has them either, so the references would be dropped on `
+    + 'the floor. Send them to a workflow that lists reference_slots in media_list_workflows, or drop the argument.',
+  );
+  // Survives machine-private redaction: it names a workflow and an argument,
+  // never the prompt or the media.
+  error.machineSafe = true;
+  throw error;
+}
+
 async function buildVideoPromptBody(args = {}) {
   const workflowId = normalizeWorkflowId(args.workflow_id || args.workflow, { mediaType: 'video' });
-  const workflow = videoWorkflowRegistry()[workflowId];
+  const registry = videoWorkflowRegistry();
+  const { workflow, routed } = routeReferenceArguments(registry[workflowId], args, registry);
+  let built;
   if (workflow.builder === 'ltx-eros') {
-    return buildLtxErosPromptBody(args, workflow);
+    built = await buildLtxErosPromptBody(args, workflow);
+  } else if (workflow.builder === 'comfy-api') {
+    built = await buildComfyApiPromptBody(args, workflow);
+  } else {
+    throw new Error(`unsupported video workflow builder: ${workflow.builder}`);
   }
-  if (workflow.builder === 'comfy-api') {
-    return buildComfyApiPromptBody(args, workflow);
+  if (routed) {
+    // workflow.id is the graph that actually ran; say where the call came
+    // from, and which arguments sent it there, so a routed run is never
+    // mistaken for a direct one.
+    built.workflow = { ...built.workflow, routed_from: routed.from, routed_for: routed.for };
   }
-  throw new Error(`unsupported video workflow builder: ${workflow.builder}`);
+  return built;
 }
 
 function contractedVideoPrompt(args, defaults, workflow) {
@@ -3664,7 +3725,11 @@ function buildServer() {
         image_url: z.string().optional(),
       })).max(9).optional().describe(
         'MiniMax H3 Reference mode: up to nine reference pictures, in order. '
-        + 'Reference N is the prompt\'s <Picture N>.',
+        + 'Reference N is the prompt\'s <Picture N>. Any reference_* argument routes the call to Reference mode '
+        + 'automatically: sent to a tier without reference slots (minimax-h3, minimax-h3-turbo) it runs on the '
+        + 'family\'s reference workflow instead (minimax-h3-reference — the result\'s workflow.id says which graph '
+        + 'ran and routed_from where the call came from); a family with no reference workflow refuses the call '
+        + 'rather than dropping the references.',
       ),
       reference_videos: z.array(z.object({
         video_path: z.string().optional(),
@@ -3685,7 +3750,8 @@ function buildServer() {
         + 'a loose pacing cue. Each clip 2-15s, MP4/MOV/WebM/MKV/AVI/M4V, resampled to 24 fps on staging and read '
         + 'only up to the generated clip\'s own length. Requires at least one reference picture or video overall. '
         + 'Set use_audio to also condition on the clip\'s soundtrack — that soundtrack then takes an <Audio N> '
-        + 'label of its own, emitted BEFORE its <Video N>, which shifts the numbering of any standalone clips.',
+        + 'label of its own, emitted BEFORE its <Video N>, which shifts the numbering of any standalone clips. '
+        + 'Routes to Reference mode automatically, like reference_images.',
       ),
       reference_audios: z.array(z.object({
         audio_path: z.string().optional(),
@@ -3697,7 +3763,8 @@ function buildServer() {
         + 'WAV/MP3/FLAC/OGG/M4A/AAC; requires at least one reference picture or video alongside. Clones the voice two ways: tag the prompt summary '
         + '[audio reuse] to reperform the clip\'s exact words (keep them verbatim, original language, inside <d>…</d>), '
         + 'or [audio reference] to lend only its timbre and delivery to NEW dialogue (never repeat the source words). '
-        + 'Define each in subject_definitions, e.g. "<Audio 1> is the voice-timbre reference for <Subject 1> (S1)."',
+        + 'Define each in subject_definitions, e.g. "<Audio 1> is the voice-timbre reference for <Subject 1> (S1)." '
+        + 'Routes to Reference mode automatically, like reference_images.',
       ),
       loras: z.array(z.object({
         id: z.string().min(1),
