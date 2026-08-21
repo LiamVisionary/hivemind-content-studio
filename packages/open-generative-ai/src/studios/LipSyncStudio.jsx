@@ -42,23 +42,9 @@ import { Modal } from '../ui/Modal.jsx';
 
 import { UploadPicker } from './UploadPicker.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
+import { LIPSYNC_PREFERENCES_KEY, normalizeLipSyncPreferences } from './lipSyncPrefs.js';
 
-const LIPSYNC_PREFERENCES_KEY = 'lipsync_generation_preferences';
 const LIPSYNC_HISTORY_KEY = 'lipsync_history';
-
-// Behaviorally identical to normalizeLipSyncPreferences in components/LipSyncStudio.js
-// (the old file is untouched; the persistence test imports the normalizer from there).
-function normalizeLipSyncPreferences(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const inputMode = value.inputMode === 'video' ? 'video' : 'image';
-  const modelId = typeof value.modelId === 'string' ? value.modelId.trim() : '';
-  if (!modelId) return null;
-  return {
-    inputMode,
-    modelId,
-    resolution: typeof value.resolution === 'string' ? value.resolution.trim() : '',
-  };
-}
 
 function createEngine() {
   let persisted = null;

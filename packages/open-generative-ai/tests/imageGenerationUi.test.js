@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 async function loadImageStudioHelpers() {
-    return import('../src/components/ImageStudio.js');
+    return import('../src/studios/image/imagePrefs.js');
 }
 
 test('image preferences retain provider, dropdown, advanced, and per-model LoRA settings', async () => {
@@ -46,6 +46,9 @@ test('image preferences retain provider, dropdown, advanced, and per-model LoRA 
         aspectRatio: '9:16',
         resolution: '2K',
         localRuntimeMode: 'persistent',
+        sampler: '',
+        scheduler: '',
+        baseSize: 0,
         negativePrompt: 'washed out',
         guidanceScale: 20,
         steps: 1,
@@ -67,6 +70,8 @@ test('image preferences retain provider, dropdown, advanced, and per-model LoRA 
                 displayName: 'Pink Hair',
                 previewUrl: '/preview/pink.jpg',
                 strength: 10,
+                // Muted LoRAs stay in the list with their weight across reloads.
+                enabled: true,
             }],
         },
     });
@@ -84,6 +89,9 @@ test('image preferences reject missing models and recover safe defaults', async 
         aspectRatio: '',
         resolution: '',
         localRuntimeMode: 'one-off',
+        sampler: '',
+        scheduler: '',
+        baseSize: 0,
         negativePrompt: '',
         guidanceScale: 7.5,
         steps: 25,
@@ -137,6 +145,9 @@ test('per-model settings are sanitized and junk entries dropped', async () => {
             customWidth: 0,
             customHeight: 1344,
             localRuntimeMode: 'persistent',
+            sampler: '',
+            scheduler: '',
+            baseSize: 0,
             coupleMode: true,
             coupleDirection: 'vertical',
             coupleSplit: 65,

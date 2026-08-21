@@ -98,10 +98,11 @@ test('outside studio mode the composer state stays in localStorage and never cal
 
 test('image studio wires the encrypted composer draft into prompt, references, and preferences', async () => {
     const fs = require('node:fs');
-    const source = fs.readFileSync(require.resolve('../src/components/ImageStudio.js'), 'utf8');
+    const path = require('node:path');
+    const source = fs.readFileSync(path.join(__dirname, '../src/studios/ImageStudio.jsx'), 'utf8');
     assert.match(source, /hydrateComposerState\(\)\.then/);
-    assert.match(source, /updateComposerSection\('image', \{ prompt: textarea\.value \}\)/);
-    assert.match(source, /updateComposerSection\('image', \{ references: uploadedImageUrls\.slice\(\) \}\)/);
+    assert.match(source, /updateComposerSection\('image', \{ prompt: value \}\)/);
+    assert.match(source, /updateComposerSection\('image', \{ references: s\.uploadedImageUrls\.slice\(\) \}\)/);
     assert.match(source, /updateComposerSection\('image', \{ references: \[\] \}\)/);
     assert.match(source, /updateComposerSection\('image', \{ preferences \}\)/);
     const uploads = fs.readFileSync(require.resolve('../src/lib/uploadHistory.js'), 'utf8');

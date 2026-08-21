@@ -104,15 +104,19 @@ test('hosted workflow discovery resolves inherited workflow definitions', () => 
 });
 
 test('Explore discovers runtime image workflows and forwards inline images', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../src/components/ImageStudio.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../src/studios/ImageStudio.jsx'), 'utf8');
+    const loraSection = fs.readFileSync(path.join(__dirname, '../src/studios/image/LoraSection.jsx'), 'utf8');
+    const hive = fs.readFileSync(path.join(__dirname, '../src/lib/hivemindStudio.js'), 'utf8');
     assert.match(source, /localAI\.listModels\(\)/);
     assert.match(source, /compatibleLocalModels\(\)/);
-    assert.match(source, /image_base64: sourceImage/);
     assert.match(source, /localAI\.listLoras\(model\.id\)/);
     assert.match(source, /loras: loraGenerationPayload\(currentLoraSelection\(\)\)/);
-    assert.match(source, /createCivitaiDownloadDialog/);
-    assert.match(source, /download-lora-btn/);
+    assert.match(source, /CivitaiDownloadDialog/);
+    assert.match(loraSection, /Download LoRA/);
     assert.match(source, /localAI\.generatePrompt\(/);
-    assert.match(source, /data-prompt-helper-use/);
+    assert.match(source, /s\.promptHelper\.result\.trim\(\)/, 'the refined prompt can be applied');
+    // References reach the bridge as inline data, never as a blob: URL that the
+    // server cannot fetch.
+    assert.match(hive, /image_base64: value/);
     assert.doesNotMatch(source, /URL\.createObjectURL\(file\)/);
 });
