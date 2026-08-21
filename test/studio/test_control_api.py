@@ -52,7 +52,8 @@ def test_control_api_is_a_thin_run_viewer_with_owner_or_operator_mutations(tmp_p
     brief.write_text("id: api\nlane: static-text-ad\nscenes:\n  - overlay: Test\n", encoding="utf-8")
     run = orchestrator.execute_content_run(brief)
 
-    assert client.get("/").status_code == 200
+    # Serving "/" is asserted by test_studio_shell_and_static_assets_are_served,
+    # which handles the unbuilt-dist case; this test is about run access.
     response = client.get("/api/runs")
     assert response.status_code == 200
     assert response.json()["runs"][0]["run_id"] == run["run_id"]
@@ -134,17 +135,27 @@ def test_operator_can_decide_approvals_but_receipt_is_returned_only_after_auth(t
     assert approved.json()["approval"]["token"].startswith("appr_")
 
 
-def test_studio_shell_and_static_assets_are_served(tmp_path: Path, monkeypatch) -> None:
+def test_studio_shell_and_static_assets_are_served(tmp_path: Path, monkeypatch, unified_frontend) -> None:
     client, _, _ = _client(tmp_path, monkeypatch)
 
     page = client.get("/")
 
+    if not unified_frontend.built:
+        # dist/ is gitignored, so an unbuilt checkout must say how to build it
+        # instead of serving an empty page with a 200.
+        assert page.status_code == 503
+        assert "npm --prefix packages/open-generative-ai run vite:build" in page.text
+        return
+
     assert page.status_code == 200
-    assert 'id="studio-shell"' in page.text
-    assert '/assets/studio.css' in page.text
-    assert '/assets/studio.js' in page.text
-    assert client.get("/assets/studio.css").headers["content-type"].startswith("text/css")
-    assert "javascript" in client.get("/assets/studio.js").headers["content-type"]
+    # The Vite build's shell, with the studio marker injected so the frontend
+    # knows it is the integrated studio without needing a URL parameter.
+    assert '<div id="app"></div>' in page.text
+    assert "window.__HIVEMIND_STUDIO__=1" in page.text
+    assert unified_frontend.script_path.removeprefix("/") in page.text
+    assert "javascript" in client.get(unified_frontend.script_path).headers["content-type"]
+    if unified_frontend.stylesheet_path:
+        assert client.get(unified_frontend.stylesheet_path).headers["content-type"].startswith("text/css")
 
 
 def test_catalog_drives_lanes_and_provider_choices(tmp_path: Path, monkeypatch) -> None:

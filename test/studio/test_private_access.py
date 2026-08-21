@@ -45,7 +45,7 @@ def _locked_client(
     return TestClient(app), orchestrator
 
 
-def test_outer_lock_hides_shell_assets_prompt_tools_and_artifacts(tmp_path: Path, monkeypatch) -> None:
+def test_outer_lock_hides_shell_assets_prompt_tools_and_artifacts(tmp_path: Path, monkeypatch, unified_frontend) -> None:
     client, orchestrator = _locked_client(tmp_path, monkeypatch)
     brief = tmp_path / "private-brief.yaml"
     brief.write_text("id: private\nlane: static-text-ad\nconcept: never expose this phrase\nscenes:\n  - overlay: Private\n", encoding="utf-8")
@@ -54,8 +54,8 @@ def test_outer_lock_hides_shell_assets_prompt_tools_and_artifacts(tmp_path: Path
     page = client.get("/")
     assert page.status_code == 200
     assert "Hivemind Content Studio is locked" in page.text
-    assert 'id="studio-shell"' not in page.text
-    assert client.get("/assets/studio.js").status_code == 401
+    assert '<div id="app"></div>' not in page.text
+    assert client.get(unified_frontend.script_path).status_code == 401
     assert client.get("/api/simple/prompts").status_code == 401
     assert client.post("/api/simple/plan", json={}).status_code == 401
     assert client.get(f"/api/runs/{run['run_id']}/artifacts/missing").status_code == 401
@@ -83,7 +83,7 @@ def test_machine_routes_keep_telemetry_and_redacted_run_receipts_available(tmp_p
         assert forbidden not in serialized
 
 
-def test_owner_unlock_uses_same_password_and_24_hour_browser_session(tmp_path: Path, monkeypatch) -> None:
+def test_owner_unlock_uses_same_password_and_24_hour_browser_session(tmp_path: Path, monkeypatch, unified_frontend) -> None:
     client, _ = _locked_client(tmp_path, monkeypatch)
 
     assert client.post("/api/owner/unlock", json={"password": "wrong"}).status_code == 401
@@ -92,8 +92,14 @@ def test_owner_unlock_uses_same_password_and_24_hour_browser_session(tmp_path: P
     assert unlocked.json()["expires_in_seconds"] == 24 * 60 * 60
     assert "HttpOnly" in unlocked.headers["set-cookie"]
     assert "SameSite=strict" in unlocked.headers["set-cookie"]
-    assert 'id="studio-shell"' in client.get("/").text
-    assert client.get("/assets/studio.js").status_code == 200
+    unlocked_page = client.get("/")
+    assert "Hivemind Content Studio is locked" not in unlocked_page.text
+    if unified_frontend.built:
+        # The gate opens for the frontend bundle, not just the API. Only assertable
+        # against a real build: with dist/ absent, an unlocked /assets request
+        # reaches a StaticFiles mount whose directory does not exist and raises.
+        assert '<div id="app"></div>' in unlocked_page.text
+        assert client.get(unified_frontend.script_path).status_code == 200
     assert client.get("/api/simple/prompts").status_code == 200
 
     assert client.post("/api/owner/lock").status_code == 200
