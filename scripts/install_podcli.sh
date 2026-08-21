@@ -16,6 +16,12 @@ git -C "$TARGET" fetch --depth 1 origin "$COMMIT"
 git -C "$TARGET" checkout --detach "$COMMIT"
 git -C "$TARGET" apply "$ROOT/patches/podcli-ffmpeg8-ass-filter.patch"
 git -C "$TARGET" apply "$ROOT/patches/podcli-remotion-caption-pages.patch"
+# Podcli hands the whole transcript to `claude`/`codex` for clip selection
+# whenever one is on PATH. This patch makes that opt-in (--ai-select) instead
+# of the default, so a render cannot ship creator material off the machine by
+# accident. Verify after install:
+#   grep -n PODCLI_ALLOW_AI_CLI "$TARGET/backend/services/claude_suggest.py"
+git -C "$TARGET" apply "$ROOT/patches/podcli-ai-select-default-off.patch"
 chmod +x "$TARGET/podcli" "$TARGET/setup.sh"
 mkdir -p "$TARGET/.podcli/presets"
 cp "$ROOT/presets/auto-clipper-local.json" "$TARGET/.podcli/presets/auto-clipper-local.json"
@@ -29,4 +35,7 @@ Next manual setup step:
 
 Then verify:
   PODCLI_BIN="$TARGET/podcli" auto-clipper doctor
+
+Transcripts stay local unless you pass --ai-select. Confirm the gate is in place:
+  grep -c PODCLI_ALLOW_AI_CLI "$TARGET/backend/services/claude_suggest.py"   # expect 1
 MSG

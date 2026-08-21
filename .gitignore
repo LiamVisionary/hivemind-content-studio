@@ -47,3 +47,8 @@ htmlcov/
 .codegraph
 /docs/superpowers
 .understand-anything
+
+# Podcli is installed by scripts/install_podcli.sh at a pinned sha and patched
+# in place. It is a separate AGPL-3.0-only program we invoke, not part of this
+# tree — and it carries its own venv and node_modules.
+vendor/

@@ -2195,6 +2195,186 @@ function editorNode(workflow, id) {
   return (workflow?.nodes || []).find((node) => String(node?.id) === String(id));
 }
 
+// MiniMax H3 "Fast high-res": one sampling schedule, two canvases.
+//
+// H3's cost is rows x steps, and rows grow with the CANVAS AREA — so a render
+// that spends every step at the delivered size pays full price for the early
+// steps, which only decide composition and motion. This lane samples those on a
+// small canvas, lifts the result to full size, and spends only the last few
+// sigmas there. The total step count does not change; the steps just move to a
+// canvas with a fraction of the rows.
+//
+// What makes it work on H3 rather than being an ordinary hires fix is a trained
+// upscaler for H3's OWN 24-channel latent (Comfyui_Minimax_h3_latent_Upscaler,
+// pinned in packages/gpu-rentals): the first pass's x0 estimate is enlarged in
+// latent space, so the 5B-param VAE never decodes and re-encodes a video
+// between the passes — which on a 5s clip costs more than the steps saved.
+//
+// The sound crosses untouched. H3 denoises a JOINT video+audio latent and the
+// upscaler only understands the video half, so the pair is split before the
+// upscale and rejoined after it, the audio latent passing through at its own
+// size. Skipping that split feeds a nested tensor to a Conv3d and the job dies
+// in the node rather than in validation.
+//
+// Returns the plan actually compiled, or null when the graph was left alone.
+function compileH3FastHighRes(promptGraph, workflow, settings) {
+  const cfg = workflow.fast_high_res && typeof workflow.fast_high_res === 'object'
+    ? workflow.fast_high_res
+    : {};
+  const targetWidth = Math.round(Number(settings.width));
+  const targetHeight = Math.round(Number(settings.height));
+  const totalSteps = Math.round(Number(settings.steps));
+  if (!(targetWidth > 0) || !(targetHeight > 0) || !(totalSteps > 0)) return null;
+
+  const align = Math.max(8, Math.round(Number(cfg.align) || 32));
+  const refineSteps = Math.max(1, Math.round(Number(cfg.refine_steps) || 3));
+  const splitStep = totalSteps - refineSteps;
+  // The first pass has to be a pass: at or below the refine count there is
+  // nothing left to sample small, and SplitSigmas would hand it an empty
+  // schedule.
+  if (splitStep < 1) return null;
+
+  // Same target-size arithmetic the node itself does, so the factor we record
+  // is the factor it computes: area in megapixels at the requested aspect,
+  // then both edges snapped to `align` (32 — the node's own recommendation,
+  // because a looser grid leaves a light band along the bottom edge).
+  const aspect = targetWidth / targetHeight;
+  const firstPassPixels = (Number(cfg.first_pass_megapixels) || 0.2) * 1024 * 1024;
+  const firstHeight = Math.max(align, Math.round(Math.sqrt(firstPassPixels / aspect) / align) * align);
+  const firstWidth = Math.max(align, Math.round((Math.sqrt(firstPassPixels / aspect) * aspect) / align) * align);
+  const factor = ((targetWidth / firstWidth) + (targetHeight / firstHeight)) / 2;
+  // Two passes cost a second conditioning encode, a second sampler warmup and
+  // the upscaler's own forward. Under a small target that overhead is the
+  // whole saving, and at factor <= 1 the node refuses outright ("only supports
+  // upscaling"), so the single-pass graph ships unchanged.
+  if (!(factor >= (Number(cfg.min_upscale_factor) || 1.3))) return null;
+
+  const conditioning = promptNodesByClass(promptGraph, 'MiniMaxH3ImageToVideo')[0];
+  const samplers = promptNodesByClass(promptGraph, 'SamplerCustomAdvanced');
+  if (!conditioning || samplers.length !== 1) return null;
+  const [condId, condNode] = conditioning;
+  const [samplerId, samplerNode] = samplers[0];
+  const guiderRef = samplerNode.inputs?.guider;
+  const sigmasRef = samplerNode.inputs?.sigmas;
+  const latentRef = samplerNode.inputs?.latent_image;
+  if (!Array.isArray(guiderRef) || !Array.isArray(sigmasRef) || !Array.isArray(latentRef)) return null;
+  // The first pass must be sampling THIS conditioning node's latent; anything
+  // else (a chained graph, a reference graph) is a topology this compiler has
+  // not been measured against.
+  if (String(latentRef[0]) !== String(condId)) return null;
+  const guiderNode = promptGraph[String(guiderRef[0])];
+  if (!guiderNode?.inputs?.model || !guiderNode?.inputs?.conditioning) return null;
+
+  const nextId = nextPromptNodeId(promptGraph);
+  const splitId = nextId();
+  const fullCondId = nextId();
+  const fullGuiderId = nextId();
+  const separateId = nextId();
+  const upscaleId = nextId();
+  const rejoinId = nextId();
+  const refineId = nextId();
+
+  // Pass 1 renders small. Everything else about the conditioning — prompt,
+  // anchor frames, length — is whatever the rest of the compiler already put
+  // there, including a pruned first_frame on a text-to-video run.
+  condNode.inputs.width = firstWidth;
+  condNode.inputs.height = firstHeight;
+
+  // One schedule, cut in two. Deriving the refine sigmas from the SAME
+  // BasicScheduler rather than writing them out means the second pass re-noises
+  // to exactly the level the first pass stopped at, at whatever step count and
+  // shift the model is running — a hardcoded sigma list would only be right for
+  // the one schedule it was copied from.
+  promptGraph[splitId] = {
+    class_type: 'SplitSigmas',
+    _meta: { title: 'Fast high-res: split the schedule' },
+    inputs: { sigmas: sigmasRef, step: splitStep },
+  };
+  samplerNode.inputs.sigmas = [splitId, 0];
+
+  // The full-size conditioning. H3 bakes the canvas into its conditioning, so
+  // the refine pass needs its own encode at the delivered size — reusing the
+  // small one would ask the model to denoise rows it was not conditioned for.
+  promptGraph[fullCondId] = {
+    class_type: condNode.class_type,
+    _meta: { title: 'Fast high-res: full-size conditioning' },
+    inputs: { ...cloneJson(condNode.inputs), width: targetWidth, height: targetHeight },
+  };
+  promptGraph[fullGuiderId] = {
+    class_type: guiderNode.class_type,
+    _meta: { title: 'Fast high-res: refine guider' },
+    inputs: { ...cloneJson(guiderNode.inputs), conditioning: [fullCondId, 0] },
+  };
+
+  // denoised_output (slot 1), not output (slot 0): the first pass stops at a
+  // non-zero sigma, so its raw latent is still noisy. Slot 1 is the model's
+  // clean-image estimate at that point, which is what an upscaler trained on
+  // clean latents expects.
+  promptGraph[separateId] = {
+    class_type: 'LTXVSeparateAVLatent',
+    _meta: { title: 'Fast high-res: split video from sound' },
+    inputs: { av_latent: [samplerId, 1] },
+  };
+  promptGraph[upscaleId] = {
+    class_type: 'MinimaxH3LatentUpscaler3D',
+    _meta: { title: 'Fast high-res: neural latent upscale' },
+    inputs: {
+      latent: [separateId, 0],
+      model_name: String(cfg.model_name || 'minimax_h3_latent_upscaler_3d_bf16.safetensors'),
+      // `mode` is a DynamicCombo: the chosen key selects which nested inputs
+      // exist, and those arrive under a `mode.` prefix.
+      mode: 'target dimensions',
+      'mode.width': targetWidth,
+      'mode.height': targetHeight,
+      align,
+      device: 'cuda',
+      precision: String(cfg.precision || 'bf16'),
+    },
+  };
+  promptGraph[rejoinId] = {
+    class_type: 'LTXVConcatAVLatent',
+    _meta: { title: 'Fast high-res: rejoin sound' },
+    inputs: { video_latent: [upscaleId, 0], audio_latent: [separateId, 1] },
+  };
+  promptGraph[refineId] = {
+    class_type: samplerNode.class_type,
+    _meta: { title: 'Fast high-res: full-size refine' },
+    inputs: {
+      ...cloneJson(samplerNode.inputs),
+      guider: [fullGuiderId, 0],
+      sigmas: [splitId, 1],
+      latent_image: [rejoinId, 0],
+    },
+  };
+
+  // Everything that read the finished clip now reads the refine pass. Only
+  // slot 0 moves: the separate node deliberately holds slot 1 of the first
+  // sampler, and the new nodes are skipped so the rewrite cannot eat its own
+  // wiring.
+  const added = new Set([splitId, fullCondId, fullGuiderId, separateId, upscaleId, rejoinId, refineId]);
+  for (const [nodeId, node] of Object.entries(promptGraph)) {
+    if (added.has(nodeId) || !node?.inputs) continue;
+    for (const [key, value] of Object.entries(node.inputs)) {
+      if (Array.isArray(value) && String(value[0]) === String(samplerId) && Number(value[1]) === 0) {
+        node.inputs[key] = [refineId, 0];
+      }
+    }
+  }
+
+  return {
+    first_pass: { width: firstWidth, height: firstHeight },
+    output: { width: targetWidth, height: targetHeight },
+    upscale_factor: Math.round(factor * 1000) / 1000,
+    steps: { first_pass: splitStep, refine: refineSteps },
+    // What the saving actually is, in units of a full-size step: the first
+    // pass's steps cost their share of the rows, the refine steps cost all of
+    // them. Reported so a caller can see the trade it made without a stopwatch.
+    full_size_step_equivalents: Math.round(
+      (splitStep * ((firstWidth * firstHeight) / (targetWidth * targetHeight)) + refineSteps) * 100,
+    ) / 100,
+  };
+}
+
 function setEditorWidget(workflow, id, keyOrIndex, value) {
   const node = editorNode(workflow, id);
   if (!node) return;
@@ -2965,6 +3145,18 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   else compileLtxImageAnchors(promptGraph, settings.keyframes);
   if (settings.motionContextName) compileH3MotionContextChain(promptGraph, settings);
   injectWorkflowLoras(promptGraph, settings.loras, workflow.lora_injection);
+  // Fast high-res runs LAST of the graph rewrites: it clones the conditioning
+  // node and the sampler, so every earlier step — the canvas, the frame count,
+  // the anchor frames, the accelerator chain, the LoRAs — has to be settled
+  // first or the clone carries a stale copy of it.
+  if (argOrDefault(args, defaults, 'fast_high_res') === true
+      && (workflow.accepts || []).includes('fast_high_res')) {
+    const plan = compileH3FastHighRes(promptGraph, workflow, settings);
+    // null means the compiler declined — too small a target for two passes to
+    // pay, too few steps to split, or a graph topology it has not been measured
+    // against. Record what was RENDERED, not what was asked for.
+    settings.fastHighRes = plan || false;
+  }
 
   const extraPngInfo = {};
   const mobileWorkflowPath = resolveWorkflowFile(workflow.mobile_workflow || workflow.editor_workflow || workflow.mobileWorkflow);
@@ -3630,6 +3822,7 @@ function buildServer() {
         description: z.string().max(1000).optional(),
       })).min(1).max(12).optional().describe('Ingredients IC-LoRA only: independent conditioning references composed server-side into one black, unlabeled, contain-only sheet. These images never become timeline anchors.'),
       spectrum: z.boolean().optional().describe('Spectrum forecasting: predicts about half the sampling steps instead of computing them — roughly half the sampling time, softer fine detail. Defaults to the workflow setting.'),
+      fast_high_res: z.boolean().optional().describe('Fast high-res (MiniMax H3): sample the first pass on a small canvas, lift the video latent to full size with H3\'s trained latent upscaler, and spend only the last few sigmas at full size. Same step count, most of them on a fraction of the rows. Off unless asked for; the compiler declines and renders single-pass when the target is too small for two passes to pay.'),
       negative_prompt: z.string().max(2000).optional().describe('Optional negative video prompt mapped through the registered workflow when supported.'),
       nag_scale: z.number().min(0).max(30).optional().describe('Normalized Attention Guidance scale for the local distilled LTX lanes. Those run cfg=1, where a negative prompt is otherwise ignored; NAG applies it inside cross-attention for ~8% more time. Omit for the default (11), pass <=1 to disable.'),
       image_path: z.string().optional().describe('Absolute local image path or existing Comfy input filename. Absolute paths are copied into the private Comfy input folder before queueing if the workflow needs Comfy access.'),
@@ -3684,6 +3877,9 @@ function buildServer() {
         + 'movement, attribute_transfer performs a DIFFERENT action in that performer\'s manner, weak_reference is '
         + 'a loose pacing cue. Each clip 2-15s, MP4/MOV/WebM/MKV/AVI/M4V, resampled to 24 fps on staging and read '
         + 'only up to the generated clip\'s own length. Requires at least one reference picture or video overall. '
+        + 'With NO reference_images attached, <Video 1> is the IDENTITY reference too: bind <Subject 1> to it '
+        + '("<Subject 1> is the man in <Video 1>, with …"), tag it fully_preserved, and say its performer\'s face, '
+        + 'hair, build and wardrobe carry — only the clip\'s setting and framing are excluded. '
         + 'Set use_audio to also condition on the clip\'s soundtrack — that soundtrack then takes an <Audio N> '
         + 'label of its own, emitted BEFORE its <Video N>, which shifts the numbering of any standalone clips.',
       ),

@@ -20,6 +20,9 @@
 // by its opening and closing lines rather than by exact match, and survives the
 // user writing their lines into the middle of it.
 
+import { referenceLabels, referenceSubjectLine, referenceVoiceLabel, withReferenceTags } from './h3References.js';
+import { normalizePersonaGender, personaGenderWords } from './personaId.js';
+
 export const UGC_PEOPLE = Object.freeze([
   'a woman in her mid-20s with a messy bun, an oversized grey hoodie, no makeup',
   'a man in his early 30s with two-day stubble, a stretched-out band t-shirt, hair still wet',
@@ -111,10 +114,35 @@ const VIDEO_CLOSING = 'End unresolved — no payoff, no lesson, no slogan.';
 const IMAGE_OPENING = 'Ultra realistic iPhone front camera selfie.';
 const IMAGE_CLOSING = 'no text, no captions, 9:16.';
 
-/** The cast for arm number `index`, cycling without repeating a pairing soon. */
-export function ugcVariantAt(index) {
+// The bank alternates women and men, so a loaded persona's gender picks every
+// other entry and the cycle still never repeats a person on consecutive deals.
+// Non-binary has no bank of its own: the whole bank is dealt with its gendered
+// words neutralised, since "a woman in her mid-20s" would be a lie about the
+// person in the pictures just as much as the wrong pronoun in a prompt is.
+const PERSON_GENDER = /^a (woman|man) in (her|his) /;
+
+export function ugcPeopleFor(gender) {
+  const which = normalizePersonaGender(gender);
+  if (which === 'female') return UGC_PEOPLE.filter((person) => /^a woman /.test(person));
+  if (which === 'male') return UGC_PEOPLE.filter((person) => /^a man /.test(person));
+  if (which === 'nonbinary') {
+    return UGC_PEOPLE.map((person) => person
+      .replace(PERSON_GENDER, 'a person in their ')
+      // The bank's later possessives ("reading glasses pushed up into her
+      // hair", "beanie pushed back off his forehead") are all determiners.
+      .replace(/\b(her|his)\b/g, 'their'));
+  }
+  return UGC_PEOPLE;
+}
+
+/**
+ * The cast for arm number `index`, cycling without repeating a pairing soon.
+ * `gender` (a saved persona's) narrows who can be dealt — see ugcPeopleFor.
+ */
+export function ugcVariantAt(index, { gender = '' } = {}) {
   const n = Math.max(0, Math.floor(Number(index) || 0));
-  const person = UGC_PEOPLE[n % UGC_PEOPLE.length];
+  const people = ugcPeopleFor(gender);
+  const person = people[n % people.length];
   const room = UGC_ROOMS[n % UGC_ROOMS.length];
   // Two beats or three, alternating, taken from a window that walks the bank —
   // so consecutive arms share at most one gesture.
@@ -162,7 +190,12 @@ export function ugcTimeline(durationSeconds) {
 // Anchored on the "):" that closes each label's parenthetical rather than on
 // the first colon — the timings ("HOOK 0:00–0:03") carry colons of their own,
 // and the script itself may too. Lazy, so a colon in the script cannot capture.
-const SCRIPT_LINE = /^(HOOK|BODY|CTA)\b[^\n]*?\):[ \t]*(.*)$/;
+// In the reference brief the same three lines sit inside H3 shots —
+// "[Shot 2] At 00:03.000, BODY …" — so the shot header is an optional prefix.
+const SCRIPT_LINE = /^(?:\[Shot \d+\] (?:At \d{2}:\d{2}\.\d{3}, )?)?(HOOK|BODY|CTA)\b[^\n]*?\):[ \t]*(.*)$/;
+// The reference brief writes each line as (S1) dialogue; reading it back
+// unwraps the speaker and the <d>[language] …</d> so the words round-trip.
+const SPOKEN_LINE = /^\(S\d\) says: <d>(?:\[[^\]]*\]\s*)?([\s\S]*?)<\/d>\s*$/;
 const PLACEHOLDERS = new Set([UGC_HOOK_PLACEHOLDER, UGC_BODY_PLACEHOLDER, UGC_CTA_PLACEHOLDER]);
 
 /**
@@ -177,7 +210,9 @@ export function readUgcScript(prompt) {
   for (const line of String(prompt || '').split('\n')) {
     const match = SCRIPT_LINE.exec(line);
     if (!match) continue;
-    const text = match[2].trim();
+    let text = match[2].trim();
+    const spoken = SPOKEN_LINE.exec(text);
+    if (spoken) text = spoken[1].trim();
     if (text && !PLACEHOLDERS.has(text)) script[match[1].toLowerCase()] = text;
   }
   return script;
@@ -239,7 +274,21 @@ function stripBlock(prompt, opening, closing) {
   return `${source.slice(0, start)}${source.slice(end)}`.replace(/\n{3,}/g, '\n\n').trim();
 }
 
+// The reference brief (below) is not a block inside a prompt — it IS the
+// prompt, six sections of it. Turning UGC off therefore leaves nothing behind,
+// exactly as nothing was there before it was armed over an empty composer; a
+// topic line the composer held is carried inside the brief and comes back out
+// only by arming again.
+const SIX_SECTION = /^subject_definitions:/m;
+
+export function isUgcReferenceBrief(prompt) {
+  const source = String(prompt || '');
+  return SIX_SECTION.test(source) && source.includes(VIDEO_OPENING) && source.includes(VIDEO_CLOSING)
+    && /^non_diegetic_music:/m.test(source);
+}
+
 export function stripUgcVideoBrief(prompt) {
+  if (isUgcReferenceBrief(prompt)) return '';
   return stripBlock(prompt, VIDEO_OPENING, VIDEO_CLOSING);
 }
 
@@ -259,16 +308,140 @@ export function hasUgcFirstFrame(prompt) {
   return String(prompt || '').includes(IMAGE_OPENING);
 }
 
+// ---------------------------------------------------------------------------
+// UGC with reference pictures attached.
+//
+// A dealt person is for a batch with NO identity source. When pictures are
+// attached — a loaded Hive Persona, or references by hand — the person in the
+// clip is the person in the pictures, and the only way pictures reach the model
+// is H3's reference mode, whose trained format is the six-section frame. So the
+// brief is written IN that frame: <Subject 1> bound to <Picture N> (the same
+// sentence the reference scaffold writes), the hook / body / CTA as (S1)
+// dialogue in <d> lines, the voice clip bound as the timbre reference, and
+// "nobody else speaks" in the soundscape. A flat block with a decorated Subject
+// line would have gone to the model as prose — and a voice reference with
+// unscripted seconds is exactly how a clip fills itself with invented speech
+// (measured 2026-08-12).
+//
+// The room, its light, the ambient sound and the behavioural beats still deal
+// per arm. That is the batch's variety; only the person is pinned.
+
+const shotStamp = (seconds) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.000`;
+const spoken = (text) => `(S1) says: <d>[English] ${text}</d>`;
+
+/** "Cheryl — the woman in your 3 reference pictures", for the menu's Who row. */
+export function ugcSubjectLabel(persona) {
+  const count = (persona?.images || []).length;
+  const clips = (persona?.videos || []).length;
+  if (!count && !clips) return '';
+  const gender = normalizePersonaGender(persona?.gender);
+  const noun = gender && gender !== 'nonbinary' ? personaGenderWords(gender).noun : 'person';
+  // No picture: the clip is the character reference, so it is who the brief is about.
+  const pictures = !count
+    ? 'your reference clip'
+    : (count === 1 ? 'your reference picture' : `your ${count} reference pictures`);
+  const name = String(persona?.name || '').trim();
+  return `${name ? `${name} — ` : ''}the ${noun} in ${pictures}`;
+}
+
+/**
+ * The UGC brief for a clip about the person in the attached pictures, in H3's
+ * six-section reference format. `persona` is { name?, gender?, images, videos,
+ * audios } — the reference rows as the studio holds them. `context` is what
+ * the composer held before arming (the topic), carried into the shot.
+ */
+export function ugcReferenceBrief(variant, { durationSeconds, script, persona, context = '' } = {}) {
+  const cast = variant || ugcVariantAt(0);
+  const { room } = cast;
+  const { hookEnd, ctaStart, seconds, hasBody } = ugcTimeline(durationSeconds);
+  const images = persona?.images || [];
+  const videos = persona?.videos || [];
+  const audios = persona?.audios || [];
+  const gender = normalizePersonaGender(persona?.gender);
+  const labels = referenceLabels({ images, videos, audios });
+  const voice = referenceVoiceLabel(labels);
+  const noun = gender && gender !== 'nonbinary' ? personaGenderWords(gender).noun : '';
+
+  const subject = [
+    referenceSubjectLine({ pictures: labels.images, videos: labels.videos.map((label) => label.video), gender }),
+    '<Subject 1> is rendered as photoreal live-action, real human skin texture and hair, shot on a phone front camera — not illustrated, not stylised, no beauty filter.',
+  ];
+  if (voice) {
+    subject.push('<Subject 1> speaks as S1.');
+    subject.push(`${voice} is the voice-timbre reference for <Subject 1> (S1). It is not the voice of anyone else in this clip.`);
+  } else {
+    // No clone to bind: at least say what kind of voice, or H3 gives an
+    // unvoiced subject its generic adult male.
+    subject.push(`<Subject 1> speaks as S1${noun ? `, in a ${noun}'s voice` : ''}.`);
+  }
+
+  const shots = [
+    `[Shot 1] HOOK ${ugcClock(0)}–${ugcClock(hookEnd)} (already mid-sentence, as if we joined late): ${spoken(script?.hook || UGC_HOOK_PLACEHOLDER)}`,
+  ];
+  if (hasBody) {
+    shots.push(
+      `[Shot 2] At ${shotStamp(hookEnd)}, BODY ${ugcClock(hookEnd)}–${ugcClock(ctaStart)} (natural blinks, one gaze break, one filler word, `
+      + `one micro pause; the body shifts once): ${spoken(script?.body || UGC_BODY_PLACEHOLDER)}`,
+    );
+  }
+  shots.push(
+    `[Shot ${hasBody ? 3 : 2}] At ${shotStamp(ctaStart)}, CTA ${ugcClock(ctaStart)}–${ugcClock(seconds)} (an afterthought, trailing off — never a slogan): `
+    + spoken(script?.cta || UGC_CTA_PLACEHOLDER),
+  );
+
+  const topic = String(context || '').trim();
+  const brief = [
+    'subject_definitions:',
+    ...subject,
+    '',
+    'summary:',
+    // The audio contract up front when a voice is attached — the same tag the
+    // Cast control writes, on the summary's own line rather than above it.
+    `${voice ? '[audio reference] ' : ''}${VIDEO_OPENING} <Subject 1> talks to the front camera of a phone held at arm's length, ${room.place}, for the whole clip; nobody else is in the shot.`,
+    '',
+    'retention_analysis:',
+    '<Subject 1>: fully_preserved — the same face, hair, build and wardrobe in every shot and at every distance.',
+    '',
+    'detailed_description:',
+    ...(topic ? [`Topic: ${topic}`] : []),
+    `Camera: handheld front-camera selfie, chest-up, natural micro shakes, 9:16. Place: ${room.light}. ${room.detail}`,
+    ...shots,
+    `Behavioural beats: ${cast.beats.join('; ')}. Keep the skin texture, no beauty filter, lips synced.`,
+    VIDEO_CLOSING,
+    '',
+    'overall_soundscape:',
+    `Phone-mic voice of <Subject 1> (S1) with room tone and one ambient sound event — ${room.sound}. No other speakers, no speech before the hook or after the CTA. No music.`,
+    '',
+    'non_diegetic_music:',
+    'N/A',
+  ].join('\n');
+  // The retention contract for every attached reference, and the [audio
+  // reference] summary tag when a voice is attached — written by the same code
+  // that writes them for a hand-scaffolded prompt, so the two never drift.
+  return withReferenceTags(brief, { images, videos, audios, gender });
+}
+
 /**
  * Arm (or re-arm, or clear) UGC on a video prompt.
  *
  * Passing a null variant strips. Re-arming keeps whatever script the old block
- * held, so dealing a new cast never costs the words.
+ * held, so dealing a new cast never costs the words. With reference pictures
+ * or clips attached (`persona.images` / `persona.videos`), the brief is the six-section reference brief
+ * above and becomes the whole prompt; what the composer held is carried in as
+ * the topic — unless it was itself six-section (a cast, an earlier scaffold),
+ * which the brief re-derives from the same references.
  */
-export function applyUgcVideoBrief(prompt, variant, { durationSeconds } = {}) {
+export function applyUgcVideoBrief(prompt, variant, { durationSeconds, persona = null } = {}) {
   const script = readUgcScript(prompt);
   const base = stripUgcVideoBrief(prompt);
   if (!variant) return base;
+  // A clip with no picture is still a character reference (the clip carries
+  // the person), so it gets the reference brief too — not a dealt stranger.
+  if ((persona?.images || []).length || (persona?.videos || []).length) {
+    return ugcReferenceBrief(variant, {
+      durationSeconds, script, persona, context: SIX_SECTION.test(base) ? '' : base,
+    });
+  }
   const block = ugcVideoBrief(variant, { durationSeconds, script });
   return base ? `${base}\n\n${block}` : block;
 }

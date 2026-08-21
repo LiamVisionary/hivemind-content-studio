@@ -111,6 +111,29 @@ def test_a_forged_cookie_does_not_open_a_workspace(client):
 
 # ── managing workspaces ──────────────────────────────────────────────────────
 
+def test_the_gate_offers_a_new_workspace_card(client):
+    gate = client.get("/", headers={"accept": "text/html"})
+    assert gate.status_code == 200
+    assert "New workspace" in gate.text
+    assert 'id="create-form"' in gate.text
+    # Both approval paths are in the page: the owner-passkey button (shown only
+    # when the owner has a passkey) and the owner-password fallback.
+    assert 'id="create-passkey"' in gate.text
+    assert 'id="create-owner-password"' in gate.text
+
+
+def test_the_gates_create_flow_lands_in_the_new_workspace(client):
+    # The exact sequence the gate's create card performs: owner approval sets
+    # the session the create route checks, then unlocking the NEW workspace
+    # switches the session so the reload lands inside it.
+    _sign_in(client, 1, OWNER_PASSWORD)
+    created = client.post("/api/accounts", json={"name": "Editor", "password": "editor-pass"})
+    assert created.status_code == 201, created.text
+    new_id = int(created.json()["account"]["id"])
+    _sign_in(client, new_id, "editor-pass")
+    assert client.get("/api/accounts").json()["signed_in_as"] == new_id
+
+
 def test_only_the_owner_can_add_a_workspace(client):
     assert client.post("/api/accounts", json={"name": "Sneaky", "password": "x"}).status_code == 403
 
@@ -204,6 +227,79 @@ def test_each_workspace_has_its_own_vault_identity_over_http(client):
     # A fresh workspace has NO vault, so its browser is asked to create one
     # rather than being handed the owner's.
     assert client.get("/api/vault/identity").json()["identity"] is None
+
+
+def test_one_workspace_cannot_enumerate_anothers_runs(client):
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, 1, OWNER_PASSWORD)
+    owner_run = client.post("/api/runs", json={
+        "lane": "static-text-ad", "title": "Owner ad",
+        "concept": "Owner's private concept.", "scenes": [{"overlay": "Owner"}],
+    }).json()["run_id"]
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, second, "second-pass")
+    # The listing enumerates only this workspace's runs…
+    assert client.get("/api/runs").json()["runs"] == []
+    # …and the owner's run is INDISTINGUISHABLE from one that never existed.
+    hidden = client.get(f"/api/runs/{owner_run}")
+    absent = client.get(f"/api/runs/{owner_run}x")
+    assert hidden.status_code == absent.status_code == 404
+    assert hidden.json()["detail"].replace(f"{owner_run}", "") == absent.json()["detail"].replace(f"{owner_run}x", "")
+    assert client.get(f"/api/runs/{owner_run}/artifacts/anything").status_code == 404
+    assert client.post(f"/api/runs/{owner_run}/cancel", json={"reason": "not mine"}).status_code == 404
+
+    # Its own runs appear normally — and stay invisible to the owner in turn.
+    mine = client.post("/api/runs", json={
+        "lane": "static-text-ad", "title": "Second ad",
+        "concept": "Second's concept.", "scenes": [{"overlay": "Second"}],
+    }).json()["run_id"]
+    assert [run["run_id"] for run in client.get("/api/runs").json()["runs"]] == [mine]
+
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, 1, OWNER_PASSWORD)
+    owner_listed = [run["run_id"] for run in client.get("/api/runs").json()["runs"]]
+    assert owner_run in owner_listed and mine not in owner_listed
+    assert client.get(f"/api/runs/{mine}").status_code == 404
+
+
+def test_canvas_history_is_the_owners_machine_surface(client, tmp_path, monkeypatch):
+    """The canvas index reads MACHINE-wide sources, so only the owner holds it;
+    a sibling workspace's History must enumerate nothing it cannot open."""
+    output = tmp_path / "canvas-piece.png"
+    output.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    record = {
+        "id": "job-1", "status": "success",
+        "created_at": "2026-08-21T00:00:00+00:00",
+        "finished_at": "2026-08-21T00:00:00+00:00",
+        "outputs": [str(output)],
+    }
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    canvas_client = TestClient(build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        control_token="control-secret",
+        operator_token="operator-secret",
+        owner_access=OwnerAccess.for_testing(password=OWNER_PASSWORD, cipher=cipher),
+        private_cipher=cipher,
+        canvas_history_fetcher=lambda: [dict(record)],
+    ))
+
+    _sign_in(canvas_client, 1, OWNER_PASSWORD)
+    owner_view = canvas_client.get("/api/canvas/history").json()
+    assert [item["output_basename"] for item in owner_view["history"]] == ["canvas-piece.png"]
+    created = canvas_client.post("/api/accounts", json={"name": "Second", "password": "second-pass"})
+    assert created.status_code == 201, created.text
+    second = int(created.json()["account"]["id"])
+    owner_item = owner_view["history"][0]["history_id"]
+
+    canvas_client.post("/api/accounts/sign-out")
+    _sign_in(canvas_client, second, "second-pass")
+    second_view = canvas_client.get("/api/canvas/history").json()
+    assert second_view["history"] == [] and second_view["pagination"]["total"] == 0
+    # The tiles' detail routes hide the owner's items outright.
+    assert canvas_client.get(f"/api/canvas/history/{owner_item}/media").status_code == 404
+    assert canvas_client.get(f"/api/canvas/history/{owner_item}/workflow").status_code == 404
+    assert canvas_client.delete(f"/api/canvas/history/{owner_item}", params={}).status_code in {404, 422}
 
 
 def test_one_workspace_cannot_read_anothers_sealed_blobs(client):
@@ -306,11 +402,17 @@ def test_the_legacy_owner_hash_is_upgraded_to_scrypt_on_first_use(client, tmp_pa
     _sign_in(client, 1, OWNER_PASSWORD)
 
 
-def test_gpu_rentals_stay_owner_only(client):
+def test_gpu_rentals_follow_any_signed_in_workspace(client, monkeypatch):
+    # No marketplace is consulted: the claim under test is the ACCESS rule,
+    # and the conftest transport guard would (rightly) refuse a real call.
+    from hivemind_content_studio import rental_providers
+
+    monkeypatch.setattr(rental_providers, "configured_providers", lambda: [])
+    # Signed out, the rental surface is refused outright…
+    assert client.get("/api/gpu-rentals").status_code == 401
+    # …but any workspace may manage rentals once signed in: its creation was
+    # owner-approved, and that approval carries the whole studio.
     second = _add_workspace(client, "Second", "second-pass")
     _sign_in(client, second, "second-pass")
-    # Renting spends real money on machine-wide provider keys, so a second
-    # workspace must not reach it even though it is properly signed in.
-    refused = client.get("/api/gpu-rentals")
-    assert refused.status_code == 403
-    assert "owner workspace" in refused.json()["detail"]
+    reached = client.get("/api/gpu-rentals")
+    assert reached.status_code not in (401, 403)

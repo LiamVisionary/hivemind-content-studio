@@ -1038,6 +1038,62 @@ def test_start_video_uploads_and_forwards_the_motion_context_clip(tmp_path: Path
     assert "media-studio-input-chain.mp4" in started["uploaded_names"]
 
 
+def test_start_video_forwards_each_reference_video_with_its_canvas(tmp_path: Path, monkeypatch) -> None:
+    """Reference mode: every motion clip goes to the MCP as {video_path,
+    use_audio, canvas}. "compact" is the opt-in 384x1152 staging (a measured
+    motion-only result); anything else — including an absent key, or the UI's
+    own "full" — forwards as "full", the node's own reference canvas."""
+    descriptor = MediaStudioDescriptor(
+        app_id="test",
+        app_name="Media Studio",
+        mcp_url="http://127.0.0.1:8796/mcp",
+        upload_base="http://127.0.0.1:8788",
+        auth_env_key=None,
+        tool="media_generate_video",
+        job_tool="media_get_job",
+        workflow_id="minimax-h3-reference",
+    )
+    walk = tmp_path / "walk.mp4"
+    walk.write_bytes(b"walk")
+    wave = tmp_path / "wave.mp4"
+    wave.write_bytes(b"wave")
+    nod = tmp_path / "nod.mp4"
+    nod.write_bytes(b"nod")
+    captured: dict = {}
+
+    class Client:
+        def call_tool(self, name, arguments, **_kwargs):
+            assert name in {descriptor.tool, descriptor.job_tool}
+            if name == descriptor.tool:
+                captured.update(arguments)
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({"job": {"id": "job-canvas", "status": "queued"}}),
+                }],
+            }
+
+    monkeypatch.setattr("hivemind_content_studio.media_studio._required_descriptor", lambda: descriptor)
+    monkeypatch.setattr("hivemind_content_studio.media_studio._upload_video", lambda _descriptor, video: f"up-{Path(video).name}")
+    monkeypatch.setattr("hivemind_content_studio.media_studio._client", lambda *_args: Client())
+
+    start_video(
+        prompt="<Video 1> walks, <Video 2> waves, <Video 3> nods",
+        reference_videos=[
+            {"video_path": walk, "use_audio": True, "canvas": "compact"},
+            {"video_path": wave, "use_audio": False, "canvas": "full"},
+            {"video_path": nod},
+        ],
+        duration_seconds=5,
+    )
+
+    assert captured["reference_videos"] == [
+        {"video_path": "up-walk.mp4", "use_audio": True, "canvas": "compact"},
+        {"video_path": "up-wave.mp4", "use_audio": False, "canvas": "full"},
+        {"video_path": "up-nod.mp4", "use_audio": False, "canvas": "full"},
+    ]
+
+
 def test_start_video_refuses_motion_context_plus_source_video(tmp_path: Path, monkeypatch) -> None:
     descriptor = MediaStudioDescriptor(
         app_id="test",

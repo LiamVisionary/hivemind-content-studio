@@ -386,3 +386,90 @@ test('the versus starter keeps the arena and the announcer bound to labels', asy
     // A fist that never retracts follows its target around the frame.
     assert.match(prompt, /rebounds instantly back to guard/);
 });
+
+// The reference-driven starters describe "the subject" — who is whoever the
+// loaded persona is. They are written with gender tokens and rendered for that
+// persona at the one place the menu reads them; with no persona (or one with no
+// gender set) they read as the female default they were written as.
+test('the subject starters are rendered for the loaded persona\'s gender', async () => {
+    const { DEFAULT_PROMPTS, defaultPromptsFor, renderDefaultPrompt } = await import('../src/lib/defaultPrompts.js');
+    const { renderGenderTokens } = await import('../src/lib/personaId.js');
+
+    const raw = DEFAULT_PROMPTS.find((entry) => entry.id === 'travel-vlog-h3');
+    assert.match(raw.parts[0].prompt, /\{her\}/, 'the raw starter holds tokens, not a baked gender');
+
+    // No persona → female default, and no token ever reaches the composer.
+    const plain = defaultPromptsFor('video', H3_MODEL).find((entry) => entry.id === 'travel-vlog-h3');
+    assert.match(plain.parts[0].prompt, /<Subject 1> is the young woman shown in <Picture 1>/);
+    assert.doesNotMatch(plain.parts[0].prompt, /\{(woman|her|them|hers|herself|she)\}/i);
+    assert.match(plain.note, /Attach her photo/);
+
+    // A male persona → his starter, prompts and notes alike.
+    const his = defaultPromptsFor('video', { ...H3_MODEL, persona: { id: 'p', name: 'Marco', gender: 'male' } })
+        .find((entry) => entry.id === 'travel-vlog-h3');
+    assert.match(his.parts[0].prompt, /<Subject 1> is the young man shown in <Picture 1>/);
+    assert.match(his.parts[0].prompt, /glances down at his phone/);
+    assert.match(his.parts[1].prompt, /a step behind him/);
+    assert.match(his.note, /Attach his photo/);
+    assert.match(his.parts[0].note, /attach his reference picture/);
+    assert.doesNotMatch(`${his.parts[0].prompt}\n${his.parts[1].prompt}`, /\b(she|her|woman)\b/i, 'nothing female-coded is left behind');
+
+    // Seedance prose too, and a non-binary persona gets they/them.
+    const theirs = defaultPromptsFor('video', { ...SEEDANCE_25_MODEL, persona: { id: 'p', name: 'Sam', gender: 'nonbinary' } })
+        .find((entry) => entry.id === 'travel-vlog-seedance-25');
+    assert.match(theirs.parts[0].prompt, /Use the person from the reference image as the main subject\. Maintain their exact facial identity/);
+    assert.match(theirs.parts[0].prompt, /The camera follows them from behind/);
+    assert.doesNotMatch(theirs.parts[0].prompt, /\b(she|her|woman|he|his|man)\b/i);
+
+    // Every starter renders clean for every gender — no token survives, and the
+    // ones with no tokens are byte-identical to their raw text.
+    for (const entry of DEFAULT_PROMPTS) {
+        for (const gender of ['', 'female', 'male', 'nonbinary']) {
+            const rendered = renderDefaultPrompt(entry, gender);
+            for (const part of rendered.parts) {
+                assert.doesNotMatch(part.prompt, /\{(woman|her|them|hers|herself|she)\}/i, `${entry.id}/${gender} renders clean`);
+            }
+            if (!/\{(woman|her|them|hers|herself|she)\}/i.test(entry.parts.map((part) => part.prompt).join('\n'))) {
+                assert.deepEqual(rendered.parts.map((part) => part.prompt), entry.parts.map((part) => part.prompt),
+                    `${entry.id} has no tokens and is untouched`);
+            }
+        }
+    }
+    assert.equal(renderGenderTokens('no tokens here', 'male'), 'no tokens here');
+});
+
+// "Hair in a bun" is for the woman the starter was written about. A male
+// persona loses the ponytail, the makeup and the crop top — not just the
+// pronouns — and nothing female-coded survives in ANY starter rendered for him.
+test('a male or non-binary persona is not handed the starter woman\'s hairstyle, makeup or wardrobe', async () => {
+    const { DEFAULT_PROMPTS, renderDefaultPrompt, defaultPromptsFor } = await import('../src/lib/defaultPrompts.js');
+    const GROOMING = /ponytail|wispy bangs|makeup|crop top|high-waisted/i;
+    const FEMALE = /\b(she|her|hers|herself|woman)\b/;
+    const korean = DEFAULT_PROMPTS.filter((entry) => entry.idea === 'korean-home-video');
+    assert.ok(korean.length >= 4, 'every model family has a Korean home video starter');
+    for (const entry of [...korean, ...DEFAULT_PROMPTS.filter((e) => e.idea === 'travel-vlog')]) {
+        const him = renderDefaultPrompt(entry, 'male').parts.map((part) => part.prompt).join('\n');
+        assert.doesNotMatch(him, GROOMING, `${entry.id}/male keeps none of her grooming`);
+        assert.doesNotMatch(him, FEMALE, `${entry.id}/male has no female-coded word left`);
+        assert.match(him, /\b(he|his|him|man)\b/, `${entry.id}/male is about a man`);
+        const them = renderDefaultPrompt(entry, 'nonbinary').parts.map((part) => part.prompt).join('\n');
+        assert.doesNotMatch(them, /ponytail|wispy bangs|crop top|high-waisted|\b(she|her|he|his|him|woman|man)\b/, `${entry.id}/nonbinary is neutral`);
+        assert.doesNotMatch(them, /\bthey (walks|sits|smiles|crouches|hangs|turns|notices|stands|pegs|has)\b/, `${entry.id}/nonbinary keeps verb agreement`);
+        // The woman's starter is still hers — and still what an unset persona gets.
+        const her = renderDefaultPrompt(entry, 'female').parts.map((part) => part.prompt).join('\n');
+        assert.deepEqual(renderDefaultPrompt(entry, '').parts.map((p) => p.prompt).join('\n'), her, `${entry.id}: unset renders the female default`);
+        if (entry.idea === 'korean-home-video') assert.match(her, /messy side ponytail|messy black side ponytail/, `${entry.id}/female keeps the ponytail`);
+    }
+    // No rendering leaves a seam: no doubled spaces, no space before punctuation.
+    for (const entry of DEFAULT_PROMPTS) {
+        for (const gender of ['', 'female', 'male', 'nonbinary']) {
+            for (const part of renderDefaultPrompt(entry, gender).parts) {
+                assert.doesNotMatch(part.prompt, /  | [,.;]/, `${entry.id}/${gender} renders without a seam`);
+            }
+        }
+    }
+    // And the menu hands a male persona his Korean starters on every family.
+    const his = defaultPromptsFor('video', { ...H3_MODEL, persona: { id: 'p', name: 'Marco', gender: 'male' } })
+        .find((entry) => entry.id === 'korean-home-video-h3');
+    assert.match(his.parts[0].prompt, /A Korean man in his early twenties/);
+});

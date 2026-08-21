@@ -741,3 +741,50 @@
 - Source: verify-assimilation-manifest
 - Decision: passed
 - Reason: ASSIMILATION.autoclip.phase1.json: 7 concrete reuse entries, 7 substantive
+## 2026-08-20T07:58:46.852110+00:00 - implementation
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: hive-assimilate
+- Decision: adapted_code
+- Reason: Phase 1 landed: rerank.py, titles.py, llm_json.py, prompts.py, llm.py, db migration 3, podcli/scheduling/obsidian/cli/mcp/doctor wiring, presets/prompts defaults + 7 category overlays, 20 new tests
+## 2026-08-20T07:58:46.938542+00:00 - correction
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: live-verification
+- Decision: adapted_code
+- Reason: Live run on local Qwen3-4B showed the title pass echoing the reviewer critique into the caption field; removed score+reason from the title payload entirely (departs from donor step4) and locked it with a test
+## 2026-08-20T07:58:47.061268+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: passed
+- Reason: ASSIMILATION.autoclip.phase1.json: 7 concrete reuse entries, 7 substantive
+## 2026-08-20T07:58:47.114248+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: verify-assimilation-manifest
+- Decision: selected
+- Reason: ASSIMILATION.autoclip.phase1.json valid: 7 concrete reuse entries, 7 substantive. Suites: test/auto_clipper 58 passed; +test/services +test_repo_contract 576 passed 0 failed. Podcli render path unproven on this machine (podcli not installed).
+## 2026-08-20T08:15:29.118500+00:00 - audit
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: audit-candidate-repo
+- Decision: selected
+- Reason: Pre-install audit of the render dependency; podcli was never installed on this machine (no vendor/)
+
+### Candidates
+- nmbrthirteen/podcli@e204f98
+  - Decision: selected-donor
+  - Reason: AGPL-3.0-only; audit high=0 medium=3; DEFECT: ai_select defaults true and pipes transcript into claude/codex on PATH; gated by patches/podcli-ai-select-default-off.patch and verified by canary + doctor
+## 2026-08-20T11:24:02.656996+00:00 - correction
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: live-verification
+- Decision: adapted_code
+- Reason: Real podcli render exposed two defects the fake path hid: import globbed intermediates+thumbnails as clips (9 rows for --top 3, no timings), and the semantic pass had no text to read. Now parses podcli's printed selection and slices the transcript by range. Hook quality went from 'Nobody tells you about raising mo' (0.35) to 'Your round is priced by your worst month' (0.95).
+## 2026-08-20T11:24:02.694152+00:00 - verification
+
+- Request: Scope zhouxiaoka/autoclip (MIT) as a phased assimilation into hivemind-content-studio: LLM clip re-rank + title/caption generation layer on top of the existing Podcli render path
+- Source: live-verification
+- Decision: selected
+- Reason: Podcli installed at pinned e204f98 with 3 patches; doctor overall_ok True; canary claude+codex on PATH never spawned across a full render (gate held); 587 passed 10 skipped 0 failed

@@ -229,3 +229,124 @@ test('an incomplete export says so IN THE FILE, not just in a toast', async () =
     assert.equal(whole.incomplete, undefined);
     assert.deepEqual(parsePersonaExport(JSON.stringify(whole)).images.length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Gender — the one thing about a character its pictures cannot tell a prompt.
+
+test('a persona carries a gender, normalised to the studio vocabulary', async () => {
+    const { personaFromReferences, normalizePersonaGender, PERSONA_GENDERS } = await load();
+    assert.deepEqual(PERSONA_GENDERS, ['', 'female', 'male', 'nonbinary']);
+    assert.equal(personaFromReferences({ ...CHERYL, gender: 'female' }).gender, 'female');
+    // Spellings a persona file from elsewhere (or an agent) might carry.
+    assert.equal(normalizePersonaGender('Woman'), 'female');
+    assert.equal(normalizePersonaGender(' M '), 'male');
+    assert.equal(normalizePersonaGender('non-binary'), 'nonbinary');
+    assert.equal(normalizePersonaGender('they'), 'nonbinary');
+    // Unknown is unset, never a throw and never a guess.
+    assert.equal(normalizePersonaGender('dragon'), '');
+    assert.equal(normalizePersonaGender(undefined), '');
+    // A persona saved before gender existed reads as unset.
+    assert.equal(personaFromReferences(CHERYL).gender, '');
+});
+
+test('changing the gender is an edit worth saving', async () => {
+    const { samePersonaReferences } = await load();
+    assert.equal(samePersonaReferences({ ...CHERYL, gender: 'female' }, { ...CHERYL, gender: 'female' }), true);
+    assert.equal(samePersonaReferences({ ...CHERYL, gender: 'female' }, { ...CHERYL, gender: 'male' }), false);
+    // And a pre-gender persona compared with itself is unchanged.
+    assert.equal(samePersonaReferences(CHERYL, { ...CHERYL, gender: '' }), true);
+});
+
+test('the summary and the identity label say it, loading hands it back', async () => {
+    const { personaSummary, personaIdentity, applyPersonaToReferences } = await load();
+    assert.equal(personaSummary({ ...CHERYL, gender: 'female' }), 'Female · 2 pictures · 1 motion clip · 1 voice clip');
+    assert.equal(personaSummary(CHERYL), '2 pictures · 1 motion clip · 1 voice clip');
+    assert.deepEqual(personaIdentity({ id: 'p1', name: 'Cheryl', gender: 'woman' }), { id: 'p1', name: 'Cheryl', gender: 'female' });
+    assert.deepEqual(personaIdentity({ id: 'p1', name: 'Cheryl' }), { id: 'p1', name: 'Cheryl', gender: '' });
+    assert.equal(personaIdentity(null), null);
+    assert.equal(personaIdentity({ id: 'p1' }), null, 'no name, no persona');
+    assert.equal(applyPersonaToReferences({ ...CHERYL, gender: 'male' }).gender, 'male');
+});
+
+test('gender words and template tokens render for each persona, female by default', async () => {
+    const { personaGenderWords, renderGenderTokens } = await load();
+    assert.deepEqual(personaGenderWords('male'), { noun: 'man', she: 'he', her: 'his', them: 'him', hers: 'his', herself: 'himself' });
+    assert.equal(personaGenderWords('nonbinary').noun, 'person');
+    assert.equal(personaGenderWords('').noun, 'woman', 'unset reads as the female default the starters were written as');
+    const template = 'The {woman} checks {her} phone; the camera follows {them}. {Her} laugh. [KEEP {this}]';
+    assert.equal(renderGenderTokens(template, ''), 'The woman checks her phone; the camera follows her. Her laugh. [KEEP {this}]');
+    assert.equal(renderGenderTokens(template, 'male'), 'The man checks his phone; the camera follows him. His laugh. [KEEP {this}]');
+    assert.equal(renderGenderTokens(template, 'nonbinary'), 'The person checks their phone; the camera follows them. Their laugh. [KEEP {this}]');
+});
+
+test('an exported persona travels with its gender and an import keeps it', async () => {
+    const { buildPersonaExport, parsePersonaExport } = await load();
+    const media = {
+        [CHERYL.images[0]]: 'data:image/png;base64,AAAA',
+        [CHERYL.images[1]]: 'data:image/png;base64,BBBB',
+        [CHERYL.videos[0].url]: 'data:video/mp4;base64,CCCC',
+        [CHERYL.audios[0].url]: 'data:audio/mp4;base64,DDDD',
+    };
+    const { document } = buildPersonaExport({ name: 'Cheryl', persona: { ...CHERYL, gender: 'female' }, media });
+    assert.equal(document.gender, 'female');
+    assert.equal(parsePersonaExport(JSON.stringify(document)).gender, 'female');
+    // Unset is simply absent, and an older file without the field still parses.
+    const { document: unset } = buildPersonaExport({ name: 'Cheryl', persona: CHERYL, media });
+    assert.equal('gender' in unset, false);
+    assert.equal(parsePersonaExport(JSON.stringify(unset)).gender, '');
+});
+
+// Pronouns are not the only thing a template genders: a hairstyle, makeup or
+// a crop top written for the woman the starter was about must not be handed to
+// a man. Segments exist for the genders they fit and vanish for the rest.
+test('gender segments keep a detail for the genders it fits and drop it for the rest', async () => {
+    const { renderGenderTokens } = await load();
+    const line = 'The {woman} sits, {f:adjusting her messy ponytail}{m:rubbing the back of his neck}{nb:pushing their hair back}, {f,nb:tucks {her} hair back and }smiles.';
+    assert.equal(renderGenderTokens(line, ''), 'The woman sits, adjusting her messy ponytail, tucks her hair back and smiles.');
+    assert.equal(renderGenderTokens(line, 'female'), 'The woman sits, adjusting her messy ponytail, tucks her hair back and smiles.');
+    assert.equal(renderGenderTokens(line, 'male'), 'The man sits, rubbing the back of his neck, smiles.');
+    assert.equal(renderGenderTokens(line, 'nonbinary'), 'The person sits, pushing their hair back, tucks their hair back and smiles.');
+    // A subject pronoun for non-binary is a noun phrase, so the verb it was
+    // written with stays right: "they walks" never happens.
+    assert.equal(renderGenderTokens('{She} walks; {she} smiles.', 'nonbinary'), 'The person walks; the person smiles.');
+    assert.equal(renderGenderTokens('{She} walks.', 'male'), 'He walks.');
+    // Braces that are not tokens or segments are untouched.
+    assert.equal(renderGenderTokens('{x:keep} {this} {f} {f:}', 'male'), '{x:keep} {this} {f} ');
+});
+
+// Compact staging is the third per-clip switch (url, soundtrack, compact). Like
+// the soundtrack it changes what the model is given, so it is part of the
+// character: saved, compared, exported and imported with it.
+test('a clip\'s compact switch is part of the persona, and absent on an older save reads as off', async () => {
+    const { personaFromReferences, samePersonaReferences, applyPersonaToReferences } = await load();
+    const compact = {
+        ...CHERYL,
+        videos: [{ ...CHERYL.videos[0], compact: true }],
+    };
+    assert.equal(personaFromReferences(compact).videos[0].compact, true);
+    assert.equal(personaFromReferences(CHERYL).videos[0].compact, false, 'an absent flag is off, not undefined');
+    // Flipping it is an edit worth saving — and a persona saved before the
+    // switch existed is NOT edited merely by being loaded.
+    assert.equal(samePersonaReferences(CHERYL, compact), false);
+    assert.equal(samePersonaReferences(CHERYL, { ...CHERYL, videos: [{ ...CHERYL.videos[0], compact: false }] }), true);
+    // Loading restores the row with the switch where it was left.
+    assert.equal(applyPersonaToReferences(compact).videos[0].compact, true);
+});
+
+test('the compact switch travels in a persona export and comes back on import', async () => {
+    const { buildPersonaExport, parsePersonaExport } = await load();
+    const { document: doc } = buildPersonaExport({
+        name: 'Cheryl',
+        persona: { videos: [{ url: '/walk.mp4', name: 'walk.mp4', useAudio: false, compact: true }] },
+        media: { '/walk.mp4': 'data:video/mp4;base64,BBB' },
+    });
+    assert.equal(doc.videos[0].compact, true);
+    const back = parsePersonaExport(JSON.stringify(doc));
+    assert.equal(back.videos[0].compact, true);
+    // A file from before the switch existed, or one that never mentions it.
+    const older = parsePersonaExport(JSON.stringify({
+        ...doc, videos: [{ dataUrl: 'data:video/mp4;base64,BBB', name: 'walk.mp4', useAudio: true }],
+    }));
+    assert.equal(older.videos[0].compact, false);
+    assert.equal(older.videos[0].useAudio, true);
+});

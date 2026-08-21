@@ -541,6 +541,15 @@ def test_a_registered_lora_grows_the_disk_it_downloads_onto(monkeypatch, tmp_pat
     assert gpu_rentals.tier_disk_gb("image") == base_disk + 1
 
 
+def test_vast_quotes_the_price_of_the_disk_it_will_rent() -> None:
+    """`disk_space` only filters; Vast prices dph_total from `allocated_storage`
+    (8GB when omitted). Quoting at 8GB and renting at 120GB is how the Machines
+    view said $0.551/hr for a box that billed $0.613/hr (2026-08-21)."""
+    body = vast_provider.PROVIDER._query_body(OfferQuery(gpu_names=["RTX 5090"], min_disk_gb=120))
+    assert body["allocated_storage"] == 120
+    assert body["disk_space"] == {"gt": 120}
+
+
 def test_lora_disk_sizing_reaches_the_offer_search_and_the_launch(monkeypatch, tmp_path: Path) -> None:
     """One number, both consumers: the disk we FILTER hosts on and the disk we
     ASK for have to agree, or we rent a box that cannot hold what we then try

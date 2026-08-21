@@ -7,6 +7,7 @@ import {
     workflowIdFromHivemindModelId,
 } from './hivemindModelIds.js';
 import { isMinimaxFamilyModel } from './videoTasks.js';
+import { referenceVideoCanvas } from './h3References.js';
 
 // Re-exported so the id format keeps one import path for existing callers.
 export { isHivemindVideoModelId, workflowIdFromHivemindModelId };
@@ -149,6 +150,11 @@ export function mapHivemindWorkflowModels(catalog) {
                 // lists it in `accepts` only for graphs that carry the node, so
                 // the toggle appears exactly where it does something.
                 supportsSpectrum: accepts.includes('spectrum'),
+                // Fast high-res (H3's two-pass latent upscale) is registry-gated
+                // the same way: the graph needs a latent upscaler node on the
+                // lane, so the switch appears only where the registry says the
+                // workflow can compile it.
+                supportsFastHighRes: accepts.includes('fast_high_res'),
                 // The refinement (sampling steps) control needs a registry-mapped
                 // steps slot AND a full-step lane. A distilled turbo build
                 // registers 4-8 steps, where a 32-step "high detail" override
@@ -547,6 +553,14 @@ export async function generateHivemindVideo(params) {
         .map(async (item) => ({
             video_base64: await mediaSourceToDataUrl(item.url, 'video'),
             use_audio: Boolean(item.useAudio),
+            // How the clip is staged for the node: "compact" (a 384x1152 box,
+            // about a third of the rows and half the step time, the same
+            // motion) when the row switched it on, "full" otherwise — and
+            // always full while no picture is attached, because then the clip
+            // is the character reference and identity needs pixels. The rule
+            // lives in referenceVideoCanvas so the panel's switch and what is
+            // sent can never disagree.
+            canvas: referenceVideoCanvas(item, { images: referenceImages }),
             // The clip's own length, so the gateway can refuse an over-budget
             // run before it stages anything. A reference is trimmed to
             // min(its own length, the clip's), so this is what decides the
@@ -614,6 +628,7 @@ export async function generateHivemindVideo(params) {
         // Tri-state: only send an explicit choice, so leaving the toggle alone
         // keeps whatever the registered workflow ships with.
         ...(typeof params.spectrum === 'boolean' ? { spectrum: params.spectrum } : {}),
+        ...(typeof params.fast_high_res === 'boolean' ? { fast_high_res: params.fast_high_res } : {}),
         // Sampling-steps override (H3 refinement). Omitted = workflow default.
         ...(Number.isFinite(Number(params.steps)) && Number(params.steps) > 0
             ? { steps: Math.round(Number(params.steps)) }

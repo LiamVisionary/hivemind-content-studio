@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -79,7 +80,7 @@ def render_run(
         db.set_run_status(conn, run_id, "render_failed")
         raise RuntimeError(f"Podcli failed with exit code {result.returncode}. See {log_path}")
 
-    created = import_podcli_outputs(conn, run_id, output_dir, result.stdout)
+    created = import_podcli_outputs(conn, run_id, output_dir, result.stdout, transcript=transcript)
     db.set_run_status(conn, run_id, "rendered" if created else "rendered_no_clips")
     if created:
         enrich_run(conn, cfg, run_id, output_dir=output_dir, category=category)
@@ -205,7 +206,13 @@ def run_podcli_command(command: list[str], timeout: int) -> subprocess.Completed
             pass
 
 
-def import_podcli_outputs(conn, run_id: int, output_dir: Path, stdout: str) -> int:
+def import_podcli_outputs(
+    conn,
+    run_id: int,
+    output_dir: Path,
+    stdout: str,
+    transcript: Path | None = None,
+) -> int:
     count = 0
     json_candidates = _json_objects(stdout)
     for idx, payload in enumerate(json_candidates, start=1):
@@ -234,7 +241,38 @@ def import_podcli_outputs(conn, run_id: int, output_dir: Path, stdout: str) -> i
     if count:
         return count
 
-    videos = sorted(p for p in output_dir.rglob("*.mp4") if p.is_file())
+    # Podcli writes no machine-readable manifest, but it does print its
+    # selection. Parsing that is the difference between knowing a clip's range
+    # and its opening line, and importing a directory listing blind.
+    selected = parse_selected_clips(stdout)
+    videos = rendered_clip_files(output_dir)
+    segments = _transcript_segments(transcript)
+
+    if selected and videos:
+        for idx, entry in enumerate(selected, start=1):
+            path = _match_clip_file(entry["text"], videos)
+            # Podcli only prints the first ~50 characters of the opening line,
+            # truncated mid-word. Recover the clip's real text from the
+            # transcript we handed it, so the semantic pass scores and writes
+            # hooks from what is actually said rather than from a fragment.
+            excerpt = _excerpt_for_range(
+                segments, entry["start_seconds"], entry["end_seconds"]
+            ) or entry["text"]
+            db.add_clip(
+                conn,
+                run_id=run_id,
+                slug=f"clip-{idx:02d}",
+                start_seconds=entry["start_seconds"],
+                end_seconds=entry["end_seconds"],
+                score=entry["score"],
+                rationale=f"Podcli heuristic selection ({entry['raw_score']}).",
+                transcript_excerpt=excerpt,
+                output_path=str(path) if path else None,
+                status="rendered",
+            )
+            count += 1
+        return count
+
     for idx, path in enumerate(videos, start=1):
         db.add_clip(
             conn,
@@ -246,6 +284,132 @@ def import_podcli_outputs(conn, run_id: int, output_dir: Path, stdout: str) -> i
         )
         count += 1
     return count
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+# "  ✓ 1. [1:36 → +37s] (14/20) And then you spend seven months pretending you don"
+_SELECTED = re.compile(
+    r"[✓✔]\s*(?P<index>\d+)\.\s*"
+    r"\[(?P<start>(?:\d+:)?\d+:\d+)\s*(?:→|->)\s*\+(?P<duration>\d+(?:\.\d+)?)s\]\s*"
+    r"\((?P<score>[^)]*)\)\s*(?P<text>.*)"
+)
+# Everything Podcli leaves behind that is not a finished clip: the pre-outro
+# intermediate it keeps beside each render, and the per-clip thumbnail frames.
+_NOT_A_CLIP = ("outro_scaled", "_with_thumb", "thumb_frame")
+
+
+def parse_selected_clips(stdout: str) -> list[dict]:
+    """Recover Podcli's own picks — range, heuristic score, opening line."""
+    entries: list[dict] = []
+    for line in _ANSI.sub("", stdout).splitlines():
+        match = _SELECTED.search(line)
+        if not match:
+            continue
+        start = _clock_to_seconds(match.group("start"))
+        if start is None:
+            continue
+        duration = float(match.group("duration"))
+        raw_score = match.group("score").strip()
+        entries.append(
+            {
+                "index": int(match.group("index")),
+                "start_seconds": start,
+                "end_seconds": start + duration,
+                "score": _normalize_heuristic_score(raw_score),
+                "raw_score": raw_score,
+                "text": match.group("text").strip(),
+            }
+        )
+    entries.sort(key=lambda entry: entry["index"])
+    return entries
+
+
+def rendered_clip_files(output_dir: Path) -> list[Path]:
+    """Finished clips only.
+
+    A bare `rglob("*.mp4")` also returns Podcli's pre-outro intermediates and
+    its per-clip thumbnail frames, which is how a `--top 3` run produced nine
+    clip rows — and how a thumbnail frame could reach an approval queue.
+    """
+    return sorted(
+        path
+        for path in output_dir.rglob("*.mp4")
+        if path.is_file() and not any(marker in path.name for marker in _NOT_A_CLIP)
+    )
+
+
+def _transcript_segments(transcript: Path | None) -> list[dict]:
+    """Timed segments from the JSON we generated for Podcli, if we have it."""
+    if transcript is None:
+        return []
+    try:
+        payload = json.loads(Path(transcript).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    segments = payload.get("segments")
+    return segments if isinstance(segments, list) else []
+
+
+def _excerpt_for_range(segments: list[dict], start: float, end: float) -> str | None:
+    """Every segment that overlaps the clip, joined in order."""
+    if not segments:
+        return None
+    spoken: list[str] = []
+    for segment in segments:
+        try:
+            seg_start = float(segment.get("start"))
+            seg_end = float(segment.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if seg_end <= start or seg_start >= end:
+            continue
+        text = str(segment.get("text") or "").strip()
+        if text:
+            spoken.append(text)
+    return " ".join(spoken) or None
+
+
+def _clock_to_seconds(value: str) -> float | None:
+    parts = value.split(":")
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError:
+        return None
+    if len(numbers) == 2:
+        return float(numbers[0] * 60 + numbers[1])
+    if len(numbers) == 3:
+        return float(numbers[0] * 3600 + numbers[1] * 60 + numbers[2])
+    return None
+
+
+def _normalize_heuristic_score(raw: str) -> float | None:
+    """Podcli reports either `14/20` or `10pts`. Only the fraction has a scale."""
+    fraction = re.match(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$", raw)
+    if not fraction:
+        return None
+    numerator, denominator = float(fraction.group(1)), float(fraction.group(2))
+    if denominator <= 0:
+        return None
+    return max(0.0, min(1.0, numerator / denominator))
+
+
+def _match_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _match_clip_file(text: str, videos: list[Path]) -> Path | None:
+    """Podcli names each file after the clip's opening line, so the line matches it."""
+    wanted = _match_key(text)
+    if not wanted:
+        return None
+    for path in videos:
+        stem = _match_key(path.stem.removesuffix("_short"))
+        if not stem:
+            continue
+        shortest = min(len(stem), len(wanted))
+        if shortest >= 12 and stem[:shortest] == wanted[:shortest]:
+            return path
+    return None
 
 
 def _json_objects(text: str) -> list[dict]:

@@ -194,6 +194,17 @@ class CanvasHistoryStore:
                     changed += connection.total_changes - before
         return changed
 
+    def clear(self) -> int:
+        """Erase every indexed row.
+
+        For a store that synced records its account should never have held: the
+        machine-wide canvas surface belongs to the owner, and a non-owner store
+        that adopted it before that rule was enforced keeps thousands of
+        foreign filenames on disk until they are wiped."""
+        with self._connect() as connection:
+            removed = connection.execute("DELETE FROM canvas_history")
+        return removed.rowcount
+
     def list(self, *, limit: int = 300) -> list[dict[str, Any]]:
         return self.page(page=1, page_size=limit)["items"]
 

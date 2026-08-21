@@ -16,9 +16,12 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useSavedLibrary } from '../../hooks/hooks.js';
 import {
+  PERSONA_GENDER_OPTIONS,
   applyPersonaToReferences,
+  normalizePersonaGender,
   personaCounts,
   personaFromReferences,
+  personaIdentity,
   personaIsEmpty,
   personaPrimaryImage,
   personaSummary,
@@ -34,6 +37,33 @@ import { ReferenceThumb } from './ReferenceThumb.jsx';
 import { zh } from './videoLogic.js';
 
 const BAR_BUTTON = 'rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50';
+
+// The persona's gender, as a row of chips. It is the one thing about a
+// character that its pictures cannot tell a prompt — "the woman"/"her" or "the
+// man"/"his" — so it is set here beside the name, and every template, cast
+// definition, UGC deal and helper request reads it from the saved persona.
+function GenderChips({ value, onChange, disabled = false, compact = false }) {
+  return (
+    <div role="group" aria-label={zh() ? '性别' : 'Gender'} className="flex flex-wrap items-center gap-1">
+      {PERSONA_GENDER_OPTIONS.map((option) => (
+        <button
+          key={option.value || 'unset'}
+          type="button"
+          disabled={disabled}
+          aria-pressed={value === option.value}
+          onClick={() => onChange(option.value)}
+          className={cx(
+            'rounded font-medium transition-colors disabled:opacity-50',
+            compact ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-1 text-[11px]',
+            value === option.value ? 'bg-honey-tint text-honey' : 'text-ink3 hover:bg-bg3 hover:text-ink2',
+          )}
+        >
+          {zh() ? option.zh : option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function PersonaFace({ data, posters, onPosterCaptured }) {
   const url = personaPrimaryImage(data);
@@ -59,7 +89,7 @@ function PersonaFace({ data, posters, onPosterCaptured }) {
  * @param {string[]} props.images                 the attached <Picture N> rows
  * @param {object[]} props.videos                 the attached <Video N> rows
  * @param {object[]} props.audios                 the attached <Audio N> rows
- * @param {object}   props.persona                { id, name } of the loaded persona, or null
+ * @param {object}   props.persona                { id, name, gender } of the loaded persona, or null
  * @param {Function} props.onPersonaChange        (next|null) => void
  * @param {Function} props.onLoad                 ({ images, videos, audios }) => void
  * @param {object}   props.limits                 the running workflow's slot counts
@@ -84,9 +114,13 @@ export function PersonaBar({
   // while reading one in. Both are slow — every reference is decrypted or
   // re-uploaded one at a time — so neither may look instant.
   const [busyTransfer, setBusyTransfer] = useState('');
+  // The gender chosen in the save dialog. Seeded from the loaded persona when
+  // the dialog opens, so "Save as new" starts from the character on screen.
+  const [saveGender, setSaveGender] = useState('');
   const importInputRef = useRef(null);
 
-  const current = personaFromReferences({ images, videos, audios });
+  const gender = normalizePersonaGender(persona?.gender);
+  const current = personaFromReferences({ images, videos, audios, gender });
   const empty = personaIsEmpty(current);
   const activeEntry = persona?.id ? entries.find((entry) => entry.id === persona.id) : null;
   // Only meaningful once the library has actually been read: before that, an
@@ -101,10 +135,11 @@ export function PersonaBar({
   const save = async (name) => {
     setSaving(true);
     try {
-      const entry = await saveLibraryEntry(LIBRARIES.personas, { name, data: current });
+      const data = { ...current, gender: normalizePersonaGender(saveGender) };
+      const entry = await saveLibraryEntry(LIBRARIES.personas, { name, data });
       // A same-name save is an upsert, so an existing id means it replaced one.
       const replaced = entries.some((item) => item.id === entry.id);
-      onPersonaChange?.({ id: entry.id, name: entry.name });
+      onPersonaChange?.(personaIdentity({ id: entry.id, name: entry.name, gender: data.gender }));
       setSaveOpen(false);
       toast.success(replaced
         ? (zh() ? `已更新“${name}”。` : `Updated “${name}”.`)
@@ -180,10 +215,10 @@ export function PersonaBar({
   };
 
   const load = (entry) => {
-    const { images: nextImages, videos: nextVideos, audios: nextAudios, missing, trimmed } =
+    const { images: nextImages, videos: nextVideos, audios: nextAudios, gender: nextGender, missing, trimmed } =
       applyPersonaToReferences(entry.data, { limits, known });
     onLoad?.({ images: nextImages, videos: nextVideos, audios: nextAudios });
-    onPersonaChange?.({ id: entry.id, name: entry.name });
+    onPersonaChange?.(personaIdentity({ id: entry.id, name: entry.name, gender: nextGender }));
     // Never let a character come back quietly smaller than it was saved.
     if (missing.length) {
       toast(zh()
@@ -218,7 +253,15 @@ export function PersonaBar({
 
   const openSave = (asNew) => {
     setSaveAsNew(asNew);
+    setSaveGender(gender);
     setSaveOpen(true);
+  };
+
+  // Changing the gender of the loaded character is an edit like swapping a
+  // picture: the bar shows it, Save writes it.
+  const setLoadedGender = (value) => {
+    if (!persona?.name) return;
+    onPersonaChange?.(personaIdentity({ ...persona, gender: value }));
   };
 
   const counts = personaCounts(current);
@@ -245,17 +288,25 @@ export function PersonaBar({
       </div>
 
       {persona?.name ? (
-        <div className="flex items-center gap-2">
-          <PersonaFace data={current} posters={posters} onPosterCaptured={onPosterCaptured} />
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[12px] font-semibold text-ink1">{persona.name}</span>
-            <span className={cx('block truncate text-[10px]', edited ? 'text-honey' : 'text-ink3')}>
-              {edited
-                ? (zh() ? `已修改 · ${personaSummary(current)}` : `Edited · ${personaSummary(current)}`)
-                : personaSummary(current)}
+        <>
+          <div className="flex items-center gap-2">
+            <PersonaFace data={current} posters={posters} onPosterCaptured={onPosterCaptured} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[12px] font-semibold text-ink1">{persona.name}</span>
+              <span className={cx('block truncate text-[10px]', edited ? 'text-honey' : 'text-ink3')}>
+                {edited
+                  ? (zh() ? `已修改 · ${personaSummary(current)}` : `Edited · ${personaSummary(current)}`)
+                  : personaSummary(current)}
+              </span>
             </span>
-          </span>
-        </div>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.06em] text-ink3">
+              {zh() ? '性别' : 'Gender'}
+            </span>
+            <GenderChips compact value={gender} onChange={setLoadedGender} disabled={saving} />
+          </div>
+        </>
       ) : (
         <p className="text-[10px] leading-snug text-ink3">
           {zh()
@@ -382,7 +433,7 @@ export function PersonaBar({
         title={saveAsNew ? 'Save as a new persona' : 'Save Hive Persona ID'}
         label="Character name"
         placeholder="e.g. Cheryl"
-        hint={personaSummary(current)}
+        hint={personaSummary({ ...current, gender: saveGender })}
         // Saving as new starts from a blank field so it cannot overwrite by
         // accident; the plain save pre-fills whatever is loaded.
         initialName={saveAsNew ? '' : (persona?.name || '')}
@@ -391,7 +442,19 @@ export function PersonaBar({
         confirmLabel="Save persona"
         onClose={() => setSaveOpen(false)}
         onSave={save}
-      />
+      >
+        <div className="mt-3">
+          <SectionLabel>{zh() ? '性别' : 'Gender'}</SectionLabel>
+          <div className="mt-1.5">
+            <GenderChips value={saveGender} onChange={setSaveGender} disabled={saving} />
+          </div>
+          <p className="mt-1.5 text-[11px] leading-relaxed text-ink3">
+            {zh()
+              ? '模板、演员表和 UGC 预设会据此写“她/他/他们”。'
+              : 'Starters, the Cast control, UGC deals and the prompt helper write “her”, “his” or “their” from this.'}
+          </p>
+        </div>
+      </SaveNameModal>
 
       <ConfirmModal
         open={Boolean(confirmDelete)}

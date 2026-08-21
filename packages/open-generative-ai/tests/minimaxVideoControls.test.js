@@ -103,6 +103,44 @@ test('refinement steps stay gated on a full-step lane end to end', async () => {
     assert.match(videoStudio, /supportsQualitySteps\(currentModel\(setup, s\.catalogs\)\)/);
 });
 
+test('fast high-res is derived from the registry and survives a reload', async () => {
+    // The two-pass latent upscale needs an upscaler node on the executing lane,
+    // so the switch is registry-gated like every other capability: derived once
+    // from `accepts`, read verbatim downstream.
+    const restore = stubBrowserGlobals();
+    try {
+        const studio = await import(`${pathToFileURL(path.join(__dirname, '../src/lib/hivemindStudio.js')).href}?test=fast-high-res`);
+        const [base, reference, ltx] = studio.mapHivemindWorkflowModels({
+            media: { video: [{ id: 'media-studio-mcp', label: 'Media Studio', available: true, models: [
+                { id: 'minimax-h3', label: 'MiniMax H3', family: 'minimax', accepts: ['steps', 'fast_high_res'] },
+                { id: 'minimax-h3-reference', label: 'Reference', family: 'minimax', accepts: ['steps', 'reference_images'] },
+                { id: 'ltx23-eros-fast', label: 'LTX', family: 'ltx-2.3', accepts: ['steps'] },
+            ] }] },
+        });
+        assert.equal(base.supportsFastHighRes, true);
+        assert.equal(reference.supportsFastHighRes, false, 'the reference lane conditions through a different node');
+        assert.equal(ltx.supportsFastHighRes, false);
+    } finally {
+        restore();
+    }
+
+    const videoLogic = fs.readFileSync(path.join(__dirname, '../src/studios/video/videoLogic.js'), 'utf8');
+    assert.doesNotMatch(videoLogic, /accepts\.includes\('fast_high_res'\)/, 'the rule lives in the registry mapper only');
+    const videoStudio = fs.readFileSync(path.join(__dirname, '../src/studios/VideoStudio.jsx'), 'utf8');
+    // Gated on the SELECTED model, so a preference left on from H3 cannot ride
+    // along into a graph with no upscaler to compile.
+    assert.match(videoStudio, /supportsFastHighRes\(currentModel\(setup, s\.catalogs\)\)/);
+
+    // A speed/quality preference, so it persists — and only as a real boolean.
+    const { normalizeVideoPreferences } = await import('../src/lib/videoPreferences.js');
+    const fast = (value) => normalizeVideoPreferences({ modelId: 'hivemind-media:minimax-h3', fastHighRes: value }).fastHighRes;
+    assert.equal(fast(true), true);
+    assert.equal(fast(false), false);
+    assert.equal(fast(undefined), false, 'off unless it was explicitly turned on');
+    assert.equal(fast('true'), false, 'a string is not a choice');
+});
+
+
 test('the persisted steps override round-trips within sane bounds', async () => {
     const { normalizeVideoPreferences } = await import('../src/lib/videoPreferences.js');
     const steps = (value) => normalizeVideoPreferences({ modelId: 'hivemind-media:minimax-h3', steps: value }).steps;

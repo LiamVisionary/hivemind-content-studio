@@ -796,16 +796,20 @@ export function GpuMachinesView({ active }) {
               </div>
             ))}
             <small className="text-[11px] text-ink3">
-              {/* Two different failures used to share one verdict. A host that
-                  never starts its container IS a bad host. A download that
-                  stalls often is not — it can be a transient dip, or the link
-                  being shared — and telling someone to blame the host sends
-                  them re-renting instead of retrying. */}
+              {/* Different failures used to share one verdict. A host that
+                  never starts its container IS a bad host. The beacon reports
+                  two distinct download endings: "failed" (a stream gave up
+                  after its resumed retries, or the object was refused — the
+                  reason carries the last curl/HTTP error) and "stalled" (still
+                  crawling at the deadline). Neither indicts the tier, and the
+                  failed host is held out of the next search either way. */}
               {failures.every((failure) => /never started/i.test(failure.reason || ''))
                 ? 'The host never started its container, so this is the machine rather than the tier — renting again normally lands on a different one.'
-                : failures.every((failure) => /download/i.test(failure.reason || ''))
-                  ? 'A weight download stalled. That is often the machine, but a shared or briefly slow link does it too, so the same tier is usually still worth retrying.'
-                  : 'Often the machine rather than the tier — renting again normally lands on a different one.'}
+                : failures.every((failure) => /download failed/i.test(failure.reason || ''))
+                  ? 'A weight download gave up: one stream exhausted its retries, or the object was refused — the reason names the last error. That host is held out for a day, so renting the same tier again lands on a different one.'
+                  : failures.every((failure) => /download stalled/i.test(failure.reason || ''))
+                    ? 'A weight download was still crawling at the deadline — usually the host\'s link rather than the tier. That host is held out for a day, so the same tier is still worth retrying.'
+                    : 'Often the machine rather than the tier — renting again normally lands on a different one.'}
             </small>
           </Card>
         )}

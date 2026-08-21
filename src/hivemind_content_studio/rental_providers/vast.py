@@ -138,6 +138,15 @@ class VastProvider:
             "gpu_name": {"eq": names[0]} if len(names) == 1 else {"in": names},
             "reliability2": {"gt": 0.99},
             "disk_space": {"gt": query.min_disk_gb},
+            # `disk_space` only FILTERS. The price Vast quotes (dph_total) is
+            # GPU plus storage, and the storage half is computed from
+            # `allocated_storage`, which defaults to 8GB when omitted — so
+            # without this line every offer is quoted as if it carried an 8GB
+            # disk while create() rents it with the tier's 120GB. Measured
+            # 2026-08-21 on a 5090 ask: quoted $0.551/hr, billed $0.613/hr,
+            # the whole gap being 112GB x $0.40/GB-month. Quote the disk we
+            # will actually rent, and the offer price is the instance price.
+            "allocated_storage": query.min_disk_gb,
             "type": "on-demand",
             "order": [["dph_total", "asc"]],
             # Price-ordered and truncated, so this has to exceed the whole

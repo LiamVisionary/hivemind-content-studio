@@ -39,6 +39,8 @@ import { isLtxFamilyModel, isMinimaxFamilyModel } from './videoTasks.js';
 // workflows, and a prompt written for one reads the same on its siblings.
 // Seedance 2.5 is split out from the rest of Seedance because its 30s ceiling
 // changes how the prompt is written, not just how long it runs.
+import { renderGenderTokens } from './personaId.js';
+
 export const PROMPT_FAMILIES = Object.freeze({
   'seedance-2.5': 'Seedance 2.5',
   seedance: 'Seedance 2.0 / 1.5 / Lite',
@@ -48,10 +50,10 @@ export const PROMPT_FAMILIES = Object.freeze({
 
 // Verbatim from Liam's Seedance 2.5 prompt (2026-08-11), and the source text
 // every other variant below is a rewrite of.
-const KOREAN_HOME_VIDEO_SEEDANCE_25 = `Create a 30-second ultra-realistic candid home-video sequence of a young Korean woman in her early 20s living an ordinary late morning in a quiet Korean residential neighborhood.
+const KOREAN_HOME_VIDEO_SEEDANCE_25 = `Create a 30-second ultra-realistic candid home-video sequence of a young Korean {woman} in {her} early 20s living an ordinary late morning in a quiet Korean residential neighborhood.
 
 SUBJECT:
-Young Korean woman, natural everyday appearance, realistic skin texture, minimal makeup, black wavy hair in a messy side ponytail with wispy bangs. Faded charcoal-grey sleeveless crop top, loose high-waisted light-wash jeans, black canvas sneakers, simple black cord necklace. Warm, relaxed personality. Keep her face, body, hairstyle, clothing, and appearance perfectly consistent throughout.
+Young Korean {woman}, natural everyday appearance, realistic skin texture, {f:minimal makeup, black wavy hair in a messy side ponytail with wispy bangs}{m:short black hair slightly grown out and tousled}{nb:no makeup, black wavy hair tied back loosely}. {f:Faded charcoal-grey sleeveless crop top, loose high-waisted light-wash jeans}{m:Faded charcoal-grey t-shirt, loose light-wash jeans}{nb:Faded charcoal-grey sleeveless top, loose light-wash jeans}, black canvas sneakers, simple black cord necklace. Warm, relaxed personality. Keep {her} face, body, hairstyle, clothing, and appearance perfectly consistent throughout.
 
 SETTING:
 Authentic Korean residential neighborhood — narrow concrete alleys, low-rise homes, small terraces, potted plants, laundry lines, bicycles, utility poles, overhead wires and mature trees. Quiet, lived-in atmosphere. No shops, advertisements, crowds, cafés, or commercial activity.
@@ -60,17 +62,17 @@ VISUAL STYLE:
 Ultra-realistic documentary home-video footage from an early-2000s consumer DV camcorder. Imperfect handheld operation, natural camera shake, awkward framing, occasional reframing, autofocus hunting, slight lens breathing, exposure pumping between sunlight and shade, subtle motion blur, mild rolling shutter, faded colors, soft contrast, slight digital compression and sensor noise. No stabilization, no cinematic camera moves, no modern color grading. Everything must feel genuinely captured, not AI-generated.
 
 TIMELINE:
-00:00–00:05 — Outside her small house, she sits on a low concrete wall adjusting her messy ponytail. Wind moves loose strands of hair. She casually smiles while the camera struggles to lock focus.
+00:00–00:05 — Outside {her} small house, {she} sits on a low concrete wall {f:adjusting her messy ponytail}{m:rubbing the back of his neck}{nb:pushing their hair back}. Wind moves {f,nb:loose strands of hair}{m:the leaves overhead}. {She} casually smiles while the camera struggles to lock focus.
 
-00:05–00:10 — She walks into a narrow residential alley. A stray cat approaches. She crouches naturally, pets it and gently feeds it. Autofocus shifts imperfectly between her face and the cat.
+00:05–00:10 — {She} walks into a narrow residential alley. A stray cat approaches. {She} crouches naturally, pets it and gently feeds it. Autofocus shifts imperfectly between {her} face and the cat.
 
-00:10–00:15 — In a small front yard, she hangs laundry on a clothesline. Fabric moves naturally in the breeze while sunlight and cloud shadows subtly change the exposure.
+00:10–00:15 — In a small front yard, {she} hangs laundry on a clothesline. Fabric moves naturally in the breeze while sunlight and cloud shadows subtly change the exposure.
 
-00:15–00:20 — She sits on a quiet terrace with a simple ceramic coffee cup, casually watching the neighborhood and brushing loose hair behind her ear. Handheld side angle with natural camera drift.
+00:15–00:20 — {She} sits on a quiet terrace with a simple ceramic coffee cup, casually watching the neighborhood{f,nb: and brushing loose hair behind {her} ear}{m: and turning the cup slowly in his hands}. Handheld side angle with natural camera drift.
 
-00:20–00:25 — Close side profile. Someone off-camera casually greets her. She turns, smiles warmly, raises her hand and naturally says, “Annyeong.” The camera reacts slightly late.
+00:20–00:25 — Close side profile. Someone off-camera casually greets {them}. {She} turns, smiles warmly, raises {her} hand and naturally says, “Annyeong.” The camera reacts slightly late.
 
-00:25–00:30 — She walks slowly down a tree-lined residential lane holding her coffee. She notices the camera, gives a small genuine smile, then looks away and continues walking. The recording abruptly cuts to black mid-motion like an old camcorder being switched off.
+00:25–00:30 — {She} walks slowly down a tree-lined residential lane holding {her} coffee. {She} notices the camera, gives a small genuine smile, then looks away and continues walking. The recording abruptly cuts to black mid-motion like an old camcorder being switched off.
 
 AUDIO:
 Only authentic location sound: birds, distant motorcycles, light wind, rustling leaves, faint neighborhood chatter, cat sounds, footsteps on concrete, laundry moving on the clothesline and subtle residential ambience. Natural Korean speech only. No music, narration, cinematic sound effects, or artificial sound design.
@@ -81,7 +83,7 @@ Make it feel like a forgotten personal home video from the early 2000s — intim
 // The identity blocks every Seedance part repeats. Repetition is the point: a
 // continuation that stops describing her renders a different woman.
 const SEEDANCE_IDENTITY = `SUBJECT:
-Young Korean woman, natural everyday appearance, realistic skin texture, minimal makeup, black wavy hair in a messy side ponytail with wispy bangs. Faded charcoal-grey sleeveless crop top, loose high-waisted light-wash jeans, black canvas sneakers, simple black cord necklace. Warm, relaxed personality. Keep her face, body, hairstyle, clothing, and appearance perfectly consistent throughout.
+Young Korean {woman}, natural everyday appearance, realistic skin texture, {f:minimal makeup, black wavy hair in a messy side ponytail with wispy bangs}{m:short black hair slightly grown out and tousled}{nb:no makeup, black wavy hair tied back loosely}. {f:Faded charcoal-grey sleeveless crop top, loose high-waisted light-wash jeans}{m:Faded charcoal-grey t-shirt, loose light-wash jeans}{nb:Faded charcoal-grey sleeveless top, loose light-wash jeans}, black canvas sneakers, simple black cord necklace. Warm, relaxed personality. Keep {her} face, body, hairstyle, clothing, and appearance perfectly consistent throughout.
 
 SETTING:
 Authentic Korean residential neighborhood — narrow concrete alleys, low-rise homes, small terraces, potted plants, laundry lines, bicycles, utility poles, overhead wires and mature trees. Quiet, lived-in atmosphere. No shops, advertisements, crowds, cafés, or commercial activity.
@@ -95,53 +97,53 @@ Only authentic location sound: birds, distant motorcycles, light wind, rustling 
 GOAL:
 Make it feel like a forgotten personal home video from the early 2000s — intimate, spontaneous, imperfect, warm, mundane and deeply believable. Prioritize realistic human motion, natural facial expressions, physical interaction, environmental detail and consistent identity over cinematic beauty.`;
 
-const KOREAN_HOME_VIDEO_SEEDANCE_A = `Create a 15-second ultra-realistic candid home-video sequence of a young Korean woman in her early 20s living an ordinary late morning in a quiet Korean residential neighborhood.
+const KOREAN_HOME_VIDEO_SEEDANCE_A = `Create a 15-second ultra-realistic candid home-video sequence of a young Korean {woman} in {her} early 20s living an ordinary late morning in a quiet Korean residential neighborhood.
 
 ${SEEDANCE_IDENTITY}
 
 TIMELINE:
-00:00–00:05 — Outside her small house, she sits on a low concrete wall adjusting her messy ponytail. Wind moves loose strands of hair. She casually smiles while the camera struggles to lock focus.
+00:00–00:05 — Outside {her} small house, {she} sits on a low concrete wall {f:adjusting her messy ponytail}{m:rubbing the back of his neck}{nb:pushing their hair back}. Wind moves {f,nb:loose strands of hair}{m:the leaves overhead}. {She} casually smiles while the camera struggles to lock focus.
 
-00:05–00:10 — She walks into a narrow residential alley. A stray cat approaches. She crouches naturally, pets it and gently feeds it. Autofocus shifts imperfectly between her face and the cat.
+00:05–00:10 — {She} walks into a narrow residential alley. A stray cat approaches. {She} crouches naturally, pets it and gently feeds it. Autofocus shifts imperfectly between {her} face and the cat.
 
-00:10–00:15 — In a small front yard, she hangs laundry on a clothesline. Fabric moves naturally in the breeze while sunlight and cloud shadows subtly change the exposure. The clip ends mid-action with the camera still rolling.
+00:10–00:15 — In a small front yard, {she} hangs laundry on a clothesline. Fabric moves naturally in the breeze while sunlight and cloud shadows subtly change the exposure. The clip ends mid-action with the camera still rolling.
 
 ${SEEDANCE_AUDIO_GOAL}`;
 
-const KOREAN_HOME_VIDEO_SEEDANCE_B = `Continue the previous clip with no cut. The same recording keeps running: same woman, same clothes, same neighborhood, same camcorder, same late-morning light. Begin from the final frame of the previous clip and carry its motion forward.
+const KOREAN_HOME_VIDEO_SEEDANCE_B = `Continue the previous clip with no cut. The same recording keeps running: same {woman}, same clothes, same neighborhood, same camcorder, same late-morning light. Begin from the final frame of the previous clip and carry its motion forward.
 
 ${SEEDANCE_IDENTITY}
 
 TIMELINE:
-00:00–00:05 — She sits on a quiet terrace with a simple ceramic coffee cup, casually watching the neighborhood and brushing loose hair behind her ear. Handheld side angle with natural camera drift.
+00:00–00:05 — {She} sits on a quiet terrace with a simple ceramic coffee cup, casually watching the neighborhood{f,nb: and brushing loose hair behind {her} ear}{m: and turning the cup slowly in his hands}. Handheld side angle with natural camera drift.
 
-00:05–00:10 — Close side profile. Someone off-camera casually greets her. She turns, smiles warmly, raises her hand and naturally says, “Annyeong.” The camera reacts slightly late.
+00:05–00:10 — Close side profile. Someone off-camera casually greets {them}. {She} turns, smiles warmly, raises {her} hand and naturally says, “Annyeong.” The camera reacts slightly late.
 
-00:10–00:15 — She walks slowly down a tree-lined residential lane holding her coffee. She notices the camera, gives a small genuine smile, then looks away and continues walking. The recording abruptly cuts to black mid-motion like an old camcorder being switched off.
+00:10–00:15 — {She} walks slowly down a tree-lined residential lane holding {her} coffee. {She} notices the camera, gives a small genuine smile, then looks away and continues walking. The recording abruptly cuts to black mid-motion like an old camcorder being switched off.
 
 ${SEEDANCE_AUDIO_GOAL}`;
 
 // H3's trained format: three fields, "[Shot 1]" unstamped, later shots at
 // MM:SS.mmm, a stable speaker id for anyone who talks, and no negative prompt —
 // "no music" is written as non_diegetic_music: N/A, never as a prohibition.
-const KOREAN_HOME_VIDEO_H3_A = `integrated_multimodal_description: Ultra-realistic documentary home-video footage shot on an early-2000s consumer DV camcorder — faded desaturated colour, soft contrast, mild digital compression and visible sensor noise, imperfect handheld operation with natural shake and awkward framing, autofocus hunting, slight lens breathing and exposure pumping between sunlight and shade, no stabilisation and no modern colour grading. [Shot 1] A Korean woman in her early twenties (S1) sits on a low concrete wall outside a small house in a quiet Korean residential neighbourhood of narrow concrete alleys, low-rise homes, potted plants and overhead wires; she has natural skin texture and almost no makeup, black wavy hair in a messy side ponytail with wispy bangs, a faded charcoal-grey sleeveless crop top, loose high-waisted light-wash jeans, black canvas sneakers and a thin black cord necklace. She reaches back with both hands and reties the ponytail while the wind lifts loose strands across her face, then smiles to herself; the camera hunts for focus, overshoots her and settles again. [Shot 2] At 00:05.000, the same woman walks into a narrow alley lined with potted plants, a leaning bicycle and a utility pole; a stray tabby cat trots up to her, she crouches down on her heels, holds out her hand, strokes its back and sets a small piece of food on the concrete, and the autofocus shifts imperfectly back and forth between her face and the animal. [Shot 3] At 00:10.000, in a small front yard she pegs a damp shirt onto a clothesline strung between two poles, the fabric swinging in the breeze while a cloud crosses the sun and the exposure pumps down and back up; the camera reframes late and clips the top of her head for a moment, still rolling as the clip ends.
+const KOREAN_HOME_VIDEO_H3_A = `integrated_multimodal_description: Ultra-realistic documentary home-video footage shot on an early-2000s consumer DV camcorder — faded desaturated colour, soft contrast, mild digital compression and visible sensor noise, imperfect handheld operation with natural shake and awkward framing, autofocus hunting, slight lens breathing and exposure pumping between sunlight and shade, no stabilisation and no modern colour grading. [Shot 1] A Korean {woman} in {her} early twenties (S1) sits on a low concrete wall outside a small house in a quiet Korean residential neighbourhood of narrow concrete alleys, low-rise homes, potted plants and overhead wires; {she} has natural skin texture and {f:almost no makeup, black wavy hair in a messy side ponytail with wispy bangs, a faded charcoal-grey sleeveless crop top, loose high-waisted light-wash jeans}{m:short black hair slightly grown out and tousled, a faded charcoal-grey t-shirt, loose light-wash jeans}{nb:no makeup, black wavy hair tied back loosely, a faded charcoal-grey sleeveless top, loose light-wash jeans}, black canvas sneakers and a thin black cord necklace. {f:She reaches back with both hands and reties the ponytail while the wind lifts loose strands across her face, then smiles to herself}{m:He rubs the back of his neck while the wind moves the leaves overhead, then smiles to himself}{nb:The person pushes their hair back while the wind lifts loose strands across their face, then smiles to themself}; the camera hunts for focus, overshoots {them} and settles again. [Shot 2] At 00:05.000, the same {woman} walks into a narrow alley lined with potted plants, a leaning bicycle and a utility pole; a stray tabby cat trots up to {them}, {she} crouches down on {her} heels, holds out {her} hand, strokes its back and sets a small piece of food on the concrete, and the autofocus shifts imperfectly back and forth between {her} face and the animal. [Shot 3] At 00:10.000, in a small front yard {she} pegs a damp shirt onto a clothesline strung between two poles, the fabric swinging in the breeze while a cloud crosses the sun and the exposure pumps down and back up; the camera reframes late and clips the top of {her} head for a moment, still rolling as the clip ends.
 
-overall_soundscape: Quiet lived-in residential ambience — birdsong, a distant motorcycle two streets away, light wind moving leaves and the laundry on the line, faint neighbourhood chatter. Close handling noise from the camcorder body, her footsteps on concrete, the cat's short meow, wooden pegs clicking onto the line. Her breathing and a small laugh to herself.
+overall_soundscape: Quiet lived-in residential ambience — birdsong, a distant motorcycle two streets away, light wind moving leaves and the laundry on the line, faint neighbourhood chatter. Close handling noise from the camcorder body, {her} footsteps on concrete, the cat's short meow, wooden pegs clicking onto the line. {Her} breathing and a small laugh to {herself}.
 
 non_diegetic_music: N/A`;
 
-const KOREAN_HOME_VIDEO_H3_B = `integrated_multimodal_description: Ultra-realistic documentary home-video footage shot on an early-2000s consumer DV camcorder — faded desaturated colour, soft contrast, mild digital compression and visible sensor noise, imperfect handheld operation with natural shake, autofocus hunting and exposure pumping between sunlight and shade, no stabilisation and no modern colour grading. The recording continues without a cut in the same quiet Korean residential neighbourhood of narrow concrete alleys, low-rise homes, potted plants and overhead wires, in the same late-morning light. [Shot 1] The same Korean woman in her early twenties (S1) — natural skin texture, almost no makeup, black wavy hair in a messy side ponytail with wispy bangs, a faded charcoal-grey sleeveless crop top, loose high-waisted light-wash jeans, black canvas sneakers and a thin black cord necklace — stands where the previous shot left her, the framing unchanged, breathing and shifting her weight while a strand of hair moves in the breeze; nobody speaks. [Shot 2] At 00:01.000, she sits down on a quiet terrace with a plain ceramic coffee cup held in both hands, watching the neighbourhood and tucking a loose strand of hair behind her ear; the handheld camera drifts a short distance to the side, slowly, then settles. [Shot 3] At 00:06.000, a close side profile of her face as someone off camera casually greets her; she turns towards the voice, smiles warmly and raises one hand. (S1) says: <d>[Korean] 안녕.</d> The camera reacts a moment late and swings to recentre her. [Shot 4] At 00:11.000, she walks slowly away down a tree-lined residential lane holding the coffee cup, dappled sunlight crossing her shoulders; she notices the camera, gives a small genuine smile, looks away and keeps walking, and the recording cuts abruptly to black mid-step like an old camcorder being switched off.
+const KOREAN_HOME_VIDEO_H3_B = `integrated_multimodal_description: Ultra-realistic documentary home-video footage shot on an early-2000s consumer DV camcorder — faded desaturated colour, soft contrast, mild digital compression and visible sensor noise, imperfect handheld operation with natural shake, autofocus hunting and exposure pumping between sunlight and shade, no stabilisation and no modern colour grading. The recording continues without a cut in the same quiet Korean residential neighbourhood of narrow concrete alleys, low-rise homes, potted plants and overhead wires, in the same late-morning light. [Shot 1] The same Korean {woman} in {her} early twenties (S1) — natural skin texture, {f:almost no makeup, black wavy hair in a messy side ponytail with wispy bangs, a faded charcoal-grey sleeveless crop top, loose high-waisted light-wash jeans}{m:short black hair slightly grown out and tousled, a faded charcoal-grey t-shirt, loose light-wash jeans}{nb:no makeup, black wavy hair tied back loosely, a faded charcoal-grey sleeveless top, loose light-wash jeans}, black canvas sneakers and a thin black cord necklace — stands where the previous shot left {them}, the framing unchanged, breathing and shifting {her} weight while {f,nb:a strand of hair moves in the breeze}{m:the breeze moves the leaves overhead}; nobody speaks. [Shot 2] At 00:01.000, {she} sits down on a quiet terrace with a plain ceramic coffee cup held in both hands, watching the neighbourhood{f,nb: and tucking a loose strand of hair behind {her} ear}{m: and turning the cup slowly in his hands}; the handheld camera drifts a short distance to the side, slowly, then settles. [Shot 3] At 00:06.000, a close side profile of {her} face as someone off camera casually greets {them}; {she} turns towards the voice, smiles warmly and raises one hand. (S1) says: <d>[Korean] 안녕.</d> The camera reacts a moment late and swings to recentre {them}. [Shot 4] At 00:11.000, {she} walks slowly away down a tree-lined residential lane holding the coffee cup, dappled sunlight crossing {her} shoulders; {she} notices the camera, gives a small genuine smile, looks away and keeps walking, and the recording cuts abruptly to black mid-step like an old camcorder being switched off.
 
-overall_soundscape: The same quiet residential ambience carried over — birdsong, a distant motorcycle, light wind in the leaves, faint neighbourhood chatter. Close camcorder handling noise, her footsteps on concrete, the ceramic cup clinking against her ring, fabric shifting as she sits. Her breathing and a small laugh under the greeting, then abrupt hard silence as the recording ends.
+overall_soundscape: The same quiet residential ambience carried over — birdsong, a distant motorcycle, light wind in the leaves, faint neighbourhood chatter. Close camcorder handling noise, {her} footsteps on concrete, the ceramic cup clinking against {her} ring, fabric shifting as {she} sits. {Her} breathing and a small laugh under the greeting, then abrupt hard silence as the recording ends.
 
 non_diegetic_music: N/A`;
 
 // LTX wants one flowing chronological paragraph, and dialogue text does not
 // belong in its visual conditioning — so the greeting is described as an action
 // rather than quoted.
-const KOREAN_HOME_VIDEO_LTX_A = `Handheld early-2000s DV camcorder footage, faded colour and soft contrast with visible sensor noise, autofocus hunting and exposure pumping between sunlight and shade. A Korean woman in her early twenties — messy black side ponytail with wispy bangs, faded charcoal-grey sleeveless crop top, loose light-wash jeans, black canvas sneakers — sits on a low concrete wall outside a small house in a quiet Korean residential neighbourhood, retying her ponytail with both hands while the wind lifts loose strands across her face. She smiles to herself as the camera drifts and struggles to lock focus on her. She stands, steps down and walks into a narrow concrete alley lined with potted plants, a leaning bicycle and a utility pole strung with overhead wires. The shot ends on her mid-stride, the camera still following.`;
+const KOREAN_HOME_VIDEO_LTX_A = `Handheld early-2000s DV camcorder footage, faded colour and soft contrast with visible sensor noise, autofocus hunting and exposure pumping between sunlight and shade. A Korean {woman} in {her} early twenties — {f:messy black side ponytail with wispy bangs, faded charcoal-grey sleeveless crop top}{m:short black hair slightly grown out, faded charcoal-grey t-shirt}{nb:black wavy hair tied back loosely, faded charcoal-grey sleeveless top}, loose light-wash jeans, black canvas sneakers — sits on a low concrete wall outside a small house in a quiet Korean residential neighbourhood, {f:retying her ponytail with both hands while the wind lifts loose strands across her face}{m:rubbing the back of his neck while the wind moves the leaves overhead}{nb:pushing their hair back while the wind lifts loose strands across their face}. {She} smiles to {herself} as the camera drifts and struggles to lock focus on {them}. {She} stands, steps down and walks into a narrow concrete alley lined with potted plants, a leaning bicycle and a utility pole strung with overhead wires. The shot ends on {them} mid-stride, the camera still following.`;
 
-const KOREAN_HOME_VIDEO_LTX_B = `Handheld early-2000s DV camcorder footage continuing without a cut, faded colour and soft contrast with visible sensor noise, autofocus hunting and exposure pumping. The same Korean woman in her early twenties — messy black side ponytail with wispy bangs, faded charcoal-grey sleeveless crop top, loose light-wash jeans, black canvas sneakers — crouches in the narrow alley as a stray tabby cat walks up to her, strokes its back and sets a small piece of food on the concrete, the focus shifting imperfectly between her face and the animal. She stands and moves into a small front yard, where she pegs a damp shirt onto a clothesline, the fabric swinging in the breeze as a cloud crosses the sun and the exposure dips and recovers. The camera reframes late, clipping the top of her head for a moment.`;
+const KOREAN_HOME_VIDEO_LTX_B = `Handheld early-2000s DV camcorder footage continuing without a cut, faded colour and soft contrast with visible sensor noise, autofocus hunting and exposure pumping. The same Korean {woman} in {her} early twenties — {f:messy black side ponytail with wispy bangs, faded charcoal-grey sleeveless crop top}{m:short black hair slightly grown out, faded charcoal-grey t-shirt}{nb:black wavy hair tied back loosely, faded charcoal-grey sleeveless top}, loose light-wash jeans, black canvas sneakers — crouches in the narrow alley as a stray tabby cat walks up to {them}, strokes its back and sets a small piece of food on the concrete, the focus shifting imperfectly between {her} face and the animal. {She} stands and moves into a small front yard, where {she} pegs a damp shirt onto a clothesline, the fabric swinging in the breeze as a cloud crosses the sun and the exposure dips and recovers. The camera reframes late, clipping the top of {her} head for a moment.`;
 
 // Verbatim from Liam's Seedance 2.5 travel-vlog prompt (2026-08-11). Kept as
 // written, including the "No cinematic commercial aesthetic / No face changes"
@@ -152,19 +154,19 @@ const KOREAN_HOME_VIDEO_LTX_B = `Handheld early-2000s DV camcorder footage conti
 // It is reference-driven ("the woman from the reference image"), which means it
 // runs on an image tier, not plain text-to-video — see the entry note for the
 // two ways to supply her.
-const TRAVEL_VLOG_SEEDANCE_25 = `An ultra-realistic handheld travel vlog filmed by a friend following the main character throughout the day. Use the woman from the reference image as the main subject. Maintain her exact facial identity, hairstyle, facial features, and body proportions consistently throughout the entire video.
+const TRAVEL_VLOG_SEEDANCE_25 = `An ultra-realistic handheld travel vlog filmed by a friend following the main character throughout the day. Use the {woman} from the reference image as the main subject. Maintain {her} exact facial identity, hairstyle, facial features, and body proportions consistently throughout the entire video.
 
-The camera should feel like a genuine personal vlog camera rather than a commercial production. Use natural handheld movement, casual framing, subtle imperfections in human camera operation, and an authentic everyday atmosphere. Avoid scripted acting. The woman behaves naturally, interacting with her surroundings as she would in a real travel vlog.
+The camera should feel like a genuine personal vlog camera rather than a commercial production. Use natural handheld movement, casual framing, subtle imperfections in human camera operation, and an authentic everyday atmosphere. Avoid scripted acting. The {woman} behaves naturally, interacting with {her} surroundings as anyone would in a real travel vlog.
 
-0–5s: Morning departure. The woman leaves a cozy apartment carrying a small backpack. She checks her phone, smiles toward the camera, adjusts her hair, and begins walking outside. The camera follows her from behind with slight natural shakiness, as if a friend is casually filming her. Morning sunlight fills the scene, with quiet neighborhood streets and people beginning their day.
+0–5s: Morning departure. The {woman} leaves a cozy apartment carrying a small backpack, checks {her} phone, smiles toward the camera, {f,nb:adjusts {her} hair, }and begins walking outside. The camera follows {them} from behind with slight natural shakiness, as if a friend is casually filming {them}. Morning sunlight fills the scene, with quiet neighborhood streets and people beginning their day.
 
-5–12s: Exploring the city. The camera follows her through local streets. She visits a small café, buys a drink, briefly talks to the camera, and laughs naturally. She continues through a street market, looks around at small shops, and takes casual photos. The camera remains close to her, capturing spontaneous everyday moments.
+5–12s: Exploring the city. The camera follows {them} through local streets. The {woman} visits a small café, buys a drink, briefly talks to the camera, and laughs naturally, then continues through a street market, looks around at small shops, and takes casual photos. The camera remains close to {them}, capturing spontaneous everyday moments.
 
-12–20s: Arriving at the beach. She takes public transportation or walks toward the coast. The environment gradually transitions from busy city streets into a peaceful seaside town. The ocean breeze naturally moves her hair. She becomes visibly excited when she sees the ocean for the first time. The camera follows her along the beach as she picks up a seashell, watches the waves, and naturally interacts with people nearby.
+12–20s: Arriving at the beach. The {woman} takes public transportation or walks toward the coast. The environment gradually transitions from busy city streets into a peaceful seaside town. The ocean breeze naturally moves {her} hair. The {woman} becomes visibly excited at the first sight of the ocean. The camera follows {them} along the beach as the {woman} picks up a seashell, watches the waves, and naturally interacts with people nearby.
 
-20–27s: Summer beach afternoon. She meets friends at the beach. Everyone chats, laughs, and plays casually near the water. The camera naturally moves between the group, capturing genuine candid moments rather than staged performances. She eventually looks back toward the camera and smiles naturally.
+20–27s: Summer beach afternoon. The {woman} meets friends at the beach. Everyone chats, laughs, and plays casually near the water. The camera naturally moves between the group, capturing genuine candid moments rather than staged performances. The {woman} eventually looks back toward the camera and smiles naturally.
 
-27–30s: Ending moment. Golden-hour sunset. She sits near the ocean holding a drink while quietly watching the sunset. The camera slowly moves backward, gradually revealing the beach, waves, and peaceful evening atmosphere. The final moment should feel like a genuine personal travel memory captured spontaneously.
+27–30s: Ending moment. Golden-hour sunset. The {woman} sits near the ocean holding a drink while quietly watching the sunset. The camera slowly moves backward, gradually revealing the beach, waves, and peaceful evening atmosphere. The final moment should feel like a genuine personal travel memory captured spontaneously.
 
 Visual style: Ultra-realistic authentic travel-vlog footage. Ultra-realistic smartphone or mirrorless-camera appearance. Natural daylight and believable environmental lighting. Casual handheld movement with subtle camera shake and imperfect human operation. Genuine human reactions and spontaneous interactions. Documentary-level realism with highly detailed skin, hair, clothing, environments, and natural textures.
 
@@ -184,24 +186,24 @@ The entire 30-second generation should feel like one continuous, coherent day ca
 // the chain rules on top of the reference format: it re-describes the whole
 // scene, opens on a hold with no dialogue, and starts its first real beat at 1s,
 // because the opening ~0.9s is part 1's carried-over tail.
-const TRAVEL_VLOG_H3_SUBJECT = `<Subject 1> is the young woman shown in <Picture 1>: [DESCRIBE HER FROM YOUR OWN PICTURE — face, skin, hair colour and style, build, and the clothes she wears for the day]. She is the only person the camera follows, and her face, hair, build and outfit stay exactly the same in every shot.
-<Picture 1> is a photograph of her used as the identity source only. Its background, framing and pose are not reproduced; the clip opens on its own action somewhere else.`;
+const TRAVEL_VLOG_H3_SUBJECT = `<Subject 1> is the young {woman} shown in <Picture 1>: [DESCRIBE <Subject 1> FROM YOUR OWN PICTURE — face, skin, hair colour and style, build, and the clothes worn for the day]. <Subject 1> is the only person the camera follows, and {her} face, hair, build and outfit stay exactly the same in every shot.
+<Picture 1> is a photograph of {them} used as the identity source only. Its background, framing and pose are not reproduced; the clip opens on its own action somewhere else.`;
 
 const TRAVEL_VLOG_H3_A = `subject_definitions:
 ${TRAVEL_VLOG_H3_SUBJECT}
 
 summary:
-A handheld personal travel vlog filmed by a friend walking with her: <Subject 1> leaves her apartment in the morning, walks through the city, stops for a coffee and drifts through a street market, in one continuous fifteen-second stretch. <Picture 1> drives who she is; every place and action is new.
+A handheld personal travel vlog filmed by a friend walking with {them}: <Subject 1> leaves {her} apartment in the morning, walks through the city, stops for a coffee and drifts through a street market, in one continuous fifteen-second stretch. <Picture 1> drives who <Subject 1> is; every place and action is new.
 
 retention_analysis:
-<Subject 1>: fully_preserved — her face, hair, build and outfit stay exactly as the picture shows them, in every shot and at every distance.
+<Subject 1>: fully_preserved — {her} face, hair, build and outfit stay exactly as the picture shows them, in every shot and at every distance.
 <Picture 1>: attribute_transfer — used as the identity source only, with its own background, framing and pose left behind.
 
 detailed_description:
-Ultra-realistic handheld travel-vlog footage, shot by a friend on a phone or a small mirrorless camera: natural daylight, believable everyday exposure, casual framing that sits slightly off-centre, subtle camera shake and the small imperfections of a person operating a camera while walking. No cinematic grading, no dramatic posing, no artificial transitions. [Shot 1] Morning. <Subject 1> steps out of a cosy apartment doorway with a small backpack over one shoulder, glances down at her phone, looks up and smiles toward the camera, tucks her hair back and starts walking down the quiet residential street; the camera follows a step or two behind her, drifting and correcting as the operator walks, with low morning sun across the pavement and a few neighbours beginning their day in the background. [Shot 2] At 00:05.000, the camera follows her along a narrow city street and into a small café, where she orders and takes a paper cup with both hands, turns back toward the lens and laughs at something the person filming says. (S1) says: <d>[English] okay — coffee first, then I swear we're actually going.</d> The camera stays close and hand-held, dipping slightly as the operator laughs. [Shot 3] At 00:10.000, she moves through a street market, glancing over stalls of fruit and small goods, lifting her phone to take a casual photo of something off to the side, then turning to walk on with the cup still in her hand; the camera swings a little late to keep her in frame and the clip ends with her mid-stride, still walking.
+Ultra-realistic handheld travel-vlog footage, shot by a friend on a phone or a small mirrorless camera: natural daylight, believable everyday exposure, casual framing that sits slightly off-centre, subtle camera shake and the small imperfections of a person operating a camera while walking. No cinematic grading, no dramatic posing, no artificial transitions. [Shot 1] Morning. <Subject 1> steps out of a cosy apartment doorway with a small backpack over one shoulder, glances down at {her} phone, looks up and smiles toward the camera, {f,nb:tucks {her} hair back and }starts walking down the quiet residential street; the camera follows a step or two behind {them}, drifting and correcting as the operator walks, with low morning sun across the pavement and a few neighbours beginning their day in the background. [Shot 2] At 00:05.000, the camera follows {them} along a narrow city street and into a small café, where <Subject 1> orders and takes a paper cup with both hands, turns back toward the lens and laughs at something the person filming says. (S1) says: <d>[English] okay — coffee first, then I swear we're actually going.</d> The camera stays close and hand-held, dipping slightly as the operator laughs. [Shot 3] At 00:10.000, <Subject 1> moves through a street market, glancing over stalls of fruit and small goods, lifting {her} phone to take a casual photo of something off to the side, then turning to walk on with the cup still in {her} hand; the camera swings a little late to keep {them} in frame and the clip ends with <Subject 1> mid-stride, still walking.
 
 overall_soundscape:
-Ordinary morning street tone — distant traffic, birds, a scooter passing, the clatter and chatter of a café, an espresso machine, market voices and footsteps on pavement. Close handling noise from the camera and the operator's breathing as they walk. Her laugh, and the small ambient movement of a city getting going.
+Ordinary morning street tone — distant traffic, birds, a scooter passing, the clatter and chatter of a café, an espresso machine, market voices and footsteps on pavement. Close handling noise from the camera and the operator's breathing as they walk. {Her} laugh, and the small ambient movement of a city getting going.
 
 non_diegetic_music:
 N/A`;
@@ -210,17 +212,17 @@ const TRAVEL_VLOG_H3_B = `subject_definitions:
 ${TRAVEL_VLOG_H3_SUBJECT}
 
 summary:
-The same handheld travel vlog continuing without a cut: <Subject 1> reaches the coast, sees the ocean, meets friends on the beach and ends the day sitting by the water at sunset, in one continuous fifteen-second stretch. <Picture 1> drives who she is; the day carries on from where the previous clip stopped.
+The same handheld travel vlog continuing without a cut: <Subject 1> reaches the coast, sees the ocean, meets friends on the beach and ends the day sitting by the water at sunset, in one continuous fifteen-second stretch. <Picture 1> drives who <Subject 1> is; the day carries on from where the previous clip stopped.
 
 retention_analysis:
 <Subject 1>: fully_preserved — the same face, hair, build and outfit as the previous clip and as the picture, unchanged by the new location and light.
 <Picture 1>: attribute_transfer — still the identity source only; its background, framing and pose are not reproduced.
 
 detailed_description:
-Ultra-realistic handheld travel-vlog footage continuing from the previous clip with no cut, filmed by the same friend on the same phone or small mirrorless camera: natural daylight, casual off-centre framing, subtle shake and the imperfections of walking while filming. No cinematic grading, no dramatic posing, no artificial transitions. [Shot 1] The held framing from the end of the previous clip: <Subject 1> mid-stride with her cup, the camera a step behind her, nothing yet changing — she breathes, shifts the backpack strap on her shoulder and a strand of hair moves across her face. Nobody speaks. [Shot 2] At 00:01.000, the street opens out and the city gives way to a quiet seaside town; she walks toward the water with the sea breeze pulling at her hair, and her face lifts into real surprise and delight the moment the ocean comes into view. (S1) says: <d>[English] oh my god — look at it.</d> She crouches on the sand, picks up a seashell, turns it over and watches the waves come in, the camera following loose and low behind her. [Shot 3] At 00:06.000, she reaches a group of friends on the beach; they talk over each other and laugh, someone kicks water at someone else, and the camera moves naturally between them rather than settling on anyone, catching half-finished gestures and people walking through frame. She glances back at the lens and smiles. [Shot 4] At 00:11.000, golden hour: she sits near the water holding a drink, watching the sun go down with the wind still moving her hair, and the camera drifts slowly backward to reveal the beach, the waves and the evening light before the clip ends on that wide, quiet frame.
+Ultra-realistic handheld travel-vlog footage continuing from the previous clip with no cut, filmed by the same friend on the same phone or small mirrorless camera: natural daylight, casual off-centre framing, subtle shake and the imperfections of walking while filming. No cinematic grading, no dramatic posing, no artificial transitions. [Shot 1] The held framing from the end of the previous clip: <Subject 1> mid-stride with {her} cup, the camera a step behind {them}, nothing yet changing — <Subject 1> breathes, shifts the backpack strap on {her} shoulder and {f,nb:a strand of hair moves across {her} face}{m:the breeze catches his collar}. Nobody speaks. [Shot 2] At 00:01.000, the street opens out and the city gives way to a quiet seaside town; <Subject 1> walks toward the water with the sea breeze pulling at {her} hair, and {her} face lifts into real surprise and delight the moment the ocean comes into view. (S1) says: <d>[English] oh my god — look at it.</d> <Subject 1> crouches on the sand, picks up a seashell, turns it over and watches the waves come in, the camera following loose and low behind {them}. [Shot 3] At 00:06.000, <Subject 1> reaches a group of friends on the beach; they talk over each other and laugh, someone kicks water at someone else, and the camera moves naturally between them rather than settling on anyone, catching half-finished gestures and people walking through frame. <Subject 1> glances back at the lens and smiles. [Shot 4] At 00:11.000, golden hour: <Subject 1> sits near the water holding a drink, watching the sun go down with the wind still moving {her} hair, and the camera drifts slowly backward to reveal the beach, the waves and the evening light before the clip ends on that wide, quiet frame.
 
 overall_soundscape:
-Coast tone taking over from the town — waves breaking and drawing back, wind across the microphone, gulls, distant voices along the beach and the crunch of sand underfoot. Her friends' overlapping talk and laughter, her own breathing and laugh, the camera handling close to the mic, and the wind settling into a calmer evening as the shot pulls back.
+Coast tone taking over from the town — waves breaking and drawing back, wind across the microphone, gulls, distant voices along the beach and the crunch of sand underfoot. {Her} friends' overlapping talk and laughter, {her} own breathing and laugh, the camera handling close to the mic, and the wind settling into a calmer evening as the shot pulls back.
 
 non_diegetic_music:
 N/A`;
@@ -290,7 +292,7 @@ The copied soundtrack from <Audio 1> runs throughout as the complete final mix �
 non_diegetic_music:
 N/A`;
 
-const KOREAN_HOME_VIDEO_LTX_C = `Handheld early-2000s DV camcorder footage continuing without a cut, faded colour and soft contrast with visible sensor noise, autofocus hunting and exposure pumping. The same Korean woman in her early twenties — messy black side ponytail with wispy bangs, faded charcoal-grey sleeveless crop top, loose light-wash jeans, black canvas sneakers — sits on a quiet terrace holding a plain ceramic coffee cup in both hands, watching the neighbourhood and tucking a loose strand of hair behind her ear while the camera drifts slowly to the side. She turns towards someone off camera, smiles warmly and raises a hand in greeting, and the camera reacts a moment late and swings to recentre her. She walks slowly away down a tree-lined residential lane with the cup in her hand, dappled sunlight crossing her shoulders, glances at the camera with a small genuine smile, then looks away and keeps walking as the recording cuts abruptly to black mid-step.`;
+const KOREAN_HOME_VIDEO_LTX_C = `Handheld early-2000s DV camcorder footage continuing without a cut, faded colour and soft contrast with visible sensor noise, autofocus hunting and exposure pumping. The same Korean {woman} in {her} early twenties — {f:messy black side ponytail with wispy bangs, faded charcoal-grey sleeveless crop top}{m:short black hair slightly grown out, faded charcoal-grey t-shirt}{nb:black wavy hair tied back loosely, faded charcoal-grey sleeveless top}, loose light-wash jeans, black canvas sneakers — sits on a quiet terrace holding a plain ceramic coffee cup in both hands, watching the neighbourhood{f,nb: and tucking a loose strand of hair behind {her} ear}{m: and turning the cup slowly in his hands} while the camera drifts slowly to the side. {She} turns towards someone off camera, smiles warmly and raises a hand in greeting, and the camera reacts a moment late and swings to recentre {them}. {She} walks slowly away down a tree-lined residential lane with the cup in {her} hand, dappled sunlight crossing {her} shoulders, glances at the camera with a small genuine smile, then looks away and keeps walking as the recording cuts abruptly to black mid-step.`;
 
 /**
  * The shipped library.
@@ -431,7 +433,7 @@ export const DEFAULT_PROMPTS = Object.freeze([
     name: 'Friend-filmed travel vlog',
     summary: 'Apartment to sunset in one 30s take, five beats',
     requires: 'a photo of the subject',
-    note: 'One 30s generation (~$10.20 at 720p, ~$5.10 on the 480p tier). She comes from a picture, so pick a tier that takes one: attach a start frame and the studio switches to Seedance 2.5 I2V, where the photo becomes frame zero — or choose Seedance 2.5 Omni Reference and attach several photos of her, which steers identity without deciding the opening shot.',
+    note: 'One 30s generation (~$10.20 at 720p, ~$5.10 on the 480p tier). The {woman} comes from a picture, so pick a tier that takes one: attach a start frame and the studio switches to Seedance 2.5 I2V, where the photo becomes frame zero — or choose Seedance 2.5 Omni Reference and attach several photos of {them}, which steers identity without deciding the opening shot.',
     parts: [Object.freeze({
       label: 'Whole clip',
       durationSeconds: 30,
@@ -447,20 +449,20 @@ export const DEFAULT_PROMPTS = Object.freeze([
     name: 'Friend-filmed travel vlog',
     summary: 'Same day as two chained H3 clips, identity from a photo',
     requires: 'a photo of the subject, attached as a reference picture',
-    note: 'H3 holds a scene for ~15s, so the day is two chained clips. Attach her photo in References (reference picture) and leave it attached for both parts — text alone will not hold one face across two generations. Fill in [DESCRIBE HER…] from your own picture.',
+    note: 'H3 holds a scene for ~15s, so the day is two chained clips. Attach {her} photo in References (reference picture) and leave it attached for both parts — text alone will not hold one face across two generations. Fill in [DESCRIBE <Subject 1>…] from your own picture.',
     parts: [
       Object.freeze({
         label: 'Morning to market',
         durationSeconds: 15,
         prompt: TRAVEL_VLOG_H3_A,
-        note: 'Set duration to 15s, attach her reference picture, and generate.',
+        note: 'Set duration to 15s, attach {her} reference picture, and generate.',
       }),
       Object.freeze({
         label: 'Coast to sunset',
         durationSeconds: 15,
         continuation: true,
         prompt: TRAVEL_VLOG_H3_B,
-        note: 'Press Continue scene on the part 1 result, keep her reference picture attached, then paste this over the armed prompt.',
+        note: 'Press Continue scene on the part 1 result, keep {her} reference picture attached, then paste this over the armed prompt.',
       }),
     ],
   }),
@@ -653,7 +655,34 @@ export function defaultPromptTotalSeconds(entry) {
 export function defaultPromptsFor(section, source) {
   const family = promptFamilyOf(source);
   if (!family) return [];
-  return DEFAULT_PROMPTS.filter((entry) => entry.section === section && entry.family === family);
+  // `source` is the studio's setup, so it also carries which persona is loaded;
+  // the starters written about "the subject" are rendered for that character.
+  const gender = source?.persona?.gender || '';
+  return DEFAULT_PROMPTS
+    .filter((entry) => entry.section === section && entry.family === family)
+    .map((entry) => renderDefaultPrompt(entry, gender));
+}
+
+/**
+ * A starter written for one persona. The reference-driven starters describe
+ * "the subject" with gender tokens (`{woman}`, `{her}`, `{them}` — see
+ * renderGenderTokens); this resolves them for the loaded persona's gender, in
+ * the prompts and in the notes alike. No persona, or one with no gender set,
+ * renders the female default the starters were written as.
+ */
+export function renderDefaultPrompt(entry, gender = '') {
+  if (!entry) return entry;
+  const render = (text) => (text ? renderGenderTokens(text, gender) : text);
+  return {
+    ...entry,
+    note: render(entry.note),
+    requires: render(entry.requires),
+    parts: (entry.parts || []).map((part) => ({
+      ...part,
+      prompt: render(part.prompt),
+      note: render(part.note),
+    })),
+  };
 }
 
 /** "Seedance 2.5 · 30s · Candid early-2000s camcorder day" for the menu row. */

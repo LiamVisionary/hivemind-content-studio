@@ -172,9 +172,12 @@ def start_video(
     # ingredient_images, which LTX stitches into one conditioning sheet.
     reference_images: list[str | Path] | None = None,
     # Voice/timbre clips (<Audio N>) and motion references (<Video N>) for the
-    # same Reference mode. Each reference video is {"video_path", "use_audio"};
-    # use_audio also conditions on that clip's own soundtrack, which then takes
-    # an <Audio N> label of its own ahead of its <Video N>.
+    # same Reference mode. Each reference video is {"video_path", "use_audio",
+    # "canvas"}; use_audio also conditions on that clip's own soundtrack, which
+    # then takes an <Audio N> label of its own ahead of its <Video N>, and
+    # canvas "compact" stages the clip inside a 384x1152 box (a third of the
+    # sequence rows, the same motion — motion references only; "full", the
+    # default, keeps the node's own canvas).
     reference_audios: list[str | Path] | None = None,
     reference_videos: list[dict[str, Any]] | None = None,
     duration_seconds: float = 4,
@@ -190,6 +193,7 @@ def start_video(
     head_swap_backend: str | None = None,
     head_swap_face_enhancer: bool = False,
     spectrum: bool | None = None,
+    fast_high_res: bool | None = None,
     steps: int | None = None,
     loras: list[dict[str, Any]] | None = None,
     requester_pub: str = "",
@@ -245,6 +249,7 @@ def start_video(
         {
             "video_path": Path(str(item.get("video_path") or "")).expanduser().resolve(),
             "use_audio": bool(item.get("use_audio")),
+            "canvas": "compact" if str(item.get("canvas") or "").strip().lower() == "compact" else "full",
         }
         for item in (reference_videos or [])
     ]
@@ -303,6 +308,7 @@ def start_video(
             {
                 "video_path": _upload_video(descriptor, reference["video_path"]),
                 "use_audio": reference["use_audio"],
+                "canvas": reference["canvas"],
             }
             for reference in video_references
         ]
@@ -350,6 +356,9 @@ def start_video(
         # Tri-state on purpose: None leaves the workflow's own default alone,
         # so only an explicit user choice overrides the registered graph.
         **({"spectrum": bool(spectrum)} if spectrum is not None else {}),
+        # Fast high-res (MiniMax H3 two-pass latent upscale). Tri-state for the
+        # same reason as spectrum: None leaves the registered graph alone.
+        **({"fast_high_res": bool(fast_high_res)} if fast_high_res is not None else {}),
         # Sampling steps override, forwarded through the MCP's registry-slot
         # params record. None keeps the workflow's registered default.
         **({"params": {"steps": int(steps)}} if isinstance(steps, int) and steps > 0 else {}),
@@ -652,6 +661,7 @@ def generate_video(
     # exceed the old 9-minute budget (a 13-minute job hit the cap live).
     max_polls: int = 450,
     spectrum: bool | None = None,
+    fast_high_res: bool | None = None,
     steps: int | None = None,
     requester_pub: str = "",
 ) -> dict[str, Any]:
@@ -680,6 +690,7 @@ def generate_video(
         head_swap_backend=head_swap_backend,
         head_swap_face_enhancer=head_swap_face_enhancer,
         spectrum=spectrum,
+        fast_high_res=fast_high_res,
         steps=steps,
     )
     return finish_video(

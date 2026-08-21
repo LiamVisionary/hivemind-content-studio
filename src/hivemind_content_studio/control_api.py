@@ -67,7 +67,7 @@ from .orchestrator import ContentOrchestrator
 from .prompt_history import PromptHistoryStore
 from .providers import provider_report, providers_for
 from .account_gate import account_gate_html
-from .account_scope import AccountWorkspaces, NoAccountInScope, bootstrap_accounts
+from .account_scope import AccountWorkspaces, NoAccountInScope, RunClaims, bootstrap_accounts
 from .accounts import (
     ACCOUNT_COOKIE,
     SESSION_SECONDS,
@@ -241,6 +241,11 @@ class PromptHelperGenerateBody(BaseModel):
     # judgements inside it invert (speech becomes required, polish becomes the
     # failure mode).
     ugc: bool = False
+    # The loaded Hive Persona's gender — "female" / "male" / "nonbinary" — so
+    # the helper writes "the woman"/"her" or "the man"/"his" instead of
+    # guessing. Only the gender: the persona's name is sealed to the owner's
+    # vault and never reaches this host.
+    personaGender: str | None = None
     # The clip length the studio is set to, so the written timeline fits inside it.
     durationSeconds: float | None = None
     # The start frame itself, as a data URL, for models with a projector: an
@@ -309,6 +314,13 @@ class MediaStudioReferenceVideoBody(BaseModel):
     # motion reference usually carries audio nobody wants in the shot, and an
     # unwanted soundtrack silently spends one of the model's <Audio N> labels.
     use_audio: bool = False
+    # How the clip is staged for the node. "full" keeps MiniMax H3's own
+    # 768-short-edge reference canvas; "compact" fits it inside 384x1152, never
+    # upscaled — about 3.3x fewer sequence rows and half the step time for the
+    # same motion (same-seed A/B on a rented 5090, 2026-08-21). Measured for
+    # MOTION references only, so it is a per-clip opt-in; the studio holds it
+    # off while the clip is the character reference (no picture attached).
+    canvas: Literal["full", "compact"] = "full"
 
 
 class MediaStudioVideoBody(BaseModel):
@@ -360,6 +372,9 @@ class MediaStudioVideoBody(BaseModel):
     # None = leave the workflow's own default alone; only an explicit choice
     # overrides the registered graph.
     spectrum: bool | None = None
+    # Fast high-res: MiniMax H3's two-pass latent upscale (sample small, refine
+    # at full size). Same tri-state — None leaves the registered graph alone.
+    fast_high_res: bool | None = None
     # Sampling-steps override for workflows whose registry maps a steps slot
     # (MiniMax H3's refinement setting). None keeps the workflow default.
     steps: int | None = Field(default=None, ge=1, le=100)
@@ -936,6 +951,7 @@ def build_control_app(
     # the module-level singletons they replaced: an unset scope raises instead
     # of quietly serving account 1's library to whoever asked.
     account_store = AccountStore(state_dir / "accounts.sqlite3")
+    run_claims = RunClaims(state_dir / "run-claims.sqlite3")
     workspaces = AccountWorkspaces(state_dir, cipher=cipher)
     # The owner account inherits whatever password the studio was already
     # configured with — env hash in production, injected hash under test — so
@@ -1049,11 +1065,17 @@ def build_control_app(
         try:
             os.close(descriptor)
             write_private_text(draft_path, yaml.safe_dump(body.to_brief(), sort_keys=False))
-            return runs.execute_content_run(
+            run = runs.execute_content_run(
                 draft_path,
                 policy={"privacy": body.privacy},
                 budget={"max_cost_usd": body.max_cost_usd},
             )
+            # Stamp whose run this is at the only moment anyone knows: machine
+            # callers are in owner scope here, so agent runs file to the owner.
+            scope = current_account.get()
+            if scope is not None:
+                run_claims.claim(run["run_id"], scope.id)
+            return run
         finally:
             draft_path.unlink(missing_ok=True)
 
@@ -1146,23 +1168,49 @@ def build_control_app(
         if getattr(request.state, "account", None) is None:
             raise HTTPException(status_code=401, detail="Sign in to a workspace")
 
-    def require_owner_account(request: Request) -> None:
-        """The owner workspace specifically.
-
-        GPU rentals spend real money against machine-wide provider keys and
-        attach lanes the whole studio shares, so they are not per-workspace
-        state — a second workspace must not be able to rent on the owner's card.
-        """
-        account = getattr(request.state, "account", None)
-        if account is None:
-            raise HTTPException(status_code=401, detail="Sign in to a workspace")
-        if not account.is_owner:
-            raise HTTPException(status_code=403, detail="Only the owner workspace can manage GPU rentals")
-
-    register_gpu_rental_routes(app, require_owner_account)
+    # GPU rentals are open to EVERY signed-in workspace, not just the owner.
+    # Deliberate (2026-08-21): a workspace only exists because the owner
+    # approved its creation, and that approval carries the whole studio —
+    # including renting on the machine-wide provider keys. The gate that
+    # matters is workspace creation itself, which stays owner-approved.
+    register_gpu_rental_routes(app, require_owner)
 
     def owner_visible(request: Request, value: dict[str, Any]) -> dict[str, Any]:
         return value if bool(getattr(request.state, "is_owner", False)) else machine_run_receipt(value)
+
+    def run_claim_visible(run_id: str, claimed: int | None) -> bool:
+        """May the current scope see this run at all?
+
+        Every workspace enumerates only its own generations — in both
+        directions, so the owner does not see a sibling's runs either. What the
+        owner does hold is everything UNCLAIMED: runs that predate accounts,
+        runs started by agents holding a machine token (they resolve to owner
+        scope, so their claims already say owner), and runs whose workspace
+        has since been deleted — falling back beats stranding them invisibly.
+        """
+        scope = current_account.get()
+        if scope is None:
+            # No session and no machine token: the pre-auth machine surface,
+            # which only ever serves machine_run_receipt redactions — run id
+            # and status, no prompts, no paths. Agents and monitors watch the
+            # whole machine through it, so it stays whole-machine.
+            return True
+        if claimed == scope.id:
+            return True
+        return scope.is_owner and (claimed is None or account_store.get(claimed) is None)
+
+    def require_visible_run(run_id: str) -> dict[str, Any]:
+        """The run, or a 404 that is indistinguishable from it never existing —
+        which runs exist in other workspaces is exactly what this hides."""
+        try:
+            run = runs.get_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        if not run_claim_visible(run_id, run_claims.account_for(run_id)):
+            # Byte-identical to the KeyError detail above (str() of a KeyError
+            # keeps its quotes), so absent and hidden cannot be told apart.
+            raise HTTPException(status_code=404, detail=str(KeyError(f"Unknown run: {run_id}")))
+        return run
 
     def stage_media_studio_reference(value: str) -> Path:
         prefix = "/api/media-studio/references/"
@@ -1745,7 +1793,7 @@ def build_control_app(
             {"role": "system", "content": prompt_profiles.system_prompt(
                 profile, duration_seconds=body.durationSeconds, character_notes=notes,
                 continuation=body.isContinuation, previous_prompt=body.previousPrompt,
-                ugc=body.ugc, references=body.references)},
+                ugc=body.ugc, references=body.references, persona_gender=body.personaGender)},
             {"role": "user", "content": idea},
         ]
         # Revising is the same conversation with the current draft in it, so
@@ -1960,10 +2008,15 @@ def build_control_app(
         payloads: list[tuple[str, bytes]] = []
         total_bytes = 0
         for index, reference in enumerate(reused, start=1):
+            source_run_id = str(reference.get("run_id") or "")
             try:
-                source_run = runs.get_run(str(reference.get("run_id") or ""))
+                source_run = runs.get_run(source_run_id)
             except KeyError:
                 raise HTTPException(status_code=400, detail="A saved reference image belongs to an unknown run") from None
+            # Another workspace's run is "unknown" here too — reusing its
+            # artifacts would read that workspace's media into this one.
+            if not run_claim_visible(source_run_id, run_claims.account_for(source_run_id)):
+                raise HTTPException(status_code=400, detail="A saved reference image belongs to an unknown run")
             record = next(
                 (item for item in source_run["artifact_records"] if item.get("id") == reference.get("artifact_id")),
                 None,
@@ -2047,6 +2100,11 @@ def build_control_app(
     @app.get("/api/runs")
     def list_runs(request: Request, status: str = "", limit: int = 100) -> dict:
         values = runs.list_runs(status=status or None, limit=limit)
+        claims = run_claims.accounts_for([str(value.get("run_id") or "") for value in values])
+        values = [
+            value for value in values
+            if run_claim_visible(str(value.get("run_id") or ""), claims.get(str(value.get("run_id") or "")))
+        ]
         return {"ok": True, "runs": values if request.state.is_owner else [machine_run_receipt(value) for value in values]}
 
     @app.get("/api/telemetry/generations")
@@ -2233,6 +2291,7 @@ def build_control_app(
                 reference_videos.append({
                     "video_path": staged_reference,
                     "use_audio": bool(video_item.use_audio),
+                    "canvas": video_item.canvas,
                 })
             # Video and image are decoded INDEPENDENTLY. They used to share one
             # if/elif chain, so a request carrying both — the only kind head swap
@@ -2472,6 +2531,7 @@ def build_control_app(
                 head_swap_backend=body.head_swap_backend,
                 head_swap_face_enhancer=body.head_swap_face_enhancer,
                 spectrum=body.spectrum,
+                fast_high_res=body.fast_high_res,
                 steps=body.steps,
                 loras=loras,
                 requester_pub=_requester_pub(request),
@@ -2745,6 +2805,16 @@ def build_control_app(
         name = f"reference-{secrets.token_hex(16)}{suffix}"
         reference = (references_root() / name).resolve()
         reference.write_bytes(body)
+        # An iPhone HEIC is stored as a JPEG: the browser has no HEIC decoder
+        # (so the tile drew broken) and neither does the lane's ComfyUI (so the
+        # run would have failed at LoadImage). Like the poster below, this can
+        # only happen NOW, while the plaintext is still here. A HEIC that will
+        # not decode is kept as uploaded — today's behaviour, never a lost upload.
+        transcoded = media_posters.transcode_opaque_image(reference)
+        if transcoded is not None:
+            reference = transcoded
+            name = reference.name
+            suffix = reference.suffix
         # Build the thumbnail NOW, while the plaintext is still here. Once sealed
         # the host can never read this file again, so this is the only moment a
         # poster can be made server-side — and without one, drawing a 32px tile
@@ -2948,10 +3018,17 @@ def build_control_app(
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str, request: Request) -> dict:
-        try:
-            return owner_visible(request, runs.get_run(run_id))
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return owner_visible(request, require_visible_run(run_id))
+
+    def _canvas_is_owner_surface() -> bool:
+        """The canvas history indexes MACHINE-wide sources — ComfyUI's output
+        roots and the media gateway's job log — which only owner-level surfaces
+        (the passphrase-gated Canvas, agents on the machine token, the gateway
+        itself) ever write to. A workspace's own studio generations live in its
+        runs and media-studio stores instead. So the machine surface belongs to
+        the owner, and a sibling workspace enumerates none of it — its History
+        shows only what it can actually open."""
+        return scoped_account().is_owner
 
     @app.get("/api/canvas/history", dependencies=[Depends(require_owner)])
     def canvas_output_history(
@@ -2961,6 +3038,19 @@ def build_control_app(
         model: str = "",
         limit: int | None = None,
     ) -> dict:
+        if not _canvas_is_owner_surface():
+            # Also wipe anything this store adopted before the rule existed:
+            # rows are foreign filenames this workspace should never hold.
+            canvas_store().clear()
+            return {
+                "ok": True,
+                "source_preserved": True,
+                "privacy": "Canvas history is the owner workspace's machine-wide surface.",
+                "history": [],
+                "pagination": {"page": 1, "page_size": limit if limit is not None else page_size,
+                               "total": 0, "has_more": False},
+                "filters": {"formats": [], "models": []},
+            }
         sync_error = ""
         if page <= 1:
             try:
@@ -2985,6 +3075,8 @@ def build_control_app(
 
     @app.get("/api/canvas/history/{history_id}/workflow", dependencies=[Depends(require_owner)])
     def canvas_output_workflow(history_id: str) -> dict:
+        if not _canvas_is_owner_surface():
+            raise HTTPException(status_code=404, detail="Canvas output not found")
         try:
             output_name = canvas_store().output_name(history_id)
         except KeyError:
@@ -3001,6 +3093,8 @@ def build_control_app(
 
     @app.post("/api/canvas/history/{history_id}/provenance", dependencies=[Depends(require_owner)])
     def remember_canvas_provenance(history_id: str, body: CanvasProvenanceBody) -> dict:
+        if not _canvas_is_owner_surface():
+            raise HTTPException(status_code=404, detail="Canvas output not found")
         try:
             metadata = canvas_store().remember_provenance(history_id, models=body.models, seeds=body.seeds)
         except KeyError:
@@ -3009,6 +3103,8 @@ def build_control_app(
 
     @app.delete("/api/canvas/history/{history_id}", dependencies=[Depends(require_owner)])
     def delete_canvas_history_output(history_id: str, body: ConfirmDeleteBody) -> dict:
+        if not _canvas_is_owner_surface():
+            raise HTTPException(status_code=404, detail="Canvas output not found")
         if not body.confirm:
             raise HTTPException(status_code=400, detail="Permanent deletion requires confirm=true")
         try:
@@ -3024,6 +3120,8 @@ def build_control_app(
 
     @app.get("/api/canvas/history/{history_id}/media", response_class=Response, dependencies=[Depends(require_owner)])
     def canvas_output_media(history_id: str, request: Request) -> Response:
+        if not _canvas_is_owner_surface():
+            raise HTTPException(status_code=404, detail="Canvas output not found")
         try:
             output_name = canvas_store().output_name(history_id)
         except KeyError:
@@ -3049,10 +3147,7 @@ def build_control_app(
         dependencies=[Depends(require_owner)],
     )
     def artifact(run_id: str, artifact_id: str, request: Request) -> Response:
-        try:
-            run = runs.get_run(run_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from None
+        run = require_visible_run(run_id)
         record = next((item for item in run["artifact_records"] if item.get("id") == artifact_id), None)
         if not record:
             raise HTTPException(status_code=404, detail="Artifact not found")
@@ -3108,14 +3203,17 @@ def build_control_app(
 
     @app.post("/api/runs/{run_id}/resume", dependencies=[Depends(require_owner_or_control)])
     def resume(run_id: str, request: Request) -> dict:
+        require_visible_run(run_id)
         return owner_visible(request, runs.resume_run(run_id))
 
     @app.post("/api/runs/{run_id}/retry", dependencies=[Depends(require_owner_or_control)])
     def retry(run_id: str, body: RetryBody, request: Request) -> dict:
+        require_visible_run(run_id)
         return owner_visible(request, runs.retry_step(run_id, body.step_id))
 
     @app.post("/api/runs/{run_id}/cancel", dependencies=[Depends(require_owner_or_control)])
     def cancel(run_id: str, body: CancelBody, request: Request) -> dict:
+        require_visible_run(run_id)
         return owner_visible(request, runs.cancel_run(run_id, body.reason))
 
     @app.get("/api/approvals", dependencies=[Depends(require_control)])

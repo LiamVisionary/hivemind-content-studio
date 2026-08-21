@@ -445,3 +445,25 @@ def test_a_high_score_does_not_bypass_the_approval_gate(conn, scfg, monkeypatch)
     assert conn.execute("SELECT rights_status FROM sources WHERE id = ?", (source_id,)).fetchone()[0] == "research"
     with pytest.raises(db.PolicyError, match="rights_status"):
         schedule_run(conn, scfg, run_id=run_id, platforms=["tiktok"], times=["09:00"])
+
+
+def test_titles_are_written_from_the_transcript_alone(conn, scfg):
+    """The reviewer's critique must never reach the writing pass.
+
+    On a real run against a local 4B, passing `reason` through made the model
+    write a review of a weak clip into the caption field — text that would have
+    shipped as the post body. The transcript is the only input.
+    """
+    run_id, clip_ids = make_run(conn, scfg, ["clip-01"])
+    db.set_clip_semantics(
+        conn, clip_ids[0], llm_score=0.1, llm_reason="Vague, no numbers, ends without closure."
+    )
+    seen: list[dict] = []
+
+    def call(prompt, payload):
+        seen.extend(payload)
+        return json.dumps({"clip-01": {"hook": "H", "caption": "C"}})
+
+    titles.generate_titles(conn, scfg, run_id, caller=call)
+
+    assert seen == [{"id": "clip-01", "transcript": "transcript for clip-01"}]

@@ -16,7 +16,7 @@
 //   <ReferencesMenu
 //     images={[url]}                                  // <Picture N>
 //     audios={[{ url, name }]}                        // <Audio N>
-//     videos={[{ url, name, useAudio }]}              // <Video N>
+//     videos={[{ url, name, useAudio, compact }]}     // <Video N>
 //     prompt={string} onPromptChange={(next) => void}  // for the tag button
 //     limits={{ images: 9, audios: 3, videos: 3 }}
 //     onChange={{ images, audios, videos }}           // one setter per kind
@@ -41,6 +41,7 @@ import {
   referenceBudgetReport,
   referenceRowKeys,
   referenceUrl,
+  referenceVideoCompactLocked,
   unscriptedTimeWarning,
   withReferenceTags,
 } from '../../lib/h3References.js';
@@ -107,7 +108,9 @@ function AudioRowPreview({ url }) {
   );
 }
 
-function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio, onPrep }) {
+function ReferenceRow({
+  kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio, onToggleCompact, compactLocked = false, onPrep,
+}) {
   const meta = KIND_META[kind];
   const url = typeof item === 'string' ? item : item?.url;
   const name = fileLabel(item);
@@ -151,6 +154,35 @@ function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, o
           {zh() ? '含原声' : 'sound'}
         </button>
       ) : null}
+      {kind === 'videos' ? (
+        // Staging size. A MOTION clip carries the same movement staged 384 px
+        // wide as at the node's full canvas, for about a third of the sequence
+        // rows and half the step time (referenceVideoCanvas has the numbers).
+        // Held off — shown off and disabled, whatever the row holds — while no
+        // picture is attached, because then this clip is the character
+        // reference and identity needs pixels.
+        <button
+          type="button"
+          disabled={compactLocked}
+          aria-pressed={!compactLocked && Boolean(item?.compact)}
+          onClick={onToggleCompact}
+          title={compactLocked
+            ? (zh()
+              ? '没有附加图片时，该片段就是角色参考——身份需要像素，紧凑模式不可用。'
+              : 'Off while no picture is attached: this clip is the character reference, and identity needs pixels.')
+            : (zh()
+              ? '以小尺寸（384 px）送入该片段——动作相同，开销约为三分之一。片段作为角色参考时不可用。'
+              : 'Stage this clip small (384 px) — same motion, 3x cheaper. Off when the clip is the character reference.')}
+          className={cx(
+            'shrink-0 rounded px-1.5 py-1 text-[10px] font-medium transition-colors',
+            compactLocked
+              ? 'cursor-not-allowed text-ink3 opacity-50'
+              : (item?.compact ? 'bg-honey-tint text-honey' : 'text-ink3 hover:bg-bg3 hover:text-ink2'),
+          )}
+        >
+          {zh() ? '紧凑' : 'Compact'}
+        </button>
+      ) : null}
       {kind === 'videos' && onPrep ? (
         <button
           type="button"
@@ -178,8 +210,8 @@ function ReferenceRow({ kind, index, item, label, posterUrl, onPosterCaptured, o
 }
 
 export function ReferenceSection({
-  kind, items, limit, labels, onAdd, onRemove, onToggleAudio, busy, recent, onPickRecent,
-  dropTarget, onWriteTags, posters = {}, onPosterCaptured, onPrep,
+  kind, items, limit, labels, onAdd, onRemove, onToggleAudio, onToggleCompact, compactLocked = false,
+  busy, recent, onPickRecent, dropTarget, onWriteTags, posters = {}, onPosterCaptured, onPrep,
 }) {
   const meta = KIND_META[kind];
   const full = items.length >= limit;
@@ -223,6 +255,8 @@ export function ReferenceSection({
           onPosterCaptured={onPosterCaptured}
           onRemove={() => onRemove(index)}
           onToggleAudio={() => onToggleAudio?.(index)}
+          onToggleCompact={() => onToggleCompact?.(index)}
+          compactLocked={compactLocked}
           onPrep={onPrep ? () => onPrep(index) : null}
         />
       ))}
@@ -427,7 +461,7 @@ export function ReferencesMenu({
   // means someone with only a voice clip still finds it.
   const tagSectionKind = videos.length ? 'videos' : (audios.length ? 'audios' : null);
   const labels = referenceLabels({ images, videos, audios });
-  const motionWarning = motionReferenceWarning({ prompt, videos });
+  const motionWarning = motionReferenceWarning({ prompt, videos, images });
   const timeWarning = unscriptedTimeWarning({ prompt, durationSeconds, videos, audios });
   const total = images.length + videos.length + audios.length;
   // H3 rations references four ways at once; only the per-kind count was ever
@@ -479,7 +513,7 @@ export function ReferencesMenu({
     }
     if (current.length >= limits[kind]) return;
     if (kind === 'images') emit('images', [...current, url]);
-    else if (kind === 'videos') emit('videos', [...current, { url, name, useAudio: false }]);
+    else if (kind === 'videos') emit('videos', [...current, { url, name, useAudio: false, compact: false }]);
     else emit('audios', [...current, { url, name }]);
   };
 
@@ -540,7 +574,7 @@ export function ReferencesMenu({
     });
     if (added.images.length) emit('images', [...images, ...added.images.map((item) => item.url)]);
     if (added.videos.length) {
-      emit('videos', [...videos, ...added.videos.map((item) => ({ ...item, useAudio: false }))]);
+      emit('videos', [...videos, ...added.videos.map((item) => ({ ...item, useAudio: false, compact: false }))]);
     }
     if (added.audios.length) emit('audios', [...audios, ...added.audios]);
     for (const rejection of rejected) {
@@ -640,7 +674,7 @@ export function ReferencesMenu({
               posters={posters}
               onPosterCaptured={onPosterCaptured}
               onWriteTags={kind === tagSectionKind && onPromptChange
-                ? () => onPromptChange(withReferenceTags(prompt, { images, videos, audios }))
+                ? () => onPromptChange(withReferenceTags(prompt, { images, videos, audios, gender: persona?.gender || '' }))
                 : null}
               onPickRecent={(url) => attach(kind, url)}
               onAdd={() => openPicker(kind)}
@@ -648,6 +682,13 @@ export function ReferencesMenu({
               onToggleAudio={(index) => emit('videos', videos.map((item, i) => (
                 i === index ? { ...item, useAudio: !item.useAudio } : item
               )))}
+              onToggleCompact={(index) => emit('videos', videos.map((item, i) => (
+                i === index ? { ...item, compact: !item.compact } : item
+              )))}
+              // No picture attached means the clip is the character reference
+              // (the info line below says exactly that), and identity needs
+              // pixels — so the compact switch is held off rather than offered.
+              compactLocked={kind === 'videos' && referenceVideoCompactLocked({ images })}
               onPrep={kind === 'videos' ? (index) => setPrepIndex(index) : null}
             />
           ))}
@@ -710,6 +751,15 @@ export function ReferencesMenu({
                   : `Dialogue runs about ${timeWarning.spoken}s; the clip is ${timeWarning.duration}s. Roughly ${timeWarning.gap}s is unaccounted for — shorten the clip, write more line, or say what fills the time and that nobody else speaks.`)}
             </p>
           ) : null}
+          {videos.length && !images.length ? (
+            // No picture: the clip is the character reference, and the model is
+            // told so — the exclusion advice below is for the picture+clip case.
+            <p className="rounded-md border border-line1 px-2 py-1.5 text-[10px] leading-snug text-ink3">
+              {zh()
+                ? '没有附加图片：<Video 1> 就是角色参考——片中人物的长相、发型、服装与动作方式会带入成片。附加图片后，视频仅作动作参考。'
+                : "No picture attached: <Video 1> is the character reference — its performer's face, hair, wardrobe and manner carry into the clip. Attach a picture and the clip becomes motion-only."}
+            </p>
+          ) : null}
           {motionWarning ? (
             <p className="rounded-md border border-honey/40 bg-honey-tint px-2 py-1.5 text-[10px] leading-snug text-honey">
               {motionWarning.kind === 'unnamed'
@@ -759,8 +809,8 @@ export function ReferencesMenu({
               }
               const uploaded = await uploadInto('videos', file);
               // Replace in place so the reference keeps its <Video N> label and
-              // its soundtrack switch — renumbering the rows under someone who
-              // only trimmed a clip would silently repoint their prompt.
+              // its soundtrack and compact switches — renumbering the rows under
+              // someone who only trimmed a clip would silently repoint their prompt.
               emit('videos', videos.map((item, i) => (
                 i === index ? { ...item, url: uploaded.url, name: uploaded.name } : item
               )));

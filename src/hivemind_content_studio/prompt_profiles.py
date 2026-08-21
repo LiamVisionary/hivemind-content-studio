@@ -177,6 +177,13 @@ weak_reference is a loose pacing cue. Unless the brief asks to copy the source s
 prefer attribute_transfer and say plainly what does NOT carry: the reference \
 performer's face, clothing, setting and framing.
 
+When NO reference picture is attached, the first reference video is ALSO the identity \
+reference: bind <Subject 1> to it ("<Subject 1> is the man in <Video 1>, with …"), \
+describe the person from what the clip actually shows, mark that <Video N> \
+fully_preserved — face, hair, build, wardrobe and manner of movement all carry — and \
+exclude only the clip's setting and framing. Any further video clip stays a movement \
+reference.
+
 A reference audio clip clones a VOICE (or piece of music). It works in exactly one of \
 two modes, and the brief decides which:
 - [audio reuse] — the clip's own words are reperformed. Keep the source words \
@@ -497,7 +504,14 @@ def _reference_inventory_clause(references: dict | None, duration_seconds: float
                 "(numbered before it, because that is the order the model reads them in)."
             )
         length = f" It runs {seconds:g}s." if seconds else ""
-        lines.append(f"- <Video {index}> is a motion reference.{length}")
+        if not images and index == 1:
+            # No picture: the first clip is who is on screen, not just how they move.
+            lines.append(
+                f"- <Video {index}> is the IDENTITY reference as well as the motion reference: "
+                f"the person in it is who is on screen.{length}"
+            )
+        else:
+            lines.append(f"- <Video {index}> is a motion reference.{length}")
         # A motion reference shorter than the shot only drives its opening. The
         # writer has to invent the rest, and saying so is the difference between
         # a clip that keeps moving and one that goes static once the reference
@@ -561,6 +575,41 @@ def _reference_inventory_clause(references: dict | None, duration_seconds: float
     )
 
 
+# What a persona's saved gender tells the writer. One sentence each, and the
+# same words the studio's own generators use (castPrompt / h3References /
+# ugcMode in the OpenGen lib), so a helper-written prompt and a cast-written
+# one call the same person the same thing.
+_PERSONA_GENDER_CLAUSES = {
+    "female": (
+        "\n\nThe person on screen is a woman. Call her \"the woman\" and use she/her — "
+        "never \"the man\", \"he\" or \"they\"."
+    ),
+    "male": (
+        "\n\nThe person on screen is a man. Call him \"the man\" and use he/his — "
+        "never \"the woman\", \"she\" or \"they\"."
+    ),
+    "nonbinary": (
+        "\n\nThe person on screen is non-binary. Call them \"the person\" and use they/them — "
+        "never \"the woman\", \"the man\", \"she\" or \"he\"."
+    ),
+}
+_PERSONA_GENDER_H3_SUFFIX = (
+    " In subject_definitions, introduce <Subject 1> with that noun (\"<Subject 1> is the {noun} shown in "
+    "<Picture 1>\" — or \"shown in <Video 1>\" when only a reference video is attached), then refer to "
+    "<Subject 1> by label rather than by pronoun."
+)
+_PERSONA_GENDER_NOUNS = {"female": "woman", "male": "man", "nonbinary": "person"}
+
+
+def normalize_persona_gender(value: str | None) -> str:
+    """One of female / male / nonbinary, or '' — the studio's own vocabulary
+    (personaId.js PERSONA_GENDERS); anything else is treated as unset."""
+    key = str(value or "").strip().lower()
+    aliases = {"f": "female", "woman": "female", "m": "male", "man": "male", "non-binary": "nonbinary", "nb": "nonbinary"}
+    key = aliases.get(key, key)
+    return key if key in _PERSONA_GENDER_CLAUSES else ""
+
+
 def system_prompt(
     profile: str,
     *,
@@ -570,6 +619,7 @@ def system_prompt(
     previous_prompt: str | None = None,
     ugc: bool = False,
     references: dict | None = None,
+    persona_gender: str | None = None,
 ) -> str:
     """The instruction, with the clip length folded in when the studio knows it.
 
@@ -601,7 +651,12 @@ def system_prompt(
     helper writes <Picture 1>..<Picture N> for pictures that are really there
     instead of guessing a count — and gets the interleaved audio numbering
     right, since a clip carrying its own soundtrack takes an <Audio N> emitted
-    before its <Video N>."""
+    before its <Video N>.
+
+    ``persona_gender`` is the loaded Hive Persona's saved gender (female /
+    male / nonbinary). Without it the helper picks a gender from the idea —
+    usually "she", since that is what most of the examples it has seen were —
+    and a male persona's prompt comes back about a woman."""
     system = PROFILES.get(profile, PROFILES[DEFAULT_VIDEO_PROFILE])["system"]
     if ugc:
         if profile == DEFAULT_IMAGE_PROFILE:
@@ -623,6 +678,14 @@ def system_prompt(
     reference_clause = _reference_inventory_clause(references, duration_seconds)
     if reference_clause and profile == "minimax-h3-reference":
         system += reference_clause
+    # ``persona_gender`` is the loaded Hive Persona's saved gender. It applies
+    # to every profile — a Seedance paragraph needs "the woman"/"her" as much
+    # as an H3 prompt does — and the H3 profiles additionally get the label form.
+    gender = normalize_persona_gender(persona_gender)
+    if gender:
+        system += _PERSONA_GENDER_CLAUSES[gender]
+        if profile.startswith("minimax-h3"):
+            system += _PERSONA_GENDER_H3_SUFFIX.format(noun=_PERSONA_GENDER_NOUNS[gender])
     if character_notes and profile.startswith("minimax-h3"):
         lines = "\n".join(f"- {note}" for note in character_notes)
         system += (

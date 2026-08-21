@@ -19,6 +19,7 @@
 // the persona saved them in. Effect-free on purpose — no vault, no network, no
 // React — because the numbering rules are the part that has to be provable.
 import { WORDS_PER_SECOND, referenceLabels } from './h3References.js';
+import { normalizePersonaGender, personaGenderWords } from './personaId.js';
 
 const DEFAULT_LIMITS = { images: 9, videos: 3, audios: 3 };
 
@@ -36,12 +37,18 @@ export function castPersona(name, persona, { style = PERSONA_DEFAULT_STYLE } = {
     kind: 'persona',
     style: String(style || ''),
     name: String(name || 'Persona'),
+    // Saved with the persona. It decides the noun the definition uses ("the
+    // woman shown in <Picture 1>") and, when the subject speaks without a
+    // cloned voice, which voice to ask for — H3's default for an unvoiced
+    // subject is a generic adult male (measured 2026-08-13). '' = unknown:
+    // the definition says "the character" and asks for no particular voice.
+    gender: normalizePersonaGender(persona?.gender),
     // Free text describing the member, so the definition line is not a
     // placeholder someone has to remember to fill in.
     appearance: '',
     images: (persona?.images || []).filter(Boolean).map(String),
     videos: (persona?.videos || []).filter((item) => item?.url).map((item) => ({
-      url: String(item.url), name: String(item.name || ''), useAudio: Boolean(item.useAudio),
+      url: String(item.url), name: String(item.name || ''), useAudio: Boolean(item.useAudio), compact: Boolean(item.compact),
     })),
     audios: (persona?.audios || []).filter((item) => item?.url).map((item) => ({
       url: String(item.url), name: String(item.name || ''),
@@ -189,16 +196,28 @@ function subjectDefinition(role, shared = false) {
     return lines.join('\n');
   }
   const parts = [];
-  if (role.pictures.length === 1) parts.push(`the character shown in ${role.pictures[0]}`);
-  else if (role.pictures.length > 1) parts.push(`the character shown in ${role.pictures.join(', ')}`);
-  else parts.push(`${member.name}`);
+  // The noun comes from the persona's saved gender; "the character" only when
+  // it was never set, so an old persona reads exactly as it always did.
+  const noun = member.gender ? personaGenderWords(member.gender).noun : 'character';
+  if (role.pictures.length === 1) parts.push(`the ${noun} shown in ${role.pictures[0]}`);
+  else if (role.pictures.length > 1) parts.push(`the ${noun} shown in ${role.pictures.join(', ')}`);
+  // No picture: the first clip is the character reference — MiniMax's own
+  // guide binds subjects to clips this way ("<Subject N> is the young man in
+  // <Video 2>, …"). A name alone would introduce someone the model has never seen.
+  else if (role.videos.length) parts.push(`the ${noun} shown in ${role.videos[0].video}`);
+  else parts.push(member.gender ? `a ${noun}, ${member.name}` : `${member.name}`);
   const voice = roleVoiceLabel(role);
   const lines = [`${subject} is ${parts[0]}: ${member.appearance || '[appearance — one or two lines]'}.`];
   // Stated per subject, so a scene style cannot quietly restyle a real person.
   if (member.style) lines.push(`${subject} is rendered as ${member.style}.`);
   // H3 binds a voice to a subject through this pairing, written out. Without
   // it a trailing (Sx) on a dialogue line is unattached and the model guesses.
-  if (role.speaker) lines.push(`${subject} speaks as ${role.speaker}.`);
+  // With no clone to bind, at least say what KIND of voice: left unsaid, an
+  // unvoiced subject comes back as a generic adult male whoever is on screen.
+  if (role.speaker) {
+    const kind = !voice && member.gender && member.gender !== 'nonbinary' ? `, in a ${noun}'s voice` : '';
+    lines.push(`${subject} speaks as ${role.speaker}${kind}.`);
+  }
   if (voice) {
     // Exclusivity is stated whenever anyone else is in the shot: with one clone
     // and two speakers, nothing otherwise says which of them it belongs to, and
@@ -220,7 +239,7 @@ function retentionLines(role) {
   // person stays the same person for the whole clip, at every distance — which
   // is a different promise, and the one that keeps a face from drifting between
   // the near and far ends of a shot.
-  if (role.pictures.length) {
+  if (role.pictures.length || role.videos.length) {
     lines.push(
       `${role.subject}: fully_preserved — the same face, hair, build and wardrobe in every shot `
       + 'and at every distance.',
@@ -229,16 +248,26 @@ function retentionLines(role) {
   for (const label of role.pictures) {
     lines.push(`${label}: fully_preserved — ${role.subject}'s face, hair and wardrobe carry into the clip.`);
   }
+  // With no picture the first clip is the character reference and carries the
+  // person; any further clip is motion-only, as every clip is when pictures exist.
+  const identityVideo = role.pictures.length ? null : (role.videos[0] || null);
   for (const label of role.videos) {
     if (label.audio) {
       lines.push(
         `${label.audio}: reference — only the timbre carries. Its words do NOT carry and its accent does NOT carry.`,
       );
     }
-    lines.push(
-      `${label.video}: attribute_transfer — only its manner of movement carries. Its performer's appearance, `
-      + `clothing, setting and framing do NOT carry.`,
-    );
+    if (label === identityVideo) {
+      lines.push(
+        `${label.video}: fully_preserved — ${role.subject} IS the person in this clip: face, hair, build, wardrobe `
+        + `and manner of movement all carry. Only the clip's setting and framing do NOT carry.`,
+      );
+    } else {
+      lines.push(
+        `${label.video}: attribute_transfer — only its manner of movement carries. Its performer's appearance, `
+        + `clothing, setting and framing do NOT carry.`,
+      );
+    }
   }
   for (const label of role.audios) {
     lines.push(`${label}: reference — only the timbre carries. Its words do NOT carry.`);

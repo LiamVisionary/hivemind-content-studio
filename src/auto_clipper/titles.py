@@ -30,16 +30,21 @@ CAPTION_LIMIT = 280
 
 
 def _payload_for(clip: Any) -> dict[str, Any]:
+    """Transcript only.
+
+    The donor also feeds its `recommend_reason` into this step, because it is
+    writing titles from an outline and needs the extra signal. We send the
+    transcript itself, so the critique adds nothing — and it actively harms the
+    output: on a real run against a local 4B, passing the reviewer-facing reason
+    made the model write a *review* of a weak clip ("No specific numbers, no
+    decision point") into the caption field, which would have shipped as the post
+    body. The score leaks the same way. Neither is sent.
+    """
     excerpt = clip["transcript_excerpt"] or clip["rationale"] or ""
-    payload: dict[str, Any] = {
+    return {
         "id": clip["slug"],
         "transcript": str(excerpt)[:EXCERPT_LIMIT],
     }
-    if clip["llm_score"] is not None:
-        payload["score"] = clip["llm_score"]
-    if clip["llm_reason"]:
-        payload["reason"] = clip["llm_reason"]
-    return payload
 
 
 def _clean(value: Any, limit: int) -> str | None:

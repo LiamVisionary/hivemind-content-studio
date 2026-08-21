@@ -32,6 +32,7 @@ import {
 } from '../../lib/localModels.js';
 import { isLocalAIAvailable } from '../../lib/localInferenceClient.js';
 import { resolveMediaSrc } from '../../lib/e2eMedia.js';
+import { personaIdentity } from '../../lib/personaId.js';
 import { getLang, t } from '../../lib/i18n.js';
 
 export const zh = () => getLang() === 'zh-CN';
@@ -644,6 +645,10 @@ export function applyRestoredPreferences(prev, preferences, c) {
   if (['light', 'strong', ''].includes(preferences.denoise)) s.denoise = preferences.denoise;
   if (typeof preferences.seed === 'number') s.seed = preferences.seed;
   if (typeof preferences.steps === 'number') s.steps = preferences.steps;
+  // A speed/quality preference, so it survives a reload. The send path re-gates
+  // it on the selected model's capability, so a value left on from MiniMax H3
+  // is inert on a workflow that cannot compile the two-pass graph.
+  s.fastHighRes = preferences.fastHighRes === true;
   // An in-progress scene chain survives reload: the pointer is opaque and the
   // clip stays sealed. videoRequestPlan re-gates it, so a stale value on a
   // non-chaining model is inert.
@@ -682,8 +687,8 @@ export function applyGenerationContext(prev, context, c) {
       ? context.referenceVideos.filter((item) => item?.url)
       : [],
     // Restoring a run restores which character it was: a captured persona is
-    // only its id and name, so a deleted one comes back as a plain label.
-    persona: context.persona?.name ? { id: context.persona.id || '', name: context.persona.name } : null,
+    // only its id, name and gender, so a deleted one comes back as a plain label.
+    persona: personaIdentity(context.persona),
     videoUrl: context.videoUrl || null,
     videoName: context.videoName || null,
     motionContextUrl: context.motionContextUrl || null,
@@ -760,4 +765,5 @@ export const redactPrivateHistoryEntry = (entry) => (
 // definitions that disagree. A cloud model has no such field and reads false,
 // which is correct: these are local-graph capabilities.
 export const supportsSpectrum = (model) => Boolean(model?.supportsSpectrum);
+export const supportsFastHighRes = (model) => Boolean(model?.supportsFastHighRes);
 export const supportsQualitySteps = (model) => Boolean(model?.supportsQualitySteps);

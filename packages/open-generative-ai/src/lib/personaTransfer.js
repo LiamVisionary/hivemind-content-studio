@@ -114,6 +114,7 @@ export async function importPersonaTransfer(text, { uploadFn, onProgress } = {})
       url: await upload(item.dataUrl, item.name || `persona-motion-${index + 1}`),
       name: item.name,
       useAudio: item.useAudio,
+      compact: item.compact,
     });
   }
   const audios = [];
@@ -123,5 +124,5 @@ export async function importPersonaTransfer(text, { uploadFn, onProgress } = {})
       name: item.name,
     });
   }
-  return { name: parsed.name, data: personaFromReferences({ images, videos, audios }) };
+  return { name: parsed.name, data: personaFromReferences({ images, videos, audios, gender: parsed.gender }) };
 }

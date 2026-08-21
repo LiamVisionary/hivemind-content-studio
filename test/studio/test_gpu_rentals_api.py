@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -155,6 +157,10 @@ def test_offers_filters_and_shape(tmp_path: Path, monkeypatch) -> None:
         # queries per tier would triple the calls behind a polling view.
         assert payload["gpu_name"]["in"] == [
             "RTX 4090", "RTX 5090", "RTX PRO 6000 WS", "RTX PRO 6000 S"]
+        # The disk we filter on is the disk we price on is the disk we rent:
+        # dph_total is quoted from allocated_storage, and leaving it at Vast's
+        # 8GB default under-quoted every H3 box by the cost of 112GB.
+        assert payload["allocated_storage"] == payload["disk_space"]["gt"] == gpu_rentals.tier_disk_gb("image")
         return {"offers": [{"id": 1, "gpu_name": "RTX 5090", "dph_total": 0.402, "gpu_ram": 32607,
                             "inet_down": 755.0, "reliability2": 0.9942, "geolocation": "South Korea, KR"}]}
 
@@ -809,18 +815,127 @@ def test_a_degraded_download_gives_up_instead_of_crawling(tier: str, monkeypatch
     assert "--speed-limit 51200" not in script, "the floor no degraded transfer ever trips"
     assert f"--speed-limit {gpu_rentals.DOWNLOAD_MIN_BYTES_PER_SEC}" in script
     assert f"--speed-time {gpu_rentals.DOWNLOAD_STALL_SECONDS}" in script
-    # Resume, so aborting a slow transfer costs the retry and not the bytes.
-    assert "curl -sf -C -" in script or "curl -sfL -C -" in script
-    assert "--retry 8" in script
+    # Resume is the library's, not curl's: --retry re-sends a bare GET with no
+    # Range and truncates the output to zero, and never fires on a connection
+    # reset or early close (measured 2026-08-22). test_rental_downloads.py runs
+    # the library itself; here, only that the onstart carries it and not --retry.
+    assert "--retry" not in script
+    assert 'again "$p" $rc $hc $a' in script
+    # No HEAD on a GET presign: R2 answers 403, the length came back empty and
+    # every R2 weight silently took the single-stream path.
+    assert "-sfI" not in script and "curl -I" not in script
+    assert "c -r 0-0" in script
 
     # A job that is still RUNNING never trips the "all jobs exited" escape, so
     # the watcher needs its own deadline or a hung connection bills forever.
     assert f"DL_DEADLINE=$(( $(date +%s) + {gpu_rentals.DOWNLOAD_DEADLINE_SECONDS} ))" in script
-    assert 'if [ "$(date +%s)" -ge "$DL_DEADLINE" ]; then dlfail' in script
-    assert 'if [ -z "$(jobs -r)" ]; then dlfail' in script
+    assert 'dlwait "$DL_DEADLINE" "${FILES[@]}"' in script
+    assert f'dlfail "stalled {gpu_rentals.DOWNLOAD_DEADLINE_SECONDS // 60}min"' in script
+    assert 'dlfail "failed"' in script
     # Both exits say what to do: the presigned URLs expire, so there is no
     # repair path for a half-provisioned box.
     assert "destroy this machine and rent another" in script
+
+
+# The exact shape _presign_r2 emits (SigV4 query auth, signature last), with
+# components of the real lengths: a 32-hex token id, a 64-hex signature. A real
+# one measured 405 chars for a 40-char key on 2026-08-22; this lands within a
+# few chars of that, so the size check below is about the script Vast actually
+# receives, not about placeholder URLs that would pass anything.
+_REAL_QUERY = (
+    "X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=0123456789abcdef0123456789abcdef%2F20260822%2Fauto%2Fs3%2Faws4_request"
+    "&X-Amz-Date=20260822T050000Z&X-Amz-Expires=10800&X-Amz-SignedHeaders=host"
+)
+
+
+def _realistic_presign(key: str, now=None) -> str:
+    sig = hashlib.sha256(key.encode()).hexdigest()
+    return f"https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/hivemind-rental-models/{key}?{_REAL_QUERY}&X-Amz-Signature={sig}"
+
+
+def test_the_realistic_presign_is_the_real_length() -> None:
+    assert abs(len(_realistic_presign("vae/minimax_h3_video_vae_fp16.safetensors")) - 405) <= 12
+
+
+@pytest.mark.parametrize("tier", ["image", "video", "minimax"])
+def test_every_tier_onstart_leaves_room_for_registered_loras(tier: str, monkeypatch) -> None:
+    """Vast rejects an onstart over 16KB with an error that names nothing, and
+    the generator raises first — at RENT time, for the user. Pin the headroom
+    here instead, so growth in provisioning fails in CI. A registered user
+    LoRA adds one mkdir + one factored pget line (~230 chars); hold room for
+    three. Measured 2026-08-22 after the download library landed: image
+    ~3.9KB, video ~2.9KB, minimax ~0.8KB — minimax is the tight one because
+    most of its onstart is H3 node installs and public HuggingFace URLs,
+    which no factoring touches."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
+    script = gpu_rentals._onstart_script(tier)
+    headroom = gpu_rentals.VAST_ONSTART_LIMIT - len(script)
+    assert headroom >= 700, f"{tier}: only {headroom} chars left under Vast's onstart limit"
+
+
+def test_presigned_urls_are_emitted_once_as_a_prefix_and_query(monkeypatch) -> None:
+    """Every presigned URL in a batch shares host, bucket, algorithm,
+    credential, date and expiry — ~300 of its ~400 chars. The onstart carries
+    those once and each pget line only its key and signature, and bash has to
+    put them back together into the very URL that was signed."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
+    script = gpu_rentals._onstart_script("minimax")
+    prefix = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/hivemind-rental-models/"
+    assert f"RB='{prefix}'" in script
+    assert f"RQ='{_REAL_QUERY}'" in script
+    key = "vae/minimax_h3_video_vae_fp16.safetensors"
+    sig = hashlib.sha256(key.encode()).hexdigest()
+    line = f'[ -s "$M/vae/minimax_h3_video_vae_fp16.safetensors" ] || pget "${{RB}}{key}?${{RQ}}&X-Amz-Signature={sig}" "$M/vae/minimax_h3_video_vae_fp16.safetensors" &'
+    assert line in script
+    assert _realistic_presign(key) not in script, "the full URL is not ALSO emitted"
+    # Braced, or $RB would swallow the first letters of the key ($RBvae...).
+    assert "$RBvae" not in script and "$RQ&" not in script
+    # And bash reassembles exactly what was signed.
+    setup = "\n".join(l for l in script.splitlines() if l.startswith(("RB=", "RQ=")))
+    probe = subprocess.run(
+        ["bash", "-c", setup + f'\necho "${{RB}}{key}?${{RQ}}&X-Amz-Signature={sig}"'],
+        capture_output=True, text=True, check=True,
+    )
+    assert probe.stdout.strip() == _realistic_presign(key)
+    # Public HuggingFace URLs are not presigned and stay literal.
+    assert 'pget "https://huggingface.co/' in script
+
+
+def test_urls_of_any_other_shape_are_emitted_literally(monkeypatch) -> None:
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}?sig=x")
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
+    script = gpu_rentals._onstart_script("image")
+    assert "RB=" not in script and "RQ=" not in script
+    assert 'pget "https://r2.example/vae/qwen_image_vae.safetensors?sig=x"' in script
+
+
+def test_a_batch_of_presigns_is_signed_at_one_instant(monkeypatch) -> None:
+    """Factoring only works if every URL in the batch carries the same
+    X-Amz-Date; _onstart_script pins the clock for the batch. Without the
+    pin, a batch that straddled a second boundary would silently fall back
+    to literal URLs and could overflow the onstart."""
+    monkeypatch.setattr(gpu_rentals, "_r2_credentials", lambda: ("AKID", "secret", "acct"))
+    clock = iter([
+        datetime(2026, 8, 22, 5, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 22, 5, 0, 1, tzinfo=timezone.utc),
+    ])
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(clock)
+
+    monkeypatch.setattr(gpu_rentals, "datetime", _FrozenDatetime)
+    with gpu_rentals._pinned_presign_clock():
+        a = gpu_rentals._presign_r2_get("vae/a.safetensors")
+        b = gpu_rentals._presign_r2_get("vae/b.safetensors")
+    assert "X-Amz-Date=20260822T050000Z" in a and "X-Amz-Date=20260822T050000Z" in b
+    assert gpu_rentals._presign_clock.get() is None, "the pin does not outlive the batch"
+    _prefix, query, exprs = gpu_rentals._factor_presigned_urls([a, b])
+    assert query is not None and len(exprs) == 2 and exprs[0] != exprs[1]
 
 
 @pytest.mark.parametrize("tier", ["image", "video", "minimax"])
@@ -1898,8 +2013,13 @@ def test_minimax_tier_ships_the_turbo_lora(tmp_path: Path, monkeypatch) -> None:
     # Kijai's W4A8 pruned pair (11.7 + 11.0 GB), which is a different
     # quantisation from the int8_convrot FL2VA the video lane converts itself,
     # and REF2VA has no video-lane equivalent at all. One rented box serves both
-    # studio pages, so both weight sets ship.
-    assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(66.0, abs=0.2)
+    # studio pages, so both weight sets ship. 66.0 -> 66.7 when the Fast
+    # high-res lane landed: a 0.69GB neural upscaler for H3's own latent, which
+    # has to be on disk BEFORE ComfyUI starts because its node builds the
+    # model_name combo by scanning that directory at schema time.
+    assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(66.7, abs=0.2)
+    assert '"$M/latent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors"' in script
+    assert "Comfyui_Minimax_h3_latent_Upscaler" in script
 
 
 # --- rental LoRA registry ---------------------------------------------------

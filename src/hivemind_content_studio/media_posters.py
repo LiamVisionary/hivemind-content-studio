@@ -21,6 +21,16 @@ import shutil
 import subprocess
 from pathlib import Path
 
+# Formats the browser cannot draw. Chromium (and so the desktop app) has no
+# HEIC/HEIF decoder, and neither does a stock ComfyUI (its requirements pin
+# Pillow alone) — so an iPhone photo stored as-is would draw as a broken tile
+# AND fail inside the lane's LoadImage at generate time. Such an upload is
+# re-encoded to JPEG while the plaintext is still here; see
+# `transcode_opaque_image`.
+OPAQUE_IMAGE_SUFFIXES = frozenset({".heic", ".heif"})
+TRANSCODED_SUFFIX = ".jpg"
+TRANSCODE_QUALITY = 92
+
 # Wide enough to stay sharp on a retina 36px row and in the 2x-density saved
 # list, small enough that the decrypt is instant.
 POSTER_WIDTH = 320
@@ -57,21 +67,81 @@ def poster_owner_stem(name: str) -> str | None:
     return str(name)[: -len(POSTER_SUFFIX)] if is_poster_name(name) else None
 
 
+_PLUGINS_REGISTERED = False
+
+
+def _register_image_plugins() -> None:
+    """Teach Pillow the containers phones upload in. Pillow decodes HEIC/HEIF
+    only through pillow-heif, and only once its opener is registered — the
+    package being installed is not enough, which is how an iPhone upload got a
+    silent `None` poster here while qa.py could read the same file fine."""
+    global _PLUGINS_REGISTERED
+    if _PLUGINS_REGISTERED:
+        return
+    _PLUGINS_REGISTERED = True
+    try:
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+    except Exception:
+        # Without the plugin HEIC simply stays undecodable here, and the
+        # callers already treat that as "no poster" / "leave the file as it is".
+        pass
+
+
 def build_image_poster(source: Path, destination: Path) -> bool:
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
     except Exception:
         return False
+    _register_image_plugins()
     try:
         with Image.open(source) as image:
             image.draft("RGB", (POSTER_WIDTH * 2, POSTER_WIDTH * 2))
-            frame = image.convert("RGB")
+            # Browsers draw a JPEG the way its EXIF orientation says; a poster
+            # that ignores it shows a phone portrait lying on its side next to
+            # the upright original. (pillow-heif already applies the HEIF
+            # orientation on decode and resets the tag, so this is a no-op there.)
+            frame = ImageOps.exif_transpose(image.convert("RGB"))
             frame.thumbnail((POSTER_WIDTH, POSTER_WIDTH))
             frame.save(destination, format="JPEG", quality=80, optimize=True)
         return destination.is_file() and destination.stat().st_size > 0
     except Exception:
         destination.unlink(missing_ok=True)
         return False
+
+
+def transcode_opaque_image(source: Path) -> Path | None:
+    """Re-encode a HEIC/HEIF reference as a JPEG sibling and remove the original.
+
+    Returns the JPEG path, or None when the file is not one of those formats or
+    could not be decoded — in which case the caller keeps the original as-is,
+    exactly as before. Orientation is baked into the pixels (the browser and the
+    lane then agree on which way is up); the rest of the EXIF block — GPS
+    coordinates, device serials — is not carried over, which is the right
+    default for bytes that leave this host for a rented GPU at generate time.
+    Must run before sealing: afterwards this host can never read the file again.
+    """
+    if Path(source).suffix.lower() not in OPAQUE_IMAGE_SUFFIXES:
+        return None
+    try:
+        from PIL import Image, ImageOps
+    except Exception:
+        return None
+    _register_image_plugins()
+    destination = Path(source).with_suffix(TRANSCODED_SUFFIX)
+    try:
+        with Image.open(source) as image:
+            frame = ImageOps.exif_transpose(image.convert("RGB"))
+            frame.save(destination, format="JPEG", quality=TRANSCODE_QUALITY, optimize=True)
+        if not (destination.is_file() and destination.stat().st_size > 0):
+            destination.unlink(missing_ok=True)
+            return None
+    except Exception:
+        destination.unlink(missing_ok=True)
+        return None
+    Path(source).unlink(missing_ok=True)
+    return destination
 
 
 def build_video_poster(source: Path, destination: Path) -> bool:

@@ -25,11 +25,7 @@ def collect_checks(cfg: Config) -> dict[str, Any]:
         "ffprobe": _command("ffprobe", ["ffprobe", "-version"]),
         "docker": _command("docker", ["docker", "--version"]),
         "yt-dlp": _yt_dlp_check(),
-        "podcli": {
-            "ok": is_podcli_available(cfg),
-            "path": _redact_path(cfg.podcli_bin),
-            "detail": "configured executable found" if is_podcli_available(cfg) else "missing; run scripts/install_podcli.sh",
-        },
+        "podcli": _podcli_check(cfg),
         "postiz": {
             "ok": bool(cfg.postiz_url),
             "url": cfg.postiz_url,
@@ -71,6 +67,43 @@ def format_checks(checks: dict[str, Any]) -> str:
 
 def checks_json(checks: dict[str, Any]) -> str:
     return json.dumps(checks, indent=2, sort_keys=True)
+
+
+AI_CLI_GATE = "PODCLI_ALLOW_AI_CLI"
+
+
+def _podcli_check(cfg: Config) -> dict[str, Any]:
+    """Presence, plus proof that the transcript-egress gate survived the install.
+
+    Stock Podcli pipes the whole transcript into `claude`/`codex` whenever one
+    is on PATH. `patches/podcli-ai-select-default-off.patch` makes that opt-in.
+    An install that skipped the patch — or an upgrade that dropped it — is a
+    silent egress path, so it is checked every time rather than assumed.
+    """
+    available = is_podcli_available(cfg)
+    check: dict[str, Any] = {"ok": available, "path": _redact_path(cfg.podcli_bin)}
+    if not available:
+        check["detail"] = "missing; run scripts/install_podcli.sh"
+        return check
+
+    gate_file = Path(cfg.podcli_bin).expanduser().parent / "backend" / "services" / "claude_suggest.py"
+    try:
+        gated = AI_CLI_GATE in gate_file.read_text(encoding="utf-8")
+    except OSError:
+        check["ok"] = False
+        check["detail"] = f"found, but {gate_file.name} is unreadable — cannot confirm the AI-CLI gate"
+        return check
+
+    check["ai_cli_gate"] = gated
+    if not gated:
+        check["ok"] = False
+        check["detail"] = (
+            "UNGATED: this install sends transcripts to claude/codex by default. "
+            "Apply patches/podcli-ai-select-default-off.patch."
+        )
+    else:
+        check["detail"] = "found; transcript egress gated (opt in with --ai-select)"
+    return check
 
 
 def _prompts_check(cfg: Config) -> dict[str, Any]:

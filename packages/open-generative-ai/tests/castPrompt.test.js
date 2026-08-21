@@ -491,3 +491,56 @@ test("a known character's voice is named inside the dialogue tag", async () => {
     });
     assert.match(prompt, /<Subject 2> speaks as S2, in SpongeBob SquarePants' voice/);
 });
+
+// A persona with only a clip: the clip is the character reference — MiniMax's
+// guide binds subjects to videos outright — so the definition names it and the
+// retention contract carries the person, not just the movement. With a picture
+// beside it the same clip is motion-only again, exactly as before.
+test('a persona with only a clip is introduced by that clip, which carries the person', async () => {
+    const { compileCastPrompt, castPersona } = await load();
+    const clipOnly = castPersona('Liam', { images: [], videos: [{ url: '/liam.mov', useAudio: false }], audios: [], gender: 'male' });
+    const { prompt } = compileCastPrompt({ members: [clipOnly], speakingOrder: [0], template: { summary: 'x' } });
+    assert.match(prompt, /<Subject 1> is the man shown in <Video 1>: \[appearance/);
+    assert.match(prompt, /<Subject 1>: fully_preserved — the same face, hair, build and wardrobe/);
+    assert.match(prompt, /<Video 1>: fully_preserved — <Subject 1> IS the person in this clip/);
+    assert.doesNotMatch(prompt, /<Video 1>: attribute_transfer/);
+
+    const withPicture = castPersona('Liam', { images: ['/l.jpg'], videos: [{ url: '/liam.mov', useAudio: false }], audios: [], gender: 'male' });
+    const pictured = compileCastPrompt({ members: [withPicture], template: { summary: 'x' } }).prompt;
+    assert.match(pictured, /<Subject 1> is the man shown in <Picture 1>/);
+    assert.match(pictured, /<Video 1>: attribute_transfer[\s\S]*do NOT carry/);
+});
+
+// The persona's saved gender is what the definition calls them. "The
+// character" only when it was never set, so an older persona reads as it did.
+test('a persona is introduced by its gender, and asked for a matching voice when it has no clone', async () => {
+    const { compileCastPrompt, castPersona } = await load();
+
+    const her = compileCastPrompt({ members: [castPersona('Cheryl', { ...CHERYL, gender: 'female' })], template: { summary: 'x' } }).prompt;
+    assert.match(her, /<Subject 1> is the woman shown in <Picture 1>, <Picture 2>/);
+    // Cheryl's clip soundtrack IS her voice, so no voice kind is asked for.
+    assert.match(her, /<Subject 1> speaks as S1\.\n<Audio 1> is the voice-timbre reference for <Subject 1> \(S1\)\./);
+    assert.doesNotMatch(her, /woman's voice/);
+
+    // Pictures only, and speaking: say what kind of voice, or H3 picks its
+    // generic adult male for whoever is on screen.
+    const marco = castPersona('Marco', { images: ['/m.jpg'], gender: 'male' });
+    const him = compileCastPrompt({ members: [marco], speakingOrder: [0], template: { summary: 'x' } }).prompt;
+    assert.match(him, /<Subject 1> is the man shown in <Picture 1>: \[appearance/);
+    assert.match(him, /<Subject 1> speaks as S1, in a man's voice\./);
+
+    // Non-binary: the noun is "person" and no voice kind is implied. Marco,
+    // left out of the speaking order, gets no speaker line and so no voice kind.
+    const sam = castPersona('Sam', { images: ['/s.jpg'], gender: 'nonbinary' });
+    const them = compileCastPrompt({ members: [marco, sam], speakingOrder: [1], template: { summary: 'x' } }).prompt;
+    assert.match(them, /<Subject 2> is the person shown in <Picture 2>/);
+    assert.match(them, /<Subject 2> speaks as S1\./);
+    assert.doesNotMatch(them, /<Subject 1> speaks as/);
+    assert.doesNotMatch(them, /voice\./);
+
+    // Unset reads exactly as it always has.
+    const unset = compileCastPrompt({ members: [castPersona('Cheryl', CHERYL)], template: { summary: 'x' } }).prompt;
+    assert.match(unset, /<Subject 1> is the character shown in <Picture 1>, <Picture 2>/);
+    assert.equal(castPersona('Cheryl', CHERYL).gender, '');
+    assert.equal(castPersona('Cheryl', { ...CHERYL, gender: 'Woman' }).gender, 'female');
+});

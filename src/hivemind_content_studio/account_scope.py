@@ -38,8 +38,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -185,6 +187,68 @@ class AccountWorkspaces:
         root = AccountPaths.under(self.state_dir, account_id).root
         if root.is_dir():
             shutil.rmtree(root)
+
+
+class RunClaims:
+    """Which workspace each shared-store run belongs to.
+
+    Runs are the one store that stays machine-wide — ids are minted by the
+    orchestrator and agents resume them by id across processes — so this is
+    the documented exception to the files-not-WHERE-clauses rule above: a
+    single map from run id to account id, written at creation time, the only
+    moment anyone knows who asked. A run with no claim predates accounts or
+    was started by a machine caller; both belong to the owner.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path).expanduser().resolve()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS run_claims ("
+                " run_id TEXT PRIMARY KEY,"
+                " account_id INTEGER NOT NULL,"
+                " created_at TEXT NOT NULL)"
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.execute("PRAGMA busy_timeout = 30000")
+        return connection
+
+    def claim(self, run_id: str, account_id: int) -> None:
+        # First claim wins: a claim names the run's creator, and the creator
+        # is whoever was in scope when the run id first existed.
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO run_claims(run_id, account_id, created_at) VALUES(?, ?, ?)"
+                " ON CONFLICT(run_id) DO NOTHING",
+                (
+                    str(run_id),
+                    int(account_id),
+                    datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                ),
+            )
+
+    def account_for(self, run_id: str) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT account_id FROM run_claims WHERE run_id = ?", (str(run_id),)
+            ).fetchone()
+        return int(row[0]) if row else None
+
+    def accounts_for(self, run_ids: list[str]) -> dict[str, int]:
+        """One query for a whole listing, not one connection per row."""
+        cleaned = [str(run_id) for run_id in run_ids if run_id]
+        if not cleaned:
+            return {}
+        marks = ",".join("?" for _ in cleaned)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT run_id, account_id FROM run_claims WHERE run_id IN ({marks})", cleaned
+            ).fetchall()
+        return {str(run_id): int(account_id) for run_id, account_id in rows}
 
 
 def _move(source: Path, target: Path) -> bool:

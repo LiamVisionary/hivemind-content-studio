@@ -56,6 +56,8 @@ p.lede{margin:8px 0 0;color:#a3a3ac;font-size:13px;line-height:1.55;text-align:c
 .avatar{width:118px;height:118px;border-radius:14px;display:grid;place-items:center;font-size:40px;font-weight:600;
   color:#0c0c0e;border:3px solid transparent;transition:border-color .16s,transform .16s}
 .tile:hover .avatar,.tile:focus-visible .avatar{border-color:#f2f2f3;transform:scale(1.05)}
+.avatar.add{background:#111114;border:3px dashed rgba(255,255,255,.22);color:#6f6f78;font-size:44px;font-weight:400}
+.tile:hover .avatar.add,.tile:focus-visible .avatar.add{border-color:#f2f2f3;color:#f2f2f3}
 .tile:focus-visible{outline:none}
 .tile-name{font-size:14px;color:#a3a3ac;transition:color .16s}
 .tile:hover .tile-name,.tile:focus-visible .tile-name{color:#f2f2f3}
@@ -71,6 +73,7 @@ p.lede{margin:8px 0 0;color:#a3a3ac;font-size:13px;line-height:1.55;text-align:c
 .card h2{margin:0;font-size:19px;font-weight:640;letter-spacing:-0.01em}
 .card .who{display:flex;align-items:center;gap:12px}
 .card .who .avatar{width:46px;height:46px;border-radius:10px;font-size:19px;border-width:0}
+.card .who .avatar.add{border-width:2px;font-size:22px}
 button{min-height:46px;border:0;border-radius:10px;font:600 14px inherit;cursor:pointer;transition:background .15s,border-color .15s}
 .primary{background:#f6b21b;color:#1a1205;display:flex;align-items:center;justify-content:center;gap:9px}
 .primary:hover{background:#ffc94a}
@@ -179,6 +182,21 @@ function renderTiles() {
     tile.addEventListener('click', () => choose(account));
     list.append(tile);
   }
+  // The dashed "add" tile. Creation is owner-approved server-side, so showing
+  // the tile to an unauthenticated visitor gives away nothing they could use.
+  const add = document.createElement('button');
+  add.className = 'tile';
+  add.type = 'button';
+  add.setAttribute('aria-label', 'Create a new workspace');
+  const addAvatar = document.createElement('span');
+  addAvatar.className = 'avatar add';
+  addAvatar.textContent = '+';
+  const addName = document.createElement('span');
+  addName.className = 'tile-name';
+  addName.textContent = 'New workspace';
+  add.append(addAvatar, addName);
+  add.addEventListener('click', showCreate);
+  list.append(add);
 }
 
 function choose(account) {
@@ -205,7 +223,130 @@ function choose(account) {
 function back() {
   chosen = null;
   el('signin').hidden = true;
+  el('create').hidden = true;
   el('picker').hidden = false;
+}
+
+function showCreate() {
+  chosen = null;
+  el('picker').hidden = true;
+  el('signin').hidden = true;
+  el('create').hidden = false;
+  el('create-error').textContent = '';
+  el('create-form').reset();
+  el('create-submit').disabled = false;
+  el('create-passkey').disabled = false;
+  const owner = accounts.find((account) => account.is_owner);
+  const passkeyApproval = Boolean(owner && owner.has_passkey && window.PublicKeyCredential);
+  el('create-passkey').hidden = !passkeyApproval;
+  el('create-divider').hidden = !passkeyApproval;
+  el('create-name').focus();
+}
+
+function createFail(message) {
+  el('create-error').textContent = message;
+  el('create-submit').disabled = false;
+  el('create-passkey').disabled = false;
+}
+
+/**
+ * Creating a workspace from the gate is a three-step dance: prove the owner
+ * approves (which sets the session cookie the create route checks), create,
+ * then unlock the NEW workspace so the reload lands in it with its own
+ * passphrase handed off for the vault. The approval step exists because the
+ * server only lets a signed-in OWNER add workspaces — the picker is reachable
+ * unauthenticated, and a gate that let anyone mint themselves a workspace
+ * would hand an intruder a foothold. This function is steps two and three,
+ * shared by both approval paths.
+ */
+async function createApproved(name, password) {
+  try {
+    const created = await api('/api/accounts', { name, password });
+    await api('/api/accounts/unlock', { account_id: created.account.id, password });
+    handOff(created.account.id, { passphrase: password });
+    location.reload();
+  } catch (error) {
+    // The owner approval left a signed-in session behind. Drop it so the
+    // gate's invariant — picker visible means nobody is signed in — holds.
+    try { await api('/api/accounts/sign-out', {}); } catch {}
+    throw error;
+  }
+}
+
+async function createWorkspace(event) {
+  event.preventDefault();
+  el('create-error').textContent = '';
+  const owner = accounts.find((account) => account.is_owner);
+  if (!owner) {
+    el('create-error').textContent = 'No owner workspace exists to approve this.';
+    return;
+  }
+  const name = el('create-name').value.trim();
+  const password = el('create-password').value;
+  el('create-submit').disabled = true;
+  el('create-passkey').disabled = true;
+  try {
+    await api('/api/accounts/unlock', { account_id: owner.id, password: el('create-owner-password').value });
+  } catch (error) {
+    createFail(/wrong password/i.test(error.message || '')
+      ? "That is not the owner's password." : (error.message || 'Owner approval failed.'));
+    return;
+  }
+  try {
+    await createApproved(name, password);
+  } catch (error) {
+    createFail(error.message || 'Could not create the workspace.');
+  }
+}
+
+// Owner approval by passkey: the same assertion the sign-in card performs,
+// scoped to the owner account, minus the PRF read — approval needs the owner's
+// IDENTITY, not their vault key, and the workspace being created gets its own.
+async function createWorkspaceWithPasskey() {
+  el('create-error').textContent = '';
+  const owner = accounts.find((account) => account.is_owner);
+  if (!owner) {
+    el('create-error').textContent = 'No owner workspace exists to approve this.';
+    return;
+  }
+  // The passkey button bypasses form submission, so the fields it depends on
+  // are validated by hand — the browser bubble points at whichever is missing.
+  if (!el('create-name').reportValidity() || !el('create-password').reportValidity()) return;
+  const name = el('create-name').value.trim();
+  const password = el('create-password').value;
+  el('create-submit').disabled = true;
+  el('create-passkey').disabled = true;
+  try {
+    const { publicKey } = await api('/api/accounts/webauthn/authenticate/options', { account_id: owner.id });
+    const credential = await navigator.credentials.get({
+      publicKey: {
+        ...publicKey,
+        challenge: unb64url(publicKey.challenge),
+        allowCredentials: (publicKey.allowCredentials || []).map((entry) => ({
+          ...entry, id: unb64url(entry.id),
+        })),
+      },
+    });
+    if (!credential) throw new Error('No passkey was offered.');
+    await api('/api/accounts/webauthn/authenticate', {
+      credential_id: credential.id,
+      client_data_json: b64url(credential.response.clientDataJSON),
+      authenticator_data: b64url(credential.response.authenticatorData),
+      signature: b64url(credential.response.signature),
+    });
+  } catch (error) {
+    if (error && (error.name === 'NotAllowedError' || error.name === 'AbortError')) {
+      createFail('Owner approval was cancelled.');
+      return;
+    }
+    createFail(error.message || 'Owner approval failed.');
+    return;
+  }
+  try {
+    await createApproved(name, password);
+  } catch (error) {
+    createFail(error.message || 'Could not create the workspace.');
+  }
 }
 
 function fail(message) {
@@ -218,7 +359,7 @@ async function signInWithPasskey(account) {
     fail('This browser has no passkey support. Use your password below.');
     return;
   }
-  if (account && !account.has_passkey) {
+  if (!account.has_passkey) {
     fail('This workspace has no passkey yet. Sign in with your password once and you can add one.');
     el('password').focus();
     return;
@@ -227,8 +368,8 @@ async function signInWithPasskey(account) {
   el('error').textContent = '';
   try {
     const { publicKey } = await api('/api/accounts/webauthn/authenticate/options',
-      { account_id: account ? account.id : null });
-    const salt = await prfSalt(account ? account.id : 0);
+      { account_id: account.id });
+    const salt = await prfSalt(account.id);
     const credential = await navigator.credentials.get({
       publicKey: {
         ...publicKey,
@@ -380,15 +521,16 @@ async function start() {
     return;
   }
   renderTiles();
-  // One workspace and nothing to choose between: go straight to its sign-in.
-  if (accounts.length === 1) choose(accounts[0]);
-  el('quick-passkey').hidden = !accounts.some((account) => account.has_passkey);
+  // The picker always shows now — even with one workspace there is a real
+  // choice on it, because the "New workspace" tile sits beside the accounts.
 }
 
 el('passkey').addEventListener('click', () => signInWithPasskey(chosen));
-el('quick-passkey').addEventListener('click', () => signInWithPasskey(null));
 el('password-form').addEventListener('submit', signInWithPassword);
 el('back').addEventListener('click', back);
+el('create-form').addEventListener('submit', createWorkspace);
+el('create-passkey').addEventListener('click', createWorkspaceWithPasskey);
+el('create-back').addEventListener('click', back);
 el('enrol-add').addEventListener('click', addPasskey);
 el('enrol-skip').addEventListener('click', () => {
   if (el('enrol-hide').checked) {
@@ -436,9 +578,6 @@ def account_gate_html() -> str:
           Nothing in one can be opened from another.</p>
       </div>
       <ul class="tiles" id="tiles"></ul>
-      <div style="display:grid;justify-items:center;margin-top:26px">
-        <button class="back" id="quick-passkey" type="button" hidden>Use a passkey instead</button>
-      </div>
     </div>
 
     <section class="card" id="signin" hidden aria-labelledby="signin-title">
@@ -480,6 +619,36 @@ def account_gate_html() -> str:
       <p class="error" id="error" role="alert"></p>
       <div style="display:grid;justify-items:center">
         <button class="back" id="back" type="button">Choose a different workspace</button>
+      </div>
+    </section>
+
+    <section class="card" id="create" hidden aria-labelledby="create-title">
+      <div class="who">
+        <span class="avatar add" aria-hidden="true">+</span>
+        <div>
+          <h2 id="create-title">New workspace</h2>
+          <p class="lede" style="text-align:left;margin:2px 0 0">Its own library, its own key.</p>
+        </div>
+      </div>
+      <form id="create-form">
+        <label>Workspace name
+          <input id="create-name" type="text" autocomplete="off" maxlength="40" required>
+        </label>
+        <label>Its password
+          <input id="create-password" type="password" autocomplete="new-password" required>
+        </label>
+        <button class="primary" id="create-passkey" type="button" hidden>
+          {_KEY_GLYPH}<span>Approve with owner passkey</span>
+        </button>
+        <div class="divider" id="create-divider" hidden><span>or</span></div>
+        <label>Owner password — adding a workspace needs the owner's approval
+          <input id="create-owner-password" type="password" autocomplete="current-password" required>
+        </label>
+        <button class="secondary" id="create-submit" type="submit">Create workspace</button>
+      </form>
+      <p class="error" id="create-error" role="alert"></p>
+      <div style="display:grid;justify-items:center">
+        <button class="back" id="create-back" type="button">Choose a different workspace</button>
       </div>
     </section>
   </main>

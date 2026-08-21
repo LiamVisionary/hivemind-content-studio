@@ -143,6 +143,10 @@ export function normalizeVideoPreferences(value) {
         // null = use whatever the selected workflow ships with; true/false is an
         // explicit user override of the forecaster.
         spectrum: typeof value.spectrum === 'boolean' ? value.spectrum : null,
+        // Fast high-res is OFF unless the user turns it on, so it persists as a
+        // plain boolean rather than the spectrum tri-state: the registered graph's
+        // own default is false and there is nothing to defer to.
+        fastHighRes: value.fastHighRes === true,
         // Sampling-steps override (H3 refinement). null = workflow default. Only
         // sent for models whose registry maps a steps slot, so a stale value from
         // another model cannot leak into a graph without one.

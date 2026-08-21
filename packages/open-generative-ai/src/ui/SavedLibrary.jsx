@@ -20,6 +20,10 @@ const same = (left, right) => String(left || '').trim().toLowerCase() === String
 export function SaveNameModal({
   open, title, label, hint, placeholder, initialName = '', existing = [], existingLabel = 'Or replace one you saved',
   takenNames = existing.map((entry) => entry.name), busy = false, confirmLabel = 'Save', onClose, onSave,
+  // Anything a library needs to ask for beside the name (a persona's gender),
+  // rendered under the name field. The dialog stays the one place a named
+  // thing is saved, rather than each library growing a dialog of its own.
+  children = null,
 }) {
   const [name, setName] = useState(initialName);
   const inputRef = useRef(null);
@@ -70,6 +74,7 @@ export function SaveNameModal({
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
         />
       </Field>
+      {children}
 
       {existing.length ? (
         <div className="mt-3">

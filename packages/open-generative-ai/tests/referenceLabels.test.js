@@ -87,6 +87,7 @@ test('warns when the clip is named but nothing is excluded', async () => {
     const warn = await loadWarning();
     const result = warn({
         prompt: '<Video 1> drives her gestures.',
+        images: ['/a.png'],
         videos: [{ url: 'v1' }],
     });
     assert.equal(result.kind, 'no-exclusion');
@@ -96,8 +97,18 @@ test('stays quiet once the prompt says what must not carry', async () => {
     const warn = await loadWarning();
     assert.equal(warn({
         prompt: "<Video 1> is a motion reference. Its performer's appearance, clothing and setting do NOT carry.",
+        images: ['/a.png'],
         videos: [{ url: 'v1' }],
     }), null);
+});
+
+// With no picture attached the clip IS the character reference — its performer
+// taking over the shot is the point — so the exclusion nag would be wrong.
+// An unnamed clip is still flagged: the model has to be told which label it is.
+test('with no picture the clip is the character reference, so nothing need be excluded', async () => {
+    const warn = await loadWarning();
+    assert.equal(warn({ prompt: '<Video 1> is who she is.', videos: [{ url: 'v1' }] }), null);
+    assert.equal(warn({ prompt: 'She talks to camera.', videos: [{ url: 'v1' }] }).kind, 'unnamed');
 });
 
 // Dragging: the row a file lands in, and the highlight that promises it.
@@ -183,12 +194,31 @@ test('row keys survive a list that arrives with the same source twice', async ()
 
 // The retention-tag button: it has to produce a line that clears the warning.
 test('the tag button writes a line that names the clip AND excludes its look', async () => {
+    const { withReferenceTags, motionReferenceWarning } = await loadDrag();
+    const images = ['/a.png'];
+    const videos = [{ url: 'v1' }];
+    const prompt = withReferenceTags('A woman speaks to camera.', { images, videos });
+
+    assert.match(prompt, /<Video 1>: attribute_transfer/);
+    assert.equal(motionReferenceWarning({ prompt, videos, images }), null);
+});
+
+// The same button with no picture attached: the clip is the character
+// reference, so the line it writes carries the person rather than excluding them.
+test('with no picture the tag button makes the clip the character reference', async () => {
     const { withMotionRetentionTags, motionReferenceWarning } = await loadDrag();
     const videos = [{ url: 'v1' }];
     const prompt = withMotionRetentionTags('A woman speaks to camera.', videos);
 
-    assert.match(prompt, /<Video 1>: attribute_transfer/);
+    assert.match(prompt, /<Subject 1> is the person shown in <Video 1>: \[hair, face/);
+    assert.match(prompt, /<Video 1>: fully_preserved — <Subject 1> IS the person in this clip/);
+    assert.doesNotMatch(prompt, /<Video 1>: attribute_transfer/);
     assert.equal(motionReferenceWarning({ prompt, videos }), null);
+    // A second clip stays a motion reference: only the first carries the person.
+    const two = withMotionRetentionTags('A woman speaks to camera.', [{ url: 'v1' }, { url: 'v2' }]);
+    assert.match(two, /<Video 1>: fully_preserved — <Subject 1> IS the person/);
+    assert.match(two, /<Video 2>: attribute_transfer/);
+    assert.match(two, /carrying the look and manner of <Video 1>, gesturing in the manner of <Video 2>/);
 });
 
 test('the tag button lands inside retention_analysis when the section exists', async () => {
@@ -212,8 +242,10 @@ test('the tag button covers a second clip without touching the first', async () 
     const { withMotionRetentionTags } = await loadDrag();
     const once = withMotionRetentionTags('A shot.', [{ url: 'v1' }]);
     const twice = withMotionRetentionTags(once, [{ url: 'v1' }, { url: 'v2' }]);
-    assert.equal((twice.match(/<Video 1>:/g) || []).length, 1);
-    assert.equal((twice.match(/<Video 2>:/g) || []).length, 1);
+    // Retention lines, counted at line start: the subject sentence "…shown in
+    // <Video 1>: [hair…" mentions the label too, and is not a claim.
+    assert.equal((twice.match(/^<Video 1>:/gm) || []).length, 1);
+    assert.equal((twice.match(/^<Video 2>:/gm) || []).length, 1);
 });
 
 // Three unrelated reasons a dropped file cannot be attached, told apart.
@@ -290,7 +322,10 @@ test('a clip with no soundtrack gets a frame but no audio scaffold', async () =>
     const { withReferenceTags } = await import('../src/lib/h3References.js');
     const out = withReferenceTags('', { videos: [{ useAudio: false }] });
     assert.match(out, /^subject_definitions:/);
-    assert.match(out, /<Video 1>: attribute_transfer/);
+    // No picture, so the clip is who <Subject 1> is — not merely how they move.
+    assert.match(out, /<Subject 1> is the person shown in <Video 1>/);
+    assert.match(out, /<Video 1>: fully_preserved — <Subject 1> IS the person in this clip/);
+    assert.doesNotMatch(out, /<Video 1>: attribute_transfer/);
     assert.doesNotMatch(out, /<Audio/);
     assert.doesNotMatch(out, /<d>/, 'nothing is speaking, so there is no line to write');
     assert.doesNotMatch(out, /\[audio reference\]/);
@@ -329,10 +364,12 @@ test('pressing it twice does not write the scaffold twice', async () => {
     assert.equal(withReferenceTags(once, refs), once);
 
     // And a label the user already wrote is left exactly as they wrote it.
-    const edited = once.replace(/<Video 1>: attribute_transfer[^\n]*/, '<Video 1>: fully_preserved — copy this move.');
+    // (No picture here, so the scaffold's own line is the identity one.)
+    const edited = once.replace(/^<Video 1>: fully_preserved — <Subject 1> IS[^\n]*/m, '<Video 1>: fully_preserved — copy this move.');
+    assert.notEqual(edited, once, 'the scaffold wrote the clip line this test rewrites');
     const after = withReferenceTags(edited, refs);
     assert.match(after, /<Video 1>: fully_preserved — copy this move\./);
-    assert.equal((after.match(/<Video 1>:/g) || []).length, 1);
+    assert.equal((after.match(/^<Video 1>:/gm) || []).length, 1);
 });
 
 test('each piece lands in its own section when the six-section format is in use', async () => {
@@ -396,4 +433,122 @@ test('nothing to say, and nothing to warn about without a voice', async () => {
     }), null);
     // And an untouched composer is not a mistake yet.
     assert.equal(unscriptedTimeWarning({ prompt: '', durationSeconds: 8, audios: [{ url: '/v.m4a' }] }), null);
+});
+
+// The frame's subject line used to say "the person" no matter who was loaded,
+// which left the model to pick a gender — and an unvoiced subject then came
+// back as a generic adult male whoever was in the pictures.
+test('the frame names the loaded persona\'s gender, and says "person" when it has none', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    assert.match(withReferenceTags('', { images: ['/a.png'], gender: 'female' }), /<Subject 1> is the woman shown in <Picture 1>: \[hair, face/);
+    assert.match(withReferenceTags('', { images: ['/a.png'], gender: 'male' }), /<Subject 1> is the man shown in <Picture 1>/);
+    // Non-binary and unset both read "person": there is no noun to add.
+    assert.match(withReferenceTags('', { images: ['/a.png'], gender: 'nonbinary' }), /<Subject 1> is the person shown in <Picture 1>/);
+    assert.match(withReferenceTags('', { images: ['/a.png'] }), /<Subject 1> is the person shown in <Picture 1>/);
+    // With no pictures but a clip, the clip is the character reference and the
+    // noun lands in front of it, the way MiniMax's own guide binds a subject to
+    // a video ("<Subject N> is the young man in <Video 2>, with …").
+    assert.match(withReferenceTags('', { videos: [{ useAudio: false }], gender: 'male' }), /<Subject 1> is the man shown in <Video 1>: \[hair, face/);
+    assert.match(withReferenceTags('', { videos: [{ useAudio: false }] }), /<Subject 1> is the person shown in <Video 1>: \[hair, face/);
+    // With no visual reference at all the noun still lands, ahead of the fill-in.
+    assert.match(withReferenceTags('', { audios: [{ url: '/v.wav' }], gender: 'male' }), /<Subject 1> is a man: \[hair, face/);
+    assert.match(withReferenceTags('', { audios: [{ url: '/v.wav' }] }), /<Subject 1> is \[hair, face/);
+});
+
+// The scaffold and the UGC reference brief introduce <Subject 1> with ONE
+// sentence, exported so they cannot drift apart.
+test('the subject line is one exported sentence, shared by the frame and the UGC brief', async () => {
+    const { referenceSubjectLine, referenceVoiceLabel, referenceLabels, withReferenceTags } = await import('../src/lib/h3References.js');
+    const line = referenceSubjectLine({ pictures: ['<Picture 1>', '<Picture 2>'], gender: 'male' });
+    assert.equal(line, '<Subject 1> is the man shown in <Picture 1> through <Picture 2>: [hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the pictures].');
+    assert.ok(withReferenceTags('', { images: ['/a', '/b'], gender: 'male' }).includes(line));
+    const labels = referenceLabels({ images: ['/a'], videos: [{ useAudio: true }], audios: [{ url: '/v' }] });
+    assert.equal(referenceVoiceLabel(labels), '<Audio 1>', "a clip's soundtrack is the first voice heard");
+    assert.equal(referenceVoiceLabel(referenceLabels({ images: ['/a'] })), '');
+});
+
+// A label is "spoken for" only by a retention line of its own. The subject
+// sentence — "…shown in <Picture 1> through <Picture 3>: [hair…" — mentions the
+// last picture followed by a colon, and used to count as its claim, so the last
+// picture got no contract at all (found by the UGC reference brief, 2026-08-21).
+test('a label mentioned mid-sentence is not a claim; only its own retention line is', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const prompt = [
+        'subject_definitions:',
+        '<Subject 1> is the woman shown in <Picture 1> through <Picture 3>: [hair, face].',
+        '', 'summary:', 'y', '',
+        'retention_analysis:',
+        '<Picture 2>: fully_preserved — written by hand.',
+        '', 'detailed_description:', 'z',
+    ].join('\n');
+    const out = withReferenceTags(prompt, { images: ['/a', '/b', '/c'] });
+    assert.match(out, /^<Picture 1>: fully_preserved/m);
+    assert.match(out, /^<Picture 3>: fully_preserved/m, 'the last picture gets its contract despite the subject sentence');
+    assert.equal(out.match(/^<Picture 2>:/gm).length, 1, 'a hand-written line is respected, not doubled');
+    assert.match(out, /^<Picture 2>: fully_preserved — written by hand\.$/m);
+});
+
+// Compact staging. Measured 2026-08-21 on a rented 5090 (same seed, 5s clip
+// @1216x704, three identity pictures, a phone clip as the motion reference): a
+// reference staged 384 px wide transfers the motion as well as the node's own
+// 704x1504 canvas — PSNR 23.7 dB / SSIM 0.88 between the two renders against
+// ~17.4 dB / 0.80 to a no-video control — at 22 s a step instead of 42 s and
+// 16.7 GiB instead of 23.0. So the row offers it; but it is a MOTION-only
+// result, and with no picture attached the clip IS the character reference.
+test('a compact row stages "compact", and is held to "full" while the clip is the character reference', async () => {
+    const { referenceVideoCanvas, referenceVideoCompactLocked } = await import('../src/lib/h3References.js');
+    const pictures = ['/api/media-studio/references/face.png'];
+
+    // Off by default: a row that never touched the switch stages full.
+    assert.equal(referenceVideoCanvas({ url: '/walk.mp4' }, { images: pictures }), 'full');
+    assert.equal(referenceVideoCanvas({ url: '/walk.mp4', compact: false }, { images: pictures }), 'full');
+    assert.equal(referenceVideoCanvas('/walk.mp4', { images: pictures }), 'full', 'a bare url has no switch');
+    // Switched on, with a picture carrying the identity: compact.
+    assert.equal(referenceVideoCanvas({ url: '/walk.mp4', compact: true }, { images: pictures }), 'compact');
+    // No picture — the clip is the character reference, identity needs pixels,
+    // and the switch is HELD rather than honoured, however the row is set.
+    assert.equal(referenceVideoCanvas({ url: '/walk.mp4', compact: true }, { images: [] }), 'full');
+    assert.equal(referenceVideoCanvas({ url: '/walk.mp4', compact: true }), 'full');
+    assert.equal(referenceVideoCanvas({ url: '/walk.mp4', compact: true }, { images: ['', null] }), 'full', 'junk picture slots are not pictures');
+    assert.equal(referenceVideoCompactLocked({ images: [] }), true);
+    assert.equal(referenceVideoCompactLocked({ images: pictures }), false);
+    assert.equal(referenceVideoCompactLocked(), true);
+});
+
+test('the switch changes neither the labels nor the budget — staging size is not a reference', async () => {
+    const { referenceLabels, referenceBudgetReport } = await import('../src/lib/h3References.js');
+    const plain = [{ url: '/walk.mp4', useAudio: true }];
+    const compact = [{ url: '/walk.mp4', useAudio: true, compact: true }];
+    assert.deepEqual(referenceLabels({ images: ['/a'], videos: compact }), referenceLabels({ images: ['/a'], videos: plain }));
+    const durations = { '/walk.mp4': 6 };
+    assert.deepEqual(
+        referenceBudgetReport({ images: ['/a'], videos: compact, durations }),
+        referenceBudgetReport({ images: ['/a'], videos: plain, durations }),
+    );
+});
+
+test('each video row carries a Compact switch beside its sound switch, held off without a picture', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const menu = fs.readFileSync(path.join(__dirname, '../src/studios/video/ReferencesMenu.jsx'), 'utf8');
+
+    // The row: a per-video toggle, with the hint that says what it buys and
+    // when it is off, and a disabled state that gives the reason instead.
+    const sound = menu.indexOf("{zh() ? '含原声' : 'sound'}");
+    const compact = menu.indexOf("{zh() ? '紧凑' : 'Compact'}");
+    assert.ok(sound > 0 && compact > sound, 'Compact sits beside the sound toggle on the video row');
+    assert.match(menu, /Stage this clip small \(384 px\) — same motion, 3x cheaper\. Off when the clip is the character reference\./);
+    assert.match(menu, /Off while no picture is attached: this clip is the character reference, and identity needs pixels\./);
+    assert.match(menu, /disabled=\{compactLocked\}/);
+    assert.match(menu, /aria-pressed=\{!compactLocked && Boolean\(item\?\.compact\)\}/, 'a locked row reads as off whatever it holds');
+
+    // The lock is the shared rule, not a second opinion: no picture attached.
+    assert.match(menu, /import \{[^}]*referenceVideoCompactLocked[^}]*\} from '\.\.\/\.\.\/lib\/h3References\.js'/s);
+    assert.match(menu, /compactLocked=\{kind === 'videos' && referenceVideoCompactLocked\(\{ images \}\)\}/);
+    // Toggling flips THAT row only, the same way the sound switch does.
+    assert.match(menu, /onToggleCompact=\{\(index\) => emit\('videos', videos\.map\(\(item, i\) => \(\s*i === index \? \{ \.\.\.item, compact: !item\.compact \} : item\s*\)\)\)\}/);
+    // Default OFF on every way a clip arrives — picked, dropped, or prepped in
+    // place (which spreads the row and so keeps what it had).
+    assert.match(menu, /\{ url, name, useAudio: false, compact: false \}/);
+    assert.match(menu, /\(\{ \.\.\.item, useAudio: false, compact: false \}\)/);
 });

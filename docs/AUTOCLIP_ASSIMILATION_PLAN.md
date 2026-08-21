@@ -43,7 +43,41 @@ Confirmed by source read, not inference:
 | `utils/subtitle_processor.py::_split_text_to_words` | **No gain** — their word timing is the same uniform split we already do at `transcripts.py:172`. Negative finding: our transcript layer is not behind theirs |
 | WebSocket progress + Flower | Deferred — real, but it is an orchestration want, not a quality gap. See Phase 3 |
 
-### Phase 1 — the re-rank and hook layer (THIS PASS)
+### Phase 1 — the re-rank and hook layer (LANDED 2026-08-20)
+
+> **Status:** landed and verified on real hardware. `pytest test/auto_clipper` 66 passed;
+> `test/auto_clipper test/services test/studio/test_repo_contract.py` 587 passed, 10 skipped, 0 failed.
+> Live proof: Podcli installed at the pinned sha, three patches applied, and a real
+> `podcli process --top 3` render driven end to end through `auto-clipper render` — real cuts, real
+> captions, then a local `Qwen3-4B-Instruct-2507` scoring and writing hooks for each. `doctor` reports
+> `overall_ok: True`.
+>
+> **Three defects found by live runs, all fixed.** The first two were invisible to
+> `AUTO_CLIPPER_FAKE_RENDER=1`, which is exactly why the fake path is not sufficient proof.
+>
+> 1. **Import was a directory listing, not a clip list.** `import_podcli_outputs` fell back to
+>    `rglob("*.mp4")` whenever Podcli emitted no JSON on stdout — which is always, because Podcli writes
+>    no manifest. A `--top 3` run produced **nine** clip rows: three real clips, three pre-outro
+>    intermediates, and three thumbnail-frame videos, all with `start_seconds`/`end_seconds` of `None`.
+>    A thumbnail frame could have reached the approval queue as a postable clip. Podcli does print its
+>    picks (`✓ 1. [0:00 → +22s] (10pts) Here's the thing…`), so we now parse that for range, heuristic
+>    score, and opening line, and filter the output directory to finished clips only.
+> 2. **The semantic pass had nothing to read.** With no stdout JSON, every imported clip's
+>    `transcript_excerpt` was `None` and its rationale was the literal string "Imported from Podcli
+>    output directory" — so the re-rank was scoring that, and the hook writer wrote from Podcli's
+>    50-character truncated opening line. Real output: `"Nobody tells you about raising mo"`, scored
+>    0.35. We now slice the transcript we handed Podcli by the clip's parsed range and pass the real
+>    text. Same clip, same model, after: `"Your round is priced by your worst month"`, scored 0.95.
+> 3. **The prompt's worked example got copied.** A caption came back as the example from
+>    `clip-title.txt` almost verbatim, because the example and the test transcript were both written
+>    from the same sentence. The example is now in an unrelated domain, with an explicit instruction
+>    that it demonstrates shape, not subject matter.
+>
+> **Defect found by the first live run, and fixed.** Feeding the reviewer-facing `reason` into the title pass
+> made the model write a *critique* of a weak clip into the caption field ("No specific numbers, no
+> decision point, no outcome") — text that would have shipped as the post body. The title pass now
+> receives the transcript and nothing else; `test_titles_are_written_from_the_transcript_alone` locks it.
+> This is a departure from the donor, which does pass `recommend_reason` into its step 4.
 
 Runs **after** Podcli renders, **before** the run is marked `rendered`. Podcli still decides where to cut;
 the LLM decides what is worth posting and what to call it.
@@ -81,7 +115,7 @@ for TikTok/YouTube/IG/X, not translated literally.
 visible to the reviewer; the score only orders them. The approval gate remains the single place where
 anything is filtered out, because that gate is what keeps public creator material research-only.
 
-### Phase 2 — selection independence (NEXT, optional)
+### Phase 2 — selection independence (NEXT, optional — not started)
 
 Only worth doing if Podcli's cuts prove to be the bottleneck rather than its ordering.
 
@@ -93,7 +127,7 @@ Only worth doing if Podcli's cuts prove to be the bottleneck rather than its ord
 This would let us propose cut points ourselves and hand Podcli explicit in/out times, instead of accepting
 whatever it picks. It is a real change in posture — do not start it before Phase 1 has run on real sources.
 
-### Phase 3 — collections and orchestration (LATER)
+### Phase 3 — collections and orchestration (LATER — not started)
 
 | Capability | Donor source | Target | Reuse type |
 | --- | --- | --- | --- |
@@ -136,13 +170,15 @@ answer — revisit only if long sources actually block the agent path.
 
 Phase 1 is not done until:
 
-1. `pytest test/auto_clipper` passes, including new tests for `llm_json` extraction (fenced, bare, prose-
-   wrapped, and unparseable input) and for re-rank fail-open behavior with a stubbed LLM.
-2. A real render on a real source shows `llm_score`, `llm_reason`, and `hook_title` populated in the DB,
-   with `AUTO_CLIPPER_FAKE_RENDER=1` covering the offline path.
-3. A stubbed LLM failure still produces `status = rendered` and a scheduled caption that falls back to the
-   existing behavior — proving a dead LLM costs us nothing.
-4. `auto-clipper schedule` emits a Postiz payload whose caption is the generated hook, verified in the
-   written payload JSON with `CONTENT_STUDIO_ENABLE_LIVE_PUBLISH` **off**.
-5. The approval gate is re-proven: a run with high scores still refuses to schedule without
-   `auto-clipper approve`.
+1. ✅ `pytest test/auto_clipper` passes (66), including `llm_json` extraction (fenced, bare, prose-wrapped,
+   unparseable) and re-rank fail-open behaviour with a stubbed LLM.
+2. ✅ Met. Podcli installed at pinned `e204f98` with all three patches; `auto-clipper render 1 --top 3
+   --category business` cut three real clips, and `llm_score`, `llm_reason`, `hook_title`, and `caption`
+   are populated on all three by a real local model. The Obsidian run note lists them best-first with
+   hook and reason. `AUTO_CLIPPER_FAKE_RENDER=1` still covers the offline path.
+3. ✅ `test_render_still_succeeds_when_the_llm_is_dead` — `AUTO_CLIPPER_LLM=off` leaves the run
+   `rendered`, both clips intact, and the caption exactly what it was before this layer existed.
+4. ✅ `test_render_enriches_clips_and_the_caption_reaches_postiz` reads the written payload JSON with
+   `CONTENT_STUDIO_ENABLE_LIVE_PUBLISH` off and asserts the generated caption is in it.
+5. ✅ `test_a_high_score_does_not_bypass_the_approval_gate` — every clip scores 1.0, the source stays
+   `research`, and `schedule_run` still raises `PolicyError`.

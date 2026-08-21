@@ -236,6 +236,10 @@ the reviewer reads them in ranked order. The pass **ranks but never deletes** â€
 the only filter â€” and it fails open, so a missing model costs a render nothing. Set `AUTO_CLIPPER_LLM` to
 `auto` (default: an already-loaded local model, else the cloud provider), `local`, `cloud`, or `off`.
 
+Podcli's own AI clip selection is **off** by default. Stock Podcli hands the whole transcript to any
+`claude` or `codex` binary on PATH; `patches/podcli-ai-select-default-off.patch` makes that an explicit
+`--ai-select` opt-in, and `auto-clipper doctor` fails an install that is missing the gate.
+
 The optional operator console is secondary and starts locally with `hive-env-run -- uv run content-studio-api`. It reads the same state store; authenticated mutations require `CONTENT_STUDIO_CONTROL_TOKEN`.
 
 The repository also snapshots the relevant Shared Brain skills under `skills/shared/` and vendors the audited Clueso workflow shelf under `skills/vendor/clueso-ai/`. `skills/hivemind-content-studio/SKILL.md` is linked into `.agents/skills/` as the canonical entry skill; provider adapters are operational references, not duplicate implementations.

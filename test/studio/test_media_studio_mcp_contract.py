@@ -1691,6 +1691,143 @@ def test_easycache_is_absent_from_the_graph_unless_it_is_asked_for(tmp_path):
     assert graph["16"]["inputs"]["model"] == [spectrum_id, 0]
 
 
+def test_fast_high_res_is_absent_from_the_graph_unless_it_is_asked_for(tmp_path):
+    """Off by default has to mean the single-pass graph, unchanged.
+
+    A second sampler that merely exists still doubles conditioning encodes and
+    sampler warmups, so "off" is checked as ABSENCE of the whole two-pass
+    apparatus rather than a flag somewhere set to false.
+    """
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {"prompt": "a kite over a harbour"})
+
+    assert len([n for n in graph.values() if n["class_type"] == "SamplerCustomAdvanced"]) == 1
+    for absent in ("SplitSigmas", "LTXVSeparateAVLatent", "LTXVConcatAVLatent",
+                   "MinimaxH3LatentUpscaler3D"):
+        assert not [n for n in graph.values() if n["class_type"] == absent], absent
+    assert len([n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo"]) == 1
+    # And the sampler still reads the scheduler directly, not through a split.
+    assert graph["14"]["inputs"]["sigmas"] == ["9", 0]
+
+
+def test_fast_high_res_compiles_one_schedule_across_two_canvases(tmp_path):
+    """The whole point of the lane, checked structurally rather than by clock.
+
+    On a rented card the saving is obvious, but a graph that merely LOOKS
+    two-pass — refining from the noisy latent instead of the x0 estimate, or
+    conditioning the refine pass at the small canvas — produces a plausible
+    video and a silently wrong one. Every link that distinguishes those is
+    pinned here.
+    """
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    entry = next(w for w in registry["workflows"] if w["id"] == "minimax-h3")
+    cfg = entry["fast_high_res"]
+    steps = entry["defaults"]["steps"]
+    width, height = entry["defaults"]["width"], entry["defaults"]["height"]
+
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour",
+        "fast_high_res": True,
+    })
+
+    samplers = {k: v for k, v in graph.items() if v["class_type"] == "SamplerCustomAdvanced"}
+    assert len(samplers) == 2
+    first_id = "14"
+    refine_id = next(k for k in samplers if k != first_id)
+
+    # One schedule, cut once: the refine pass re-noises to exactly the sigma the
+    # first pass stopped at, because both halves come from the same scheduler.
+    split_id, split = next((k, v) for k, v in graph.items() if v["class_type"] == "SplitSigmas")
+    assert split["inputs"]["sigmas"] == ["9", 0]
+    assert split["inputs"]["step"] == steps - cfg["refine_steps"]
+    assert graph[first_id]["inputs"]["sigmas"] == [split_id, 0]
+    assert graph[refine_id]["inputs"]["sigmas"] == [split_id, 1]
+
+    # Two canvases. The first-pass conditioning shrinks; the refine pass gets
+    # its OWN encode at the delivered size, because H3 bakes the canvas into
+    # its conditioning.
+    conds = {k: v for k, v in graph.items() if v["class_type"] == "MiniMaxH3ImageToVideo"}
+    assert len(conds) == 2
+    small = graph["104"]["inputs"]
+    full_id = next(k for k in conds if k != "104")
+    full = graph[full_id]["inputs"]
+    assert (full["width"], full["height"]) == (width, height)
+    assert small["width"] < width and small["height"] < height
+    assert small["width"] % cfg["align"] == 0 and small["height"] % cfg["align"] == 0
+    # Same prompt and length on both — only the canvas differs.
+    assert small["prompt"] == full["prompt"] and small["length"] == full["length"]
+    assert graph[refine_id]["inputs"]["guider"] != graph[first_id]["inputs"]["guider"]
+    refine_guider = graph[graph[refine_id]["inputs"]["guider"][0]]
+    assert refine_guider["inputs"]["conditioning"] == [full_id, 0]
+    # Same patched model chain: the accelerators are applied once, not twice.
+    assert refine_guider["inputs"]["model"] == graph[graph[first_id]["inputs"]["guider"][0]]["inputs"]["model"]
+
+    # denoised_output (slot 1), not output (slot 0). The first pass stops at a
+    # non-zero sigma, so slot 0 is still noise; the upscaler was trained on
+    # clean latents.
+    sep_id, sep = next((k, v) for k, v in graph.items() if v["class_type"] == "LTXVSeparateAVLatent")
+    assert sep["inputs"]["av_latent"] == [first_id, 1]
+
+    # The video half is upscaled; the audio half crosses untouched and is
+    # rejoined, because H3 denoises the two together and the upscaler is a
+    # Conv3d that would choke on the nested pair.
+    ups_id, ups = next((k, v) for k, v in graph.items() if v["class_type"] == "MinimaxH3LatentUpscaler3D")
+    assert ups["inputs"]["latent"] == [sep_id, 0]
+    assert ups["inputs"]["mode"] == "target dimensions"
+    assert (ups["inputs"]["mode.width"], ups["inputs"]["mode.height"]) == (width, height)
+    assert ups["inputs"]["model_name"] == cfg["model_name"]
+    join_id, join = next((k, v) for k, v in graph.items() if v["class_type"] == "LTXVConcatAVLatent")
+    assert join["inputs"]["video_latent"] == [ups_id, 0]
+    assert join["inputs"]["audio_latent"] == [sep_id, 1]
+    assert graph[refine_id]["inputs"]["latent_image"] == [join_id, 0]
+
+    # Everything downstream now reads the REFINE pass — a graph that decoded the
+    # first sampler would deliver the small render and waste the second pass.
+    assert graph["10"]["inputs"]["samples"] == [refine_id, 0]
+    assert graph["23"]["inputs"]["samples"] == [refine_id, 0]
+
+
+def test_fast_high_res_declines_a_target_too_small_to_pay_for_two_passes(tmp_path):
+    """Below the upscale floor the overhead IS the saving, and at factor <= 1
+    the node refuses outright. The compiler has to leave the graph alone rather
+    than ship one that dies at render time."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a kite over a harbour",
+        "fast_high_res": True,
+        "width": 384,
+        "height": 224,
+    })
+
+    assert len([n for n in graph.values() if n["class_type"] == "SamplerCustomAdvanced"]) == 1
+    assert not [n for n in graph.values() if n["class_type"] == "MinimaxH3LatentUpscaler3D"]
+    assert graph["104"]["inputs"]["width"] == 384
+
+
+def test_fast_high_res_is_registry_gated_to_the_workflows_that_declare_it(tmp_path):
+    """The switch is compiled from `accepts`, like every other capability.
+
+    minimax-h3-turbo INHERITS the base entry, so it carries the lane too — same
+    graph shape, and upstream's own reference workflow runs the two passes over
+    the distilled model. The reference lane declares its own accepts and does
+    not: it conditions through MiniMaxH3ReferenceToVideo, a topology this
+    compiler has never been measured against, and a toggle that silently did
+    nothing there would be worse than no toggle.
+    """
+    resolved = {w["id"]: w for w in _resolved_registry_workflows(
+        json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8")))}
+    assert "fast_high_res" in resolved["minimax-h3"]["accepts"]
+    assert "fast_high_res" in resolved["minimax-h3-turbo"]["accepts"]
+    assert "fast_high_res" not in resolved["minimax-h3-reference"]["accepts"]
+
+    # And the flag is inert where it is not declared, rather than half-applied.
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "a kite over a harbour",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "fast_high_res": True,
+    })
+    assert len([n for n in graph.values() if n["class_type"] == "SamplerCustomAdvanced"]) == 1
+    assert not [n for n in graph.values() if n["class_type"] == "MinimaxH3LatentUpscaler3D"]
+
+
 def test_easycache_threshold_wires_the_node_between_spectrum_and_the_sampler(tmp_path):
     graph = _capture_video_graph(tmp_path, "minimax-h3", {
         "prompt": "a kite over a harbour",

@@ -13,17 +13,48 @@ const EXTENSIONS = {
   audios: ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac'],
 };
 
+import { normalizePersonaGender, personaGenderWords } from './personaId.js';
+
 // The source behind an attached reference. Pictures are stored as a bare url;
 // clips carry a name (and, for video, its soundtrack switch) alongside it.
 export function referenceUrl(item) {
   return (typeof item === 'string' ? item : item?.url) || '';
 }
 
+// ── Compact staging ──────────────────────────────────────────────────────────
+//
+// How a reference clip is STAGED for the node — the `canvas` the MCP takes on
+// each reference_videos entry. "full" keeps MiniMax H3's own 768-short-edge
+// reference canvas; "compact" fits the clip inside 384x1152 (never upscaled):
+// about 3.3x fewer sequence rows and roughly half the step time. Measured
+// 2026-08-21 on a rented 5090, same seed, 5s clip @1216x704 with three identity
+// pictures: a MOTION reference staged 384 px wide transfers the movement as
+// well as the full canvas (PSNR 23.7 dB / SSIM 0.88 between the two renders,
+// against ~17.4 dB / 0.80 to a no-video control) while the real step time fell
+// from 42 s to 22 s and torch's peak from 23.0 to 16.7 GiB.
+//
+// It is a per-clip choice and OFF by default, because the measurement is for
+// motion only. With no picture attached the clip IS the character reference
+// (the panel says so on its info line), and identity needs pixels — so while
+// that is the case the switch is held off however the row is set. Holding it
+// rather than clearing it means a picture removed and re-attached does not
+// silently lose the choice, and a picture removed after the fact cannot quietly
+// shrink the face the run is built on.
+export function referenceVideoCompactLocked({ images = [] } = {}) {
+  return !(Array.isArray(images) ? images : []).filter(Boolean).length;
+}
+
+export function referenceVideoCanvas(item, { images = [] } = {}) {
+  if (referenceVideoCompactLocked({ images })) return 'full';
+  const compact = typeof item === 'object' && item !== null && Boolean(item.compact);
+  return compact ? 'compact' : 'full';
+}
+
 // Two rows of the SAME source are never what someone means. Nothing about a
 // reference varies per slot: the item holds only its url, its filename and (for
-// video) whether its soundtrack is on — and that switch belongs to the one row,
-// which is why a clip with sound already claims an <Audio N> of its own without
-// being attached twice. The retention marker does vary per label, but it lives
+// video) its soundtrack and compact-staging switches — and those belong to the
+// one row, which is why a clip with sound already claims an <Audio N> of its
+// own without being attached twice. The retention marker does vary per label, but it lives
 // in the prompt, and the two markers a duplicate could carry contradict each
 // other over one source: fully_copy reperforms its words, reference forbids
 // them. So a repeat only burns one of the nine picture (or three clip) slots.
@@ -125,6 +156,17 @@ const VIDEO_RETENTION = (label) => (
   + `setting and framing do NOT carry. (fully_preserved to reproduce the movement itself.)`
 );
 
+// With no picture attached the clip is the only visual reference there is, so
+// it carries the PERSON as well as the manner. MiniMax's own reference guide
+// binds subjects to clips outright ("<Subject N> is the young man in <Video 2>,
+// with short wavy brown hair …"), and the rental A/B that showed a clip taking
+// over the shot is the same behaviour — wanted, this time.
+const VIDEO_IDENTITY_RETENTION = (label) => (
+  `${label}: fully_preserved — <Subject 1> IS the person in this clip: their face, hair, build and wardrobe `
+  + `carry, and so does their manner of movement. Only the clip's setting and framing do NOT carry. `
+  + `(attribute_transfer to borrow the movement alone.)`
+);
+
 const SOUNDTRACK_RETENTION = (label, videoLabel) => (
   `${label}: reference — the voice from ${videoLabel}'s own soundtrack: its timbre, accent and delivery. `
   + `The words spoken in it do NOT carry; <Subject 1> speaks the lines written below. `
@@ -160,12 +202,21 @@ function insertIntoSection(prompt, sectionName, block) {
 // then each clip's soundtrack immediately before the clip itself, then the
 // voice clips. A label the author has already spoken for is left alone.
 function retentionLines(labels, existing) {
-  const unclaimed = (label) => !existing.includes(`${label}:`);
+  // "Spoken for" means a retention line of its own — the label at the start of
+  // a line, followed by its colon. Anywhere-in-text was too loose: the subject
+  // sentence "…shown in <Picture 1> through <Picture 3>: [hair…" reads as a
+  // claim on <Picture 3> and left the last picture with no contract at all.
+  const unclaimed = (label) => !new RegExp(`^${label.replace(/[<>]/g, '\\$&')}:`, 'm').test(existing);
   const lines = [];
   labels.images.forEach((label) => { if (unclaimed(label)) lines.push(PICTURE_RETENTION(label)); });
+  // No picture → the first clip is the character reference; any further clip
+  // stays a motion reference.
+  const identityVideo = labels.images.length ? null : (labels.videos[0]?.video || null);
   labels.videos.forEach((label) => {
     if (label.audio && unclaimed(label.audio)) lines.push(SOUNDTRACK_RETENTION(label.audio, label.video));
-    if (unclaimed(label.video)) lines.push(VIDEO_RETENTION(label.video));
+    if (unclaimed(label.video)) {
+      lines.push(label.video === identityVideo ? VIDEO_IDENTITY_RETENTION(label.video) : VIDEO_RETENTION(label.video));
+    }
   });
   labels.audios.forEach((label) => { if (unclaimed(label)) lines.push(VOICE_RETENTION(label)); });
   return lines;
@@ -176,28 +227,59 @@ function retentionLines(labels, existing) {
 // the labels and the two instructions that are easy to omit and expensive to
 // miss (who <Subject 1> is, and that nothing else is spoken in the clip) are
 // written out.
-function referenceFrame(written, labels) {
+/**
+ * Who <Subject 1> is, from the pictures attached and the persona's gender:
+ * "<Subject 1> is the woman shown in <Picture 1> through <Picture 3>: [hair,
+ * face, build, wardrobe — write it out …]". The frame below and the UGC brief
+ * both open with it, so the model hears the same introduction either way.
+ * "the woman" / "the man" when the loaded persona says so; "the person"
+ * otherwise — a noun here is what stops the model inventing one.
+ * With no picture but a clip, the clip IS the character reference: "<Subject 1>
+ * is the man shown in <Video 1>: [hair, face …]" — the form MiniMax's own guide
+ * uses for a subject that comes from a video.
+ */
+export function referenceSubjectLine({ pictures = [], videos = [], gender = '' } = {}) {
+  const which = normalizePersonaGender(gender);
+  const noun = which && which !== 'nonbinary' ? personaGenderWords(which).noun : 'person';
+  if (pictures.length) {
+    const range = pictures.length > 1 ? `${pictures[0]} through ${pictures[pictures.length - 1]}` : pictures[0];
+    return `<Subject 1> is the ${noun} shown in ${range}: [hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the pictures].`;
+  }
+  if (videos.length) {
+    return `<Subject 1> is the ${noun} shown in ${videos[0]}: [hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the clip].`;
+  }
+  return `<Subject 1> is ${which && which !== 'nonbinary' ? `a ${noun}: ` : ''}[hair, face, build, wardrobe — write it out].`;
+}
+
+/** The first voice the model will hear for <Subject 1>: a clip's soundtrack, else a voice clip. */
+export function referenceVoiceLabel(labels) {
   const voices = [
-    ...labels.videos.filter((label) => label.audio).map((label) => label.audio),
-    ...labels.audios,
+    ...(labels?.videos || []).filter((label) => label.audio).map((label) => label.audio),
+    ...(labels?.audios || []),
   ];
-  const voice = voices[0] || '';
+  return voices[0] || '';
+}
+
+function referenceFrame(written, labels, gender = '') {
+  const voice = referenceVoiceLabel(labels);
   const motion = labels.videos.map((label) => label.video);
   const pictures = labels.images;
   const lines = written ? written.split('\n') : [];
   const spoken = lines.filter((line) => line.includes('<d>'));
   const prose = lines.filter((line) => !line.includes('<d>')).join(' ').trim();
 
-  const subject = [pictures.length
-    ? `<Subject 1> is the person shown in ${pictures.length > 1 ? `${pictures[0]} through ${pictures[pictures.length - 1]}` : pictures[0]}: [hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the pictures].`
-    : '<Subject 1> is [hair, face, build, wardrobe — write it out].'];
+  const subject = [referenceSubjectLine({ pictures, videos: motion, gender })];
   // Binding the voice to the subject AND to the speaker id is what keeps a
   // cloned voice attached to the person on screen.
   if (voice) subject.push(`${voice} is the voice-timbre reference for <Subject 1> (S1).`);
 
+  // No picture → the first clip is who <Subject 1> is, not just how they move.
+  const identityVideo = pictures.length ? null : (motion[0] || null);
+  const manner = identityVideo ? motion.slice(1) : motion;
   const clauses = [`A medium shot of <Subject 1>${voice ? ' speaking one line straight to camera' : ''}`];
   if (voice) clauses.push(`in the voice of ${voice}`);
-  if (motion.length) clauses.push(`gesturing in the manner of ${motion.join(' and ')}`);
+  if (identityVideo) clauses.push(`carrying the look and manner of ${identityVideo}`);
+  if (manner.length) clauses.push(`gesturing in the manner of ${manner.join(' and ')}`);
 
   return [
     'subject_definitions:',
@@ -229,11 +311,11 @@ function referenceFrame(written, labels) {
   ].join('\n');
 }
 
-export function withReferenceTags(prompt, { images = [], videos = [], audios = [] } = {}) {
+export function withReferenceTags(prompt, { images = [], videos = [], audios = [], gender = '' } = {}) {
   let out = String(prompt || '');
   const labels = referenceLabels({ images, videos, audios });
 
-  if (!SIX_SECTION_FORMAT.test(out)) return referenceFrame(out.trim(), labels);
+  if (!SIX_SECTION_FORMAT.test(out)) return referenceFrame(out.trim(), labels, normalizePersonaGender(gender));
 
   const retention = retentionLines(labels, out);
   const hasAudio = labels.audios.length > 0 || labels.videos.some((label) => label.audio);
@@ -272,9 +354,13 @@ export const withMotionRetentionTags = (prompt, videos = []) => withReferenceTag
 // video — and replaced her with the reference performer (her headwrap, her wall)
 // when it did neither. The retention tag biases; only words bind. So the panel
 // says so before the run, not after.
+//
+// With NO picture attached the take-over is the point: the clip is the only
+// visual reference, so its performer IS the subject and nothing need be
+// excluded — the exclusion nag is for the picture+clip case only.
 const EXCLUSION_HINT = /\b(do not carry|does not carry|don'?t carry|not carry|must not|do NOT|never carry|no[t]? .{0,24}(appearance|clothing|wardrobe|setting|background))\b/i;
 
-export function motionReferenceWarning({ prompt = '', videos = [] } = {}) {
+export function motionReferenceWarning({ prompt = '', videos = [], images = [] } = {}) {
   if (!videos.length) return null;
   const text = String(prompt || '');
   const unnamed = videos
@@ -286,6 +372,7 @@ export function motionReferenceWarning({ prompt = '', videos = [] } = {}) {
       labels: unnamed.map((ordinal) => `<Video ${ordinal}>`),
     };
   }
+  if (!images.length) return null;
   if (!EXCLUSION_HINT.test(text)) return { kind: 'no-exclusion', labels: [] };
   return null;
 }

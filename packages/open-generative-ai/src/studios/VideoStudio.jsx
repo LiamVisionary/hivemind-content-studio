@@ -44,7 +44,8 @@ import { collectChainClips, missingChainParent } from '../lib/chainLineage.js';
 import { chainKey, chainTimelineModel } from '../lib/chainTimeline.js';
 import { ChainTimeline } from './video/ChainTimeline.jsx';
 import { armChainPrompt } from '../lib/chainPrompt.js';
-import { applyUgcVideoBrief, hasUgcVideoBrief, ugcVariantAt } from '../lib/ugcMode.js';
+import { personaIdentity } from '../lib/personaId.js';
+import { applyUgcVideoBrief, hasUgcVideoBrief, ugcSubjectLabel, ugcVariantAt } from '../lib/ugcMode.js';
 import { UgcMenu } from './UgcMenu.jsx';
 import { restoredHistoryEntry } from '../lib/restoredOutput.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
@@ -131,7 +132,7 @@ import {
   getAdvancedVideoInputs, getAdvancedVideoPayload,
   normalizeVideoPreferences, normalizeVideoIngredientSelections, normalizeSelectedVideoIngredientSheet,
   normalizeVideoGenerationProgress, normalizeSamplerSteps, classifyVideoGenerationStage, formatVideoGenerationElapsed,
-  computeSmoothProgress, supportsSpectrum, supportsQualitySteps,
+  computeSmoothProgress, supportsSpectrum, supportsFastHighRes, supportsQualitySteps,
   closestVideoAspectRatio, imageDimensions, redactPrivateHistoryEntry,
   groupModelTiers, activeTierFor, tierPairFor,
 } from './video/videoLogic.js';
@@ -387,6 +388,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     denoise: s.setup.denoise,
     seed: s.setup.seed,
     steps: s.setup.steps,
+    fastHighRes: s.setup.fastHighRes,
     motionContextUrl: s.setup.motionContextUrl,
     motionContextIndex: s.setup.motionContextIndex,
     advancedValues: s.setup.advancedValues,
@@ -522,10 +524,28 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   // the words stay put is exactly how a batch is made. Passing null clears.
   // Only the deal number lives in setup; the block is derived from it and the
   // clip length, so nothing prompt-like reaches the plaintext settings store.
+  // Who a UGC clip is about when reference pictures are attached and will be
+  // sent: the person in them (named and gendered by the loaded persona, if
+  // any), with the voice rows so the brief can bind the clone. Null means no
+  // identity source — the brief deals a person instead.
+  const ugcPersona = () => {
+    const images = s.setup.referenceImageUrls || [];
+    if (!images.length || !videoRequestPlan(s.setup).sendReferenceImages) return null;
+    return {
+      name: s.setup.persona?.name || '',
+      gender: s.setup.persona?.gender || '',
+      images,
+      videos: s.setup.referenceVideos || [],
+      audios: s.setup.referenceAudios || [],
+    };
+  };
   const applyUgc = (index) => {
-    const variant = Number.isInteger(index) ? ugcVariantAt(index) : null;
+    // A loaded persona's gender picks the cast pool: the dealt person must be
+    // the kind of person the attached pictures show.
+    const variant = Number.isInteger(index) ? ugcVariantAt(index, { gender: s.setup.persona?.gender }) : null;
     const prompt = applyUgcVideoBrief(s.setup.prompt, variant, {
       durationSeconds: Number(s.setup.duration) || null,
+      persona: ugcPersona(),
     });
     // A UGC clip is a phone held in portrait. Switching here rather than
     // leaving it to the user, and said out loud in the menu.
@@ -631,7 +651,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   // is loaded or saved, cleared when the rows are emptied or the character is
   // deleted. Purely a label: it never adds or removes a reference itself.
   const onPersonaChange = (next) => {
-    s.setup = { ...s.setup, persona: next?.name ? { id: next.id || '', name: next.name } : null };
+    s.setup = { ...s.setup, persona: personaIdentity(next) };
     bump();
   };
 
@@ -650,7 +670,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       referenceAudios: audios,
       // The rows only still ARE one saved character when the cast is that one
       // persona; anything else and the name would be a lie about what is loaded.
-      persona: persona?.name ? { id: persona.id || '', name: persona.name } : null,
+      persona: personaIdentity(persona),
     });
     updateComposerDraft({ prompt });
     bump();
@@ -1722,6 +1742,12 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         }
         // Only an explicit choice is sent; null leaves the workflow default.
         if (typeof setup.spectrum === 'boolean') localParams.spectrum = setup.spectrum;
+        // Fast high-res, gated on the capability for the same reason as the
+        // refinement steps below: a preference left on from MiniMax H3 must not
+        // ride along into an LTX graph, which has no upscaler to compile.
+        if (setup.fastHighRes === true && supportsFastHighRes(currentModel(setup, s.catalogs))) {
+          localParams.fast_high_res = true;
+        }
         // Refinement steps: only for models whose registry maps a full-step
         // lane (supportsQualitySteps), so a preference saved on MiniMax H3
         // can never leak into a turbo or LTX graph.
@@ -2863,6 +2889,20 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             />
           </Field>
         ) : null}
+        {supportsFastHighRes(model) ? (
+          <Field
+            label={zh() ? '快速高清' : 'Fast high-res'}
+            hint={zh()
+              ? '先在约五分之一的画布上采样，再用 H3 自己的潜空间放大器把画面提升到目标尺寸，只有最后几步在全尺寸上运行。步数不变，但大部分步数跑在少得多的像素上——在 5090 上实测约快一倍。尺寸、时长和声音都不变。它走的是另一条采样路径，所以同一个种子给出的是另一条镜头，而不是同一条的加速版。'
+              : 'Samples the opening steps on a canvas about a fifth the size, lifts the picture to full size with H3\u2019s own latent upscaler, and spends only the last few steps there. Same number of steps, most of them on far fewer pixels \u2014 measured at about half the render time on a 5090. Size, length and sound are unchanged. It samples a different path, so the same seed gives a DIFFERENT take rather than the same one faster.'}
+          >
+            <Toggle
+              checked={s.setup.fastHighRes === true}
+              onChange={(next) => commit({ ...s.setup, fastHighRes: next })}
+              label={zh() ? '快速高清' : 'Fast high-res'}
+            />
+          </Field>
+        ) : null}
         {denoiseAvailable ? (
           <>
             <Field
@@ -3075,7 +3115,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     });
     if (added.images.length) onCharacterRefsChange([...current.images, ...added.images.map((item) => item.url)]);
     if (added.videos.length) {
-      onReferenceVideosChange([...current.videos, ...added.videos.map((item) => ({ ...item, useAudio: false }))]);
+      onReferenceVideosChange([...current.videos, ...added.videos.map((item) => ({ ...item, useAudio: false, compact: false }))]);
     }
     if (added.audios.length) onReferenceAudiosChange([...current.audios, ...added.audios]);
     for (const rejection of rejected) {
@@ -3170,7 +3210,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       const url = await promoteOutputToReference(payload.url, { kind: mediaKind });
       const name = basenameOf(payload.url);
       if (kind === 'images') onCharacterRefsChange([...current.images, url]);
-      else if (kind === 'videos') onReferenceVideosChange([...current.videos, { url, name, useAudio: false }]);
+      else if (kind === 'videos') onReferenceVideosChange([...current.videos, { url, name, useAudio: false, compact: false }]);
       else onReferenceAudiosChange([...current.audios, { url, name }]);
       toast.success(describeReferenceAttachment({
         images: kind === 'images' ? 1 : 0,
@@ -3370,6 +3410,8 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             mode="video"
             active={hasUgcVideoBrief(s.setup.prompt)}
             variantIndex={Number.isInteger(s.setup.ugcVariantIndex) ? s.setup.ugcVariantIndex : null}
+            gender={s.setup.persona?.gender || ''}
+            subject={ugcSubjectLabel(ugcPersona())}
             durationSeconds={Number(s.setup.duration) || null}
             verticalAvailable={aspectRatiosFor(s.setup, s.setup.modelId).includes('9:16')}
             onArm={applyUgc}
@@ -3750,6 +3792,9 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         // required rather than optional, polish becomes the failure mode — so
         // the helper has to be told, the same way it is told about a chain.
         ugc={hasUgcVideoBrief(s.setup.prompt)}
+        // Only the gender travels, never the name: the saved persona is sealed
+        // to the owner's vault and this host never learns what it is called.
+        personaGender={s.setup.persona?.gender || ''}
         onUse={(prompt) => {
           // A helper result that omits a label would silently unbind that
           // reference. Re-applying the scaffold puts back only what is missing.
@@ -3758,6 +3803,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
               images: s.setup.referenceImageUrls || [],
               videos: s.setup.referenceVideos || [],
               audios: s.setup.referenceAudios || [],
+              gender: s.setup.persona?.gender || '',
             })
             : prompt);
           focusPrompt();

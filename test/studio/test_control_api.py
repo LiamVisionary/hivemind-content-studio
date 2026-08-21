@@ -1921,7 +1921,8 @@ def test_reference_listing_tags_each_entry_with_its_medium(tmp_path: Path, monke
 def test_media_studio_video_start_stages_reference_audio_and_video(tmp_path: Path, monkeypatch) -> None:
     """The other two reference kinds travel the same inline path as pictures: a
     voice clip becomes <Audio N>, a motion clip becomes <Video N>, and each
-    video carries its own use_audio flag through to the runner."""
+    video carries its own use_audio flag — and its staging canvas — through to
+    the runner."""
     started: dict = {}
 
     def fake_start(**kwargs):
@@ -1946,7 +1947,7 @@ def test_media_studio_video_start_stages_reference_audio_and_video(tmp_path: Pat
             "workflow_id": "minimax-h3-reference",
             "reference_images": [{"image_base64": f"data:image/png;base64,{base64.b64encode(b'sheet').decode()}"}],
             "reference_audios": [{"audio_base64": f"data:audio/wav;base64,{voice}"}],
-            "reference_videos": [{"video_base64": f"data:video/mp4;base64,{motion}", "use_audio": True}],
+            "reference_videos": [{"video_base64": f"data:video/mp4;base64,{motion}", "use_audio": True, "canvas": "compact"}],
             "duration_seconds": 5,
         },
     )
@@ -1954,6 +1955,7 @@ def test_media_studio_video_start_stages_reference_audio_and_video(tmp_path: Pat
     assert started["staged_audio"] == [b"british-voice-bytes"]
     assert started["staged_video"] == [b"gesture-clip-bytes"]
     assert started["reference_videos"][0]["use_audio"] is True
+    assert started["reference_videos"][0]["canvas"] == "compact"
     # Both staged copies are released once the gateway owns the uploads.
     assert not Path(started["reference_audios"][0]).exists()
     assert not Path(started["reference_videos"][0]["video_path"]).exists()
@@ -1968,6 +1970,38 @@ def test_media_studio_video_start_stages_reference_audio_and_video(tmp_path: Pat
     )
     assert refused.status_code == 400
     assert "At most 3 reference videos" in refused.json()["detail"]
+
+
+def test_media_studio_video_start_stages_reference_video_full_canvas_by_default(tmp_path: Path, monkeypatch) -> None:
+    """Compact staging is opt-in per clip (a measured motion-only result), so a
+    request that never mentions the canvas forwards "full" — the node's own
+    reference canvas — and the only other value the MCP takes is "compact"."""
+    started: dict = {}
+
+    def fake_start(**kwargs):
+        started.update(kwargs)
+        return {"job_id": "job-ref-3", "uploaded_names": [], "provider": "Media Studio"}
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.run_media_studio_video_start", fake_start)
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_finish",
+        lambda job_id, **_: {"job_id": job_id, "provider": "Media Studio", "gateway_output": "ref-out.mp4.e2e"},
+    )
+    client, _, _ = _client(tmp_path, monkeypatch)
+    motion = base64.b64encode(b"gesture-clip-bytes").decode("ascii")
+    body = {
+        "prompt": "moving like the reference",
+        "workflow_id": "minimax-h3-reference",
+        "reference_images": [{"image_base64": f"data:image/png;base64,{base64.b64encode(b'sheet').decode()}"}],
+        "reference_videos": [{"video_base64": f"data:video/mp4;base64,{motion}"}],
+        "duration_seconds": 5,
+    }
+    assert client.post("/api/media-studio/video/start", json=body).status_code == 200
+    assert started["reference_videos"][0]["canvas"] == "full"
+    assert started["reference_videos"][0]["use_audio"] is False
+
+    body["reference_videos"] = [{"video_base64": f"data:video/mp4;base64,{motion}", "canvas": "tiny"}]
+    assert client.post("/api/media-studio/video/start", json=body).status_code == 422
 
 
 def test_inline_media_trusts_the_bytes_when_the_label_is_unfamiliar(tmp_path: Path) -> None:
@@ -2103,6 +2137,89 @@ def test_a_voice_clip_gets_no_poster(tmp_path: Path, monkeypatch) -> None:
     assert upload.status_code == 200
     assert upload.json()["poster_url"] is None
     assert client.get("/api/media-studio/references").json()["references"][0]["poster_url"] is None
+
+
+def _heic_bytes(size=(64, 48), orientation: int = 1) -> bytes:
+    """A real HEIC, as an iPhone would hand one over — optionally with the EXIF
+    orientation phones set instead of rotating pixels."""
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    buffer = io.BytesIO()
+    exif = Image.Exif()
+    exif[0x0112] = orientation
+    Image.new("RGB", size, "red").save(buffer, format="HEIF", exif=exif.tobytes())
+    return buffer.getvalue()
+
+
+def test_a_heic_reference_is_stored_as_a_jpeg_the_browser_and_the_lane_can_both_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Seven iPhone photos came in as .HEIC and every tile drew broken: the
+    browser has no HEIC decoder, the poster builder never registered Pillow's,
+    and the lane's stock ComfyUI (Pillow only) would have refused them at
+    LoadImage anyway. The upload now re-encodes to JPEG while the plaintext is
+    still here — pixels upright, the rest of the EXIF block left behind."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": ("IMG_0001.HEIC", _heic_bytes(orientation=6), "image/heic")},
+    )
+
+    assert upload.status_code == 200, upload.text
+    url = upload.json()["url"]
+    assert url.endswith(".jpg"), url
+    assert upload.json()["poster_url"] and upload.json()["poster_url"].endswith(".poster.jpg")
+
+    fetched = client.get(url)
+    assert fetched.status_code == 200
+    assert fetched.content.startswith(b"\xff\xd8\xff"), "the stored reference is not a JPEG"
+    with Image.open(io.BytesIO(fetched.content)) as stored:
+        assert stored.format == "JPEG"
+        # Orientation 6 on a 64x48 frame displays upright as 48x64: baked in.
+        assert stored.size == (48, 64)
+        assert stored.getexif().get(0x0112) in (None, 1)
+
+    listed = client.get("/api/media-studio/references").json()["references"]
+    assert [entry["kind"] for entry in listed] == ["image"]
+    assert listed[0]["name"].endswith(".jpg") and listed[0]["poster_url"]
+    # Nothing of the original container is left behind, sealed or not.
+    store = _reference_store(tmp_path)
+    assert [path.name for path in store.iterdir() if ".heic" in path.name.lower()] == []
+
+
+def test_a_heic_that_will_not_decode_is_kept_as_uploaded(tmp_path: Path, monkeypatch) -> None:
+    """The transcode is a convenience on the way in, never a new way to lose an
+    upload: bytes Pillow cannot read stay exactly what they were."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": ("broken.heic", b"\x00\x00\x00\x18ftypheic-not-really", "image/heic")},
+    )
+    assert upload.status_code == 200, upload.text
+    assert upload.json()["url"].endswith(".heic")
+    assert upload.json()["poster_url"] is None
+
+
+def test_a_poster_follows_the_exif_orientation_of_a_phone_jpeg(tmp_path: Path, monkeypatch) -> None:
+    """Browsers draw a JPEG the way its EXIF orientation says, so the poster
+    has to as well — otherwise a phone portrait's tile lies on its side."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+    buffer = io.BytesIO()
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    Image.new("RGB", (64, 48), "blue").save(buffer, format="JPEG", exif=exif.tobytes())
+
+    upload = client.post(
+        "/api/media-studio/references",
+        files={"file": ("portrait.jpg", buffer.getvalue(), "image/jpeg")},
+    )
+    assert upload.status_code == 200, upload.text
+    poster = client.get(upload.json()["poster_url"])
+    assert poster.status_code == 200
+    with Image.open(io.BytesIO(poster.content)) as image:
+        assert image.size == (48, 64)
 
 
 def test_the_browser_can_backfill_a_poster_for_a_reference_sealed_before_posters(

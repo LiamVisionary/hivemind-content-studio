@@ -60,6 +60,11 @@ export function PromptHelperDialog({
     // being an ad, but the judgements inside it invert: speech stops being
     // optional, and every production word becomes a tell.
     ugc = false,
+    // The loaded Hive Persona's gender ('' when none is loaded or it was never
+    // set). The helper writes "the woman"/"her" or "the man"/"his" from it
+    // instead of guessing from the idea. Only the gender goes — the persona's
+    // name is sealed to the owner's vault and stays out of every request.
+    personaGender = '',
     // What the run will condition on, when reference mode is armed:
     // { images: N, videos: [{ useAudio }], audios: N }. The helper has to write
     // the labels the graph will actually carry, and it cannot count them itself.
@@ -190,6 +195,7 @@ export function PromptHelperDialog({
                 isContinuation: Boolean(continuingFromUrl),
                 previousPrompt: (continuingFromUrl && continuingFromPrompt) || null,
                 ugc: Boolean(ugc),
+                personaGender: personaGender || undefined,
                 // Reference mode: how many of each are attached, and which
                 // clips bring their own soundtrack (each of those takes an
                 // <Audio N> label of its own, before its <Video N>).

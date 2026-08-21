@@ -24,8 +24,8 @@ export const KIND_META = {
     tag: (index) => `<Video ${index + 1}>`,
     icon: 'film',
     hint: () => (zh()
-      ? '动作方式：手势幅度、体态、神情。提示词里 <Video N> 的 retention_analysis 决定是照搬动作还是只借用其举止。2-15 秒。'
-      : "How a body moves: gesture, posture, mannerisms, expressiveness. The <Video N> retention_analysis tag in your prompt decides whether the motion is copied or only its manner is borrowed. 2-15s."),
+      ? '动作方式：手势幅度、体态、神情。提示词里 <Video N> 的 retention_analysis 决定是照搬动作还是只借用其举止。没有图片时，<Video 1> 同时也是角色参考。2-15 秒。'
+      : "How a body moves: gesture, posture, mannerisms, expressiveness. The <Video N> retention_analysis tag in your prompt decides whether the motion is copied or only its manner is borrowed. With no picture attached, <Video 1> is also the character reference. 2-15s."),
   },
   audios: {
     accept: 'audio/*',

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import contextvars
 import gzip
 import hashlib
 import hmac
@@ -38,7 +39,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import quote
 
 import requests
@@ -93,14 +94,14 @@ PRESIGN_EXPIRE_SECONDS = 3 * 3600
 # the video tier's 11 presigned URLs alone are ~6.6KB of it.
 VAST_ONSTART_LIMIT = 16384
 _REQUEST_TIMEOUT = 30
-# curl aborts a transfer that stays under this floor for DOWNLOAD_STALL_SECONDS,
-# and its own --retry then reopens the connection, resuming from the .dl
-# partial. The floor used to be 50 KB/s, which is low enough that no degraded
-# transfer ever trips it: measured 2026-08-10, a route that had collapsed to
-# 59 KB/s sat just above the floor and would have needed ~39 HOURS to finish an
-# 8.3GB file, holding a billed box at 10/11 the whole time. Healthy R2 pulls run
-# 55-100 MB/s aggregate — 5-9 MB/s per file with a whole tier in flight — so
-# 1 MB/s sits well below "contended" and well above "dead".
+# curl cuts a connection that stays under this floor for DOWNLOAD_STALL_SECONDS
+# (exit 28), and the download library below reopens it and RESUMES from the
+# bytes already on disk. The floor used to be 50 KB/s, which is low enough that
+# no degraded transfer ever trips it: measured 2026-08-10, a route that had
+# collapsed to 59 KB/s sat just above the floor and would have needed ~39 HOURS
+# to finish an 8.3GB file, holding a billed box at 10/11 the whole time. Healthy
+# R2 pulls run 55-100 MB/s aggregate — 5-9 MB/s per file with a whole tier in
+# flight — so 1 MB/s sits well below "contended" and well above "dead".
 # A connection this slow for this long is stalled, not busy. It used to be
 # 1 MB/s, which is a THROUGHPUT expectation rather than a liveness check: a
 # healthy 5090 whose link was momentarily shared tripped it and the watchdog
@@ -111,13 +112,34 @@ DOWNLOAD_STALL_SECONDS = 90
 # out well below what the box can take — a 5090 measured 6 MB/s on a single
 # stream and 32 MB/s across five — and the largest file is the whole tail of
 # provisioning, so splitting IT is what shortens the wait.
+#
+# The split only happens when the object's length is known. It used to be
+# learned with a HEAD — and R2 answers 403 to a HEAD on a GET-presigned URL
+# (SigV4 signs the method), so every R2 weight silently took the single-stream
+# fallback and only the public HuggingFace files were ever split. Measured
+# 2026-08-22 against the live bucket. The length now comes from a one-byte
+# ranged GET on the same URL, whose Content-Range carries the total.
 DOWNLOAD_CONNECTIONS = 8
 DOWNLOAD_SPLIT_MIN_BYTES = 512 * 1024 * 1024
+# Every stream is retried at the shell level, resumed from its own byte offset,
+# on ANY failure — not curl's --retry, which (measured 2026-08-22) re-sends a
+# bare GET with no Range and truncates the output to zero on each retry, and
+# only covers timeouts and HTTP 408/429/5xx in the first place. A connection
+# reset (curl 56) or early close (18) on the one stream carrying a 5 GB VAE is
+# exactly how rental vast:48337699 died at 6/7 with a healthy host and link.
+# Permanent answers (HTTP 400-407, 409-419) are not retried: a 403/404 says
+# the URL is wrong, and re-asking costs billed minutes. The DEADLINE below
+# still bounds the whole phase, so this many attempts can never outlast it.
+DOWNLOAD_STREAM_ATTEMPTS = 12
+DOWNLOAD_RETRY_PAUSE_SECONDS = 5
+DOWNLOAD_CONNECT_TIMEOUT_SECONDS = 30
 # Backstop for a stall the per-transfer floor cannot see, e.g. a connection that
 # hangs without dying or a retry loop that keeps resetting. The slowest healthy
 # provision observed is ~20 minutes (95GB video tier), so this only fires on a
 # machine that is never going to finish.
 DOWNLOAD_DEADLINE_SECONDS = 45 * 60
+# How often the watcher re-counts landed files and re-publishes the beacon.
+DOWNLOAD_POLL_SECONDS = 5
 
 # Per-tier serving sets: (R2 object key, ComfyUI models/ subpath). Mirrors
 # packages/gpu-rentals/models.manifest.json.
@@ -187,6 +209,19 @@ _MINIMAX_PUBLIC_FILES = [
         "minimax_h3_ref2va_pruned_w4a8_mixed.safetensors",
         11.0,
     ),
+    # Weights for the "Fast high-res" latent upscaler (bf16 build: same network
+    # as the fp16/fp32 files, and bf16 is the numerically forgiving one on the
+    # Blackwell cards this tier rents). Public, so it comes straight from
+    # HuggingFace. It MUST be on disk before ComfyUI starts: the node builds its
+    # model_name combo by scanning this directory at schema time, so a box that
+    # downloaded it late would advertise an empty list and reject the graph.
+    (
+        "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/main/"
+        "minimax_h3_latent_upscaler_3d_bf16.safetensors",
+        "latent_upscale_models",
+        "minimax_h3_latent_upscaler_3d_bf16.safetensors",
+        0.69,
+    ),
 ]
 # Pinned like every other node on the box. 2026-08-07 HEAD; ships
 # h3_silu_temb_grid.safetensors, the silu(t_emb) grid the loader needs.
@@ -241,6 +276,17 @@ _H3_SOLATTN_COMMIT = "842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc"
 # Pinned to the audited tag: it is alpha and its route surface has changed
 # between commits, and the strip below is written against exactly this one.
 _H3_STUDIO_TAG = "v0.1.0-alpha.20"
+
+# The "Fast high-res" two-pass lane: a trained neural upscaler for H3's own
+# 24-channel latent, so a first pass can be sampled at a fraction of the target
+# canvas and lifted to full size WITHOUT the 5B-param VAE decode/encode round
+# trip an ordinary pixel upscale would need. Audited before pinning (three
+# Python files, no network, no subprocess, no eval); its only sharp edge is a
+# torch.load(weights_only=False) branch for .pth checkpoints, which we never
+# take — the box pulls the safetensors build below. Pinned like every other
+# node here: the pack is two days old and its schema (a DynamicCombo `mode`)
+# is exactly what the compiled graph addresses.
+_H3_LATENT_UPSCALER_COMMIT = "04f71594d11325be877b5ba05096fcb851c29048"
 
 # lane_needles: lowercase substrings matched by the media-gateway's
 # COMFY_LANE_RULES against graph class names + model file inputs — attach
@@ -538,7 +584,7 @@ def _r2_credentials() -> tuple[str, str, str]:
 def _presign_r2(method: str, object_key: str, *, now: datetime | None = None) -> str:
     access_key, secret, account = _r2_credentials()
     host = f"{account}.r2.cloudflarestorage.com"
-    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+    stamp = (now or _presign_clock.get() or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
     date = stamp[:8]
     scope = f"{date}/auto/s3/aws4_request"
     path = "/" + quote(f"{R2_BUCKET}/{object_key}", safe="/")
@@ -924,6 +970,149 @@ def _authorize_rental_key_lines() -> list[str]:
     ]
 
 
+def _download_lib_lines(
+    *,
+    floor: int = DOWNLOAD_MIN_BYTES_PER_SEC,
+    stall: int = DOWNLOAD_STALL_SECONDS,
+    conns: int = DOWNLOAD_CONNECTIONS,
+    split: int = DOWNLOAD_SPLIT_MIN_BYTES,
+    tries: int = DOWNLOAD_STREAM_ATTEMPTS,
+    pause: int | float = DOWNLOAD_RETRY_PAUSE_SECONDS,
+    connect_timeout: int = DOWNLOAD_CONNECT_TIMEOUT_SECONDS,
+    deadline: int = DOWNLOAD_DEADLINE_SECONDS,
+    poll: int | float = DOWNLOAD_POLL_SECONDS,
+) -> list[str]:
+    """The bash that fetches the weights on a rented box.
+
+    Five functions, bash-3.2 clean so the test suite can run them on a Mac
+    against a fault-injecting HTTP server, and compact because every byte
+    competes with presigned URLs for Vast's 16KB onstart field:
+
+    - c        every transfer: follow redirects, fail on HTTP errors, bound the
+               connect, and cut a connection under the liveness floor.
+    - plen     the object's length from a ONE-BYTE RANGED GET. Not a HEAD: R2
+               returns 403 to a HEAD on a GET-presigned URL, which is what made
+               every R2 weight single-stream until 2026-08-22.
+    - stream   one ranged connection, retried on any error and RESUMED from the
+               part's own length — curl's --retry neither resumes nor covers
+               connection resets. Permanent 4xx answers fail at once. A server
+               that ignores the range gets a marker so pget can fall back.
+    - plain    one connection with no resume, for a server that gave no length.
+    - pget     the whole object: split when it is long enough and the length is
+               known; parts appended onto the first BY INDEX (a glob orders
+               part10 before part2 and silently scrambles the file) and moved
+               into place only at the verified length, so a partial is never
+               counted as a model. On failure $dest.err says what happened.
+    - dlwait   the watcher: publishes progress until every file exists, and
+               otherwise leaves through the beacon with the cause. Running
+               jobs are sampled BEFORE the files are counted, so a fetch that
+               lands between the two reads is never called a failure.
+    """
+    # Written flat and terse on purpose: the whole onstart must fit Vast's 16KB
+    # field alongside ~400 chars per presigned URL, and the minimax tier with
+    # one registered LoRA already sits within a few hundred chars of it.
+    # Helpers: sz <file> (bytes, 0 when absent), pn <dest> <i> (part name),
+    # again <file> <rc> <code> <attempt> (0 = pause and retry; 1 = gave up and
+    # wrote <file>.err — permanent HTTP 400-407/409-419, or attempts exhausted).
+    return [
+        f'c() {{ curl -sfL --connect-timeout {connect_timeout} --speed-limit {floor} --speed-time {stall} "$@"; }}',
+        'sz() { [ -f "$1" ] && wc -c < "$1" | tr -d " " || echo 0; }',
+        "pn() { printf '%s.part%03d' \"$1\" $2; }",
+        "plen() { c -r 0-0 -o /dev/null -D - --max-filesize 1048576 \"$1\" | tr -d '\\r'"
+        " | awk 'tolower($1)==\"content-range:\"{sub(/.*\\//,\"\",$3); n=$3} END{print n}'; }",
+        'again() { case $3 in 40[0-79]|41[0-9]) echo "http $3" > "$1.err"; return 1;; esac'
+        f'; [ $4 -ge {tries} ] && {{ echo "curl $2 http $3 after $4 tries" > "$1.err"; return 1; }}; sleep {pause}; }}',
+        "stream() { u=$1; p=$2; s=$3; e=$4; n=$((e-s+1)); a=0",
+        'while :; do h=$(sz "$p"); [ $h -ge $n ] && return 0',
+        'hc=$(c -r "$((s+h))-$e" -o "$p.tmp" -w %{http_code} "$u"); rc=$?',
+        'case $hc in 206) cat "$p.tmp" >> "$p";;'
+        ' 200) [ $s -eq 0 ] || { rm -f "$p.tmp"; : > "$p.nr"; return 2; }; mv "$p.tmp" "$p";; esac',
+        'rm -f "$p.tmp"; [ $rc -eq 0 ] && continue',
+        'a=$((a+1)); again "$p" $rc $hc $a || return 1; done; }',
+        "plain() { u=$1; d=$2; a=0",
+        'while :; do hc=$(c -o "$d.dl" -w %{http_code} "$u"); rc=$?',
+        '[ $rc -eq 0 ] && { mv "$d.dl" "$d"; return 0; }',
+        'rm -f "$d.dl"; a=$((a+1)); again "$d" $rc $hc $a || return 1; done; }',
+        'pget() { u=$1; d=$2; rm -f "$d".part* "$d.dl" "$d.err"; len=$(plen "$u")',
+        'case "$len" in ""|*[!0-9]*) plain "$u" "$d"; return;; esac',
+        f"n={conns}; [ $len -lt {split} ] && n=1",
+        "while :; do k=$(((len+n-1)/n)); i=0",
+        "while [ $i -lt $n ]; do s=$((i*k)); e=$((s+k-1)); [ $e -ge $len ] && e=$((len-1))"
+        '; stream "$u" "$(pn "$d" $i)" $s $e & i=$((i+1)); done; wait',
+        'set -- "$d".part*.nr; [ -e "$1" ] && { rm -f "$d".part*; n=1; continue; }',
+        'bad=""; i=0',
+        'while [ $i -lt $n ]; do p=$(pn "$d" $i); s=$((i*k)); w=$k; [ $((s+w)) -gt $len ] && w=$((len-s)); h=$(sz "$p")',
+        '[ $h -eq $w ] || { bad="part $i $h/${w}B"; [ -s "$p.err" ] && bad="part $i: $(cat "$p.err")"; break; }',
+        '[ $i -gt 0 ] && { cat "$p" >> "$d.part000" && rm -f "$p" || { bad="assemble $i"; break; }; }; i=$((i+1)); done',
+        '[ -z "$bad" ] && [ "$(sz "$d.part000")" = "$len" ] && { mv "$d.part000" "$d"; return 0; }',
+        'rm -f "$d".part*; echo "${bad:-size mismatch}" > "$d.err"; return 1; done; }',
+        # One exit for both ways a download can end badly. Says "destroy it"
+        # because there is no repair path: the presigned URLs expire, and a
+        # half-provisioned box that launches ComfyUI anyway just fails later,
+        # at generate time, where the cause is far harder to see.
+        'dlfail() { beacon error "$dn" "download $1 at $dn/$t: ${why:-$cur} — destroy this machine and rent another"; exit 1; }',
+        "dlwait() { dl=$1; shift; t=$#",
+        'while :; do run=$(jobs -r); dn=0; cur=""; why=""',
+        'for f in "$@"; do if [ -s "$f" ]; then dn=$((dn+1)); else [ -z "$cur" ] && cur=${f##*/}'
+        '; [ -s "$f.err" ] && why="$why${why:+; }${f##*/} ($(cat "$f.err"))"; fi; done',
+        'beacon downloading "$dn" "$cur"; [ $dn -eq $t ] && return 0',
+        f'[ -z "$run" ] && dlfail "failed"; [ "$(date +%s)" -ge "$dl" ] && dlfail "stalled {deadline // 60}min"; sleep {poll}; done; }}',
+    ]
+
+
+# A batch of presigned URLs is signed at one instant so they share every query
+# parameter but the signature; _presign_r2 reads this when no `now` is passed.
+# A ContextVar, not a module global: two rentals generating onstarts on two
+# request threads must not pin each other's clock.
+_presign_clock: contextvars.ContextVar[datetime | None] = contextvars.ContextVar(
+    "presign_clock", default=None
+)
+
+
+@contextlib.contextmanager
+def _pinned_presign_clock() -> Iterator[None]:
+    token = _presign_clock.set(datetime.now(timezone.utc))
+    try:
+        yield
+    finally:
+        _presign_clock.reset(token)
+
+
+# <base>?<query>&X-Amz-Signature=<hex> — the shape _presign_r2 emits, signature
+# last. Anything else is left alone.
+_PRESIGNED_URL = re.compile(r"^(?P<base>https://[^?]+)\?(?P<query>.+)&X-Amz-Signature=(?P<sig>[0-9A-Za-z]+)$")
+
+
+def _factor_presigned_urls(urls: list[str]) -> tuple[str | None, str | None, list[str]]:
+    """Split presigned URLs into one shared prefix + query and per-URL tails.
+
+    Returns (prefix, query, expressions). When every URL has the presigned
+    shape, the same query string and a common path prefix, the expressions
+    are `${RB}<rest-of-path>?${RQ}&X-Amz-Signature=<sig>` for the onstart to
+    expand (braced: a bare $RB would swallow the path's first letters), and
+    the caller emits RB/RQ once. Otherwise (prefix, query) is (None, None)
+    and the expressions are the URLs verbatim.
+    """
+    matches = [_PRESIGNED_URL.match(url) for url in urls]
+    if not urls or not all(matches):
+        return None, None, list(urls)
+    queries = {m["query"] for m in matches}  # type: ignore[index]
+    bases = [m["base"] for m in matches]  # type: ignore[index]
+    prefix = os.path.commonprefix(bases)
+    prefix = prefix[: prefix.rfind("/") + 1]
+    unsafe = set("'\"$`\\")
+    if len(queries) != 1 or not prefix.startswith("https://") or prefix.count("/") < 3:
+        return None, None, list(urls)
+    query = queries.pop()
+    if unsafe & set(prefix + query) or any(unsafe & set(base) for base in bases):
+        return None, None, list(urls)
+    exprs = [
+        f"${{RB}}{m['base'][len(prefix):]}?${{RQ}}&X-Amz-Signature={m['sig']}"  # type: ignore[index]
+        for m in matches
+    ]
+    return prefix, query, exprs
+
+
 def _onstart_script(tier: str) -> str:
     spec = TIERS[tier]
     # The tier's curated serving set plus every user LoRA registered for it —
@@ -943,42 +1132,10 @@ def _onstart_script(tier: str) -> str:
         + str(total)
         + ",\"detail\":\"%s\",\"ts\":%s}' \"$1\" \"$2\" \"$3\" \"$(date +%s)\""
         " > /root/beacon/progress.json.tmp && mv /root/beacon/progress.json.tmp /root/beacon/progress.json; }",
-        # pget <url> <dest> — fetch one object over several ranged
-        # connections and reassemble it. Falls back to a single stream when the
-        # server will not do ranges or the file is small enough not to matter.
-        "pget() {",
-        '  u="$1"; d="$2"; one() { curl -sfL -C - --retry 8 --retry-delay 5'
-        f' --speed-limit {DOWNLOAD_MIN_BYTES_PER_SEC} --speed-time {DOWNLOAD_STALL_SECONDS}'
-        ' -o "$d.dl" "$u" && mv "$d.dl" "$d"; }',
-        "  len=$(curl -sfIL \"$u\" | tr -d '\\r' | awk 'tolower($1)==\"content-length:\"{n=$2} END{print n}')",
-        f'  case "$len" in (*[!0-9]*|"") one; return;; esac',
-        f'  [ "$len" -lt {DOWNLOAD_SPLIT_MIN_BYTES} ] && {{ one; return; }}',
-        f'  n={DOWNLOAD_CONNECTIONS}; chunk=$(( (len + n - 1) / n )); i=0',
-        '  rm -f "$d".part*',
-        '  while [ $i -lt $n ]; do',
-        '    s=$(( i * chunk )); e=$(( s + chunk - 1 )); [ $e -ge $len ] && e=$(( len - 1 ))',
-        '    curl -sfL -C - --retry 8 --retry-delay 5'
-        f' --speed-limit {DOWNLOAD_MIN_BYTES_PER_SEC} --speed-time {DOWNLOAD_STALL_SECONDS}'
-        ' -r "$s-$e" -o "$(printf \'%s.part%03d\' "$d" $i)" "$u" &',
-        '    i=$(( i + 1 ))',
-        '  done',
-        '  wait',
-        # Reassemble by INDEX, never by glob: `cat part.*` orders
-        # lexicographically and silently scrambles a file past nine chunks,
-        # producing bytes that still pass a size check.
-        '  i=0; : > "$d.dl"',
-        '  while [ $i -lt $n ]; do',
-        '    part=$(printf \'%s.part%03d\' "$d" $i)',
-        '    [ -s "$part" ] || { rm -f "$d".part* "$d.dl"; return 1; }',
-        '    cat "$part" >> "$d.dl" || { rm -f "$d".part* "$d.dl"; return 1; }',
-        '    i=$(( i + 1 ))',
-        '  done',
-        '  rm -f "$d".part*',
-        # wc -c rather than stat -c%s: the GNU flag is right for the container
-        # but makes this function untestable anywhere else.
-        '  [ "$(wc -c < "$d.dl" | tr -d " ")" = "$len" ] || { rm -f "$d.dl"; return 1; }',
-        '  mv "$d.dl" "$d"',
-        "}",
+        # The download library: pget/plen/stream/plain/dlwait. Kept in its own
+        # builder so the test suite can run the very same bash against a
+        # misbehaving HTTP server (test/studio/test_rental_downloads.py).
+        *_download_lib_lines(),
         'beacon booting 0 "Host accepted, preparing environment"',
         # setsid for the same reason as ComfyUI below: the beacon is how the boot
         # reports itself, so it must outlive whatever signals onstart's group.
@@ -1083,6 +1240,14 @@ def _onstart_script(tier: str) -> str:
             "git clone -q --depth 1 https://github.com/kijai/ComfyUI-SolAttn_triton "
             "/workspace/ComfyUI/custom_nodes/ComfyUI-SolAttn_triton || true",
             f"pin /workspace/ComfyUI/custom_nodes/ComfyUI-SolAttn_triton {_H3_SOLATTN_COMMIT}",
+            # Fast high-res (two-pass latent upscale). Off by default in the
+            # graph, so a box without it would still serve every ordinary job —
+            # but the node has no dependencies beyond torch/einops, and a lane
+            # that cannot honour the toggle is worse than 200KB of source.
+            "git clone -q --depth 1 https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler "
+            "/workspace/ComfyUI/custom_nodes/Comfyui_Minimax_h3_latent_Upscaler || true",
+            "pin /workspace/ComfyUI/custom_nodes/Comfyui_Minimax_h3_latent_Upscaler "
+            f"{_H3_LATENT_UPSCALER_COMMIT}",
             "[ -f /workspace/ComfyUI/custom_nodes/comfyui-kjnodes/requirements.txt ] && "
             "/venv/main/bin/pip install -q -r /workspace/ComfyUI/custom_nodes/comfyui-kjnodes/requirements.txt",
             "/venv/main/bin/pip install -q sageattention",
@@ -1117,16 +1282,28 @@ def _onstart_script(tier: str) -> str:
         ]
     files = []
     lines.append('beacon downloading 0 "Starting model downloads"')
-    for object_key, subdir in models:
+    # Presigned URLs are ~400 chars each and are most of the 16KB onstart, yet
+    # everything but the object key and the signature is the same for every
+    # URL signed at one instant: host, bucket, algorithm, credential, date,
+    # expiry. Sign the batch at one instant and emit the shared prefix and
+    # query ONCE as shell variables, so each pget line carries ~100 chars
+    # instead of ~400. URLs of any other shape (tests, a future bucket) are
+    # emitted literally, exactly as before.
+    with _pinned_presign_clock():
+        signed = [(object_key, subdir, _presign_r2_get(object_key)) for object_key, subdir in models]
+    prefix, query, url_exprs = _factor_presigned_urls([url for _key, _subdir, url in signed])
+    if prefix is not None:
+        lines.append(f"RB='{prefix}'")
+        lines.append(f"RQ='{query}'")
+    for (object_key, subdir, _url), url_expr in zip(signed, url_exprs):
         filename = object_key.rsplit("/", 1)[-1]
-        url = _presign_r2_get(object_key)
         files.append(f'"$M/{subdir}/{filename}"')
         lines.append(f'mkdir -p "$M/{subdir}"')
-        # Atomic .dl → mv so a partial download is never counted as a
-        # complete model (by the beacon counter, or by a rerun's [ -s ]).
-        # -C - resumes the .dl partial across curl's own retries.
+        # pget moves the object into place only at its verified length, so a
+        # partial is never counted as a model (by the beacon counter, or by a
+        # rerun's [ -s ]).
         lines.append(
-            f'[ -s "$M/{subdir}/{filename}" ] || pget "{url}" "$M/{subdir}/{filename}" &'
+            f'[ -s "$M/{subdir}/{filename}" ] || pget "{url_expr}" "$M/{subdir}/{filename}" &'
         )
     # Public upstream weights (no presigning, no R2 round trip) pulled the same
     # atomic way and counted in the same beacon total.
@@ -1139,31 +1316,9 @@ def _onstart_script(tier: str) -> str:
     lines += [
         f"FILES=({' '.join(files)})",
         f"DL_DEADLINE=$(( $(date +%s) + {DOWNLOAD_DEADLINE_SECONDS} ))",
-        # One exit for both ways a download can end badly. Says "destroy it"
-        # because there is no repair path: the presigned URLs expire, and a
-        # half-provisioned box that launches ComfyUI anyway just fails later,
-        # at generate time, where the cause is far harder to see.
-        f'dlfail() {{ beacon error "$DONE" "download $1 at $DONE/{total}: $CURRENT'
-        ' — destroy this machine and rent another"; exit 1; }',
-        "while true; do",
-        '  DONE=0; CURRENT=""',
-        '  for f in "${FILES[@]}"; do',
-        '    if [ -s "$f" ]; then DONE=$((DONE+1)); else [ -z "$CURRENT" ] && CURRENT=$(basename "$f"); fi',
-        "  done",
-        '  beacon downloading "$DONE" "$CURRENT"',
-        f'  [ "$DONE" -eq {total} ] && break',
-        # Failure escape: when every download job has exited but files are
-        # still missing, report the error through the beacon instead of
-        # spinning forever (a curl that exhausts retries would otherwise
-        # leave the machine stuck at N/total).
-        '  if [ -z "$(jobs -r)" ]; then dlfail "failed"; fi',
-        # A job that is still RUNNING can be just as stuck as one that died:
-        # curl only gives up when a transfer drops under the speed floor, and
-        # a connection can hang without ever tripping it. Bound the wait so a
-        # machine that will never finish stops billing at a known cost.
-        f'  if [ "$(date +%s)" -ge "$DL_DEADLINE" ]; then dlfail "stalled {DOWNLOAD_DEADLINE_SECONDS // 60}min"; fi',
-        "  sleep 5",
-        "done",
+        # dlwait publishes progress until every file is in place, and otherwise
+        # exits the box through the beacon with the reason (see the library).
+        'dlwait "$DL_DEADLINE" "${FILES[@]}"',
         "wait",
         f'beacon starting-comfy {total} "Launching ComfyUI"',
         ". /venv/main/bin/activate",

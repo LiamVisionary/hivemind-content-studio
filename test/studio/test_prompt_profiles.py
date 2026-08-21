@@ -928,6 +928,36 @@ def test_measured_reference_lengths_reach_the_writer():
     assert "Carry the motion on" not in covered
 
 
+def test_a_clip_with_no_picture_is_the_identity_reference():
+    """With no picture attached the first clip is who is on screen, and the
+    writer is told so — otherwise it binds identity to pictures that do not
+    exist and forbids the only reference it has from carrying the person."""
+    body = prompt_profiles.system_prompt(
+        "minimax-h3-reference",
+        duration_seconds=5,
+        references={"images": 0, "videos": [{"useAudio": False, "seconds": 5}], "audios": 0},
+    )
+    assert "<Video 1> is the IDENTITY reference as well as the motion reference" in body
+    assert "<Video 1> is a motion reference." not in body
+    # The profile itself carries the rule, whatever the inventory says.
+    assert "the first reference video is ALSO the identity" in body
+    # With a picture beside it the same clip is a motion reference again.
+    pictured = prompt_profiles.system_prompt(
+        "minimax-h3-reference",
+        duration_seconds=5,
+        references={"images": 1, "videos": [{"useAudio": False, "seconds": 5}], "audios": 0},
+    )
+    assert "<Video 1> is a motion reference." in pictured
+    assert "IDENTITY reference" not in pictured
+    # A second clip with no picture stays a motion reference; only the first is the person.
+    two = prompt_profiles.system_prompt(
+        "minimax-h3-reference",
+        references={"images": 0, "videos": [{"useAudio": False}, {"useAudio": False}], "audios": 0},
+    )
+    assert "<Video 1> is the IDENTITY reference" in two
+    assert "<Video 2> is a motion reference." in two
+
+
 def test_unmeasured_reference_lengths_are_never_printed_as_zero():
     """A file the browser could not demux has NO length, not a length of zero."""
     for missing in (None, 0, -2, "abc", {}):
@@ -959,3 +989,32 @@ def test_seconds_budget_counts_a_split_soundtrack_twice():
     assert "of video against 15s" not in body
     # ...but its soundtrack plus the 5s clip is 17s of audio.
     assert "17s of audio against 15s" in body
+
+
+def test_the_persona_gender_tells_the_writer_what_to_call_the_subject() -> None:
+    """Without it the helper picks a gender from the idea — usually "she", since
+    that is what most of the examples it has seen were — and a male persona's
+    prompt comes back about a woman. Applies to every profile; the H3 ones also
+    get the label form, since there the subject is <Subject 1>."""
+    plain = prompt_profiles.system_prompt("minimax-h3-reference")
+    assert "The person on screen is" not in plain
+
+    him = prompt_profiles.system_prompt("minimax-h3-reference", persona_gender="male")
+    assert 'The person on screen is a man. Call him "the man" and use he/his' in him
+    assert '<Subject 1> is the man shown in <Picture 1>' in him
+
+    her = prompt_profiles.system_prompt("ltx-video", persona_gender="female")
+    assert 'The person on screen is a woman. Call her "the woman" and use she/her' in her
+    # Only the H3 profiles talk in labels.
+    assert "<Subject 1> is the woman shown in" not in her
+
+    them = prompt_profiles.system_prompt("minimax-h3-t2v", persona_gender="nonbinary")
+    assert 'use they/them' in them
+    assert '<Subject 1> is the person shown in <Picture 1>' in them
+
+    # The studio's own spellings and a few aliases; anything else is unset.
+    assert prompt_profiles.normalize_persona_gender("Woman") == "female"
+    assert prompt_profiles.normalize_persona_gender("non-binary") == "nonbinary"
+    assert prompt_profiles.normalize_persona_gender("dragon") == ""
+    assert prompt_profiles.system_prompt("minimax-h3-reference", persona_gender="dragon") == plain
+    assert prompt_profiles.system_prompt("minimax-h3-reference", persona_gender=None) == plain

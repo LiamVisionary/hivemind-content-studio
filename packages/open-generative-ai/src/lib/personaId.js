@@ -17,10 +17,125 @@
 // and restores them in that order — reshuffling on load would silently
 // renumber every label in a prompt written against it.
 
-/** Normalise the studio's three reference lists into a persona payload. */
-export function personaFromReferences({ images = [], videos = [], audios = [] } = {}) {
+// ---------------------------------------------------------------------------
+// Gender.
+//
+// A persona is recognised by its pictures, but the PROMPTS written around it are
+// words — and English cannot describe a person for more than a sentence without
+// choosing "the woman"/"her" or "the man"/"his". Left unstated, every template
+// ships one default (the starters are written for "her") and the cast compiler
+// has to say "the character", which also leaves H3 free to give an unvoiced
+// subject its generic adult-male voice. So the gender is part of the character,
+// set once when the persona is saved, and every generator that writes about the
+// persona reads it from here: the cast compiler, the reference scaffold, the
+// UGC deal, the prompt helper and the shipped starters.
+//
+// Three values plus "not set". Not set keeps today's wording everywhere — a
+// persona saved before this existed changes nothing.
+export const PERSONA_GENDERS = Object.freeze(['', 'female', 'male', 'nonbinary']);
+
+export const PERSONA_GENDER_OPTIONS = Object.freeze([
+  { value: '', label: 'Not set', zh: '未设置' },
+  { value: 'female', label: 'Female', zh: '女' },
+  { value: 'male', label: 'Male', zh: '男' },
+  { value: 'nonbinary', label: 'Non-binary', zh: '非二元' },
+]);
+
+// Alternate spellings a persona file from elsewhere (or an agent) might carry.
+const GENDER_ALIASES = Object.freeze({
+  f: 'female', woman: 'female', women: 'female', girl: 'female', she: 'female', her: 'female',
+  m: 'male', man: 'male', men: 'male', boy: 'male', he: 'male', him: 'male', his: 'male',
+  'non-binary': 'nonbinary', nb: 'nonbinary', enby: 'nonbinary', they: 'nonbinary', them: 'nonbinary',
+  neutral: 'nonbinary', other: 'nonbinary', x: 'nonbinary',
+});
+
+/** One of PERSONA_GENDERS, '' for anything unknown — never throws. */
+export function normalizePersonaGender(value) {
+  const key = String(value ?? '').trim().toLowerCase();
+  if (!key) return '';
+  if (PERSONA_GENDERS.includes(key)) return key;
+  return GENDER_ALIASES[key] || '';
+}
+
+export function personaGenderLabel(gender, { zh = false } = {}) {
+  const option = PERSONA_GENDER_OPTIONS.find((item) => item.value === normalizePersonaGender(gender));
+  if (!option || !option.value) return '';
+  return zh ? option.zh : option.label;
+}
+
+// The English a prompt needs. `noun` is what to call the person; `her` is the
+// possessive determiner ("her phone"), `them` the object ("filming her"), and
+// `she` the subject. For non-binary the subject renders as "the person" rather
+// than "they", because a template's verbs were conjugated for a singular
+// subject ("she walks") and "they walks" is wrong — a noun phrase keeps every
+// sentence grammatical without touching its verb. Not set reads as female,
+// which is what every starter was written as, so an unset persona changes
+// nothing.
+const GENDER_WORDS = Object.freeze({
+  female: Object.freeze({ noun: 'woman', she: 'she', her: 'her', them: 'her', hers: 'hers', herself: 'herself' }),
+  male: Object.freeze({ noun: 'man', she: 'he', her: 'his', them: 'him', hers: 'his', herself: 'himself' }),
+  nonbinary: Object.freeze({ noun: 'person', she: 'the person', her: 'their', them: 'them', hers: 'theirs', herself: 'themself' }),
+});
+
+export function personaGenderWords(gender) {
+  return GENDER_WORDS[normalizePersonaGender(gender)] || GENDER_WORDS.female;
+}
+
+// Templates write the female form in braces — `{woman}`, `{she}`, `{her}`,
+// `{them}`, `{hers}`, `{herself}` — and a capitalised token (`{Her}`) renders
+// capitalised. Anything else in braces is left exactly as written, so a
+// prompt's own "[brackets]" and "{curly}" notes are safe.
+const GENDER_TOKEN = /\{(woman|she|her|them|hers|herself)\}/gi;
+
+// A segment that exists for some genders only: `{f:…}`, `{m:…}`, `{nb:…}`, or
+// a list — `{f,nb:…}`. Pronouns are not the only thing a template genders:
+// "black wavy hair in a messy side ponytail", "minimal makeup", "crop top"
+// belong to the woman the starter was written about, and rendering them for a
+// man hands him her hairstyle. Such a detail is written as a segment per
+// gender, or once for the genders it fits, and the others simply lose it — so
+// the segment is written WITH its own surrounding spaces and punctuation.
+// Simple tokens may nest one level inside (`{f,nb:tucks {her} hair back and }`).
+// Unset is female, like everything else here.
+const GENDER_SEGMENT = /\{(f|m|nb)((?:,(?:f|m|nb))*):((?:[^{}]|\{[^{}]*\})*)\}/g;
+const SEGMENT_KEY = { female: 'f', male: 'm', nonbinary: 'nb' };
+
+/** Render a template's gender tokens and segments for one persona. '' → the female default. */
+export function renderGenderTokens(text, gender) {
+  const which = normalizePersonaGender(gender);
+  const key = SEGMENT_KEY[which] || 'f';
+  const words = personaGenderWords(which);
+  return String(text || '')
+    .replace(GENDER_SEGMENT, (match, first, rest, body) => (
+      `${first}${rest}`.split(',').includes(key) ? body : ''
+    ))
+    .replace(GENDER_TOKEN, (match, token) => {
+      const name = token.toLowerCase();
+      const word = words[name === 'woman' ? 'noun' : name];
+      if (word === undefined) return match;
+      return /^[A-Z]/.test(token) ? word.charAt(0).toUpperCase() + word.slice(1) : word;
+    });
+}
+
+/**
+ * The studio's handle on a loaded persona: { id, name, gender }. One function so
+ * the label is shaped the same way wherever it is set — on load, on save, on
+ * cast apply, on restoring a generation — and so a persona saved before gender
+ * existed comes back with gender '' instead of undefined.
+ */
+export function personaIdentity(value) {
+  if (!value?.name) return null;
+  return {
+    id: String(value.id || ''),
+    name: String(value.name),
+    gender: normalizePersonaGender(value.gender),
+  };
+}
+
+/** Normalise the studio's three reference lists (and the gender) into a persona payload. */
+export function personaFromReferences({ images = [], videos = [], audios = [], gender = '' } = {}) {
   return {
     v: 1,
+    gender: normalizePersonaGender(gender),
     images: (Array.isArray(images) ? images : [])
       .filter((url) => typeof url === 'string' && url)
       .map(String),
@@ -32,6 +147,11 @@ export function personaFromReferences({ images = [], videos = [], audios = [] } 
         // Whether the clip's own soundtrack rides along as an <Audio N> of its
         // own. It changes what the model is given, so it is part of the persona.
         useAudio: Boolean(item.useAudio),
+        // Whether the clip is staged compact (a 384x1152 box) when it is a
+        // motion reference — see referenceVideoCanvas. Also what the model is
+        // given, so also part of the persona; absent on an older save reads as
+        // off, which is the default a fresh row gets.
+        compact: Boolean(item.compact),
       })),
     audios: (Array.isArray(audios) ? audios : [])
       .filter((item) => item?.url)
@@ -53,10 +173,12 @@ export function personaIsEmpty(data) {
 
 const plural = (count, one, many) => `${count} ${count === 1 ? one : many}`;
 
-/** "9 pictures · 1 motion clip · 1 voice" — the row's one-line description. */
+/** "Female · 9 pictures · 1 motion clip · 1 voice" — the row's one-line description. */
 export function personaSummary(data) {
   const { images, videos, audios } = personaCounts(data);
   const parts = [];
+  const gender = personaGenderLabel(data?.gender);
+  if (gender) parts.push(gender);
   if (images) parts.push(plural(images, 'picture', 'pictures'));
   if (videos) parts.push(plural(videos, 'motion clip', 'motion clips'));
   if (audios) parts.push(plural(audios, 'voice clip', 'voice clips'));
@@ -75,8 +197,11 @@ export function personaPrimaryImage(data) {
 function fingerprint(data) {
   const persona = personaFromReferences(data || {});
   return JSON.stringify({
+    // The gender is part of the character: changing it changes what every
+    // template writes about them, so it counts as an edit worth saving.
+    gender: persona.gender,
     images: persona.images,
-    videos: persona.videos.map((item) => [item.url, item.useAudio]),
+    videos: persona.videos.map((item) => [item.url, item.useAudio, item.compact]),
     audios: persona.audios.map((item) => item.url),
   });
 }
@@ -142,6 +267,7 @@ export function applyPersonaToReferences(data, { limits = DEFAULT_LIMITS, known 
     images: take('images', persona.images, (url) => url),
     videos: take('videos', persona.videos, (item) => item.url),
     audios: take('audios', persona.audios, (item) => item.url),
+    gender: persona.gender,
     missing,
     trimmed,
   };
@@ -202,7 +328,9 @@ export function buildPersonaExport({ name, persona, media = {}, exportedAt = '' 
   // reading it in an object literal above them would always see it empty.
   const images = source.images.map((url) => inline('images', url)).filter(Boolean);
   const videos = source.videos
-    .map((item) => inline('videos', item.url, { name: item.name, useAudio: Boolean(item.useAudio) }))
+    .map((item) => inline('videos', item.url, {
+      name: item.name, useAudio: Boolean(item.useAudio), compact: Boolean(item.compact),
+    }))
     .filter(Boolean);
   const audios = source.audios
     .map((item) => inline('audios', item.url, { name: item.name }))
@@ -212,6 +340,9 @@ export function buildPersonaExport({ name, persona, media = {}, exportedAt = '' 
       kind: PERSONA_EXPORT_KIND,
       v: PERSONA_EXPORT_VERSION,
       name: String(name || '').trim().slice(0, 120) || 'Persona',
+      // Travels with the character: the receiving studio's templates need it
+      // as much as this one's did. Omitted when not set.
+      ...(source.gender ? { gender: source.gender } : {}),
       exportedAt: String(exportedAt || ''),
       // What the persona HELD, beside what this file managed to carry. A
       // backup that quietly ships fewer references than the character had is
@@ -260,7 +391,7 @@ export function parsePersonaExport(value) {
     .map((item) => ({ ...extra(item), dataUrl: String(item.dataUrl) }));
   const images = media(parsed.images, () => ({}));
   const videos = media(parsed.videos, (item) => ({
-    name: String(item.name || ''), useAudio: Boolean(item.useAudio),
+    name: String(item.name || ''), useAudio: Boolean(item.useAudio), compact: Boolean(item.compact),
   }));
   const audios = media(parsed.audios, (item) => ({ name: String(item.name || '') }));
   if (!images.length && !videos.length && !audios.length) {
@@ -268,6 +399,7 @@ export function parsePersonaExport(value) {
   }
   return {
     name: String(parsed.name || '').trim().slice(0, 120) || 'Imported persona',
+    gender: normalizePersonaGender(parsed.gender),
     images,
     videos,
     audios,

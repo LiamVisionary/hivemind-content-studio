@@ -38,6 +38,13 @@ export function UgcMenu({
   // so turning UGC back on deals the NEXT one rather than starting the cycle
   // over — repeating a cast is the thing this is here to avoid.
   variantIndex = null,
+  // The loaded persona's gender, if any: the preview must show the cast that
+  // arming would actually deal, and the deal is narrowed by it.
+  gender = '',
+  // When reference pictures are attached, the person in the clip is the one in
+  // the pictures, not a dealt description — say so where the cast is previewed.
+  // A short line like "Cheryl — the woman in your 3 reference pictures".
+  subject = '',
   durationSeconds = null,
   // True when the current model offers 9:16, so arming can say whether it is
   // also going to switch the aspect ratio rather than doing it invisibly.
@@ -47,7 +54,7 @@ export function UgcMenu({
   const armed = Boolean(active);
   const nextIndex = Number.isInteger(variantIndex) ? variantIndex + 1 : 0;
   // Armed shows the cast you have; off shows the one arming would deal.
-  const cast = ugcVariantAt(armed ? variantIndex : nextIndex);
+  const cast = ugcVariantAt(armed ? variantIndex : nextIndex, { gender });
   const video = mode === 'video';
   const timeline = ugcTimeline(durationSeconds);
 
@@ -85,7 +92,7 @@ export function UgcMenu({
                 ? `${zh() ? '当前阵容' : 'Cast'} ${cast.index + 1}`
                 : (zh() ? '下一组阵容' : 'Next cast')}
             </div>
-            <CastRow label={zh() ? '人物' : 'Who'}>{cast.person}</CastRow>
+            <CastRow label={zh() ? '人物' : 'Who'}>{subject || cast.person}</CastRow>
             <CastRow label={zh() ? '场景' : 'Where'}>
               {cast.room.place}, {cast.room.light}. {cast.room.detail}
             </CastRow>
@@ -118,7 +125,9 @@ export function UgcMenu({
               {video
                 ? (zh()
                   ? '在 HOOK / BODY / CTA 三行的 ⟨…⟩ 处写下你的台词，然后交给提示词助手改写成目标模型格式。重新发牌会保留台词。'
-                  : 'Write your three lines where the ⟨…⟩ marks are, then hand it to the prompt helper to render into the model\'s format. Re-dealing keeps your lines.')
+                  : (subject
+                    ? 'Write your three lines where the ⟨…⟩ marks are — the brief is already in H3\'s reference format, with <Subject 1> bound to your pictures and your lines as (S1) dialogue. Re-dealing keeps your lines and changes the room, light and beats.'
+                    : 'Write your three lines where the ⟨…⟩ marks are, then hand it to the prompt helper to render into the model\'s format. Re-dealing keeps your lines.'))
                 : (zh()
                   ? '这段可直接用作首帧提示词。'
                   : 'This is usable as the first-frame prompt as it stands.')}

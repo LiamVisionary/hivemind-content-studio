@@ -14,21 +14,18 @@ on-screen line and the post title. The caption is the body text that ships with 
 
 # Input
 
-A JSON array of clips that have already been scored. Each has a stable `id`, its transcript, and — as
-internal context only — the score and the reviewer-facing reason behind it.
+A JSON array of clips. Each has a stable `id` and its transcript.
 
-`score` and `reason` are notes to a human editor, not material for the post. Never echo them, paraphrase
-them, or let their tone leak into your output. A clip that scored badly still gets a straight hook and
-caption written from its transcript; you are not reviewing the clip, and the viewer must never read a
-critique of the thing they are about to watch.
+You are writing for the viewer, not reviewing the clip. Some clips are weaker than others; a weak one
+still gets a straight hook and caption written from whatever its transcript actually says. Never describe
+the clip's quality, never say what it lacks, and never write anything the viewer would read as a critique
+of the thing they are about to watch.
 
 ```json
 [
   {
     "id": "clip-01",
-    "transcript": "the thing nobody tells you about raising is that the round is priced by your worst month...",
-    "score": 0.88,
-    "reason": "Names a specific, counterintuitive mechanic and closes on it."
+    "transcript": "everyone salts the pasta water at the wrong time. you want it boiling first, because salt raises the boiling point and cold salted water just sits there corroding your pot..."
   }
 ]
 ```
@@ -48,8 +45,8 @@ Return a single JSON object keyed by clip id. No preamble, no markdown outside t
 ```json
 {
   "clip-01": {
-    "hook": "Your round is priced by your worst month",
-    "caption": "Not your best one. The mechanic nobody explains before you start raising, in 40 seconds."
+    "hook": "You're salting pasta water at the wrong time",
+    "caption": "Salt raises the boiling point, so it goes in after the boil. Before that, it is just sitting there corroding your pot."
   }
 }
 ```
@@ -60,3 +57,5 @@ Return a single JSON object keyed by clip id. No preamble, no markdown outside t
 - Both `hook` and `caption` are strings. Never arrays, never null.
 - Write in the language of the transcript.
 - Write for the viewer, from the clip's own content. Never assess, rate, or critique the clip.
+- The worked example above shows the *shape* of a good answer. Never reuse its wording, and never
+  borrow its subject matter — write only from the transcript you were given.

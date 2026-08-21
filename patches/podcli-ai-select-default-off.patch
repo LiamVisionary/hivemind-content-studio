@@ -1,0 +1,64 @@
+diff --git a/backend/cli.py b/backend/cli.py
+index 31662df..ca84297 100644
+--- a/backend/cli.py
++++ b/backend/cli.py
+@@ -241,6 +241,11 @@ def cmd_process(args):
+         config["crop_strategy"] = args.crop
+     if args.top:
+         config["top_clips"] = args.top
++    if getattr(args, "ai_select", False):
++        # Opt in to handing the transcript to an external agent CLI. Sets the
++        # env gate too, so one flag is the whole decision.
++        config["ai_select"] = True
++        os.environ["PODCLI_ALLOW_AI_CLI"] = "1"
+     if getattr(args, "review_each", False):
+         config["review_each_clip"] = True
+     if getattr(args, "post_review", False):
+@@ -2656,6 +2661,7 @@ def main():
+     proc.add_argument("--outro", help="Outro video (asset name or path)")
+     proc.add_argument("--time-adjust", type=float, help="Timestamp offset in seconds")
+     proc.add_argument("--no-energy", action="store_true", help="Skip audio energy analysis")
++    proc.add_argument("--ai-select", action="store_true", help="Send the transcript to an external agent CLI (claude/codex) for clip selection. Off by default: the transcript leaves this machine.")
+     proc.add_argument("--no-speakers", action="store_true", help="Skip speaker detection (faster, uses face detection only)")
+     proc.add_argument("--no-cache", action="store_true", help="Force re-transcription (ignore cached transcript)")
+     proc.add_argument("--quality", choices=["low", "medium", "high", "max"], help="Output quality (default: high)")
+diff --git a/backend/presets.py b/backend/presets.py
+index f7cbb87..d0306ab 100644
+--- a/backend/presets.py
++++ b/backend/presets.py
+@@ -47,7 +47,7 @@ DEFAULT_PRESET = {
+     "use_ass_captions": False,
+     "generate_thumbnails": True,
+     "generate_content": True,
+-    "ai_select": True,
++    "ai_select": False,
+     "review_each_clip": False,
+     "post_render_review": False,
+     "more_suggestions_multiplier": 3,
+diff --git a/backend/services/claude_suggest.py b/backend/services/claude_suggest.py
+index b781083..eafc2ed 100644
+--- a/backend/services/claude_suggest.py
++++ b/backend/services/claude_suggest.py
+@@ -91,6 +91,22 @@ def _run_ai_command(
+     timeout: int,
+ ) -> subprocess.CompletedProcess:
+     """Execute one AI CLI prompt and return the completed process."""
++    # Default-deny. Both subprocess.run calls below hand the episode transcript
++    # to an external agent CLI, which sends it off this machine. That has to be
++    # an explicit, per-invocation decision by the operator, not a side effect of
++    # having `claude` or `codex` on PATH. Gated here rather than at the call
++    # sites because this function is the only place a CLI is spawned, so the
++    # gate survives refactors upstream of it.
++    if os.environ.get("PODCLI_ALLOW_AI_CLI", "").strip().lower() not in {"1", "true", "yes", "on"}:
++        return subprocess.CompletedProcess(
++            args=[cli_path],
++            returncode=126,
++            stdout="",
++            stderr=(
++                "AI CLI selection is disabled: the transcript would be sent to an external "
++                "agent. Pass --ai-select, or set PODCLI_ALLOW_AI_CLI=1, to opt in."
++            ),
++        )
+     if engine == "codex":
+         output_file = prompt_file + ".out"
+         result = subprocess.run(

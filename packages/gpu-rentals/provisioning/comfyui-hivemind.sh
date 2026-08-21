@@ -385,6 +385,21 @@ if [[ "${RENTAL_TIER:-image}" == "minimax-video" ]]; then
         git -C "$solattn_dir" checkout -q 842c4eaa7d91dbaef3fee3ccdbf36a39521e82fc
     fi
 
+    # Fast high-res: a trained neural upscaler for H3's own 24-channel latent,
+    # so the studio's two-pass lane can sample small and finish at full size
+    # without the 5B-param VAE decode/encode round trip. Pinned; audited before
+    # pinning (no network, no subprocess, no eval — its one torch.load with
+    # weights_only=False only runs for .pth checkpoints, and we ship safetensors).
+    upscaler_dir="${COMFYUI_DIR}/custom_nodes/Comfyui_Minimax_h3_latent_Upscaler"
+    if [[ ! -d "$upscaler_dir" ]]; then
+        git clone -q https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler.git "$upscaler_dir"
+        git -C "$upscaler_dir" checkout -q 04f71594d11325be877b5ba05096fcb851c29048
+    fi
+    # The node scans this directory at schema time, so the weights have to land
+    # before ComfyUI starts or the model_name combo comes up empty.
+    fetch "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/resolve/main/minimax_h3_latent_upscaler_3d_bf16.safetensors" \
+          "latent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors"
+
     # RIFE weights for core ComfyUI's FrameInterpolate (no custom node needed).
     # 24 -> 48 fps costs +2.9s on a ~40s generation and leaves duration intact.
     fetch "https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/rife_v4.26.safetensors" \
