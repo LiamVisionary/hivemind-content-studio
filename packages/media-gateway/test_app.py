@@ -4400,6 +4400,145 @@ class RemoteComfyLaneTests(unittest.TestCase):
             with patch.object(app, 'urlopen', return_value=Broken()):
                 self.assertIn('502', app.comfy_lane_liveness_error('rental9'))
 
+    def test_a_lanes_vram_headroom_is_read_from_its_own_launch_flags(self):
+        """The H3 motion-reference budget was measured with --vram-headroom 12
+        and is only valid on a lane that runs it. Comfy's planner cannot see
+        reference rows, so a lane launched without the flag holds roughly half
+        the rows and a job the budget allows dies in block 0 (2026-08-21, job
+        34a722c2). The lane publishes its own argv on /system_stats; that, not
+        the provisioning's intent, is what the gateway reports."""
+        app = load_app()
+        # The parser: absent is 0.0 (ComfyUI's default), unknown is None, and
+        # the two spellings argparse accepts both count. Last one wins.
+        self.assertEqual(app.vram_headroom_gb_from_argv(['main.py', '--vram-headroom', '12']), 12.0)
+        self.assertEqual(app.vram_headroom_gb_from_argv(['main.py', '--vram-headroom=4.5']), 4.5)
+        self.assertEqual(app.vram_headroom_gb_from_argv(['main.py', '--disable-metadata']), 0.0)
+        self.assertEqual(app.vram_headroom_gb_from_argv(['main.py', '--vram-headroom', '4', '--vram-headroom', '12']), 12.0)
+        self.assertIsNone(app.vram_headroom_gb_from_argv(None))
+        self.assertIsNone(app.vram_headroom_gb_from_argv('--vram-headroom 12'))
+
+        lanes = {'default': 'http://127.0.0.1:8188', 'rental9': 'http://127.0.0.1:18337'}
+        probes = []
+
+        def answering(argv):
+            class Answer:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return json.dumps({"system": {"argv": argv}, "devices": []}).encode()
+            def fake_urlopen(request, timeout=None):
+                probes.append(request.full_url)
+                return Answer()
+            return fake_urlopen
+
+        with patch.object(app, 'COMFY_LANES', lanes), \
+             patch.object(app, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {'rental9': 'lane-secret'}), \
+             patch.object(app, '_lane_launch_args_cache', {}):
+            with patch.object(app, 'urlopen', answering(['main.py', '--disable-metadata', '--vram-headroom', '12'])):
+                report = app.comfy_lane_vram_headroom('rental9')
+            self.assertEqual(report, {
+                'lane': 'rental9', 'remote': True, 'vram_headroom_gb': 12.0, 'probed': True, 'error': None,
+            })
+            self.assertEqual(probes, ['http://127.0.0.1:18337/system_stats'])
+            # Cached: the flags only change when ComfyUI is relaunched, and a
+            # reference job asks twice (pre-flight, then the staged files).
+            with patch.object(app, 'urlopen', side_effect=AssertionError('must not re-probe inside the TTL')):
+                self.assertEqual(app.comfy_lane_vram_headroom('rental9')['vram_headroom_gb'], 12.0)
+
+        with patch.object(app, 'COMFY_LANES', lanes), \
+             patch.object(app, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app, '_lane_launch_args_cache', {}):
+            # Launched WITHOUT the flag: a fact, reported as 0.0 — this is the
+            # lane the MCP guard holds to the smaller ceiling.
+            with patch.object(app, 'urlopen', answering(['main.py', '--disable-auto-launch', '--disable-metadata'])):
+                report = app.comfy_lane_vram_headroom('rental9')
+            self.assertTrue(report['probed'])
+            self.assertEqual(report['vram_headroom_gb'], 0.0)
+
+        with patch.object(app, 'COMFY_LANES', lanes), \
+             patch.object(app, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app, '_lane_launch_args_cache', {}):
+            # A lane that will not answer is UNKNOWN, never "without": the
+            # record says so and names the reason, and nothing is cached.
+            with patch.object(app, 'urlopen', side_effect=ConnectionRefusedError('Connection refused')):
+                report = app.comfy_lane_vram_headroom('rental9')
+            self.assertEqual((report['probed'], report['vram_headroom_gb']), (False, None))
+            self.assertIn('Connection refused', report['error'])
+            with patch.object(app, 'urlopen', answering(['main.py', '--vram-headroom', '12'])):
+                self.assertEqual(app.comfy_lane_vram_headroom('rental9')['vram_headroom_gb'], 12.0)
+
+    def test_api_lanes_resolve_names_the_lane_a_graph_routes_to_and_its_headroom(self):
+        """The MCP's motion-reference guard asks this before pricing a job: only
+        the gateway knows the lanes, so the same first-match rules that will
+        route the submission answer here, and the lane's own /system_stats argv
+        says whether the measured budget applies."""
+        app = load_app()
+        graph = {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}
+
+        class Answer:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({"system": {"argv": ["main.py", "--disable-metadata"]}}).encode()
+
+        import urllib.request
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp, self._route_state(app, tmp), \
+             patch.object(app, 'TOKEN', 'test-token'), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app, 'COMFY_LANE_RULES', []), \
+             patch.object(app, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app, '_lane_launch_args_cache', {}), \
+             patch.object(app, 'urlopen', return_value=Answer()):
+            Path(tmp, 'rental-lanes.json').write_text(json.dumps({"47": {
+                "lane": "rental47", "local_port": 18347, "needles": ["minimax_h3"], "tier": "minimax",
+            }}))
+            server_thread.start()
+            try:
+                def resolve(body):
+                    request = urllib.request.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/lanes/resolve',
+                        data=json.dumps(body).encode('utf-8'),
+                        headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                        method='POST',
+                    )
+                    try:
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            return response.status, json.loads(response.read().decode('utf-8'))
+                    except urllib.error.HTTPError as error:
+                        return error.code, json.loads(error.read().decode('utf-8'))
+
+                status, answer = resolve({"graph": graph})
+                self.assertEqual(status, 200)
+                # The attached H3 box, launched without the flag.
+                self.assertEqual(answer, {
+                    'ok': True, 'lane': 'rental47', 'remote': True,
+                    'vram_headroom_gb': 0.0, 'probed': True, 'error': None,
+                })
+                # A graph no rental claims routes to the local default, which
+                # is probed the same way (a CUDA host running the studio
+                # locally carries the same contract).
+                status, answer = resolve({"graph": {"1": {"class_type": "CheckpointLoaderSimple",
+                                                           "inputs": {"ckpt_name": "sdxl.safetensors"}}}})
+                self.assertEqual((status, answer['lane'], answer['remote']), (200, 'default', False))
+                # The body is a graph, not a /prompt submission: nothing else
+                # is accepted, so a wrong shape can never be mistaken for a job.
+                status, answer = resolve({"prompt": graph})
+                self.assertEqual(status, 400)
+                self.assertIn('graph', answer['error'])
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
     def test_requester_scoping_of_prompt_routes(self):
         app = load_app()
         with TemporaryDirectory() as tmp:

@@ -1219,9 +1219,70 @@ function h3ReferenceCanvas(width, height) {
   return { width: canvasWidth, height: canvasHeight };
 }
 
-function motionReferenceRowBudget(workflow) {
-  const budget = Number(workflow?.motion_reference_budget?.max_packed_rows);
-  return budget > 0 ? budget : null;
+// The rows this run may use — a property of the LANE it will run on, not of
+// the workflow alone. `max_packed_rows` was measured on a lane launched with
+// `--vram-headroom` (motion_reference_budget.vram_headroom_gb); without the
+// flag the loader keeps the whole int8 DiT resident and the same card holds
+// only `max_packed_rows_without_vram_headroom` — the 142,366-row job that
+// samples with the flag is the one that died in block 0 without it. `lane` is
+// the gateway's answer from resolveLaneForGraph(): a lane it probed and found
+// short of the flag is held to the smaller ceiling, and the reason rides with
+// the number so the refusal can name the flag. A lane that could not be asked
+// keeps the measured budget: a dead lane is the submit-time liveness probe's to
+// name, and a gateway that cannot answer enforces nothing either way, so
+// refusing here would only add a failure mode. Null when the workflow carries
+// no measured budget at all — an unmeasured card is not a card that cannot.
+function motionReferenceRowBudget(workflow, lane) {
+  const measured = Number(workflow?.motion_reference_budget?.max_packed_rows);
+  if (!(measured > 0)) return null;
+  const requiredHeadroom = Number(workflow?.motion_reference_budget?.vram_headroom_gb) || 0;
+  const reduced = Number(workflow?.motion_reference_budget?.max_packed_rows_without_vram_headroom);
+  const probed = Boolean(lane && lane.probed === true && Number.isFinite(Number(lane.vramHeadroomGb)));
+  const laneHeadroom = probed ? Number(lane.vramHeadroomGb) : null;
+  if (probed && reduced > 0 && laneHeadroom < requiredHeadroom) {
+    return { rows: reduced, measured, requiredHeadroom, lane: lane.lane, laneHeadroom, reducedByLane: true };
+  }
+  return { rows: measured, measured, requiredHeadroom, lane: lane?.lane ?? null, laneHeadroom, reducedByLane: false };
+}
+
+// Which lane this graph routes to, and what that lane's ComfyUI was launched
+// with. Only the gateway knows the lanes — the same first-match rules that will
+// route the submission answer here — and it reads the lane's own /system_stats
+// argv (POST /api/lanes/resolve). Never throws: an answer the guard cannot use
+// comes back as `probed: false` with the reason, and motionReferenceRowBudget()
+// decides what an unknown is worth.
+async function resolveLaneForGraph(promptGraph) {
+  try {
+    const answer = await requestJson('/api/lanes/resolve', {
+      method: 'POST',
+      body: { graph: promptGraph },
+      timeoutMs: 15000,
+    });
+    if (!answer || typeof answer !== 'object' || typeof answer.lane !== 'string') {
+      return { lane: null, remote: false, probed: false, vramHeadroomGb: null, error: 'the gateway did not name a lane' };
+    }
+    const headroom = Number(answer.vram_headroom_gb);
+    const probed = answer.probed === true && Number.isFinite(headroom);
+    if (!probed) {
+      console.error(
+        `[media-studio-mcp] launch flags of lane '${answer.lane}' unknown (${answer.error || 'not probed'}); `
+        + 'the motion-reference guard keeps the measured budget',
+      );
+    }
+    return {
+      lane: answer.lane,
+      remote: answer.remote === true,
+      probed,
+      vramHeadroomGb: probed ? headroom : null,
+      error: answer.error ? String(answer.error) : null,
+    };
+  } catch (error) {
+    console.error(
+      `[media-studio-mcp] could not resolve the lane for the motion-reference guard (${error?.message || error}); `
+      + 'keeping the measured budget',
+    );
+    return { lane: null, remote: false, probed: false, vramHeadroomGb: null, error: String(error?.message || error) };
+  }
 }
 
 // Rows one motion clip adds to a clip of `clipFrames` frames. Dimensions and
@@ -1300,11 +1361,13 @@ function motionReferenceClipCeilingFrames(workflow, settings, budget) {
 }
 
 // The longest the motion clips could be, trimmed, for the clip as asked — the
-// other lever. A reference shorter than the clip keeps its own length.
+// other lever. A reference shorter than the clip keeps its own length. Null
+// when nothing at or above the model card's 2s floor fits: a lever that names
+// a length staging would refuse is not a lever.
 function motionReferenceTrimCeilingSeconds(workflow, settings, budget) {
   const frameRate = Number(settings.frameRate) || 24;
   let frames = gridFrameCountAtMost(workflow, REF_VIDEO_MAX_SECONDS * frameRate);
-  while (frames !== null) {
+  while (frames !== null && frames / frameRate >= REF_VIDEO_MIN_SECONDS) {
     const trimmed = {
       ...settings,
       referenceVideos: (settings.referenceVideos || []).filter(Boolean)
@@ -1361,23 +1424,23 @@ function assertReferenceSlotsExist(workflow, args = {}) {
   throw error;
 }
 
-function assertMotionReferenceFitsTheCard(workflow, settings) {
+function assertMotionReferenceFitsTheCard(workflow, settings, lane) {
   // Only runs with a motion clip attached: the cap is on reference VIDEO. Nine
   // pictures on a 15s clip were never the problem and keep the full range.
   const videos = Array.isArray(settings.referenceVideos) ? settings.referenceVideos.filter(Boolean) : [];
   if (!videos.length) return;
-  const budget = motionReferenceRowBudget(workflow);
+  const budget = motionReferenceRowBudget(workflow, lane);
   if (!budget) return;
   const width = Number(settings.width);
   const height = Number(settings.height);
   const frames = Number(settings.frames);
   if (!(width > 0 && height > 0 && frames > 0)) return;
   const priced = packedSequenceRows(workflow, settings, frames);
-  if (priced.total <= budget) return;
+  if (priced.total <= budget.rows) return;
   const rate = Number(settings.frameRate) || 24;
   const seconds = (value) => (value / rate).toFixed(1);
-  const clipCeiling = motionReferenceClipCeilingFrames(workflow, settings, budget);
-  const trimCeiling = motionReferenceTrimCeilingSeconds(workflow, settings, budget);
+  const clipCeiling = motionReferenceClipCeilingFrames(workflow, settings, budget.rows);
+  const trimCeiling = motionReferenceTrimCeilingSeconds(workflow, settings, budget.rows);
   const soundtrackRows = priced.videos.reduce((sum, item) => sum + item.audioRows, 0);
   const plural = videos.length === 1 ? '' : 's';
   const levers = [];
@@ -1393,12 +1456,23 @@ function assertMotionReferenceFitsTheCard(workflow, settings) {
     levers.push('stage the reference video compact (canvas "compact": about a third of the rows, the same motion)');
   }
   levers.push('drop a reference video');
+  // A lane held to the smaller ceiling is told WHY, and what restores the
+  // full budget: the flag by name, the value the budget was measured with,
+  // and that the tier's own provisioning passes it. That is the one sentence
+  // the operator can act on; "100,000" alone reads as a smaller card.
+  const limit = budget.reducedByLane
+    ? `${thousands(budget.rows)} on lane '${budget.lane}', whose ComfyUI runs `
+      + `${budget.laneHeadroom > 0 ? `with --vram-headroom ${budget.laneHeadroom}` : 'without --vram-headroom'} — `
+      + `the ${thousands(budget.measured)}-row budget was measured with --vram-headroom ${budget.requiredHeadroom}, `
+      + 'which the minimax-tier provisioning passes; re-provision that machine, or relaunch its ComfyUI with the '
+      + 'flag, to get the full budget back'
+    : thousands(budget.rows);
   const error = new Error(
     `a ${seconds(priced.frames)}s clip at ${width}x${height} does not fit this card with ${videos.length} `
     + `reference video${plural} attached: together they carry ${thousands(priced.total)} packed rows — the clip `
     + `itself, each reference encoded at its own canvas for min(its length, the clip's)`
     + `${soundtrackRows ? ' plus its soundtrack' : ''}${priced.pictureRows ? ', and the reference pictures' : ''} `
-    + `— and the limit here is ${thousands(budget)}. Either ${levers.join(', or ')}. `
+    + `— and the limit here is ${limit}. Either ${levers.join(', or ')}. `
     + 'Reference pictures cost the same whatever the length.',
   );
   // Survives machine-private redaction. This message is made of the card's
@@ -3029,6 +3103,13 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   const suppliedReferenceVideos = Array.isArray(args.reference_videos)
     ? args.reference_videos.filter(Boolean)
     : [];
+  // The budget depends on the lane (motionReferenceRowBudget): ask the gateway
+  // once, before the pre-flight, and price both checks against the same
+  // answer. Only a job with a motion clip on a workflow that carries a measured
+  // budget pays the round trip; everything else never asks.
+  const motionReferenceLane = suppliedReferenceVideos.length && motionReferenceRowBudget(workflow)
+    ? await resolveLaneForGraph(promptGraph)
+    : null;
   const chainsFromMotionContext = args.motion_context_path !== undefined
     || args.motion_context_base64 !== undefined
     || args.motion_context_url !== undefined;
@@ -3061,7 +3142,7 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
       })),
       referenceImageCount: Array.isArray(args.reference_images) ? args.reference_images.filter(Boolean).length : 0,
       referenceAudioCount: Array.isArray(args.reference_audios) ? args.reference_audios.filter(Boolean).length : 0,
-    });
+    }, motionReferenceLane);
   }
   const ingredientSheet = await ingredientSheetFromArgs(args, workflow, {
     width: targetWidth,
@@ -3501,7 +3582,7 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     referenceImageCount: settings.referenceImageNames?.length || 0,
     referenceAudioCount: settings.referenceAudioNames?.length || 0,
     referenceAudioSeconds: (settings.referenceAudioNames || []).map((name) => stagedMediaDuration(name) ?? undefined),
-  });
+  }, motionReferenceLane);
   settings.extensionFrames = normalizedLtxExtensionFrames(settings.durationSeconds, settings.frameRate);
   const usesIngredientConditioning = workflow.prompt_contract?.type === 'ltx23-ingredients';
   if (usesIngredientConditioning) {

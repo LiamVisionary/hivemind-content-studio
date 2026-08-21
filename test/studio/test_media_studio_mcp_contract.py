@@ -1431,7 +1431,7 @@ def _model_chain(graph):
 
 
 def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False, return_body=False,
-                         with_reply=False, extra_workflow_ids=()):
+                         with_reply=False, extra_workflow_ids=(), lane_resolution=None):
     """Run the real MCP against a capture backend and return the posted graph.
 
     The MCP is a separate node process with its own registry loading, staging
@@ -1439,6 +1439,12 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
     The temp registry holds only `workflow_id` unless `extra_workflow_ids`
     names siblings it should be able to route to; `with_reply` also returns
     the raw JSON-RPC reply so a test can read the tool's own result.
+
+    `lane_resolution` is what the backend answers to POST /api/lanes/resolve —
+    the gateway's account of which lane the graph routes to and what that
+    lane's ComfyUI was launched with (the motion-reference guard asks before
+    pricing a reference job). None answers 404, the way a gateway from before
+    the route would.
     """
     registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
     resolved = _resolved_registry_workflows(registry_src)
@@ -1457,6 +1463,21 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
+            if self.path == "/api/lanes/resolve":
+                # Asked with the graph, never a /prompt body: a resolve must not
+                # be mistakable for a submission by this harness or the gateway.
+                assert "graph" in body and "prompt" not in body
+                if lane_resolution is None:
+                    self.send_response(404)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error": "not found"}')
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, **lane_resolution}).encode())
+                return
             if "prompt" in body:
                 captures.append(body)
             self.send_response(200)
@@ -2295,6 +2316,91 @@ def test_the_same_long_clip_is_allowed_without_a_motion_reference(tmp_path):
     assert node["inputs"]["length"] == 362, "15s on the 17k+5 grid"
 
 
+_LANE_WITH_THE_FLAG = {"lane": "rental48", "remote": True, "vram_headroom_gb": 12.0, "probed": True, "error": None}
+_LANE_WITHOUT_THE_FLAG = {"lane": "rental48", "remote": True, "vram_headroom_gb": 0.0, "probed": True, "error": None}
+_LANE_WITH_TOO_LITTLE = {"lane": "rental48", "remote": True, "vram_headroom_gb": 4.0, "probed": True, "error": None}
+_LANE_THAT_WOULD_NOT_ANSWER = {"lane": "rental48", "remote": True, "vram_headroom_gb": None, "probed": False,
+                               "error": "URLError: Connection refused"}
+
+
+@pytest.mark.parametrize("lane, runs", [
+    (_LANE_WITHOUT_THE_FLAG, "without --vram-headroom"),
+    (_LANE_WITH_TOO_LITTLE, "with --vram-headroom 4"),
+])
+def test_a_lane_launched_without_vram_headroom_is_held_to_the_smaller_budget(tmp_path, lane, runs):
+    """The 210,000-row budget is a property of a lane launched with
+    --vram-headroom 12, not of the card: Comfy's planner cannot see reference
+    rows, and without the flag the loader keeps the whole int8 DiT resident —
+    the 142,366-row job that samples with the flag is the one that died in
+    block 0 without it (2026-08-21, job 34a722c2). The guard asks the gateway
+    which lane the graph routes to and what that lane's ComfyUI runs, and a lane
+    short of the flag is held to the ~100k ceiling. The refusal has to name the
+    flag: "100,000" alone reads as a smaller card, and the one sentence the
+    operator can act on is the one that says which flag, and that the tier's
+    own provisioning passes it."""
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    # Priced before staging at the node's largest reference canvas: 89,452 clip
+    # rows + 1,206 audio rows + 107,712 for 345 effective reference frames =
+    # 198,370 — inside the measured budget, so this is the run the flag decides.
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=lane)
+    assert "does not fit this card" in reply
+    assert "198,370 packed rows" in reply
+    assert "the limit here is 100,000 on lane 'rental48'" in reply
+    assert f"whose ComfyUI runs {runs}" in reply
+    assert "measured with --vram-headroom 12" in reply
+    assert "re-provision that machine, or relaunch its ComfyUI with the flag" in reply
+    # The levers are priced at the ceiling that applies: 175 frames of clip with
+    # this reference (98,870 rows). Nothing at or above the model card's 2s
+    # reference floor fits under the full clip, so no trim length is offered —
+    # a lever naming a length staging would refuse is not a lever.
+    assert "shorten the clip to 7.3s" in reply
+    assert "trim the reference video" not in reply
+    assert "drop a reference video" in reply
+
+
+def test_a_lane_running_the_flag_keeps_the_measured_budget(tmp_path):
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 lane_resolution=_LANE_WITH_THE_FLAG)
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362
+
+
+def test_a_lane_the_gateway_could_not_ask_keeps_the_measured_budget(tmp_path):
+    """Unknown is not "without". A lane that will not answer is the submit-time
+    liveness probe's to name, and a gateway that cannot answer enforces
+    nothing either way — refusing here would only add a failure mode to a job
+    that is fine on a lane provisioned the right way. (A gateway from before
+    the route, answering 404, is the case every other test in this file
+    exercises.)"""
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 lane_resolution=_LANE_THAT_WOULD_NOT_ANSWER)
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362
+
+
+def test_a_job_without_a_motion_reference_never_asks_the_gateway_which_lane(tmp_path):
+    """Only a reference-video job pays the round trip. Pictures alone were
+    never the problem, and the resolve route is answered by the gateway's
+    routing rules — an image-only H3 job must not be slowed by it, so the
+    harness is told to fail loudly if it is ever asked."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+        "reference_images": [{"image_base64": _TINY_PNG}],
+    }, lane_resolution={"lane": "must-not-be-asked", "remote": True, "vram_headroom_gb": 0.0, "probed": True,
+                        "error": "the guard asked for a lane on a job with no motion reference"})
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362
+
+
 def test_reference_video_refuses_more_clips_than_it_has_slots(tmp_path):
     source = _write_test_video(tmp_path / "many.mp4", seconds=3, fps=24)
     reply = _capture_video_graph(
@@ -2530,6 +2636,32 @@ def test_motion_reference_budget_mirror_matches_the_registry():
     assert fallback["minimax-h3"].motion_reference_max_seconds["max|16:9"] == round(107 / 24, 3)
     # Non-minimax workflows have no measured budget and keep the full range.
     assert fallback["ltx23-eros-dmd-v12"].motion_reference_max_seconds is None
+
+
+def test_the_no_headroom_ceiling_reaches_every_h3_video_lane():
+    """The budget carries the headroom it was measured with and the ceiling a
+    lane without it is held to; both inherit to reference mode (the workflow
+    that actually stages motion clips), and the headroom is the one the
+    minimax-tier provisioning passes — otherwise the guard enforces a flag the
+    boxes never get."""
+    from hivemind_content_studio.gpu_rentals import TIERS
+
+    registry = json.loads(WORKFLOW_REGISTRY.read_text())
+    checked = 0
+    for workflow in _resolved_registry_workflows(registry):
+        if workflow["id"].startswith("minimax-h3") and workflow.get("media_type") == "video":
+            budget = workflow["motion_reference_budget"]
+            assert budget["vram_headroom_gb"] == TIERS["minimax"]["comfy_vram_headroom_gb"] == 12
+            assert budget["max_packed_rows_without_vram_headroom"] == 100000
+            assert budget["max_packed_rows_without_vram_headroom"] < budget["max_packed_rows"]
+            checked += 1
+    assert checked >= 2, "reference mode must inherit the budget"
+    # The measured bracket the ceiling sits in: 95,092 rows ran without the
+    # flag, 142,366 did not.
+    assert 95092 < 100000 < 142366
+    # The provisioning script the box actually runs passes the same value.
+    script = (ROOT / "packages" / "gpu-rentals" / "provisioning" / "comfyui-hivemind.sh").read_text()
+    assert f'--vram-headroom {TIERS["minimax"]["comfy_vram_headroom_gb"]}"' in script
 
 
 def _call_mcp_tool(name: str, arguments: dict) -> str:

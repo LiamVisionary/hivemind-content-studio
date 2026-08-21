@@ -479,6 +479,11 @@ TIERS: dict[str, dict[str, Any]] = {
         "models": _MINIMAX_MODELS,
         "needs_int8_fast": False,
         "needs_h3_stack": True,
+        # ComfyUI's --vram-headroom for this tier's lanes. The H3 motion-
+        # reference budget (workflow-registry.json motion_reference_budget) was
+        # measured with exactly this much; the onstart passes it, attach records
+        # what the box actually runs, and the gateway reads it per job.
+        "comfy_vram_headroom_gb": 12,
         # Whole-job seconds for the reference clip on a warm 5090, as the graph
         # was tuned: 183s on 2026-08-07, 102s on 2026-08-08, 40s on 2026-08-10.
         # Quote the current one — the older figures survived in this string for
@@ -1200,6 +1205,21 @@ def _onstart_script(tier: str) -> str:
             "fi",
             'if [ "$RAM_GB" -lt 48 ];'
             ' then EXTRA_ARGS="$EXTRA_ARGS --disable-smart-memory"; fi',
+            # Comfy's memory planner sizes the DiT load from the noise latent
+            # alone — MiniMaxH3 declares no memory_usage_factor_conds — so every
+            # reference row (pictures, motion clips, soundtracks) is invisible
+            # to it, and a reference-mode job dies in block 0 with the whole
+            # int8 DiT resident (2026-08-21, job 34a722c2: 26.47GiB + 6.21GiB
+            # on a 31.36GiB 5090). --vram-headroom (ComfyUI >= ec4dec93, in the
+            # pin above) asks DynamicVRAM to keep that much free. Measured
+            # 2026-08-21 on a 110GB-RAM 5090: it costs nothing per step on a
+            # plain job, but it did NOT rescue the reference-mode OOM (jobs
+            # b9f5b32d/103f6173 failed identically at 12 and 20) — the packed
+            # row budget is what keeps a job on the card. Kept because it is
+            # free and the lane-argv plumbing reads it; rides with the
+            # smart-memory branch and is left off the <48GB path.
+            'if [ "$RAM_GB" -ge 48 ];'
+            f' then EXTRA_ARGS="$EXTRA_ARGS --vram-headroom {spec["comfy_vram_headroom_gb"]}"; fi',
             f"if ! git -C /workspace/ComfyUI merge-base --is-ancestor {_H3_COMFY_COMMIT} HEAD 2>/dev/null; then",
             "  git -C /workspace/ComfyUI fetch -q --depth 200 origin master",
             f"  git -C /workspace/ComfyUI checkout -q {_H3_COMFY_COMMIT}",
@@ -1790,6 +1810,10 @@ def _instance_dto(instance: Instance, probe: bool = False) -> dict:
         "tunnel_alive": bool(attachment and _tunnel_carrying_traffic(ref)),
         "models_served": (attachment or {}).get("needles")
         or TIERS.get(_tier_from_label(label), {}).get("lane_needles", []),
+        # ComfyUI's --vram-headroom on the attached lane, as read at attach time
+        # (0.0 = launched without it, None = unknown or not attached). The H3
+        # motion-reference budget needs the tier's comfy_vram_headroom_gb.
+        "vram_headroom_gb": (attachment or {}).get("vram_headroom_gb"),
         "studio_pages": (attachment or {}).get("studio_pages")
         or TIERS.get(_tier_from_label(label), {}).get("studio_pages", []),
         "gpu": instance.gpu_name,
@@ -2428,6 +2452,47 @@ def _lane_answers(port: int, timeout: float = 1.5) -> bool:
         return False
 
 
+def _lane_comfy_launch_args(port: int, timeout: float = 3.0) -> list[str] | None:
+    """The argv ComfyUI behind this lane was launched with, from its /system_stats.
+
+    None when the lane cannot be read or does not publish `system.argv`; the
+    caller keeps "unknown" apart from "launched without"."""
+    try:
+        response = requests.get(
+            f"http://127.0.0.1:{int(port)}/system_stats", timeout=timeout
+        )
+        response.raise_for_status()
+        argv = (response.json().get("system") or {}).get("argv")
+    except Exception:
+        return None
+    return [str(item) for item in argv] if isinstance(argv, list) else None
+
+
+def vram_headroom_gb_from_argv(argv) -> float | None:
+    """`--vram-headroom N` (or `--vram-headroom=N`) from a ComfyUI argv, in GB.
+
+    0.0 when the flag is absent (ComfyUI's default), None when argv is unknown.
+    Mirrors vram_headroom_gb_from_argv() in packages/media-gateway/app.py, which
+    cannot import this package; the last occurrence wins, as argparse has it."""
+    if not isinstance(argv, (list, tuple)):
+        return None
+    items = [str(item) for item in argv]
+    value = 0.0
+    for index, item in enumerate(items):
+        raw = None
+        if item == "--vram-headroom" and index + 1 < len(items):
+            raw = items[index + 1]
+        elif item.startswith("--vram-headroom="):
+            raw = item.split("=", 1)[1]
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+    return max(0.0, value)
+
+
 def _tunnel_carrying_traffic(ref: RentalRef, timeout: float = 1.5) -> bool:
     """Is the lane actually usable, not merely the ssh process alive?
 
@@ -2642,6 +2707,15 @@ def attach_rental(rental_id: str | int, *, select: bool = False) -> dict:
     lane = _lane_name(ref)
     if _tunnel_pid(ref) is None:
         _spawn_tunnel(ref, ip, ssh_port, local_port)
+    # What the box's ComfyUI was actually launched with. The MiniMax H3
+    # motion-reference budget is valid only on a lane running --vram-headroom
+    # (this tier's onstart passes it); a box provisioned another way, or whose
+    # ComfyUI was relaunched by hand, may not carry it. Recorded so Machines can
+    # show it and the attach can say so — the gateway still asks the lane
+    # itself per job (POST /api/lanes/resolve), because the registry is a
+    # snapshot and the lane is the truth.
+    launch_args = _lane_comfy_launch_args(local_port)
+    vram_headroom_gb = vram_headroom_gb_from_argv(launch_args)
     attachments = _read_attachments()
     existing = attachments.get(str(ref)) or {}
     # Selecting puts this machine ahead of every other attachment; a plain
@@ -2660,8 +2734,30 @@ def attach_rental(rental_id: str | int, *, select: bool = False) -> dict:
         "studio_pages": TIERS[tier]["studio_pages"],
         "attached_at": existing.get("attached_at") or time.time(),
         "priority": priority,
+        "comfy_launch_args": launch_args,
+        "vram_headroom_gb": vram_headroom_gb,
     }
     _write_attachments(attachments)
+    warnings = []
+    required_headroom = TIERS[tier].get("comfy_vram_headroom_gb")
+    if required_headroom:
+        if vram_headroom_gb is None:
+            warnings.append(
+                "could not read this machine's ComfyUI launch flags from /system_stats; the "
+                f"MiniMax H3 motion-reference budget needs --vram-headroom {required_headroom}, "
+                "and the gateway will ask the lane again before each reference-video job"
+            )
+        elif vram_headroom_gb < required_headroom:
+            runs_with = (
+                "without --vram-headroom" if vram_headroom_gb == 0
+                else f"with --vram-headroom {vram_headroom_gb:g}"
+            )
+            warnings.append(
+                f"this machine's ComfyUI runs {runs_with}; the MiniMax H3 motion-reference "
+                f"budget was measured with --vram-headroom {required_headroom} (this tier's "
+                "provisioning passes it), so reference-video jobs here are held to the smaller "
+                "no-headroom ceiling — re-provision the machine, or relaunch its ComfyUI with the flag"
+            )
     paused = _read_paused_state()
     if paused.pop(str(ref), None) is not None:
         _write_paused_state(paused)
@@ -2671,7 +2767,8 @@ def attach_rental(rental_id: str | int, *, select: bool = False) -> dict:
     # in-flight generations and made "use this machine" a 30-second event.
     return {"rental_id": str(ref), "attached": True, "lane": lane,
             "restarting_stack": False, "studio_pages": TIERS[tier]["studio_pages"],
-            "priority": priority}
+            "priority": priority, "vram_headroom_gb": vram_headroom_gb,
+            "warnings": warnings}
 
 
 def select_rental(rental_id: str | int) -> dict:

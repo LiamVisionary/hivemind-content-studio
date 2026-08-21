@@ -1284,6 +1284,10 @@ def _attach_env(monkeypatch, tmp_path):
     monkeypatch.setattr(gpu_rentals, "_tunnel_pid", lambda rid: spawned.get("rid") == rid and 4321 or None)
     restarts = []
     monkeypatch.setattr(gpu_rentals, "_schedule_stack_restart", lambda: restarts.append(1))
+    # The faked tunnel answers no /system_stats; stand in a box launched the way
+    # the provisioning launches it, so attach records a known headroom.
+    monkeypatch.setattr(gpu_rentals, "_lane_comfy_launch_args",
+                        lambda port, timeout=3.0: ["main.py", "--disable-metadata", "--vram-headroom", "12"])
     return spawned, restarts
 
 
@@ -1324,6 +1328,93 @@ def test_attach_writes_overlay_and_spawns_tunnel(tmp_path: Path, monkeypatch) ->
     rentals = client.get("/api/gpu-rentals").json()["rentals"]
     assert rentals[0]["attached"] is True and rentals[0]["tunnel_alive"] is True
     assert rentals[0]["studio_pages"] == ["image"]
+
+
+def _ready_minimax_instance(rid=7):
+    return {"id": rid, "label": f"{gpu_rentals.STUDIO_LABEL_PREFIX}minimax-rtx5090-{rid}",
+            "actual_status": "running", "public_ipaddr": "9.9.9.9", "gpu_name": "RTX 5090",
+            "ports": {"22/tcp": [{"HostPort": "41000"}], "18189/tcp": [{"HostPort": "28189"}]}}
+
+
+def test_attach_records_the_lanes_vram_headroom_and_says_when_the_flag_is_missing(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The H3 motion-reference budget (workflow-registry.json) was measured
+    with --vram-headroom 12 — Comfy's planner cannot see reference rows, and
+    without the flag a job the budget allows OOMs in block 0 (2026-08-21, job
+    34a722c2). This tier's onstart passes the flag, but a box provisioned any
+    other way, or whose ComfyUI was relaunched by hand, may not run it. Attach
+    reads what the box ACTUALLY runs from its /system_stats argv, records it,
+    and says so — the gateway still asks the lane per job, because the
+    registry is a snapshot."""
+    _fake_vast(monkeypatch, lambda m, p, b: {"instances": [_ready_minimax_instance()]})
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda url: {"step": "ready", "done": 4, "total": 4, "detail": ""})
+    _attach_env(monkeypatch, tmp_path)
+    client = _client(tmp_path, monkeypatch)
+    registry = tmp_path / "media-state/rental-lanes.json"
+
+    # Launched as provisioned: recorded, and nothing to warn about.
+    body = client.post("/api/gpu-rentals/7/attach").json()
+    assert body["vram_headroom_gb"] == 12.0 and body["warnings"] == []
+    record = json.loads(registry.read_text())["vast:7"]
+    assert record["vram_headroom_gb"] == 12.0
+    assert record["comfy_launch_args"] == ["main.py", "--disable-metadata", "--vram-headroom", "12"]
+
+    # Launched WITHOUT the flag: recorded as 0 (a fact, not an unknown), and
+    # the attach names the flag, the value the budget needs, and the fix.
+    monkeypatch.setattr(gpu_rentals, "_lane_comfy_launch_args",
+                        lambda port, timeout=3.0: ["main.py", "--disable-auto-launch", "--disable-metadata"])
+    body = client.post("/api/gpu-rentals/7/attach").json()
+    assert body["attached"] is True and body["vram_headroom_gb"] == 0.0
+    assert len(body["warnings"]) == 1
+    assert "without --vram-headroom" in body["warnings"][0]
+    assert "--vram-headroom 12" in body["warnings"][0]
+    assert "re-provision" in body["warnings"][0]
+    assert json.loads(registry.read_text())["vast:7"]["vram_headroom_gb"] == 0.0
+    # Machines reads it off the attachment.
+    monkeypatch.setattr(gpu_rentals, "_tunnel_carrying_traffic", lambda *_a, **_k: True)
+    rentals = client.get("/api/gpu-rentals").json()["rentals"]
+    assert rentals[0]["attached"] is True and rentals[0]["vram_headroom_gb"] == 0.0
+
+    # Less than the budget needs is called out the same way, with the value.
+    monkeypatch.setattr(gpu_rentals, "_lane_comfy_launch_args",
+                        lambda port, timeout=3.0: ["main.py", "--vram-headroom", "4"])
+    body = client.post("/api/gpu-rentals/7/attach").json()
+    assert body["vram_headroom_gb"] == 4.0
+    assert "with --vram-headroom 4;" in body["warnings"][0]
+
+    # A lane that could not be read is UNKNOWN — never "without" — and the
+    # attach says the gateway will ask again rather than pretending to know.
+    monkeypatch.setattr(gpu_rentals, "_lane_comfy_launch_args", lambda port, timeout=3.0: None)
+    body = client.post("/api/gpu-rentals/7/attach").json()
+    assert body["vram_headroom_gb"] is None
+    assert "could not read" in body["warnings"][0] and "--vram-headroom 12" in body["warnings"][0]
+    assert json.loads(registry.read_text())["vast:7"]["comfy_launch_args"] is None
+
+    # The parser keeps the two apart and reads both spellings argparse takes.
+    assert gpu_rentals.vram_headroom_gb_from_argv(["main.py", "--vram-headroom=12"]) == 12.0
+    assert gpu_rentals.vram_headroom_gb_from_argv(["main.py"]) == 0.0
+    assert gpu_rentals.vram_headroom_gb_from_argv(None) is None
+
+
+def test_the_onstart_passes_the_headroom_the_budget_was_measured_with(monkeypatch) -> None:
+    """One number, three places: the tier table, the onstart the box runs, and
+    the registry's budget. If they drift, the guard enforces a flag the
+    provisioning no longer passes, or the provisioning passes one the budget
+    was not measured with."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.test/{key}")
+    required = gpu_rentals.TIERS["minimax"]["comfy_vram_headroom_gb"]
+    assert required == 12
+    script = gpu_rentals._onstart_script("minimax")
+    assert f'--vram-headroom {required}"' in script
+    root = Path(__file__).resolve().parents[2]
+    registry = json.loads((root / "packages" / "media-gateway" / "workflow-registry.json").read_text())
+    h3 = next(w for w in registry["workflows"] if w["id"] == "minimax-h3")
+    assert h3["motion_reference_budget"]["vram_headroom_gb"] == required
+    # The image/video tiers never launch H3 and never pass the flag.
+    for tier in ("image", "video"):
+        assert "--vram-headroom" not in gpu_rentals._onstart_script(tier)
 
 
 def test_a_live_ssh_with_a_dead_forward_is_not_a_live_tunnel(tmp_path: Path, monkeypatch) -> None:
