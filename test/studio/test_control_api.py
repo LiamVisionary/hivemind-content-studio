@@ -189,8 +189,19 @@ def test_simple_catalog_combines_safe_hivemind_brains_and_media_capabilities(tmp
     gpt_image = next(item for item in catalog["media"]["image"] if item["id"] == "openai-gpt-image")
     assert next(model for model in gpt_image["models"] if model["id"] == "gpt-image-1.5")["max_reference_images"] == 16
     media_studio = next(item for item in catalog["media"]["video"] if item["id"] == "media-studio-mcp")
-    assert {model["id"] for model in media_studio["models"]} >= {"ltx23-eros-fast", "ltx23-eros-exact"}
+    # Every Eros lane the MCP's built-in video registry ships. ltx23-eros-exact is
+    # deliberately absent: its exact-v1-merged-q8 MLX build was retired along with
+    # the workflow, and the DMD lanes replaced it.
+    assert {model["id"] for model in media_studio["models"]} >= {
+        "ltx23-eros-fast",
+        "ltx23-eros-dmd",
+        "ltx23-eros-dmd-v12",
+        "ltx23-eros-v12-fast-rebuilt",
+        "ltx23-eros-v14-fast",
+        "ltx23-eros-v14",
+    }
     assert next(model for model in media_studio["models"] if model["id"] == "ltx23-eros-fast")["label"] == "LTX 2.3 Eros Fast"
+    assert next(model for model in media_studio["models"] if model["id"] == "ltx23-eros-v14")["label"] == "LTX 2.3 Eros v1.4"
     seedance = next(item for item in catalog["media"]["video"] if item["id"] == "muapi")
     assert next(model for model in seedance["models"] if model["id"] == "seedance-v2.0-t2v")["max_reference_images"] is None
     assert any(template["id"] == "ugc-product-ad-15s" for template in catalog["templates"])
