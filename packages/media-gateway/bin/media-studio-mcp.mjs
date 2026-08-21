@@ -1714,6 +1714,24 @@ function inputRelativeName(path) {
   return rel.split(sep).join('/');
 }
 
+// A bare/relative name names a file the caller believes is already staged in
+// the Comfy input folder. The privacy sweeper prunes staged plaintext on a
+// TTL, so a name that worked minutes ago can be gone — and a graph carrying a
+// vanished name fails remote-lane validation as an opaque 400 long after this
+// process could have said which file was missing. Refuse it here instead.
+function requireStagedInputFile(name, { field, restage }) {
+  if (!existsSync(join(comfyInputDir, name))) {
+    const error = new Error(
+      `${field} "${name}" is not in the Comfy input folder — staged inputs are pruned after a `
+      + `privacy TTL, so re-send the file as ${restage} instead of reusing its staged name`,
+    );
+    error.status = 400;
+    error.machineSafe = true;
+    throw error;
+  }
+  return name;
+}
+
 function stageLtxErosImage(imagePathOrName, fallbackName) {
   const value = String(imagePathOrName || fallbackName || '').trim();
   if (!value) throw new Error('image_path is required for LTX Eros video generation');
@@ -1733,16 +1751,19 @@ function stageLtxErosImage(imagePathOrName, fallbackName) {
   return stagedName;
 }
 
-function stageLtxVideo(videoPathOrName) {
+function stageLtxVideo(videoPathOrName, {
+  field = 'video_path',
+  restage = 'video_base64, video_url, or an absolute path',
+} = {}) {
   const value = String(videoPathOrName || '').trim();
   if (!value) return null;
-  if (!isAbsolute(value)) return value;
+  if (!isAbsolute(value)) return requireStagedInputFile(value, { field, restage });
   const source = resolve(value);
-  if (!existsSync(source)) throw new Error(`video_path not found: ${value}`);
+  if (!existsSync(source)) throw new Error(`${field} not found: ${value}`);
   const alreadyInput = inputRelativeName(source);
   if (alreadyInput) return alreadyInput;
   const ext = detectVideoExtension(null, '', source);
-  if (!ext) throw new Error('video_path must point to MP4, MOV, WebM, MKV, AVI, or M4V video');
+  if (!ext) throw new Error(`${field} must point to MP4, MOV, WebM, MKV, AVI, or M4V video`);
   mkdirSync(comfyInputDir, { recursive: true });
   const stem = basename(source, ext).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'video';
   const stagedName = `mcp_video_${Date.now()}_${stem}${ext}`;
@@ -3224,7 +3245,10 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     throw new Error('motion_context_* cannot be combined with video_* — the context clip seeds a NEW shot, it is not footage to extend');
   }
   if (rawMotionContext) {
-    settings.motionContextName = stageLtxVideo(rawMotionContext);
+    settings.motionContextName = stageLtxVideo(rawMotionContext, {
+      field: 'motion_context_path',
+      restage: 'motion_context_base64, motion_context_url, or an absolute path',
+    });
     settings.motionContextHasAudio = stagedVideoHasAudio(settings.motionContextName);
     // A latent cannot be resized, so a chained clip must render on the context
     // clip's exact canvas no matter which aspect tier the caller sent.
