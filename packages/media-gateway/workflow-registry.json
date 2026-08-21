@@ -1163,7 +1163,7 @@
       "inherits": "minimax-h3",
       "title": "MiniMax H3 Reference",
       "beta": true,
-      "description": "MiniMax H3 conditioned on up to nine reference pictures instead of a start/end frame — the model's Reference mode. Subjects, clothing, environments and styles are carried across from the references; the prompt follows MiniMax's full-reference format (subject_definitions, retention_analysis, <Subject N>/<Picture N> labels). Same weights and same rented lane as MiniMax H3, so no re-provisioning.",
+      "description": "MiniMax H3 conditioned on up to nine reference pictures and up to three reference audio clips instead of a start/end frame — the model's Reference mode. Subjects, clothing, environments and styles are carried across from the pictures; a reference audio clip clones a VOICE (or music) — either reperforming its exact dialogue or lending only its timbre and delivery to new lines. Audio clips must be 2-15s each, 15s combined, and always ride alongside at least one picture. The prompt follows MiniMax's full-reference format (subject_definitions, retention_analysis, <Subject N>/<Picture N>/<Audio N> labels). Same weights and same rented lane as MiniMax H3, so no re-provisioning.",
       "api_workflow": "workflows/minimax-h3-reference.api.json",
       "requires": {
         "prompt": true,
@@ -1172,6 +1172,7 @@
       "accepts": [
         "prompt",
         "reference_images",
+        "reference_audios",
         "motion_context_path",
         "motion_context_base64",
         "motion_context_url",
@@ -1181,7 +1182,8 @@
         "frames",
         "seed",
         "steps",
-        "spectrum"
+        "spectrum",
+        "loras"
       ],
       "reference_image_slots": [
         {
@@ -1221,8 +1223,22 @@
           "input": "image"
         }
       ],
+      "reference_audio_slots": [
+        {
+          "node": "129",
+          "input": "audio"
+        },
+        {
+          "node": "130",
+          "input": "audio"
+        },
+        {
+          "node": "131",
+          "input": "audio"
+        }
+      ],
       "prompt_contract": {
-        "guidance": "Reference mode uses MiniMax's full-reference rewrite format (ref_en): six sections in order — subject_definitions (label every reference as <Subject N> / <Picture N>), summary, retention_analysis (fully_preserved | partially_preserved | attribute_transfer | weak_reference per label), detailed_description (shots, <d>[English] …</d> speech, (S1) ids), overall_soundscape, non_diegetic_music. Reference pictures are supplied in order, so <Picture 1> is the first image sent."
+        "guidance": "Reference mode uses MiniMax's full-reference rewrite format (ref_en): six sections in order — subject_definitions (label every reference as <Subject N> / <Picture N>), summary, retention_analysis (fully_preserved | partially_preserved | attribute_transfer | weak_reference per label), detailed_description (shots, <d>[English] …</d> speech, (S1) ids), overall_soundscape, non_diegetic_music. Reference pictures are supplied in order, so <Picture 1> is the first image sent. Reference audio clips are labeled <Audio N> in their own supplied order, numbered independently of pictures. Define each in subject_definitions ('<Audio 1> is the voice-timbre reference for <Subject 1> (S1).'), tag the summary [audio reuse] when the source words are reperformed verbatim (keep them, original language, inside <d>…</d>) or [audio reference] when only timbre/rhythm/emotion carries (then the source's own words must NOT appear), and mark each <Audio N> in retention_analysis with fully_copy | partially_copy | reference | weak_reference."
       }
     },
     {
@@ -1232,7 +1248,21 @@
       "description": "MiniMax H3 omni-modal video generation: video and native stereo audio (voice, SFX, music) are denoised jointly in one pass. Text-to-video by default; supply a start image for image-to-video. Runs on an H3-capable CUDA Comfy lane (pruned int8_convrot DiT + Qwen3-VL 32B nvfp4 encoder, ComfyUI >= e377e263 with the Spectrum forecaster node — see packages/gpu-rentals). Native canvas is a 768px short edge at 24 fps, up to ~15s on the 17k+5 frame grid. Spectrum forecasting is on by default and can be switched off per generation: it predicts about half the transformer steps instead of computing them, which roughly halves sampling time but softens fine detail.",
       "family": "minimax",
       "builder": "comfy-api",
-      "supports_loras": false,
+      "supports_loras": true,
+      "compatible_base_models": [
+        "MiniMax H3"
+      ],
+      "lora_injection": {
+        "class_type": "LoraLoaderModelOnly",
+        "targets": [
+          {
+            "node": "31",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model"
+      },
       "api_workflow": "workflows/minimax-h3.api.json",
       "default": false,
       "frame_grid": {
@@ -1264,7 +1294,8 @@
         "frames",
         "seed",
         "steps",
-        "spectrum"
+        "spectrum",
+        "loras"
       ],
       "defaults": {
         "width": 1216,

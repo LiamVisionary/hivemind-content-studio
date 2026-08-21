@@ -88,23 +88,32 @@ def test_video_loras_have_native_mlx_and_comfy_graph_parity():
     assert "mergeNativeWorkflowLoras(nativeSpec.loras, settings.loras)" in source
 
     registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    # Civitai's base-model category per family — what the studio's LoRA panel
+    # filters the installed catalog by.
+    expected_bases = {"ltx-2.3": ["LTXV"], "minimax": ["MiniMax H3"]}
     checked = 0
     for workflow in (item for item in _resolved_registry_workflows(registry) if item["media_type"] == "video"):
         if not workflow.get("supports_loras"):
-            # Non-LTX families (e.g. minimax-h3) have no LoRA lane; the parity
-            # contract below is specifically about LTXV LoRA injection.
             assert "lora_injection" not in workflow
             assert "loras" not in workflow.get("accepts", [])
             continue
         checked += 1
         assert workflow["supports_loras"] is True
-        assert workflow["compatible_base_models"] == ["LTXV"]
+        assert workflow["compatible_base_models"] == expected_bases[workflow["family"]]
         assert "loras" in workflow["accepts"]
         injection = workflow["lora_injection"]
-        graph = json.loads(Path(workflow["api_workflow"]).read_text(encoding="utf-8"))["prompt"]
+        graph_path = Path(workflow["api_workflow"])
+        if not graph_path.is_absolute():
+            graph_path = ROOT / "packages" / "media-gateway" / graph_path
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))["prompt"]
         sources = [graph[target["node"]]["inputs"][target["input"]] for target in injection["targets"]]
         assert all(source_ref == sources[0] for source_ref in sources)
     assert checked, "no LoRA-capable video workflows resolved — registry parse regressed"
+    # All three H3 graphs (base, turbo, reference) route the model through the
+    # SageAttention patch node the inherited injection contract targets, so the
+    # loop above just proved LoRA injection has a live seam in each of them.
+    h3 = [w for w in _resolved_registry_workflows(registry) if w.get("family") == "minimax"]
+    assert h3 and all(w["supports_loras"] is True for w in h3)
 
 
 def test_minimax_h3_registry_entry_matches_its_comfy_graph():
@@ -1385,11 +1394,15 @@ def test_spectrum_toggle_reaches_the_graph(tmp_path, workflow_id, spectrum):
     assert node["inputs"]["enabled"] is spectrum
 
 
-def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False):
+def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False, env=None,
+                         submit_response=None, return_reply=False):
     """Run the real MCP against a capture backend and return the posted graph.
 
     The MCP is a separate node process with its own registry loading, staging
     and pruning; only a real submission proves what a workflow actually sends.
+    submit_response=(status, payload) makes the backend answer the graph
+    submission with a canned reply (e.g. a Comfy validation 400);
+    return_reply=True returns the MCP's raw reply instead of the graph.
     """
     registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
     workflow = next(item for item in _resolved_registry_workflows(registry_src) if item["id"] == workflow_id)
@@ -1406,6 +1419,13 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
             body = json.loads(self.rfile.read(length) or b"{}")
             if "prompt" in body:
                 captures.append(body["prompt"])
+                if submit_response is not None:
+                    status, payload = submit_response
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(payload).encode())
+                    return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -1432,6 +1452,7 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
         "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "0",
         "MEDIA_STUDIO_WORKFLOW_REGISTRY": str(registry),
         "COMFY_INPUT_DIR": str(tmp_path / "input"),
+        **(env or {}),
     }
     process = subprocess.Popen(
         ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
@@ -1474,13 +1495,20 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
         assert not captures, "the MCP submitted a graph it should have refused"
         return reply
     assert captures, "the MCP posted no graph"
-    return captures[0]
+    return reply if return_reply else captures[0]
 
 
 # A 1x1 PNG: enough for staging, nothing to decode.
 _TINY_PNG = (
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP8"
     "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+# Eight samples of 16 kHz mono silence with a full RIFF/WAVE header: enough for
+# the MCP's magic-byte sniff to stage it as .wav, nothing to decode.
+_TINY_WAV = (
+    "data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YRAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAA"
 )
 
 
@@ -1575,6 +1603,140 @@ def test_reference_mode_refuses_more_references_than_it_has_slots(tmp_path):
         {"prompt": "x", "reference_images": [{"image_base64": _TINY_PNG}] * 10},
         expect_refusal=True)
     assert "at most 9 reference images" in reply or "Too big" in reply or "max" in reply
+
+
+def test_minimax_h3_reference_audio_fills_slots_in_order_and_prunes_the_rest(tmp_path):
+    """Voice cloning: standalone reference audio rides the same autogrow
+    contract as pictures — LoadAudio into ref_audios.ref_audio_N, clip N is the
+    prompt's <Audio N> (numbered independently of <Picture N>) — and an
+    unfilled audio slot must take its key and loader with it when pruned: a
+    real Comfy lane rejects an empty LoadAudio filename at submit.
+    """
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "she speaks new lines in the referenced voice",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_audios": [{"audio_base64": _TINY_WAV}, {"audio_base64": _TINY_WAV}],
+    })
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    audio_keys = sorted(k for k in node["inputs"] if k.startswith("ref_audios."))
+    assert audio_keys == ["ref_audios.ref_audio_1", "ref_audios.ref_audio_2"]
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadAudio"]
+    assert len(loaders) == 2, "the unused reference audio loader must be pruned"
+    assert all(n["inputs"]["audio"].endswith(".wav") for n in loaders), \
+        "staged reference audio must carry a real filename with its sniffed extension"
+    # Pictures are untouched by the audio pass.
+    assert [k for k in node["inputs"] if k.startswith("ref_images.")] == ["ref_images.ref_image_1"]
+
+
+def test_reference_audio_cannot_be_the_sole_reference(tmp_path):
+    """The model card is explicit: audio must accompany an image or video
+    reference and can never be the only conditioning. Without the guard this
+    only fails once the graph reaches the GPU."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "voice only", "reference_audios": [{"audio_base64": _TINY_WAV}]},
+        expect_refusal=True)
+    assert "requires at least one reference image" in reply
+
+
+def test_reference_audio_refuses_more_clips_than_it_has_slots(tmp_path):
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x",
+         "reference_images": [{"image_base64": _TINY_PNG}],
+         "reference_audios": [{"audio_base64": _TINY_WAV}] * 4},
+        expect_refusal=True)
+    assert "at most 3 reference audio clips" in reply or "Too big" in reply or "max" in reply
+
+
+def test_reference_image_bare_name_must_still_exist_in_the_input_folder(tmp_path):
+    """A bare name points at a previously staged input file, and the privacy
+    sweeper prunes those on a TTL — a name that worked minutes ago can be gone.
+    Unvalidated it rode into the graph and died on the remote lane as an opaque
+    prompt_outputs_failed_validation 400. The MCP must refuse at compile time,
+    naming the missing file and how to re-stage it."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "reference_images": [{"image_path": "media-studio-inline-deadbeef.png"}]},
+        expect_refusal=True)
+    assert "media-studio-inline-deadbeef.png" in reply
+    assert "not in the Comfy input folder" in reply
+    assert "image_base64" in reply, "the refusal must say how to re-stage the file"
+
+
+def test_reference_audio_bare_name_must_still_exist_in_the_input_folder(tmp_path):
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x",
+         "reference_images": [{"image_base64": _TINY_PNG}],
+         "reference_audios": [{"audio_path": "mcp_audio_swept_away.wav"}]},
+        expect_refusal=True)
+    assert "mcp_audio_swept_away.wav" in reply
+    assert "not in the Comfy input folder" in reply
+    assert "audio_base64" in reply, "the refusal must say how to re-stage the clip"
+
+
+def test_missing_staged_input_refusal_survives_machine_private_redaction(tmp_path):
+    """The reproduced failure shape: machine-private receipts redact every
+    error to a bare MediaStudioError, so a swept input was indistinguishable
+    from any other 400. Staged-input refusals carry no prompt or media content
+    (only the opaque staged filename), so they are exempt from the blanket
+    redaction — the caller needs the name to know what to re-stage."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "reference_images": [{"image_path": "media-studio-inline-deadbeef.png"}]},
+        expect_refusal=True,
+        env={"MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "1"})
+    assert "media-studio-inline-deadbeef.png" in reply
+    assert "not in the Comfy input folder" in reply
+
+
+def test_comfy_validation_details_survive_to_the_caller(tmp_path):
+    """When a lane still rejects a graph (prompt_outputs_failed_validation),
+    the useful part lives in node_errors — a SIBLING of `error` that used to be
+    dropped, leaving remote rejections unreadable even in server logs. The
+    digest keeps node/input/filename (staged names are opaque hashes, so it is
+    machine-private safe) and must drop details/input_config, which enumerate
+    the lane's entire input folder."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3",
+        {"prompt": "x", "image_base64": _TINY_PNG},
+        env={"MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "1"},
+        submit_response=(400, {
+            "error": {"type": "prompt_outputs_failed_validation",
+                      "message": "Prompt outputs failed validation", "details": "", "extra_info": {}},
+            "node_errors": {"78": {"class_type": "LoadImage", "errors": [{
+                "type": "value_not_in_list",
+                "message": "Value not in list",
+                "details": "image: 'mcp_inline_1_abc.png' not in ['neighbor-job-input.png']",
+                "extra_info": {"input_name": "image",
+                               "input_config": [["neighbor-job-input.png"], {}],
+                               "received_value": "mcp_inline_1_abc.png"}}]}},
+        }),
+        return_reply=True)
+    assert "LoadImage #78.image" in reply
+    assert "mcp_inline_1_abc.png" in reply
+    assert "neighbor-job-input.png" not in reply, \
+        "details/input_config leak the lane's input folder listing and must be dropped"
+
+
+def test_reference_bare_names_still_pass_through_when_the_file_exists(tmp_path):
+    """The legit staged-name reuse flow keeps working: a bare name that IS in
+    the input folder rides into the graph untouched, not re-staged."""
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / "kept-reference.png").write_bytes(b"\x89PNG\r\n\x1a\nkept")
+    (input_dir / "kept-voice.wav").write_bytes(b"RIFFkeptWAVEfmt ")
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "reuse the staged pair",
+        "reference_images": [{"image_path": "kept-reference.png"}],
+        "reference_audios": [{"audio_path": "kept-voice.wav"}],
+    })
+    image_loaders = [n for n in graph.values() if n["class_type"] == "LoadImage"]
+    assert [n["inputs"]["image"] for n in image_loaders] == ["kept-reference.png"]
+    audio_loaders = [n for n in graph.values() if n["class_type"] == "LoadAudio"]
+    assert [n["inputs"]["audio"] for n in audio_loaders] == ["kept-voice.wav"]
 
 
 def _tiny_video_data_url(tmp_path, *, with_audio=True, size="96x64", frames=30):

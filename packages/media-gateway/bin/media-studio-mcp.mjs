@@ -45,6 +45,9 @@ const comfyDir = process.env.COMFY_DIR || join(homedir(), 'comfy', 'ComfyUI');
 const comfyInputDir = process.env.COMFY_INPUT_DIR || join(homedir(), '.comfy-private.noindex', 'input');
 const maxInlineImageBytes = Number(process.env.MEDIA_STUDIO_MCP_MAX_INLINE_IMAGE_BYTES || 50 * 1024 * 1024);
 const maxInlineVideoBytes = Number(process.env.MEDIA_STUDIO_MCP_MAX_INLINE_VIDEO_BYTES || 18 * 1024 * 1024);
+// Reference audio clips are capped at 15s combined by the H3 model card, so
+// even lossless stereo stays small; the cap guards against non-audio payloads.
+const maxInlineAudioBytes = Number(process.env.MEDIA_STUDIO_MCP_MAX_INLINE_AUDIO_BYTES || 25 * 1024 * 1024);
 const machinePrivate = process.env.MEDIA_STUDIO_MCP_MACHINE_PRIVATE !== '0';
 const ltxErosApiWorkflowPath = process.env.MEDIA_STUDIO_LTX_EROS_API_WORKFLOW || process.env.ZIMG_LTX_EROS_API_WORKFLOW || join(comfyDir, 'workflows', 'civitai', 'ltx23-eros-anchor', 'ltx23-eros-anchor.user-image-api.json');
 const ltxErosMobileWorkflowDir = process.env.MEDIA_STUDIO_LTX_EROS_MOBILE_WORKFLOW_DIR || process.env.ZIMG_LTX_EROS_MOBILE_WORKFLOW_DIR || join(comfyDir, 'user', 'default', 'workflows');
@@ -762,6 +765,113 @@ async function stageVideoUrl(value) {
   return stageVideoBuffer(buffer, { mime, sourceName: basename(source.pathname) });
 }
 
+function extensionForAudioMime(mime) {
+  const normalized = String(mime || '').split(';')[0].trim().toLowerCase();
+  return {
+    'audio/wav': '.wav',
+    'audio/x-wav': '.wav',
+    'audio/wave': '.wav',
+    'audio/mpeg': '.mp3',
+    'audio/mp3': '.mp3',
+    'audio/flac': '.flac',
+    'audio/x-flac': '.flac',
+    'audio/ogg': '.ogg',
+    'audio/mp4': '.m4a',
+    'audio/x-m4a': '.m4a',
+    'audio/aac': '.aac',
+  }[normalized] || '';
+}
+
+function detectAudioExtension(buffer, mime, sourceName) {
+  if (buffer?.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WAVE') return '.wav';
+  if (buffer?.length >= 4 && buffer.toString('ascii', 0, 4) === 'fLaC') return '.flac';
+  if (buffer?.length >= 4 && buffer.toString('ascii', 0, 4) === 'OggS') return '.ogg';
+  if (buffer?.length >= 3 && buffer.toString('ascii', 0, 3) === 'ID3') return '.mp3';
+  if (buffer?.length >= 2 && buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) return '.mp3';
+  if (buffer?.length >= 12 && buffer.toString('ascii', 4, 8) === 'ftyp') return '.m4a';
+  const fromMime = extensionForAudioMime(mime);
+  if (fromMime) return fromMime;
+  const fromName = extname(String(sourceName || '')).toLowerCase();
+  return ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac'].includes(fromName) ? fromName : '';
+}
+
+function stageAudioBuffer(buffer, { mime = '', sourceName = '' } = {}) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('inline audio is empty');
+  if (buffer.length > maxInlineAudioBytes) {
+    throw new Error(`inline audio is too large; max ${Math.round(maxInlineAudioBytes / 1024 / 1024)} MB (reference clips are 15 seconds at most anyway)`);
+  }
+  const ext = detectAudioExtension(buffer, mime, sourceName);
+  if (!ext) throw new Error(`inline audio must be WAV, MP3, FLAC, OGG, M4A, or AAC; received ${mime || 'unknown type'}`);
+  mkdirSync(comfyInputDir, { recursive: true });
+  const stagedName = `mcp_audio_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}${ext}`;
+  writeFileSync(join(comfyInputDir, stagedName), buffer);
+  return stagedName;
+}
+
+function decodeBase64Audio(value) {
+  const text = String(value || '').trim();
+  if (!text) throw new Error('audio_base64 is empty');
+  const dataUrl = text.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.*)$/is);
+  const mime = dataUrl ? String(dataUrl[1] || '').trim().toLowerCase() : '';
+  if (mime && !mime.startsWith('audio/')) throw new Error(`audio_base64 data URL must be audio/*, got ${mime}`);
+  let encoded = (dataUrl ? dataUrl[2] : text).replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/');
+  if (!encoded || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('audio_base64 is not valid base64');
+  encoded = encoded.padEnd(Math.ceil(encoded.length / 4) * 4, '=');
+  return { buffer: Buffer.from(encoded, 'base64'), mime };
+}
+
+function stageBase64Audio(value) {
+  const decoded = decodeBase64Audio(value);
+  return stageAudioBuffer(decoded.buffer, { mime: decoded.mime });
+}
+
+async function stageAudioUrl(value) {
+  const source = new URL(String(value || '').trim());
+  if (!['http:', 'https:'].includes(source.protocol)) throw new Error('audio_url must be http or https');
+  const response = await fetch(source, {
+    headers: { Accept: 'audio/*,application/octet-stream' },
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!response.ok) throw new Error(`audio_url fetch failed: HTTP ${response.status}`);
+  const length = Number(response.headers.get('content-length') || 0);
+  if (length && length > maxInlineAudioBytes) {
+    throw new Error(`audio_url is too large; max ${Math.round(maxInlineAudioBytes / 1024 / 1024)} MB`);
+  }
+  const mime = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return stageAudioBuffer(buffer, { mime, sourceName: basename(source.pathname) });
+}
+
+// Resolves one reference_audios entry to a Comfy input filename: inline data
+// and URLs are staged, an absolute path is copied in, and a bare name must
+// already be in the input folder (same contract as ref images).
+async function audioSourceFromEntry(entry = {}) {
+  const audioBase64 = entry.audio_base64;
+  if (audioBase64 !== undefined && audioBase64 !== null && String(audioBase64).trim() !== '') {
+    return stageBase64Audio(audioBase64);
+  }
+  const audioUrl = entry.audio_url;
+  if (audioUrl !== undefined && audioUrl !== null && String(audioUrl).trim() !== '') {
+    return stageAudioUrl(audioUrl);
+  }
+  const audioPath = String(entry.audio_path ?? '').trim();
+  if (!audioPath) return undefined;
+  if (!isAbsolute(audioPath)) {
+    return requireStagedInputFile(audioPath, { field: 'audio_path', restage: 'audio_base64, audio_url, or an absolute path' });
+  }
+  const source = resolve(audioPath);
+  if (!existsSync(source)) throw new Error(`audio_path not found: ${audioPath}`);
+  const alreadyInput = inputRelativeName(source);
+  if (alreadyInput) return alreadyInput;
+  if (!detectAudioExtension(null, '', source)) {
+    throw new Error(`audio_path must be WAV, MP3, FLAC, OGG, M4A, or AAC: ${audioPath}`);
+  }
+  mkdirSync(comfyInputDir, { recursive: true });
+  const stagedName = `mcp_audio_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}${extname(source).toLowerCase()}`;
+  copyFileSync(source, join(comfyInputDir, stagedName));
+  return stagedName;
+}
+
 async function stageInlineImageFromArgs(args = {}) {
   const params = args.params && typeof args.params === 'object' ? args.params : {};
   const imageBase64 = args.image_base64 ?? params.image_base64;
@@ -950,10 +1060,30 @@ function inputRelativeName(path) {
   return rel.split(sep).join('/');
 }
 
+// A bare/relative name names a file the caller believes is already staged in
+// the Comfy input folder. The privacy sweeper prunes staged plaintext on a
+// TTL, so a name that worked minutes ago can be gone — and a graph carrying a
+// vanished name fails remote-lane validation as an opaque 400 long after this
+// process could have said which file was missing. Refuse it here instead.
+function requireStagedInputFile(name, { field, restage }) {
+  if (!existsSync(join(comfyInputDir, name))) {
+    const error = new Error(
+      `${field} "${name}" is not in the Comfy input folder — staged inputs are pruned after a `
+      + `privacy TTL, so re-send the file as ${restage} instead of reusing its staged name`,
+    );
+    error.status = 400;
+    error.machineSafe = true;
+    throw error;
+  }
+  return name;
+}
+
 function stageLtxErosImage(imagePathOrName, fallbackName) {
   const value = String(imagePathOrName || fallbackName || '').trim();
   if (!value) throw new Error('image_path is required for LTX Eros video generation');
-  if (!isAbsolute(value)) return value;
+  if (!isAbsolute(value)) {
+    return requireStagedInputFile(value, { field: 'image_path', restage: 'image_base64, image_url, or an absolute path' });
+  }
   const source = resolve(value);
   if (!existsSync(source)) throw new Error(`image_path not found: ${value}`);
   const alreadyInput = inputRelativeName(source);
@@ -2215,6 +2345,47 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     }
     settings.referenceImageNames = staged;
   }
+  // Reference audio: voice/music cloning through the same autogrow contract.
+  // Clip N is the prompt's <Audio N> (numbered independently of <Picture N>),
+  // and every unfilled slot is pruned the same way — a real Comfy lane rejects
+  // an empty LoadAudio filename at submit. The model card caps clips at 2-15s
+  // each and 15s combined, and forbids audio as the sole reference, so an
+  // audio-only request fails loudly here instead of as a lane-side error.
+  if (Array.isArray(workflow.reference_audio_slots) && workflow.reference_audio_slots.length) {
+    const supplied = Array.isArray(args.reference_audios) ? args.reference_audios : [];
+    if (supplied.length > workflow.reference_audio_slots.length) {
+      throw new Error(
+        `workflow ${workflow.id} accepts at most ${workflow.reference_audio_slots.length} reference audio clips`,
+      );
+    }
+    if (supplied.length && !settings.referenceImageNames?.length) {
+      throw new Error(
+        `workflow ${workflow.id} cannot take reference audio alone — supply at least one reference image alongside it`,
+      );
+    }
+    const stagedAudio = [];
+    for (const [index, slot] of workflow.reference_audio_slots.entries()) {
+      const entry = supplied[index];
+      const source = entry ? await audioSourceFromEntry(entry) : undefined;
+      if (source !== undefined) {
+        stagedAudio.push(source);
+        setMappedApiInput(promptGraph, slot, source);
+        continue;
+      }
+      const normalized = normalizeSlot(slot);
+      if (!normalized) continue;
+      delete promptGraph[normalized.node];
+      for (const node of Object.values(promptGraph)) {
+        if (!node?.inputs) continue;
+        for (const [key, value] of Object.entries(node.inputs)) {
+          if (Array.isArray(value) && String(value[0]) === String(normalized.node)) {
+            delete node.inputs[key];
+          }
+        }
+      }
+    }
+    if (stagedAudio.length) settings.referenceAudioNames = stagedAudio;
+  }
   if (timelineImageName) settings.timelineImageName = timelineImageName;
   if (ingredientSheet) {
     settings.ingredientSheet = {
@@ -2552,13 +2723,39 @@ async function requestJson(path, { method = 'GET', body, query, timeoutMs = 6000
     // Stringify object errors: a structured {error:{...}} body used to surface as
     // the literal "[object Object]", hiding the only useful diagnostic.
     const raw = data?.error ?? data?.message ?? text ?? `HTTP ${response.status}`;
-    const message = typeof raw === 'string' ? raw : JSON.stringify(raw);
-    const err = new Error(message);
+    let message = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    // ComfyUI validation failures put the useful part in a node_errors SIBLING
+    // of `error`, which the line above drops — a rejected graph then reads as a
+    // bare "prompt_outputs_failed_validation". Keep the digest on the message.
+    const nodeErrorDetail = comfyNodeErrorSummary(data?.node_errors);
+    const err = new Error(nodeErrorDetail ? `${message}; ${nodeErrorDetail}` : message);
     err.status = response.status;
     err.response = data;
+    if (nodeErrorDetail) err.machineSafe = true;
     throw err;
   }
   return data;
+}
+
+// Compact digest of ComfyUI's node_errors payload. Only private-safe parts
+// survive: node id, class type, input name, error message, and the received
+// value (input filenames are opaque mcp_* names). `details` and `input_config`
+// are dropped — value_not_in_list puts the lane's ENTIRE input folder listing
+// in them.
+function comfyNodeErrorSummary(nodeErrors) {
+  if (!nodeErrors || typeof nodeErrors !== 'object' || Array.isArray(nodeErrors)) return '';
+  const parts = [];
+  for (const [nodeId, nodeError] of Object.entries(nodeErrors)) {
+    const classType = String(nodeError?.class_type || '').trim();
+    for (const item of Array.isArray(nodeError?.errors) ? nodeError.errors : []) {
+      const input = item?.extra_info?.input_name ? `.${item.extra_info.input_name}` : '';
+      const received = item?.extra_info?.received_value !== undefined
+        ? ` (received ${JSON.stringify(item.extra_info.received_value)})`
+        : '';
+      parts.push(`${classType || 'node'} #${nodeId}${input}: ${item?.message || item?.type || 'invalid'}${received}`);
+    }
+  }
+  return parts.slice(0, 8).join('; ');
 }
 
 function ok(data) {
@@ -2617,7 +2814,7 @@ function machineOperationReceipt(value) {
 }
 
 function machineFailureReceipt(error) {
-  return {
+  const receipt = {
     ok: false,
     privacy: 'machine-redacted',
     status: error?.status,
@@ -2625,6 +2822,12 @@ function machineFailureReceipt(error) {
     prompts_redacted: true,
     media_redacted: true,
   };
+  // Errors marked machineSafe carry no prompt or media content — only Comfy
+  // input filenames (opaque mcp_* names) and node/input identifiers. They are
+  // exempt from the blanket redaction because the caller needs the message to
+  // recover (e.g. re-stage a swept input file) instead of seeing an opaque 400.
+  if (error?.machineSafe && error?.message) receipt.error = String(error.message);
+  return receipt;
 }
 
 function authorizedHttpRequest(req) {
@@ -2989,6 +3192,18 @@ function buildServer() {
       })).max(9).optional().describe(
         'MiniMax H3 Reference mode: up to nine reference pictures, in order. '
         + 'Reference N is the prompt\'s <Picture N>.',
+      ),
+      reference_audios: z.array(z.object({
+        audio_path: z.string().optional(),
+        audio_base64: z.string().optional(),
+        audio_url: z.string().optional(),
+      })).max(3).optional().describe(
+        'MiniMax H3 Reference mode: up to three voice (or music) reference clips, in order — clip N is the '
+        + 'prompt\'s <Audio N>, numbered independently of pictures. Each clip 2-15s, 15s combined, WAV/MP3/FLAC/OGG/M4A/AAC; '
+        + 'requires at least one reference image alongside. Clones the voice two ways: tag the prompt summary '
+        + '[audio reuse] to reperform the clip\'s exact words (keep them verbatim, original language, inside <d>…</d>), '
+        + 'or [audio reference] to lend only its timbre and delivery to NEW dialogue (never repeat the source words). '
+        + 'Define each in subject_definitions, e.g. "<Audio 1> is the voice-timbre reference for <Subject 1> (S1)."',
       ),
       loras: z.array(z.object({
         id: z.string().min(1),

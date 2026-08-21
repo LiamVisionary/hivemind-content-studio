@@ -1,5 +1,5 @@
 {
-  "comment": "MiniMax H3 reference mode. Conditions on up to nine reference pictures through MiniMaxH3ReferenceToVideo's autogrow ref_images inputs rather than a first/last frame. Same weights and lane as minimax-h3; prompts follow the ref_en guide's subject_definitions / retention_analysis format.",
+  "comment": "MiniMax H3 reference mode. Conditions on up to nine reference pictures (autogrow ref_images) and up to three standalone reference audio clips (autogrow ref_audios — voice/music timbre cloning; each 2-15s, 15s total, never audio alone) through MiniMaxH3ReferenceToVideo rather than a first/last frame. Same weights and lane as minimax-h3; prompts follow the ref_en guide's subject_definitions / retention_analysis format with <Picture i> / <Audio j> labels.",
   "prompt": {
     "6": {
       "class_type": "UNETLoader",
@@ -117,6 +117,18 @@
         ],
         "ref_images.ref_image_9": [
           "128",
+          0
+        ],
+        "ref_audios.ref_audio_1": [
+          "129",
+          0
+        ],
+        "ref_audios.ref_audio_2": [
+          "130",
+          0
+        ],
+        "ref_audios.ref_audio_3": [
+          "131",
           0
         ]
       },
@@ -317,6 +329,33 @@
       },
       "_meta": {
         "title": "Reference picture 9"
+      }
+    },
+    "129": {
+      "class_type": "LoadAudio",
+      "inputs": {
+        "audio": ""
+      },
+      "_meta": {
+        "title": "Reference audio 1"
+      }
+    },
+    "130": {
+      "class_type": "LoadAudio",
+      "inputs": {
+        "audio": ""
+      },
+      "_meta": {
+        "title": "Reference audio 2"
+      }
+    },
+    "131": {
+      "class_type": "LoadAudio",
+      "inputs": {
+        "audio": ""
+      },
+      "_meta": {
+        "title": "Reference audio 3"
       }
     }
   }
