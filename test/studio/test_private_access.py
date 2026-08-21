@@ -275,6 +275,36 @@ def test_canvas_history_indexes_e2e_only_outputs_and_purges_sealed_locator_rows(
         ).fetchone()[0] == 0
 
 
+def test_canvas_history_ignores_the_second_recipient_envelope_beside_an_output(tmp_path: Path) -> None:
+    """A dual-sealed generation is ONE generation, however many keys can open it.
+
+    An agent-submitted job — a rental harvest, or any local job with a
+    requesting agent — lands two envelopes for the same media: the owner's
+    <name>.e2e and the agent's <name>.agent-<fp>.e2e beside it. Only the
+    owner's is a generation this studio can show; the agent's copy is sealed to
+    a key this host does not hold, so surfacing it would mean a second tile for
+    the same clip that nothing here could ever decrypt.
+    """
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    logical = "cmf-41eecc4f-minimax_h3_00001_.mp4"
+    fingerprint = "b8c09d11fbfe53e0c2de8857adc7e6f2"
+    (output_root / f"{logical}.e2e").write_bytes(b"owner-envelope")
+    (output_root / f"{logical}.agent-{fingerprint}.e2e").write_bytes(b"agent-envelope")
+
+    records = CanvasGatewayClient(output_roots=[output_root]).filesystem_history()
+
+    assert [Path(record["outputs"][0]).name for record in records] == [logical]
+
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    store = CanvasHistoryStore(tmp_path / "canvas.sqlite3", cipher=cipher)
+    store.sync(records)
+    items = store.page(page=1, page_size=10)["items"]
+    assert len(items) == 1
+    assert items[0]["media_type"] == "video/mp4"
+    assert items[0]["encrypted_at_rest"] is True
+
+
 def test_canvas_history_pages_deduplicated_outputs_and_filters_by_file_format(tmp_path: Path) -> None:
     output_root = tmp_path / "output"
     output_root.mkdir()

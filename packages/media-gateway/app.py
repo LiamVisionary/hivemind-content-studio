@@ -1474,6 +1474,31 @@ def sealing_spki_for_route(route):
     return normalized_requester_spki((route or {}).get("requester_spki")) or vault_public_key_spki()
 
 
+def sealing_recipients_for_route(route):
+    """(owner, agent) public keys for a remote job's harvested outputs.
+
+    A harvest used to seal to exactly ONE recipient — the requester — so an
+    agent-submitted rental job produced media the owner's own studio could
+    never open: History failed to decrypt the tile and Download saved the
+    enc:v1 JSON. The local path solved this long ago by sealing twice; this is
+    that same split for the remote path. The owner's envelope keeps the plain
+    <name>.e2e path every existing reader already looks for, and the agent
+    keeps its access through <name>.agent-<fp>.e2e.
+
+    Both halves move together under the one flag the local path and
+    send_output_file() already use. With dual seal off there is still exactly
+    one envelope and it stays sealed to whoever asked for the job — flipping it
+    to the owner alone would take the agent's access away without the read side
+    ever offering it a copy it could open. With no owner vault yet, likewise:
+    one envelope, to the requester, exactly as before.
+    """
+    owner = vault_public_key_spki()
+    if not AGENT_DUAL_SEAL_ENABLED or not owner:
+        return sealing_spki_for_route(route), None
+    agent = normalized_requester_spki((route or {}).get("requester_spki"))
+    return owner, (agent if agent != owner else None)
+
+
 def _prompt_input_file_refs(body):
     """Local Comfy input files a prompt graph references (LoadImage-style
     string inputs). These are what must be staged onto a remote lane."""
@@ -1591,14 +1616,19 @@ def remote_output_logical_name(prompt_id, filename):
 
 
 def harvest_remote_comfy_outputs(prompt_id, history):
-    """Fetch a finished remote prompt's outputs and seal each to the requester
-    key BEFORE anything persists. Plaintext bytes only ever touch a 0600
-    staging file inside the gateway's private state dir - never a shared
-    output dir. Returns the logical output names."""
+    """Fetch a finished remote prompt's outputs and seal each to its recipients
+    BEFORE anything persists. Plaintext bytes only ever touch a 0600 staging
+    file inside the gateway's private state dir - never a shared output dir.
+    Returns the logical output names.
+
+    An agent-submitted job seals twice from that one staging file (owner and
+    agent, see sealing_recipients_for_route), so both can read the result and
+    neither the plaintext nor a second key ever leaves this function."""
     route = comfy_prompt_route(prompt_id) or {}
-    spki = sealing_spki_for_route(route)
+    spki, agent_spki = sealing_recipients_for_route(route)
     if not spki:
         raise RuntimeError("no sealing key: the requester presented none and no owner vault exists")
+    agent_fp = requester_fingerprint(agent_spki)
     lane = route.get("lane") or "default"
     harvested = []
     for ref in _comfy_history_output_refs(history):
@@ -1615,6 +1645,18 @@ def harvest_remote_comfy_outputs(prompt_id, history):
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(data)
             _seal_file_with_helper(spki, staged, envelope, logical_name)
+            if agent_fp:
+                # Secondary recipient: never at the cost of the owner's copy,
+                # which is already on disk by here. A failure is logged and the
+                # harvest carries on, exactly as the local path does.
+                try:
+                    _seal_file_with_helper(
+                        agent_spki, staged,
+                        agent_envelope_path_for(COMFY_OUTPUT_DIR / logical_name, agent_fp),
+                        logical_name,
+                    )
+                except Exception as exc:
+                    print(f"[agent-seal] second recipient failed for {logical_name}: {exc}", file=sys.stderr)
         finally:
             try:
                 staged.unlink()

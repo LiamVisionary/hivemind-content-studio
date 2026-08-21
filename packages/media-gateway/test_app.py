@@ -26,6 +26,16 @@ def load_app():
     return app
 
 
+def open_sealed_envelope(path, key_path):
+    """The plaintext inside an enc:v1 envelope, via the real unseal helper.
+
+    Sealing is only worth asserting on with real keys: a mocked cipher cannot
+    show that one recipient's key opens its envelope and not the other's."""
+    import media_unseal
+    envelope = json.loads(Path(path).read_text(encoding='utf-8'))
+    return media_unseal.unseal(envelope, media_unseal.load_private_key(key_path))
+
+
 class ZImageAppTests(unittest.TestCase):
     def test_ltx_mlx_runtime_prefers_persistent_checkout_over_temp(self):
         app = load_app()
@@ -2062,11 +2072,6 @@ class ZImageAppTests(unittest.TestCase):
             'agent_key': agent_key, 'agent_spki': agent_spki,
         }
 
-    def _open_envelope(self, path, key_path):
-        import media_unseal
-        envelope = json.loads(Path(path).read_text(encoding='utf-8'))
-        return media_unseal.unseal(envelope, media_unseal.load_private_key(key_path))
-
     def test_agent_dual_seal_gives_each_recipient_its_own_openable_envelope(self):
         app = load_app()
         with TemporaryDirectory() as td:
@@ -2092,13 +2097,13 @@ class ZImageAppTests(unittest.TestCase):
                 # Distinct envelopes (fresh DEK + IV each), same plaintext.
                 self.assertNotEqual(owner_envelope.read_bytes(), agent_envelope.read_bytes())
                 expected = b'\x89PNG\r\n\x1a\n' + b'pixels-that-only-a-key-holder-sees'
-                self.assertEqual(self._open_envelope(owner_envelope, fx['owner_key']), expected)
-                self.assertEqual(self._open_envelope(agent_envelope, fx['agent_key']), expected)
+                self.assertEqual(open_sealed_envelope(owner_envelope, fx['owner_key']), expected)
+                self.assertEqual(open_sealed_envelope(agent_envelope, fx['agent_key']), expected)
                 # Neither key opens the other's envelope.
                 with self.assertRaises(Exception):
-                    self._open_envelope(owner_envelope, fx['agent_key'])
+                    open_sealed_envelope(owner_envelope, fx['agent_key'])
                 with self.assertRaises(Exception):
-                    self._open_envelope(agent_envelope, fx['owner_key'])
+                    open_sealed_envelope(agent_envelope, fx['owner_key'])
 
     def test_agent_dual_seal_only_touches_jobs_that_registered_a_key(self):
         app = load_app()
@@ -4104,6 +4109,7 @@ class RemoteComfyLaneTests(unittest.TestCase):
                  patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
                  patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
                  patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', False), \
                  patch.object(app, '_seal_file_with_helper', side_effect=fake_seal), \
                  patch.object(app, 'urlopen', side_effect=fake_urlopen):
                 app.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
@@ -4122,6 +4128,203 @@ class RemoteComfyLaneTests(unittest.TestCase):
                 self.assertEqual(app.comfy_prompt_route(pid)['status'], 'harvested')
                 self.assertIn('/view?', fetched[0])
                 self.assertIn('filename=video_00001_.mp4', fetched[0])
+
+    def _harvest_keypairs(self, root):
+        """Real RSA keys for the harvest path, as media_unseal would mint them.
+
+        Fakes would prove nothing here: the claim under test is that two
+        independent private keys each open their own envelope and neither opens
+        the other's, which only real crypto can show.
+        """
+        import media_unseal
+
+        owner_key = Path(root) / 'owner.pem'
+        agent_key = Path(root) / 'agent.pem'
+        return {
+            'owner_key': owner_key, 'owner_spki': media_unseal.generate_keypair(owner_key),
+            'agent_key': agent_key, 'agent_spki': media_unseal.generate_keypair(agent_key),
+        }
+
+    def _harvest_urlopen(self, payload, fetched):
+        class FakeResponse:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return payload
+
+        def fake_urlopen(request, timeout=None):
+            fetched.append(request.full_url)
+            return FakeResponse()
+
+        return fake_urlopen
+
+    def test_remote_harvest_gives_the_owner_and_the_agent_each_an_openable_envelope(self):
+        """A rental job an agent submitted must not lock the owner out.
+
+        The harvest sealed to a single recipient — the requester — so an
+        agent-submitted job came back as media the owner's own studio could
+        never open: the History tile failed to decrypt and Download saved the
+        enc:v1 JSON with an .mp4 name. The owner's envelope now keeps the plain
+        <name>.e2e path every reader already looks for, and the agent keeps its
+        access through its own <name>.agent-<fp>.e2e alongside it.
+        """
+        app = load_app()
+        pid = 'remote-prompt-dual'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        payload = b'MP4BYTES-that-only-a-key-holder-sees'
+        fetched = []
+
+        with TemporaryDirectory() as tmp:
+            keys = self._harvest_keypairs(tmp)
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app, 'vault_public_key_spki', return_value=keys['owner_spki']), \
+                 patch.object(app, 'urlopen', side_effect=self._harvest_urlopen(payload, fetched)):
+                app.record_comfy_prompt_route(pid, 'rental', requester_spki=keys['agent_spki'])
+                harvested = app.harvest_remote_comfy_outputs(pid, history)
+                self.assertEqual(app.comfy_prompt_route(pid)['status'], 'harvested')
+
+            logical = out_dir / harvested[0]
+            owner_envelope = app.e2e_envelope_path_for(logical)
+            agent_envelope = app.agent_envelope_path_for(
+                logical, app.requester_fingerprint(keys['agent_spki']))
+
+            # Exactly two envelopes and no plaintext: the owner's at the path
+            # History reads, the agent's beside it.
+            self.assertEqual(
+                sorted(p.name for p in out_dir.iterdir()),
+                sorted([owner_envelope.name, agent_envelope.name]))
+            self.assertEqual(list(state_dir.glob('.remote-harvest-*')), [])
+            # Distinct envelopes (fresh DEK + IV each), same fetched bytes.
+            self.assertNotEqual(owner_envelope.read_bytes(), agent_envelope.read_bytes())
+            self.assertEqual(open_sealed_envelope(owner_envelope, keys['owner_key']), payload)
+            self.assertEqual(open_sealed_envelope(agent_envelope, keys['agent_key']), payload)
+            # Neither key opens the other's envelope.
+            with self.assertRaises(Exception):
+                open_sealed_envelope(owner_envelope, keys['agent_key'])
+            with self.assertRaises(Exception):
+                open_sealed_envelope(agent_envelope, keys['owner_key'])
+
+    def test_history_shows_one_tile_for_a_dual_sealed_output(self):
+        """Two recipients, one generation.
+
+        The harvest now drops a second envelope beside the owner's, in the same
+        shared output dir the file-fallback history walks. The agent's copy is
+        sealed to a key this host does not hold, so listing it would offer the
+        owner a tile their browser could never decrypt — the very symptom the
+        dual seal exists to remove."""
+        app = load_app()
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            out_dir.mkdir()
+            logical = out_dir / 'cmf-41eecc4f-minimax_h3_00001_.mp4'
+            fingerprint = 'b8c09d11fbfe53e0c2de8857adc7e6f2'
+            app.e2e_envelope_path_for(logical).write_text('{"ciphertext":"owner"}')
+            app.agent_envelope_path_for(logical, fingerprint).write_text('{"ciphertext":"agent"}')
+            with patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app, 'OUT_DIR', out_dir), \
+                 patch.object(app, '_workflow_index_records', {}):
+                records = app.output_file_records()
+        self.assertEqual([r['outputs'] for r in records], [[str(logical.resolve())]])
+
+    def test_remote_harvest_writes_one_envelope_when_there_is_no_second_recipient(self):
+        """No owner vault, and an owner-initiated job, each keep one envelope.
+
+        Without a vault there is nobody to seal a second copy to, so the
+        requester's single envelope stays exactly as it was; and a job the
+        owner started themselves never presents a requester key, so it must not
+        grow a stray agent envelope in the shared output dir.
+        """
+        app = load_app()
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        sealed = []
+
+        def fake_seal(spki, source, envelope, media_name):
+            sealed.append((spki, Path(envelope).name))
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        for label, owner_spki, requester_spki, expected_spki in (
+            ('no-vault', None, self.SPKI, self.SPKI),
+            ('owner-job', self.OTHER_SPKI, None, self.OTHER_SPKI),
+        ):
+            with self.subTest(case=label), TemporaryDirectory() as tmp:
+                sealed.clear()
+                out_dir = Path(tmp) / 'output'
+                state_dir = Path(tmp) / 'state'
+                pid = f'remote-prompt-single-{label}'
+                patches = self._route_state(app, tmp)
+                with patches, \
+                     patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                     patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                     patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                     patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                     patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                     patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                     patch.object(app, 'vault_public_key_spki', return_value=owner_spki), \
+                     patch.object(app, '_seal_file_with_helper', side_effect=fake_seal), \
+                     patch.object(app, 'urlopen', side_effect=self._harvest_urlopen(b'MP4BYTES', [])):
+                    app.record_comfy_prompt_route(pid, 'rental', requester_spki=requester_spki)
+                    harvested = app.harvest_remote_comfy_outputs(pid, history)
+
+                self.assertEqual(sealed, [(expected_spki, harvested[0] + '.e2e')])
+                self.assertEqual([p.name for p in out_dir.iterdir()], [harvested[0] + '.e2e'])
+
+    def test_remote_harvest_keeps_the_agent_copy_when_the_owner_copy_is_the_one_at_risk(self):
+        """A failed second seal may never cost the owner their only copy.
+
+        The agent's envelope is a convenience; the owner's is the generation.
+        So the owner seals first, and a failure sealing the agent copy is
+        logged and swallowed — the harvest still completes and still records
+        the output, exactly as the local path behaves.
+        """
+        app = load_app()
+        pid = 'remote-prompt-agent-fails'
+        history = {
+            'status': {'completed': True, 'status_str': 'success'},
+            'outputs': {'9': {'images': [{'filename': 'video_00001_.mp4', 'subfolder': '', 'type': 'output'}]}},
+        }
+        agent_fp = app.requester_fingerprint(self.SPKI)
+
+        def fake_seal(spki, source, envelope, media_name):
+            if spki == self.SPKI:
+                raise RuntimeError('seal helper exited 1')
+            Path(envelope).write_text(json.dumps({'ciphertext': 'sealed', 'wrapped_dek': 'dek', 'v': 1}))
+
+        with TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / 'output'
+            state_dir = Path(tmp) / 'state'
+            patches = self._route_state(app, tmp)
+            with patches, \
+                 patch.object(app, 'COMFY_LANES', {'rental': 'http://rental.test:8188'}), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', {'rental'}), \
+                 patch.object(app, 'COMFY_LANE_TOKENS', {'rental': 'lane-secret'}), \
+                 patch.object(app, 'COMFY_OUTPUT_DIR', out_dir), \
+                 patch.object(app, 'GATEWAY_STATE_DIR', state_dir), \
+                 patch.object(app, 'AGENT_DUAL_SEAL_ENABLED', True), \
+                 patch.object(app, 'vault_public_key_spki', return_value=self.OTHER_SPKI), \
+                 patch.object(app, '_seal_file_with_helper', side_effect=fake_seal), \
+                 patch.object(app, 'urlopen', side_effect=self._harvest_urlopen(b'MP4BYTES', [])):
+                app.record_comfy_prompt_route(pid, 'rental', requester_spki=self.SPKI)
+                harvested = app.harvest_remote_comfy_outputs(pid, history)
+                # The output is still recorded, so the scrub that follows can run.
+                self.assertEqual(app.comfy_prompt_route(pid)['status'], 'harvested')
+
+            self.assertEqual([p.name for p in out_dir.iterdir()], [harvested[0] + '.e2e'])
+            self.assertNotIn(agent_fp, ''.join(p.name for p in out_dir.iterdir()))
+            self.assertEqual(list(state_dir.glob('.remote-harvest-*')), [])
 
     def test_scrub_deletes_remote_files_and_drops_history(self):
         app = load_app()
