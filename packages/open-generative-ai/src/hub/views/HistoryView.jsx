@@ -10,7 +10,7 @@
 // history_id/prompt_id keys keep decrypted blob <img> srcs alive across the 10s
 // poll. Destructive deletes go through ConfirmModal (was a native <dialog>).
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useMediaSrc } from '../../hooks/hooks.js';
+import { useMediaSealFailure, useMediaSrc } from '../../hooks/hooks.js';
 import { registerMediaDownloadName } from '../../lib/e2eMedia.js';
 import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { downloadMedia } from '../../lib/downloadMedia.js';
@@ -25,7 +25,7 @@ import {
   setHistoryFilter, setPromptFavorite, titleCase, useHub,
 } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
-import { MediaThumb } from '../components/MediaThumb.jsx';
+import { MediaThumb, VaultLockedTile } from '../components/MediaThumb.jsx';
 
 const FILTERS = [
   { value: '', label: 'All' },
@@ -57,6 +57,11 @@ function useOnVisible(cb, { once = false, rootMargin = '0px', resetKey } = {}) {
 
 function CanvasVideoInner({ url }) {
   const src = useMediaSrc(url);
+  // useMediaSrc fails open to the raw envelope URL when this tab can't decrypt;
+  // a <video> pointed at that never leaves readyState 0 and reads as a broken
+  // generation. Say so instead.
+  const sealFailure = useMediaSealFailure(url);
+  if (sealFailure) return <VaultLockedTile reason={sealFailure} />;
   return <video src={src} controls controlsList="nodownload" preload="metadata" className="h-full w-full object-cover" />;
 }
 

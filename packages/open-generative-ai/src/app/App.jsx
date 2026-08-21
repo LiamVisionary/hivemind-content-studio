@@ -8,8 +8,9 @@
 // - navToken guards superseded navigations; page commits only after success
 // - stale-chunk recovery reloads once when a rebuilt dist 404s a lazy import
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Toaster } from 'react-hot-toast';
+import { toast, Toaster } from 'react-hot-toast';
 import { ExploreDock } from '../bridges/ExploreDock.jsx';
+import { MEDIA_DOWNLOAD_BLOCKED_EVENT } from '../lib/downloadMedia.js';
 import { OutputRestoreDropZone } from './OutputRestoreDropZone.jsx';
 import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
 import { Spinner } from '../ui/kit.jsx';
@@ -134,6 +135,18 @@ export function App() {
   useEffect(() => {
     navigate(initialPage());
   }, [navigate]);
+
+  // A refused download (sealed media this tab can't decrypt) has to say so — the
+  // alternative was writing envelope JSON under a .mp4 name and letting the owner
+  // discover it in ~/Downloads as a corrupt file.
+  useEffect(() => {
+    const onBlocked = (e) => toast.error(
+      e.detail?.message || "This output is encrypted and your vault can't open it.",
+      { duration: 7000 },
+    );
+    window.addEventListener(MEDIA_DOWNLOAD_BLOCKED_EVENT, onBlocked);
+    return () => window.removeEventListener(MEDIA_DOWNLOAD_BLOCKED_EVENT, onBlocked);
+  }, []);
 
   const isHub = Boolean(HUB_PAGES[page]);
 

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCivitaiDownloads, subscribeCivitaiDownloads } from '../lib/civitaiDownloadStore.js';
 import { getRentalLoras, refreshRentalLoras, subscribeRentalLoras } from '../lib/rentalLoras.js';
-import { peekResolvedMediaSrc, resolveMediaSrc } from '../lib/e2eMedia.js';
+import { mediaSealFailure, peekResolvedMediaSrc, resolveMediaSrc, subscribeMediaSealFailures } from '../lib/e2eMedia.js';
 import { captureImagePoster, captureVideoPoster, peekMediaPoster } from '../lib/mediaPoster.js';
 import { ensureLibraryLoaded, isLibraryLoaded, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
 import { getLang, setLang, t, tf } from '../lib/i18n.js';
@@ -74,6 +74,24 @@ export function useMediaSrc(url) {
     };
   }, [url]);
   return src;
+}
+
+// Why the sealed media at `url` could not be opened here ('locked',
+// 'undecryptable', or null), kept live by subscription.
+//
+// Reading the registry during render is NOT enough on its own: useMediaSrc's
+// fail-open setSrc hands back the same URL the element already had, and React
+// bails out of a re-render when the state value is unchanged — so the caller
+// would keep showing a dead player. The subscription is what guarantees the flip.
+export function useMediaSealFailure(url) {
+  const [reason, setReason] = useState(() => mediaSealFailure(url));
+  useEffect(() => {
+    setReason(mediaSealFailure(url));
+    return subscribeMediaSealFailures((changed) => {
+      if (changed === url) setReason(mediaSealFailure(url));
+    });
+  }, [url]);
+  return reason;
 }
 
 // A small poster for a sealed reference, as a data URL.

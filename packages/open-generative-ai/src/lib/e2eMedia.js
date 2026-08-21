@@ -12,6 +12,56 @@ import { ensureVaultReady } from './vaultSession.js';
 
 const blobCache = new Map(); // original url -> object URL
 
+// Sealed media this tab could NOT open, and why:
+//   'locked'        — the vault has no key here (fresh tab, owner cookie still
+//                     valid so the lock screen never stashed the passphrase)
+//   'undecryptable' — there is a key and the envelope refuses it (an
+//                     agent-sealed rental output, a re-created vault)
+// resolveMediaSrc stays fail-open and still hands back the ORIGINAL url for
+// both, so this side channel is the only way a caller can tell "plaintext media"
+// apart from "ciphertext I must not render or save". Without it an <img>/<video>
+// gets envelope JSON and dies quietly, and a download writes 2 MB of
+// {"ciphertext":…} under a .mp4 name.
+const sealFailures = new Map(); // original url -> reason
+const sealFailureListeners = new Set();
+
+function noteSealFailure(url, reason) {
+    // Every successful plaintext resolve clears; only a real change is announced.
+    if ((sealFailures.get(url) || null) === (reason || null)) return;
+    if (reason) sealFailures.set(url, reason); else sealFailures.delete(url);
+    // Display code holds a sync check; a listener that throws must not stop the rest.
+    for (const listener of sealFailureListeners) {
+        try { listener(url, reason || null); } catch { /* a bad subscriber is its own problem */ }
+    }
+}
+
+/** Why `url` could not be decrypted this session: 'locked', 'undecryptable', or null. */
+export function mediaSealFailure(url) {
+    return sealFailures.get(String(url || '')) || null;
+}
+
+/** True when `url` is a verified E2E envelope this tab cannot open (either reason). */
+export function isMediaVaultLocked(url) {
+    return mediaSealFailure(url) !== null;
+}
+
+/** Notified as (url, reason|null) whenever a URL's seal state changes. */
+export function subscribeMediaSealFailures(listener) {
+    sealFailureListeners.add(listener);
+    return () => sealFailureListeners.delete(listener);
+}
+
+// The one place that decides "these bytes are still sealed". The custom header is
+// authoritative when readable; Content-Type is the fallback that survives
+// cross-origin (the gateway sets no Expose-Headers) and is what a data: URL
+// carrying an inlined envelope announces about itself.
+export function isSealedEnvelopeResponse(response) {
+    const headers = response?.headers;
+    if (!headers?.get) return false;
+    if (headers.get('X-E2E-Media') === '1') return true;
+    return (headers.get('Content-Type') || '').includes('hivemind.e2e');
+}
+
 // Suggested download filename per media URL, registered by whoever knows which
 // MODEL produced the output (see downloadNames.js). A blob: URL carries no
 // filename of its own, so right-click "Save image as…" and the native <video>
@@ -41,18 +91,26 @@ export async function resolveMediaSrc(url) {
     } catch {
         return url; // network/CORS — let the element try normally
     }
-    // Detect E2E by the custom header when readable, else by Content-Type — the
-    // latter is always exposed cross-origin (the media comes from the gateway on
-    // a different origin, where custom headers are hidden without Expose-Headers).
-    const contentType = response.headers.get('Content-Type') || '';
-    const isE2E = response.headers.get('X-E2E-Media') === '1' || contentType.includes('hivemind.e2e');
-    if (!response.ok || !isE2E) {
-        // Legacy plaintext or non-media: don't buffer it here (videos must stream).
+    if (!response.ok) {
+        // An error page says nothing about whether the media is sealed, so any
+        // recorded seal failure stands.
         try { response.body?.cancel(); } catch { /* already consumed */ }
         return url;
     }
+    if (!isSealedEnvelopeResponse(response)) {
+        // Legacy plaintext or non-media: don't buffer it here (videos must stream).
+        try { response.body?.cancel(); } catch { /* already consumed */ }
+        noteSealFailure(url, null); // provably not an envelope
+        return url;
+    }
+    if (!(await ensureVaultReady())) {
+        // Verified envelope, no key in this tab. Still fail-open, but flagged, so
+        // display code can say "locked" instead of pointing an element at JSON.
+        try { response.body?.cancel(); } catch { /* already consumed */ }
+        noteSealFailure(url, 'locked');
+        return url;
+    }
     try {
-        if (!(await ensureVaultReady())) return url; // locked; can't decrypt now
         const envelope = await response.json();
         const bytes = await decryptMedia(envelope.ciphertext, envelope.wrapped_dek);
         const type = envelope.media_type || 'application/octet-stream';
@@ -61,10 +119,15 @@ export async function resolveMediaSrc(url) {
         // the object URL a filename for the browser's own download paths.
         const payload = name ? new File([bytes], name, { type }) : new Blob([bytes], { type });
         const blobUrl = URL.createObjectURL(payload);
+        noteSealFailure(url, null); // a later unlock opened it after all
         blobCache.set(url, blobUrl);
         return blobUrl;
     } catch {
-        return url; // fail open — never worse than today
+        // We hold a key and it did not open this envelope: sealed to someone else
+        // (an agent-sealed rental output), or the payload is damaged. Either way
+        // the bytes behind this URL are ciphertext.
+        noteSealFailure(url, 'undecryptable');
+        return url; // still fail open — never worse than today
     }
 }
 
@@ -85,4 +148,5 @@ export function revokeResolvedMedia(url) {
 export function clearResolvedMediaCache() {
     for (const blobUrl of blobCache.values()) URL.revokeObjectURL(blobUrl);
     blobCache.clear();
+    for (const url of [...sealFailures.keys()]) noteSealFailure(url, null);
 }
