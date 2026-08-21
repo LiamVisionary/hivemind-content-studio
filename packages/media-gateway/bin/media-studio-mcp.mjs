@@ -155,21 +155,6 @@ const ltxErosVariants = {
       seed: 42,
     },
   },
-  'exact-v1-merged-q8': {
-    title: 'Exact-v1 bf16 LoRA merged q8 distilled',
-    marker: 'Eros/native_mlx_ltx__exact-v1-merged-q8',
-    mobileWorkflow: 'LTX 2.3 Eros MLX Exact v1 Merged q8 Mobile.json',
-    benchmarkSeconds: 247.44,
-    defaults: {
-      image: 'e39e3b884e724eb8bb19e6176a408f42.png',
-      prompt: defaultLtxErosPrompt,
-      width: 480,
-      height: 832,
-      frames: 233,
-      frame_rate: 24,
-      seed: 42,
-    },
-  },
 };
 
 const ltxErosVariantAliases = {
@@ -321,7 +306,6 @@ const workflowAliases = {
   ltx: 'ltx23-eros-fast',
   'ltx-eros': 'ltx23-eros-fast',
   'ltx23-eros': 'ltx23-eros-fast',
-  exact: 'ltx23-eros-exact',
   fastregular: 'ltx23-regular-fp8',
   'fast-regular': 'ltx23-regular-fp8',
   'regular-fast': 'ltx23-regular-fp8',

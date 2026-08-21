@@ -245,11 +245,12 @@ LTX2_MLX_VARIANT_ALIASES = {
     "fast-q8": "fast-q8-v12",
     "fast_q8_v12": "fast-q8-v12",
     "mlx-bits-v12": "fast-q8-v12",
-    "exact": "exact-v1-merged-q8",
-    "exact-v1": "exact-v1-merged-q8",
-    "merged": "exact-v1-merged-q8",
-    "merged-q8": "exact-v1-merged-q8",
-    "exact_v1_merged_q8": "exact-v1-merged-q8",
+    # The exact-v1-merged-q8 build was retired along with the ltx23-eros-exact
+    # workflow, so its aliases are gone too rather than resolving to a key that
+    # LTX2_MLX_VARIANTS no longer defines. Outputs made on that lane still carry
+    # a native_mlx_ltx__exact-v1-merged-q8 marker; _normalize_ltx_mlx_variant now
+    # answers None for it, which is the "not a native MLX job" signal every
+    # caller already handles — see _ltx_mlx_variant_from_text.
     "regular": "regular-q8-distilled",
     "regular-q8": "regular-q8-distilled",
     "regular-fast": "regular-q8-distilled",

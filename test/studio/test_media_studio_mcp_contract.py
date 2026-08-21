@@ -294,7 +294,6 @@ def test_video_mcp_compiles_shared_keyframes_into_comfy_cuda_graph(tmp_path, wor
     mobile_workflow = {"nodes": [], "extra": {}}
     for name in (
         "LTX 2.3 Eros MLX Fast q8 v1.2 Mobile.json",
-        "LTX 2.3 Eros MLX Exact v1 Merged q8 Mobile.json",
         "LTX 2.3 Regular FP8 Mobile.json",
     ):
         (mobile_dir / name).write_text(json.dumps(mobile_workflow), encoding="utf-8")

@@ -189,7 +189,7 @@ def test_simple_catalog_combines_safe_hivemind_brains_and_media_capabilities(tmp
     gpt_image = next(item for item in catalog["media"]["image"] if item["id"] == "openai-gpt-image")
     assert next(model for model in gpt_image["models"] if model["id"] == "gpt-image-1.5")["max_reference_images"] == 16
     media_studio = next(item for item in catalog["media"]["video"] if item["id"] == "media-studio-mcp")
-    assert {model["id"] for model in media_studio["models"]} >= {"ltx23-eros-fast", "ltx23-eros-exact"}
+    assert {model["id"] for model in media_studio["models"]} >= {"ltx23-eros-fast", "ltx23-eros-dmd"}
     assert next(model for model in media_studio["models"] if model["id"] == "ltx23-eros-fast")["label"] == "LTX 2.3 Eros Fast"
     seedance = next(item for item in catalog["media"]["video"] if item["id"] == "muapi")
     assert next(model for model in seedance["models"] if model["id"] == "seedance-v2.0-t2v")["max_reference_images"] is None
