@@ -78,3 +78,34 @@ test('E2E media: fails open to the original URL on any error', async () => {
     assert.equal(await media.resolveMediaSrc('/image/x.png'), '/image/x.png');
     assert.equal(await media.resolveMediaSrc(''), '');
 });
+
+test('E2E media: locked vault fails open AND flags the URL as vault-locked', async () => {
+    stubStudioBrowser();
+    // A fresh tab whose owner cookie is still valid: the lock screen never ran,
+    // so there is no per-tab passphrase and the vault cannot bootstrap.
+    global.sessionStorage = { getItem: () => null };
+    // e2eMedia's un-suffixed vaultSession/e2eVault instances are shared across
+    // cases; the first test left that vault unlocked, so lock it back down.
+    const session = await import('../src/lib/vaultSession.js');
+    session.resetVaultSession();
+
+    let bodyCancelled = false;
+    global.fetch = async (url) => {
+        if (url === '/api/canvas/history/42/media') {
+            return {
+                ok: true,
+                headers: { get: (h) => (h === 'X-E2E-Media' ? '1' : h === 'Content-Type' ? 'application/vnd.hivemind.e2e+json' : null) },
+                json: async () => { throw new Error('envelope must not be read while locked'); },
+                body: { cancel() { bodyCancelled = true; } },
+            };
+        }
+        throw new Error(`unexpected ${url}`);
+    };
+    const media = await import(`../src/lib/e2eMedia.js?case=${Date.now()}-locked`);
+
+    const src = await media.resolveMediaSrc('/api/canvas/history/42/media');
+    assert.equal(src, '/api/canvas/history/42/media', 'still fail-open: the original URL comes back');
+    assert.equal(media.isMediaVaultLocked('/api/canvas/history/42/media'), true, 'the URL is flagged so tiles can offer the unlock flow');
+    assert.equal(media.isMediaVaultLocked('/api/canvas/history/other/media'), false, 'only verified envelopes are flagged');
+    assert.equal(bodyCancelled, true, 'the undecryptable envelope body is not downloaded');
+});

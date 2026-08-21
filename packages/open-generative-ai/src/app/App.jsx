@@ -13,6 +13,7 @@ import { ExploreDock } from '../bridges/ExploreDock.jsx';
 import { MEDIA_DOWNLOAD_BLOCKED_EVENT } from '../lib/downloadMedia.js';
 import { OutputRestoreDropZone } from './OutputRestoreDropZone.jsx';
 import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
+import { VaultUnlockModal } from '../bridges/VaultUnlockModal.jsx';
 import { Spinner } from '../ui/kit.jsx';
 import { HUB_PAGES, isKnownPage } from './navConfig.jsx';
 import { Shell } from './Shell.jsx';
@@ -183,6 +184,7 @@ export function App() {
       ) : null}
 
       <VaultRecoveryModal />
+      <VaultUnlockModal />
       <ExploreDock />
       <OutputRestoreDropZone />
       <Toaster
