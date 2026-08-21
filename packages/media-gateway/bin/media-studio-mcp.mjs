@@ -480,11 +480,11 @@ function publicWorkflow(workflow) {
     ...(Array.isArray(workflow.aspect_ratios) ? { aspect_ratios: workflow.aspect_ratios } : {}),
     // Capacity facts, published so the studio can refuse an impossible run in
     // the picker instead of letting it fail at submit. Both are needed to work
-    // out a ceiling: the budget gives the pixel-frames, the grid says which
-    // frame counts the graph can actually sample.
+    // out a ceiling: the budget gives the packed rows the card holds, the grid
+    // says which frame counts the graph can actually sample.
     ...(workflow.frame_grid ? { frame_grid: workflow.frame_grid } : {}),
-    ...(Number(workflow.motion_reference_budget?.max_reference_pixel_frames) > 0
-      ? { motion_reference_max_reference_pixel_frames: Number(workflow.motion_reference_budget.max_reference_pixel_frames) }
+    ...(Number(workflow.motion_reference_budget?.max_packed_rows) > 0
+      ? { motion_reference_max_packed_rows: Number(workflow.motion_reference_budget.max_packed_rows) }
       : {}),
   };
 }
@@ -992,94 +992,352 @@ const REF_VIDEO_MAX_PIXELS = 768 * 1344;
 // 25% slow and drag every gesture with it. Re-encode to a true 24 fps, hold the
 // model card's 15s ceiling, and land inside the reference-frame budget above.
 // Audio is kept only when the caller wants the clip's own soundtrack in.
-// A reference VIDEO is trimmed to the generated clip's own length, so its
-// tokens grow WITH the clip and ride every sampling step; reference PICTURES
-// cost a flat amount however long the clip is. That difference is the whole
-// budget. Measured 2026-08-13 on a rented 5090 (31.36GiB usable) in MiniMax H3
-// reference mode at 1216x704, nine pictures + a voice clip throughout:
+const REF_VIDEO_MAX_SECONDS = 15;
+// The model card's floor; normalizeReferenceVideo refuses anything shorter,
+// so a "trim to" lever below it would be advice the lane then rejects.
+const REF_VIDEO_MIN_SECONDS = 2;
+// Opt-in "compact" staging for MOTION references: fit the clip inside a
+// 384-short-edge x 1152-long-edge box, never upscaled. The node keeps our
+// frames rather than upscaling them, so the reference costs ~3.3x fewer
+// sequence rows than its 768-short-edge canvas and sampling runs about twice
+// as fast. Measured 2026-08-21 on the rented 5090, same seed, a 5s clip with
+// three pictures and a 5s phone reference: the full (704x1504 at the node), 544
+// and 384 renders sit 22-24dB PSNR / 0.86-0.88 SSIM from each other — the
+// between-seed noise — and ~17dB / 0.80 from the no-video control: the same
+// performance, the same motion. One scene, one seed, identity from pictures:
+// not validated for a video that IS the identity reference, which is why this
+// is a per-clip choice and not the default.
+const REF_VIDEO_COMPACT_SHORT_EDGE = 384;
+const REF_VIDEO_COMPACT_LONG_EDGE = 1152;
+
+// ---- The motion-reference VRAM budget --------------------------------------
 //
-//   with the motion clip     124f (5.2s) peak 20.89GiB  OK
-//                            141f (5.9s) peak 29.63GiB  OK   <- 94% of the card
-//                            158f (6.6s)                OUT OF MEMORY
-//   without it               158f (6.6s) peak 14.97GiB  OK
-//                            192f (8.0s) peak 15.44GiB  OK
+// Why a motion clip runs the card out when the same clip without one does not:
+// Comfy's memory planner sizes the DiT load from the noise latent alone.
+// comfy/model_base.py's MiniMaxH3 never sets memory_usage_factor_conds, so
+// memory_required() sees the OUTPUT canvas and length and nothing else, while
+// every reference — pictures, motion clips, soundtracks — rides in the
+// conditioning as `minimax_refs` and gets loaded around as if it were free.
+// The DynamicVRAM loader fills the card with the int8 DiT (19.5GiB of the
+// 31.36GiB) and what is left has to hold the activations of the WHOLE packed
+// sequence at once — about 98KB per row at block 0's qkv_proj — so the budget
+// is on total packed rows, clip and references alike. 2026-08-21 (job
+// 34a722c2) a 10s clip at 1216x704 with a 13.3s phone reference died there at
+// 26.47GiB + 6.21GiB; the same job under `--vram-headroom 12` died the same
+// way (27.55 + 6.46GiB), so the flag at 12 is not a remedy:
 //
-// 0.51GiB per frame with the motion clip against 0.014GiB per frame without —
-// 36x. That reading was taken on a different allocator and no longer holds —
-// see `motion_reference_budget.measured` in the registry for the 2026-08-15
-// re-measurement, where the per-reference-frame cost is roughly 0.9GiB across
-// 48->243 frames. What survives from it is the SHAPE of the rule, not the
-// number: a motion clip is the expensive kind of reference, and pictures are
-// flat cost however long the clip is.
+//   output video   latent_t(frames) × (W/16 × H/16) / 4  — a /16 VAE packed 1x2x2
+//   output audio   2 × round(frames/24 × 40)            — the joint audio latent
+//   each motion    latent_t(n) × (cw/16 × ch/16) / 4, where (cw, ch) is the
+//   clip           node's adapt_canvas() of the STAGED clip's own dimensions —
+//                  a 768-short-edge canvas capped at 768*1344, each axis rounded
+//                  to 32, never upscaled past the source — NOT the output canvas
+//                  (a portrait phone clip lands on 704x1504: 1,034 rows per
+//                  latent frame, against 836 for a 1216x704 output), and n is
+//                  its length trimmed to min(its own, the clip's) and then DOWN
+//                  to the 17k+5 lattice; plus, with use_audio, its soundtrack
+//                  encoded IN FULL (never trimmed to the clip): 2 × round(s × 40)
+//   each picture   at most the output's rows per latent frame (ref_image_size
+//                  "match" scales down to the output's pixel area)
+//   each voice     2 × round(s × 40)
+//   clip
 //
-// The budget is spent on the EFFECTIVE reference length, which the node defines
-// as min(the reference's own length, the clip's length):
+// latent_t(n) = ((n − 5) / 17) × 5 + 2 is video_latent_t() in
+// comfy_extras/nodes_minimax_h3.py; the other constants are the node's own.
+// Text tokens are not counted: the caller cannot change them, and the
+// measured points below include them. The old rule priced a reference at the
+// OUTPUT canvas per frame and ignored the soundtrack, which is how the job
+// above sat exactly at its ceiling and failed.
 //
-//   if frames.shape[0] > frame_count: frames = frames[:frame_count]
-//                                        — comfy_extras/nodes_minimax_h3.py
+// The budget lives on the workflow (`motion_reference_budget.max_packed_rows`)
+// rather than here, because the STUDIO has to know it too: this guard is the
+// backstop, not the user experience. A duration that cannot render should never
+// be offered in the picker, and the only way the picker and the guard agree is
+// if they read the same number (motion_reference_duration_limits in
+// media_studio.py mirrors this pricing). A workflow with no measured budget is
+// not guarded — an unmeasured card is not the same as a card that cannot do it.
 //
-// So a reference LONGER than the clip is trimmed down to it and the clip's
-// length is what costs; a reference SHORTER than the clip keeps its own length
-// and costs that much whatever the clip does. The old guard only modelled the
-// first case, so it capped the clip even when a two-second reference made the
-// full duration range affordable.
-//
-// The measured budget lives on the workflow rather than here, because the
-// STUDIO has to know it too: this guard is the backstop, not the user
-// experience. A duration that cannot render should never be offered in the
-// picker, and the only way the picker and the guard agree is if they read the
-// same number. A workflow with no measured budget is not guarded — an
-// unmeasured card is not the same as a card that cannot do it.
-function motionReferencePixelFrameBudget(workflow) {
-  const budget = Number(workflow?.motion_reference_budget?.max_reference_pixel_frames);
+// Anchors, all on a rented RTX 5090 (31.36GiB usable), ComfyUI 0.32.0,
+// cudaMallocAsync, DynamicVRAM, workflow minimax-h3-reference:
+//   142,366 rows   10s clip at 1216x704, 7 pictures, 13.3s soundtracked phone
+//                  reference (704x1504 at the node): OUT OF MEMORY, three times
+//                  (jobs 34a722c2, b9f5b32d, 103f6173 — the last two under
+//                  --vram-headroom 12 and 20 with IDENTICAL numbers, so that
+//                  flag is no lever) — 155,006 rows with its text, 6.21GiB of
+//                  qkv_proj
+//    95,092 rows   the same with the reference trimmed to 4s: sampled, but in
+//                  the thrash regime (73s a step against 28-31s for a plain
+//                  clip, the card pegged) and OUT OF MEMORY at step 4 (job
+//                  b2f76185) — so the edge for reference work is BELOW this,
+//                  and the budget has to keep a run out of the thrash, not
+//                  just out of the immediate failure
+//    76,600 rows   the same 10s clip with 3 pictures and the reference trimmed
+//                  to 6s and staged compact (384x832 at the node, 312 rows per
+//                  latent frame): SAMPLED steadily, 48.5s a step, torch pool
+//                  high-water 23.34GiB (job 69a108a5)
+//    66,900 rows   5s clip at 1216x704, 3 pictures, 5s full-canvas reference:
+//                  ran, 42.0s a step, torch 22.97GiB (job 1f9db575); the same
+//                  reference staged at 544 and 384 wide ran at 30.2s and 22.3s
+//                  a step (54k and 44k rows), three pictures alone at 15.1s (34k)
+//    90,658 rows   a plain 15s clip at 1216x704, no references: ran, torch pool
+//                  high-water 27.16GiB — ~7.7GiB of activations for ~92k rows
+// So a clean fit with normal step times is proven up to ~77k rows and the
+// thrash starts before 95k; 85,000 sits between. Reference rows also cost
+// steeply in TIME (15s a step for pictures alone, 42s with a full-canvas 5s
+// reference, 73s in the thrash). The 2026-08-15 "158 effective frames ran"
+// point (~98k rows) was read off nvidia-smi on another box and is not trusted. Re-measure by reading torch's
+// own peak (the OOM summary, or /system_stats torch_vram_total during
+// sampling), never nvidia-smi under cudaMallocAsync and never the first run
+// after an OOM — and never with workflow_id minimax-h3: references handed to
+// a workflow without slots used to be dropped silently, which is what the
+// 2026-08-21 "verified" probes had actually measured (see
+// assertReferenceSlotsExist below).
+const H3_CANVAS_MULTIPLE = 32;
+const H3_REFERENCE_BASE_SHORT_EDGE = 768;
+const H3_REFERENCE_MAX_PIXELS = REF_VIDEO_MAX_PIXELS;
+const H3_VAE_STRIDE = 16;
+const H3_LATENT_PIXELS_PER_ROW = 4;
+const H3_AUDIO_LATENT_FPS = 40;
+const H3_AUDIO_LATENT_ROWS_PER_FRAME = 2;
+// The most rows one latent frame of reference video can ever cost:
+// adapt_canvas() at its worst aspect (a ~7.6:1 panorama rounds to 2816x384).
+// Pre-flight prices an un-staged clip at this, so it can only over-count.
+const H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX = 1056;
+// ...and the most a COMPACT-staged clip can cost: the whole 1152x384 box. It
+// never upscales past the source, so this bounds every aspect ratio exactly.
+const H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX = h3RowsPerLatentFrame(REF_VIDEO_COMPACT_LONG_EDGE, REF_VIDEO_COMPACT_SHORT_EDGE);
+
+// video_latent_t() in comfy_extras/nodes_minimax_h3.py.
+function h3VideoLatentFrames(frameCount) {
+  const frames = Math.max(0, Math.round(Number(frameCount) || 0));
+  return frames <= 5 ? 2 : Math.floor((frames - 5) / 17) * 5 + 2;
+}
+
+function h3RowsPerLatentFrame(width, height) {
+  return (Math.floor(width / H3_VAE_STRIDE) * Math.floor(height / H3_VAE_STRIDE)) / H3_LATENT_PIXELS_PER_ROW;
+}
+
+function h3AudioLatentRows(seconds) {
+  return Math.round(Math.max(0, Number(seconds) || 0) * H3_AUDIO_LATENT_FPS) * H3_AUDIO_LATENT_ROWS_PER_FRAME;
+}
+
+// Python's round(): half to even. The node rounds each canvas axis with it, and
+// an even-pixel staged width of 16 mod 32 lands exactly on the half.
+function roundHalfEven(value) {
+  const floor = Math.floor(value);
+  const diff = value - floor;
+  if (diff > 0.5) return floor + 1;
+  if (diff < 0.5) return floor;
+  return floor % 2 === 0 ? floor : floor + 1;
+}
+
+// adapt_canvas() plus the never-upscale rule in MiniMaxH3ReferenceToVideo.execute.
+function h3ReferenceCanvas(width, height) {
+  const snap = (value) => Math.max(H3_CANVAS_MULTIPLE, roundHalfEven(value / H3_CANVAS_MULTIPLE) * H3_CANVAS_MULTIPLE);
+  const ratio = width / height;
+  let nominalWidth = ratio >= 1 ? H3_REFERENCE_BASE_SHORT_EDGE * ratio : H3_REFERENCE_BASE_SHORT_EDGE;
+  let nominalHeight = ratio >= 1 ? H3_REFERENCE_BASE_SHORT_EDGE : H3_REFERENCE_BASE_SHORT_EDGE / ratio;
+  if (nominalWidth * nominalHeight > H3_REFERENCE_MAX_PIXELS) {
+    const scale = Math.sqrt(H3_REFERENCE_MAX_PIXELS / (nominalWidth * nominalHeight));
+    nominalWidth *= scale;
+    nominalHeight *= scale;
+  }
+  let canvasWidth = snap(nominalWidth);
+  let canvasHeight = snap(nominalHeight);
+  if (width * height < canvasWidth * canvasHeight) {
+    canvasWidth = snap(width);
+    canvasHeight = snap(height);
+  }
+  return { width: canvasWidth, height: canvasHeight };
+}
+
+function motionReferenceRowBudget(workflow) {
+  const budget = Number(workflow?.motion_reference_budget?.max_packed_rows);
   return budget > 0 ? budget : null;
 }
 
-// The longest grid-legal stretch of motion reference this canvas can carry, or
-// null when the workflow has no measured budget. Shared by the guard below and
-// by the capability the studio picker reads, so both quote the same ceiling.
-function motionReferenceFrameCeiling(workflow, width, height) {
-  const budget = motionReferencePixelFrameBudget(workflow);
-  if (!budget || !(width > 0 && height > 0)) return null;
-  return gridFrameCountAtMost(workflow, Math.floor(budget / (width * height)));
+// Rows one motion clip adds to a clip of `clipFrames` frames. Dimensions and
+// length are the STAGED file's when known; an unknown length is priced as the
+// longest the lane will stage, an unknown canvas at the node's largest.
+function motionReferenceVideoRows(workflow, reference, clipFrames, frameRate) {
+  const seconds = Math.min(
+    Number(reference?.seconds) > 0 ? Number(reference.seconds) : REF_VIDEO_MAX_SECONDS,
+    REF_VIDEO_MAX_SECONDS,
+  );
+  const referenceFrames = Math.round(seconds * frameRate);
+  const effectiveFrames = gridFrameCountAtMost(workflow, Math.min(referenceFrames, clipFrames));
+  let rowsPerLatentFrame = reference?.compact
+    ? H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX
+    : H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX;
+  if (Number(reference?.width) > 0 && Number(reference?.height) > 0) {
+    const canvas = h3ReferenceCanvas(Number(reference.width), Number(reference.height));
+    rowsPerLatentFrame = h3RowsPerLatentFrame(canvas.width, canvas.height);
+  }
+  const videoRows = h3VideoLatentFrames(effectiveFrames) * rowsPerLatentFrame;
+  const audioRows = reference?.useAudio ? h3AudioLatentRows(seconds) : 0;
+  return { videoRows, audioRows, rows: videoRows + audioRows, effectiveFrames, seconds };
+}
+
+// The whole packed sequence for a run — output, motion clips, pictures, voice
+// clips — for a clip of `clipFrames` frames at the settings' canvas.
+function packedSequenceRows(workflow, settings, clipFrames) {
+  const width = Number(settings.width);
+  const height = Number(settings.height);
+  const frameRate = Number(settings.frameRate) || 24;
+  // The node aligns the clip UP to the lattice before anything is encoded.
+  const frames = normalizedGridFrameCount(workflow, clipFrames) ?? Math.round(Number(clipFrames) || 0);
+  const outputRowsPerLatentFrame = h3RowsPerLatentFrame(width, height);
+  const outputVideoRows = h3VideoLatentFrames(frames) * outputRowsPerLatentFrame;
+  const outputAudioRows = h3AudioLatentRows(frames / frameRate);
+  const videos = (Array.isArray(settings.referenceVideos) ? settings.referenceVideos : [])
+    .filter(Boolean)
+    .map((reference) => motionReferenceVideoRows(workflow, reference, frames, frameRate));
+  const pictureRows = (Number(settings.referenceImageCount) || 0) * outputRowsPerLatentFrame;
+  const audioSeconds = Array.isArray(settings.referenceAudioSeconds) ? settings.referenceAudioSeconds : [];
+  let voiceRows = 0;
+  for (let index = 0; index < (Number(settings.referenceAudioCount) || 0); index += 1) {
+    const seconds = Number(audioSeconds[index]) > 0 ? Number(audioSeconds[index]) : REF_VIDEO_MAX_SECONDS;
+    voiceRows += h3AudioLatentRows(Math.min(seconds, REF_VIDEO_MAX_SECONDS));
+  }
+  const referenceRows = videos.reduce((sum, item) => sum + item.rows, 0);
+  return {
+    total: outputVideoRows + outputAudioRows + referenceRows + pictureRows + voiceRows,
+    frames,
+    outputVideoRows,
+    outputAudioRows,
+    videos,
+    pictureRows,
+    voiceRows,
+  };
+}
+
+function gridFrameCountBelow(workflow, frames) {
+  const modulus = Math.round(Number(workflow?.frame_grid?.modulus));
+  if (!Number.isFinite(modulus) || modulus <= 0) return null;
+  const floor = normalizedGridFrameCount(workflow, 1);
+  const next = frames - modulus;
+  return next >= floor ? next : null;
+}
+
+// The longest clip that still fits with the references as attached — the first
+// lever the refusal names. Walks the lattice down from the asked length.
+function motionReferenceClipCeilingFrames(workflow, settings, budget) {
+  let frames = normalizedGridFrameCount(workflow, settings.frames);
+  if (frames === undefined) return null;
+  while (frames !== null) {
+    if (packedSequenceRows(workflow, settings, frames).total <= budget) return frames;
+    frames = gridFrameCountBelow(workflow, frames);
+  }
+  return null;
+}
+
+// The longest the motion clips could be, trimmed, for the clip as asked — the
+// other lever. A reference shorter than the clip keeps its own length.
+function motionReferenceTrimCeilingSeconds(workflow, settings, budget) {
+  const frameRate = Number(settings.frameRate) || 24;
+  let frames = gridFrameCountAtMost(workflow, REF_VIDEO_MAX_SECONDS * frameRate);
+  while (frames !== null) {
+    const trimmed = {
+      ...settings,
+      referenceVideos: (settings.referenceVideos || []).filter(Boolean)
+        .map((reference) => ({ ...reference, seconds: frames / frameRate })),
+    };
+    if (packedSequenceRows(workflow, trimmed, settings.frames).total <= budget) return frames / frameRate;
+    frames = gridFrameCountBelow(workflow, frames);
+  }
+  return null;
+}
+
+function thousands(value) {
+  return String(Math.round(Number(value) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// References handed to a workflow with no reference slots used to be dropped
+// without a word: the staging blocks below are gated on the slots existing, so
+// the graph sampled as plain text-to-video and the caller got a clip that had
+// never seen a single picture or motion clip they sent. Two sessions measured
+// "reference mode" VRAM ceilings against exactly that on 2026-08-21. Refuse,
+// and name the sibling that does take them — reference mode is a routing-only
+// workflow the studio reaches by itself, but an agent has to ask for it by id.
+const REFERENCE_SLOT_KEYS = [
+  ['reference_images', 'reference_image_slots', 'reference pictures'],
+  ['reference_videos', 'reference_video_slots', 'reference videos'],
+  ['reference_audios', 'reference_audio_slots', 'reference audio clips'],
+];
+
+function assertReferenceSlotsExist(workflow, args = {}) {
+  const orphaned = REFERENCE_SLOT_KEYS
+    .map(([argKey, slotKey, label]) => ({
+      argKey,
+      slotKey,
+      label,
+      count: Array.isArray(args[argKey]) ? args[argKey].filter(Boolean).length : 0,
+    }))
+    .filter((item) => item.count > 0 && !(Array.isArray(workflow[item.slotKey]) && workflow[item.slotKey].length));
+  if (!orphaned.length) return;
+  const sibling = Object.values(videoWorkflowRegistry()).find((candidate) =>
+    candidate.id !== workflow.id
+    && candidate.family && candidate.family === workflow.family
+    && (candidate.media_type || 'video') === (workflow.media_type || 'video')
+    && orphaned.every((item) => Array.isArray(candidate[item.slotKey]) && candidate[item.slotKey].length));
+  const what = orphaned.map((item) => `${item.count} ${item.label}`).join(' and ');
+  const error = new Error(
+    `workflow ${workflow.id} has no slots for references: the ${what} sent with it would be dropped and the `
+    + `clip would render without them. `
+    + (sibling
+      ? `Send them to workflow ${sibling.id}${sibling.title ? ` (${sibling.title})` : ''} instead.`
+      : 'Pick a workflow that lists reference slots.'),
+  );
+  // Workflow ids and counts only — nothing the caller sent.
+  error.machineSafe = true;
+  throw error;
 }
 
 function assertMotionReferenceFitsTheCard(workflow, settings) {
-  // A COUNT, not the staged names: this has to be answerable before anything is
-  // staged, and how many motion clips are attached is the only part that
-  // matters. Staging one just to learn it was never going to fit is the whole
-  // bug this guard exists to avoid.
-  if (!(Number(settings.referenceVideoCount) > 0)) return;
+  // Only runs with a motion clip attached: the cap is on reference VIDEO. Nine
+  // pictures on a 15s clip were never the problem and keep the full range.
+  const videos = Array.isArray(settings.referenceVideos) ? settings.referenceVideos.filter(Boolean) : [];
+  if (!videos.length) return;
+  const budget = motionReferenceRowBudget(workflow);
+  if (!budget) return;
   const width = Number(settings.width);
   const height = Number(settings.height);
   const frames = Number(settings.frames);
   if (!(width > 0 && height > 0 && frames > 0)) return;
-  const ceiling = motionReferenceFrameCeiling(workflow, width, height);
-  if (!ceiling) return;
-  // An unknown reference length is treated as long, because a reference at or
-  // beyond the clip's length is the expensive case and guessing the cheap one
-  // would let an over-budget run through.
-  const referenceFrames = Number(settings.referenceVideoFrames) > 0
-    ? Number(settings.referenceVideoFrames)
-    : Infinity;
-  const effectiveFrames = Math.min(referenceFrames, frames);
-  if (effectiveFrames <= ceiling) return;
+  const priced = packedSequenceRows(workflow, settings, frames);
+  if (priced.total <= budget) return;
   const rate = Number(settings.frameRate) || 24;
   const seconds = (value) => (value / rate).toFixed(1);
+  const clipCeiling = motionReferenceClipCeilingFrames(workflow, settings, budget);
+  const trimCeiling = motionReferenceTrimCeilingSeconds(workflow, settings, budget);
+  const soundtrackRows = priced.videos.reduce((sum, item) => sum + item.audioRows, 0);
+  const plural = videos.length === 1 ? '' : 's';
+  const levers = [];
+  if (clipCeiling) levers.push(`shorten the clip to ${seconds(clipCeiling)}s`);
+  if (trimCeiling && trimCeiling >= REF_VIDEO_MIN_SECONDS) {
+    levers.push(
+      `trim the reference video${plural} to ${trimCeiling.toFixed(1)}s or less — a reference shorter than `
+      + 'the clip keeps its own length, so it costs only that',
+    );
+  }
+  if (soundtrackRows) levers.push(`leave the soundtrack out (it alone costs ${thousands(soundtrackRows)} rows)`);
+  if (videos.some((reference) => !reference.compact)) {
+    levers.push('stage the reference video compact (canvas "compact": about a third of the rows, the same motion)');
+  }
+  levers.push('drop a reference video');
   const error = new Error(
-    `a ${seconds(frames)}s clip at ${width}x${height} does not fit this card alongside a reference `
-    + `video that long: the reference is trimmed to the clip's own length, so together they carry `
-    + `${effectiveFrames} reference frames and the limit here is ${ceiling} (${seconds(ceiling)}s). `
-    + `Either shorten the clip to ${seconds(ceiling)}s, use a reference video of ${seconds(ceiling)}s `
-    + `or less — a shorter reference keeps its own length, so it costs less and leaves the full `
-    + `duration range open — or drop the reference video. Reference pictures cost the same whatever `
-    + `the length.`,
+    `a ${seconds(priced.frames)}s clip at ${width}x${height} does not fit this card with ${videos.length} `
+    + `reference video${plural} attached: together they carry ${thousands(priced.total)} packed rows — the clip `
+    + `itself, each reference encoded at its own canvas for min(its length, the clip's)`
+    + `${soundtrackRows ? ' plus its soundtrack' : ''}${priced.pictureRows ? ', and the reference pictures' : ''} `
+    + `— and the limit here is ${thousands(budget)}. Either ${levers.join(', or ')}. `
+    + 'Reference pictures cost the same whatever the length.',
   );
   // Survives machine-private redaction. This message is made of the card's
-  // capacity and the canvas the caller already chose — frame counts, a
-  // duration, a pixel size. It carries no prompt text and no media, which is
-  // what redaction exists to protect. Without the flag the studio receives a
-  // bare "MediaStudioError" and the one thing the user could act on is the one
+  // capacity and the canvas the caller already chose — row counts, a duration,
+  // a pixel size. It carries no prompt text and no media, which is what
+  // redaction exists to protect. Without the flag the studio receives a bare
+  // "MediaStudioError" and the one thing the user could act on is the one
   // thing that gets stripped.
   error.machineSafe = true;
   throw error;
@@ -1088,17 +1346,22 @@ function assertMotionReferenceFitsTheCard(workflow, settings) {
 // Aspect-preserving downscale into REF_VIDEO_MAX_PIXELS, never an upscale, both
 // axes even (yuv420p needs it). Written as an ffmpeg expression rather than
 // probed dimensions so one filter is right for portrait, landscape and square.
-function referenceVideoScaleFilter() {
-  const s = `min(1\\,sqrt(${REF_VIDEO_MAX_PIXELS}/(iw*ih)))`;
+function referenceVideoScaleFilter(canvas = 'full') {
+  // "compact" fits the clip inside REF_VIDEO_COMPACT_LONG_EDGE x
+  // REF_VIDEO_COMPACT_SHORT_EDGE (either orientation); the node never
+  // upscales, so that box bounds what the clip can cost.
+  const s = canvas === 'compact'
+    ? `min(1\\,min(${REF_VIDEO_COMPACT_SHORT_EDGE}/min(iw\\,ih)\\,${REF_VIDEO_COMPACT_LONG_EDGE}/max(iw\\,ih)))`
+    : `min(1\\,sqrt(${REF_VIDEO_MAX_PIXELS}/(iw*ih)))`;
   return `scale=w=trunc(iw*${s}/2)*2:h=trunc(ih*${s}/2)*2`;
 }
 
-function normalizeReferenceVideo(stagedName, { keepAudio = false, maxSeconds = 15 } = {}) {
+function normalizeReferenceVideo(stagedName, { keepAudio = false, maxSeconds = REF_VIDEO_MAX_SECONDS, canvas = 'full' } = {}) {
   const source = resolve(comfyInputDir, stagedName);
   const duration = stagedMediaDuration(stagedName);
-  if (duration !== null && duration < 2) {
+  if (duration !== null && duration < REF_VIDEO_MIN_SECONDS) {
     throw new Error(
-      `reference video is ${duration.toFixed(1)}s; MiniMax H3 reference videos must be at least 2 seconds`,
+      `reference video is ${duration.toFixed(1)}s; MiniMax H3 reference videos must be at least ${REF_VIDEO_MIN_SECONDS} seconds`,
     );
   }
   mkdirSync(comfyInputDir, { recursive: true });
@@ -1107,7 +1370,7 @@ function normalizeReferenceVideo(stagedName, { keepAudio = false, maxSeconds = 1
     '-y', '-hide_banner', '-loglevel', 'error',
     '-i', source,
     '-t', String(maxSeconds),
-    '-vf', `fps=24,${referenceVideoScaleFilter()}`,
+    '-vf', `fps=24,${referenceVideoScaleFilter(canvas)}`,
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p',
     ...(keepAudio ? ['-c:a', 'aac', '-b:a', '128k'] : ['-an']),
     join(comfyInputDir, outputName),
@@ -2449,6 +2712,7 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   // length and whether a motion clip is attached all arrive with the request.
   // Motion-context chaining is the one path that rewrites the canvas later, so
   // it is left to the authoritative check rather than guessed at here.
+  assertReferenceSlotsExist(workflow, args);
   const suppliedReferenceVideos = Array.isArray(args.reference_videos)
     ? args.reference_videos.filter(Boolean)
     : [];
@@ -2466,23 +2730,24 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     const preflightFrames = explicitPreflightFrames !== undefined
       ? positiveInt(explicitPreflightFrames, 0, { min: 1, max: 100000 })
       : normalizedGridFrameCount(workflow, Math.round(preflightDuration * preflightFrameRate));
-    // The LONGEST attached reference decides the cost, and only a caller-sent
-    // hint is available this early — probing the sources would mean fetching
-    // and decoding them, which is the work this pre-flight exists to skip. No
-    // hint means "assume long", so the guard stays safe; the authoritative
-    // check below re-runs against the real staged durations either way.
-    const hintedReferenceFrames = suppliedReferenceVideos
-      .map((entry) => Number(entry?.duration_seconds) * preflightFrameRate)
-      .filter((value) => Number.isFinite(value) && value > 0);
+    // Only caller-sent hints are available this early — probing the sources
+    // would mean fetching and decoding them, which is the work this pre-flight
+    // exists to skip. An un-hinted clip is priced as the longest the lane will
+    // stage, at the node's largest reference canvas, so the pre-flight can only
+    // over-count; the authoritative check below re-runs against the real
+    // staged files, with their true dimensions and lengths.
     assertMotionReferenceFitsTheCard(workflow, {
-      referenceVideoCount: suppliedReferenceVideos.length,
-      referenceVideoFrames: hintedReferenceFrames.length === suppliedReferenceVideos.length
-        ? Math.max(...hintedReferenceFrames)
-        : 0,
       width: targetWidth,
       height: targetHeight,
       frames: preflightFrames,
       frameRate: preflightFrameRate,
+      referenceVideos: suppliedReferenceVideos.map((entry) => ({
+        seconds: Number(entry?.duration_seconds) > 0 ? Number(entry.duration_seconds) : undefined,
+        useAudio: entry?.use_audio === true,
+        compact: entry?.canvas === 'compact',
+      })),
+      referenceImageCount: Array.isArray(args.reference_images) ? args.reference_images.filter(Boolean).length : 0,
+      referenceAudioCount: Array.isArray(args.reference_audios) ? args.reference_audios.filter(Boolean).length : 0,
     });
   }
   const ingredientSheet = await ingredientSheetFromArgs(args, workflow, {
@@ -2667,8 +2932,9 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
       const source = entry ? await referenceVideoSourceFromEntry(entry) : undefined;
       if (source !== undefined) {
         const keepAudio = entry.use_audio === true && stagedVideoHasAudio(source);
-        const normalizedName = normalizeReferenceVideo(source, { keepAudio });
-        stagedVideos.push({ name: normalizedName, audio: keepAudio });
+        const canvas = entry.canvas === 'compact' ? 'compact' : 'full';
+        const normalizedName = normalizeReferenceVideo(source, { keepAudio, canvas });
+        stagedVideos.push({ name: normalizedName, audio: keepAudio, canvas });
         setMappedApiInput(promptGraph, slot, normalizedName);
         const audioLink = normalizeSlot(slot?.audio_link);
         if (!keepAudio && audioLink && promptGraph[audioLink.node]?.inputs) {
@@ -2681,15 +2947,21 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     if (stagedVideos.length) {
       settings.referenceVideoNames = stagedVideos.map((item) => item.name);
       settings.referenceVideoAudio = stagedVideos.map((item) => item.audio);
-      // Measured off the NORMALIZED file, which is already 24 fps and already
-      // held to the model card's 15s ceiling, so this is the frame count the
-      // node will actually load. The longest one sets the cost.
-      const stagedFrames = stagedVideos
-        .map((item) => Number(stagedMediaDuration(item.name)) * (Number(defaults.frame_rate) || 24))
-        .filter((value) => Number.isFinite(value) && value > 0);
-      settings.referenceVideoFrames = stagedFrames.length === stagedVideos.length
-        ? Math.max(...stagedFrames)
-        : 0;
+      // Measured off the NORMALIZED file, which is already 24 fps, already held
+      // to the model card's 15s ceiling and already inside the node's reference
+      // canvas — so these are the length and the dimensions the node will
+      // actually encode, and what the VRAM budget is priced on.
+      settings.referenceVideos = stagedVideos.map((item) => {
+        const dimensions = stagedVideoDimensions(item.name);
+        return {
+          name: item.name,
+          useAudio: item.audio,
+          compact: item.canvas === 'compact',
+          seconds: stagedMediaDuration(item.name) ?? undefined,
+          width: dimensions?.width,
+          height: dimensions?.height,
+        };
+      });
     }
   }
   // Reference audio: voice/music cloning through the same autogrow contract.
@@ -2913,8 +3185,9 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   // rewrite the canvas after the fact (motion-context chaining).
   assertMotionReferenceFitsTheCard(workflow, {
     ...settings,
-    referenceVideoCount: settings.referenceVideoNames?.length || 0,
-    referenceVideoFrames: settings.referenceVideoFrames || 0,
+    referenceImageCount: settings.referenceImageNames?.length || 0,
+    referenceAudioCount: settings.referenceAudioNames?.length || 0,
+    referenceAudioSeconds: (settings.referenceAudioNames || []).map((name) => stagedMediaDuration(name) ?? undefined),
   });
   settings.extensionFrames = normalizedLtxExtensionFrames(settings.durationSeconds, settings.frameRate);
   const usesIngredientConditioning = workflow.prompt_contract?.type === 'ltx23-ingredients';
@@ -3671,6 +3944,13 @@ function buildServer() {
         video_base64: z.string().optional(),
         video_url: z.string().optional(),
         use_audio: z.boolean().optional(),
+        canvas: z.enum(['full', 'compact']).optional().describe(
+          'How the clip is staged for the node. "full" (default) keeps MiniMax H3\'s own 768-short-edge '
+          + 'reference canvas. "compact" fits the clip inside 384x1152, never upscaled: about 3.3x fewer '
+          + 'sequence rows and roughly half the sampling time, which is what lets a longer clip or a longer '
+          + 'reference fit the card. Measured indistinguishable for MOTION references (same-seed renders at '
+          + 'full, 544 and 384 sit within the between-seed noise of each other); not validated when the video '
+          + 'is the identity reference, so it is a per-clip choice.'),
         duration_seconds: z.number().positive().max(3600).optional().describe(
           'This clip\'s own length, if the caller already knows it. Purely an optimisation: a reference is '
           + 'trimmed to min(its own length, the generated clip\'s), so this decides whether the run fits, and '

@@ -1946,37 +1946,42 @@ def test_reference_video_refuses_a_clip_shorter_than_the_model_card_allows(tmp_p
 
 
 def test_a_long_clip_with_a_motion_reference_is_refused_before_it_is_staged(tmp_path):
-    """The node trims a reference to min(its own length, the clip's length), so
-    the budget is spent on that EFFECTIVE length rather than on the clip's.
+    """The budget is on the whole packed sequence — the clip, each motion clip
+    at the node's own reference canvas plus its soundtrack, the pictures — and
+    a reference is trimmed to min(its own length, the clip's), so a reference at
+    or beyond the clip's length makes the CLIP the thing that has to fit.
 
-    Re-measured 2026-08-15 on a rented 5090 (32607MiB) under ComfyUI 0.32.0 with
-    the cudaMallocAsync allocator, H3 reference mode at 704x1216 with nine
-    pictures and a voice clip: 48, 96, 158 and 243 effective reference frames all
-    ran (27.88-30.06GiB); 305 ran out of memory. The failure used to arrive three
-    minutes in as a CUDA allocator dump, and the first version of this guard
-    over-corrected by capping the CLIP whenever any reference was attached."""
+    Anchored 2026-08-21 on a rented 5090: a 10s clip at 1216x704 with a 13.3s
+    phone reference (142,366 rows) ran out of memory three times, and the same
+    with the reference trimmed to 4s (95,092 rows) thrashed and died. The
+    failure used to arrive three minutes in as a CUDA allocator dump, and the
+    first version of this guard over-corrected by capping the CLIP whenever any
+    reference was attached."""
     # A SHORT reference keeps its own length, so it costs only that and leaves
-    # the whole duration range open. This 3s clip against a 15s render is the
-    # case the first version of this guard refused outright.
-    short = _write_test_video(tmp_path / "motion-short.mp4", seconds=3, fps=24)
+    # the duration range open: a 2s clip against a 10s render (60,192 + 810
+    # clip rows + 12,672 for the reference at the pre-flight's worst canvas =
+    # 73,674 against 85,000) is the shape the first version refused outright.
+    short = _write_test_video(tmp_path / "motion-short.mp4", seconds=2, fps=24)
     _capture_video_graph(
         tmp_path, "minimax-h3-reference",
-        {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
-         "reference_videos": [{"video_path": str(short), "duration_seconds": 3}]})
+        {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(short), "duration_seconds": 2}]})
 
     # A reference at or beyond the clip's length is trimmed down to it, so the
-    # CLIP becomes the thing that has to fit — and 15s does not.
+    # CLIP becomes the thing that has to fit — and 15s does not: 90,658 clip
+    # rows + 107,712 for 345 effective reference frames = 198,370.
     long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
     reply = _capture_video_graph(
         tmp_path, "minimax-h3-reference",
         {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
          "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]},
         expect_refusal=True)
-    assert "does not fit" in reply
-    # The refusal has to name the length that DOES fit, not merely say no — and
-    # name the shorter-reference lever, which is the one that keeps the range.
-    assert "243" in reply and "10.1s" in reply
-    assert "reference video of 10.1s or less" in reply
+    assert "does not fit this card" in reply
+    # The refusal names the lattice point that DOES fit: 141 frames of clip with
+    # this reference (79,934 rows). Trimming the reference under the full clip
+    # would have to go below the card's 2s floor, so that lever is not offered.
+    assert "shorten the clip to 5.9s" in reply
+    assert "trim the reference" not in reply
 
 
 def test_the_same_long_clip_is_allowed_without_a_motion_reference(tmp_path):
@@ -2199,13 +2204,13 @@ def test_motion_reference_budget_mirror_matches_the_registry():
     from hivemind_content_studio.media_catalog import (
         _H3_FRAME_GRID,
         _H3_FRAME_RATE,
-        _H3_MOTION_REFERENCE_PIXEL_FRAMES,
+        _H3_MOTION_REFERENCE_PACKED_ROWS,
         _built_in_video_models_with_limits,
     )
 
     registry = json.loads(WORKFLOW_REGISTRY.read_text())
     h3 = next(w for w in registry["workflows"] if w["id"] == "minimax-h3")
-    assert h3["motion_reference_budget"]["max_reference_pixel_frames"] == _H3_MOTION_REFERENCE_PIXEL_FRAMES
+    assert h3["motion_reference_budget"]["max_packed_rows"] == _H3_MOTION_REFERENCE_PACKED_ROWS
     assert h3["frame_grid"] == _H3_FRAME_GRID
     assert h3["defaults"]["frame_rate"] == _H3_FRAME_RATE
 
@@ -2216,12 +2221,13 @@ def test_motion_reference_budget_mirror_matches_the_registry():
         # VIDEO lanes only: minimax-h3-image shares the id prefix but is a still
         # lane with no motion references, so it carries no budget by design.
         if workflow["id"].startswith("minimax-h3") and workflow.get("media_type") == "video":
-            assert workflow["motion_reference_budget"]["max_reference_pixel_frames"] == _H3_MOTION_REFERENCE_PIXEL_FRAMES
+            assert workflow["motion_reference_budget"]["max_packed_rows"] == _H3_MOTION_REFERENCE_PACKED_ROWS
 
     # And the fallback list the studio gets when the registry cannot be read
     # carries the ceiling rather than silently restoring the full range.
     fallback = {model.id: model for model in _built_in_video_models_with_limits()}
-    assert fallback["minimax-h3"].motion_reference_max_seconds["high|9:16"] == round(243 / 24, 3)
+    assert fallback["minimax-h3"].motion_reference_max_seconds["high|9:16"] == round(124 / 24, 3)
+    assert fallback["minimax-h3"].motion_reference_max_seconds["max|16:9"] == round(107 / 24, 3)
     # Non-minimax workflows have no measured budget and keep the full range.
     assert fallback["ltx23-eros-dmd-v12"].motion_reference_max_seconds is None
 
@@ -2286,33 +2292,37 @@ def test_an_impossible_motion_reference_clip_is_refused_before_anything_is_stage
     body = _call_mcp_tool("media_generate_video", {
         "workflow_id": "minimax-h3-reference",
         "prompt": "x",
-        "width": 704,
-        "height": 1216,
+        "width": 768,
+        "height": 1344,
         "duration_seconds": 15,
-        # A reference as long as the clip: the node trims it to the clip, so the
-        # clip's own 15s is what has to fit, and it does not.
+        # A reference as long as the clip on the native canvas: the node trims
+        # it to the clip, so the clip's own 15s is what has to fit — and at this
+        # canvas it does not (216,774 packed rows against 85,000).
         "reference_videos": [{"video_path": missing, "use_audio": False, "duration_seconds": 15}],
     })
 
     # The reason survives machine-private redaction, because it is the card's
     # capacity and the canvas the caller already chose — no prompt, no media.
     assert "does not fit this card" in body, body[:400]
-    assert "10.1s" in body
+    # 124 frames of clip with this reference fit (76,782 rows).
+    assert "shorten the clip to 5.2s" in body
     # Never reached the staging step, so it cannot have complained about the file.
     assert "never-staged-because" not in body
 
 
-def test_a_short_motion_reference_leaves_the_full_duration_range_open():
-    """The bug this rule was rewritten for: a two-second reference on a 15s
+def test_a_short_motion_reference_leaves_the_duration_range_open():
+    """The bug this rule was rewritten for: a two-second reference on a long
     render. The node keeps a short reference at its own length, so it costs only
     that — but the first guard capped the clip whenever ANY reference was
-    attached, and refused this outright."""
+    attached, and refused this outright. (A 15s render at this canvas is 90,658
+    rows before any reference and sits over the budget on its own, so the
+    longest render that takes a motion clip here is 10s: 73,674 rows.)"""
     body = _call_mcp_tool("media_generate_video", {
         "workflow_id": "minimax-h3-reference",
         "prompt": "x",
         "width": 704,
         "height": 1216,
-        "duration_seconds": 15,
+        "duration_seconds": 10,
         "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False, "duration_seconds": 2}],
     })
     assert "does not fit this card" not in body, body[:400]
@@ -2321,16 +2331,115 @@ def test_a_short_motion_reference_leaves_the_full_duration_range_open():
 def test_an_unmeasured_reference_is_treated_as_long():
     """No duration hint means the pre-flight cannot know the clip is short, and
     guessing short would let an over-budget run through to a three-minute OOM.
-    It assumes long; the authoritative check re-runs on the real staged file."""
+    It assumes the longest the lane will stage (15s) at the node's largest
+    reference canvas; the authoritative check re-runs on the real staged file."""
     body = _call_mcp_tool("media_generate_video", {
         "workflow_id": "minimax-h3-reference",
         "prompt": "x",
-        "width": 704,
-        "height": 1216,
+        "width": 768,
+        "height": 1344,
         "duration_seconds": 15,
         "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False}],
     })
     assert "does not fit this card" in body, body[:400]
+
+
+def test_a_lying_duration_hint_is_caught_on_the_staged_file(tmp_path):
+    """The pre-flight trusts the caller's duration hint; the authoritative check
+    prices the STAGED file — its real length AND the node's canvas for its real
+    dimensions. A 2s hint on a 10s portrait phone clip sails through pre-flight
+    (60,192 + 810 + 12,672 = 73,674 rows) and is refused once staged: 704x1504
+    at the node is 1,034 rows per latent frame, 74,448 for its 243 effective
+    frames."""
+    phone = _write_test_video(tmp_path / "phone.mp4", seconds=10, fps=24, size="688x1496")
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(phone), "duration_seconds": 2}]},
+        expect_refusal=True)
+    assert "does not fit this card" in reply
+    # 60,192 + 810 + 74,448 = 135,450 rows. Priced at the clip's REAL canvas,
+    # 141 frames of clip fit (79,020 rows).
+    assert "shorten the clip to 5.9s" in reply
+
+
+def test_a_compact_reference_costs_a_third_and_is_staged_inside_384x1152(tmp_path):
+    """canvas "compact" stages a motion reference inside 384x1152 instead of the
+    node's 768-short-edge canvas. Priced before staging at the compact worst
+    case (432 rows per latent frame against 1,056): a 6s phone clip on a 10s
+    render at 1216x704 is 61,002 + 42 x 432 = 79,146 rows — inside the budget —
+    where the same clip staged full would be 61,002 + 42 x 1,056 = 105,354 and
+    refused. The staged file really is inside the box (688x1496 -> 384x834)."""
+    phone = _write_test_video(tmp_path / "phone6.mp4", seconds=6, fps=24, size="688x1496")
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(phone), "duration_seconds": 6}]},
+        expect_refusal=True)
+    assert "does not fit this card" in reply
+    # The refusal offers the compact lever by name.
+    assert "stage the reference video compact" in reply
+
+    graph = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(phone), "duration_seconds": 6, "canvas": "compact"}]})
+    staged = graph["140"]["inputs"]["file"]
+    width, height = _probe(tmp_path / "input" / staged, "v:0", "stream=width,height").split(",")[:2]
+    assert (int(width), int(height)) == (384, 834)
+
+
+def test_references_handed_to_a_workflow_without_slots_are_refused_not_dropped():
+    """The plain minimax-h3 workflow has no reference slots, and the staging
+    blocks are gated on the slots — so references sent with it used to vanish
+    silently and the clip rendered as plain text-to-video. Two sessions measured
+    "reference mode" VRAM ceilings against exactly that on 2026-08-21. The MCP
+    now refuses and names the sibling that takes them."""
+    body = _call_mcp_tool("media_generate_video", {
+        "workflow_id": "minimax-h3",
+        "prompt": "x",
+        "duration_seconds": 5,
+        "reference_images": [{"image_path": "/nonexistent/pic.png"}],
+        "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "duration_seconds": 3}],
+    })
+    assert "has no slots for references" in body, body[:400]
+    assert "1 reference pictures and 1 reference videos" in body
+    assert "minimax-h3-reference" in body
+    # Refused before anything was staged, and with nothing of the caller's in it.
+    assert "/nonexistent" not in body
+
+
+def test_the_guard_and_the_picker_price_a_run_the_same_way():
+    """One source of truth: the MCP's refusal and the studio's picker ceiling
+    are computed by two mirrors of the same pricing. The refusal above names
+    the clip length that fits for the native canvas without pictures or voice;
+    the picker's published ceiling assumes nine pictures and a voice clip. Both
+    must fall out of the Python mirror with those inputs."""
+    from hivemind_content_studio.media_studio import (
+        _grid_frames_at_most,
+        _h3_packed_rows,
+        motion_reference_duration_limits,
+    )
+    from hivemind_content_studio.media_catalog import _H3_MOTION_REFERENCE_PACKED_ROWS
+
+    grid = {"modulus": 17, "offset": 5}
+
+    def ceiling(**kwargs):
+        frames = 362
+        while frames >= 5:
+            if _h3_packed_rows(grid, 24, 1344, 768, frames, reference_seconds=15, **kwargs) <= _H3_MOTION_REFERENCE_PACKED_ROWS:
+                return frames
+            frames = _grid_frames_at_most(grid, frames - 1)
+        return None
+
+    # The MCP scenario: one reference without its soundtrack, no pictures, no voice.
+    assert ceiling(reference_audio=False, pictures=0, voice_seconds=0) == 124  # "5.2s"
+    # The picker scenario: slot maximum of pictures, the full voice allowance.
+    limits = motion_reference_duration_limits({
+        "motion_reference_max_packed_rows": _H3_MOTION_REFERENCE_PACKED_ROWS,
+        "frame_grid": grid, "defaults": {"frame_rate": 24},
+    })
+    assert round(limits["max|16:9"] * 24) == ceiling() == 107
 
 
 def test_a_motion_reference_clip_that_fits_is_not_refused_and_redaction_still_holds():
