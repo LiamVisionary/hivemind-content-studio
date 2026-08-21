@@ -21,6 +21,7 @@ import re
 import socketserver
 import subprocess
 import threading
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -147,7 +148,9 @@ def _ranges(srv) -> list[str]:
 
 
 def _run(tail: str, cwd: Path, **knobs) -> subprocess.CompletedProcess:
-    settings = dict(split=SPLIT, tries=3, pause=0, poll=0.2, floor=1024, stall=30)
+    # tries=3 with a long patience: most tests want the count to govern so a
+    # give-up is quick; the patience tests override both.
+    settings = dict(split=SPLIT, tries=3, pause=0, patience=600, poll=0.2, floor=1024, stall=30)
     settings.update(knobs)
     lib = "\n".join(gpu_rentals._download_lib_lines(**settings))
     return subprocess.run(
@@ -241,9 +244,51 @@ def test_a_stream_that_keeps_dying_reports_the_part_and_the_last_error(server, t
     proc, dest = _pget(server, tmp_path)
     assert proc.returncode == 1
     assert not dest.exists()
-    # curl 18 = transfer closed with bytes remaining; http 206 = the range was honoured.
-    assert _err(dest).read_text().strip() == "part 5: curl 18 http 206 after 3 tries"
+    # curl 18 = transfer closed with bytes remaining; http 206 = the range was
+    # honoured; then where it was talking to and how long the last attempt
+    # took — the box is destroyed on failure, so the beacon line is all that
+    # survives to say what happened.
+    text = _err(dest).read_text().strip()
+    assert re.fullmatch(r"part 5: curl 18 http 206 via 127\.0\.0\.1 in [\d.]+s after 3 tries/\d+s", text), text
     assert not list(tmp_path.glob("*.part*")), "nothing half-done is left to be counted"
+
+
+def test_patience_is_time_not_a_count(server, tmp_path: Path) -> None:
+    """Measured 2026-08-22 on a RunPod 5090: one stream of each big
+    HuggingFace weight kept timing out after the CDN redirect while the other
+    seven streams of the same file finished; a 12-attempt cap gave up after
+    ~8 minutes and the box was destroyed at 6/8. A stream now keeps trying
+    for PATIENCE seconds of consecutive failure, the pause growing, and the
+    attempt cap is only a hard stop behind that."""
+    s, e = _part_range(5)
+    server.faults.cut_window = (s, e + 1, 1_000)
+    t0 = time.monotonic()
+    # Integer pause: bash arithmetic has no floats (the library coerces).
+    proc, dest = _pget(server, tmp_path, tries=1000, patience=2, pause=1)
+    elapsed = time.monotonic() - t0
+    assert proc.returncode == 1
+    text = _err(dest).read_text().strip()
+    match = re.fullmatch(r"part 5: curl 18 http 206 via \S* in [\d.]+s after (\d+) tries/(\d+)s", text)
+    assert match, text
+    assert int(match[1]) >= 3, "kept trying well past a handful of attempts"
+    assert int(match[2]) >= 2 and elapsed >= 2, "gave up on the clock, not the count"
+    assert elapsed < 30, "…and not much past it"
+
+
+def test_a_stream_never_outlives_the_phase_deadline(server, tmp_path: Path) -> None:
+    # The onstart exports DL_DEADLINE before the fetchers fork; once it has
+    # passed, a failing stream stops at its next failure instead of using up
+    # its patience while dlwait has already given the box up.
+    s, e = _part_range(5)
+    server.faults.cut_window = (s, e + 1, 1_000)
+    dest = tmp_path / "model.safetensors"
+    proc = _run(
+        f'DL_DEADLINE=$(( $(date +%s) - 1 )); pget "{_url(server)}" "{dest}"',
+        tmp_path, tries=1000, patience=600, pause=0,
+    )
+    assert proc.returncode == 1
+    text = _err(dest).read_text().strip()
+    assert re.fullmatch(r"part 5: curl 18 http 206 via \S* in [\d.]+s after 1 tries/\d+s", text), text
 
 
 # --- dlwait ----------------------------------------------------------------

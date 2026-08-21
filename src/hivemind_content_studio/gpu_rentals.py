@@ -128,9 +128,17 @@ DOWNLOAD_SPLIT_MIN_BYTES = 512 * 1024 * 1024
 # reset (curl 56) or early close (18) on the one stream carrying a 5 GB VAE is
 # exactly how rental vast:48337699 died at 6/7 with a healthy host and link.
 # Permanent answers (HTTP 400-407, 409-419) are not retried: a 403/404 says
-# the URL is wrong, and re-asking costs billed minutes. The DEADLINE below
-# still bounds the whole phase, so this many attempts can never outlast it.
-DOWNLOAD_STREAM_ATTEMPTS = 12
+# the URL is wrong, and re-asking costs billed minutes. Everything else is
+# retried for PATIENCE seconds of consecutive failure on that stream, with the
+# pause growing from PAUSE to 6xPAUSE, and never past the phase DEADLINE below.
+# Time, not a count: measured 2026-08-22 on a RunPod 5090 (runpod:vrygri4b9b1x78),
+# one stream of each big HuggingFace weight kept timing out after the CDN
+# redirect (curl 28 http 302) while the other seven streams of the same file
+# finished — a 12-attempt cap gave up after ~8 minutes and the box was
+# destroyed at 6/8 with every R2 weight already on disk. ATTEMPTS is only a
+# hard stop behind the time bounds.
+DOWNLOAD_STREAM_ATTEMPTS = 200
+DOWNLOAD_STREAM_PATIENCE_SECONDS = 20 * 60
 DOWNLOAD_RETRY_PAUSE_SECONDS = 5
 DOWNLOAD_CONNECT_TIMEOUT_SECONDS = 30
 # Backstop for a stall the per-transfer floor cannot see, e.g. a connection that
@@ -983,6 +991,7 @@ def _download_lib_lines(
     split: int = DOWNLOAD_SPLIT_MIN_BYTES,
     tries: int = DOWNLOAD_STREAM_ATTEMPTS,
     pause: int | float = DOWNLOAD_RETRY_PAUSE_SECONDS,
+    patience: int = DOWNLOAD_STREAM_PATIENCE_SECONDS,
     connect_timeout: int = DOWNLOAD_CONNECT_TIMEOUT_SECONDS,
     deadline: int = DOWNLOAD_DEADLINE_SECONDS,
     poll: int | float = DOWNLOAD_POLL_SECONDS,
@@ -1013,6 +1022,9 @@ def _download_lib_lines(
                jobs are sampled BEFORE the files are counted, so a fetch that
                lands between the two reads is never called a failure.
     """
+    # bash arithmetic is integer-only: a fractional pause would make `again`
+    # error out and the stream die without writing its .err.
+    pause = int(pause)
     # Written flat and terse on purpose: the whole onstart must fit Vast's 16KB
     # field alongside ~400 chars per presigned URL, and the minimax tier with
     # one registered LoRA already sits within a few hundred chars of it.
@@ -1025,19 +1037,30 @@ def _download_lib_lines(
         "pn() { printf '%s.part%03d' \"$1\" $2; }",
         "plen() { c -r 0-0 -o /dev/null -D - --max-filesize 1048576 \"$1\" | tr -d '\\r'"
         " | awk 'tolower($1)==\"content-range:\"{sub(/.*\\//,\"\",$3); n=$3} END{print n}'; }",
-        'again() { case $3 in 40[0-79]|41[0-9]) echo "http $3" > "$1.err"; return 1;; esac'
-        f'; [ $4 -ge {tries} ] && {{ echo "curl $2 http $3 after $4 tries" > "$1.err"; return 1; }}; sleep {pause}; }}',
-        "stream() { u=$1; p=$2; s=$3; e=$4; n=$((e-s+1)); a=0",
+        # again <file> <rc> <code> <attempt> <ip|seconds>: 0 = paused, try
+        # again; 1 = gave up and wrote <file>.err. Gives up on a permanent 4xx,
+        # after PATIENCE seconds of consecutive failure (f0 = first failure;
+        # each stream is its own subshell, so the variable is per stream), at
+        # the phase deadline (DL_DEADLINE, exported by the onstart before the
+        # fetchers fork), or at the hard attempt cap — whichever comes first.
+        # W is curl's write-out: status, the peer it was talking to, seconds.
+        "W='%{http_code}|%{remote_ip}|%{time_total}'",
+        'again() { case $3 in 40[0-79]|41[0-9]) echo "http $3" > "$1.err"; return 1;; esac',
+        'now=$(date +%s); [ $f0 -eq 0 ] && f0=$now; v=${5/|/ in }',
+        f'[ $((now-f0)) -ge {patience} ] || [ $4 -ge {tries} ] || {{ [ -n "${{DL_DEADLINE:-}}" ] && [ $now -ge $DL_DEADLINE ]; }}'
+        ' && { echo "curl $2 http $3 via ${v}s after $4 tries/$((now-f0))s" > "$1.err"; return 1; }',
+        f'pz=$(($4*{pause})); [ $pz -gt {pause * 6} ] && pz={pause * 6}; sleep $pz; }}',
+        "stream() { u=$1; p=$2; s=$3; e=$4; n=$((e-s+1)); a=0; f0=0",
         'while :; do h=$(sz "$p"); [ $h -ge $n ] && return 0',
-        'hc=$(c -r "$((s+h))-$e" -o "$p.tmp" -w %{http_code} "$u"); rc=$?',
+        'o=$(c -r "$((s+h))-$e" -o "$p.tmp" -w "$W" "$u"); rc=$?; hc=${o%%|*}',
         'case $hc in 206) cat "$p.tmp" >> "$p";;'
         ' 200) [ $s -eq 0 ] || { rm -f "$p.tmp"; : > "$p.nr"; return 2; }; mv "$p.tmp" "$p";; esac',
         'rm -f "$p.tmp"; [ $rc -eq 0 ] && continue',
-        'a=$((a+1)); again "$p" $rc $hc $a || return 1; done; }',
-        "plain() { u=$1; d=$2; a=0",
-        'while :; do hc=$(c -o "$d.dl" -w %{http_code} "$u"); rc=$?',
+        'a=$((a+1)); again "$p" $rc $hc $a "${o#*|}" || return 1; done; }',
+        "plain() { u=$1; d=$2; a=0; f0=0",
+        'while :; do o=$(c -o "$d.dl" -w "$W" "$u"); rc=$?; hc=${o%%|*}',
         '[ $rc -eq 0 ] && { mv "$d.dl" "$d"; return 0; }',
-        'rm -f "$d.dl"; a=$((a+1)); again "$d" $rc $hc $a || return 1; done; }',
+        'rm -f "$d.dl"; a=$((a+1)); again "$d" $rc $hc $a "${o#*|}" || return 1; done; }',
         'pget() { u=$1; d=$2; rm -f "$d".part* "$d.dl" "$d.err"; len=$(plen "$u")',
         'case "$len" in ""|*[!0-9]*) plain "$u" "$d"; return;; esac',
         f"n={conns}; [ $len -lt {split} ] && n=1",
@@ -1302,6 +1325,10 @@ def _onstart_script(tier: str) -> str:
         ]
     files = []
     lines.append('beacon downloading 0 "Starting model downloads"')
+    # Set BEFORE the fetchers fork: a background job inherits the variables
+    # that exist at fork time, and `again` reads DL_DEADLINE so no stream
+    # keeps retrying past the phase deadline dlwait enforces.
+    lines.append(f"DL_DEADLINE=$(( $(date +%s) + {DOWNLOAD_DEADLINE_SECONDS} ))")
     # Presigned URLs are ~400 chars each and are most of the 16KB onstart, yet
     # everything but the object key and the signature is the same for every
     # URL signed at one instant: host, bucket, algorithm, credential, date,
@@ -1335,7 +1362,6 @@ def _onstart_script(tier: str) -> str:
         )
     lines += [
         f"FILES=({' '.join(files)})",
-        f"DL_DEADLINE=$(( $(date +%s) + {DOWNLOAD_DEADLINE_SECONDS} ))",
         # dlwait publishes progress until every file is in place, and otherwise
         # exits the box through the beacon with the reason (see the library).
         'dlwait "$DL_DEADLINE" "${FILES[@]}"',

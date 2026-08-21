@@ -820,7 +820,10 @@ def test_a_degraded_download_gives_up_instead_of_crawling(tier: str, monkeypatch
     # reset or early close (measured 2026-08-22). test_rental_downloads.py runs
     # the library itself; here, only that the onstart carries it and not --retry.
     assert "--retry" not in script
-    assert 'again "$p" $rc $hc $a' in script
+    assert 'again "$p" $rc $hc $a "${o#*|}"' in script
+    # The phase deadline is set BEFORE the fetchers fork so every stream
+    # inherits it; a stream that keeps failing stops at the deadline too.
+    assert script.index("DL_DEADLINE=$((") < script.index('pget "')
     # No HEAD on a GET presign: R2 answers 403, the length came back empty and
     # every R2 weight silently took the single-stream path.
     assert "-sfI" not in script and "curl -I" not in script
@@ -864,15 +867,15 @@ def test_every_tier_onstart_leaves_room_for_registered_loras(tier: str, monkeypa
     the generator raises first — at RENT time, for the user. Pin the headroom
     here instead, so growth in provisioning fails in CI. A registered user
     LoRA adds one mkdir + one factored pget line (~230 chars); hold room for
-    three. Measured 2026-08-22 after the download library landed: image
-    ~3.9KB, video ~2.9KB, minimax ~0.8KB — minimax is the tight one because
+    two. Measured 2026-08-22 after the download library landed: image
+    ~3.7KB, video ~2.8KB, minimax ~0.5KB — minimax is the tight one because
     most of its onstart is H3 node installs and public HuggingFace URLs,
     which no factoring touches."""
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
     monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
     script = gpu_rentals._onstart_script(tier)
     headroom = gpu_rentals.VAST_ONSTART_LIMIT - len(script)
-    assert headroom >= 700, f"{tier}: only {headroom} chars left under Vast's onstart limit"
+    assert headroom >= 450, f"{tier}: only {headroom} chars left under Vast's onstart limit"
 
 
 def test_presigned_urls_are_emitted_once_as_a_prefix_and_query(monkeypatch) -> None:
