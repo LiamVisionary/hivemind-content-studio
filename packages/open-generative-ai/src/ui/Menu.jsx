@@ -37,7 +37,13 @@ export function useDismissable(open, close) {
  * ChipButton — labelled current-value chip for composer bars.
  * <ChipButton icon="cpu" label="Model" value="Seedance Lite" onClick={...} active />
  */
-export function ChipButton({ icon, label, value, onClick, active = false, disabled = false, className = '', chevron = true }) {
+export function ChipButton({
+  icon, label, value, onClick, active = false, disabled = false, className = '', chevron = true,
+  // An armed chip whose settings no longer agree with the composer. Drawn as a
+  // dashed honey outline rather than a new colour, so "on" and "on but stale"
+  // stay one family and only the edge changes.
+  warn = false,
+}) {
   return (
     <button
       type="button"
@@ -48,11 +54,12 @@ export function ChipButton({ icon, label, value, onClick, active = false, disabl
         active
           ? 'border-honey/50 bg-honey-tint text-ink1'
           : 'border-line1 bg-bg2 text-ink1 hover:border-line2 hover:bg-bg3',
+        warn && 'border-dashed border-honey',
         disabled && 'opacity-40',
         className,
       )}
     >
-      {icon ? <Icon name={icon} size={15} className="shrink-0 text-ink3" /> : null}
+      {icon ? <Icon name={icon} size={15} className={cx('shrink-0', warn ? 'text-honey' : 'text-ink3')} /> : null}
       {label ? <span className="shrink-0 text-xs font-medium text-ink3">{label}</span> : null}
       {value ? <span className="truncate font-medium">{value}</span> : null}
       {chevron ? <Icon name="chevronDown" size={13} className="shrink-0 text-ink3" /> : null}
