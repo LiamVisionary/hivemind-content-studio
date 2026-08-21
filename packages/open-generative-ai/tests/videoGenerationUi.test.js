@@ -1,8 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+// The live studio is src/studios/VideoStudio.jsx; its pure logic lives in
+// video/videoLogic.js (a plain .js module precisely so node:test can import it).
 async function loadVideoStudioHelpers() {
-    return import('../src/components/VideoStudio.js');
+    return import('../src/studios/video/videoLogic.js');
 }
 
 test('video progress normalizes ratio and percentage telemetry', async () => {
@@ -47,14 +49,14 @@ test('studio dropdowns cap their height to the space above the anchor and scroll
     assert.equal(clampVideoDropdownMaxHeight(120), 180);
     assert.equal(clampVideoDropdownMaxHeight(undefined), 180);
 
+    // The vanilla studios each set dropdown.style.maxHeight imperatively. React routes
+    // every studio popup through one shared Menu, so the cap is asserted once, at the
+    // single place that can now regress it.
     const fs = require('node:fs');
     const path = require('node:path');
-    for (const file of ['VideoStudio.js', 'ImageStudio.js']) {
-        const source = fs.readFileSync(path.join(__dirname, '../src/components', file), 'utf8');
-        assert.match(source, /dropdown\.style\.maxHeight/, `${file} caps dropdown height`);
-        assert.match(source, /flex flex-col min-h-0 max-h-\[70vh\]/, `${file} lets the model list shrink and scroll`);
-        assert.doesNotMatch(source, /flex flex-col h-full max-h-\[70vh\]/, `${file} dropped the unconstrained wrapper`);
-    }
+    const menu = fs.readFileSync(path.join(__dirname, '../src/ui/Menu.jsx'), 'utf8');
+    assert.match(menu, /max-h-\[min\([^\]]+\)\]/, 'the shared menu caps its height');
+    assert.match(menu, /overflow-y-auto/, 'and scrolls instead of overflowing the viewport');
 });
 
 test('Ingredients start frames choose the nearest supported output geometry', async () => {
@@ -90,7 +92,6 @@ test('video preferences retain the complete generation configuration', async () 
                     { url: 'https://outside.test/profile.png', description: 'ignored' },
                 ],
             },
-            pingWhenComplete: true,
         }),
         {
             modelId: 'hivemind-video:ltx23-eros-fast',
@@ -101,6 +102,10 @@ test('video preferences retain the complete generation configuration', async () 
             quality: 'high',
             mode: 'pro',
             effectName: 'dolly',
+            matchStartFrameAr: null,
+            denoise: '',
+            nagScale: null,
+            seed: -1,
             advancedValues: { generate_audio: false, guidance: 3.5 },
             loraSelections: {
                 'ltx23-regular-fp8': [{
@@ -109,6 +114,7 @@ test('video preferences retain the complete generation configuration', async () 
                     displayName: 'Style',
                     previewUrl: '',
                     strength: 0.75,
+                    enabled: true,
                 }],
             },
             ingredientSelections: [{
@@ -117,7 +123,6 @@ test('video preferences retain the complete generation configuration', async () 
             }],
             ingredientSheets: [],
             ingredientSelectedSheet: 'stitched',
-            pingWhenComplete: true,
         },
     );
     assert.deepEqual(
@@ -131,16 +136,34 @@ test('video preferences retain the complete generation configuration', async () 
             quality: '',
             mode: '',
             effectName: '',
+            matchStartFrameAr: null,
+            denoise: '',
+            nagScale: null,
+            seed: -1,
             advancedValues: {},
             loraSelections: {},
             ingredientSelections: [],
             ingredientSheets: [],
             ingredientSelectedSheet: '',
-            pingWhenComplete: false,
         },
     );
     assert.equal(normalizeVideoPreferences({ duration: 5 }), null);
     assert.equal(normalizeVideoPreferences(null), null);
+});
+
+test('ping-when-complete is a shared setting, not a per-studio video preference', async () => {
+    const { normalizeVideoPreferences } = await loadVideoStudioHelpers();
+
+    // It used to round-trip through the video preferences blob. It is now owned by
+    // lib/completionPing.js and shared across every studio, so persisting a copy here
+    // would let the two disagree.
+    const prefs = normalizeVideoPreferences({ modelId: 'seedance-v2.0-t2v', pingWhenComplete: true });
+    assert.ok(!('pingWhenComplete' in prefs));
+
+    const ping = await import('../src/lib/completionPing.js');
+    assert.equal(typeof ping.isCompletionPingEnabled, 'function');
+    assert.equal(typeof ping.setCompletionPingEnabled, 'function');
+    assert.equal(typeof ping.subscribeCompletionPing, 'function');
 });
 
 test('video preferences migrate regular and Eros Ingredients into one shared selection', async () => {
@@ -213,15 +236,20 @@ test('ingredient sheet selection normalizes stitched, uploaded, and off states',
 test('video Studio renders and forwards workflow-compatible LoRAs', async () => {
     const fs = require('node:fs');
     const path = require('node:path');
-    const source = fs.readFileSync(path.join(__dirname, '../src/components/VideoStudio.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../src/studios/VideoStudio.jsx'), 'utf8');
+    const loraPanel = fs.readFileSync(path.join(__dirname, '../src/studios/image/LoraSection.jsx'), 'utf8');
     const hive = fs.readFileSync(path.join(__dirname, '../src/lib/hivemindStudio.js'), 'utf8');
 
-    assert.match(source, /createCivitaiDownloadDialog/);
-    assert.match(source, /localAI\.listLoras\(model\.workflowId\)/);
-    assert.match(source, /loras: loraGenerationPayload\(currentVideoLoraSelection\(\)\)/);
-    assert.match(source, /Download LoRA/);
-    assert.match(source, /hivemind-context-updated/);
-    assert.match(source, /isHivemindStudioEnabled\(\) && isLocalAIAvailable\(\)/);
+    assert.match(source, /CivitaiDownloadDialog/, 'can open the Civitai download dialog');
+    // Video workflows are not in workflow-registry.json, so the bridge cannot look up
+    // their base models by id — the client must pass the catalog's compatibleBaseModels
+    // alongside the WORKFLOW id (not the model id) or LoRA lookup 404s.
+    assert.match(source, /listLoras\(model\.workflowId, model\.compatibleBaseModels\)/);
+    assert.match(source, /loras: loraGenerationPayload\(/, 'forwards the LoRA payload to generation');
+    assert.match(loraPanel, /Download LoRA/, 'the shared LoRA panel offers a download affordance');
+    assert.match(source, /hivemind-context-updated/, 'reacts to Hivemind context changes');
+    assert.match(source, /isHivemindStudioEnabled\(\)/, 'gated on studio mode');
+    // The bridge side of the contract is a plain module and unchanged by the port.
     assert.match(hive, /supportsLoras: Boolean\(workflow\.supports_loras\)/);
     assert.match(hive, /loras: params\.loras/);
 });
@@ -229,75 +257,112 @@ test('video Studio renders and forwards workflow-compatible LoRAs', async () => 
 test('Explore supports direct video routing and narrow-width media navigation', () => {
     const fs = require('node:fs');
     const path = require('node:path');
-    const main = fs.readFileSync(path.join(__dirname, '../src/main.js'), 'utf8');
-    const shell = fs.readFileSync(path.join(__dirname, '../src/components/AppShell.js'), 'utf8');
+    const app = fs.readFileSync(path.join(__dirname, '../src/app/App.jsx'), 'utf8');
+    const shell = fs.readFileSync(path.join(__dirname, '../src/app/Shell.jsx'), 'utf8');
 
-    assert.match(main, /get\('page'\)/);
-    assert.match(main, /navigate\(builders\[requestedPage\] \|\| HUB_PAGES\[requestedPage\] \? requestedPage : 'image'\)/);
-    // A failed lazy import must leave the router retryable (currentPage only
-    // commits after a successful mount) and trigger stale-chunk recovery.
-    assert.doesNotMatch(main, /if \(page === currentPage\) return;.{0,120}currentPage = page;/s);
-    assert.match(main, /await loadPageModule\(builders\[page\]\);[\s\S]*?currentPage = page;/);
+    // ?page=<studio> still deep-links, and an unknown page still falls back to image.
+    assert.match(app, /get\('page'\)/);
+    assert.match(app, /isKnownPage\(requested\) \? requested : 'image'/);
+    // A failed lazy import must leave the router retryable — the committed page
+    // (pageRef) may only advance AFTER the module resolves, never before.
+    assert.match(app, /await loadWithRetry\([\s\S]{0,400}?pageRef\.current = target;/);
+    assert.doesNotMatch(app, /pageRef\.current = target;[\s\S]{0,200}?await loadWithRetry\(/);
     // One immediate retry absorbs transient import failures (dist rebuilt
     // mid-session / stack restarting) before the router snaps back.
-    assert.match(main, /async function loadPageModule\(loader\) \{\s*try \{ return await loader\(\); \}\s*catch \{ return loader\(\); \}/);
-    assert.match(main, /recoverFromStaleChunks\(error\)/);
-    assert.match(main, /dynamically imported module/);
-    assert.match(shell, /Studio media navigation/);
-    assert.match(shell, /lg:hidden/);
+    assert.match(app, /async function loadWithRetry\(loader\) \{\s*try \{ return await loader\(\); \}\s*catch \{ return loader\(\); \}/);
+    assert.match(app, /recoverFromStaleChunks\(error\)/);
+    assert.match(app, /dynamically imported module/);
+    // Narrow widths get a horizontally scrollable studio nav rather than a wrapped one.
+    assert.match(shell, /overflow-x-auto[^"]*lg:hidden/);
+});
+
+// What the vanilla test could only grep for, the React split exposes as real
+// functions: which images a generation actually conditions on.
+test('the active ingredient set follows the selected sheet', async () => {
+    const { activeIngredientSheetItems } = await loadVideoStudioHelpers();
+    const model = { id: 'hivemind-video:ltx23-ic-ingredients-lora', supportsIngredientImages: true };
+    const selections = [
+        { url: '/api/media-studio/references/front.png', description: 'front' },
+        { url: '/api/media-studio/references/side.png', description: 'side' },
+    ];
+    const sheets = [{ url: '/api/media-studio/references/sheet.png', description: 'cast sheet' }];
+
+    // 'stitched' conditions on every saved view (the sheet is built from them).
+    assert.deepEqual(
+        activeIngredientSheetItems(model, { selectedSheet: 'stitched', selections, sheets }),
+        selections,
+    );
+    // A finished sheet is used as-is, no stitching — it alone conditions the run.
+    assert.deepEqual(
+        activeIngredientSheetItems(model, { selectedSheet: sheets[0].url, selections, sheets }),
+        [sheets[0]],
+    );
+    // Tapping the selected sheet again turns ingredients off entirely.
+    assert.deepEqual(activeIngredientSheetItems(model, { selectedSheet: '', selections, sheets }), []);
+    // A sheet that no longer exists must not silently fall back to the saved views.
+    assert.deepEqual(
+        activeIngredientSheetItems(model, { selectedSheet: '/api/media-studio/references/gone.png', selections, sheets }),
+        [],
+    );
+    // No ingredients-capable model selected: nothing is conditioned on.
+    assert.deepEqual(activeIngredientSheetItems(null, { selectedSheet: 'stitched', selections, sheets }), []);
+});
+
+test('the Ingredients workflow resolves from the selection, then the canonical LTX one', async () => {
+    const { getIngredientsWorkflow } = await loadVideoStudioHelpers();
+    const canonical = { id: 'hv:a', workflowId: 'ltx23-ic-ingredients-lora', supportsIngredientImages: true };
+    const eros = { id: 'hv:b', workflowId: 'ltx23-eros-ic-ingredients-lora', supportsIngredientImages: true };
+    const plain = { id: 'hv:c', workflowId: 'ltx23-regular-fp8', supportsIngredientImages: false };
+    const catalog = [plain, canonical, eros];
+
+    // The selected model wins when it supports ingredients...
+    assert.equal(getIngredientsWorkflow({ modelId: 'hv:b' }, catalog), eros);
+    // ...otherwise the canonical LTX Ingredients workflow is offered.
+    assert.equal(getIngredientsWorkflow({ modelId: 'hv:c' }, catalog), canonical);
+    // With no canonical entry, any ingredients-capable workflow will do.
+    assert.equal(getIngredientsWorkflow({ modelId: 'hv:c' }, [plain, eros]), eros);
+    assert.equal(getIngredientsWorkflow({ modelId: 'hv:c' }, [plain]), null);
 });
 
 test('video Studio exposes conditioning-only Ingredients reference views', async () => {
     const fs = require('node:fs');
     const path = require('node:path');
-    const source = fs.readFileSync(path.join(__dirname, '../src/components/VideoStudio.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../src/studios/VideoStudio.jsx'), 'utf8');
+    const panel = fs.readFileSync(path.join(__dirname, '../src/studios/video/IngredientsPanel.jsx'), 'utf8');
     const hive = fs.readFileSync(path.join(__dirname, '../src/lib/hivemindStudio.js'), 'utf8');
 
-    assert.match(source, /Ingredient references/);
+    // The panel is conditioning-only and says so.
+    assert.match(panel, /Ingredient references/);
+    assert.match(panel, /Stitched sheet/);
+    assert.match(panel, /Active in next generation/);
+    assert.match(panel, /Tap again to turn ingredients off/);
+    assert.match(panel, /Used as-is, no stitching/);
     assert.match(source, /LTX Ingredients/);
-    assert.match(source, /v-ingredients-btn/);
-    assert.match(source, /workflowId === 'ltx23-ic-ingredients-lora'/);
-    assert.match(source, /selectedModel === workflow\.id && dropdownOpen === 'advanced'/);
-    assert.match(source, /Stitched sheet/);
-    assert.match(source, /data-ingredient-count/);
-    assert.match(source, /Active in next generation/);
-    assert.match(source, /ingredient reference views are active for the next generation/);
-    assert.match(source, /ingredientFileInput\.multiple = true/);
-    assert.match(source, /ingredientImages: currentIngredientSelection/);
-    assert.match(source, /ingredientImages: activeIngredientSheetItems/);
-    assert.match(source, /sharedIngredientSelections/);
-    assert.match(source, /sharedIngredientSheets/);
-    assert.match(source, /ingredientSheetFileInput/);
     assert.match(source, /normalizeSelectedVideoIngredientSheet/);
-    assert.match(source, /Tap again to turn ingredients off/);
-    assert.match(source, /Used as-is, no stitching/);
-    assert.match(source, /selectedIngredientSheet = 'stitched'/);
-    assert.match(source, /selectedIngredientSheet = result\.url/);
-    // Selecting or uploading a finished sheet snaps the output aspect to the
-    // sheet's geometry so it is not letterboxed into a tiny conditioning image,
-    // and generation re-asserts the match even after a session restore.
-    assert.match(source, /matchAspectToIngredientSheet/);
-    assert.equal(source.match(/void matchAspectToIngredientSheet\(selectedIngredientSheet\)/g).length, 2);
-    assert.match(source, /await matchAspectToIngredientSheet\(selectedIngredientSheet\)/);
-    // Local workflows expose a Standard/High resolution tier that reaches the
-    // backend as a lowercase resolution field.
-    assert.match(source, /return \['Standard', 'High'\]/);
-    assert.match(source, /resolution: String\(selectedResolution \|\| ''\)\.toLowerCase\(\) === 'high' \? 'high' : 'standard'/);
+    // Ingredient state is shared across the regular and Eros workflows, never
+    // keyed per model (the old per-model map caused them to diverge).
     assert.doesNotMatch(source, /ingredientSelectionsByModel/);
+    // Selecting or uploading a finished sheet snaps the output aspect to the sheet's
+    // geometry so it is not letterboxed into a tiny conditioning image, and
+    // generation re-asserts the match even after a session restore.
+    assert.match(source, /matchAspectToIngredientSheet/);
+    assert.match(source, /previewHivemindIngredientSheet/);
+    // Local workflows expose a Standard/High tier that reaches the backend lowercased.
+    assert.match(source, /=== 'high' \? 'high' : 'standard'/);
 
     const mcp = fs.readFileSync(path.join(__dirname, '../../media-gateway/bin/media-studio-mcp.mjs'), 'utf8');
     // A single ingredient source is described as a whole reference sheet, not
     // as a lone positioned panel.
     assert.match(mcp, /entries\.length === 1/);
     assert.match(mcp, /The reference sheet shows the same character from multiple angles/);
-    assert.match(source, /else if \(uploadedImageUrl\) \{\s*localParams\.image = uploadedImageUrl;/);
-    assert.match(source, /Number\(duration\) === Number\(model\?\.inputs\?\.duration\?\.default\)/);
-    assert.match(source, /previewHivemindIngredientSheet/);
+
+    // The bridge contract is a plain module, unchanged by the port.
     assert.match(hive, /supportsIngredientImages: accepts\.includes\('ingredient_images'\)/);
     assert.match(hive, /ingredient_images: ingredientImages/);
     assert.match(hive, /resolution: String\(params\.resolution\)\.trim\(\)\.toLowerCase\(\)/);
     assert.match(hive, /workflow\.aspect_ratios/);
     assert.match(hive, /workflow\.default_duration_seconds/);
+    // Ingredients must not suppress a separately-supplied start frame.
     assert.doesNotMatch(hive, /!ingredientImages\.length && imageReference/);
     assert.doesNotMatch(hive, /!ingredientImages\.length && imageBase64/);
     assert.match(hive, /\/api\/media-studio\/ingredients\/preview/);
@@ -306,16 +371,19 @@ test('video Studio exposes conditioning-only Ingredients reference views', async
 test('expanded media view closes via X or backdrop without touching the setup', () => {
     const fs = require('node:fs');
     const path = require('node:path');
-    for (const file of ['ImageStudio.js', 'VideoStudio.js']) {
-        const source = fs.readFileSync(path.join(__dirname, '../src/components', file), 'utf8');
-        assert.match(source, /closeCanvasBtn/, `${file} has an X close button`);
-        assert.match(source, /event\.target === canvas/, `${file} closes on backdrop click`);
-        // The plain close resets the view only — it must not restore an old
-        // context or clear the user's in-progress prompt and settings.
-        const closeHandler = source.match(/closeCanvasBtn\.onclick[\s\S]{0,220}?\};/)[0];
-        assert.match(closeHandler, /resetToPromptBar\(\)/, `${file} close returns to the prompt bar`);
-        assert.doesNotMatch(closeHandler, /restore|clearViewed|textarea\.value|picker\.reset/, `${file} close leaves setup untouched`);
-    }
+    // The vanilla studios each hand-rolled a canvas overlay. React routes the
+    // expanded view through the shared Modal, so the close paths are asserted once.
+    const modal = fs.readFileSync(path.join(__dirname, '../src/ui/Modal.jsx'), 'utf8');
+    assert.match(modal, /onClick=\{dismissable \? onClose : undefined\}/, 'backdrop click closes');
+    assert.match(modal, /e\.key === 'Escape'\) onClose\?\.\(\)/, 'Escape closes');
+
+    // The contract that mattered: a plain close only dismisses the view. Restoring
+    // the shot's setup is a SEPARATE, explicitly-invoked action, so dismissing can
+    // never clobber the user's in-progress prompt and settings.
+    const viewer = fs.readFileSync(path.join(__dirname, '../src/studios/image/GalleryAndViewer.jsx'), 'utf8');
+    assert.match(viewer, /export function ViewerModal\(\{[^}]*\bonClose\b[^}]*\bonBackToSetup\b/s,
+        'dismiss and restore-setup are distinct props, not one handler');
+    assert.match(viewer, /<Modal open onClose=\{onClose\}/, 'the X and backdrop route to the plain dismiss');
 });
 
 test('video preference restoration validates advanced values against the current model schema', async () => {

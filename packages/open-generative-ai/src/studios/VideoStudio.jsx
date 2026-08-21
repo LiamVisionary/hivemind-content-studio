@@ -6,7 +6,7 @@
 // Port rules honored here:
 // - All src/lib modules are consumed unchanged (source of truth).
 // - The imperative state cascades (mode switches, model defaults, restore) live
-//   in ./video/videoLogic.jsx as pure transitions over an immutable `setup`
+//   in ./video/videoLogic.js as pure transitions over an immutable `setup`
 //   object; this component wires them to the UI and lib. Labels render FROM state
 //   (the old getElementById sync layer is gone).
 // - alert() -> toast.error() / an inline danger callout, with identical abort
@@ -89,7 +89,7 @@ import {
   computeSmoothProgress,
   closestVideoAspectRatio, imageDimensions, redactPrivateHistoryEntry,
   groupModelTiers, activeTierFor, tierPairFor,
-} from './video/videoLogic.jsx';
+} from './video/videoLogic.js';
 
 // Re-export the spec-listed pure helpers so tests/other callers keep importing
 // them from a video studio module.
@@ -98,7 +98,7 @@ export {
   normalizeVideoIngredientSelections, normalizeSelectedVideoIngredientSheet,
   normalizeVideoGenerationProgress, classifyVideoGenerationStage, formatVideoGenerationElapsed,
   closestVideoAspectRatio,
-} from './video/videoLogic.jsx';
+} from './video/videoLogic.js';
 
 /* ---------------- media leaves (E2E-transparent) ---------------- */
 

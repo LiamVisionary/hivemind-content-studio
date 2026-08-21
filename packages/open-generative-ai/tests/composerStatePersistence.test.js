@@ -96,14 +96,18 @@ test('outside studio mode the composer state stays in localStorage and never cal
     assert.equal(JSON.parse(store.get('opengen_composer_state')).image.prompt, 'local draft');
 });
 
+// The live studio is a React component (src/studios/ImageStudio.jsx), so its wiring
+// has no importable surface — this stays a source check, but aimed at the file that
+// actually ships. It asserts WHICH composer sections get written, not how the
+// surrounding component is spelled.
 test('image studio wires the encrypted composer draft into prompt, references, and preferences', async () => {
     const fs = require('node:fs');
-    const source = fs.readFileSync(require.resolve('../src/components/ImageStudio.js'), 'utf8');
-    assert.match(source, /hydrateComposerState\(\)\.then/);
-    assert.match(source, /updateComposerSection\('image', \{ prompt: textarea\.value \}\)/);
-    assert.match(source, /updateComposerSection\('image', \{ references: uploadedImageUrls\.slice\(\) \}\)/);
-    assert.match(source, /updateComposerSection\('image', \{ references: \[\] \}\)/);
-    assert.match(source, /updateComposerSection\('image', \{ preferences \}\)/);
+    const source = fs.readFileSync(require.resolve('../src/studios/ImageStudio.jsx'), 'utf8');
+    assert.match(source, /hydrateComposerState\(\)\.then/, 'hydrates the encrypted draft on mount');
+    assert.match(source, /updateComposerSection\('image', \{ prompt:/, 'persists the prompt');
+    assert.match(source, /updateComposerSection\('image', \{ references: [^[]/, 'persists picked references');
+    assert.match(source, /updateComposerSection\('image', \{ references: \[\] \}\)/, 'persists a cleared reference list');
+    assert.match(source, /updateComposerSection\('image', \{ preferences \}\)/, 'persists generation preferences');
     const uploads = fs.readFileSync(require.resolve('../src/lib/uploadHistory.js'), 'utf8');
     assert.match(uploads, /isHivemindStudioEnabled\(\)/);
     assert.match(uploads, /setComposerUploads/);

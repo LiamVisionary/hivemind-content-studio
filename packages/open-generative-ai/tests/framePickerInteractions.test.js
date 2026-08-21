@@ -1,9 +1,10 @@
 // Reference / keyframe picker interaction rules.
 //
-// UploadPicker.jsx, FrameSlotsPicker.jsx, VideoStudio.jsx and videoLogic.jsx are
-// JSX, which node:test cannot import, so these assert the shape of the source the
-// same way the other studio tests do (see loraSelection.test.js). The behaviors
-// themselves were verified in the browser against the running studio.
+// UploadPicker.jsx, FrameSlotsPicker.jsx and VideoStudio.jsx are JSX, which node:test
+// cannot import, so the assertions that reach into them check the shape of the source.
+// (video/videoLogic.js IS importable — prefer a real call over a grep when the
+// behavior lives there.) The interactions themselves were verified in the browser
+// against the running studio.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -58,7 +59,7 @@ test('a start-frame pick that switches to a keyframe model opens that picker', (
 });
 
 test('clearing the start frame keeps a local workflow selected', () => {
-    const logic = read('src/studios/video/videoLogic.jsx');
+    const logic = read('src/studios/video/videoLogic.js');
     const cleared = logic.slice(logic.indexOf('export function startFrameClearedTransition'));
     const body = cleared.slice(0, cleared.indexOf('\n}'));
     // The keyframe pickers live on hivemind workflows, which take the start frame

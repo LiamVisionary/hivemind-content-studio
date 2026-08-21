@@ -1,8 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+// The live studio is src/studios/ImageStudio.jsx; its preference logic is extracted
+// to image/imagePrefs.js so node:test can import it (a .jsx file cannot be).
 async function loadImageStudioHelpers() {
-    return import('../src/components/ImageStudio.js');
+    return import('../src/studios/image/imagePrefs.js');
 }
 
 test('image preferences retain provider, dropdown, advanced, and per-model LoRA settings', async () => {
@@ -16,6 +18,9 @@ test('image preferences retain provider, dropdown, advanced, and per-model LoRA 
         aspectRatio: ' 9:16 ',
         resolution: '2K',
         localRuntimeMode: 'persistent',
+        sampler: ' deis_3m ',
+        scheduler: ' beta ',
+        baseSize: 5000,
         negativePrompt: 'washed out',
         guidanceScale: 99,
         steps: 0,
@@ -46,6 +51,10 @@ test('image preferences retain provider, dropdown, advanced, and per-model LoRA 
         aspectRatio: '9:16',
         resolution: '2K',
         localRuntimeMode: 'persistent',
+        // '' / 0 mean "let the workflow decide"; baseSize clamps to 2048.
+        sampler: 'deis_3m',
+        scheduler: 'beta',
+        baseSize: 2048,
         negativePrompt: 'washed out',
         guidanceScale: 20,
         steps: 1,
@@ -67,9 +76,30 @@ test('image preferences retain provider, dropdown, advanced, and per-model LoRA 
                 displayName: 'Pink Hair',
                 previewUrl: '/preview/pink.jpg',
                 strength: 10,
+                // Muted LoRAs stay in the list with their weight across reloads.
+                enabled: true,
             }],
         },
     });
+});
+
+test('a muted LoRA survives a reload as muted, keeping its weight', async () => {
+    const { normalizeImagePreferences } = await loadImageStudioHelpers();
+
+    const prefs = normalizeImagePreferences({
+        modelId: 'local-krea2',
+        loraSelections: {
+            'krea2-turbo': [
+                { id: 'muted', strength: 0.6, enabled: false },
+                { id: 'active', strength: 0.8, enabled: true },
+            ],
+        },
+    });
+
+    assert.deepEqual(prefs.loraSelections['krea2-turbo'].map((l) => [l.id, l.enabled, l.strength]), [
+        ['muted', false, 0.6],
+        ['active', true, 0.8],
+    ]);
 });
 
 test('image preferences reject missing models and recover safe defaults', async () => {
@@ -84,6 +114,9 @@ test('image preferences reject missing models and recover safe defaults', async 
         aspectRatio: '',
         resolution: '',
         localRuntimeMode: 'one-off',
+        sampler: '',
+        scheduler: '',
+        baseSize: 0,
         negativePrompt: '',
         guidanceScale: 7.5,
         steps: 25,
@@ -117,6 +150,8 @@ test('per-model settings are sanitized and junk entries dropped', async () => {
                 customWidth: -5,
                 customHeight: 1344,
                 localRuntimeMode: 'persistent',
+                sampler: ' dpmpp_2m ',
+                baseSize: 3000,
                 coupleMode: 1,
                 coupleDirection: 'vertical',
                 coupleSplit: 65,
@@ -137,6 +172,11 @@ test('per-model settings are sanitized and junk entries dropped', async () => {
             customWidth: 0,
             customHeight: 1344,
             localRuntimeMode: 'persistent',
+            // Per-model sampler/scheduler/base size follow the model, same as the
+            // top-level fields; an omitted scheduler stays '' (workflow decides).
+            sampler: 'dpmpp_2m',
+            scheduler: '',
+            baseSize: 2048,
             coupleMode: true,
             coupleDirection: 'vertical',
             coupleSplit: 65,

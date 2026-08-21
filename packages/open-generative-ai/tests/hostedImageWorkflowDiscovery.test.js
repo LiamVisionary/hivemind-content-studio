@@ -103,16 +103,22 @@ test('hosted workflow discovery resolves inherited workflow definitions', () => 
     });
 });
 
+// React component wiring has no importable surface, so this stays a source check —
+// aimed at the shipping studio (src/studios/ImageStudio.jsx) and at the LoRA panel
+// the Civitai/download affordances moved into during the React port.
 test('Explore discovers runtime image workflows and forwards inline images', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../src/components/ImageStudio.js'), 'utf8');
-    assert.match(source, /localAI\.listModels\(\)/);
-    assert.match(source, /compatibleLocalModels\(\)/);
-    assert.match(source, /image_base64: sourceImage/);
-    assert.match(source, /localAI\.listLoras\(model\.id\)/);
-    assert.match(source, /loras: loraGenerationPayload\(currentLoraSelection\(\)\)/);
-    assert.match(source, /createCivitaiDownloadDialog/);
-    assert.match(source, /download-lora-btn/);
-    assert.match(source, /localAI\.generatePrompt\(/);
-    assert.match(source, /data-prompt-helper-use/);
+    const source = fs.readFileSync(path.join(__dirname, '../src/studios/ImageStudio.jsx'), 'utf8');
+    const loraPanel = fs.readFileSync(path.join(__dirname, '../src/studios/image/LoraSection.jsx'), 'utf8');
+
+    assert.match(source, /localAI\.listModels\(\)/, 'discovers runtime local models');
+    assert.match(source, /compatibleLocalModels\(\)/, 'filters them to the compatible set');
+    assert.match(source, /image_base64:/, 'forwards inline image bytes rather than a blob URL');
+    assert.match(source, /localAI\.listLoras\(model\.id\)/, 'lists LoRAs for the selected model');
+    assert.match(source, /loras: loraGenerationPayload\(currentLoraSelection\(\)\)/, 'forwards the LoRA payload');
+    assert.match(source, /CivitaiDownloadDialog/, 'can open the Civitai download dialog');
+    assert.match(loraPanel, /Download LoRA/, 'the LoRA panel offers a download affordance');
+    assert.match(source, /localAI\.generatePrompt\(/, 'runs the local prompt helper');
+    // A blob: URL cannot survive a reload or reach the backend — references must be
+    // read as bytes. This guard is why image_base64 exists above.
     assert.doesNotMatch(source, /URL\.createObjectURL\(file\)/);
 });
