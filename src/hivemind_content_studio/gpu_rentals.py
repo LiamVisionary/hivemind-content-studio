@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import contextvars
 import gzip
 import hashlib
 import hmac
@@ -39,7 +38,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import quote
 
 import requests
@@ -90,8 +89,12 @@ def comfy_image_for(provider_key: str) -> str:
 # stays bound to 127.0.0.1 — only the beacon is exposed.
 BEACON_PORT = 18189
 PRESIGN_EXPIRE_SECONDS = 3 * 3600
-# Vast's documented ceiling for the onstart/args field. Measured 2026-08-08:
-# the video tier's 11 presigned URLs alone are ~6.6KB of it.
+# Vast's documented ceiling for the onstart/args field. The weight list used
+# to live inline (measured 2026-08-08: the video tier's 11 presigned URLs alone
+# were ~6.6KB of it) and capped how many user LoRAs a tier could carry; since
+# 2026-08-22 the onstart holds one presigned manifest URL instead, so its size
+# no longer depends on what a tier serves. The ceiling still bounds the node
+# installs and the inlined privacy node.
 VAST_ONSTART_LIMIT = 16384
 _REQUEST_TIMEOUT = 30
 # curl cuts a connection that stays under this floor for DOWNLOAD_STALL_SECONDS
@@ -597,7 +600,7 @@ def _r2_credentials() -> tuple[str, str, str]:
 def _presign_r2(method: str, object_key: str, *, now: datetime | None = None) -> str:
     access_key, secret, account = _r2_credentials()
     host = f"{account}.r2.cloudflarestorage.com"
-    stamp = (now or _presign_clock.get() or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
     date = stamp[:8]
     scope = f"{date}/auto/s3/aws4_request"
     path = "/" + quote(f"{R2_BUCKET}/{object_key}", safe="/")
@@ -1017,6 +1020,8 @@ def _download_lib_lines(
                part10 before part2 and silently scrambles the file) and moved
                into place only at the verified length, so a partial is never
                counted as a model. On failure $dest.err says what happened.
+    - dlstart  <manifest> <models-dir>: one pget per manifest line, FILES
+               set for dlwait. A file already at its full size is skipped.
     - dlwait   the watcher: publishes progress until every file exists, and
                otherwise leaves through the beacon with the cause. Running
                jobs are sampled BEFORE the files are counted, so a fetch that
@@ -1074,6 +1079,8 @@ def _download_lib_lines(
         '[ $i -gt 0 ] && { cat "$p" >> "$d.part000" && rm -f "$p" || { bad="assemble $i"; break; }; }; i=$((i+1)); done',
         '[ -z "$bad" ] && [ "$(sz "$d.part000")" = "$len" ] && { mv "$d.part000" "$d"; return 0; }',
         'rm -f "$d".part*; echo "${bad:-size mismatch}" > "$d.err"; return 1; done; }',
+        "dlstart() { FILES=(); while IFS=$'\\t' read -r u d; do [ -n \"$d\" ] || continue; FILES+=(\"$2/$d\")"
+        '; mkdir -p "$2/${d%/*}"; [ -s "$2/$d" ] || pget "$u" "$2/$d" & done < "$1"; }',
         # One exit for both ways a download can end badly. Says "destroy it"
         # because there is no repair path: the presigned URLs expire, and a
         # half-provisioned box that launches ComfyUI anyway just fails later,
@@ -1088,65 +1095,114 @@ def _download_lib_lines(
     ]
 
 
-# A batch of presigned URLs is signed at one instant so they share every query
-# parameter but the signature; _presign_r2 reads this when no `now` is passed.
-# A ContextVar, not a module global: two rentals generating onstarts on two
-# request threads must not pin each other's clock.
-_presign_clock: contextvars.ContextVar[datetime | None] = contextvars.ContextVar(
-    "presign_clock", default=None
-)
+# --- the weights manifest --------------------------------------------------
+# The list of weights a box must fetch does NOT live in the onstart. Vast caps
+# the onstart at 16KB and a presigned URL is ~400 chars, so with the list
+# inline the MiniMax tier could carry about two registered user LoRAs before
+# renting was refused — a cap nobody asked for. The onstart now carries ONE
+# presigned URL to a small manifest in the private bucket; the box fetches it,
+# caches it on /workspace (a paused-then-resumed box reruns its onstart after
+# the presigns have expired, and still has to know its file list), and starts
+# the same pget jobs from it. Size of the onstart is independent of how many
+# weights or LoRAs a tier serves.
+#
+# Manifest format: one line per weight, `<url>\t<subdir>/<filename>`, the
+# path relative to ComfyUI's models/ directory. Tabs because neither a
+# presigned URL nor a model filename contains one.
+RENTAL_MANIFEST_PREFIX = "rental-manifests/"
+# A manifest is useful for as long as the presigns inside it — 3h — plus the
+# box's own retry window; after a day it is litter, and the next rent sweeps
+# it. Tracked locally by key (no bucket listing needed): rental-manifests.json.
+RENTAL_MANIFEST_TTL_SECONDS = 24 * 3600
 
 
-@contextlib.contextmanager
-def _pinned_presign_clock() -> Iterator[None]:
-    token = _presign_clock.set(datetime.now(timezone.utc))
-    try:
-        yield
-    finally:
-        _presign_clock.reset(token)
+def _rental_manifest(tier: str) -> tuple[str, int]:
+    """The tab-separated manifest for a tier, and how many weights it names.
 
-
-# <base>?<query>&X-Amz-Signature=<hex> — the shape _presign_r2 emits, signature
-# last. Anything else is left alone.
-_PRESIGNED_URL = re.compile(r"^(?P<base>https://[^?]+)\?(?P<query>.+)&X-Amz-Signature=(?P<sig>[0-9A-Za-z]+)$")
-
-
-def _factor_presigned_urls(urls: list[str]) -> tuple[str | None, str | None, list[str]]:
-    """Split presigned URLs into one shared prefix + query and per-URL tails.
-
-    Returns (prefix, query, expressions). When every URL has the presigned
-    shape, the same query string and a common path prefix, the expressions
-    are `${RB}<rest-of-path>?${RQ}&X-Amz-Signature=<sig>` for the onstart to
-    expand (braced: a bare $RB would swallow the path's first letters), and
-    the caller emits RB/RQ once. Otherwise (prefix, query) is (None, None)
-    and the expressions are the URLs verbatim.
+    The tier's curated serving set plus every user LoRA registered for it,
+    each as a presigned GET on the private bucket, then the public upstream
+    weights verbatim — all counted in the same beacon total and landed by the
+    same pget (verified length, atomic move, never a partial counted).
     """
-    matches = [_PRESIGNED_URL.match(url) for url in urls]
-    if not urls or not all(matches):
-        return None, None, list(urls)
-    queries = {m["query"] for m in matches}  # type: ignore[index]
-    bases = [m["base"] for m in matches]  # type: ignore[index]
-    prefix = os.path.commonprefix(bases)
-    prefix = prefix[: prefix.rfind("/") + 1]
-    unsafe = set("'\"$`\\")
-    if len(queries) != 1 or not prefix.startswith("https://") or prefix.count("/") < 3:
-        return None, None, list(urls)
-    query = queries.pop()
-    if unsafe & set(prefix + query) or any(unsafe & set(base) for base in bases):
-        return None, None, list(urls)
-    exprs = [
-        f"${{RB}}{m['base'][len(prefix):]}?${{RQ}}&X-Amz-Signature={m['sig']}"  # type: ignore[index]
-        for m in matches
-    ]
-    return prefix, query, exprs
+    spec = TIERS[tier]
+    rows: list[tuple[str, str]] = []
+    for object_key, subdir in list(spec["models"]) + _rental_lora_downloads(tier):
+        rows.append((_presign_r2_get(object_key), f"{subdir}/{object_key.rsplit('/', 1)[-1]}"))
+    for url, subdir, filename, _size_gb in spec.get("public_models") or []:
+        rows.append((url, f"{subdir}/{filename}"))
+    for url, dest in rows:
+        if "\t" in url or "\t" in dest or "\n" in url or "\n" in dest:
+            raise GpuRentalError(f"weight entry is not manifest-safe: {dest}", status_code=500)
+    return "".join(f"{url}\t{dest}\n" for url, dest in rows), len(rows)
+
+
+def _manifest_state_path() -> Path:
+    return MEDIA_STATE_ROOT / "rental-manifests.json"
+
+
+def _read_manifest_state() -> dict:
+    try:
+        state = json.loads(_manifest_state_path().read_text())
+    except Exception:
+        state = {}
+    state.setdefault("keys", {})
+    return state
+
+
+def _prune_rental_manifests(now: float | None = None) -> list[str]:
+    """Delete manifests older than RENTAL_MANIFEST_TTL_SECONDS. Best effort:
+    a manifest that will not delete is re-tried next time, never fatal."""
+    state = _read_manifest_state()
+    now = time.time() if now is None else now
+    removed = []
+    for key, created in list(state["keys"].items()):
+        if now - float(created or 0) < RENTAL_MANIFEST_TTL_SECONDS:
+            continue
+        try:
+            response = requests.delete(_presign_r2("DELETE", key), timeout=_REQUEST_TIMEOUT)
+        except Exception:  # noqa: BLE001 - network: try again next rent
+            continue
+        if response.status_code < 400 or response.status_code == 404:
+            state["keys"].pop(key, None)
+            removed.append(key)
+    MEDIA_STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    _manifest_state_path().write_text(json.dumps(state, indent=1))
+    return removed
+
+
+def _publish_rental_manifest(text: str) -> str:
+    """PUT the manifest to the private bucket; return a presigned GET for it.
+
+    Raises GpuRentalError when the bucket refuses — a box that cannot learn
+    its file list is a box that bills for nothing, so renting stops here.
+    """
+    _prune_rental_manifests()
+    key = f"{RENTAL_MANIFEST_PREFIX}{datetime.now(timezone.utc):%Y%m%d}/{uuid.uuid4().hex}.tsv"
+    try:
+        response = requests.put(
+            _presign_r2("PUT", key),
+            data=text.encode("utf-8"),
+            headers={"Content-Type": "text/tab-separated-values"},
+            timeout=_REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise GpuRentalError(f"could not publish the weights manifest to R2: {exc}", status_code=503) from exc
+    if response.status_code >= 400:
+        raise GpuRentalError(
+            f"could not publish the weights manifest to R2: HTTP {response.status_code} {response.text[:120]}",
+            status_code=503,
+        )
+    state = _read_manifest_state()
+    state["keys"][key] = time.time()
+    MEDIA_STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    _manifest_state_path().write_text(json.dumps(state, indent=1))
+    return _presign_r2_get(key)
 
 
 def _onstart_script(tier: str) -> str:
     spec = TIERS[tier]
-    # The tier's curated serving set plus every user LoRA registered for it —
-    # same presigned-GET delivery, same beacon accounting, same atomic .dl→mv.
-    models = list(spec["models"]) + _rental_lora_downloads(tier)
-    total = len(models) + len(spec.get("public_models") or [])
+    manifest, total = _rental_manifest(tier)
+    manifest_url = _publish_rental_manifest(manifest)
     lines = [
         "#!/bin/bash",
         "exec > /root/hivemind-provision.log 2>&1",
@@ -1323,45 +1379,24 @@ def _onstart_script(tier: str) -> str:
             "[ -f $H3S/requirements.txt ] && "
             "/venv/main/bin/pip install -q -r $H3S/requirements.txt || true",
         ]
-    files = []
-    lines.append('beacon downloading 0 "Starting model downloads"')
+    lines.append('beacon downloading 0 "Fetching the weights manifest"')
     # Set BEFORE the fetchers fork: a background job inherits the variables
     # that exist at fork time, and `again` reads DL_DEADLINE so no stream
     # keeps retrying past the phase deadline dlwait enforces.
     lines.append(f"DL_DEADLINE=$(( $(date +%s) + {DOWNLOAD_DEADLINE_SECONDS} ))")
-    # Presigned URLs are ~400 chars each and are most of the 16KB onstart, yet
-    # everything but the object key and the signature is the same for every
-    # URL signed at one instant: host, bucket, algorithm, credential, date,
-    # expiry. Sign the batch at one instant and emit the shared prefix and
-    # query ONCE as shell variables, so each pget line carries ~100 chars
-    # instead of ~400. URLs of any other shape (tests, a future bucket) are
-    # emitted literally, exactly as before.
-    with _pinned_presign_clock():
-        signed = [(object_key, subdir, _presign_r2_get(object_key)) for object_key, subdir in models]
-    prefix, query, url_exprs = _factor_presigned_urls([url for _key, _subdir, url in signed])
-    if prefix is not None:
-        lines.append(f"RB='{prefix}'")
-        lines.append(f"RQ='{query}'")
-    for (object_key, subdir, _url), url_expr in zip(signed, url_exprs):
-        filename = object_key.rsplit("/", 1)[-1]
-        files.append(f'"$M/{subdir}/{filename}"')
-        lines.append(f'mkdir -p "$M/{subdir}"')
-        # pget moves the object into place only at its verified length, so a
-        # partial is never counted as a model (by the beacon counter, or by a
-        # rerun's [ -s ]).
-        lines.append(
-            f'[ -s "$M/{subdir}/{filename}" ] || pget "{url_expr}" "$M/{subdir}/{filename}" &'
-        )
-    # Public upstream weights (no presigning, no R2 round trip) pulled the same
-    # atomic way and counted in the same beacon total.
-    for url, subdir, filename, _size_gb in spec.get("public_models") or []:
-        files.append(f'"$M/{subdir}/{filename}"')
-        lines.append(f'mkdir -p "$M/{subdir}"')
-        lines.append(
-            f'[ -s "$M/{subdir}/{filename}" ] || pget "{url}" "$M/{subdir}/{filename}" &'
-        )
     lines += [
-        f"FILES=({' '.join(files)})",
+        # The manifest: fetched with the library's own retrying single-stream
+        # fetch, cached on the persistent disk, and — when the fetch fails on a
+        # rerun because its presign has expired — read from that cache. Only a
+        # box with neither can go no further, and it says so.
+        "MF=/workspace/.hivemind-manifest",
+        f'plain "{manifest_url}" "$MF.new" && mv -f "$MF.new" "$MF"',
+        '[ -s "$MF" ] || { beacon error 0 "weights manifest unavailable ($(cat "$MF.new.err" 2>/dev/null))'
+        ' — destroy this machine and rent another"; exit 1; }',
+        # One pget per manifest line. pget moves the object into place only
+        # at its verified length, so a partial is never counted as a model
+        # (by the beacon counter, or by a rerun's [ -s ]).
+        'dlstart "$MF" "$M"',
         # dlwait publishes progress until every file is in place, and otherwise
         # exits the box through the beacon with the reason (see the library).
         'dlwait "$DL_DEADLINE" "${FILES[@]}"',

@@ -330,6 +330,37 @@ def test_dlwait_names_the_file_and_the_cause_when_a_fetch_gives_up(tmp_path: Pat
     )
 
 
+def test_dlstart_lands_every_manifest_entry_under_the_models_dir(server, tmp_path: Path) -> None:
+    """The onstart no longer lists weights; it fetches a tab-separated manifest
+    (`url<TAB>subdir/filename`) and dlstart turns each line into the same
+    pget job, setting FILES for dlwait. One entry already complete is left
+    alone, not re-fetched."""
+    models = tmp_path / "models"
+    (models / "loras").mkdir(parents=True)
+    (models / "loras" / "done.safetensors").write_bytes(BLOB)
+    manifest = tmp_path / "manifest.tsv"
+    manifest.write_text(
+        f"{_url(server, '/one')}\tdiffusion_models/one.safetensors\n"
+        f"{_url(server, '/two')}\tvae/deeper/two.safetensors\n"
+        f"{_url(server, '/missing')}\tloras/done.safetensors\n"  # would 404 — must be skipped
+    )
+    proc = _run(
+        'beacon() { echo "$1|$2|$3" >> beacon.log; }\n'
+        f'dlstart "{manifest}" "{models}"\n'
+        'echo "FILES=${#FILES[@]}"\n'
+        'dlwait $(( $(date +%s) + 600 )) "${FILES[@]}"\n',
+        tmp_path,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "FILES=3" in proc.stdout
+    for rel in ("diffusion_models/one.safetensors", "vae/deeper/two.safetensors", "loras/done.safetensors"):
+        assert hashlib.sha256((models / rel).read_bytes()).hexdigest() == SHA, rel
+    assert _beacon_lines(tmp_path)[-1] == "downloading|3|"
+    # The complete file was never requested: no GET for /missing.
+    assert not any(path == "/missing" for _m, path, _r in server.faults.log)
+    assert not list(models.rglob("*.part*"))
+
+
 def test_dlwait_stalls_out_at_the_deadline_while_a_fetch_is_still_running(tmp_path: Path) -> None:
     proc = _dlwait(tmp_path, "( sleep 2; echo x > a.bin ) >/dev/null 2>&1 &", deadline_offset=-1)
     assert proc.returncode == 1

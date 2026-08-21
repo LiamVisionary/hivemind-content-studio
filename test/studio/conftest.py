@@ -99,6 +99,28 @@ def _no_marketplace_calls_from_tests(monkeypatch, request):
     monkeypatch.setattr(runpod, "graphql", blocked)
 
 
+@pytest.fixture(autouse=True)
+def rental_manifest(monkeypatch):
+    """Generating a rental onstart publishes the weights manifest to R2. No
+    test may do that over the network; every test gets a recorder instead.
+    Request this fixture by name to read what would have been published:
+    `rental_manifest["text"]` is the tab-separated manifest, `["url"]` the
+    presigned GET the onstart carries. Tests of the publisher itself call the
+    real function through `rental_manifest["real_publish"]`."""
+    from hivemind_content_studio import gpu_rentals
+
+    recorded = {"text": None, "url": "https://r2.example/rental-manifests/test.tsv?X-Amz-Signature=m",
+                "real_publish": gpu_rentals._publish_rental_manifest, "calls": 0}
+
+    def fake_publish(text: str) -> str:
+        recorded["text"] = text
+        recorded["calls"] += 1
+        return recorded["url"]
+
+    monkeypatch.setattr(gpu_rentals, "_publish_rental_manifest", fake_publish)
+    return recorded
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

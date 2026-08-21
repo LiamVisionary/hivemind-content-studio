@@ -562,7 +562,7 @@ def test_offers_rejects_unknown_tier(tmp_path: Path, monkeypatch) -> None:
     assert response.status_code == 400
 
 
-def test_create_uses_cheapest_offer_and_provisioning_onstart(tmp_path: Path, monkeypatch) -> None:
+def test_create_uses_cheapest_offer_and_provisioning_onstart(tmp_path: Path, monkeypatch, rental_manifest) -> None:
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}?sig=x")
 
     def handler(method, path, payload):
@@ -572,10 +572,13 @@ def test_create_uses_cheapest_offer_and_provisioning_onstart(tmp_path: Path, mon
         assert payload["image"] == gpu_rentals.COMFY_IMAGE
         assert payload["label"].startswith(gpu_rentals.STUDIO_LABEL_PREFIX)
         onstart = payload["onstart"]
-        assert "Krea2_Turbo_convrot_int8mixed.safetensors" in onstart
         assert "ComfyUI-INT8-Fast" in onstart
         assert "--highvram" not in onstart
-        assert "https://r2.example/" in onstart
+        # The weights are named by the manifest the onstart fetches, not inline.
+        assert rental_manifest["url"] in onstart
+        assert "Krea2_Turbo_convrot_int8mixed.safetensors" in rental_manifest["text"]
+        assert "https://r2.example/" in rental_manifest["text"]
+        assert "Krea2_Turbo_convrot_int8mixed.safetensors" not in onstart
         return {"new_contract": 4242, "success": True}
 
     calls = _fake_vast(monkeypatch, handler)
@@ -759,25 +762,27 @@ def test_labels_carry_the_gpu_class_and_older_ones_still_parse(tmp_path: Path, m
     assert gpu_rentals._tier_from_label(f"{gpu_rentals.STUDIO_LABEL_PREFIX}image-abc123") == "image"
 
 
-def test_video_tier_provisions_ltx_set(tmp_path: Path, monkeypatch) -> None:
+def test_video_tier_provisions_ltx_set(tmp_path: Path, monkeypatch, rental_manifest) -> None:
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}?sig=x")
-    script = gpu_rentals._onstart_script("video")
-    assert "ltx-2.3-22b-dev-fp8.safetensors" in script
-    assert "ltx2310eros_v14_dmd_lora.safetensors" in script
-    assert "gemma_3_12B_it_fp8_scaled.safetensors" in script
+    gpu_rentals._onstart_script("video")
+    manifest = rental_manifest["text"]
+    assert "ltx-2.3-22b-dev-fp8.safetensors" in manifest
+    assert "ltx2310eros_v14_dmd_lora.safetensors" in manifest
+    assert "gemma_3_12B_it_fp8_scaled.safetensors" in manifest
 
 
-def test_minimax_tier_provisions_h3_stack(tmp_path: Path, monkeypatch) -> None:
+def test_minimax_tier_provisions_h3_stack(tmp_path: Path, monkeypatch, rental_manifest) -> None:
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}?sig=x")
     script = gpu_rentals._onstart_script("minimax")
+    manifest = rental_manifest["text"]
     # The full manifest minimax-h3-video serving set (DiT + TE + both VAEs).
-    assert "minimax_h3_fl2va_pruned_int8_convrot.safetensors" in script
-    assert "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" in script
-    assert "minimax_h3_video_vae_fp16.safetensors" in script
-    assert "minimax_h3_audio_vae_fp32.safetensors" in script
+    assert "minimax_h3_fl2va_pruned_int8_convrot.safetensors" in manifest
+    assert "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors" in manifest
+    assert "minimax_h3_video_vae_fp16.safetensors" in manifest
+    assert "minimax_h3_audio_vae_fp32.safetensors" in manifest
     # The turbo LoRA and its loader come from upstream, not R2: the loader is
     # REQUIRED to apply the LoRA to our pruned base, and both are pinned.
-    assert "minimax_h3_turbo_v4_step600_ema.safetensors" in script
+    assert "minimax_h3_turbo_v4_step600_ema.safetensors" in manifest
     assert "ComfyUI-MiniMax-H3-Turbo" in script
     assert gpu_rentals._H3_TURBO_NODE_COMMIT in script
     # The stripped-AdaLN conversion is gone.
@@ -823,7 +828,7 @@ def test_a_degraded_download_gives_up_instead_of_crawling(tier: str, monkeypatch
     assert 'again "$p" $rc $hc $a "${o#*|}"' in script
     # The phase deadline is set BEFORE the fetchers fork so every stream
     # inherits it; a stream that keeps failing stops at the deadline too.
-    assert script.index("DL_DEADLINE=$((") < script.index('pget "')
+    assert script.index("DL_DEADLINE=$((") < script.index('dlstart "$MF"')
     # No HEAD on a GET presign: R2 answers 403, the length came back empty and
     # every R2 weight silently took the single-stream path.
     assert "-sfI" not in script and "curl -I" not in script
@@ -862,83 +867,115 @@ def test_the_realistic_presign_is_the_real_length() -> None:
 
 
 @pytest.mark.parametrize("tier", ["image", "video", "minimax"])
-def test_every_tier_onstart_leaves_room_for_registered_loras(tier: str, monkeypatch) -> None:
+def test_every_tier_onstart_keeps_headroom_under_vasts_limit(tier: str, monkeypatch) -> None:
     """Vast rejects an onstart over 16KB with an error that names nothing, and
     the generator raises first — at RENT time, for the user. Pin the headroom
-    here instead, so growth in provisioning fails in CI. A registered user
-    LoRA adds one mkdir + one factored pget line (~230 chars); hold room for
-    two. Measured 2026-08-22 after the download library landed: image
-    ~3.7KB, video ~2.8KB, minimax ~0.5KB — minimax is the tight one because
-    most of its onstart is H3 node installs and public HuggingFace URLs,
-    which no factoring touches."""
+    here instead, so growth in provisioning fails in CI. Since the weight
+    list moved into the manifest (2026-08-22) the size does not depend on
+    what a tier serves; what remains is node installs and the inlined
+    privacy node. Measured: image ~5.9KB, video ~5.9KB, minimax ~2.8KB."""
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
     monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
     script = gpu_rentals._onstart_script(tier)
     headroom = gpu_rentals.VAST_ONSTART_LIMIT - len(script)
-    assert headroom >= 450, f"{tier}: only {headroom} chars left under Vast's onstart limit"
+    assert headroom >= 2000, f"{tier}: only {headroom} chars left under Vast's onstart limit"
 
 
-def test_presigned_urls_are_emitted_once_as_a_prefix_and_query(monkeypatch) -> None:
-    """Every presigned URL in a batch shares host, bucket, algorithm,
-    credential, date and expiry — ~300 of its ~400 chars. The onstart carries
-    those once and each pget line only its key and signature, and bash has to
-    put them back together into the very URL that was signed."""
+@pytest.mark.parametrize("tier", ["image", "video", "minimax"])
+def test_the_onstart_carries_one_manifest_url_and_no_weight_urls(tier: str, monkeypatch, rental_manifest) -> None:
+    """The weight list lives in a manifest the box fetches, not in the onstart.
+    Vast caps the onstart at 16KB and a presigned URL is ~400 chars, which
+    used to cap the MiniMax tier at about two registered user LoRAs."""
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
     monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
-    script = gpu_rentals._onstart_script("minimax")
-    prefix = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/hivemind-rental-models/"
-    assert f"RB='{prefix}'" in script
-    assert f"RQ='{_REAL_QUERY}'" in script
-    key = "vae/minimax_h3_video_vae_fp16.safetensors"
-    sig = hashlib.sha256(key.encode()).hexdigest()
-    line = f'[ -s "$M/vae/minimax_h3_video_vae_fp16.safetensors" ] || pget "${{RB}}{key}?${{RQ}}&X-Amz-Signature={sig}" "$M/vae/minimax_h3_video_vae_fp16.safetensors" &'
-    assert line in script
-    assert _realistic_presign(key) not in script, "the full URL is not ALSO emitted"
-    # Braced, or $RB would swallow the first letters of the key ($RBvae...).
-    assert "$RBvae" not in script and "$RQ&" not in script
-    # And bash reassembles exactly what was signed.
-    setup = "\n".join(l for l in script.splitlines() if l.startswith(("RB=", "RQ=")))
-    probe = subprocess.run(
-        ["bash", "-c", setup + f'\necho "${{RB}}{key}?${{RQ}}&X-Amz-Signature={sig}"'],
-        capture_output=True, text=True, check=True,
-    )
-    assert probe.stdout.strip() == _realistic_presign(key)
-    # Public HuggingFace URLs are not presigned and stay literal.
-    assert 'pget "https://huggingface.co/' in script
+    script = gpu_rentals._onstart_script(tier)
+    assert rental_manifest["calls"] == 1
+    assert script.count(rental_manifest["url"]) == 1
+    assert "X-Amz-Signature" not in script.replace(rental_manifest["url"], "")
+    assert "huggingface.co" not in script
+    manifest, total = gpu_rentals._rental_manifest(tier)
+    assert manifest == rental_manifest["text"]
+    rows = [line.split("\t") for line in manifest.splitlines()]
+    assert len(rows) == total and f'"total":{total},' in script
+    for url, dest in rows:
+        assert url.startswith("https://") and "/" in dest and not dest.startswith("/")
+    assert 'dlstart "$MF" "$M"' in script and 'dlwait "$DL_DEADLINE" "${FILES[@]}"' in script
+    # A rerun after the presigns expire reads the cached copy.
+    assert "MF=/workspace/.hivemind-manifest" in script and '[ -s "$MF" ] ||' in script
 
 
-def test_urls_of_any_other_shape_are_emitted_literally(monkeypatch) -> None:
-    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}?sig=x")
+def test_registered_loras_do_not_change_the_onstart_size(monkeypatch, rental_manifest) -> None:
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
     monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
-    script = gpu_rentals._onstart_script("image")
-    assert "RB=" not in script and "RQ=" not in script
-    assert 'pget "https://r2.example/vae/qwen_image_vae.safetensors?sig=x"' in script
+    bare = gpu_rentals._onstart_script("minimax")
+    rows_before = rental_manifest["text"].count("\n")
+    monkeypatch.setattr(
+        gpu_rentals, "_rental_lora_downloads",
+        lambda tier: [(f"user-loras/h3/lora{i:02d}.safetensors", "loras/h3") for i in range(40)],
+    )
+    loaded = gpu_rentals._onstart_script("minimax")
+    assert rental_manifest["text"].count("\n") == rows_before + 40
+    # Only the beacon's total changes (8 -> 48, three mentions): forty LoRAs, same onstart.
+    assert abs(len(loaded) - len(bare)) <= 8
 
 
-def test_a_batch_of_presigns_is_signed_at_one_instant(monkeypatch) -> None:
-    """Factoring only works if every URL in the batch carries the same
-    X-Amz-Date; _onstart_script pins the clock for the batch. Without the
-    pin, a batch that straddled a second boundary would silently fall back
-    to literal URLs and could overflow the onstart."""
-    monkeypatch.setattr(gpu_rentals, "_r2_credentials", lambda: ("AKID", "secret", "acct"))
-    clock = iter([
-        datetime(2026, 8, 22, 5, 0, 0, tzinfo=timezone.utc),
-        datetime(2026, 8, 22, 5, 0, 1, tzinfo=timezone.utc),
-    ])
+def test_publishing_the_manifest_puts_it_to_r2_and_remembers_the_key(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(gpu_rentals, "_presign_r2", lambda method, key, **_kw: f"https://r2.example/{method}/{key}")
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/GET/{key}?sig=x")
+    puts = []
 
-    class _FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return next(clock)
+    class _Resp:
+        status_code = 200
+        text = ""
 
-    monkeypatch.setattr(gpu_rentals, "datetime", _FrozenDatetime)
-    with gpu_rentals._pinned_presign_clock():
-        a = gpu_rentals._presign_r2_get("vae/a.safetensors")
-        b = gpu_rentals._presign_r2_get("vae/b.safetensors")
-    assert "X-Amz-Date=20260822T050000Z" in a and "X-Amz-Date=20260822T050000Z" in b
-    assert gpu_rentals._presign_clock.get() is None, "the pin does not outlive the batch"
-    _prefix, query, exprs = gpu_rentals._factor_presigned_urls([a, b])
-    assert query is not None and len(exprs) == 2 and exprs[0] != exprs[1]
+    monkeypatch.setattr(gpu_rentals.requests, "put",
+                        lambda url, data=None, headers=None, timeout=None: puts.append((url, data, headers)) or _Resp())
+    url = rental_manifest["real_publish"]("https://a\tloras/a.safetensors\n")
+    assert len(puts) == 1
+    put_url, body, headers = puts[0]
+    assert put_url.startswith(f"https://r2.example/PUT/{gpu_rentals.RENTAL_MANIFEST_PREFIX}")
+    assert body == b"https://a\tloras/a.safetensors\n"
+    key = put_url.split("/PUT/", 1)[1]
+    assert url == f"https://r2.example/GET/{key}?sig=x"
+    state = json.loads((tmp_path / "state" / "rental-manifests.json").read_text())
+    assert key in state["keys"]
+
+
+def test_a_refused_manifest_put_stops_the_rental_before_it_bills(tmp_path: Path, monkeypatch, rental_manifest) -> None:
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(gpu_rentals, "_presign_r2", lambda method, key, **_kw: f"https://r2.example/{method}/{key}")
+
+    class _Resp:
+        status_code = 403
+        text = "denied"
+
+    monkeypatch.setattr(gpu_rentals.requests, "put", lambda *a, **k: _Resp())
+    with pytest.raises(gpu_rentals.GpuRentalError, match="manifest"):
+        rental_manifest["real_publish"]("x\ty\n")
+
+
+def test_stale_manifests_are_swept_on_the_next_rent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
+    (tmp_path / "state").mkdir()
+    now = 1_800_000_000.0
+    (tmp_path / "state" / "rental-manifests.json").write_text(json.dumps({"keys": {
+        "rental-manifests/old.tsv": now - 2 * 86400,
+        "rental-manifests/fresh.tsv": now - 600,
+    }}))
+    monkeypatch.setattr(gpu_rentals, "_presign_r2", lambda method, key, **_kw: f"https://r2.example/{method}/{key}")
+    deleted = []
+
+    class _Resp:
+        status_code = 204
+        text = ""
+
+    monkeypatch.setattr(gpu_rentals.requests, "delete", lambda url, timeout=None: deleted.append(url) or _Resp())
+    removed = gpu_rentals._prune_rental_manifests(now=now)
+    assert removed == ["rental-manifests/old.tsv"]
+    assert deleted == ["https://r2.example/DELETE/rental-manifests/old.tsv"]
+    state = json.loads((tmp_path / "state" / "rental-manifests.json").read_text())
+    assert list(state["keys"]) == ["rental-manifests/fresh.tsv"]
 
 
 @pytest.mark.parametrize("tier", ["image", "video", "minimax"])
@@ -1018,8 +1055,9 @@ def test_onstart_fits_vast_arg_limit(tier: str, monkeypatch) -> None:
 
 
 def test_oversized_onstart_is_refused_before_vast_sees_it(monkeypatch) -> None:
-    monkeypatch.setattr(gpu_rentals, "_presign_r2_get",
-                        lambda key: "https://r2.example/" + "u" * 4000)
+    # The weight list no longer lives in the onstart, so presigned URLs cannot
+    # overflow it; the authorized key is the remaining per-rental string.
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 " + "A" * 8000)
     with pytest.raises(gpu_rentals.GpuRentalError) as excinfo:
         gpu_rentals._onstart_script("video")
     # The message must carry the numbers Vast's own error withholds.
@@ -2091,14 +2129,15 @@ def test_rent_honours_the_preference(tmp_path: Path, monkeypatch) -> None:
     assert floors == [500]
 
 
-def test_minimax_tier_ships_the_turbo_lora(tmp_path: Path, monkeypatch) -> None:
+def test_minimax_tier_ships_the_turbo_lora(tmp_path: Path, monkeypatch, rental_manifest) -> None:
     """A faster LINK only shortens provisioning. The generation-speed lever is
     the turbo workflow — which needs BOTH the LoRA and upstream's loader on the
     box, since ComfyUI's plain loader cannot apply it to our pruned base."""
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
     script = gpu_rentals._onstart_script("minimax")
-    assert "minimax_h3_turbo_v4_step600_ema.safetensors" in script
-    assert '"$M/loras/minimax_h3_turbo_v4_step600_ema.safetensors"' in script
+    manifest = rental_manifest["text"]
+    assert ("https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/resolve/main/"
+            "minimax_h3_turbo_v4_step600_ema.safetensors\tloras/minimax_h3_turbo_v4_step600_ema.safetensors\n") in manifest
     assert "ComfyUI-MiniMax-H3-Turbo" in script
     # Public HF weights need a redirect-following curl; the R2 presigned URLs do not.
     assert "curl -sfL" in script
@@ -2112,7 +2151,7 @@ def test_minimax_tier_ships_the_turbo_lora(tmp_path: Path, monkeypatch) -> None:
     # has to be on disk BEFORE ComfyUI starts because its node builds the
     # model_name combo by scanning that directory at schema time.
     assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(66.7, abs=0.2)
-    assert '"$M/latent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors"' in script
+    assert "\tlatent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors\n" in manifest
     assert "Comfyui_Minimax_h3_latent_Upscaler" in script
 
 
@@ -2155,7 +2194,7 @@ def test_rental_lora_routes_require_owner(tmp_path: Path, monkeypatch) -> None:
     assert client.delete("/api/gpu-rentals/loras/x.safetensors").status_code == 401
 
 
-def test_rental_lora_add_provisions_matching_tiers(tmp_path: Path, monkeypatch) -> None:
+def test_rental_lora_add_provisions_matching_tiers(tmp_path: Path, monkeypatch, rental_manifest) -> None:
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}?sig=x")
     rel = _install_lora(tmp_path, monkeypatch)
     uploads = _sync_uploads(monkeypatch)
@@ -2174,14 +2213,14 @@ def test_rental_lora_add_provisions_matching_tiers(tmp_path: Path, monkeypatch) 
     assert [(e["id"], e["status"]) for e in listed] == [(rel, "ready")]
 
     script = gpu_rentals._onstart_script("video")
-    assert f"https://r2.example/user-loras/{rel}?sig=x" in script
-    assert f'"$M/loras/{rel}"' in script
+    assert f"https://r2.example/user-loras/{rel}?sig=x\tloras/{rel}\n" in rental_manifest["text"]
     # 11 curated video files + this one, in the same beacon accounting.
     assert '"total":12' in script
-    assert rel not in gpu_rentals._onstart_script("image")
+    gpu_rentals._onstart_script("image")
+    assert rel not in rental_manifest["text"]
 
 
-def test_rental_lora_keeps_nested_relative_path(tmp_path: Path, monkeypatch) -> None:
+def test_rental_lora_keeps_nested_relative_path(tmp_path: Path, monkeypatch, rental_manifest) -> None:
     """A LoRA installed under a subdirectory must land at the SAME relative
     path on the box — the graph's lora_name is that relative id."""
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
@@ -2190,12 +2229,11 @@ def test_rental_lora_keeps_nested_relative_path(tmp_path: Path, monkeypatch) -> 
     client = _client(tmp_path, monkeypatch)
     assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).status_code == 201
     assert gpu_rentals._rental_lora_downloads("video") == [(f"user-loras/{rel}", "loras/ltx")]
-    script = gpu_rentals._onstart_script("video")
-    assert 'mkdir -p "$M/loras/ltx"' in script
-    assert '"$M/loras/ltx/glow lora.safetensors"' in script
+    gpu_rentals._onstart_script("video")
+    assert "\tloras/ltx/glow lora.safetensors\n" in rental_manifest["text"]
 
 
-def test_rental_lora_minimax_h3_maps_to_the_minimax_tier(tmp_path: Path, monkeypatch) -> None:
+def test_rental_lora_minimax_h3_maps_to_the_minimax_tier(tmp_path: Path, monkeypatch, rental_manifest) -> None:
     """Civitai's H3 category is "MiniMax H3" (character/style LoRAs exist there,
     not just the turbo distill). They ride the H3 tier only — nothing on the
     LTX or image boxes can load them."""
@@ -2205,9 +2243,10 @@ def test_rental_lora_minimax_h3_maps_to_the_minimax_tier(tmp_path: Path, monkeyp
     client = _client(tmp_path, monkeypatch)
     body = client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).json()
     assert body["tiers"] == ["minimax"]
-    script = gpu_rentals._onstart_script("minimax")
-    assert '"$M/loras/h3/lain.safetensors"' in script
-    assert rel not in gpu_rentals._onstart_script("video")
+    gpu_rentals._onstart_script("minimax")
+    assert "\tloras/h3/lain.safetensors\n" in rental_manifest["text"]
+    gpu_rentals._onstart_script("video")
+    assert rel not in rental_manifest["text"]
 
 
 def test_rental_lora_context_bases_cover_handplaced_files(tmp_path: Path, monkeypatch) -> None:
@@ -2236,7 +2275,7 @@ def test_rental_lora_rejects_bad_input(tmp_path: Path, monkeypatch) -> None:
     assert client.post("/api/gpu-rentals/loras", json={"id": "../../etc/passwd", "rating": "sfw"}).status_code == 400
 
 
-def test_rental_lora_failed_upload_is_excluded_and_retryable(tmp_path: Path, monkeypatch) -> None:
+def test_rental_lora_failed_upload_is_excluded_and_retryable(tmp_path: Path, monkeypatch, rental_manifest) -> None:
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
     rel = _install_lora(tmp_path, monkeypatch)
     _sync_uploads(monkeypatch, status="error", error="R2 upload failed: HTTP 500")
@@ -2245,11 +2284,13 @@ def test_rental_lora_failed_upload_is_excluded_and_retryable(tmp_path: Path, mon
     listed = client.get("/api/gpu-rentals/loras").json()["loras"]
     assert listed[0]["status"] == "error" and "HTTP 500" in listed[0]["error"]
     # A half-uploaded LoRA must never reach a box's download list.
-    assert rel not in gpu_rentals._onstart_script("video")
+    gpu_rentals._onstart_script("video")
+    assert rel not in rental_manifest["text"]
     # Re-adding is the retry path.
     _sync_uploads(monkeypatch)
     assert client.post("/api/gpu-rentals/loras", json={"id": rel, "rating": "sfw"}).status_code == 201
-    assert rel in gpu_rentals._onstart_script("video")
+    gpu_rentals._onstart_script("video")
+    assert rel in rental_manifest["text"]
 
 
 def test_rental_lora_remove(tmp_path: Path, monkeypatch) -> None:

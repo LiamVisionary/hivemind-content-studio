@@ -495,7 +495,7 @@ def _lora_entry(lora_id: str, base_model: str, size_gb: float) -> dict:
     }
 
 
-def test_a_registered_lora_reaches_both_providers_from_one_source(monkeypatch, tmp_path: Path) -> None:
+def test_a_registered_lora_reaches_both_providers_from_one_source(monkeypatch, tmp_path: Path, rental_manifest) -> None:
     """The whole point of building the onstart in gpu_rentals: there is exactly
     one LoRA pipeline, and swapping the marketplace cannot change it.
 
@@ -505,11 +505,12 @@ def test_a_registered_lora_reaches_both_providers_from_one_source(monkeypatch, t
     """
     _register_lora(monkeypatch, tmp_path)
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: f"https://r2.example/{key}")
-    script = gpu_rentals._onstart_script("image")
-    assert "user-loras/krea2/my-style.safetensors" in script
+    gpu_rentals._onstart_script("image")
+    manifest = rental_manifest["text"]
+    assert "user-loras/krea2/my-style.safetensors" in manifest
     # And it lands where the studios' graphs name it: installed-LoRA ids keep
     # their subdirectory, so lora_name resolves identically on the rented box.
-    assert "loras/krea2" in script
+    assert "\tloras/krea2/my-style.safetensors\n" in manifest
 
     captured = {}
     monkeypatch.setattr(runpod_provider.RunPodProvider, "create",
@@ -521,8 +522,10 @@ def test_a_registered_lora_reaches_both_providers_from_one_source(monkeypatch, t
          "usd_per_hour": 0.69, "setup_minutes": 2.0}])
     monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], 500))
     gpu_rentals.create_rental("image")
-    assert "user-loras/krea2/my-style.safetensors" in captured["spec"].onstart, \
-        "RunPod is handed the same script, LoRAs included"
+    assert rental_manifest["url"] in captured["spec"].onstart, \
+        "RunPod is handed the same script, pointing at the same manifest"
+    assert "user-loras/krea2/my-style.safetensors" in rental_manifest["text"], \
+        "and that manifest carries the LoRA"
 
 
 def test_a_registered_lora_grows_the_disk_it_downloads_onto(monkeypatch, tmp_path: Path) -> None:
