@@ -69,7 +69,7 @@ The native route currently uses:
 - Distilled two-stage generation: half-resolution denoising, latent upscale, and distilled refinement.
 - Native LoRA fusion for Transition, Better Motion, and IC Dual Character workflows.
 - Native multi-image conditioning with frame indices and strengths.
-- Native source-video extension through `ltx-2-mlx extend --distilled`. Fast, Exact, and Regular each retain the same distilled transformer they use for ordinary generation; source video and audio are encoded as temporal context rather than reduced to a still frame.
+- Native source-video extension through `ltx-2-mlx extend --distilled`. The Eros and Regular lanes each retain the same distilled transformer they use for ordinary generation; source video and audio are encoded as temporal context rather than reduced to a still frame.
 - The official fixed eight-step distilled retake schedule for Apple source-video continuation. CFG, STG, and negative conditioning are intentionally absent in this mode, matching distilled generation semantics.
 - Joint video and audio decoding followed by MP4 muxing.
 - Automatic ComfyUI model unloading before LTX to release unified memory.
@@ -107,26 +107,26 @@ Source-video extension follows the same rule. The MCP normalizes `video_base64`,
 4. `LTXVSetAudioVideoMaskByTime` freezes every video token and every source-audio token while marking only the appended audio interval for generation.
 5. The selected workflow's existing refinement model, CFG guider, sampler, and sigma schedule generate that audio interval with video-to-audio cross-attention. The generated video and extended audio are decoded and muxed into one MP4.
 
-Both routes preserve the source clip and append the requested duration. Audio behavior depends on the actual input stream: a source with audio returns `audio_mode: "extend"`, preserves that soundtrack, and generates only the appended interval; a mute source returns `audio_mode: "generate"` and generates synchronized audio across the complete output timeline. On MLX, mute input is represented by audio-VAE-encoded PCM silence for correct latent sizing, then the full audio mask is denoised. Never use an unconditioned all-zero audio latent as preserved silence: it decodes into periodic noise. Source dimensions are retained rather than replaced by image-generation width/height controls. The current cross-platform direction is append/after. Fast, Exact, and Regular are configured out of the box on Apple Silicon; no separate dev-model environment variable is required.
+Both routes preserve the source clip and append the requested duration. Audio behavior depends on the actual input stream: a source with audio returns `audio_mode: "extend"`, preserves that soundtrack, and generates only the appended interval; a mute source returns `audio_mode: "generate"` and generates synchronized audio across the complete output timeline. On MLX, mute input is represented by audio-VAE-encoded PCM silence for correct latent sizing, then the full audio mask is denoised. Never use an unconditioned all-zero audio latent as preserved silence: it decodes into periodic noise. Source dimensions are retained rather than replaced by image-generation width/height controls. The current cross-platform direction is append/after. The Eros and Regular lanes are configured out of the box on Apple Silicon; no separate dev-model environment variable is required.
 
 Frame units are explicit. `extension_output_frames` is the number of appended video frames. `extension_latent_frames` is the MLX VAE's internal temporal representation, where one latent frame represents eight output frames. For example, four seconds at 24 fps is 96 output frames and 12 latent frames. A client must use the output-frame count and duration when validating the result; 12 latent frames does not mean a 12-frame clip.
 
 The installer applies two platform-neutral `ComfyUI-LTXVideo` compatibility patches on Windows, Linux/CUDA, and macOS: absent noise masks remain absent instead of becoming null mask entries, and overlap blending aligns offloaded latent devices while retaining integer `batch_index` values. The MPS-only LoRA bypass remains Darwin-only. Lightricks' documented Comfy runtime target is a CUDA GPU with at least 32 GB VRAM; Apple Silicon uses the native MLX route in this Studio.
 
-For the two Eros IDs, Apple Silicon selects distinct MLX model variants. The current non-MLX fallback uses the installed Eros Comfy graph, so the Fast versus Exact distinction is primarily meaningful on the native route.
+Each Eros ID selects its own MLX model variant on Apple Silicon. The current non-MLX fallback uses the installed Eros Comfy graph, so the distinction between Eros lanes is primarily meaningful on the native route.
 
 ### Core parity versus model-specific LoRAs
 
-| Capability | Eros Fast | Eros Exact | Regular LTX 2.3 |
-| --- | --- | --- | --- |
-| Start image by path, URL, or base64 | Yes | Yes | Yes |
-| Middle/end/arbitrary image anchors | Yes | Yes | Yes |
-| Source video and audio continuation | Yes, matching distilled model | Yes, matching distilled model | Yes, matching distilled model |
-| Requested append duration and frame-rate normalization | Yes | Yes | Yes |
-| Native MLX on Apple and Comfy fallback on Windows/CUDA | Yes | Yes | Yes |
-| Real denoise progress and explicit output/latent frame units | Yes | Yes | Yes |
+| Capability | Eros Fast | Regular LTX 2.3 |
+| --- | --- | --- |
+| Start image by path, URL, or base64 | Yes | Yes |
+| Middle/end/arbitrary image anchors | Yes | Yes |
+| Source video and audio continuation | Yes, matching distilled model | Yes, matching distilled model |
+| Requested append duration and frame-rate normalization | Yes | Yes |
+| Native MLX on Apple and Comfy fallback on Windows/CUDA | Yes | Yes |
+| Real denoise progress and explicit output/latent frame units | Yes | Yes |
 
-This parity applies to shared generation controls and transports. Transition, Better Motion, and Dual Character remain separate regular-family workflows. Ingredients has both regular and Eros dev-family lanes because its specialized IC-LoRA topology is now shared while the base checkpoint is selected explicitly. It is not injected into the unrelated Eros Fast or Exact workflow IDs.
+This parity applies to shared generation controls and transports. Transition, Better Motion, and Dual Character remain separate regular-family workflows. Ingredients has both regular and Eros dev-family lanes because its specialized IC-LoRA topology is now shared while the base checkpoint is selected explicitly. It is not injected into the unrelated Eros Fast workflow ID.
 
 ## Registered LTX workflows
 
@@ -142,15 +142,6 @@ Call `media_list_workflows` at runtime instead of hard-coding this list forever.
 - Measured reference: `193.11s` for the full 233-frame, approximately 9.7-second benchmark on this Mac.
 - Use `frames`; this built-in workflow does not map `duration_seconds`.
 - Does not expose a registered negative-prompt slot through the Eros builder.
-
-### `ltx23-eros-exact`
-
-- Alias: `exact`.
-- Apple model: Exact-v1 bf16 LoRA merged q8 distilled.
-- Intended use: the exact merged Eros model when model fidelity is preferred over the faster Eros variant.
-- Defaults: `480x832`, `233` frames, `24` fps, seed `42`.
-- Measured reference: `247.44s` for the same full benchmark on this Mac.
-- Uses the same MCP fields and built-in Eros graph shape as Eros Fast.
 
 ### `ltx23-regular-fp8`
 
@@ -261,7 +252,7 @@ On native MLX, frame counts are normalized to the nearest valid `8n + 1` count. 
 - `233` frames at 24 fps places the final anchor at 9.667 seconds and produces an approximately 9.7-second file.
 - `241` frames at 24 fps places the final anchor at 10 seconds and produces an approximately 10.04-second file.
 
-For regular-family workflows, `duration_seconds` is converted to approximately `round(duration * fps) + 1` frames and then normalized. For Eros Fast and Eros Exact, set `frames` directly.
+For regular-family workflows, `duration_seconds` is converted to approximately `round(duration * fps) + 1` frames and then normalized. For the Eros lanes, set `frames` directly.
 
 In video-extension mode, duration is always converted independently of the source length. The normalized append count is `ceil(duration_seconds * frame_rate / 8) * 8` output frames. Apple MLX divides that value by eight only at the final CLI boundary because `ltx-2-mlx extend --extend-frames` accepts latent frames. Comfy/CUDA receives the full output-frame value in `LTXVExtendSampler.num_new_frames`.
 
@@ -869,7 +860,7 @@ When an MCP-connected agent receives a vague request such as "generate a video f
 2. Call `media_list_workflows` when workflow choice matters or the request mentions motion, transitions, multiple characters, or exact fidelity.
 3. Use `ltx23-eros-fast` when the request is otherwise vague because it is the registered default.
 4. Treat an attached client-side image as bytes and send it through `image_base64`; never send the client's local path to the server.
-5. Choose Transition for an explicit start/end transformation, Better Motion for stronger motion, IC Dual Character for storyboarded two-person coverage, Ingredients for a panelized character/prop/location reference sheet, Regular for neutral/general LTX, and Eros Exact only when that model variant is requested.
+5. Choose Transition for an explicit start/end transformation, Better Motion for stronger motion, IC Dual Character for storyboarded two-person coverage, Ingredients for a panelized character/prop/location reference sheet, and Regular for neutral/general LTX.
 6. Submit asynchronously, poll, and return the final tailnet-reachable media URL.
 7. Report `elapsed_seconds` from the completed job as generation time. Do not estimate it from clip duration.
 
@@ -891,7 +882,6 @@ These are observations from this Mac, not performance promises:
 | Workflow / case | Dimensions | Frames | Result | Backend time |
 | --- | ---: | ---: | --- | ---: |
 | Eros Fast benchmark | 480x832 | 233 | Full approximately 9.7s video | 193.11s |
-| Eros Exact benchmark | 480x832 | 233 | Full approximately 9.7s video | 247.44s |
 | Regular start/end short test | 576x1024 | 41 | Native start/end anchors and audio | 42.14s |
 | Regular dual-character control | 1024x576 | 241 | Three-shot 10s control | 318.86s |
 | IC Dual Character LoRA | 1024x576 | 241 | Three-shot 10s IC run | 345.91s |
