@@ -11,7 +11,8 @@
 //      BROWSER's own download paths offer the same filename.
 // Both read the same name, produced once by downloadNames.js at generation time.
 
-import { mediaDownloadNameFor, resolveMediaSrc } from './e2eMedia.js';
+import { isMediaVaultLocked, mediaDownloadNameFor, resolveMediaSrc } from './e2eMedia.js';
+import { requestVaultUnlock } from './vaultSession.js';
 
 /**
  * Save `url` to disk as `filename`. When no filename is given, the registered
@@ -22,7 +23,14 @@ import { mediaDownloadNameFor, resolveMediaSrc } from './e2eMedia.js';
 export async function downloadMedia(url, filename) {
   const name = filename || mediaDownloadNameFor(url) || '';
   try {
-    const response = await fetch(await resolveMediaSrc(url));
+    const src = await resolveMediaSrc(url);
+    if (isMediaVaultLocked(url)) {
+      // Sealed media, no vault key in this tab: "saving" would write envelope
+      // JSON to disk. Open the unlock flow instead of failing silently.
+      requestVaultUnlock();
+      return;
+    }
+    const response = await fetch(src);
     const blob = await response.blob();
     // Name the blob too: if anything downstream re-derives a name from this
     // object rather than the anchor, it still agrees.

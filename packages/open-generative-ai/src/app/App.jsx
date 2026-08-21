@@ -12,6 +12,7 @@ import { Toaster } from 'react-hot-toast';
 import { ExploreDock } from '../bridges/ExploreDock.jsx';
 import { OutputRestoreDropZone } from './OutputRestoreDropZone.jsx';
 import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
+import { VaultUnlockModal } from '../bridges/VaultUnlockModal.jsx';
 import { Spinner } from '../ui/kit.jsx';
 import { HUB_PAGES, isKnownPage } from './navConfig.jsx';
 import { Shell } from './Shell.jsx';
@@ -162,6 +163,7 @@ export function App() {
       ) : null}
 
       <VaultRecoveryModal />
+      <VaultUnlockModal />
       <ExploreDock />
       <OutputRestoreDropZone />
       <Toaster

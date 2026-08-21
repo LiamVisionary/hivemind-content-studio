@@ -11,7 +11,7 @@
 // poll. Destructive deletes go through ConfirmModal (was a native <dialog>).
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
-import { registerMediaDownloadName } from '../../lib/e2eMedia.js';
+import { isMediaVaultLocked, registerMediaDownloadName } from '../../lib/e2eMedia.js';
 import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { downloadMedia } from '../../lib/downloadMedia.js';
 import { ConfirmModal } from '../../ui/Modal.jsx';
@@ -25,7 +25,7 @@ import {
   setHistoryFilter, setPromptFavorite, titleCase, useHub,
 } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
-import { MediaThumb } from '../components/MediaThumb.jsx';
+import { MediaThumb, VaultLockedTile } from '../components/MediaThumb.jsx';
 
 const FILTERS = [
   { value: '', label: 'All' },
@@ -57,6 +57,10 @@ function useOnVisible(cb, { once = false, rootMargin = '0px', resetKey } = {}) {
 
 function CanvasVideoInner({ url }) {
   const src = useMediaSrc(url);
+  // useMediaSrc fails open to the raw envelope URL when the vault has no key in
+  // this tab; a <video> pointed at that sits at readyState 0 forever. The setSrc
+  // that delivers the fail-open URL re-renders us, so this sync check is enough.
+  if (isMediaVaultLocked(url)) return <VaultLockedTile />;
   return <video src={src} controls controlsList="nodownload" preload="metadata" className="h-full w-full object-cover" />;
 }
 

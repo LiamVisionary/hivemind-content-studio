@@ -12,6 +12,18 @@ import { ensureVaultReady } from './vaultSession.js';
 
 const blobCache = new Map(); // original url -> object URL
 
+// URLs verified to be E2E envelopes that could NOT decrypt because this tab has
+// no vault key (e.g. a fresh tab whose owner cookie is still valid, so the lock
+// screen never stashed the passphrase). resolveMediaSrc stays fail-open and still
+// returns the original URL for these; this side-channel lets display code say
+// "vault locked — unlock to view" instead of pointing an <img>/<video> at
+// envelope JSON and failing silently.
+const vaultLockedUrls = new Set();
+
+export function isMediaVaultLocked(url) {
+    return vaultLockedUrls.has(String(url || ''));
+}
+
 // Suggested download filename per media URL, registered by whoever knows which
 // MODEL produced the output (see downloadNames.js). A blob: URL carries no
 // filename of its own, so right-click "Save image as…" and the native <video>
@@ -52,7 +64,11 @@ export async function resolveMediaSrc(url) {
         return url;
     }
     try {
-        if (!(await ensureVaultReady())) return url; // locked; can't decrypt now
+        if (!(await ensureVaultReady())) {
+            vaultLockedUrls.add(url); // verified envelope, no key in this tab
+            try { response.body?.cancel(); } catch { /* already consumed */ }
+            return url; // fail open; display code may show an unlock affordance
+        }
         const envelope = await response.json();
         const bytes = await decryptMedia(envelope.ciphertext, envelope.wrapped_dek);
         const type = envelope.media_type || 'application/octet-stream';
@@ -61,6 +77,7 @@ export async function resolveMediaSrc(url) {
         // the object URL a filename for the browser's own download paths.
         const payload = name ? new File([bytes], name, { type }) : new Blob([bytes], { type });
         const blobUrl = URL.createObjectURL(payload);
+        vaultLockedUrls.delete(url); // a later unlock resolved it after all
         blobCache.set(url, blobUrl);
         return blobUrl;
     } catch {
