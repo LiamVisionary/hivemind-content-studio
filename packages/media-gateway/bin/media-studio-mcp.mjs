@@ -19,6 +19,7 @@ const projectRoot = dirname(__dirname);
 const repositoryRoot = resolve(projectRoot, '..', '..');
 const ingredientsSheetComposerPath = join(__dirname, 'compose-ingredients-sheet.py');
 const ltxAnchorCanvasCompilerPath = join(__dirname, 'compile-ltx-anchor-canvas.py');
+const opaqueImageTranscoderPath = join(__dirname, 'transcode-opaque-image.py');
 const mediaStateRoot = process.env.HIVEMIND_MEDIA_STATE_DIR || join(homedir(), '.hivemindos/media-studio');
 const tokenPath = process.env.MEDIA_STUDIO_TOKEN_FILE || process.env.ZIMG_TOKEN_FILE || join(mediaStateRoot, 'secure/zimg-token');
 const backendTokenPath = process.env.MEDIA_STUDIO_BACKEND_TOKEN_FILE || process.env.ZIMG_TOKEN_FILE || join(mediaStateRoot, 'secure/zimg-token');
@@ -669,10 +670,10 @@ function normalizeLtxDetailerStrength(value) {
   return Math.min(1.5, Math.max(0.05, strength));
 }
 
-function safeCopyName(path) {
+function safeCopyName(path, stagedExt = '') {
   const ext = extname(path).toLowerCase() || '.png';
   const stem = basename(path, ext).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'image';
-  return `mcp_ltx_${Date.now()}_${stem}${ext}`;
+  return `mcp_ltx_${Date.now()}_${stem}${stagedExt || ext}`;
 }
 
 function extensionForMime(mime) {
@@ -690,11 +691,72 @@ function extensionForMime(mime) {
   }[normalized] || '';
 }
 
+// Containers ComfyUI's LoadImage cannot open: it reads staged pictures with
+// plain Pillow, which has no HEIC decoder, on the local lane and on every
+// rented one. Anything that arrives in one of these is stored as a JPEG.
+const OPAQUE_IMAGE_EXTENSIONS = new Set(['.heic', '.heif']);
+
+// A HEIF file has no magic number of its own: the first four bytes are the
+// ftyp box length, and the brands after 'ftyp' say what is inside. An iPhone
+// photo is major brand heic with mif1 among the compatibles; AVIF shares the
+// mif1 compatible brand, so its own brand rules it out here and the mime /
+// filename path keeps handling it as before.
+const HEIC_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'hevm', 'hevs']);
+const HEIF_BRANDS = new Set(['mif1', 'msf1', 'heif']);
+const AVIF_BRANDS = new Set(['avif', 'avis']);
+function heifExtensionFromBrands(buffer) {
+  if (!buffer || buffer.length < 12 || buffer.toString('ascii', 4, 8) !== 'ftyp') return '';
+  const boxLength = Math.min(buffer.readUInt32BE(0) || buffer.length, buffer.length, 256);
+  const brands = [buffer.toString('ascii', 8, 12)];
+  for (let offset = 16; offset + 4 <= boxLength; offset += 4) brands.push(buffer.toString('ascii', offset, offset + 4));
+  if (brands.some((brand) => AVIF_BRANDS.has(brand))) return '';
+  if (brands.some((brand) => HEIC_BRANDS.has(brand))) return '.heic';
+  if (brands.some((brand) => HEIF_BRANDS.has(brand))) return '.heif';
+  return '';
+}
+
+// An iPhone HEIC is staged as a JPEG. The studio's upload route makes the same
+// conversion before sealing a reference; this is the MCP's side of it, for
+// image_base64 / image_url and an absolute image_path. Orientation ends up
+// baked into the pixels (pillow-heif applies it on decode), the rest of the
+// EXIF block — GPS, device serials — does not travel to the lane. Done by the
+// project venv like the ingredient sheet: Pillow only reads HEIC through
+// pillow-heif, which is a declared dependency there and nowhere else.
+function transcodeOpaqueImage(buffer) {
+  if (!existsSync(opaqueImageTranscoderPath)) {
+    const error = new Error('HEIC/HEIF images cannot be staged: the image transcoder is unavailable');
+    error.machineSafe = true;
+    throw error;
+  }
+  const result = spawnSync(ingredientPythonExecutable(), [opaqueImageTranscoderPath], {
+    cwd: repositoryRoot,
+    input: buffer,
+    timeout: 120000,
+    maxBuffer: Math.max(maxInlineImageBytes, buffer.length) * 2,
+  });
+  const jpeg = result.stdout;
+  if (!result.error && result.status === 0 && Buffer.isBuffer(jpeg)
+    && jpeg.length >= 3 && jpeg[0] === 0xff && jpeg[1] === 0xd8 && jpeg[2] === 0xff) {
+    return jpeg;
+  }
+  const reason = (result.error
+    ? result.error.message
+    : String(result.stderr || '').trim().split('\n').pop() || `exit ${result.status}`).slice(0, 300);
+  const error = new Error(`HEIC/HEIF image could not be converted to JPEG for the lane: ${reason}`);
+  // Survives machine-private redaction: the decoder's one-line reason names no
+  // path, prompt or pixel — without it the caller gets a bare MediaStudioError
+  // for a picture it could simply re-export.
+  error.machineSafe = true;
+  throw error;
+}
+
 function detectImageExtension(buffer, mime, sourceName) {
   if (buffer?.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return '.png';
   if (buffer?.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return '.jpg';
   if (buffer?.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return '.webp';
   if (buffer?.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.toString('ascii', 0, 6))) return '.gif';
+  const fromBrands = heifExtensionFromBrands(buffer);
+  if (fromBrands) return fromBrands;
   const fromMime = extensionForMime(mime);
   if (fromMime) return fromMime;
   const fromName = extname(String(sourceName || '')).toLowerCase();
@@ -707,11 +769,16 @@ function stageImageBuffer(buffer, { mime = '', sourceName = '' } = {}) {
   if (buffer.length > maxInlineImageBytes) {
     throw new Error(`inline image is too large; max ${Math.round(maxInlineImageBytes / 1024 / 1024)} MB`);
   }
-  const ext = detectImageExtension(buffer, mime, sourceName);
+  let ext = detectImageExtension(buffer, mime, sourceName);
   if (!ext) throw new Error(`inline image must be a supported image type; received ${mime || 'unknown type'}`);
+  let bytes = buffer;
+  if (OPAQUE_IMAGE_EXTENSIONS.has(ext)) {
+    bytes = transcodeOpaqueImage(buffer);
+    ext = '.jpg';
+  }
   mkdirSync(comfyInputDir, { recursive: true });
   const stagedName = `mcp_inline_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}${ext}`;
-  writeFileSync(join(comfyInputDir, stagedName), buffer);
+  writeFileSync(join(comfyInputDir, stagedName), bytes);
   return stagedName;
 }
 
@@ -1318,6 +1385,11 @@ function stageLtxErosImage(imagePathOrName, fallbackName) {
   const alreadyInput = inputRelativeName(source);
   if (alreadyInput) return alreadyInput;
   mkdirSync(comfyInputDir, { recursive: true });
+  if (OPAQUE_IMAGE_EXTENSIONS.has(extname(source).toLowerCase())) {
+    const stagedName = safeCopyName(source, '.jpg');
+    writeFileSync(join(comfyInputDir, stagedName), transcodeOpaqueImage(readFileSync(source)));
+    return stagedName;
+  }
   const stagedName = safeCopyName(source);
   copyFileSync(source, join(comfyInputDir, stagedName));
   return stagedName;
