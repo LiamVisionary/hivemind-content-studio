@@ -1385,16 +1385,21 @@ def test_spectrum_toggle_reaches_the_graph(tmp_path, workflow_id, spectrum):
     assert node["inputs"]["enabled"] is spectrum
 
 
-def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False):
+def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False, registry_entry=None):
     """Run the real MCP against a capture backend and return the posted graph.
 
     The MCP is a separate node process with its own registry loading, staging
     and pruning; only a real submission proves what a workflow actually sends.
+    registry_entry swaps in a synthetic workflow for lanes whose real api
+    graph resolves outside the repo.
     """
-    registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
-    workflow = next(item for item in _resolved_registry_workflows(registry_src) if item["id"] == workflow_id)
-    entry = json.loads(json.dumps(workflow))
-    entry["api_workflow"] = str(ROOT / "packages" / "media-gateway" / workflow["api_workflow"])
+    if registry_entry is None:
+        registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+        workflow = next(item for item in _resolved_registry_workflows(registry_src) if item["id"] == workflow_id)
+        entry = json.loads(json.dumps(workflow))
+        entry["api_workflow"] = str(ROOT / "packages" / "media-gateway" / workflow["api_workflow"])
+    else:
+        entry = registry_entry
     registry = tmp_path / "workflow-registry.json"
     registry.write_text(json.dumps({"workflows": [entry]}), encoding="utf-8")
 
@@ -1577,8 +1582,7 @@ def test_reference_mode_refuses_more_references_than_it_has_slots(tmp_path):
     assert "at most 9 reference images" in reply or "Too big" in reply or "max" in reply
 
 
-def _tiny_video_data_url(tmp_path, *, with_audio=True, size="96x64", frames=30):
-    path = tmp_path / f"context-{'voiced' if with_audio else 'mute'}.mp4"
+def _write_tiny_video(path, *, with_audio=True, size="96x64", frames=30):
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-f", "lavfi", "-i", f"color=c=gray:s={size}:r=24",
@@ -1590,6 +1594,11 @@ def _tiny_video_data_url(tmp_path, *, with_audio=True, size="96x64", frames=30):
     cmd += ["-c:a", "aac", "-shortest"] if with_audio else ["-an"]
     cmd += [str(path)]
     subprocess.run(cmd, check=True)
+
+
+def _tiny_video_data_url(tmp_path, *, with_audio=True, size="96x64", frames=30):
+    path = tmp_path / f"context-{'voiced' if with_audio else 'mute'}.mp4"
+    _write_tiny_video(path, with_audio=with_audio, size=size, frames=frames)
     return "data:video/mp4;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
 
 
@@ -1708,3 +1717,86 @@ def test_minimax_h3_motion_context_is_declared_on_every_h3_tier():
             assert field in workflow["accepts"], f"{workflow_id} must accept {field}"
         # video_* stays LTX-only: it flips extend/head-swap behavior stack-wide.
         assert not any(str(f).startswith("video_") for f in workflow["accepts"])
+
+
+def _ltx_video_extension_registry_entry(tmp_path):
+    """The real LTX 2.3 lanes (the only video_* consumers) resolve their api
+    graphs outside the repo, so video staging tests run against the same
+    synthetic extension graph the inline-video test uses."""
+    api_workflow = tmp_path / "ltx-api.json"
+    api_workflow.write_text(json.dumps(_ltx_api_workflow()), encoding="utf-8")
+    mobile_workflow = tmp_path / "LTX 2.3 Regular FP8 Mobile.json"
+    mobile_workflow.write_text(json.dumps({"nodes": [], "extra": {}}), encoding="utf-8")
+    return {
+        "id": "ltx23-regular-fp8",
+        "media_type": "video",
+        "title": "LTX regular test",
+        "family": "ltx-2.3",
+        "builder": "comfy-api",
+        "api_workflow": str(api_workflow),
+        "mobile_workflow": str(mobile_workflow),
+        "native_mlx": {"enabled": True, "variant": "regular-q8-distilled"},
+        "accepts": ["prompt", "video_path", "video_base64", "video_url", "video_mode", "duration_seconds", "frame_rate", "seed"],
+        "defaults": {"frames": 121, "frame_rate": 24, "seed": 42},
+        "slots": {
+            "prompt": {"node": "824", "input": "value"},
+            "frame_rate": {"node": "542", "input": "value"},
+            "seed": {"node": "812", "input": "noise_seed"},
+        },
+    }
+
+
+def test_video_bare_name_must_still_exist_in_the_input_folder(tmp_path):
+    """video_path mirrors the reference-image rule: a bare name points at a
+    previously staged input file, and the privacy sweeper prunes those on a
+    TTL — a name that worked minutes ago can be gone. Unvalidated it rode into
+    the graph and died on the remote lane as an opaque
+    prompt_outputs_failed_validation 400. The MCP must refuse at compile time,
+    naming the missing file and how to re-stage it."""
+    reply = _capture_video_graph(
+        tmp_path, "ltx23-regular-fp8",
+        {"prompt": "x", "video_path": "mcp_video_swept_away.mp4"},
+        expect_refusal=True,
+        registry_entry=_ltx_video_extension_registry_entry(tmp_path))
+    assert "mcp_video_swept_away.mp4" in reply
+    assert "not in the Comfy input folder" in reply
+    assert "video_path" in reply, "the refusal must name the argument that carried the stale name"
+    assert "video_base64" in reply, "the refusal must say how to re-stage the clip"
+
+
+def test_motion_context_bare_name_must_still_exist_in_the_input_folder(tmp_path):
+    """Same trap through scene chaining — and the refusal must blame
+    motion_context_path, not video_path, so the caller knows which argument
+    to re-stage."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3",
+        {"prompt": "x", "motion_context_path": "mcp_video_context_swept.mp4"},
+        expect_refusal=True)
+    assert "mcp_video_context_swept.mp4" in reply
+    assert "not in the Comfy input folder" in reply
+    assert "motion_context_path" in reply, "the refusal must name the argument that carried the stale name"
+    assert "motion_context_base64" in reply, "the refusal must say how to re-stage the clip"
+
+
+def test_video_bare_names_still_pass_through_when_the_file_exists(tmp_path):
+    """The legit staged-name reuse flow keeps working: a bare video name that
+    IS in the input folder rides into the graph untouched, not re-staged."""
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    _write_tiny_video(input_dir / "kept-clip.mp4", with_audio=False)
+    _write_tiny_video(input_dir / "kept-context.mp4")
+
+    extension = _capture_video_graph(
+        tmp_path, "ltx23-regular-fp8",
+        {"prompt": "extend the kept clip", "video_path": "kept-clip.mp4", "duration_seconds": 2},
+        registry_entry=_ltx_video_extension_registry_entry(tmp_path))
+    load = next(n for n in extension.values() if n["class_type"] == "VHS_LoadVideo")
+    assert load["inputs"]["video"] == "kept-clip.mp4"
+
+    chained = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "continue from the kept context",
+        "motion_context_path": "kept-context.mp4",
+        "duration_seconds": 5,
+    })
+    load = next(n for n in chained.values() if n["class_type"] == "LoadVideo")
+    assert load["inputs"]["file"] == "kept-context.mp4"
