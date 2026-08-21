@@ -1429,18 +1429,26 @@ def _model_chain(graph):
         node = upstream[0]
 
 
-def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False, return_body=False):
+def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False, return_body=False,
+                         with_reply=False, extra_workflow_ids=()):
     """Run the real MCP against a capture backend and return the posted graph.
 
     The MCP is a separate node process with its own registry loading, staging
     and pruning; only a real submission proves what a workflow actually sends.
+    The temp registry holds only `workflow_id` unless `extra_workflow_ids`
+    names siblings it should be able to route to; `with_reply` also returns
+    the raw JSON-RPC reply so a test can read the tool's own result.
     """
     registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
-    workflow = next(item for item in _resolved_registry_workflows(registry_src) if item["id"] == workflow_id)
-    entry = json.loads(json.dumps(workflow))
-    entry["api_workflow"] = str(ROOT / "packages" / "media-gateway" / workflow["api_workflow"])
+    resolved = _resolved_registry_workflows(registry_src)
+    entries = []
+    for wanted in (workflow_id, *extra_workflow_ids):
+        workflow = next(item for item in resolved if item["id"] == wanted)
+        entry = json.loads(json.dumps(workflow))
+        entry["api_workflow"] = str(ROOT / "packages" / "media-gateway" / workflow["api_workflow"])
+        entries.append(entry)
     registry = tmp_path / "workflow-registry.json"
-    registry.write_text(json.dumps({"workflows": [entry]}), encoding="utf-8")
+    registry.write_text(json.dumps({"workflows": entries}), encoding="utf-8")
 
     captures = []
 
@@ -1518,7 +1526,17 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
         assert not captures, "the MCP submitted a graph it should have refused"
         return reply
     assert captures, "the MCP posted no graph"
-    return captures[0] if return_body else captures[0]["prompt"]
+    result = captures[0] if return_body else captures[0]["prompt"]
+    return (result, reply) if with_reply else result
+
+
+def _mcp_tool_result(reply: str) -> dict:
+    """The tool's structured result out of a JSON-RPC reply, plain JSON or SSE-framed."""
+    text = reply.strip()
+    if not text.startswith("{"):
+        text = next(line[len("data:"):].strip() for line in text.splitlines() if line.startswith("data:"))
+    result = json.loads(text)["result"]
+    return result.get("structuredContent") or json.loads(result["content"][0]["text"])
 
 
 def test_video_mcp_submission_preserves_the_app_tab_lane(tmp_path):
@@ -1632,6 +1650,27 @@ def test_reference_mode_refuses_a_request_with_no_references(tmp_path):
     reply = _capture_video_graph(
         tmp_path, "minimax-h3-reference", {"prompt": "no references at all"}, expect_refusal=True)
     assert "requires at least one reference picture or reference video" in reply
+
+
+def test_references_on_a_workflow_with_no_reference_sibling_are_refused(tmp_path):
+    """reference_* on a workflow with no reference slots used to be dropped on
+    the floor — the staging passes are slot-gated — so the call rendered plain
+    text-to-video with no error and no hint. A family with no reference
+    workflow cannot honour them at all, so it refuses by name: the workflow,
+    and the argument it would have dropped."""
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
+    ltx = next(item for item in _resolved_registry_workflows(registry) if item["id"] == "ltx23-regular-fp8")
+    assert not any(
+        item.get("reference_image_slots") or item.get("reference_video_slots") or item.get("reference_audio_slots")
+        for item in _resolved_registry_workflows(registry) if item.get("family") == ltx["family"]
+    ), "this test wants a family with NO reference lane; pick another workflow"
+
+    reply = _capture_video_graph(
+        tmp_path, "ltx23-regular-fp8",
+        {"prompt": "a kite over a harbour", "reference_images": [{"image_base64": _TINY_PNG}]},
+        expect_refusal=True)
+    assert "workflow ltx23-regular-fp8 takes no reference_images" in reply
+    assert "reference_slots" in reply, "the refusal must point at how to find a reference-capable workflow"
 
 
 def test_reference_mode_refuses_more_references_than_it_has_slots(tmp_path):
@@ -2071,6 +2110,51 @@ def test_reference_video_alone_is_a_valid_reference(tmp_path):
     assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_0"]
     assert [k for k in node["inputs"] if k.startswith("ref_images.")] == []
     assert not [n for n in graph.values() if n["class_type"] == "LoadImage"]
+
+
+def test_references_on_the_plain_h3_tier_route_to_its_reference_sibling(tmp_path):
+    """minimax-h3 has no reference slots — only minimax-h3-reference (inherits
+    it, routing_only) does — and the studio routes between them client-side.
+    An agent sending reference_* straight to minimax-h3 used to get plain
+    text-to-video with no error and no hint: on a rented lane (2026-08-21) a
+    reseeded resubmission still served the reference node from ComfyUI's cache,
+    proving no loader was in its ancestry, and several probes were read against
+    the wrong graph. The MCP now routes the way the studio does, compiles the
+    reference loaders, and the result names both the graph that ran and the
+    workflow the call came from."""
+    source = _write_test_video(tmp_path / "manner.mp4", seconds=3, fps=24)
+    graph, reply = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a courier who moves in the manner of the reference",
+        "reference_images": [{"image_base64": _TINY_PNG}, {"image_base64": _TINY_PNG}],
+        "reference_videos": [{"video_path": str(source)}],
+    }, extra_workflow_ids=("minimax-h3-reference",), with_reply=True)
+
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert sorted(k for k in node["inputs"] if k.startswith("ref_images.")) == \
+        ["ref_images.ref_image_0", "ref_images.ref_image_1"]
+    assert [k for k in node["inputs"] if k.startswith("ref_videos.")] == ["ref_videos.ref_video_0"]
+    assert len([n for n in graph.values() if n["class_type"] == "LoadImage"]) == 2
+    assert len([n for n in graph.values() if n["class_type"] == "LoadVideo"]) == 1
+    assert not [n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo"], \
+        "the plain text/image-to-video graph must not be what ran"
+    workflow = _mcp_tool_result(reply)["workflow"]
+    assert workflow["id"] == "minimax-h3-reference"
+    assert workflow["routed_from"] == "minimax-h3"
+    assert workflow["routed_for"] == ["reference_images", "reference_videos"]
+    # Reached by routing only: the reference tier stays out of the picker.
+    assert workflow["routing_only"] is True
+
+    # No references (an empty list counts as none): the plain tier is itself,
+    # untouched by the sibling sitting in the registry.
+    graph, reply = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "a courier waits on a platform",
+        "reference_images": [],
+    }, extra_workflow_ids=("minimax-h3-reference",), with_reply=True)
+    assert next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert not [n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo"]
+    workflow = _mcp_tool_result(reply)["workflow"]
+    assert workflow["id"] == "minimax-h3"
+    assert "routed_from" not in workflow
 
 
 def test_reference_video_refuses_a_clip_shorter_than_the_model_card_allows(tmp_path):
