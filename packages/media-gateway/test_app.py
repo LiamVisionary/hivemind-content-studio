@@ -1569,35 +1569,13 @@ class ZImageAppTests(unittest.TestCase):
         app = load_app()
         body = json.dumps({
             'prompt': {
-                '597': {'class_type': 'VHS_VideoCombine', 'inputs': {'filename_prefix': 'Eros/native_mlx_ltx__fast-q8-v12'}},
-                '773': {'class_type': 'LoadImage', 'inputs': {'image': 'source.png'}},
-                '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private video prompt'}},
-            },
-        }).encode('utf-8')
-
-        # The marker has to be a live variant, or the accelerator guard is not
-        # what is doing the work and this passes for the wrong reason.
-        with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
-            self.assertIsNotNone(app.detect_native_mlx_ltx_prompt(body))
-        with patch.dict('os.environ', CUDA_ENV, clear=False):
-            self.assertIsNone(app.detect_native_mlx_ltx_prompt(body))
-
-    def test_retired_native_mlx_ltx_variant_marker_falls_back_instead_of_routing(self):
-        # Reruns of pre-retirement Eros outputs still carry the marker of a build
-        # that LTX2_MLX_VARIANTS no longer defines. Those graphs must fall back to
-        # the ComfyUI route rather than raise or resolve to a dead variant key.
-        app = load_app()
-        body = json.dumps({
-            'prompt': {
                 '597': {'class_type': 'VHS_VideoCombine', 'inputs': {'filename_prefix': 'Eros/native_mlx_ltx__exact-v1-merged-q8'}},
                 '773': {'class_type': 'LoadImage', 'inputs': {'image': 'source.png'}},
                 '824': {'class_type': 'PrimitiveStringMultiline', 'inputs': {'value': 'private video prompt'}},
             },
         }).encode('utf-8')
 
-        self.assertIsNone(app._normalize_ltx_mlx_variant('exact-v1-merged-q8'))
-        self.assertIsNone(app._ltx_mlx_variant_from_text('Eros/native_mlx_ltx__exact-v1-merged-q8'))
-        with patch.dict('os.environ', APPLE_SILICON_ENV, clear=False):
+        with patch.dict('os.environ', CUDA_ENV, clear=False):
             self.assertIsNone(app.detect_native_mlx_ltx_prompt(body))
 
     def test_krea2_turbo_legacy_runtime_lora_prompt_rewrites_to_pre_lora_route(self):

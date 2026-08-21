@@ -1239,7 +1239,12 @@ function motionReferenceRowBudget(workflow, lane) {
   const reduced = Number(workflow?.motion_reference_budget?.max_packed_rows_without_vram_headroom);
   const probed = Boolean(lane && lane.probed === true && Number.isFinite(Number(lane.vramHeadroomGb)));
   const laneHeadroom = probed ? Number(lane.vramHeadroomGb) : null;
-  if (probed && reduced > 0 && laneHeadroom < requiredHeadroom) {
+  // A lane without the flag is only held to a smaller budget when the registry
+  // actually carries a smaller one. It does not today: --vram-headroom was
+  // measured inert for the reference-mode OOM (2026-08-21, jobs b9f5b32d and
+  // 103f6173 failed identically at 12 and 20), so both numbers are 85,000 and
+  // the flag advice below stays dormant until a measurement separates them.
+  if (probed && reduced > 0 && reduced < measured && laneHeadroom < requiredHeadroom) {
     return { rows: reduced, measured, requiredHeadroom, lane: lane.lane, laneHeadroom, reducedByLane: true };
   }
   return { rows: measured, measured, requiredHeadroom, lane: lane?.lane ?? null, laneHeadroom, reducedByLane: false };

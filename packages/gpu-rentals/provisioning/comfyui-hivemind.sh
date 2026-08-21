@@ -353,6 +353,16 @@ if [[ "${RENTAL_TIER:-image}" == "minimax-video" ]]; then
     total_ram_gb=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo)
     if (( total_ram_gb < 48 )); then
         export COMFYUI_ARGS="${COMFYUI_ARGS} --disable-smart-memory"
+    else
+        # --vram-headroom (in ComfyUI since ec4dec93, inside the pin below) asks
+        # DynamicVRAM to keep that much VRAM free. Measured 2026-08-21 on a
+        # 110GB-RAM 5090: free per step on a plain job, but it did NOT rescue
+        # the H3 reference-mode OOM (jobs b9f5b32d/103f6173 failed identically
+        # at 12 and 20) — the packed-row budget is what keeps a job on the card.
+        # Kept because it costs nothing and the lane-argv plumbing reads it;
+        # same RAM gate as the gpu_rentals.py onstart (the stream reads the DiT
+        # back from pinned RAM).
+        export COMFYUI_ARGS="${COMFYUI_ARGS} --vram-headroom 12"
     fi
     H3_COMFY_COMMIT="e377e263049f9338b4d12a3dd417b36ae62948ff"
     if ! git -C "$COMFYUI_DIR" merge-base --is-ancestor "$H3_COMFY_COMMIT" HEAD 2>/dev/null; then

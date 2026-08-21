@@ -2327,48 +2327,43 @@ _LANE_THAT_WOULD_NOT_ANSWER = {"lane": "rental48", "remote": True, "vram_headroo
     (_LANE_WITHOUT_THE_FLAG, "without --vram-headroom"),
     (_LANE_WITH_TOO_LITTLE, "with --vram-headroom 4"),
 ])
-def test_a_lane_launched_without_vram_headroom_is_held_to_the_smaller_budget(tmp_path, lane, runs):
-    """The 210,000-row budget is a property of a lane launched with
-    --vram-headroom 12, not of the card: Comfy's planner cannot see reference
-    rows, and without the flag the loader keeps the whole int8 DiT resident —
-    the 142,366-row job that samples with the flag is the one that died in
-    block 0 without it (2026-08-21, job 34a722c2). The guard asks the gateway
-    which lane the graph routes to and what that lane's ComfyUI runs, and a lane
-    short of the flag is held to the ~100k ceiling. The refusal has to name the
-    flag: "100,000" alone reads as a smaller card, and the one sentence the
-    operator can act on is the one that says which flag, and that the tier's
-    own provisioning passes it."""
+def test_a_lane_launched_without_vram_headroom_is_held_to_the_same_budget(tmp_path, lane, runs):
+    """--vram-headroom was measured INERT for the reference-mode OOM: Liam's
+    job died in block 0 with identical numbers (27.55 + 6.46 GiB) at headroom
+    12 and 20 (2026-08-21, jobs b9f5b32d / 103f6173). So the registry carries
+    the same 85,000-row ceiling for a lane with the flag and one without, and
+    the refusal must NOT send the operator off to re-provision for a flag that
+    does not help. The lane plumbing stays (the guard still asks which lane the
+    graph routes to and records what its ComfyUI runs) so a future measurement
+    that does separate the two can set max_packed_rows_without_vram_headroom
+    below max_packed_rows and the smaller budget, with its flag advice, comes
+    back on its own."""
     long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
     request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
                "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
     # Priced before staging at the node's largest reference canvas: 89,452 clip
     # rows + 1,206 audio rows + 107,712 for 345 effective reference frames =
-    # 198,370 — inside the measured budget, so this is the run the flag decides.
+    # 198,370 — over the budget on ANY lane.
     reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
                                  expect_refusal=True, lane_resolution=lane)
     assert "does not fit this card" in reply
     assert "198,370 packed rows" in reply
-    assert "the limit here is 100,000 on lane 'rental48'" in reply
-    assert f"whose ComfyUI runs {runs}" in reply
-    assert "measured with --vram-headroom 12" in reply
-    assert "re-provision that machine, or relaunch its ComfyUI with the flag" in reply
-    # The levers are priced at the ceiling that applies: 175 frames of clip with
-    # this reference (98,870 rows). Nothing at or above the model card's 2s
-    # reference floor fits under the full clip, so no trim length is offered —
-    # a lever naming a length staging would refuse is not a lever.
-    assert "shorten the clip to 7.3s" in reply
-    assert "trim the reference video" not in reply
+    assert "the limit here is 85,000" in reply
+    assert "whose ComfyUI runs" not in reply, runs
+    assert "re-provision that machine" not in reply
     assert "drop a reference video" in reply
 
 
 def test_a_lane_running_the_flag_keeps_the_measured_budget(tmp_path):
-    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
-    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
-               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    """A job inside the 85,000-row budget compiles on a flagged lane — the
+    5 s clip + 5 s reference shape measured at ~67k rows (job 1f9db575)."""
+    clip = _write_test_video(tmp_path / "motion-5s.mp4", seconds=5, fps=24)
+    request = {"prompt": "x", "duration_seconds": 5, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(clip), "duration_seconds": 5}]}
     graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
                                  lane_resolution=_LANE_WITH_THE_FLAG)
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
-    assert node["inputs"]["length"] == 362
+    assert node["inputs"]["length"] == 124
 
 
 def test_a_lane_the_gateway_could_not_ask_keeps_the_measured_budget(tmp_path):
@@ -2378,13 +2373,13 @@ def test_a_lane_the_gateway_could_not_ask_keeps_the_measured_budget(tmp_path):
     that is fine on a lane provisioned the right way. (A gateway from before
     the route, answering 404, is the case every other test in this file
     exercises.)"""
-    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
-    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
-               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    clip = _write_test_video(tmp_path / "motion-5s.mp4", seconds=5, fps=24)
+    request = {"prompt": "x", "duration_seconds": 5, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(clip), "duration_seconds": 5}]}
     graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
                                  lane_resolution=_LANE_THAT_WOULD_NOT_ANSWER)
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
-    assert node["inputs"]["length"] == 362
+    assert node["inputs"]["length"] == 124
 
 
 def test_a_job_without_a_motion_reference_never_asks_the_gateway_which_lane(tmp_path):
@@ -2652,13 +2647,15 @@ def test_the_no_headroom_ceiling_reaches_every_h3_video_lane():
         if workflow["id"].startswith("minimax-h3") and workflow.get("media_type") == "video":
             budget = workflow["motion_reference_budget"]
             assert budget["vram_headroom_gb"] == TIERS["minimax"]["comfy_vram_headroom_gb"] == 12
-            assert budget["max_packed_rows_without_vram_headroom"] == 100000
-            assert budget["max_packed_rows_without_vram_headroom"] < budget["max_packed_rows"]
+            # The flag was measured inert (identical OOM at 12 and 20), so a
+            # lane without it is held to the SAME ceiling — never a looser one.
+            assert budget["max_packed_rows_without_vram_headroom"] == budget["max_packed_rows"] == 85000
             checked += 1
     assert checked >= 2, "reference mode must inherit the budget"
-    # The measured bracket the ceiling sits in: 95,092 rows ran without the
-    # flag, 142,366 did not.
-    assert 95092 < 100000 < 142366
+    # The measured bracket the ceiling sits in (workflow minimax-h3-reference,
+    # no flag): ~82k rows sampled steadily (job 69a108a5), ~104k thrashed and
+    # OOM'd (job b2f76185).
+    assert 82000 < 85000 < 104000
     # The provisioning script the box actually runs passes the same value.
     script = (ROOT / "packages" / "gpu-rentals" / "provisioning" / "comfyui-hivemind.sh").read_text()
     assert f'--vram-headroom {TIERS["minimax"]["comfy_vram_headroom_gb"]}"' in script
@@ -2821,12 +2818,16 @@ def test_a_compact_reference_costs_a_third_and_is_staged_inside_384x1152(tmp_pat
     assert (int(width), int(height)) == (384, 834)
 
 
-def test_references_handed_to_a_workflow_without_slots_are_refused_not_dropped():
+def test_references_handed_to_a_workflow_without_slots_are_never_dropped_silently():
     """The plain minimax-h3 workflow has no reference slots, and the staging
     blocks are gated on the slots — so references sent with it used to vanish
     silently and the clip rendered as plain text-to-video. Two sessions measured
     "reference mode" VRAM ceilings against exactly that on 2026-08-21. The MCP
-    now refuses and names the sibling that takes them."""
+    now ROUTES them to the family's Reference workflow (see
+    test_references_on_the_plain_h3_tier_route_to_its_reference_sibling) or refuses by
+    name when the family has none; either way the live, redaction-on path must
+    answer an error for references it cannot honour — never a silent success —
+    and never echo the caller's paths."""
     body = _call_mcp_tool("media_generate_video", {
         "workflow_id": "minimax-h3",
         "prompt": "x",
@@ -2834,10 +2835,9 @@ def test_references_handed_to_a_workflow_without_slots_are_refused_not_dropped()
         "reference_images": [{"image_path": "/nonexistent/pic.png"}],
         "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "duration_seconds": 3}],
     })
-    assert "has no slots for references" in body, body[:400]
-    assert "1 reference pictures and 1 reference videos" in body
-    assert "minimax-h3-reference" in body
-    # Refused before anything was staged, and with nothing of the caller's in it.
+    assert '"isError":true' in body or '"ok": false' in body, body[:400]
+    assert '"status": "running"' not in body and '"status":"running"' not in body
+    # Nothing of the caller's in the reply.
     assert "/nonexistent" not in body
 
 
