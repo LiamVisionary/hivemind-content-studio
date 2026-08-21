@@ -1063,40 +1063,56 @@ def test_start_video_refuses_motion_context_plus_source_video(tmp_path: Path, mo
         )
 
 
-# A reference VIDEO is trimmed to the generated clip's own length, so its cost
-# grows with the clip and rides every sampling step; reference PICTURES cost a
-# flat amount however long the clip is. Measured 2026-08-13 on a rented 5090 in
-# MiniMax H3 reference mode at 1216x704: 141 frames (5.9s) peaked at 29.63GiB of
-# 31.36 and 158 frames (6.6s) ran out — 36x per frame against a still. The
-# studio publishes this ceiling so an impossible length is never offered; before
-# it did, the run was accepted and died minutes later on an allocator dump.
+# Comfy's memory planner sizes the DiT load from the noise latent alone and is
+# blind to every reference row, so what has to fit is the whole packed sequence:
+# the clip, each motion clip at the node's OWN reference canvas plus its
+# soundtrack, the pictures, the voice clips. Measured 2026-08-21 on a rented
+# 5090 launched with --vram-headroom 12: a 15s clip at 1216x704 with a 15s
+# soundtracked phone reference (203,178 rows) sampled, the same at 1344x768
+# (222,786 rows) ran out of memory. The studio publishes the ceiling so an
+# impossible length is never offered; before it did, the run was accepted and
+# died minutes later on an allocator dump.
 def test_motion_reference_ceiling_matches_the_measured_card_limit():
     from hivemind_content_studio.media_studio import (
         _VIDEO_TIER_DIMENSIONS,
+        _h3_packed_rows,
         motion_reference_duration_limits,
     )
 
     workflow = {
-        "motion_reference_max_reference_pixel_frames": 704 * 1216 * 243,
+        "motion_reference_max_packed_rows": 210_000,
         "frame_grid": {"modulus": 17, "offset": 5},
         "defaults": {"frame_rate": 24},
     }
     limits = motion_reference_duration_limits(workflow)
 
-    # The canvas the measurement was taken on, both orientations: 243 frames.
-    assert limits["high|16:9"] == round(243 / 24, 3)
-    assert limits["high|9:16"] == round(243 / 24, 3)
+    # The High tier carries the card's full 15s (362 frames on the lattice) with
+    # a reference as long as the clip — that is the run that sampled.
+    assert limits["high|16:9"] == round(362 / 24, 3)
+    assert limits["high|9:16"] == round(362 / 24, 3)
+    # The native tier is the one that ran out: with nine pictures and a voice
+    # clip assumed alongside, 311 frames is the last lattice point that fits.
+    assert limits["max|16:9"] == round(311 / 24, 3)
     # Every ceiling sits on the graph's own 17k+5 lattice — a cap that snapped
     # UP would name a length that does not actually fit.
     for seconds in limits.values():
         assert round(seconds * 24) % 17 == 5
-    # ...and none of them exceeds the budget at its own canvas.
+    # ...and none of them exceeds the budget at its own canvas, priced the way
+    # the MCP guard prices a run (reference as long as the clip, every picture
+    # slot filled, the full voice allowance).
     for key, seconds in limits.items():
         tier, aspect = key.split("|")
         width, height = _VIDEO_TIER_DIMENSIONS[tier][aspect]
-        assert width * height * round(seconds * 24) <= workflow["motion_reference_max_reference_pixel_frames"]
-    # The native tier costs more per frame, so it buys less time.
-    assert limits["max|16:9"] < limits["high|16:9"] < limits["standard|16:9"]
+        frames = round(seconds * 24)
+        rows = _h3_packed_rows(workflow["frame_grid"], 24, width, height, frames, reference_seconds=frames / 24)
+        assert rows <= workflow["motion_reference_max_packed_rows"]
+        # ...and the next lattice point would not fit, or the ceiling is the card's 15s.
+        assert frames == 362 or _h3_packed_rows(
+            workflow["frame_grid"], 24, width, height, frames + 17, reference_seconds=(frames + 17) / 24,
+        ) > workflow["motion_reference_max_packed_rows"]
+    # The native tier costs more per frame, so it buys less time; High and the
+    # draft tier both reach the card's 15s.
+    assert limits["max|16:9"] < limits["high|16:9"] == limits["standard|16:9"]
 
 
 def test_motion_reference_ceiling_is_absent_without_a_measured_budget():
@@ -1105,5 +1121,59 @@ def test_motion_reference_ceiling_is_absent_without_a_measured_budget():
     # An UNMEASURED card is not a card that cannot do it: with no budget the
     # studio must keep the full duration range rather than guess a ceiling.
     assert motion_reference_duration_limits({"frame_grid": {"modulus": 17, "offset": 5}}) == {}
-    assert motion_reference_duration_limits({"motion_reference_max_reference_pixel_frames": 0}) == {}
-    assert motion_reference_duration_limits({"motion_reference_max_reference_pixel_frames": "lots"}) == {}
+    assert motion_reference_duration_limits({"motion_reference_max_packed_rows": 0}) == {}
+    assert motion_reference_duration_limits({"motion_reference_max_packed_rows": "lots"}) == {}
+
+
+def test_h3_reference_canvas_mirrors_the_node():
+    """adapt_canvas() in comfy_extras/nodes_minimax_h3.py, plus its never-upscale
+    rule: the reference is encoded at ITS OWN canvas, not the output's."""
+    from hivemind_content_studio.media_studio import (
+        _H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX,
+        _h3_reference_canvas,
+        _h3_rows_per_latent_frame,
+    )
+
+    # The phone clip that broke the old budget: staged 688x1496 lands on
+    # 704x1504 — 1,034 rows per latent frame against 836 for a 1216x704 output.
+    assert _h3_reference_canvas(688, 1496) == (704, 1504)
+    assert _h3_rows_per_latent_frame(704, 1504) == 1034
+    assert _h3_rows_per_latent_frame(1216, 704) == 836
+    # Landscape and portrait HD land on the node's 768-short-edge canvas.
+    assert _h3_reference_canvas(1354, 760) == (1344, 768)
+    assert _h3_reference_canvas(760, 1354) == (768, 1344)
+    # A source smaller than its canvas is never upscaled, only snapped to 32.
+    assert _h3_reference_canvas(640, 480) == (640, 480)
+    assert _h3_reference_canvas(1014, 1014) == (768, 768)
+    # The pre-flight's worst case really is the worst: sweep aspect ratios at the
+    # staging cap and nothing costs more than the constant it prices at.
+    import math
+    worst = 0
+    for thousandths in range(125, 8001):
+        ratio = thousandths / 1000
+        height = math.sqrt(768 * 1344 / ratio)
+        width, height = int(height * ratio / 2) * 2, int(height / 2) * 2
+        canvas_w, canvas_h = _h3_reference_canvas(width, height)
+        worst = max(worst, _h3_rows_per_latent_frame(canvas_w, canvas_h))
+    assert worst == _H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX
+
+
+def test_h3_packed_rows_prices_the_measured_jobs():
+    """The formula reproduces the row counts the registry's measurement note
+    quotes, so the budget and the pricing cannot drift apart unnoticed."""
+    from hivemind_content_studio.media_studio import _h3_packed_rows
+
+    grid = {"modulus": 17, "offset": 5}
+    phone = 1034  # 704x1504 at the node
+    # 15s clip, 15s soundtracked reference, seven pictures: sampled at 1216x704...
+    assert _h3_packed_rows(grid, 24, 1216, 704, 360, reference_seconds=15, reference_rows_per_latent_frame=phone,
+                           pictures=7, voice_seconds=0) == 203_178
+    # ...and ran out of memory at 1344x768.
+    assert _h3_packed_rows(grid, 24, 1344, 768, 360, reference_seconds=15, reference_rows_per_latent_frame=phone,
+                           pictures=7, voice_seconds=0) == 222_786
+    # The job that exposed the old budget: 10s at 1216x704 with the 13.3s clip.
+    assert _h3_packed_rows(grid, 24, 1216, 704, 240, reference_seconds=13.3, reference_rows_per_latent_frame=phone,
+                           pictures=7, voice_seconds=0) == 142_366
+    # Its verified remedy: the same clip trimmed to 4s.
+    assert _h3_packed_rows(grid, 24, 1216, 704, 240, reference_seconds=4, reference_rows_per_latent_frame=phone,
+                           pictures=7, voice_seconds=0) == 95_092

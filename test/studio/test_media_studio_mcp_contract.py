@@ -1429,11 +1429,18 @@ def _model_chain(graph):
         node = upstream[0]
 
 
-def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False, return_body=False):
+def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=False, return_body=False,
+                         lane_resolution=None):
     """Run the real MCP against a capture backend and return the posted graph.
 
     The MCP is a separate node process with its own registry loading, staging
     and pruning; only a real submission proves what a workflow actually sends.
+
+    `lane_resolution` is what the backend answers to POST /api/lanes/resolve —
+    the gateway's account of which lane the graph routes to and what that
+    lane's ComfyUI was launched with (the motion-reference guard asks before
+    pricing a reference job). None answers 404, the way a gateway from before
+    the route would.
     """
     registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
     workflow = next(item for item in _resolved_registry_workflows(registry_src) if item["id"] == workflow_id)
@@ -1448,6 +1455,21 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
+            if self.path == "/api/lanes/resolve":
+                # Asked with the graph, never a /prompt body: a resolve must not
+                # be mistakable for a submission by this harness or the gateway.
+                assert "graph" in body and "prompt" not in body
+                if lane_resolution is None:
+                    self.send_response(404)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"error": "not found"}')
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, **lane_resolution}).encode())
+                return
             if "prompt" in body:
                 captures.append(body)
             self.send_response(200)
@@ -1946,15 +1968,17 @@ def test_reference_video_refuses_a_clip_shorter_than_the_model_card_allows(tmp_p
 
 
 def test_a_long_clip_with_a_motion_reference_is_refused_before_it_is_staged(tmp_path):
-    """The node trims a reference to min(its own length, the clip's length), so
-    the budget is spent on that EFFECTIVE length rather than on the clip's.
+    """The budget is on the whole packed sequence — the clip, each motion clip
+    at the node's own reference canvas plus its soundtrack, the pictures — and
+    a reference is trimmed to min(its own length, the clip's), so a reference at
+    or beyond the clip's length makes the CLIP the thing that has to fit.
 
-    Re-measured 2026-08-15 on a rented 5090 (32607MiB) under ComfyUI 0.32.0 with
-    the cudaMallocAsync allocator, H3 reference mode at 704x1216 with nine
-    pictures and a voice clip: 48, 96, 158 and 243 effective reference frames all
-    ran (27.88-30.06GiB); 305 ran out of memory. The failure used to arrive three
-    minutes in as a CUDA allocator dump, and the first version of this guard
-    over-corrected by capping the CLIP whenever any reference was attached."""
+    Measured 2026-08-21 on a rented 5090 launched with --vram-headroom 12: a 15s
+    clip with a 15s soundtracked phone reference sampled at 1216x704 (203,178
+    rows) and ran out of memory at 1344x768 (222,786 rows). The failure used to
+    arrive three minutes in as a CUDA allocator dump, and the first version of
+    this guard over-corrected by capping the CLIP whenever any reference was
+    attached."""
     # A SHORT reference keeps its own length, so it costs only that and leaves
     # the whole duration range open. This 3s clip against a 15s render is the
     # case the first version of this guard refused outright.
@@ -1964,19 +1988,31 @@ def test_a_long_clip_with_a_motion_reference_is_refused_before_it_is_staged(tmp_
         {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
          "reference_videos": [{"video_path": str(short), "duration_seconds": 3}]})
 
-    # A reference at or beyond the clip's length is trimmed down to it, so the
-    # CLIP becomes the thing that has to fit — and 15s does not.
+    # The High tier carries the card's full 15s even with a reference as long
+    # as the clip — that is the run that sampled — so the old 10.1s refusal is
+    # gone and the graph asks for the full 362 frames.
     long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
-    reply = _capture_video_graph(
+    graph = _capture_video_graph(
         tmp_path, "minimax-h3-reference",
         {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+         "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]})
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362
+
+    # The native tier is the one that ran out. Priced before staging at the
+    # node's largest reference canvas: 107,856 clip rows + 1,206 audio rows +
+    # 107,712 for 345 effective reference frames = 216,774 against 210,000.
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 15, "width": 1344, "height": 768,
          "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]},
         expect_refusal=True)
-    assert "does not fit" in reply
-    # The refusal has to name the length that DOES fit, not merely say no — and
-    # name the shorter-reference lever, which is the one that keeps the range.
-    assert "243" in reply and "10.1s" in reply
-    assert "reference video of 10.1s or less" in reply
+    assert "does not fit this card" in reply
+    # The refusal names both levers with the lattice point that DOES fit:
+    # 328 frames of clip with this reference (201,302 rows), or the reference
+    # trimmed to 311 frames under the full clip (206,214 rows).
+    assert "shorten the clip to 13.7s" in reply
+    assert "trim the reference video to 13.0s or less" in reply
 
 
 def test_the_same_long_clip_is_allowed_without_a_motion_reference(tmp_path):
@@ -1988,6 +2024,91 @@ def test_the_same_long_clip_is_allowed_without_a_motion_reference(tmp_path):
     })
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
     assert node["inputs"]["length"] == 362, "15s on the 17k+5 grid"
+
+
+_LANE_WITH_THE_FLAG = {"lane": "rental48", "remote": True, "vram_headroom_gb": 12.0, "probed": True, "error": None}
+_LANE_WITHOUT_THE_FLAG = {"lane": "rental48", "remote": True, "vram_headroom_gb": 0.0, "probed": True, "error": None}
+_LANE_WITH_TOO_LITTLE = {"lane": "rental48", "remote": True, "vram_headroom_gb": 4.0, "probed": True, "error": None}
+_LANE_THAT_WOULD_NOT_ANSWER = {"lane": "rental48", "remote": True, "vram_headroom_gb": None, "probed": False,
+                               "error": "URLError: Connection refused"}
+
+
+@pytest.mark.parametrize("lane, runs", [
+    (_LANE_WITHOUT_THE_FLAG, "without --vram-headroom"),
+    (_LANE_WITH_TOO_LITTLE, "with --vram-headroom 4"),
+])
+def test_a_lane_launched_without_vram_headroom_is_held_to_the_smaller_budget(tmp_path, lane, runs):
+    """The 210,000-row budget is a property of a lane launched with
+    --vram-headroom 12, not of the card: Comfy's planner cannot see reference
+    rows, and without the flag the loader keeps the whole int8 DiT resident —
+    the 142,366-row job that samples with the flag is the one that died in
+    block 0 without it (2026-08-21, job 34a722c2). The guard asks the gateway
+    which lane the graph routes to and what that lane's ComfyUI runs, and a lane
+    short of the flag is held to the ~100k ceiling. The refusal has to name the
+    flag: "100,000" alone reads as a smaller card, and the one sentence the
+    operator can act on is the one that says which flag, and that the tier's
+    own provisioning passes it."""
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    # Priced before staging at the node's largest reference canvas: 89,452 clip
+    # rows + 1,206 audio rows + 107,712 for 345 effective reference frames =
+    # 198,370 — inside the measured budget, so this is the run the flag decides.
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=lane)
+    assert "does not fit this card" in reply
+    assert "198,370 packed rows" in reply
+    assert "the limit here is 100,000 on lane 'rental48'" in reply
+    assert f"whose ComfyUI runs {runs}" in reply
+    assert "measured with --vram-headroom 12" in reply
+    assert "re-provision that machine, or relaunch its ComfyUI with the flag" in reply
+    # The levers are priced at the ceiling that applies: 175 frames of clip with
+    # this reference (98,870 rows). Nothing at or above the model card's 2s
+    # reference floor fits under the full clip, so no trim length is offered —
+    # a lever naming a length staging would refuse is not a lever.
+    assert "shorten the clip to 7.3s" in reply
+    assert "trim the reference video" not in reply
+    assert "drop a reference video" in reply
+
+
+def test_a_lane_running_the_flag_keeps_the_measured_budget(tmp_path):
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 lane_resolution=_LANE_WITH_THE_FLAG)
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362
+
+
+def test_a_lane_the_gateway_could_not_ask_keeps_the_measured_budget(tmp_path):
+    """Unknown is not "without". A lane that will not answer is the submit-time
+    liveness probe's to name, and a gateway that cannot answer enforces
+    nothing either way — refusing here would only add a failure mode to a job
+    that is fine on a lane provisioned the right way. (A gateway from before
+    the route, answering 404, is the case every other test in this file
+    exercises.)"""
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 lane_resolution=_LANE_THAT_WOULD_NOT_ANSWER)
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362
+
+
+def test_a_job_without_a_motion_reference_never_asks_the_gateway_which_lane(tmp_path):
+    """Only a reference-video job pays the round trip. Pictures alone were
+    never the problem, and the resolve route is answered by the gateway's
+    routing rules — an image-only H3 job must not be slowed by it, so the
+    harness is told to fail loudly if it is ever asked."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+        "reference_images": [{"image_base64": _TINY_PNG}],
+    }, lane_resolution={"lane": "must-not-be-asked", "remote": True, "vram_headroom_gb": 0.0, "probed": True,
+                        "error": "the guard asked for a lane on a job with no motion reference"})
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362
 
 
 def test_reference_video_refuses_more_clips_than_it_has_slots(tmp_path):
@@ -2199,13 +2320,13 @@ def test_motion_reference_budget_mirror_matches_the_registry():
     from hivemind_content_studio.media_catalog import (
         _H3_FRAME_GRID,
         _H3_FRAME_RATE,
-        _H3_MOTION_REFERENCE_PIXEL_FRAMES,
+        _H3_MOTION_REFERENCE_PACKED_ROWS,
         _built_in_video_models_with_limits,
     )
 
     registry = json.loads(WORKFLOW_REGISTRY.read_text())
     h3 = next(w for w in registry["workflows"] if w["id"] == "minimax-h3")
-    assert h3["motion_reference_budget"]["max_reference_pixel_frames"] == _H3_MOTION_REFERENCE_PIXEL_FRAMES
+    assert h3["motion_reference_budget"]["max_packed_rows"] == _H3_MOTION_REFERENCE_PACKED_ROWS
     assert h3["frame_grid"] == _H3_FRAME_GRID
     assert h3["defaults"]["frame_rate"] == _H3_FRAME_RATE
 
@@ -2216,14 +2337,41 @@ def test_motion_reference_budget_mirror_matches_the_registry():
         # VIDEO lanes only: minimax-h3-image shares the id prefix but is a still
         # lane with no motion references, so it carries no budget by design.
         if workflow["id"].startswith("minimax-h3") and workflow.get("media_type") == "video":
-            assert workflow["motion_reference_budget"]["max_reference_pixel_frames"] == _H3_MOTION_REFERENCE_PIXEL_FRAMES
+            assert workflow["motion_reference_budget"]["max_packed_rows"] == _H3_MOTION_REFERENCE_PACKED_ROWS
 
     # And the fallback list the studio gets when the registry cannot be read
     # carries the ceiling rather than silently restoring the full range.
     fallback = {model.id: model for model in _built_in_video_models_with_limits()}
-    assert fallback["minimax-h3"].motion_reference_max_seconds["high|9:16"] == round(243 / 24, 3)
+    assert fallback["minimax-h3"].motion_reference_max_seconds["high|9:16"] == round(362 / 24, 3)
+    assert fallback["minimax-h3"].motion_reference_max_seconds["max|16:9"] == round(311 / 24, 3)
     # Non-minimax workflows have no measured budget and keep the full range.
     assert fallback["ltx23-eros-dmd-v12"].motion_reference_max_seconds is None
+
+
+def test_the_no_headroom_ceiling_reaches_every_h3_video_lane():
+    """The budget carries the headroom it was measured with and the ceiling a
+    lane without it is held to; both inherit to reference mode (the workflow
+    that actually stages motion clips), and the headroom is the one the
+    minimax-tier provisioning passes — otherwise the guard enforces a flag the
+    boxes never get."""
+    from hivemind_content_studio.gpu_rentals import TIERS
+
+    registry = json.loads(WORKFLOW_REGISTRY.read_text())
+    checked = 0
+    for workflow in _resolved_registry_workflows(registry):
+        if workflow["id"].startswith("minimax-h3") and workflow.get("media_type") == "video":
+            budget = workflow["motion_reference_budget"]
+            assert budget["vram_headroom_gb"] == TIERS["minimax"]["comfy_vram_headroom_gb"] == 12
+            assert budget["max_packed_rows_without_vram_headroom"] == 100000
+            assert budget["max_packed_rows_without_vram_headroom"] < budget["max_packed_rows"]
+            checked += 1
+    assert checked >= 2, "reference mode must inherit the budget"
+    # The measured bracket the ceiling sits in: 95,092 rows ran without the
+    # flag, 142,366 did not.
+    assert 95092 < 100000 < 142366
+    # The provisioning script the box actually runs passes the same value.
+    script = (ROOT / "packages" / "gpu-rentals" / "provisioning" / "comfyui-hivemind.sh").read_text()
+    assert f'--vram-headroom {TIERS["minimax"]["comfy_vram_headroom_gb"]}"' in script
 
 
 def _call_mcp_tool(name: str, arguments: dict) -> str:
@@ -2286,18 +2434,19 @@ def test_an_impossible_motion_reference_clip_is_refused_before_anything_is_stage
     body = _call_mcp_tool("media_generate_video", {
         "workflow_id": "minimax-h3-reference",
         "prompt": "x",
-        "width": 704,
-        "height": 1216,
+        "width": 768,
+        "height": 1344,
         "duration_seconds": 15,
-        # A reference as long as the clip: the node trims it to the clip, so the
-        # clip's own 15s is what has to fit, and it does not.
+        # A reference as long as the clip on the native canvas: the node trims
+        # it to the clip, so the clip's own 15s is what has to fit — and at this
+        # canvas it does not (216,774 packed rows against 210,000).
         "reference_videos": [{"video_path": missing, "use_audio": False, "duration_seconds": 15}],
     })
 
     # The reason survives machine-private redaction, because it is the card's
     # capacity and the canvas the caller already chose — no prompt, no media.
     assert "does not fit this card" in body, body[:400]
-    assert "10.1s" in body
+    assert "13.7s" in body
     # Never reached the staging step, so it cannot have complained about the file.
     assert "never-staged-because" not in body
 
@@ -2321,16 +2470,70 @@ def test_a_short_motion_reference_leaves_the_full_duration_range_open():
 def test_an_unmeasured_reference_is_treated_as_long():
     """No duration hint means the pre-flight cannot know the clip is short, and
     guessing short would let an over-budget run through to a three-minute OOM.
-    It assumes long; the authoritative check re-runs on the real staged file."""
+    It assumes the longest the lane will stage (15s) at the node's largest
+    reference canvas; the authoritative check re-runs on the real staged file."""
     body = _call_mcp_tool("media_generate_video", {
         "workflow_id": "minimax-h3-reference",
         "prompt": "x",
-        "width": 704,
-        "height": 1216,
+        "width": 768,
+        "height": 1344,
         "duration_seconds": 15,
         "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False}],
     })
     assert "does not fit this card" in body, body[:400]
+
+
+def test_a_lying_duration_hint_is_caught_on_the_staged_file(tmp_path):
+    """The pre-flight trusts the caller's duration hint; the authoritative check
+    prices the STAGED file — its real length AND the node's canvas for its real
+    dimensions. A 2s hint on a 15s portrait phone clip sails through pre-flight
+    (12,672 rows) and is refused once staged: 704x1504 at the node is 1,034 rows
+    per latent frame, 105,468 for its 345 effective frames."""
+    phone = _write_test_video(tmp_path / "phone.mp4", seconds=15, fps=24, size="688x1496")
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 15, "width": 1344, "height": 768,
+         "reference_videos": [{"video_path": str(phone), "duration_seconds": 2}]},
+        expect_refusal=True)
+    assert "does not fit this card" in reply
+    # 107,856 + 1,206 + 105,468 = 214,530 rows. Priced at the clip's REAL canvas,
+    # 345 frames of clip fit (209,434) — more than the 328 the pre-flight's
+    # worst case allows — or the reference trimmed to 328 frames (209,360).
+    assert "shorten the clip to 14.4s" in reply
+    assert "trim the reference video to 13.7s or less" in reply
+
+
+def test_the_guard_and_the_picker_price_a_run_the_same_way():
+    """One source of truth: the MCP's refusal and the studio's picker ceiling
+    are computed by two mirrors of the same pricing. The refusal above names
+    the clip length that fits for the native canvas without pictures or voice;
+    the picker's published ceiling assumes nine pictures and a voice clip. Both
+    must fall out of the Python mirror with those inputs."""
+    from hivemind_content_studio.media_studio import (
+        _grid_frames_at_most,
+        _h3_packed_rows,
+        motion_reference_duration_limits,
+    )
+    from hivemind_content_studio.media_catalog import _H3_MOTION_REFERENCE_PACKED_ROWS
+
+    grid = {"modulus": 17, "offset": 5}
+
+    def ceiling(**kwargs):
+        frames = 362
+        while frames >= 5:
+            if _h3_packed_rows(grid, 24, 1344, 768, frames, reference_seconds=15, **kwargs) <= _H3_MOTION_REFERENCE_PACKED_ROWS:
+                return frames
+            frames = _grid_frames_at_most(grid, frames - 1)
+        return None
+
+    # The MCP scenario: one reference without its soundtrack, no pictures, no voice.
+    assert ceiling(reference_audio=False, pictures=0, voice_seconds=0) == 328  # "13.7s"
+    # The picker scenario: slot maximum of pictures, the full voice allowance.
+    limits = motion_reference_duration_limits({
+        "motion_reference_max_packed_rows": _H3_MOTION_REFERENCE_PACKED_ROWS,
+        "frame_grid": grid, "defaults": {"frame_rate": 24},
+    })
+    assert round(limits["max|16:9"] * 24) == ceiling() == 311
 
 
 def test_a_motion_reference_clip_that_fits_is_not_refused_and_redaction_still_holds():

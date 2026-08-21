@@ -353,6 +353,15 @@ if [[ "${RENTAL_TIER:-image}" == "minimax-video" ]]; then
     total_ram_gb=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo)
     if (( total_ram_gb < 48 )); then
         export COMFYUI_ARGS="${COMFYUI_ARGS} --disable-smart-memory"
+    else
+        # Comfy's planner sizes the DiT load from the noise latent alone and is
+        # blind to every reference row, so H3 reference mode OOMs in block 0
+        # with the whole int8 DiT resident (2026-08-21). --vram-headroom (in
+        # ComfyUI since ec4dec93, inside the pin below) keeps that much VRAM
+        # free and streams weights from pinned RAM instead — same job, 21.8GB,
+        # no measurable per-step cost on a 110GB-RAM box. Same RAM gate as the
+        # gpu_rentals.py onstart: the stream reads the DiT back from RAM.
+        export COMFYUI_ARGS="${COMFYUI_ARGS} --vram-headroom 12"
     fi
     H3_COMFY_COMMIT="e377e263049f9338b4d12a3dd417b36ae62948ff"
     if ! git -C "$COMFYUI_DIR" merge-base --is-ancestor "$H3_COMFY_COMMIT" HEAD 2>/dev/null; then

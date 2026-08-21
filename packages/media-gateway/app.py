@@ -509,6 +509,103 @@ def comfy_lane_liveness_error(lane, timeout=4.0):
     )
 
 
+# ---- Lane launch flags ------------------------------------------------------
+#
+# The MiniMax H3 motion-reference budget (workflow-registry.json,
+# motion_reference_budget.max_packed_rows) was measured on a lane launched with
+# `--vram-headroom 12`. Comfy's planner is blind to every reference row —
+# comfy/model_base.py's MiniMaxH3 sets no memory_usage_factor_conds — so WITHOUT
+# the flag the loader keeps the whole int8 DiT resident and the same card holds
+# roughly half the rows: a 142,366-row job that samples with the flag died in
+# block 0's qkv_proj without it (2026-08-21, job 34a722c2, 26.47GiB + 6.21GiB on
+# a 31.36GiB 5090). The rental provisioning passes the flag, but a lane attached
+# by hand, or whose ComfyUI was relaunched on the box, may not carry it, and the
+# budget must not be granted on a promise. ComfyUI publishes its own argv on
+# /system_stats (`system.argv`), so the lane itself is the source of truth: the
+# MCP guard asks POST /api/lanes/resolve below before pricing a reference job
+# and holds a lane without the flag to the registry's smaller ceiling.
+_LANE_LAUNCH_ARGS_TTL_S = 60.0
+_lane_launch_args_cache = {}
+_lane_launch_args_lock = threading.Lock()
+
+
+def vram_headroom_gb_from_argv(argv):
+    """`--vram-headroom N` (or `--vram-headroom=N`) from a ComfyUI argv, in GB.
+
+    0.0 when the flag is absent — ComfyUI's own default — and None when argv is
+    not a list. The two must stay distinct: "launched without" is a fact that
+    shrinks the budget, "unknown" is not. The last occurrence wins, as argparse
+    would have it."""
+    if not isinstance(argv, (list, tuple)):
+        return None
+    items = [str(item) for item in argv]
+    value = 0.0
+    for index, item in enumerate(items):
+        raw = None
+        if item == "--vram-headroom" and index + 1 < len(items):
+            raw = items[index + 1]
+        elif item.startswith("--vram-headroom="):
+            raw = item.split("=", 1)[1]
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+    return max(0.0, value)
+
+
+def comfy_lane_launch_args(lane, timeout=4.0):
+    """The argv ComfyUI on `lane` was launched with, read from its /system_stats.
+
+    Cached per lane for a minute: a lane's flags change only when its ComfyUI is
+    relaunched, and a reference job asks twice (pre-flight, then the check on
+    the staged files). Raises when the lane does not answer or does not publish
+    its argv — the caller decides what an unknown is worth."""
+    base = COMFY_LANES.get(lane, COMFY_HTTP_DEFAULT).rstrip('/')
+    now = time.monotonic()
+    with _lane_launch_args_lock:
+        cached = _lane_launch_args_cache.get(lane)
+        if cached and cached[0] == base and cached[1] > now:
+            return list(cached[2])
+    with urlopen(comfy_lane_request(lane, "/system_stats"), timeout=timeout) as response:
+        if response.status >= 400:
+            raise RuntimeError(f"answered HTTP {response.status}")
+        payload = json.loads(response.read().decode("utf-8"))
+    argv = ((payload if isinstance(payload, dict) else {}).get("system") or {}).get("argv")
+    if not isinstance(argv, list):
+        raise RuntimeError("/system_stats carries no system.argv")
+    argv = [str(item) for item in argv]
+    with _lane_launch_args_lock:
+        _lane_launch_args_cache[lane] = (base, now + _LANE_LAUNCH_ARGS_TTL_S, list(argv))
+    return argv
+
+
+def comfy_lane_vram_headroom(lane, timeout=4.0):
+    """What the lane's ComfyUI was launched with, in the terms the budget needs.
+
+    Returns {"lane", "remote", "vram_headroom_gb", "probed", "error"}:
+    vram_headroom_gb is the flag's value (0.0 = launched without it) once
+    probed, and None with an error string when the lane could not be asked.
+    Never raises — a lane that will not answer is the liveness probe's problem
+    to name at submit, not this one's."""
+    record = {
+        "lane": lane,
+        "remote": comfy_lane_is_remote(lane),
+        "vram_headroom_gb": None,
+        "probed": False,
+        "error": None,
+    }
+    try:
+        argv = comfy_lane_launch_args(lane, timeout=timeout)
+    except Exception as exc:
+        record["error"] = f"{exc.__class__.__name__}: {exc}"
+        return record
+    record["vram_headroom_gb"] = vram_headroom_gb_from_argv(argv)
+    record["probed"] = True
+    return record
+
+
 def comfy_lane_request(lane, path, data=None, method=None, headers=None, content_type=None):
     """Build a urllib Request to a lane, attaching the lane's auth token."""
     base = COMFY_LANES.get(lane, COMFY_HTTP_DEFAULT).rstrip('/')
@@ -10845,6 +10942,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": str(exc)}, 400)
             except RuntimeError as exc:
                 return self.send_json({"error": str(exc)}, 500)
+        if parsed.path == "/api/lanes/resolve":
+            # Which lane a graph would route to, and what that lane's ComfyUI
+            # was launched with. The MCP's motion-reference guard asks this
+            # before pricing a reference job: its budget was measured with
+            # --vram-headroom, and a lane without the flag is held to the
+            # registry's smaller ceiling (comfy_lane_vram_headroom). Answered
+            # here, not in the MCP, because only the gateway knows the lanes —
+            # the same first-match rules that will route the submission.
+            try:
+                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            except (ValueError, json.JSONDecodeError) as exc:
+                return self.send_json({"error": str(exc)}, 400)
+            graph = data.get("graph") if isinstance(data, dict) else None
+            if not isinstance(graph, dict):
+                return self.send_json({"error": "graph (a ComfyUI API prompt graph) is required"}, 400)
+            lane = comfy_lane_for_prompt_body(json.dumps({"prompt": graph}).encode("utf-8"))
+            return self.send_json({"ok": True, **comfy_lane_vram_headroom(lane)})
         if parsed.path == "/api/delete-input":
             try:
                 data = json.loads((self.read_body() or b"{}").decode("utf-8"))

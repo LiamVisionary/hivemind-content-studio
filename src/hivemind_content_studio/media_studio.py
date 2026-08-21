@@ -1073,23 +1073,136 @@ def _grid_frames_at_most(grid: dict[str, Any] | None, value: float) -> int | Non
     return first + int((int(value) - first) // modulus) * modulus
 
 
-def motion_reference_duration_limits(workflow: dict[str, Any]) -> dict[str, float]:
-    """Longest stretch of MOTION REFERENCE each canvas can carry.
+# MiniMax H3's packed-sequence geometry, mirrored from
+# comfy_extras/nodes_minimax_h3.py and from packedSequenceRows() in
+# media-studio-mcp.mjs. The MCP guard and this picker ceiling have to price a
+# run identically or the studio offers a length the lane then refuses;
+# test_media_studio_mcp_contract pins the two together.
+_H3_CANVAS_MULTIPLE = 32
+_H3_REFERENCE_BASE_SHORT_EDGE = 768
+_H3_REFERENCE_MAX_PIXELS = 768 * 1344
+_H3_VAE_STRIDE = 16
+_H3_LATENT_PIXELS_PER_ROW = 4
+_H3_AUDIO_LATENT_FPS = 40
+_H3_AUDIO_LATENT_ROWS_PER_FRAME = 2
+# The MCP stages a reference video to at most this long (the model card's
+# ceiling), so no clip can ever carry more than gridAtMost(15 x 24) frames.
+_H3_REFERENCE_VIDEO_MAX_SECONDS = 15.0
+# The most rows one latent frame of reference video can cost: adapt_canvas()
+# at its worst aspect (a ~7.6:1 panorama rounds to 2816x384). The picker cannot
+# see the clip's dimensions, so it prices every reference at this.
+_H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX = 1056
+# What the picker assumes is attached alongside the motion clip: every picture
+# slot filled, and the card's full 15s of voice reference. It cannot know, and
+# guessing less would quote a length the guard then refuses.
+_H3_REFERENCE_PICTURE_SLOTS = 9
+_H3_REFERENCE_AUDIO_MAX_SECONDS = 15.0
 
-    The node trims a reference video to min(its own length, the clip's length)
-    — `frames[:frame_count]` in comfy_extras/nodes_minimax_h3.py — so the budget
-    is spent on that effective length, not on the clip's. Two consequences the
-    studio has to model: a reference at or beyond the clip's length makes the
-    CLIP the expensive thing, and a reference shorter than the clip costs only
-    its own length, leaving the full duration range open. Reference PICTURES
-    cost a flat amount however long the clip is and never narrow anything.
+
+def _h3_video_latent_frames(frame_count: int) -> int:
+    """video_latent_t() in comfy_extras/nodes_minimax_h3.py."""
+    frames = max(0, int(round(frame_count)))
+    return 2 if frames <= 5 else ((frames - 5) // 17) * 5 + 2
+
+
+def _h3_rows_per_latent_frame(width: int, height: int) -> float:
+    """Packed rows per latent frame: a /16 VAE packed 1x2x2."""
+    return (int(width) // _H3_VAE_STRIDE) * (int(height) // _H3_VAE_STRIDE) / _H3_LATENT_PIXELS_PER_ROW
+
+
+def _h3_audio_latent_rows(seconds: float) -> int:
+    return int(round(max(0.0, float(seconds)) * _H3_AUDIO_LATENT_FPS)) * _H3_AUDIO_LATENT_ROWS_PER_FRAME
+
+
+def _h3_reference_canvas(width: int, height: int) -> tuple[int, int]:
+    """adapt_canvas() plus the never-upscale rule in MiniMaxH3ReferenceToVideo."""
+    def snap(value: float) -> int:
+        return max(_H3_CANVAS_MULTIPLE, int(round(value / _H3_CANVAS_MULTIPLE)) * _H3_CANVAS_MULTIPLE)
+    ratio = width / height
+    if ratio >= 1.0:
+        nominal_w, nominal_h = _H3_REFERENCE_BASE_SHORT_EDGE * ratio, float(_H3_REFERENCE_BASE_SHORT_EDGE)
+    else:
+        nominal_w, nominal_h = float(_H3_REFERENCE_BASE_SHORT_EDGE), _H3_REFERENCE_BASE_SHORT_EDGE / ratio
+    if nominal_w * nominal_h > _H3_REFERENCE_MAX_PIXELS:
+        scale = math.sqrt(_H3_REFERENCE_MAX_PIXELS / (nominal_w * nominal_h))
+        nominal_w, nominal_h = nominal_w * scale, nominal_h * scale
+    canvas_w, canvas_h = snap(nominal_w), snap(nominal_h)
+    if width * height < canvas_w * canvas_h:
+        canvas_w, canvas_h = snap(width), snap(height)
+    return canvas_w, canvas_h
+
+
+def _h3_packed_rows(
+    grid: dict[str, Any] | None,
+    rate: float,
+    width: int,
+    height: int,
+    clip_frames: int,
+    *,
+    reference_seconds: float,
+    reference_rows_per_latent_frame: float = _H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX,
+    reference_audio: bool = True,
+    pictures: int = _H3_REFERENCE_PICTURE_SLOTS,
+    voice_seconds: float = _H3_REFERENCE_AUDIO_MAX_SECONDS,
+) -> float:
+    """packedSequenceRows() in media-studio-mcp.mjs for one motion clip.
+
+    The clip is aligned UP to the lattice (the node does that before encoding);
+    the reference is trimmed to min(its own length, the clip's) and DOWN to it.
+    """
+    frames = _grid_frames_at_least(grid, clip_frames)
+    out_rows = _h3_rows_per_latent_frame(width, height)
+    total = _h3_video_latent_frames(frames) * out_rows + _h3_audio_latent_rows(frames / rate)
+    seconds = min(float(reference_seconds), _H3_REFERENCE_VIDEO_MAX_SECONDS)
+    effective = _grid_frames_at_most(grid, min(int(round(seconds * rate)), frames)) or 0
+    total += _h3_video_latent_frames(effective) * reference_rows_per_latent_frame
+    if reference_audio:
+        total += _h3_audio_latent_rows(seconds)
+    total += pictures * out_rows
+    total += _h3_audio_latent_rows(voice_seconds)
+    return total
+
+
+def _grid_frames_at_least(grid: dict[str, Any] | None, value: float) -> int:
+    """Mirrors normalizedGridFrameCount: the smallest lattice point >= value."""
+    try:
+        modulus = int(round(float((grid or {}).get("modulus"))))
+    except (TypeError, ValueError):
+        return max(1, int(round(value)))
+    if modulus <= 0:
+        return max(1, int(round(value)))
+    try:
+        offset = int(round(float((grid or {}).get("offset", 1)))) % modulus
+    except (TypeError, ValueError):
+        offset = 1 % modulus
+    floor = offset if offset > 0 else modulus
+    raw = max(floor, int(round(value)))
+    return raw + ((offset - (raw % modulus)) % modulus)
+
+
+def motion_reference_duration_limits(workflow: dict[str, Any]) -> dict[str, float]:
+    """Longest clip each canvas can render with a MOTION REFERENCE at least as long.
+
+    Comfy's memory planner is blind to every reference row (MiniMaxH3 sets no
+    memory_usage_factor_conds), so what has to fit is the activations of the
+    whole packed sequence — the clip, each motion clip at the node's own
+    reference canvas plus its soundtrack, the pictures, the voice clips — against
+    the budget the lane measured (`max_packed_rows`). The node trims a reference
+    to min(its own length, the clip's) — `frames[:frame_count]` in
+    comfy_extras/nodes_minimax_h3.py — so a reference at or beyond the clip's
+    length makes the CLIP the expensive thing and caps the duration range, and
+    the ceiling here is for that case: the picker drops the durations past it
+    when the attached reference is longer. A shorter reference keeps its own
+    length and costs only that, so the full range stays open (the guard prices
+    the real files at submit and is the backstop). Reference PICTURES cost a
+    flat amount however long the clip is and never narrow anything.
 
     Published as a capability keyed "<tier>|<aspect>" so the studio can drop the
     unreachable durations from its picker. This is machine capacity — a budget,
     a canvas, a frame count — and describes no job: it is computed from the
     registry and the tier tables alone, with nothing about what anyone rendered.
     """
-    budget = workflow.get("motion_reference_max_reference_pixel_frames")
+    budget = workflow.get("motion_reference_max_packed_rows")
     try:
         budget = float(budget)
     except (TypeError, ValueError):
@@ -1105,10 +1218,21 @@ def motion_reference_duration_limits(workflow: dict[str, Any]) -> dict[str, floa
     if rate <= 0:
         rate = 24.0
     limits: dict[str, float] = {}
+    longest = _grid_frames_at_least(grid, _H3_REFERENCE_VIDEO_MAX_SECONDS * rate)
     for tier_name, dimensions in _VIDEO_TIER_DIMENSIONS.items():
         for aspect, (width, height) in dimensions.items():
-            frames = _grid_frames_at_most(grid, budget / (width * height))
-            if frames is None:
+            frames = longest
+            ceiling = None
+            while frames >= 1:
+                rows = _h3_packed_rows(grid, rate, width, height, frames, reference_seconds=frames / rate)
+                if rows <= budget:
+                    ceiling = frames
+                    break
+                below = _grid_frames_at_most(grid, frames - 1)
+                if below is None or below >= frames:
+                    break
+                frames = below
+            if ceiling is None:
                 # No legal frame count fits: the canvas cannot take a motion
                 # reference at all. Zero says that plainly; omitting the key
                 # would read as "unlimited".
@@ -1116,7 +1240,7 @@ def motion_reference_duration_limits(workflow: dict[str, Any]) -> dict[str, floa
                 continue
             # Rounded to whole frames at the workflow's rate, so the studio and
             # the guard quote the same lattice point.
-            limits[f"{tier_name}|{aspect}"] = round(frames / rate, 3)
+            limits[f"{tier_name}|{aspect}"] = round(ceiling / rate, 3)
     return limits
 
 
