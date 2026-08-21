@@ -29,10 +29,12 @@ import { AuthModal } from '../../dialogs/AuthModal.jsx';
 import { useMediaPoster, useMediaSrc } from '../../hooks/hooks.js';
 import {
   motionReferenceWarning,
+  referenceAttachIndex,
   referenceDropBlock,
   referenceKindForFile,
   referenceKindsInDrag,
   referenceLabels,
+  referenceRowKeys,
   withReferenceTags,
 } from '../../lib/h3References.js';
 import {
@@ -231,6 +233,7 @@ export function ReferenceSection({
 }) {
   const meta = KIND_META[kind];
   const full = items.length >= limit;
+  const rowKeys = referenceRowKeys(items);
   return (
     <div
       className={cx(
@@ -261,7 +264,7 @@ export function ReferenceSection({
       <p className="text-[10px] leading-snug text-ink3">{meta.hint()}</p>
       {items.map((item, index) => (
         <ReferenceRow
-          key={(typeof item === 'string' ? item : item?.url) || index}
+          key={rowKeys[index]}
           kind={kind}
           index={index}
           item={item}
@@ -459,6 +462,17 @@ export function ReferencesMenu({
   const attach = (kind, url, name = '') => {
     if (!url) return;
     const current = values[kind];
+    // The same source twice is never the intent — it would send the model one
+    // picture as both <Picture 2> and <Picture 5>, burning a slot on a copy —
+    // and it collided the rows' React keys. Say which label already holds it,
+    // because a saved tile gives no other clue that it is already in the row.
+    const attached = referenceAttachIndex(current, url);
+    if (attached >= 0) {
+      const label = labels[kind][attached];
+      const tag = label?.video || label || KIND_META[kind].tag(attached);
+      toast(zh() ? `已作为 ${tag} 附加` : `Already attached as ${tag}`, { icon: '📎' });
+      return;
+    }
     if (current.length >= limits[kind]) return;
     if (kind === 'images') emit('images', [...current, url]);
     else if (kind === 'videos') emit('videos', [...current, { url, name, useAudio: false }]);

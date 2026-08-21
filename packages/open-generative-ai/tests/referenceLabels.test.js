@@ -133,6 +133,54 @@ test('the highlight reads every kind the drag is carrying', async () => {
     assert.deepEqual(referenceKindsInDrag(null), []);
 });
 
+// Attaching the same source twice. Nothing about a reference varies per slot —
+// the item carries a url, a filename and (video only) its soundtrack switch,
+// which belongs to the one row — so a repeat sent the model one picture as two
+// <Picture N>s, burned a slot, and collided the rows' React keys.
+test('a source already in the row is found whatever shape the row holds', async () => {
+    const { referenceAttachIndex } = await import('../src/lib/h3References.js');
+
+    // Pictures are bare urls; clips are objects, and the extra per-slot state a
+    // clip carries (name, soundtrack) does not make it a different attachment.
+    assert.equal(referenceAttachIndex(['/a.png', '/b.png'], '/b.png'), 1);
+    assert.equal(referenceAttachIndex(['/a.png'], '/c.png'), -1);
+    assert.equal(referenceAttachIndex([{ url: '/v.mp4', name: 'take 1', useAudio: true }], '/v.mp4'), 0);
+    assert.equal(referenceAttachIndex([{ url: '/voice.m4a', name: 'her' }], '/voice.m4a'), 0);
+
+    assert.equal(referenceAttachIndex([], '/a.png'), -1);
+    assert.equal(referenceAttachIndex(['/a.png'], ''), -1);
+});
+
+test('the panel names the label that already holds it, and never attaches twice', async () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const menu = fs.readFileSync(path.join(__dirname, '../src/studios/video/ReferencesMenu.jsx'), 'utf8');
+
+    // The check runs BEFORE the row-full return, or a saved picture clicked
+    // into a full row would come back as silence rather than "already attached".
+    const guard = menu.indexOf('const attached = referenceAttachIndex(current, url);');
+    assert.ok(guard > 0, 'attach() consults the row it is adding to');
+    assert.ok(guard < menu.indexOf('if (current.length >= limits[kind]) return;'));
+    assert.match(menu.slice(guard), /Already attached as \$\{tag\}/);
+});
+
+test('row keys survive a list that arrives with the same source twice', async () => {
+    const { referenceRowKeys } = await import('../src/lib/h3References.js');
+
+    // The url IS the key, so removing one reference leaves the others mounted
+    // with their decrypted previews intact.
+    assert.deepEqual(referenceRowKeys(['/a.png', '/b.png']), ['/a.png', '/b.png']);
+
+    // A restored generation sealed before attach() deduped can still hand over
+    // a repeat, and duplicate keys are a React error rather than a cosmetic one.
+    const keys = referenceRowKeys(['/a.png', '/b.png', '/a.png', '/a.png']);
+    assert.equal(new Set(keys).size, 4);
+    assert.equal(keys[0], '/a.png', 'the first of each stays bare');
+
+    // Clips key off their url too, and an entry with no url at all still keys.
+    assert.deepEqual(referenceRowKeys([{ url: '/v.mp4' }, {}]), ['/v.mp4', 'row-1']);
+});
+
 // The retention-tag button: it has to produce a line that clears the warning.
 test('the tag button writes a line that names the clip AND excludes its look', async () => {
     const { withMotionRetentionTags, motionReferenceWarning } = await loadDrag();

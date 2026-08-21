@@ -13,6 +13,40 @@ const EXTENSIONS = {
   audios: ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac'],
 };
 
+// The source behind an attached reference. Pictures are stored as a bare url;
+// clips carry a name (and, for video, its soundtrack switch) alongside it.
+export function referenceUrl(item) {
+  return (typeof item === 'string' ? item : item?.url) || '';
+}
+
+// Two rows of the SAME source are never what someone means. Nothing about a
+// reference varies per slot: the item holds only its url, its filename and (for
+// video) whether its soundtrack is on — and that switch belongs to the one row,
+// which is why a clip with sound already claims an <Audio N> of its own without
+// being attached twice. The retention marker does vary per label, but it lives
+// in the prompt, and the two markers a duplicate could carry contradict each
+// other over one source: fully_copy reperforms its words, reference forbids
+// them. So a repeat only burns one of the nine picture (or three clip) slots.
+export function referenceAttachIndex(items = [], url = '') {
+  if (!url) return -1;
+  return items.findIndex((item) => referenceUrl(item) === url);
+}
+
+// React keys for the attached rows. The url identifies a reference, so removing
+// one leaves every other row mounted with its decrypted preview intact — but the
+// same url can still arrive twice from outside (a generation restored from
+// before attach() deduped), and duplicate keys are a React error, not a cosmetic
+// one. A repeat gets an occurrence suffix; the first of each stays bare.
+export function referenceRowKeys(items = []) {
+  const seen = new Map();
+  return items.map((item, index) => {
+    const url = referenceUrl(item) || `row-${index}`;
+    const seenBefore = seen.get(url) || 0;
+    seen.set(url, seenBefore + 1);
+    return seenBefore ? `${url}#${seenBefore}` : url;
+  });
+}
+
 // Which reference row a dragged file belongs in. MIME first — it is the only
 // thing a dragover event exposes, so it is what the highlight can use — with an
 // extension fallback for the drags that arrive as application/octet-stream.
