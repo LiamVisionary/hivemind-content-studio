@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any
 
@@ -414,8 +415,17 @@ class RunPodProvider:
     # landed on, so a pod listed purely from REST has no reachable SSH endpoint
     # and the studio would wait on "booting" forever. Verified against a live
     # pod 2026-08-15.
+    #
+    # createdAt is GraphQL-only too. The REST Pod schema has no creation time
+    # at all — only lastStartedAt (checked against the published OpenAPI
+    # document 2026-08-22) — and reading createdAt off the REST payload is how
+    # rental runpod:vrygri4b9b1x78 ran 19 minutes at $0.69/h with no uptime in
+    # the Machines view and was reaped as 0.0 h / $0.00. See _started_at. Both
+    # fields were validated against the live GraphQL schema the same day; a
+    # field the schema does not know 400s the whole query, and with it the
+    # port map, so nothing goes in here unverified.
     _RUNTIME_QUERY = """
-    { myself { pods { id machine { podHostId gpuTypeId }
+    { myself { pods { id createdAt lastStartedAt machine { podHostId gpuTypeId }
         runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort } } } } }
     """
 
@@ -485,10 +495,7 @@ class RunPodProvider:
             # cooldown works here exactly as it does on Vast.
             machine_id=raw.get("machineId") or machine.get("podHostId"),
             disk_gb=raw.get("containerDiskInGb"),
-            # createdAt, not uptime: the boot-stall check measures how long a
-            # box has been failing to come up, and uptime does not exist yet
-            # for precisely those pods.
-            started_at=_epoch(raw.get("createdAt")),
+            started_at=_started_at(raw, live, runtime),
             public_ip=public_ip,
             ssh=(public_ip, ssh_port) if public_ip and ssh_port else None,
             ports=ports,
@@ -507,6 +514,33 @@ class RunPodProvider:
     def credit(self) -> float:
         data = graphql("{ myself { clientBalance } }")
         return round(float((data.get("myself") or {}).get("clientBalance") or 0.0), 4)
+
+
+def _started_at(raw: dict, live: dict, runtime: dict) -> float | None:
+    """When the pod started billing, from whichever payload actually says.
+
+    Creation time first: the boot-stall check measures how long a box has been
+    failing to come up, and uptime does not exist yet for precisely those
+    pods. But REST /pods has never carried createdAt — it is GraphQL-only, so
+    it arrives in `live` — and a pod with no start time has no uptime in the
+    Machines view, no cost, and a reaper record that says it ran for free
+    (rental runpod:vrygri4b9b1x78, 2026-08-22: 19 min at $0.69/h, booked as
+    0.0 h / $0.00). lastStartedAt is REST's nearest thing: the last start, so
+    it skips a paused stretch, which is also the stretch that billed at the
+    disk rate only. The runtime clock is the last resort — it runs negative
+    while the container is still starting, and a negative uptime is not a
+    start time.
+    """
+    for field_name in ("createdAt", "lastStartedAt"):
+        for source in (raw, live):
+            started = _epoch(source.get(field_name))
+            if started:
+                return started
+    try:
+        uptime = float(runtime.get("uptimeInSeconds") or 0)
+    except (TypeError, ValueError):
+        uptime = 0.0
+    return time.time() - uptime if uptime > 0 else None
 
 
 def _epoch(value: Any) -> float | None:

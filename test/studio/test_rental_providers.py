@@ -6,6 +6,8 @@ exist because there is more than one provider.
 """
 from __future__ import annotations
 
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -348,6 +350,92 @@ def test_a_pod_is_only_running_once_its_ports_are_published(monkeypatch) -> None
         {"runtime": {"uptimeInSeconds": -6, "ports": None}},
     )
     assert inst.state == "booting" and inst.ssh is None
+
+
+# --- uptime, and therefore cost --------------------------------------------
+
+
+def _iso(epoch: float) -> str:
+    """A RunPod timestamp, as the API writes them: 2024-07-12T19:14:40.144Z."""
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _rest_pod(**extra) -> dict:
+    """A REST /pods entry as the published OpenAPI document shapes it: there is
+    no createdAt anywhere in that schema, only lastStartedAt."""
+    return {"id": "vrygri4b9b1x78", "name": f"{gpu_rentals.STUDIO_LABEL_PREFIX}minimax-rtx5090-787c9b56",
+            "desiredStatus": "RUNNING", "costPerHr": 0.69, "machineId": "63w6nejyxe4a",
+            "publicIp": "1.2.3.4", **extra}
+
+
+def test_a_runpod_pod_carries_a_start_time_so_its_uptime_and_cost_are_real() -> None:
+    """Rental runpod:vrygri4b9b1x78 (2026-08-22) ran 19 minutes at $0.69/h with
+    no uptime in the Machines view and was reaped as 0.0 h / $0.00: the adapter
+    read createdAt off the REST payload, and REST's Pod schema has no such
+    field. Vast hands start_date straight to the same DTO and shows the right
+    number; RunPod has to be read from whichever payload actually says."""
+    now = time.time()
+    nineteen_minutes = now - 19 * 60
+
+    # Vast, for comparison: start_date is an epoch on the listing itself.
+    vast = vast_provider.PROVIDER._instance(
+        {"id": 7, "label": f"{gpu_rentals.STUDIO_LABEL_PREFIX}minimax-rtx5090-x",
+         "actual_status": "running", "start_date": nineteen_minutes})
+    assert gpu_rentals._instance_dto(vast)["uptime_hours"] == pytest.approx(0.32, abs=0.01)
+
+    # REST alone (the GraphQL side degraded): lastStartedAt is the start.
+    rest_only = runpod_provider.PROVIDER._instance(_rest_pod(lastStartedAt=_iso(nineteen_minutes)))
+    assert rest_only.started_at == pytest.approx(nineteen_minutes, abs=1)
+    dto = gpu_rentals._instance_dto(rest_only)
+    assert dto["uptime_hours"] == pytest.approx(0.32, abs=0.01)
+    assert dto["usd_per_hour"] == 0.69
+
+    # With the GraphQL entry, createdAt wins: the boot-stall check measures
+    # from creation, and a resumed pod's lastStartedAt is later than that.
+    created = now - 25 * 60
+    both = runpod_provider.PROVIDER._instance(
+        _rest_pod(lastStartedAt=_iso(nineteen_minutes)),
+        {"createdAt": _iso(created), "lastStartedAt": _iso(nineteen_minutes),
+         "runtime": {"uptimeInSeconds": 1100, "ports": []}})
+    assert both.started_at == pytest.approx(created, abs=1)
+
+    # No timestamp anywhere but a container that is up: its own clock.
+    clocked = runpod_provider.PROVIDER._instance(_rest_pod(), {"runtime": {"uptimeInSeconds": 600, "ports": []}})
+    assert clocked.started_at == pytest.approx(now - 600, abs=5)
+    assert gpu_rentals._instance_dto(clocked)["uptime_hours"] == pytest.approx(0.17, abs=0.01)
+
+    # Still starting: the clock runs negative, and that is not a start time.
+    starting = runpod_provider.PROVIDER._instance(_rest_pod(), {"runtime": {"uptimeInSeconds": -6, "ports": None}})
+    assert starting.started_at is None
+    assert gpu_rentals._instance_dto(starting)["uptime_hours"] is None
+
+
+def test_listing_pods_asks_graphql_for_the_creation_time(monkeypatch) -> None:
+    """REST has no createdAt, so the runtime query is where it has to come
+    from — and the per-pod merge has to carry it into the Instance, not just
+    fetch it."""
+    now = time.time()
+    created = now - 25 * 60
+    queries: list[str] = []
+    monkeypatch.setenv("RUNPOD_API_KEY", "k")
+    monkeypatch.setattr(runpod_provider, "request",
+                        lambda method, path, payload=None: [_rest_pod(lastStartedAt=_iso(now - 19 * 60))])
+
+    def fake_graphql(query: str) -> dict:
+        queries.append(query)
+        return {"myself": {"pods": [{
+            "id": "vrygri4b9b1x78", "createdAt": _iso(created), "lastStartedAt": _iso(now - 19 * 60),
+            "machine": {"podHostId": "63w6nejyxe4a", "gpuTypeId": "NVIDIA GeForce RTX 5090"},
+            "runtime": {"uptimeInSeconds": 1100, "ports": [
+                {"privatePort": 22, "publicPort": 41000, "ip": "1.2.3.4", "isIpPublic": True}]},
+        }]}}
+    monkeypatch.setattr(runpod_provider, "graphql", fake_graphql)
+
+    [inst] = runpod_provider.PROVIDER.list_instances()
+    assert len(queries) == 1 and "createdAt" in queries[0] and "lastStartedAt" in queries[0]
+    assert inst.started_at == pytest.approx(created, abs=1)
+    assert inst.state == "running" and inst.ssh == ("1.2.3.4", "41000")
+    assert gpu_rentals._instance_dto(inst)["uptime_hours"] == pytest.approx(0.42, abs=0.01)
 
 
 # --- two marketplaces at once ----------------------------------------------
