@@ -3109,6 +3109,23 @@ def _write_failure_state(state: dict) -> None:
     _failure_state_path().write_text(json.dumps(state, indent=1))
 
 
+def _billed_hours(dto: dict, now: float) -> float | None:
+    """How long a failed box has billed, measured as it is reaped.
+
+    From the provider's start time when there is one — the DTO's uptime_hours
+    is the same clock rounded to the minute and read a poll earlier — else
+    that rounded figure, else unknown. Unknown is NOT zero: rental
+    runpod:vrygri4b9b1x78 (2026-08-22) ran 19 minutes at $0.69/h and went
+    into the log as 0.0 h / $0.00, because RunPod's REST payload carries no
+    creation time and nothing in the record said the figure was a blank.
+    """
+    started = dto.get("started_at")
+    if started:
+        return max(0.0, (now - float(started)) / 3600)
+    hours = dto.get("uptime_hours")
+    return float(hours) if hours is not None else None
+
+
 def reap_failed_rentals(instances: list[dict]) -> list[dict]:
     """Destroy managed boxes stuck in a terminal provisioning error.
 
@@ -3134,7 +3151,7 @@ def reap_failed_rentals(instances: list[dict]) -> list[dict]:
         if not RENTAL_AUTOREAP or now - first_seen < PROVISION_FAILURE_GRACE_SECONDS:
             continue
         provision = dto.get("provision") or {}
-        hours = dto.get("uptime_hours") or 0.0
+        hours = _billed_hours(dto, now)
         rate = dto.get("usd_per_hour") or 0.0
         entry = {
             "rental_id": dto["rental_id"],
@@ -3149,12 +3166,13 @@ def reap_failed_rentals(instances: list[dict]) -> list[dict]:
             "reason": provision.get("detail") or "provisioning failed",
             "progress": (f"{provision.get('done')}/{provision.get('total')}"
                          if provision.get("total") else None),
-            "uptime_hours": round(hours, 3),
+            "uptime_hours": round(hours, 3) if hours is not None else None,
             "usd_per_hour": rate,
-            # What the failure cost. Vast prorates by the second and refunds
-            # nothing, so this is the number the user actually paid to learn
-            # that this host was bad.
-            "usd_spent": round(hours * rate, 4),
+            # What the failure cost. Both marketplaces prorate by the second
+            # and refund nothing, so this is the number the user actually paid
+            # to learn that this host was bad. None when nobody knows: "free"
+            # is the one figure that is certainly wrong.
+            "usd_spent": round(hours * rate, 4) if hours is not None else None,
             "destroyed_at": now,
         }
         try:
@@ -3527,8 +3545,10 @@ def _reaper_loop() -> None:
             # Probe the beacon only for studio boxes: the phase this turns on
             # is the whole reason for the sweep.
             for entry in reap_failed_rentals([_instance_dto(i, probe=True) for i in managed]):
+                spent = entry.get("usd_spent")
+                cost = f"${spent:.2f} spent" if spent is not None else "cost unknown"
                 print(f"[gpu-rentals] destroyed failed rental {entry['rental_id']} "
-                      f"(${entry['usd_spent']:.2f} spent): {entry['reason']}", flush=True)
+                      f"({cost}): {entry['reason']}", flush=True)
             delay = REAPER_INTERVAL_SECONDS if managed else REAPER_IDLE_INTERVAL_SECONDS
         except Exception:
             # A marketplace hiccup must not kill the sweeper for the process

@@ -2009,6 +2009,35 @@ def test_a_box_that_failed_provisioning_is_destroyed_after_the_grace_window(
     assert gpu_rentals.recent_rental_failures()[0]["rental_id"] == "vast:31"
 
 
+def test_a_failed_box_is_billed_from_its_start_time_and_an_unknown_cost_says_so(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Rental runpod:vrygri4b9b1x78 (2026-08-22): 19 minutes at $0.69/h, logged
+    as 0.0 h / $0.00 because its DTO carried no uptime. The record is all that
+    outlives the machine, so it is priced from the start time the provider
+    gave, at the moment of the reap — and when nothing dated the box, it says
+    unknown rather than free."""
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(gpu_rentals, "destroy_rental", lambda rid: None)
+    monkeypatch.setattr(gpu_rentals, "PROVISION_FAILURE_GRACE_SECONDS", 0)
+    now = time.time()
+
+    priced = {**_failed_dto("runpod:vrygri4b9b1x78", uptime=None),
+              "usd_per_hour": 0.69, "started_at": now - 19 * 60}
+    [entry] = gpu_rentals.reap_failed_rentals([priced])
+    assert entry["uptime_hours"] == pytest.approx(19 / 60, abs=0.002)
+    assert entry["usd_spent"] == pytest.approx(0.69 * 19 / 60, abs=0.002)
+
+    # The DTO's rounded uptime still serves when the start time is not there.
+    [entry] = gpu_rentals.reap_failed_rentals([_failed_dto("vast:31", uptime=0.5)])
+    assert entry["usd_spent"] == pytest.approx(0.46)
+
+    # Neither: unknown, not $0.00.
+    [entry] = gpu_rentals.reap_failed_rentals([_failed_dto("runpod:undated", uptime=None)])
+    assert entry["uptime_hours"] is None and entry["usd_spent"] is None
+    assert gpu_rentals.recent_rental_failures()[-1]["usd_spent"] is None
+
+
 def test_reaping_a_failure_takes_its_host_out_of_the_running(tmp_path: Path, monkeypatch) -> None:
     """The rental dies; the machine that broke it is on sale again tomorrow.
 
