@@ -39,6 +39,7 @@ import { getComposerSection, hydrateComposerState, updateComposerSection } from 
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
+import { applyReferenceRoles, referenceLabelStyleFor } from '../lib/imageReferenceRoles.js';
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { huntLoraIds, isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraHunt, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { localModelSupportsImageInput, localModelSupportsNegativePrompt, negativePromptNeedsGuidance } from '../lib/localImageModelFilter.js';
@@ -73,6 +74,7 @@ import { StudioLayout } from '../ui/kit.jsx';
 
 import { RegionBoxEditor } from './image/RegionBoxEditor.jsx';
 import { UploadPicker } from './UploadPicker.jsx';
+import { ReferenceRolesMenu } from './image/ReferenceRolesMenu.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
@@ -199,6 +201,11 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     selectedAr,
     selectedResolution,
     uploadedImageUrls: [],
+    // What each attached reference SUPPLIES. Not persisted on purpose: the
+    // ownership block these write into the prompt is the durable artifact, and
+    // it travels with a saved prompt — a second copy in preferences could only
+    // ever disagree with it.
+    referenceRoles: [],
     localImageModels,
     useLocalModel,
     // Rented source mode: local mechanically (lane rules route by model
@@ -911,6 +918,19 @@ export function ImageStudio({
     s.prompt = value;
     updateComposerDraft({ prompt: value });
     bump();
+  };
+
+  // Reference roles -> the ownership block at the end of the prompt. Idempotent:
+  // applyReferenceRoles strips whatever block is already there before writing
+  // the new one, so tweaking a role five times leaves one block, not five.
+  const applyRoles = (roles) => {
+    s.referenceRoles = roles;
+    setPromptValue(applyReferenceRoles(
+      s.prompt,
+      roles,
+      s.uploadedImageUrls.length,
+      { labelStyle: referenceLabelStyleFor(s.useLocalModel ? s.selectedLocalModel : s.selectedModel) },
+    ));
   };
 
   // Same source the aspect picker renders from — local models carry their own
@@ -2934,6 +2954,17 @@ export function ImageStudio({
                 {t('common.clearReferences')}
               </button>
             </span>
+          ) : null}
+
+          {/* Which reference supplies what. Only worth offering while the model
+              will actually read them — an ignored reference has no role. */}
+          {refsSupported && refCount > 0 ? (
+            <ReferenceRolesMenu
+              count={refCount}
+              roles={s.referenceRoles}
+              labelStyle={referenceLabelStyleFor(s.useLocalModel ? s.selectedLocalModel : s.selectedModel)}
+              onApply={applyRoles}
+            />
           ) : null}
 
           <Menu

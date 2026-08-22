@@ -788,3 +788,11 @@
 - Source: live-verification
 - Decision: selected
 - Reason: Podcli installed at pinned e204f98 with 3 patches; doctor overall_ok True; canary claude+codex on PATH never spawned across a full render (gate held); 587 passed 10 skipped 0 failed
+## 2026-08-22T00:00:00.000000+00:00 - triage
+
+- Request: Implement the H3 Prompt Composer's capabilities in the video studio and anywhere else relevant
+- Source: BMB12d3/minimax-h3-prompt-composer@V5.37.3
+- Decision: technique-only
+- Reason: Upstream ships one 1.1MB HTML file with NO LICENSE (all rights reserved), so nothing could be copied. The valuable part is not its code but which parts of MiniMax H3's prompt grammar a composer must get exactly right, and the shape of a pre-flight check over that grammar.
+- Assimilated: shot timeline grammar, structured camera builder, frame-alignment sentence, prompt check, reference-ownership roles for still-image edits
+- Not assimilated: the composer's HTML/JS, its project format, its AI project-setup import/export, its frame grabber, its visual camera-path planner, and its second camera-move vocabulary

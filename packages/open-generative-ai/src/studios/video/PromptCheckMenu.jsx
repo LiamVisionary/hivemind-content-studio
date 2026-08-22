@@ -1,0 +1,108 @@
+// Prompt Check — the last thing between a prompt and a paid generation.
+//
+// H3 fails quietly: a cut past the end of the clip does not error, it just
+// never happens; an unclosed <d> makes the model read the stage directions
+// aloud. None of that is visible until the clip lands. So the chip reads the
+// prompt as WRITTEN — typed by hand, loaded from the library, or assembled by
+// the Shot Builder — and says what will break before it costs anything.
+//
+// It is a readout, not a gate: nothing here blocks Generate. A finding it got
+// wrong should cost a glance, never a run someone wanted.
+//
+// Rules live in lib/h3PromptCheck.js, wording in promptCheckText.js.
+import { checkH3Prompt } from '../../lib/h3PromptCheck.js';
+import { checkSummaryText, describeCheckFinding } from './promptCheckText.js';
+import { ChipButton, Menu } from '../../ui/Menu.jsx';
+import { Icon } from '../../ui/icons.jsx';
+import { SectionLabel, cx } from '../../ui/kit.jsx';
+import { zh } from './videoLogic.js';
+
+/**
+ * @param {object} props
+ * @param {string} props.prompt          what is in the composer now
+ * @param {number} props.durationSeconds what the run is set to produce
+ * @param {Array}  props.images          reference pictures, as attached
+ * @param {Array}  props.videos          motion/sound-only clip rows, as attached
+ * @param {Array}  props.audios          voice clips, as attached
+ * @param {object} props.durations       url -> measured seconds, where known
+ */
+export function PromptCheckMenu({
+  prompt = '', durationSeconds = 0, images = [], videos = [], audios = [], durations = {},
+}) {
+  const result = checkH3Prompt({ prompt, durationSeconds, images, videos, audios, durations });
+  const nothingYet = result.findings.length === 1 && result.findings[0].code === 'empty';
+  // Errors first: a broken cut matters more than a missing soundscape, and a
+  // list sorted by where it happened to be found reads as unranked noise.
+  const findings = [...result.findings].sort((a, b) => (a.level === b.level ? 0 : a.level === 'error' ? -1 : 1));
+
+  const tone = result.errors ? 'error' : (result.warnings && !nothingYet ? 'warn' : 'clean');
+  const badge = result.errors || (nothingYet ? 0 : result.warnings);
+
+  return (
+    <Menu
+      up
+      align="end"
+      width="w-[23rem]"
+      trigger={(open, toggle) => (
+        <ChipButton
+          icon={tone === 'clean' ? 'check' : 'warning'}
+          label={zh() ? '检查' : 'Check'}
+          value={badge ? String(badge) : ''}
+          active={open || tone !== 'clean'}
+          warn={tone === 'error'}
+          onClick={toggle}
+          title={zh()
+            ? '生成前检查提示词结构、镜头时间、台词标签、参考标签与声音'
+            : 'Check structure, shot timing, dialogue tags, reference tags and sound before spending a generation'}
+        />
+      )}
+    >
+      {() => (
+        <div className="flex flex-col gap-2">
+          <div>
+            <SectionLabel>{zh() ? '提示词检查' : 'Prompt check'}</SectionLabel>
+            <p className="mt-1 text-[10px] leading-snug text-ink3">
+              {checkSummaryText(result)}
+              {result.mode === 'reference' && result.sections.length
+                ? (zh() ? ` · 已识别 ${result.sections.length}/6 个字段` : ` · ${result.sections.length}/6 sections found`)
+                : ''}
+            </p>
+          </div>
+
+          {findings.length && !nothingYet ? (
+            <ul className="flex flex-col gap-1">
+              {findings.map((finding, index) => (
+                <li
+                  key={`${finding.code}-${index}`}
+                  className={cx(
+                    'flex items-start gap-1.5 rounded-md border p-1.5 text-[10px] leading-snug',
+                    finding.level === 'error'
+                      ? 'border-danger bg-danger-tint text-ink1'
+                      : 'border-honey bg-honey-tint text-ink1',
+                  )}
+                >
+                  <Icon
+                    name={finding.level === 'error' ? 'warning' : 'info'}
+                    size={11}
+                    className={cx('mt-px shrink-0', finding.level === 'error' ? 'text-danger' : 'text-honey')}
+                  />
+                  <span className="min-w-0 flex-1">{describeCheckFinding(finding)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="rounded-md border border-line1 bg-bg0 p-2 text-[10px] leading-snug text-ink2">
+              {nothingYet
+                ? (zh()
+                  ? '写点什么，或者用「分镜」搭一条时间线，这里就会开始检查。'
+                  : 'Write something, or build a timeline with Shots, and this starts checking.')
+                : (zh()
+                  ? '结构、镜头时间、台词标签、参考标签和声音都没有发现问题。这不代表模型一定听话——只代表提示词本身说得清楚。'
+                  : 'Structure, shot timing, dialogue tags, reference tags and sound all read clean. That is not a promise the model will comply — only that the prompt is unambiguous.')}
+            </p>
+          )}
+        </div>
+      )}
+    </Menu>
+  );
+}

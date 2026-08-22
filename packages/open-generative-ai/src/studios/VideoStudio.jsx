@@ -43,6 +43,8 @@ import { downloadMedia } from '../lib/downloadMedia.js';
 import { collectChainClips, missingChainParent } from '../lib/chainLineage.js';
 import { chainKey, chainTimelineModel } from '../lib/chainTimeline.js';
 import { ChainTimeline } from './video/ChainTimeline.jsx';
+import { ShotBuilderChip, ShotBuilderDialog, blankTimeline } from './video/ShotBuilder.jsx';
+import { PromptCheckMenu } from './video/PromptCheckMenu.jsx';
 import { armChainPrompt } from '../lib/chainPrompt.js';
 import { personaIdentity } from '../lib/personaId.js';
 import { applyUgcVideoBrief, hasUgcVideoBrief, ugcSubjectLabel, ugcVariantAt } from '../lib/ugcMode.js';
@@ -299,6 +301,12 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // the cast it was saved with.
     cast: [],
     castWarnings: [],
+    // The shot timeline inside ONE generation — cuts, camera, timed beats and
+    // dialogue. Held here rather than in the dialog for the same reason the
+    // cast is: a builder that forgot its shots every time it closed would be a
+    // scratchpad, not a timeline.
+    shotTimeline: blankTimeline(),
+    shotBuilderOpen: false,
   };
 
   // A duplicate overlays the source tab's configuration on top of the defaults.
@@ -3287,6 +3295,20 @@ export function VideoStudio({
     videos: Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : [],
     audios: Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : [],
   });
+  // Measured clip lengths, as far as they are known. peekMediaDuration reads
+  // the cache the References panel filled when it measured these; anything
+  // never opened comes back null and the budget reports it as unmeasured
+  // rather than as zero.
+  const referenceDurations = () => {
+    const { videos, audios } = attachedReferences();
+    const out = {};
+    for (const item of [...videos, ...audios]) {
+      const url = referenceUrl(item);
+      const seconds = url ? peekMediaDuration(url) : null;
+      if (seconds != null) out[url] = seconds;
+    }
+    return out;
+  };
 
   const attachDroppedToReferenceRows = async (files) => {
     const current = attachedReferences();
@@ -3624,6 +3646,18 @@ export function VideoStudio({
                 prompt={s.setup.prompt}
                 onPick={(entry) => addH3Character(entry, referenceEntry ? referenceLimits() : null)}
               />
+              {/* The timeline inside one generation, and the gate in front of
+                  it. Both read H3's own grammar, so both are H3-only. */}
+              <ShotBuilderChip
+                timeline={s.shotTimeline}
+                onOpen={() => { s.shotBuilderOpen = true; bump(); }}
+              />
+              <PromptCheckMenu
+                prompt={s.setup.prompt}
+                durationSeconds={Number(s.setup.duration) || 0}
+                {...attachedReferences()}
+                durations={referenceDurations()}
+              />
             </>
           ) : null}
 
@@ -3933,6 +3967,22 @@ export function VideoStudio({
           onClose={() => { s.civitaiOpen = false; bump(); }}
         />
       ) : null}
+
+      {/* Same gate as the chip: the grammar it writes ([Shot N], <d>, the six
+          sections) is H3's, so switching to another family closes it rather
+          than leaving an H3 dialog open over a Seedance run. */}
+      <ShotBuilderDialog
+        open={Boolean(s.shotBuilderOpen) && /minimax-h3/.test(s.setup.modelId || '')}
+        onClose={() => { s.shotBuilderOpen = false; bump(); }}
+        timeline={s.shotTimeline}
+        onTimelineChange={(next) => { s.shotTimeline = next; bump(); }}
+        prompt={s.setup.prompt}
+        durationSeconds={Number(s.setup.duration) || 0}
+        references={attachedReferences()}
+        firstFrame={s.setup.imageUrl || ''}
+        lastFrame={s.setup.endImageUrl || ''}
+        onApply={(text) => { setPrompt(text); focusPrompt(); }}
+      />
 
       {/* targetModel is the workflow id, not the picker id: the helper chooses its
           guidance from it, and 10Eros 1.3/1.4 want a different prompt shape than
