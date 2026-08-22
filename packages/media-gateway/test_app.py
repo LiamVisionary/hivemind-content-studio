@@ -5962,3 +5962,285 @@ class CancelHonestyTests(unittest.TestCase):
         self.assertNotIn('error', result)
         # Still cleaned up: a cancelled job's staged inputs are nobody's asset.
         self.assertEqual(scrubbed, ['stopped-prompt'])
+
+
+class H3StudioImageLaneTests(unittest.TestCase):
+    """The MiniMax H3 still-image lane: registry graph -> Director -> references.
+
+    H3 Studio graphs are not KSampler graphs. One H3StudioDirector node owns the
+    prompt, the canvas, the seed, the route and the nine ordered references, and
+    the sampler downstream is a SamplerCustomAdvanced with no positive/negative
+    inputs to follow — so every generic patch the auto runner applies misses it.
+    """
+
+    ONE_PIXEL_PNG = base64.b64decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    )
+    ONE_PIXEL_JPEG = base64.b64decode(
+        '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB'
+        'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB/9sAQwEBAQEBAQEBAQEBAQEBAQEB'
+        'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB/8AAEQgA'
+        'AQABAwEiAAIRAQMRAf/EABUAAQEAAAAAAAAAAAAAAAAAAAAI/8QAFBABAAAAAAAAAAAAAAAA'
+        'AAAAAP/EABUBAQEAAAAAAAAAAAAAAAAAAAAG/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwD'
+        'AQACEQMRAD8AlgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+        'AAf/9k='
+    )
+
+    def _graph_path(self):
+        return BASE / 'workflows' / 'minimax-h3-image.api.json'
+
+    def _compile(self, app, options, prompt='a still of @Image1'):
+        """Run the real runner up to submit and return the graph it built."""
+        captured = {}
+
+        def fake_submit(lane_url, graph, client_id):
+            captured['graph'] = json.loads(json.dumps(graph))
+            captured['lane'] = lane_url
+            raise RuntimeError('stop after compile')
+
+        with patch.object(app, '_auto_submit_prompt', fake_submit), \
+             patch.object(app, 'comfy_lane_for_prompt_body', lambda *a, **k: 'default'), \
+             patch.object(app, 'comfy_lane_is_remote', lambda lane: False), \
+             patch.object(app, 'append_history', lambda rec: None), \
+             patch.object(app, 'jobs', {}):
+            app.run_comfy_api_image('h3-test', prompt, dict(options, workflow_file=str(self._graph_path())))
+            record = dict(app.jobs['h3-test'])
+        return captured.get('graph'), record
+
+    def test_the_registry_ships_a_graph_the_gateway_is_allowed_to_load(self):
+        # The allowlist only covered the user's drop-in folders, so a lane whose
+        # graph rides in the repo could never load its own file.
+        app = load_app()
+        path, graph = app._load_auto_api_workflow(str(self._graph_path()))
+        self.assertEqual(path.name, 'minimax-h3-image.api.json')
+        self.assertTrue(app._h3_studio_director_id(graph))
+
+        with self.assertRaises(RuntimeError):
+            app._load_auto_api_workflow('/etc/passwd.json')
+
+    def test_references_reach_the_director_in_the_order_they_were_sent(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            refs = []
+            for name in ('first.png', 'second.png', 'third.png'):
+                (input_dir / name).write_bytes(self.ONE_PIXEL_PNG)
+                refs.append(str(input_dir / name))
+            with patch.object(app, 'COMFY_INPUT_DIR', input_dir):
+                graph, record = self._compile(app, {'reference_image_paths': refs, 'seed': 11})
+
+        director = graph[app._h3_studio_director_id(graph)]['inputs']
+        # Order IS the label: the compiler names them <Picture 1>..<Picture N>.
+        self.assertEqual(director['media_filename_1'], 'first.png')
+        self.assertEqual(director['media_filename_2'], 'second.png')
+        self.assertEqual(director['media_filename_3'], 'third.png')
+        self.assertEqual(director['media_type_1'], 'image')
+        # Every unused slot is written empty, so a graph can never carry a
+        # previous run's filename and the ordinals stay dense from 1.
+        for ordinal in range(4, 10):
+            self.assertEqual(director[f'media_filename_{ordinal}'], '')
+        self.assertEqual(record['reference_images'], 3)
+        self.assertEqual(director['prompt'], 'a still of @Image1')
+        self.assertEqual(director['seed'], 11)
+
+    def test_a_reference_outside_comfy_input_storage_is_staged_into_it(self):
+        # The Director loads a reference by name out of ComfyUI's input dir
+        # (h3studio collect_images), and push_prompt_inputs_to_lane finds a
+        # rental's copy the same way. A multipart upload lands elsewhere.
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            elsewhere = Path(td) / 'uploads'
+            elsewhere.mkdir()
+            (elsewhere / 'phone-shot.png').write_bytes(self.ONE_PIXEL_PNG)
+            with patch.object(app, 'COMFY_INPUT_DIR', input_dir):
+                graph, _ = self._compile(app, {'reference_image_paths': [str(elsewhere / 'phone-shot.png')]})
+                self.assertTrue((input_dir / 'phone-shot.png').is_file())
+
+        director = graph[app._h3_studio_director_id(graph)]['inputs']
+        self.assertEqual(director['media_filename_1'], 'phone-shot.png')
+
+    def test_more_references_than_slots_is_refused_not_truncated(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            refs = []
+            for index in range(10):
+                name = f'ref{index}.png'
+                (input_dir / name).write_bytes(self.ONE_PIXEL_PNG)
+                refs.append(str(input_dir / name))
+            with patch.object(app, 'COMFY_INPUT_DIR', input_dir):
+                _, record = self._compile(app, {'reference_image_paths': refs})
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('at most 9', record['error'])
+
+    def test_an_explicit_canvas_sets_both_the_ratio_and_the_area(self):
+        # plan_resolution() takes the ratio from aspect_ratio and the AREA from
+        # megapixels — always. Dimensions alone render the graph's 1:1 default;
+        # a "custom" ratio alone keeps the default area (1024x576 came back as
+        # 1632x928). Both must be set together.
+        app = load_app()
+        graph, record = self._compile(app, {'width': 1024, 'height': 576})
+        director = graph[app._h3_studio_director_id(graph)]['inputs']
+        self.assertEqual(director['aspect_ratio'], 'custom')
+        self.assertEqual(director['width'], 1024)
+        self.assertEqual(director['height'], 576)
+        self.assertAlmostEqual(director['megapixels'], 0.59, places=2)
+        self.assertEqual(record['options']['width'], 1024)
+
+    def test_an_aspect_preset_carries_the_studios_resolution_tier(self):
+        # base_size is the studio's Resolution control (the short side). The
+        # Director sizes by area, so dropping it would pin every H3 still to
+        # the graph's own default megapixels.
+        app = load_app()
+        graph, _ = self._compile(app, {'aspect_ratio': '16:9', 'base_size': 1024})
+        director = graph[app._h3_studio_director_id(graph)]['inputs']
+        self.assertEqual(director['aspect_ratio'], '16:9')
+        # 1024 short side at 16:9 is ~1.86 MP.
+        self.assertAlmostEqual(director['megapixels'], 1.86, places=2)
+
+    def test_the_ksampler_path_is_untouched_by_the_director_branch(self):
+        # The same runner still drives ordinary drop-in graphs.
+        app = load_app()
+        graph = {
+            '1': {'class_type': 'KSampler', 'inputs': {'seed': 0, 'steps': 4, 'positive': ['2', 0]}},
+            '2': {'class_type': 'CLIPTextEncode', 'inputs': {'text': ''}},
+        }
+        self.assertIsNone(app._h3_studio_director_id(graph))
+
+    def test_the_generate_route_carries_every_reference_in_order(self):
+        app = load_app()
+        data_url = 'data:image/png;base64,' + base64.b64encode(self.ONE_PIXEL_PNG).decode()
+        second_url = 'data:image/jpeg;base64,' + base64.b64encode(self.ONE_PIXEL_JPEG).decode()
+        captured = {}
+
+        def fake_start(media_type, options, runner, args):
+            captured.update(options=dict(options), runner=runner)
+            return None
+
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            try:
+                with patch.object(app, 'TOKEN', 'test-token'), \
+                     patch.object(app, 'jobs', {}), \
+                     patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
+                     patch.object(app, 'start_studio_generation_thread', side_effect=fake_start):
+                    server_thread.start()
+                    request = app.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps({
+                            'backend': 'comfy-api-image',
+                            'workflow_file': str(self._graph_path()),
+                            'prompt': '@Image1 beside @Image2',
+                            'aspect_ratio': '4:5',
+                            'base_size': 1024,
+                            'sampling_profile': 'lightx_er_sde_4',
+                            # The studio sends the first reference inline and
+                            # the rest in images_base64.
+                            'image_base64': data_url,
+                            'images_base64': [second_url],
+                        }).encode('utf-8'),
+                        headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                        method='POST',
+                    )
+                    with app.urlopen(request, timeout=5) as response:
+                        self.assertEqual(response.status, 202)
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+            options = captured['options']
+            self.assertIs(captured['runner'], app.run_comfy_api_image)
+            # Both references made it into options, staged into input storage.
+            self.assertEqual(len(options['reference_image_paths']), 2)
+            for path in options['reference_image_paths']:
+                self.assertTrue(Path(path).is_file())
+                self.assertEqual(Path(path).parent.resolve(), input_dir.resolve())
+            # And the H3-only controls, which the shared key list drops.
+            self.assertEqual(options['aspect_ratio'], '4:5')
+            self.assertEqual(options['base_size'], 1024)
+            self.assertEqual(options['sampling_profile'], 'lightx_er_sde_4')
+
+    def test_a_rented_lane_pushes_its_references_and_keeps_the_sealed_harvest(self):
+        # The H3 image graph routes to the rental lane (lane_needles minimax_h3),
+        # whose outputs never touch this disk. Collecting them from the local
+        # output dir returned nothing, so the lane could not have worked even
+        # with a perfect graph.
+        app = load_app()
+        pushed = {}
+        routed = {}
+        encrypted = []
+
+        def fake_push(body, lane):
+            pushed['lane'] = lane
+            pushed['names'] = [ref['name'] for ref in app._prompt_input_file_refs(body)]
+            return pushed['names']
+
+        def fake_watch(prompt_id, **kwargs):
+            return {'status': 'harvested', 'outputs': ['cmf-abcd1234-h3_00001_.png']}
+
+        with TemporaryDirectory() as td:
+            input_dir = Path(td) / 'input'
+            input_dir.mkdir(parents=True)
+            (input_dir / 'face.png').write_bytes(self.ONE_PIXEL_PNG)
+            sealed = Path(td) / 'cmf-abcd1234-h3_00001_.png.e2e'
+            sealed.write_text('{"format":"enc:v1"}')
+
+            with patch.object(app, 'COMFY_INPUT_DIR', input_dir), \
+                 patch.object(app, 'jobs', {}), \
+                 patch.object(app, 'append_history', lambda rec: None), \
+                 patch.object(app, 'comfy_lane_for_prompt_body', lambda *a, **k: 'rental48348132'), \
+                 patch.object(app, 'COMFY_LANES', {'rental48348132': 'http://127.0.0.1:18432'}), \
+                 patch.object(app, 'comfy_lane_is_remote', lambda lane: True), \
+                 patch.object(app, 'comfy_lane_transport_error', lambda lane: None), \
+                 patch.object(app, 'comfy_lane_liveness_error', lambda lane: None), \
+                 patch.object(app, 'vault_public_key_spki', lambda: 'owner-spki'), \
+                 patch.object(app, 'push_prompt_inputs_to_lane', fake_push), \
+                 patch.object(app, '_auto_submit_prompt', lambda *a, **k: {'prompt_id': 'remote-1'}), \
+                 patch.object(app, 'record_comfy_prompt_route', lambda pid, lane, **kw: routed.update(pid=pid, lane=lane, **kw)), \
+                 patch.object(app, 'watch_remote_comfy_prompt', fake_watch), \
+                 patch.object(app, 'find_output_logical_path', lambda name: sealed), \
+                 patch.object(app, 'record_studio_workflow_setup', lambda *a, **k: None), \
+                 patch.object(app, 'encrypt_outputs', lambda paths, **k: encrypted.extend(paths) or paths):
+                app.run_comfy_api_image('h3-remote', 'a still of @Image1', {
+                    'workflow_file': str(self._graph_path()),
+                    'reference_image_paths': [str(input_dir / 'face.png')],
+                })
+                record = dict(app.jobs['h3-remote'])
+
+        self.assertEqual(record['status'], 'success', record.get('error'))
+        # The reference was staged on the rented box — the Director reads it by
+        # name out of that box's input storage.
+        self.assertEqual(pushed['lane'], 'rental48348132')
+        self.assertEqual(pushed['names'], ['face.png'])
+        # And the route was recorded, which is what arms harvest + scrub.
+        self.assertEqual(routed['pid'], 'remote-1')
+        self.assertEqual(routed['pushed_inputs'], ['face.png'])
+        # The harvest already sealed these; sealing again would wrap the envelope.
+        self.assertEqual(encrypted, [])
+        self.assertEqual(record['outputs'], [str(sealed)])
+
+    def test_a_rented_lane_refuses_before_staging_when_it_cannot_seal(self):
+        app = load_app()
+        staged = []
+        with patch.object(app, 'jobs', {}), \
+             patch.object(app, 'append_history', lambda rec: None), \
+             patch.object(app, 'comfy_lane_for_prompt_body', lambda *a, **k: 'rental48348132'), \
+             patch.object(app, 'comfy_lane_is_remote', lambda lane: True), \
+             patch.object(app, 'comfy_lane_transport_error', lambda lane: None), \
+             patch.object(app, 'comfy_lane_liveness_error', lambda lane: None), \
+             patch.object(app, 'vault_public_key_spki', lambda: ''), \
+             patch.object(app, 'push_prompt_inputs_to_lane', lambda body, lane: staged.append(lane)):
+            app.run_comfy_api_image('h3-unsealable', 'a still', {'workflow_file': str(self._graph_path())})
+            record = dict(app.jobs['h3-unsealable'])
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('sealed', record['error'])
+        # Nothing was uploaded to a box whose results we could not have read.
+        self.assertEqual(staged, [])
