@@ -262,11 +262,38 @@ test('a rejected drop reports WHICH failure it was', async () => {
     assert.equal(referenceDropBlock({ kind: 'audios', taken: 0, limit: 0 }), 'full');
 
     // And a server refusal is neither: it carries its own message, which the
-    // drop handler must pass through rather than replace.
+    // drop path must pass through rather than replace. The panel no longer
+    // words this itself — routing lives in lib/referenceDrop.js and the sentence
+    // in referenceKinds.js, shared with the composer — so the message is
+    // checked where it travels, and the panel is pinned to that route.
+    const { attachDroppedReferences } = await import('../src/lib/referenceDrop.js');
+    const { describeReferenceRejection } = await import('../src/studios/video/referenceKinds.js');
+    const file = { name: 'clip.mp4', type: 'video/mp4', size: 150 * 1024 * 1024 };
+    const { added, rejected } = await attachDroppedReferences({
+        files: [file],
+        taken: { videos: 0 },
+        limits: { videos: 3 },
+        upload: async () => { throw new Error('too large; max 100 MB'); },
+    });
+    assert.deepEqual(added.videos, []);
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].code, 'upload-failed');
+    assert.equal(rejected[0].error?.message, 'too large; max 100 MB');
+    // The server states its cap but cannot state YOUR file's size; the sentence
+    // carries both, or "max 100 MB" is not actionable.
+    assert.equal(describeReferenceRejection(rejected[0]), 'clip.mp4 — too large; max 100 MB (150.0 MB)');
+    // A refusal that arrives without a message still says the upload failed —
+    // never the wording of the other two codes.
+    assert.match(
+        describeReferenceRejection({ name: 'clip.mp4', code: 'upload-failed', kind: 'videos', error: new Error(''), size: 0 }),
+        /^clip\.mp4 — upload failed$/,
+    );
+
     const fs = require('node:fs');
     const path = require('node:path');
     const menu = fs.readFileSync(path.join(__dirname, '../src/studios/video/ReferencesMenu.jsx'), 'utf8');
-    assert.match(menu, /reason: `\$\{err\?\.message/);
+    assert.match(menu, /await attachDroppedReferences\(\{/, 'the panel files drops through the shared router');
+    assert.match(menu, /toast\.error\(describeReferenceRejection\(rejection\)\)/, 'and reports each refusal in the shared words');
 });
 
 // The scaffold button. It used to write the <Video N> line alone, which left
