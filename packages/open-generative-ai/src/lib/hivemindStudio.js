@@ -7,7 +7,7 @@ import {
     workflowIdFromHivemindModelId,
 } from './hivemindModelIds.js';
 import { isMinimaxFamilyModel } from './videoTasks.js';
-import { referenceVideoCanvas } from './h3References.js';
+import { isSoundOnlyReference, referenceVideoCanvas } from './h3References.js';
 
 // Re-exported so the id format keeps one import path for existing callers.
 export { isHivemindVideoModelId, workflowIdFromHivemindModelId };
@@ -551,13 +551,27 @@ export async function generateHivemindVideo(params) {
     // The other two reference kinds ride the same inline path: a voice clip
     // becomes <Audio N>, a motion clip becomes <Video N>, and use_audio decides
     // whether that clip's own soundtrack is conditioned in too.
-    const referenceAudios = await Promise.all((Array.isArray(params.referenceAudios) ? params.referenceAudios : [])
+    const referenceVideoRows = (Array.isArray(params.referenceVideos) ? params.referenceVideos : [])
         .map((item) => (typeof item === 'string' ? { url: item } : item))
-        .filter((item) => item?.url)
-        .map(async (item) => ({ audio_base64: await mediaSourceToDataUrl(item.url, 'audio') })));
-    const referenceVideos = await Promise.all((Array.isArray(params.referenceVideos) ? params.referenceVideos : [])
-        .map((item) => (typeof item === 'string' ? { url: item } : item))
-        .filter((item) => item?.url)
+        .filter((item) => item?.url);
+    // A motion row switched to SOUND ONLY travels as a voice clip — in
+    // reference_audios, after the explicit ones, which is the order the model
+    // numbers <Audio N> and the order referenceLabels shows. The MCP extracts
+    // the soundtrack; the clip's pixels are never staged for the lane.
+    const referenceAudios = await Promise.all([
+        ...(Array.isArray(params.referenceAudios) ? params.referenceAudios : [])
+            .map((item) => (typeof item === 'string' ? { url: item } : item))
+            .filter((item) => item?.url)
+            .map(async (item) => ({ audio_base64: await mediaSourceToDataUrl(item.url, 'audio') })),
+        ...referenceVideoRows
+            .filter((item) => isSoundOnlyReference(item))
+            .map(async (item) => ({
+                audio_base64: await mediaSourceToDataUrl(item.url, 'video'),
+                ...(Number(item.durationSeconds) > 0 ? { duration_seconds: Number(item.durationSeconds) } : {}),
+            })),
+    ]);
+    const referenceVideos = await Promise.all(referenceVideoRows
+        .filter((item) => !isSoundOnlyReference(item))
         .map(async (item) => ({
             video_base64: await mediaSourceToDataUrl(item.url, 'video'),
             use_audio: Boolean(item.useAudio),
@@ -595,6 +609,11 @@ export async function generateHivemindVideo(params) {
         workflow_id: workflowId,
         ...(String(params.studio_lane || '').trim()
             ? { studio_lane: String(params.studio_lane).trim().slice(0, 512) }
+            : {}),
+        // The tab's "Run on" pin: the rented machine this job runs on when it
+        // serves the workflow (tried ahead of the gateway's default order).
+        ...(String(params.run_on || '').trim()
+            ? { run_on: String(params.run_on).trim().slice(0, 128) }
             : {}),
         ...(String(params.referenceDescription || '').trim()
             ? { reference_description: String(params.referenceDescription).trim() }

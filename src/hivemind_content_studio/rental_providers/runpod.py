@@ -396,6 +396,23 @@ class RunPodProvider:
             payload["minRAMPerGPU"] = int(spec.min_ram_gb)
         if spec.min_down_mbps:
             payload["minDownloadMbps"] = int(spec.min_down_mbps)
+        # A warm volume: the weights are already on it, so the pod mounts it
+        # where the provisioning script expects them and the downloads all
+        # skip. A network volume replaces the pod's own volume disk (RunPod
+        # docs) and pins the pod to the volume's data center — which is why
+        # the caller names the data centers, and why volumeInGb stays 0.
+        if spec.network_volume_id:
+            payload["networkVolumeId"] = spec.network_volume_id
+            payload["volumeMountPath"] = spec.volume_mount_path or "/workspace"
+            if spec.data_center_ids:
+                payload["dataCenterIds"] = list(spec.data_center_ids)
+            # Network volumes are a Secure Cloud feature. Measured 2026-08-22:
+            # the same pod spec answered "There are no instances currently
+            # available" on COMMUNITY with a 4090 in High stock in that data
+            # center, and launched at once on SECURE. So a volume-mounted pod
+            # rents on Secure Cloud whatever the default tier is — and bills
+            # the secure price, which is why warm offers are quoted at it.
+            payload["cloudType"] = "SECURE"
         body = request("POST", "/pods", payload)
         pod_id = body.get("id") if isinstance(body, dict) else None
         if not pod_id:
@@ -507,6 +524,28 @@ class RunPodProvider:
     def credit(self) -> float:
         data = graphql("{ myself { clientBalance } }")
         return round(float((data.get("myself") or {}).get("clientBalance") or 0.0), 4)
+
+    # --- network volumes ---------------------------------------------------
+    # Persistent storage that outlives a pod and attaches to the next one in
+    # the same data center (REST /networkvolumes). Billed per GB-month whether
+    # or not a pod is using it; this is the "no download at all" provisioning
+    # path, and the reason it is RunPod-only is that a marketplace box's disk
+    # dies with the box.
+
+    def create_network_volume(self, name: str, size_gb: int, data_center_id: str) -> str:
+        body = request("POST", "/networkvolumes",
+                       {"name": name, "size": int(size_gb), "dataCenterId": data_center_id})
+        volume_id = body.get("id") if isinstance(body, dict) else None
+        if not volume_id:
+            raise ProviderError(f"RunPod did not return a network volume id: {json.dumps(body)[:200]}")
+        return str(volume_id)
+
+    def list_network_volumes(self) -> list[dict]:
+        body = request("GET", "/networkvolumes")
+        return [v for v in (body if isinstance(body, list) else []) if isinstance(v, dict)]
+
+    def delete_network_volume(self, volume_id: str) -> None:
+        request("DELETE", f"/networkvolumes/{volume_id}")
 
 
 def _epoch(value: Any) -> float | None:

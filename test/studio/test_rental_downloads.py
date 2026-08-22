@@ -150,7 +150,9 @@ def _ranges(srv) -> list[str]:
 def _run(tail: str, cwd: Path, **knobs) -> subprocess.CompletedProcess:
     # tries=3 with a long patience: most tests want the count to govern so a
     # give-up is quick; the patience tests override both.
-    settings = dict(split=SPLIT, tries=3, pause=0, patience=600, poll=0.2, floor=1024, stall=30)
+    # chunk=CHUNK keeps the pool's pieces equal to the old fixed eighths, so the
+    # byte ranges the fault injection targets are the ranges the pool asks for.
+    settings = dict(split=SPLIT, chunk=CHUNK, tries=3, pause=0, patience=600, poll=0.2, floor=1024, stall=30)
     settings.update(knobs)
     lib = "\n".join(gpu_rentals._download_lib_lines(**settings))
     return subprocess.run(
@@ -368,3 +370,36 @@ def test_dlwait_stalls_out_at_the_deadline_while_a_fetch_is_still_running(tmp_pa
     assert _beacon_lines(tmp_path)[-1] == (
         f"error|0|download stalled {minutes}min at 0/2: a.bin — destroy this machine and rent another"
     )
+
+
+def test_a_split_object_is_pulled_as_small_chunks_by_a_worker_pool(server, tmp_path: Path) -> None:
+    """Measured 2026-08-22 on a Vast PRO 6000 in Japan: eight connections to
+    R2 opened together ran 63/44/30/26 MB/s and the other four under 7 MB/s
+    for minutes, so with fixed eighths the 15.7GB text encoder took 25 of a
+    27-minute provisioning while the 21GB transformer landed in four. The
+    object is now CHUNK-sized pieces claimed by CONNS workers: a slow
+    connection costs one piece, and the next piece is a new connection."""
+    chunk = 300_000  # 3MB+ blob -> 11 pieces for 8 workers
+    proc, dest = _pget(server, tmp_path, chunk=chunk)
+    assert proc.returncode == 0, proc.stderr
+    assert hashlib.sha256(dest.read_bytes()).hexdigest() == SHA
+    pieces = -(-len(BLOB) // chunk)
+    ranges = _ranges(server)
+    for j in range(pieces):
+        s, e = j * chunk, min((j + 1) * chunk - 1, len(BLOB) - 1)
+        assert f"bytes={s}-{e}" in ranges, f"piece {j} was never asked for"
+    assert len(ranges) == 1 + pieces, "every piece exactly once, plus the probe"
+    assert not list(tmp_path.glob("*.part*")) and not list(tmp_path.glob("*.c[0-9]*")), "claims and pieces are cleaned up"
+
+
+def test_dlwait_reports_bytes_landed_and_the_rate_while_fetching(tmp_path: Path) -> None:
+    """The beacon detail carries the two numbers a crawling fetch used to hide:
+    how much has landed (across every fetch, pieces included) and how fast."""
+    proc = _dlwait(
+        tmp_path,
+        "( head -c 2097152 /dev/zero > a.bin.part0000; sleep 0.6; mv a.bin.part0000 a.bin ) & ( echo y > b.bin ) &",
+    )
+    assert proc.returncode == 0, proc.stderr
+    lines = _beacon_lines(tmp_path)
+    assert lines[-1] == "downloading|2|", "detail is empty once everything has landed"
+    assert any(re.fullmatch(r"downloading\|1\|a\.bin \d+\.\dGB \d+MB/s", line) for line in lines), lines

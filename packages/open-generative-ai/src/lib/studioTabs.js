@@ -13,8 +13,11 @@
 //             no LoRAs, no references, no per-model tuning cache.
 //   'clone' — start from a snapshot of another tab's engine (config + prompt + LoRAs
 //             + references), but none of its run state (history, progress, results).
-// A tab with no seed at all is the original tab: it restores persisted preferences
-// and owns the session-restore duties (pending-job resume, composer draft).
+// A tab with no seed at all boots from persisted preferences. Which tab is the
+// PRIMARY one — the one that adopts the composer draft and any ownerless pending
+// job — is told to the studio explicitly by StudioTabs, because after a reload
+// restores the strip every tab has a null seed and the two stopped being the
+// same question.
 
 /* ---------------- tab list ---------------- */
 
@@ -75,6 +78,78 @@ export function consumeSeed(state, id) {
   return { ...state, tabs: state.tabs.map((tab) => (tab.id === id ? { ...tab, seed: null } : tab)) };
 }
 
+/* ---------------- session persistence ---------------- */
+
+// The strip survives a RELOAD, not a new browser session — hence sessionStorage,
+// the same store the pending-job registry uses. A reload lands mid-generation,
+// and a tab that is not restored is a tab that can never claim the render it
+// started: its job would sit in the registry with no owner, so the studio would
+// look idle while the machine kept working (see pendingJobs.js).
+//
+// Only the ids are written. A seed is a CLONE SNAPSHOT — it holds the source
+// tab's references and is consumed on first render — and a restored tab is no
+// longer a copy of anything on screen, so it boots from persisted preferences
+// like the original tab does. What comes back is the strip and the runs, not a
+// per-tab configuration the studio never persisted in the first place.
+const TAB_STATE_PREFIX = 'studio.tabs.';
+const TAB_INSTANCE_KEY = 'studio.tabs.instance';
+// A corrupt or hostile blob here MOUNTS STUDIOS, one per entry, so the restore
+// is capped well above any plausible strip.
+const MAX_RESTORED_TABS = 24;
+
+const tabStateKey = (studioType) => `${TAB_STATE_PREFIX}${String(studioType || 'studio')}`;
+
+export function saveTabState(studioType, state) {
+  try {
+    sessionStorage.setItem(tabStateKey(studioType), JSON.stringify({
+      tabs: (state?.tabs || []).map((tab) => ({ id: tab.id })),
+      activeId: state?.activeId,
+      nextId: state?.nextId,
+    }));
+  } catch { /* storage disabled or full — the strip just doesn't survive */ }
+}
+
+// Validated field by field rather than trusted: ids must be distinct positive
+// integers, and `nextId` must sit past every one of them, or a tab opened after
+// the restore would reuse a live tab's id — and with it that tab's pending job.
+export function readTabState(raw) {
+  const ids = Array.isArray(raw?.tabs)
+    ? raw.tabs.map((tab) => Number(tab?.id)).filter((id) => Number.isSafeInteger(id) && id > 0)
+    : [];
+  const unique = [...new Set(ids)].slice(0, MAX_RESTORED_TABS);
+  if (!unique.length) return newTabState();
+  const maxId = Math.max(...unique);
+  const wantedNext = Number(raw?.nextId);
+  return {
+    tabs: unique.map((id) => ({ id, seed: null })),
+    activeId: unique.includes(Number(raw?.activeId)) ? Number(raw.activeId) : unique[0],
+    nextId: Number.isSafeInteger(wantedNext) && wantedNext > maxId ? wantedNext : maxId + 1,
+  };
+}
+
+export function loadTabState(studioType) {
+  try {
+    return readTabState(JSON.parse(sessionStorage.getItem(tabStateKey(studioType)) || 'null'));
+  } catch {
+    return newTabState();
+  }
+}
+
+// The app-instance half of `studioLaneId`, held for the life of the browser tab.
+// It used to be minted per mount, which meant a reload moved every restored tab
+// onto a fresh scheduler lane — so the next generation would no longer queue
+// behind the run it just resumed, and the two would fight over the same GPU.
+export function studioInstanceId() {
+  try {
+    const saved = sessionStorage.getItem(TAB_INSTANCE_KEY);
+    if (saved) return saved;
+  } catch { /* fall through to a fresh, unpersisted id */ }
+  const minted = globalThis.crypto?.randomUUID?.()
+    || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try { sessionStorage.setItem(TAB_INSTANCE_KEY, minted); } catch { /* non-critical */ }
+  return minted;
+}
+
 /* ---------------- engine snapshots ---------------- */
 
 // Structured deep copy that survives the Maps/Sets the studio engines keep
@@ -106,7 +181,7 @@ export function snapshotTabFields(engine, keys) {
 // original's results.
 export const IMAGE_TAB_FIELDS = [
   'prompt', 'negativePrompt',
-  'selectedModel', 'selectedModelName', 'useLocalModel', 'rentedOnly',
+  'selectedModel', 'selectedModelName', 'useLocalModel', 'rentedOnly', 'rentedMachineId',
   'selectedLocalModel', 'localRuntimeMode',
   'imageMode', 'uploadedImageUrls', 'maxImages',
   'selectedAr', 'selectedResolution', 'guidanceScale', 'steps',

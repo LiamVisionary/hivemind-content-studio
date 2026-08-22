@@ -165,6 +165,14 @@ class LaunchSpec:
     # fixed-inventory clouds pick their own machine from gpu_names.
     offer_id: str | None = None
     gpu_names: list[str] = field(default_factory=list)
+    # A pre-stocked persistent volume to mount instead of pulling the weights:
+    # the provider's own network-volume id, the data centers it can be reached
+    # from (a volume pins the rental to its own region), and where to mount
+    # it. Only RunPod has volumes that outlive a box and attach to a fresh one;
+    # a marketplace (Vast) has no equivalent and ignores all three.
+    network_volume_id: str | None = None
+    data_center_ids: list[str] = field(default_factory=list)
+    volume_mount_path: str = "/workspace"
 
 
 @dataclass

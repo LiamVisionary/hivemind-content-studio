@@ -7,7 +7,7 @@ import { useEffect, useState } from 'react';
 import { Button, Spinner } from '../ui/kit.jsx';
 import { getLang } from '../lib/i18n.js';
 import { api } from '../hub/hubData.js';
-import { isRoutingLeader, notifyRentedMachinesChanged, withSelection } from '../lib/rentedMachines.js';
+import { isRoutingLeader, notifyRentedMachinesChanged, withPin } from '../lib/rentedMachines.js';
 
 const zh = () => getLang() === 'zh-CN';
 
@@ -23,30 +23,49 @@ function seconds(machine) {
   return value >= 90 ? `~${(value / 60).toFixed(1)}min` : `~${Math.round(value)}s`;
 }
 
+function LockGlyph() {
+  return (
+    <svg aria-hidden="true" width="9" height="9" viewBox="0 0 16 16" fill="currentColor" className="mr-1 inline-block align-[-1px]">
+      <path d="M4 7V5a4 4 0 1 1 8 0v2h1a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h1Zm2 0h4V5a2 2 0 1 0-4 0v2Z" />
+    </svg>
+  );
+}
+
 // With more than one ready machine, "which box does this run on?" is a real
-// question with a real answer — the gateway routes to the highest-priority
-// attachment whose models match. This is that answer, and the switch for it.
+// question with a real answer — and it is answered PER TAB. A click here pins
+// this tab to a machine: every generation the tab sends carries that pin
+// (`run_on`), which the gateway tries ahead of its default order. Nothing
+// global changes, so two tabs can drive two boxes at once and a switch made in
+// one never moves the other. (The Machines view's "Use" still sets the default
+// that un-pinned tabs and agents follow.)
 //
-// `machines`/`all` arrive already carrying the pending switch (see
-// withSelection), so the highlight moves on the click rather than on the
-// response. Only the row being switched TO shows a spinner, and no row is ever
-// disabled while one is in flight: changing your mind mid-request is a normal
-// thing to do, and greying the whole list out was most of what made this feel
-// broken — every click landed on dead controls for as long as the round-trip
-// took, with nothing on screen admitting the first one had registered.
-function MachinePicker({ machines, all, pendingId, onSelect }) {
+// `machines`/`all` already carry the pin's effect (withPin), so the highlight
+// is exactly what the gateway will do with this tab's requests. Only a row
+// being ATTACHED shows a spinner — pinning an attached box is instant, local
+// state — and no row is ever disabled: changing your mind is a normal thing to
+// do, and greying the list out was most of what made this feel broken.
+function MachinePicker({ machines, all, pinned, pendingId, onSelect }) {
   return (
     <div className="flex flex-col gap-1">
       <small className="text-[11px] text-ink3">{zh() ? '运行于' : 'Run on'}</small>
       {machines.map((machine) => {
         const leading = isRoutingLeader(machine, all);
+        const locked = machine.rental_id === pinned;
         const pending = machine.rental_id === pendingId;
         const dead = machine.attached && !machine.tunnel_alive;
+        const label = dead
+          ? (zh() ? '重新连接' : 'reconnect')
+          : locked
+            ? (zh() ? '已锁定' : 'locked')
+            : leading
+              ? (zh() ? '使用中' : 'in use')
+              : (zh() ? '切换' : 'switch');
         return (
           <button
             key={machine.rental_id}
             type="button"
-            disabled={leading && !pending}
+            aria-pressed={locked}
+            data-rental-id={machine.rental_id}
             onClick={() => onSelect(machine)}
             className={`flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors ${
               leading ? 'border-honey/50 bg-honey-tint' : 'border-line1 bg-bg1 hover:border-line2'
@@ -65,12 +84,9 @@ function MachinePicker({ machines, all, pendingId, onSelect }) {
             {pending
               ? <Spinner size={10} className="ml-auto shrink-0 text-honey" />
               : (
-                <span className="ml-auto text-[10px] uppercase tracking-[0.06em] text-ink3">
-                  {leading
-                    ? (zh() ? '使用中' : 'in use')
-                    : dead
-                      ? (zh() ? '重新连接' : 'reconnect')
-                      : (zh() ? '切换' : 'switch')}
+                <span className={`ml-auto text-[10px] uppercase tracking-[0.06em] ${locked && !dead ? 'text-honey' : 'text-ink3'}`}>
+                  {locked && !dead ? <LockGlyph /> : null}
+                  {label}
                 </span>
               )}
           </button>
@@ -80,14 +96,15 @@ function MachinePicker({ machines, all, pendingId, onSelect }) {
   );
 }
 
-export function RentedSourceStatus({ engine: s, page }) {
+// `pinned` is this tab's "Run on" machine (a rental id) and `onPin` writes it —
+// the studios own the value (it lives with the tab's other settings and is
+// copied when the tab is duplicated); this panel only shows and edits it.
+export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  // The machine the user asked for, held until the server list agrees. Clearing
-  // it when the POST resolves is not enough: the refreshed list lands a second
-  // or two later, so the highlight would snap back to the old machine and then
-  // forward again — the flicker reads as the click having failed.
-  const [chosen, setChosen] = useState(null);
+  // The row an attach is in flight for. It is the one click here that is not
+  // instant: pinning a box that is already attached is local state.
+  const [pendingId, setPendingId] = useState(null);
   const live = s.rentedMachines || [];
   const provisioning = s.rentedProvisioning || [];
   const idle = s.rentedIdle || [];
@@ -109,58 +126,69 @@ export function RentedSourceStatus({ engine: s, page }) {
   };
 
   // Every machine that could serve THIS studio, whatever state it is in —
-  // shown as it will be once a pending switch lands, so the click is answered
-  // by the picker itself and not by a network round-trip.
+  // ordered as the gateway will order them for this tab's requests: the pin
+  // first, then the server's own priority order.
   const known = [...live, ...idle, ...broken];
-  const all = chosen === null ? known : withSelection(known, chosen);
+  const all = withPin(known, pinned);
   const usable = all
     .filter((machine) => !page || (machine.studio_pages || []).includes(page))
     .sort((a, b) => Number(b.attached) - Number(a.attached)
       || (b.priority || 0) - (a.priority || 0)
       || String(a.rental_id).localeCompare(String(b.rental_id)));
 
-  // Reality caught up (or the machine went away): stop overriding it, so a
-  // switch made in another tab is not masked by a stale local guess.
-  const settled = chosen !== null && (() => {
-    const machine = known.find((m) => m.rental_id === chosen);
-    return !machine || isRoutingLeader(machine, known);
-  })();
+  // A pin that no longer names an ATTACHED machine is stale: the box was
+  // detached or destroyed (from Machines, or it expired). Drop it, so the tab
+  // follows the default again instead of sending a pin the gateway refuses.
+  // Judged only against a non-empty list — an unreachable API (locked vault,
+  // stack mid-restart) answers with no machines at all, and that is not "gone".
+  const stale = Boolean(pinned) && known.length > 0
+    && !known.some((machine) => machine.rental_id === pinned && machine.attached);
   useEffect(() => {
-    if (chosen === null) return undefined;
-    if (settled) { setChosen(null); return undefined; }
-    // A switch the refreshed list never confirms — another surface picked a
-    // different machine in the meantime — must not spin forever.
-    const timer = setTimeout(() => setChosen(null), 15000);
-    return () => clearTimeout(timer);
-  }, [chosen, settled]);
+    if (stale && onPin) onPin('');
+  }, [stale, onPin]);
 
-  const select = (machine) => {
-    if (chosen === machine.rental_id) return;
-    setChosen(machine.rental_id);
+  const select = async (machine) => {
+    if (!onPin || machine.rental_id === pinned) return;
     setError('');
-    api(`/api/gpu-rentals/${machine.rental_id}/select`, { method: 'POST' })
-      .then(() => notifyRentedMachinesChanged())
-      .catch((err) => {
-        setError(err.message || String(err));
-        // Drop the optimistic order: the machine that was leading still is.
-        setChosen((current) => (current === machine.rental_id ? null : current));
-      });
+    if (machine.attached && machine.tunnel_alive) {
+      onPin(machine.rental_id);
+      return;
+    }
+    // Idle (never pointed at this studio) or broken (tunnel gone): attach it —
+    // a plain attach, which leaves the global order alone — then pin. The pin
+    // is written only once the lane exists, or the gateway would refuse it.
+    setPendingId(machine.rental_id);
+    try {
+      await api(`/api/gpu-rentals/${machine.rental_id}/attach`, { method: 'POST' });
+      onPin(machine.rental_id);
+      notifyRentedMachinesChanged();
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setPendingId(null);
+    }
   };
 
   if (usable.length > 1) {
     const rate = live.reduce((total, m) => total + (m.usd_per_hour || 0), 0);
+    const lockedHere = Boolean(pinned) && !stale;
     return (
       <div className="flex flex-col gap-1.5">
         <MachinePicker
           machines={usable}
           all={all}
-          pendingId={settled ? null : chosen}
+          pinned={stale ? '' : pinned}
+          pendingId={pendingId}
           onSelect={select}
         />
         <small className="text-[11px] text-ink3">
-          {zh()
-            ? `生成在选中的机器上运行并加密返回（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
-            : `Generations run on the selected machine and return sealed — ${live.length} online, ~$${rate.toFixed(2)}/hr total.`}
+          {lockedHere
+            ? (zh()
+              ? `此标签页已锁定到该机器：它发出的生成在那里运行并加密返回（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
+              : `This tab is locked to that machine — its generations run there and return sealed. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`)
+            : (zh()
+              ? `当前跟随“机器”页的默认选择；点击一台机器即可将此标签页锁定到它（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
+              : `Following the Machines default — click a machine to lock this tab to it. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`)}
         </small>
         {error ? <small className="text-[11px] text-warn">{error}</small> : null}
       </div>

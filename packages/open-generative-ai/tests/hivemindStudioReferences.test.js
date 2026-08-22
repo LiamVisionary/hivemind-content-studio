@@ -144,12 +144,19 @@ test('Media Studio forwards the app-tab video queue lane', async () => {
             prompt: 'gentle camera move',
             duration: 3,
             studio_lane: 'video:window-a:2',
+            run_on: 'vast:48352597',
         });
 
         assert.equal(requests.length, 1);
         assert.equal(requests[0].url, '/api/media-studio/video/start');
         const body = JSON.parse(requests[0].options.body);
         assert.equal(body.studio_lane, 'video:window-a:2');
+        // The tab's "Run on" pin rides the same request, as the gateway reads it.
+        assert.equal(body.run_on, 'vast:48352597');
+
+        // No pin, no key: an absent pin must not reach the server as ''.
+        await generateHivemindVideo({ model: 'hivemind-media:ltx23-regular-fast', prompt: 'x', duration: 3 });
+        assert.equal('run_on' in JSON.parse(requests[1].options.body), false);
     } finally {
         global.fetch = originalFetch;
     }
@@ -276,6 +283,46 @@ test('Media Studio previews the authoritative stitched sheet without fetching en
         assert.equal(result.width, 768);
         assert.equal(result.height, 448);
         assert.equal(await result.blob.text(), 'stitched-png');
+    } finally {
+        global.fetch = originalFetch;
+    }
+});
+
+// A motion row switched to SOUND ONLY travels as a voice clip — in
+// reference_audios after the explicit ones (the order the model numbers
+// <Audio N>) — and never as a reference video. The MCP lifts the soundtrack out
+// of the container; the clip's frames are not what was attached.
+test('a sound-only motion reference travels as a voice clip, never as a reference video', async () => {
+    const { generateHivemindVideo } = await loadReferences();
+    const originalFetch = global.fetch;
+    const requests = [];
+    global.fetch = async (url, options) => {
+        requests.push({ url, options });
+        return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, job_id: 'job-s', url: '/api/media-studio/generated/s.mp4' }),
+        };
+    };
+    try {
+        await generateHivemindVideo({
+            model: 'hivemind-media:minimax-h3',
+            prompt: 'x',
+            duration: 5,
+            referenceImages: ['data:image/png;base64,iVBORw0KGgo='],
+            referenceAudios: [{ url: 'data:audio/wav;base64,UklGRg==' }],
+            referenceVideos: [
+                { url: 'data:video/mp4;base64,AAAAIGZ0eXA=', useAudio: false },
+                { url: 'data:video/quicktime;base64,AAAAIGZ0eXBxdCAg', motion: false, useAudio: true, durationSeconds: 9 },
+            ],
+        });
+        const body = JSON.parse(requests[0].options.body);
+        assert.equal(body.reference_videos.length, 1, 'only the motion row is a reference video');
+        assert.equal(body.reference_videos[0].use_audio, false);
+        assert.equal(body.reference_audios.length, 2, 'the explicit clip, then the sound-only row');
+        assert.match(body.reference_audios[0].audio_base64, /^data:audio\/wav/);
+        assert.match(body.reference_audios[1].audio_base64, /^data:video\/quicktime/);
+        assert.equal(body.reference_audios[1].duration_seconds, 9);
     } finally {
         global.fetch = originalFetch;
     }

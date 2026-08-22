@@ -34,6 +34,8 @@ import { ClipPrepDialog } from '../../dialogs/ClipPrepDialog.jsx';
 import { measureAll, peekMediaDuration } from '../../lib/mediaDuration.js';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import {
+  isSoundOnlyReference,
+  motionReferenceRows,
   motionReferenceWarning,
   referenceAttachIndex,
   referenceKindsInDrag,
@@ -108,109 +110,163 @@ function AudioRowPreview({ url }) {
   );
 }
 
+// One switch of the motion row's control strip: pressed = on, in the same
+// honey tint the other toggles use; disabled switches say why in their title.
+function RowSwitch({ on, disabled = false, title, onClick, children }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      aria-pressed={!disabled && Boolean(on)}
+      onClick={onClick}
+      title={title}
+      className={cx(
+        'rounded px-2 py-1 text-[10px] font-medium transition-colors',
+        disabled
+          ? 'cursor-not-allowed text-ink3 opacity-50'
+          : (on ? 'bg-honey-tint text-honey' : 'text-ink3 hover:bg-bg3 hover:text-ink2'),
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 function ReferenceRow({
-  kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio, onToggleCompact, compactLocked = false, onPrep,
+  kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio, onToggleMotion, onToggleCompact,
+  compactLocked = false, onPrep,
 }) {
   const meta = KIND_META[kind];
   const url = typeof item === 'string' ? item : item?.url;
   const name = fileLabel(item);
-  const tag = label?.video || label || meta.tag(index);
+  const soundOnly = kind === 'videos' && isSoundOnlyReference(item);
+  const motionOn = kind === 'videos' && !soundOnly;
+  const soundOn = kind === 'videos' && (soundOnly || Boolean(item?.useAudio));
+  // What the model will call this row: a motion clip is its <Video N> (plus
+  // its soundtrack's <Audio N> when that is on); a sound-only row is just the
+  // <Audio N> its soundtrack takes.
+  const primaryTag = typeof label === 'string' ? label : (label?.video || label?.audio || meta.tag(index));
+  const secondaryTag = typeof label === 'object' && label?.video && label?.audio ? label.audio : '';
+  const removeButton = (
+    <button
+      type="button"
+      onClick={onRemove}
+      aria-label={zh() ? '移除参考' : 'Remove reference'}
+      title={zh() ? '移除参考' : 'Remove reference'}
+      className="grid h-6 w-6 shrink-0 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+    >
+      <Icon name="x" size={12} />
+    </button>
+  );
   return (
-    <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg2 p-1 pr-1.5">
-      <div className="h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3">
-        {kind === 'images' || kind === 'videos' ? (
-          <ReferenceThumb
-            url={url}
-            posterUrl={posterUrl}
-            kind={kind === 'images' ? 'image' : 'video'}
-            alt={meta.tag(index)}
-            icon={meta.icon}
-            onPosterCaptured={onPosterCaptured}
-          />
-        ) : null}
-        {kind === 'audios' ? <AudioRowPreview url={url} /> : null}
-      </div>
-      <span className="min-w-0 flex-1">
-        {/* A picture attached from the saved list carries no filename, so the
-            model's label IS the row's name rather than being printed twice. */}
-        {name ? <span className="block truncate text-[11px] font-semibold text-ink1">{name}</span> : null}
-        <span className={cx('block truncate font-mono text-honey', name ? 'text-[10px]' : 'text-[11px]')}>
-          {tag}
-          {label?.audio ? <span className="text-ink3">{` + ${label.audio}`}</span> : null}
+    <div className="flex flex-col gap-1 rounded-md border border-line1 bg-bg2 p-1 pr-1.5">
+      <div className="flex items-center gap-2">
+        <div className="h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3">
+          {kind === 'images' || kind === 'videos' ? (
+            <ReferenceThumb
+              url={url}
+              posterUrl={posterUrl}
+              kind={kind === 'images' ? 'image' : 'video'}
+              alt={meta.tag(index)}
+              icon={meta.icon}
+              onPosterCaptured={onPosterCaptured}
+            />
+          ) : null}
+          {kind === 'audios' ? <AudioRowPreview url={url} /> : null}
+        </div>
+        <span className="min-w-0 flex-1">
+          {/* A picture attached from the saved list carries no filename, so the
+              model's label IS the row's name rather than being printed twice. */}
+          {name ? <span className="block truncate text-[11px] font-semibold text-ink1">{name}</span> : null}
+          <span className={cx('block truncate font-mono text-honey', name ? 'text-[10px]' : 'text-[11px]')}>
+            {primaryTag}
+            {secondaryTag ? <span className="text-ink3">{` + ${secondaryTag}`}</span> : null}
+            {soundOnly ? <span className="ml-1 font-sans text-ink3">{zh() ? '仅声音' : 'sound only'}</span> : null}
+            {!soundOnly && item?.compact && !compactLocked ? <span className="ml-1 font-sans text-ink3">{zh() ? '紧凑' : 'compact'}</span> : null}
+          </span>
         </span>
-      </span>
+        {/* Motion rows carry their switches on a strip of their own below;
+            pictures and voice clips have nothing to switch, so the remove
+            button stays on the line. */}
+        {kind !== 'videos' ? removeButton : null}
+      </div>
       {kind === 'videos' ? (
-        <button
-          type="button"
-          onClick={onToggleAudio}
-          title={zh()
-            ? '同时使用该片段自带的声音（会额外占用一个 <Audio N> 标签）'
-            : "Also condition on this clip's own soundtrack — it takes an <Audio N> label of its own"}
-          className={cx(
-            'shrink-0 rounded px-1.5 py-1 text-[10px] font-medium transition-colors',
-            item?.useAudio ? 'bg-honey-tint text-honey' : 'text-ink3 hover:bg-bg3 hover:text-ink2',
-          )}
-        >
-          {zh() ? '含原声' : 'sound'}
-        </button>
+        <div className="flex items-center gap-1 pl-11">
+          {/* What of the clip is used. MOTION is its movement (<Video N>);
+              SOUND is its soundtrack (<Audio N>). Both on = the clip with its
+              own sound; sound alone = a voice reference whose pixels are never
+              sent; one of the two always stays on. */}
+          <RowSwitch
+            on={motionOn}
+            onClick={onToggleMotion}
+            title={motionOn
+              ? (zh()
+                ? '使用该片段的动作（<Video N>）。关闭后只使用声音：片段成为音色参考（<Audio N>），画面不会发送。'
+                : "Use this clip's movement (<Video N>). Switch off for sound only: the clip becomes a voice reference (<Audio N>) and its pixels are never sent.")
+              : (zh()
+                ? '重新使用该片段的动作（<Video N>）'
+                : "Use this clip's movement again (<Video N>)")}
+          >
+            {zh() ? '动作' : 'Motion'}
+          </RowSwitch>
+          <RowSwitch
+            on={soundOn}
+            onClick={onToggleAudio}
+            title={soundOnly
+              ? (zh()
+                ? '仅声音：该片段的原声是音色参考（<Audio N>）。关闭后恢复为动作参考。'
+                : "Sound only: this clip's soundtrack is a voice reference (<Audio N>). Switch off to go back to motion.")
+              : (zh()
+                ? '同时使用该片段自带的声音（会额外占用一个 <Audio N> 标签）'
+                : "Also condition on this clip's own soundtrack — it takes an <Audio N> label of its own")}
+          >
+            {zh() ? '声音' : 'Sound'}
+          </RowSwitch>
+          {/* Staging size. A MOTION clip carries the same movement staged 384 px
+              wide as at the node's full canvas, for about a third of the
+              sequence rows and half the step time (referenceVideoCanvas has
+              the numbers). Held off while no picture is attached, because then
+              this clip is the character reference and identity needs pixels —
+              and off for a sound-only row, which sends no pixels at all. */}
+          <RowSwitch
+            on={!compactLocked && motionOn && Boolean(item?.compact)}
+            disabled={compactLocked || !motionOn}
+            onClick={onToggleCompact}
+            title={!motionOn
+              ? (zh() ? '仅声音的参考不发送画面。' : 'A sound-only reference sends no pixels.')
+              : compactLocked
+                ? (zh()
+                  ? '没有附加图片时，该片段就是角色参考——身份需要像素，紧凑模式不可用。'
+                  : 'Off while no picture is attached: this clip is the character reference, and identity needs pixels.')
+                : (zh()
+                  ? '以小尺寸（384 px）送入该片段——动作相同，开销约为三分之一。片段作为角色参考时不可用。'
+                  : 'Stage this clip small (384 px) — same motion, 3x cheaper. Off when the clip is the character reference.')}
+          >
+            {zh() ? '紧凑' : 'Compact'}
+          </RowSwitch>
+          <span className="flex-1" />
+          {onPrep ? (
+            <button
+              type="button"
+              onClick={onPrep}
+              aria-label={zh() ? '裁剪压缩该片段' : 'Trim and compress this clip'}
+              title={zh()
+                ? '在本机裁剪、压缩这段参考——更短更小的参考会释放完整的生成时长'
+                : 'Trim, crop and compress this reference on this device — a shorter, smaller reference frees the full generation range'}
+              className="grid h-6 w-6 shrink-0 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+            >
+              <Icon name="sliders" size={12} />
+            </button>
+          ) : null}
+          {removeButton}
+        </div>
       ) : null}
-      {kind === 'videos' ? (
-        // Staging size. A MOTION clip carries the same movement staged 384 px
-        // wide as at the node's full canvas, for about a third of the sequence
-        // rows and half the step time (referenceVideoCanvas has the numbers).
-        // Held off — shown off and disabled, whatever the row holds — while no
-        // picture is attached, because then this clip is the character
-        // reference and identity needs pixels.
-        <button
-          type="button"
-          disabled={compactLocked}
-          aria-pressed={!compactLocked && Boolean(item?.compact)}
-          onClick={onToggleCompact}
-          title={compactLocked
-            ? (zh()
-              ? '没有附加图片时，该片段就是角色参考——身份需要像素，紧凑模式不可用。'
-              : 'Off while no picture is attached: this clip is the character reference, and identity needs pixels.')
-            : (zh()
-              ? '以小尺寸（384 px）送入该片段——动作相同，开销约为三分之一。片段作为角色参考时不可用。'
-              : 'Stage this clip small (384 px) — same motion, 3x cheaper. Off when the clip is the character reference.')}
-          className={cx(
-            'shrink-0 rounded px-1.5 py-1 text-[10px] font-medium transition-colors',
-            compactLocked
-              ? 'cursor-not-allowed text-ink3 opacity-50'
-              : (item?.compact ? 'bg-honey-tint text-honey' : 'text-ink3 hover:bg-bg3 hover:text-ink2'),
-          )}
-        >
-          {zh() ? '紧凑' : 'Compact'}
-        </button>
-      ) : null}
-      {kind === 'videos' && onPrep ? (
-        <button
-          type="button"
-          onClick={onPrep}
-          aria-label={zh() ? '裁剪压缩该片段' : 'Trim and compress this clip'}
-          title={zh()
-            ? '在本机裁剪、压缩这段参考——更短更小的参考会释放完整的生成时长'
-            : 'Trim, crop and compress this reference on this device — a shorter, smaller reference frees the full generation range'}
-          className="grid h-6 w-6 shrink-0 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
-        >
-          <Icon name="sliders" size={12} />
-        </button>
-      ) : null}
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={zh() ? '移除参考' : 'Remove reference'}
-        title={zh() ? '移除参考' : 'Remove reference'}
-        className="grid h-6 w-6 shrink-0 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
-      >
-        <Icon name="x" size={12} />
-      </button>
     </div>
   );
 }
 
 export function ReferenceSection({
-  kind, items, limit, labels, onAdd, onRemove, onToggleAudio, onToggleCompact, compactLocked = false,
+  kind, items, limit, labels, onAdd, onRemove, onToggleAudio, onToggleMotion, onToggleCompact, compactLocked = false,
   busy, recent, onPickRecent, dropTarget, onWriteTags, posters = {}, onPosterCaptured, onPrep,
 }) {
   const meta = KIND_META[kind];
@@ -255,6 +311,7 @@ export function ReferenceSection({
           onPosterCaptured={onPosterCaptured}
           onRemove={() => onRemove(index)}
           onToggleAudio={() => onToggleAudio?.(index)}
+          onToggleMotion={() => onToggleMotion?.(index)}
           onToggleCompact={() => onToggleCompact?.(index)}
           compactLocked={compactLocked}
           onPrep={onPrep ? () => onPrep(index) : null}
@@ -679,11 +736,22 @@ export function ReferencesMenu({
               onPickRecent={(url) => attach(kind, url)}
               onAdd={() => openPicker(kind)}
               onRemove={(index) => emit(kind, values[kind].filter((_, i) => i !== index))}
-              onToggleAudio={(index) => emit('videos', videos.map((item, i) => (
-                i === index ? { ...item, useAudio: !item.useAudio } : item
-              )))}
+              // MOTION and SOUND are what the clip contributes; one of them
+              // always stays on. Sound off on a sound-only row hands the clip
+              // back to motion; motion off on a silent row switches its sound
+              // on, so "sound only" is one click either way.
+              onToggleAudio={(index) => emit('videos', videos.map((item, i) => {
+                if (i !== index) return item;
+                if (isSoundOnlyReference(item)) return { ...item, motion: true, useAudio: false };
+                return { ...item, useAudio: !item.useAudio };
+              }))}
+              onToggleMotion={(index) => emit('videos', videos.map((item, i) => {
+                if (i !== index) return item;
+                if (isSoundOnlyReference(item)) return { ...item, motion: true };
+                return { ...item, motion: false, useAudio: true, compact: false };
+              }))}
               onToggleCompact={(index) => emit('videos', videos.map((item, i) => (
-                i === index ? { ...item, compact: !item.compact } : item
+                i === index && !isSoundOnlyReference(item) ? { ...item, compact: !item.compact } : item
               )))}
               // No picture attached means the clip is the character reference
               // (the info line below says exactly that), and identity needs
@@ -751,7 +819,7 @@ export function ReferencesMenu({
                   : `Dialogue runs about ${timeWarning.spoken}s; the clip is ${timeWarning.duration}s. Roughly ${timeWarning.gap}s is unaccounted for — shorten the clip, write more line, or say what fills the time and that nobody else speaks.`)}
             </p>
           ) : null}
-          {videos.length && !images.length ? (
+          {motionReferenceRows(videos).length && !images.length ? (
             // No picture: the clip is the character reference, and the model is
             // told so — the exclusion advice below is for the picture+clip case.
             <p className="rounded-md border border-line1 px-2 py-1.5 text-[10px] leading-snug text-ink3">

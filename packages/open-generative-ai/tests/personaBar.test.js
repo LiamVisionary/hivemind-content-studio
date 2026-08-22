@@ -123,11 +123,11 @@ test('a video row\'s compact switch reaches the request, and every carrier keeps
     // The request: "compact" or "full" per clip, from the shared rule, which
     // also holds it to full while no picture is attached.
     const studioLib = read('src/lib/hivemindStudio.js');
-    assert.match(studioLib, /import \{ referenceVideoCanvas \} from '\.\/h3References\.js';/);
+    assert.match(studioLib, /import \{ isSoundOnlyReference, referenceVideoCanvas \} from '\.\/h3References\.js';/);
     assert.match(studioLib, /use_audio: Boolean\(item\.useAudio\),[\s\S]{0,900}canvas: referenceVideoCanvas\(item, \{ images: referenceImages \}\),/);
     // The carriers.
     assert.match(read('src/lib/personaId.js'), /useAudio: Boolean\(item\.useAudio\),[\s\S]{0,400}compact: Boolean\(item\.compact\),/, 'personaFromReferences');
-    assert.match(read('src/lib/personaId.js'), /videos: persona\.videos\.map\(\(item\) => \[item\.url, item\.useAudio, item\.compact\]\)/, 'an edit worth saving');
+    assert.match(read('src/lib/personaId.js'), /videos: persona\.videos\.map\(\(item\) => \[item\.url, item\.useAudio, item\.compact, item\.motion === false\]\)/, 'an edit worth saving');
     assert.match(read('src/lib/personaTransfer.js'), /useAudio: item\.useAudio,\s*compact: item\.compact,/, 'import re-uploads keep it');
     assert.match(read('src/lib/castPrompt.js'), /useAudio: Boolean\(item\.useAudio\), compact: Boolean\(item\.compact\),/, 'a cast member keeps it');
     // Default OFF on every way a clip reaches the rows from the studio itself.

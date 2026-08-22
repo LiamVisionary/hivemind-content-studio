@@ -298,6 +298,7 @@ test('with pricing published the picker prices the actual attachments, and Compa
                 motion_reference_max_seconds: { 'high|16:9': 5.167, 'high|9:16': 5.167 },
                 motion_reference_pricing: {
                     max_packed_rows: 85000,
+                    max_packed_rows_by_vram_gb: { '32': 85000, '96': 215000 },
                     frame_grid: { modulus: 17, offset: 5 },
                     frame_rate: 24,
                     output_rows_per_latent_frame: { 'high|16:9': 836, 'high|9:16': 836, 'standard|16:9': 336 },
@@ -320,8 +321,22 @@ test('with pricing published the picker prices the actual attachments, and Compa
         const pictures = (n) => Array.from({ length: n }, (_, i) => `blob:pic-${i}`);
         const setup = (extra) => ({ modelId: h3.id, ar: '16:9', resolution: 'High', duration: 15, referenceVideos: [], referenceImageUrls: [], referenceAudios: [], ...extra });
 
-        // No motion clip: nothing to price, the full range stays.
-        assert.equal(logic.motionReferenceLimitFor(setup({ referenceImageUrls: pictures(7) }), h3.id), null);
+        // No motion clip, but seven pictures still cost rows: at 15s the OUTPUT
+        // alone is 90,658 of the 85,000 budget, so the range has to narrow.
+        // This assertion used to read `null` — "nothing to price, the full range
+        // stays" — and it is what let Liam send a 15s clip with 7 pictures and
+        // the motion clip's soundtrack (its picture switched off) to a 5090 on
+        // 2026-08-22, where it died at 23.90 + 5.24 GiB of 31.36.
+        const picturesOnly = setup({ referenceImageUrls: pictures(7) });
+        assert.equal(logic.motionReferencePackedRows(picturesOnly, h3.id, 15), 96510);
+        const picturesLimit = logic.motionReferenceLimitFor(picturesOnly, h3.id);
+        assert.equal(picturesLimit.maxSeconds, 12);
+        assert.equal(picturesLimit.referenceVideoCount, 0);
+        assert.equal(picturesLimit.referencePictureCount, 7);
+
+        // Nothing attached at all keeps the whole range: a plain 15s render is
+        // 90,658 rows and was measured to run.
+        assert.equal(logic.motionReferenceLimitFor(setup(), h3.id), null);
 
         // Liam's job as sent: 7 pictures, the 13.3s clip at the full canvas, soundtrack on.
         const asSent = setup({ referenceImageUrls: pictures(7), referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, useAudio: true }] });
@@ -342,11 +357,64 @@ test('with pricing published the picker prices the actual attachments, and Compa
         const compactLong = setup({ referenceImageUrls: pictures(3), referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, useAudio: false, compact: true }] });
         assert.equal(logic.motionReferenceLimitFor(compactLong, h3.id).maxSeconds, 8);
 
+        // A motion row switched to SOUND ONLY is a voice clip to the card: no
+        // frames, so it costs far less than the same clip as motion — but it is
+        // NOT free, and neither are the pictures beside it. This block used to
+        // assert `null` ("leaves the full range open"), which is exactly the
+        // shape Liam sent on 2026-08-22: 15s, 7 pictures, the phone clip's
+        // picture switched off and its audio kept. It OOM'd on a 5090 at
+        // 23.90 + 5.24 GiB — 98,116 rows including text, against 85,000.
+        const soundOnly = setup({ referenceImageUrls: pictures(7), referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, motion: false, useAudio: true }] });
+        const voiceClip = setup({ referenceImageUrls: pictures(7), referenceAudios: [{ url: 'blob:voice', durationSeconds: 13.3 }] });
+        assert.equal(logic.motionReferencePackedRows(soundOnly, h3.id, 15), logic.motionReferencePackedRows(voiceClip, h3.id, 15));
+        assert.ok(logic.motionReferencePackedRows(soundOnly, h3.id, 15) < logic.motionReferencePackedRows(asSent, h3.id, 15));
+        // 90,658 clip + 5,852 pictures + 1,064 soundtrack = 97,574 at 15s.
+        assert.equal(logic.motionReferencePackedRows(soundOnly, h3.id, 15), 97574);
+        const soundLimit = logic.motionReferenceLimitFor(soundOnly, h3.id);
+        assert.equal(soundLimit.maxSeconds, 12, 'the clip is what has to give');
+        assert.equal(soundLimit.referenceVideoCount, 0);
+        assert.equal(soundLimit.referenceSoundCount, 1);
+        assert.equal(soundLimit.referencePictureCount, 7);
+
         // Compact is held to "full" with no picture attached — the clip is then the
         // character reference and identity needs pixels — so it prices at the full canvas.
         const identityClip = setup({ referenceImageUrls: [], referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, useAudio: false, compact: true }] });
         const withPics = setup({ referenceImageUrls: pictures(1), referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, useAudio: false, compact: true }] });
         assert.ok(logic.motionReferencePackedRows(identityClip, h3.id, 8) > logic.motionReferencePackedRows(withPics, h3.id, 8));
+
+        // The budget is a property of the CARD: the catalog publishes it per card
+        // size, the studio already knows which machine a run lands on (this tab's
+        // "Run on" pin when Rented is on, else the routing leader among the
+        // attached rentals — the gateway's own first-match rule), and the picker
+        // prices against THAT card. Liam's as-sent job is capped at 5s on the
+        // 5090 and not at all when a 96 GB RTX PRO 6000 leads; an unlisted or
+        // unknown card keeps the measured base rather than assuming bigger.
+        const pro6000 = { rental_id: 'vast:52', attached: true, priority: 9, models_served: ['minimax_h3'], gpu: 'RTX PRO 6000 WS', vram_gb: 96 };
+        const rtx5090 = { rental_id: 'vast:48', attached: true, priority: 1, models_served: ['minimax_h3'], gpu: 'RTX 5090', vram_gb: 32 };
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, [pro6000, rtx5090]), null, 'the PRO 6000 leads: no cap');
+        assert.equal(logic.availableDurationsFor(asSent, h3.id, [pro6000, rtx5090]).length, 15);
+        assert.equal(logic.clampDurationToMotionReference(asSent, h3.id, [pro6000, rtx5090]), 15);
+        const leader5090 = [{ ...pro6000, priority: 0 }, { ...rtx5090, priority: 9 }];
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, leader5090).maxSeconds, 5, 'the 5090 leads: the 32 GB ceiling');
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, leader5090).cardVramGb, 32);
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, leader5090).machine.rentalId, 'vast:48');
+        // This tab's pin beats the server order; a pin on a machine that is not
+        // attached is inert and the leader decides.
+        assert.equal(logic.motionReferenceLimitFor({ ...asSent, rentedOnly: true, rentedMachineId: 'vast:52' }, h3.id, leader5090), null);
+        assert.equal(logic.motionReferenceLimitFor({ ...asSent, rentedOnly: true, rentedMachineId: 'vast:gone' }, h3.id, leader5090).maxSeconds, 5);
+        // A card the table does not list keeps the base; no machines known is
+        // exactly the old behaviour.
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, [{ ...pro6000, vram_gb: 24 }]).maxSeconds, 5);
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, [{ ...pro6000, vram_gb: 24 }]).cardVramGb, null);
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, []).maxSeconds, 5);
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id).maxSeconds, 5);
+        // A machine that serves other models only is not the leader for H3.
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id, [{ ...pro6000, models_served: ['ltx23'] }]).maxSeconds, 5);
+        // The table lookup itself: a card reports a little under its size.
+        assert.deepEqual(logic.motionReferenceBudgetRows(h3.motionReferencePricing, 94.97), { rows: 215000, vramGb: 96 });
+        assert.deepEqual(logic.motionReferenceBudgetRows(h3.motionReferencePricing, 31.36), { rows: 85000, vramGb: 32 });
+        assert.deepEqual(logic.motionReferenceBudgetRows(h3.motionReferencePricing, 24), { rows: 85000, vramGb: null });
+        assert.deepEqual(logic.motionReferenceBudgetRows(h3.motionReferencePricing, null), { rows: 85000, vramGb: null });
 
         // An unknown canvas (a tier|aspect the pricing does not list) falls back to
         // the published ceiling rather than guessing.

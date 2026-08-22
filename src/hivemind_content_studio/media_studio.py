@@ -155,6 +155,57 @@ def list_media_studio_workflows(media_type: str = "video") -> list[dict[str, Any
     return [item for item in workflows if isinstance(item, dict)]
 
 
+# A workflow's frame lattice, read from the MCP's own listing so the frame
+# count this layer forwards lands on the same grid the MCP and the node use.
+# Cached briefly: the listing is static for an MCP process and start_video is
+# the hot path. Advisory only — an unreachable MCP answers None here and
+# start_video surfaces the real failure a moment later.
+_WORKFLOW_GRID_TTL_SECONDS = 60.0
+_workflow_grid_cache: dict[str, Any] = {"key": None, "at": 0.0, "grids": {}}
+
+
+def _workflow_frame_grid(descriptor: MediaStudioDescriptor, workflow_id: str | None) -> dict[str, Any] | None:
+    if not workflow_id:
+        return None
+    cache = _workflow_grid_cache
+    key = str(getattr(descriptor, "mcp_url", "") or "")
+    now = time.monotonic()
+    if cache["key"] != key or now - float(cache["at"]) > _WORKFLOW_GRID_TTL_SECONDS:
+        try:
+            payload = _result_json(_client(descriptor).call_tool("media_list_workflows", {"media_type": "video"}))
+        except Exception:
+            return None
+        grids: dict[str, dict[str, Any] | None] = {}
+        items = payload.get("workflows", []) if isinstance(payload, dict) else []
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and item.get("id"):
+                grid = item.get("frame_grid")
+                grids[str(item["id"])] = dict(grid) if isinstance(grid, dict) else None
+        cache.update({"key": key, "at": now, "grids": grids})
+    return cache["grids"].get(str(workflow_id))
+
+
+def _request_frame_count(grid: dict[str, Any] | None, duration: float, frame_rate: float) -> int:
+    """The frame count forwarded with a video request.
+
+    LTX renders 8k+1 frames, so a clip of `duration` seconds has always gone
+    out as round(duration x rate) + 1 — the count the node lands on anyway. A
+    workflow that declares its own lattice (MiniMax H3: 17k+5) must NOT get
+    that +1: the node aligns UP to its grid, and when round(duration x rate)
+    already sits on a lattice point the +1 pushes it a whole step. 8s of H3 is
+    192 frames, on the grid; +1 made it 193, which rendered as 209 = 8.7s —
+    and the MCP priced those 209 frames (86,364 packed rows, over the 85,000
+    budget) while the studio's duration picker had priced 192 (79,832) and
+    offered 8s as the cap. Lattice workflows get the smallest grid point at or
+    above the asked frames: what the MCP derives from duration_seconds alone,
+    and what the picker priced.
+    """
+    clip_frames = int(round(float(duration) * float(frame_rate)))
+    if isinstance(grid, dict) and grid.get("modulus"):
+        return max(1, _grid_frames_at_least(grid, clip_frames))
+    return max(9, min(721, clip_frames + 1))
+
+
 def start_video(
     *,
     image_path: str | Path | None = None,
@@ -185,6 +236,9 @@ def start_video(
     resolution: str = "",
     workflow_id: str | None = None,
     studio_lane: str = "",
+    # The studio's per-tab "Run on" pin: the rented machine (rental id) the
+    # job runs on when it serves the workflow. Empty = the gateway's default.
+    run_on: str = "",
     seed: int | None = None,
     denoise: str = "",
     negative_prompt: str = "",
@@ -320,11 +374,14 @@ def start_video(
             uploaded_ingredients.append({"image_path": name, "description": item["description"]})
         duration = max(1 / 24, min(30.0, float(duration_seconds)))
         frame_rate = 24
-        frames = max(9, min(721, round(duration * frame_rate) + 1))
+        frames = _request_frame_count(
+            _workflow_frame_grid(descriptor, workflow_id or descriptor.workflow_id), duration, frame_rate,
+        )
         client = _client(descriptor, requester_pub)
         arguments: dict[str, Any] = {
             **({"workflow_id": workflow_id or descriptor.workflow_id} if workflow_id or descriptor.workflow_id else {}),
             **({"studio_lane": studio_lane.strip()[:512]} if studio_lane.strip() else {}),
+            **({"run_on": run_on.strip()[:128]} if run_on.strip() else {}),
             **({"video_path": uploaded_video_name} if video is not None else {}),
             **({"motion_context_path": uploaded_motion_context_name} if motion_context is not None else {}),
             **({"video_mode": video_mode} if video is not None and not head_swap else {}),
@@ -527,7 +584,15 @@ def finish_video(
     uploaded_names: list[str] | None = None,
     output_dir: str | Path | None = None,
     poll_interval_seconds: float = 6,
-    max_polls: int = 450,
+    # 3 hours at the default interval. This is a backstop, not an estimate: a
+    # failed job is reported by check_video long before it, so the only thing
+    # the cap can do is give up on a job that is still rendering. It did
+    # exactly that at 45 minutes on 2026-08-22 — a 32-step refinement run of a
+    # 208k-row H3 reference job on a rented RTX PRO 6000 (16 real steps at
+    # ~216 s each ≈ 62 min) was declared failed by the studio while the box
+    # finished it; the clip reached History anyway. Multi-reference runs on a
+    # 96 GB card can take longer still.
+    max_polls: int = 1800,
     requester_pub: str = "",
 ) -> dict[str, Any]:
     """Wait for a started job to complete, then download + QA the result and
@@ -545,7 +610,12 @@ def finish_video(
             if index < max_polls - 1:
                 time.sleep(max(0.1, poll_interval_seconds))
         if not video_url:
-            raise TimeoutError("Media Studio did not return a finished video before the poll limit")
+            hours = max_polls * max(0.1, poll_interval_seconds) / 3600
+            raise TimeoutError(
+                "Media Studio did not return a finished video before the poll limit "
+                f"({hours:.1f} h) — the machine may still be rendering it; a finished clip lands in History "
+                "without this wait"
+            )
 
         reachable_url = _rewrite_local_url(video_url, descriptor.upload_base)
         destination_root = Path(output_dir).expanduser().resolve() if output_dir else load_config().data_dir / "generated" / "media-studio"
@@ -651,15 +721,16 @@ def generate_video(
     resolution: str = "",
     workflow_id: str | None = None,
     studio_lane: str = "",
+    run_on: str = "",
     loras: list[dict[str, Any]] | None = None,
     head_swap_lora_strength: float | None = None,
     head_swap_backend: str | None = None,
     head_swap_face_enhancer: bool = False,
     output_dir: str | Path | None = None,
     poll_interval_seconds: float = 6,
-    # 45 minutes at the default interval — high-resolution LTX runs regularly
-    # exceed the old 9-minute budget (a 13-minute job hit the cap live).
-    max_polls: int = 450,
+    # 3 hours at the default interval (see finish_video): 45 minutes was set
+    # for high-resolution LTX and lost a 62-minute PRO 6000 H3 run live.
+    max_polls: int = 1800,
     spectrum: bool | None = None,
     fast_high_res: bool | None = None,
     steps: int | None = None,
@@ -685,6 +756,7 @@ def generate_video(
         resolution=resolution,
         workflow_id=workflow_id,
         studio_lane=studio_lane,
+        run_on=run_on,
         loras=loras,
         head_swap_lora_strength=head_swap_lora_strength,
         head_swap_backend=head_swap_backend,
@@ -1236,8 +1308,23 @@ def motion_reference_pricing(workflow: dict[str, Any]) -> dict[str, Any]:
         for tier_name, dimensions in _VIDEO_TIER_DIMENSIONS.items()
         for aspect, (width, height) in dimensions.items()
     }
+    # The same budget per card size ("32": the 5090 the base was measured on,
+    # "96": the RTX PRO 6000), so the studio can price against the machine the
+    # run will actually land on. Keys stay strings (JSON), values are rows.
+    by_vram: dict[str, float] = {}
+    raw_table = workflow.get("motion_reference_max_packed_rows_by_vram_gb")
+    if isinstance(raw_table, dict):
+        for key, value in raw_table.items():
+            try:
+                size = float(key)
+                rows = float(value)
+            except (TypeError, ValueError):
+                continue
+            if size > 0 and rows > 0:
+                by_vram[str(int(size)) if float(size).is_integer() else str(size)] = rows
     return {
         "max_packed_rows": budget,
+        "max_packed_rows_by_vram_gb": by_vram,
         "frame_grid": dict(grid) if grid else None,
         "frame_rate": rate,
         "output_rows_per_latent_frame": output_rows,

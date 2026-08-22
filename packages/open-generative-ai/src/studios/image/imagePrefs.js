@@ -98,6 +98,9 @@ export function normalizeImagePreferences(value) {
         imageMode: Boolean(value.imageMode),
         useLocalModel: Boolean(value.useLocalModel),
         rentedOnly: Boolean(value.rentedOnly),
+        // The per-tab "Run on" pin (a rental id). Restored with the tab, and
+        // dropped by the Rented panel if that machine is no longer attached.
+        rentedMachineId: stringValue(value.rentedMachineId).slice(0, 128),
         localModelId: stringValue(value.localModelId),
         aspectRatio: stringValue(value.aspectRatio),
         resolution: stringValue(value.resolution),

@@ -17,8 +17,14 @@
 // Applying does both halves at once, because doing one without the other is
 // exactly how a prompt ends up addressing a <Picture 7> that is not attached:
 // the personas' references are loaded into the rows, and the prompt's
-// subject_definitions and retention_analysis are rewritten to match. The
-// creative half — summary, description, soundscape, music — is left alone.
+// subject_definitions and retention_analysis are rewritten to match.
+//
+// The creative half — summary, description, soundscape, music — is KEPT, but
+// not verbatim: whatever in it names a member rather than a subject position
+// (a voice in a dialogue tag, an (Sx) pairing, a bare character name) is
+// re-derived from the cast attached now. Leaving those was how a fight recast
+// onto a new character still spoke the old one's line (2026-08-22). The words
+// inside <d>…</d> are the exception and stay exactly as written.
 //
 // The rules all live in lib/castPrompt.js; this file is the panel around them.
 import { useState } from 'react';
@@ -68,7 +74,12 @@ const personaMember = (entry) => ({
   data: entry.data,
 });
 
-const characterMember = (entry) => ({
+/**
+ * A known character as a cast member. Exported because the character quick-add
+ * outside this panel has to build the same thing: two ways of adding the same
+ * cartoon that produced two different members would be two casts.
+ */
+export const characterCastMember = (entry) => ({
   key: `character:${entry.name}`,
   kind: 'character',
   name: entry.name,
@@ -86,7 +97,40 @@ function toCastMember(member) {
   return castCharacter(member.name, characterPromptText(member.entry), {
     style: styleById(member.styleId).style,
     voice: member.useVoice ? characterVoiceText(member.entry) : '',
+    // Naming a voice only retrieves it if the model can place the name; when it
+    // cannot it falls back to a generic adult male, which is what a named
+    // SpongeBob came back as (2026-08-13). The catalog's description of the
+    // timbre is the fallback, and it was being dropped here — the starter
+    // prompt carried it and the control that generates the starter did not.
+    voiceQuality: member.useVoice ? String(member.entry?.voiceQuality || '') : '',
   });
+}
+
+/**
+ * Panel members + whatever is in the composer -> both halves of a cast.
+ *
+ * Exported because the Apply button is not the only moment a cast has to be
+ * written into a prompt: a prompt LOADED from the library was written for the
+ * cast it was saved with, and dropping it into a composer that has a different
+ * one is the same half-rewritten state this control exists to prevent.
+ */
+export function castApplication({ members = [], prompt = '', limits, durationSeconds = 0 } = {}) {
+  const result = applyCastToPrompt(prompt, {
+    members: members.map(toCastMember), limits, durationSeconds,
+  });
+  const { images, videos, audios } = result.allocation;
+  // A cast of exactly one persona leaves the rows still BEING that saved
+  // character, so it keeps its name. Two personas, or a persona beside a
+  // cartoon, and the name would misdescribe what is attached.
+  const only = members.length === 1 && members[0].kind === 'persona' ? members[0] : null;
+  return {
+    prompt: result.prompt,
+    images,
+    videos,
+    audios,
+    warnings: result.warnings,
+    persona: only ? { id: only.key.slice('persona:'.length), name: only.name } : null,
+  };
 }
 
 function AddPersona({ members, onAdd }) {
@@ -184,7 +228,7 @@ function AddCharacter({ members, onAdd }) {
                       key={entry.name}
                       type="button"
                       disabled={already}
-                      onClick={() => { onAdd(characterMember(entry)); setOpen(false); setQuery(''); }}
+                      onClick={() => { onAdd(characterCastMember(entry)); setOpen(false); setQuery(''); }}
                       title={characterPromptText(entry)}
                       className={cx(
                         'flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-colors',
@@ -295,15 +339,25 @@ function CastRow({ member, index, total, onChange, onRemove, onMove }) {
 }
 
 /**
+ * The cast lives in the STUDIO, not in this panel: a prompt loaded from the
+ * library has to be recast on the way in, and a menu that only remembers its
+ * members while it is open cannot do that.
+ *
  * @param {object}   props
  * @param {string}   props.prompt           what is in the composer now
+ * @param {Array}    props.members          the cast, owned by the studio
+ * @param {Function} props.onMembersChange  (members) => void
+ * @param {Array}    props.warnings         from the last apply, wherever it ran
  * @param {object}   props.limits           the running workflow's slot counts
  * @param {number}   props.durationSeconds  what the run is set to produce
  * @param {Function} props.onApply          ({ prompt, images, videos, audios, warnings }) => void
  */
-export function CastMenu({ prompt = '', limits, durationSeconds = 0, onApply }) {
-  const [members, setMembers] = useState([]);
-  const [warnings, setWarnings] = useState([]);
+export function CastMenu({
+  prompt = '', members = [], onMembersChange, warnings = [], limits, durationSeconds = 0, onApply,
+}) {
+  const setMembers = (next) => onMembersChange?.(
+    typeof next === 'function' ? next(members) : next,
+  );
 
   const add = (member) => setMembers((list) => (
     list.some((item) => item.key === member.key) ? list : [...list, member]
@@ -320,24 +374,7 @@ export function CastMenu({ prompt = '', limits, durationSeconds = 0, onApply }) 
     return next;
   });
 
-  const apply = () => {
-    const cast = members.map(toCastMember);
-    const result = applyCastToPrompt(prompt, { members: cast, limits, durationSeconds });
-    setWarnings(result.warnings);
-    const { images, videos, audios } = result.allocation;
-    // A cast of exactly one persona leaves the rows still BEING that saved
-    // character, so it keeps its name. Two personas, or a persona beside a
-    // cartoon, and the name would misdescribe what is attached.
-    const only = members.length === 1 && members[0].kind === 'persona' ? members[0] : null;
-    onApply?.({
-      prompt: result.prompt,
-      images,
-      videos,
-      audios,
-      warnings: result.warnings,
-      persona: only ? { id: only.key.slice('persona:'.length), name: only.name } : null,
-    });
-  };
+  const apply = () => onApply?.(castApplication({ members, prompt, limits, durationSeconds }));
 
   return (
     <Menu
@@ -396,8 +433,9 @@ export function CastMenu({ prompt = '', limits, durationSeconds = 0, onApply }) 
             disabled={!members.length}
             onClick={apply}
             title={zh()
-              ? '写入主体定义与 retention_analysis，并把角色 ID 的参考载入参考行'
-              : "Writes subject_definitions and retention_analysis, and loads the personas' references into the reference rows"}
+              ? '写入主体定义与 retention_analysis，改写提示词里指向旧演员的部分，并把角色 ID 的参考载入参考行'
+              : 'Writes subject_definitions and retention_analysis, re-points anything in the prompt that '
+                + "named the old cast, and loads the personas' references into the reference rows"}
             className={cx(
               'rounded-md border px-2 py-1.5 text-[11px] font-semibold transition-colors',
               members.length
@@ -409,8 +447,10 @@ export function CastMenu({ prompt = '', limits, durationSeconds = 0, onApply }) 
           </button>
           <p className="text-[10px] leading-snug text-ink3">
             {zh()
-              ? '只重写主体定义与 retention_analysis，其余（摘要、镜头描述、音景、配乐）保持不变。'
-              : 'Only subject_definitions and retention_analysis are rewritten. Your summary, description, soundscape and music are left as written.'}
+              ? '重写主体定义与 retention_analysis，并把摘要与镜头描述里指向旧演员的部分（台词音色标签、(Sx) 说话人编号、角色名）改写到当前演员表；<d>…</d> 里说出口的台词原样保留。'
+              : 'subject_definitions and retention_analysis are rewritten, and anything in your summary or '
+                + 'description that names the OLD cast — a voice in a dialogue tag, an (Sx) id, a character '
+                + 'name — is re-pointed at the current one. The words inside <d>…</d> stay exactly as written.'}
           </p>
           {members.length ? null : (
             <p className="text-[10px] leading-snug text-ink3">

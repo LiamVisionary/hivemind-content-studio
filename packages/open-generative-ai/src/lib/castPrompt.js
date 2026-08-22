@@ -23,6 +23,8 @@ import { normalizePersonaGender, personaGenderWords } from './personaId.js';
 
 const DEFAULT_LIMITS = { images: 9, videos: 3, audios: 3 };
 
+const escapeRegExp = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // How a member is DRAWN, which is not the same as who they are. A persona is
 // defined by photographs, so photoreal is its honest default — the failure this
 // exists to stop is a scene style ("fighting game") silently restyling a real
@@ -49,6 +51,9 @@ export function castPersona(name, persona, { style = PERSONA_DEFAULT_STYLE } = {
     images: (persona?.images || []).filter(Boolean).map(String),
     videos: (persona?.videos || []).filter((item) => item?.url).map((item) => ({
       url: String(item.url), name: String(item.name || ''), useAudio: Boolean(item.useAudio), compact: Boolean(item.compact),
+      // A clip switched to sound only stays sound only in the cast: it is a
+      // voice reference, never the character or motion reference.
+      ...(item.motion === false ? { motion: false, useAudio: true } : {}),
     })),
     audios: (persona?.audios || []).filter((item) => item?.url).map((item) => ({
       url: String(item.url), name: String(item.name || ''),
@@ -174,26 +179,56 @@ export function roleVoiceLabel(role) {
   return withSound ? withSound.audio : '';
 }
 
+/**
+ * The definition lines for a KNOWN character — who it is, how it is drawn, and
+ * how it sounds.
+ *
+ * Exported because the Character quick-add writes a subject into a prompt
+ * without going through a cast, and two ways of defining the same cartoon that
+ * word it differently are two different prompts.
+ *
+ * `speaker` binds this subject's lines to a speaker id. An empty one means two
+ * different things, and `unbilled` is which: a member the compiler was told to
+ * leave SILENT gets no voice line at all, while a character just added to a
+ * prompt has no line YET and still gets one — a subject whose voice is never
+ * named comes back in H3's generic adult male the moment somebody writes it a
+ * line, which is the whole failure this wording exists to prevent.
+ */
+export function characterSubjectLines({
+  subject, sourceForm, style = '', voice = '', voiceQuality = '', speaker = '', unbilled = false,
+} = {}) {
+  const lines = [`${subject} is ${sourceForm}.`];
+  if (style) lines.push(`${subject} is rendered as ${style}.`);
+  if (speaker) {
+    lines.push(voice
+      ? `${subject} speaks as ${speaker}, in ${voice}.`
+      : `${subject} speaks as ${speaker}, in its own established voice.`);
+  } else if (unbilled && voice) {
+    lines.push(`${subject} speaks in ${voice}.`);
+  }
+  // Naming a voice only works if the model can retrieve it. When it cannot,
+  // it falls back to a generic adult male — measured twice: an unattributed
+  // exhale came back as an old man, and so did a named SpongeBob
+  // (2026-08-13). So DESCRIBE the voice as well as naming it, and say what
+  // it must not be, the same way the render style and the smile were fixed.
+  if (voiceQuality && (speaker || (unbilled && voice))) {
+    lines.push(`${subject}'s voice is ${voiceQuality}.`);
+  }
+  return lines;
+}
+
 /** How the model should be told to identify this member. */
 function subjectDefinition(role, shared = false) {
   const { member, subject } = role;
   if (member.kind === 'character') {
-    const lines = [`${subject} is ${member.sourceForm}.`];
-    if (member.style) lines.push(`${subject} is rendered as ${member.style}.`);
-    if (role.speaker) {
-      lines.push(member.voice
-        ? `${subject} speaks as ${role.speaker}, in ${member.voice}.`
-        : `${subject} speaks as ${role.speaker}, in its own established voice.`);
-      // Naming a voice only works if the model can retrieve it. When it cannot,
-      // it falls back to a generic adult male — measured twice: an unattributed
-      // exhale came back as an old man, and so did a named SpongeBob
-      // (2026-08-13). So DESCRIBE the voice as well as naming it, and say what
-      // it must not be, the same way the render style and the smile were fixed.
-      if (member.voiceQuality) {
-        lines.push(`${subject}'s voice is ${member.voiceQuality}.`);
-      }
-    }
-    return lines.join('\n');
+    return characterSubjectLines({
+      subject,
+      sourceForm: member.sourceForm,
+      style: member.style,
+      voice: member.voice,
+      voiceQuality: member.voiceQuality,
+      speaker: role.speaker,
+    }).join('\n');
   }
   const parts = [];
   // The noun comes from the persona's saved gender; "the character" only when
@@ -204,8 +239,11 @@ function subjectDefinition(role, shared = false) {
   // No picture: the first clip is the character reference — MiniMax's own
   // guide binds subjects to clips this way ("<Subject N> is the young man in
   // <Video 2>, …"). A name alone would introduce someone the model has never seen.
-  else if (role.videos.length) parts.push(`the ${noun} shown in ${role.videos[0].video}`);
-  else parts.push(member.gender ? `a ${noun}, ${member.name}` : `${member.name}`);
+  else if (role.videos.some((label) => label?.video)) {
+    // A sound-only row has no <Video N>: the first MOTION clip is the one the
+    // subject can be bound to.
+    parts.push(`the ${noun} shown in ${role.videos.find((label) => label?.video).video}`);
+  } else parts.push(member.gender ? `a ${noun}, ${member.name}` : `${member.name}`);
   const voice = roleVoiceLabel(role);
   const lines = [`${subject} is ${parts[0]}: ${member.appearance || '[appearance — one or two lines]'}.`];
   // Stated per subject, so a scene style cannot quietly restyle a real person.
@@ -239,7 +277,7 @@ function retentionLines(role) {
   // person stays the same person for the whole clip, at every distance — which
   // is a different promise, and the one that keeps a face from drifting between
   // the near and far ends of a shot.
-  if (role.pictures.length || role.videos.length) {
+  if (role.pictures.length || role.videos.some((label) => label?.video)) {
     lines.push(
       `${role.subject}: fully_preserved — the same face, hair, build and wardrobe in every shot `
       + 'and at every distance.',
@@ -248,15 +286,17 @@ function retentionLines(role) {
   for (const label of role.pictures) {
     lines.push(`${label}: fully_preserved — ${role.subject}'s face, hair and wardrobe carry into the clip.`);
   }
-  // With no picture the first clip is the character reference and carries the
-  // person; any further clip is motion-only, as every clip is when pictures exist.
-  const identityVideo = role.pictures.length ? null : (role.videos[0] || null);
+  // With no picture the first MOTION clip is the character reference and
+  // carries the person; any further clip is motion-only, as every clip is when
+  // pictures exist. A sound-only row is a voice clip: the timbre line only.
+  const identityVideo = role.pictures.length ? null : (role.videos.find((label) => label?.video) || null);
   for (const label of role.videos) {
     if (label.audio) {
       lines.push(
         `${label.audio}: reference — only the timbre carries. Its words do NOT carry and its accent does NOT carry.`,
       );
     }
+    if (!label.video) continue;
     if (label === identityVideo) {
       lines.push(
         `${label.video}: fully_preserved — ${role.subject} IS the person in this clip: face, hair, build, wardrobe `
@@ -437,6 +477,7 @@ const SOUNDSCAPE_VOCAL = /\b(exhale[sd]?|inhale[sd]?|breath(?:s|ing|e|es)?|pant(
  */
 export function compileCastPrompt({
   members = [], template = {}, limits = DEFAULT_LIMITS, speakingOrder = null, durationSeconds = 0,
+  previousCast = [],
 } = {}) {
   const beats = Array.isArray(template.beats) ? template.beats : [];
   // Beats know who speaks and when, so they ARE the speaking order — an
@@ -446,11 +487,16 @@ export function compileCastPrompt({
   const { roles } = allocation;
   const anyVoice = roles.some((role) => roleVoiceLabel(role));
 
+  // The creative half is CARRIED, not preserved: everything in it that names a
+  // member rather than a subject position is re-derived from the cast attached
+  // now. Beats are compiled from scratch, so they skip the pass.
+  const recast = (text) => recastCreative(text, roles, previousCast);
+
   const sections = [];
   sections.push(['subject_definitions',
     roles.map((role, _index, all) => subjectDefinition(role, all.length > 1)).join('\n')]);
 
-  const summary = String(template.summary || '').trim();
+  const summary = recast(String(template.summary || '').trim());
   if (summary) {
     // The summary audio tag is a contract about the WHOLE clip, so it is written
     // once here rather than per reference: with a voice reference attached, the
@@ -465,11 +511,11 @@ export function compileCastPrompt({
 
   const description = beats.length
     ? renderBeats(beats, roles, { style: template.style })
-    : String(template.detailed_description || '').trim();
+    : recast(String(template.detailed_description || '').trim());
   if (description) sections.push(['detailed_description', description]);
-  const soundscape = String(template.overall_soundscape || '').trim();
+  const soundscape = recast(String(template.overall_soundscape || '').trim());
   if (soundscape) sections.push(['overall_soundscape', soundscape]);
-  const music = String(template.non_diegetic_music || '').trim();
+  const music = recast(String(template.non_diegetic_music || '').trim());
   if (music) sections.push(['non_diegetic_music', music]);
 
   // MiniMax's own guide asks for roughly 350-500 English words of description.
@@ -533,6 +579,42 @@ export function compileCastPrompt({
     );
   }
 
+  // Labels the cast cannot fill. A prompt from the library was written against
+  // the rows it was saved with; dropped onto a smaller cast, <Picture 7> is a
+  // condition on an attachment that is not there, and H3 conditions it on
+  // nothing rather than saying so.
+  const creative = [summary, description, soundscape, music].filter(Boolean).join('\n');
+  const filled = {
+    Subject: roles.length,
+    Picture: allocation.labels.images.length,
+    Video: allocation.labels.videos.filter((label) => label.video).length,
+    Audio: allocation.labels.audios.length + allocation.labels.videos.filter((label) => label.audio).length,
+  };
+  for (const [kind, count] of Object.entries(filled)) {
+    const used = [...creative.matchAll(new RegExp(`<${kind} (\\d+)>`, 'g'))].map((hit) => Number(hit[1]));
+    const highest = used.length ? Math.max(...used) : 0;
+    if (highest <= count) continue;
+    const noun = kind === 'Subject' ? 'member' : kind.toLowerCase();
+    warnings.push(
+      `The prompt addresses <${kind} ${highest}>, but this cast ${kind === 'Subject' ? 'has' : 'fills'} `
+      + `${count} ${noun}${count === 1 ? '' : 's'}. A label with nothing behind it conditions on nothing — `
+      + 'add the member, attach the reference, or edit the line.',
+    );
+  }
+
+  // The words that get SAID are never rewritten — "Take that, SpongeBob!"
+  // recast into "Take that, <Subject 2>!" would be read out loud — so a name
+  // the cast no longer contains is reported instead.
+  for (const member of previousCast) {
+    if (!member.name) continue;
+    if (roles.some((role) => role.member.name === member.name)) continue;
+    if (!new RegExp(`\\b${escapeRegExp(member.name)}\\b`).test(creative)) continue;
+    warnings.push(
+      `A spoken line still says “${member.name}”, who is no longer in the cast. Dialogue is left exactly `
+      + 'as written — change the words yourself.',
+    );
+  }
+
   if (!description) {
     warnings.push('Nothing describes the shot. A prompt that only says who is in it leaves the whole clip to be invented.');
   }
@@ -578,6 +660,156 @@ export function parseSixSections(text) {
   return sections;
 }
 
+// ---------------------------------------------------------------------------
+// Recasting the CREATIVE half.
+//
+// Rewriting subject_definitions and retention_analysis used to be the whole of
+// a recast, on the reasoning that everything else is what the person wrote. It
+// is not, quite: three things in the creative half name a specific MEMBER
+// rather than a subject position, and every one of them survived a recast still
+// pointing at the cast that had just been replaced (2026-08-22 — a fight recast
+// from SpongeBob onto Naruto kept "<d>[English in SpongeBob SquarePants' voice
+// from SpongeBob SquarePants as voiced by Tom Kenny] Ouch!</d>", so the
+// definitions asked for one character and the spoken line asked for another,
+// which is worse than either one alone).
+//
+//   1. the dialogue LANGUAGE TAG, which is where a known character's voice is
+//      named. dialogueTag() writes it when compiling from beats, so it owns it
+//      when recasting too.
+//   2. the (Sx) pairing, which moves whenever the speaking order does.
+//   3. a bare NAME in the prose, left by whoever wrote the template by hand.
+//
+// All three are derivable from the cast attached NOW, so they are re-derived
+// rather than preserved. Deliberately untouched: the inside of a <d>…</d> body.
+// Those are the words that get SAID, and rewriting "Take that, SpongeBob!" into
+// "Take that, <Subject 2>!" would have the model read a label out loud — so a
+// stale name in a spoken line is reported instead of edited.
+
+/** Sections back into H3's six-section text — the inverse of the parse above. */
+export function formatSixSections(sections = {}) {
+  return SIX_SECTIONS
+    .filter((name) => String(sections[name] || '').trim())
+    .map((name) => `${name}:\n${String(sections[name]).trim()}`)
+    .join('\n\n');
+}
+
+/**
+ * True when the text IS a six-section prompt rather than merely containing one.
+ *
+ * The distinction matters to anything that edits a section and writes the
+ * prompt back out: parsing keeps only what is inside the six sections, so text
+ * sitting in front of the first header would be dropped on the way back.
+ */
+export function isSixSectionPrompt(text) {
+  const first = String(text || '').trim().split('\n')[0] || '';
+  return new RegExp(`^(${SIX_SECTIONS.join('|')}):[ \\t]*$`).test(first.trim())
+    && Boolean(parseSixSections(text));
+}
+
+/**
+ * The cast a six-section prompt was last compiled against, read out of its own
+ * subject_definitions.
+ *
+ * A prompt carries its own cast, which is the whole reason a recast can be
+ * exact without anything being remembered between two runs: the definitions say
+ * which member held which subject position, so the creative half's leftovers
+ * can be traced back to a position and re-derived from whoever holds it now.
+ */
+export function readCastFromDefinitions(text) {
+  const found = new Map();
+  const at = (number) => {
+    if (!found.has(number)) found.set(number, { index: number, identity: '', name: '', speaker: '' });
+    return found.get(number);
+  };
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trim();
+    // "is rendered as …" is a style line, not an identity, and would otherwise
+    // be read as the member's name.
+    const identity = /^<Subject (\d+)> is (?!rendered as\b)(.+?)\.?$/.exec(line);
+    if (identity) {
+      const entry = at(Number(identity[1]));
+      entry.identity = identity[2];
+      entry.name = properName(identity[2]);
+      continue;
+    }
+    const speaks = /^<Subject (\d+)> speaks as (S\d+)\b/.exec(line);
+    if (speaks) at(Number(speaks[1])).speaker = speaks[2];
+  }
+  return [...found.values()].sort((a, b) => a.index - b.index);
+}
+
+/**
+ * The name a member is called in prose, from the way it was defined.
+ *
+ * A subject defined by its references is addressed by LABEL and never by name,
+ * so a definition containing one contributes nothing — and a definition opening
+ * with an article ("a woman, Cheryl") is a description rather than a name.
+ */
+function properName(identity) {
+  const head = String(identity || '').split(': ')[0].trim();
+  if (!head || /[<>]/.test(head)) return '';
+  // "SpongeBob SquarePants from the animated series SpongeBob SquarePants
+  // (1999)" and "Buffy Summers as played by Sarah Michelle Gellar from …" both
+  // start with the name the prose would use.
+  const name = head.split(/ (?:from|as played by|as voiced by) /)[0].trim();
+  if (!name || /^(a|an|the) /i.test(name)) return '';
+  return name;
+}
+
+/** One carried-over section, with everything that names a member re-derived. */
+function recastCreative(text, roles, previous = []) {
+  const source = String(text || '');
+  if (!source) return source;
+
+  // Split on dialogue, because the two halves are governed by opposite rules:
+  // the tag is the cast's to write, the words inside are the writer's to keep.
+  const parts = [];
+  const pattern = /<d>([\s\S]*?)<\/d>/g;
+  let at = 0;
+  let match = pattern.exec(source);
+  while (match) {
+    parts.push({ prose: source.slice(at, match.index) });
+    parts.push({ dialogue: match[1] });
+    at = match.index + match[0].length;
+    match = pattern.exec(source);
+  }
+  parts.push({ prose: source.slice(at) });
+
+  // Whose line comes next: the last subject named before the <d>, which is how
+  // both this module and H3's own guide write an attributed line
+  // ("<Subject 2> (S2) says: <d>…</d>").
+  let owner = -1;
+  const out = [];
+  for (const part of parts) {
+    if (part.dialogue !== undefined) {
+      out.push(`<d>${recastDialogue(part.dialogue, roles[owner])}</d>`);
+      continue;
+    }
+    let prose = part.prose;
+    for (const member of previous) {
+      if (!member.name) continue;
+      prose = prose.replace(new RegExp(`\\b${escapeRegExp(member.name)}\\b`, 'g'), `<Subject ${member.index}>`);
+    }
+    prose = prose.replace(/<Subject (\d+)>(\s*)\(S\d+\)/g, (whole, number, gap) => {
+      const role = roles[Number(number) - 1];
+      if (!role) return whole;
+      return role.speaker ? `<Subject ${number}>${gap}(${role.speaker})` : `<Subject ${number}>`;
+    });
+    const seen = [...prose.matchAll(/<Subject (\d+)>/g)].pop();
+    if (seen) owner = Number(seen[1]) - 1;
+    out.push(prose);
+  }
+  return out.join('');
+}
+
+/** One <d>…</d> body: the language survives, the voice is the cast's to name. */
+function recastDialogue(body, role) {
+  const match = /^(\s*)\[([^\]]*)\]([\s\S]*)$/.exec(String(body || ''));
+  if (!match || !role) return body;
+  const language = match[2].split(/\s+in\s+/i)[0].trim() || 'English';
+  return `${match[1]}${dialogueTag(role, language)}${match[3]}`;
+}
+
 /**
  * Apply a cast to whatever is in the composer.
  *
@@ -592,8 +824,12 @@ export function applyCastToPrompt(prompt, { template = {}, ...options } = {}) {
   const merged = existing
     ? { ...existing, ...template }
     : { detailed_description: String(prompt || '').trim(), ...template };
+  // The prompt's own definitions say who the carried-over creative half was
+  // written about — which is what lets the recast pass find the outgoing cast's
+  // names, voices and speaker ids in it instead of leaving them behind.
+  const previousCast = readCastFromDefinitions(existing?.subject_definitions || '');
   // Derived from who is in the shot, so they are never carried over.
   delete merged.subject_definitions;
   delete merged.retention_analysis;
-  return compileCastPrompt({ ...options, template: merged });
+  return compileCastPrompt({ previousCast, ...options, template: merged });
 }

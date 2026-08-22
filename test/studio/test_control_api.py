@@ -382,6 +382,7 @@ def test_media_studio_video_job_flow_survives_long_generations(tmp_path: Path, m
             "prompt": "slow push in",
             "workflow_id": "ltx23-eros-fast",
             "studio_lane": "video:window-a:2",
+            "run_on": "vast:48352597",
             "image_base64": f"data:image/png;base64,{encoded}",
             "duration_seconds": 2,
             "resolution": "high",
@@ -397,6 +398,8 @@ def test_media_studio_video_job_flow_survives_long_generations(tmp_path: Path, m
     # The staged control-api input copy is removed as soon as the job is queued.
     assert not Path(started["image_path"]).exists()
     assert started["studio_lane"] == "video:window-a:2"
+    # The tab's "Run on" pin rides through to media_studio untouched.
+    assert started["run_on"] == "vast:48352597"
 
     payload: dict = {}
     for _ in range(100):

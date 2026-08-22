@@ -206,6 +206,10 @@ _last_live_media_studio_models: tuple[MediaModel, ...] = ()
 # reference mode. test_media_studio_mcp_contract pins these equal to the
 # registry, so the two cannot drift apart unnoticed.
 _H3_MOTION_REFERENCE_PACKED_ROWS = 85_000
+# The same budget per card ("32": the 5090 the base number was measured on,
+# "96": the RTX PRO 6000 Blackwell). Pinned equal to the registry's
+# max_packed_rows_by_vram_gb by the same contract test.
+_H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB = {"32": 85_000, "96": 240_000}
 _H3_FRAME_GRID = {"modulus": 17, "offset": 5}
 _H3_FRAME_RATE = 24
 
@@ -220,6 +224,7 @@ def _built_in_video_models_with_limits() -> tuple[MediaModel, ...]:
 
     built_in = {
         "motion_reference_max_packed_rows": _H3_MOTION_REFERENCE_PACKED_ROWS,
+        "motion_reference_max_packed_rows_by_vram_gb": dict(_H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB),
         "frame_grid": _H3_FRAME_GRID,
         "defaults": {"frame_rate": _H3_FRAME_RATE},
     }

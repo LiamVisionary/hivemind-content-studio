@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { spawnSync } from 'node:child_process';
@@ -488,6 +488,15 @@ function publicWorkflow(workflow) {
     ...(Number(workflow.motion_reference_budget?.max_packed_rows) > 0
       ? { motion_reference_max_packed_rows: Number(workflow.motion_reference_budget.max_packed_rows) }
       : {}),
+    // The same budget per card size, so the studio can price against the
+    // machine a run will actually land on (the base number is the 32 GB card).
+    ...(motionReferenceBudgetTable(workflow).length
+      ? {
+        motion_reference_max_packed_rows_by_vram_gb: Object.fromEntries(
+          motionReferenceBudgetTable(workflow).map((entry) => [String(entry.vramGb), entry.rows]),
+        ),
+      }
+      : {}),
   };
 }
 
@@ -924,10 +933,70 @@ function detectAudioExtension(buffer, mime, sourceName) {
   if (buffer?.length >= 3 && buffer.toString('ascii', 0, 3) === 'ID3') return '.mp3';
   if (buffer?.length >= 2 && buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) return '.mp3';
   if (buffer?.length >= 12 && buffer.toString('ascii', 4, 8) === 'ftyp') return '.m4a';
+  // EBML: webm/mkv. A screen recording or phone clip whose soundtrack is wanted
+  // arrives in one of these; ensureStagedAudioOnly lifts the audio track out.
+  if (buffer?.length >= 4 && buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) return '.webm';
   const fromMime = extensionForAudioMime(mime);
   if (fromMime) return fromMime;
   const fromName = extname(String(sourceName || '')).toLowerCase();
-  return ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac'].includes(fromName) ? fromName : '';
+  return ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.webm', '.mp4', '.mov', '.mkv'].includes(fromName) ? fromName : '';
+}
+
+// Reference audio may arrive inside a video container (a motion clip switched
+// to "sound only"). Only its soundtrack is wanted, so the audio track is lifted
+// out into a clean AAC file and the container — the pixels — is removed before
+// anything is pushed to a lane. A file that is already audio-only passes
+// through untouched; a clip with no audio track is refused by name.
+const AUDIO_CONTAINER_EXTENSIONS = new Set(['.mp4', '.m4a', '.mov', '.webm', '.mkv', '.ogg']);
+
+function stagedStreamKinds(name) {
+  const path = isAbsolute(name) ? resolve(name) : resolve(comfyInputDir, name);
+  const result = spawnSync(process.env.FFPROBE || 'ffprobe', [
+    '-v', 'error', '-show_entries', 'stream=codec_type,disposition', '-of', 'json', path,
+  ], { encoding: 'utf8', timeout: 15000 });
+  if (result.error || result.status !== 0) return null;
+  try {
+    const streams = JSON.parse(result.stdout || '{}').streams || [];
+    return {
+      // Cover art rides as an "attached picture" video stream; it is not footage.
+      video: streams.some((s) => s.codec_type === 'video' && !(s.disposition && Number(s.disposition.attached_pic) === 1)),
+      audio: streams.some((s) => s.codec_type === 'audio'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function ensureStagedAudioOnly(stagedName) {
+  const name = String(stagedName || '').trim();
+  if (!name) return name;
+  const ext = extname(name).toLowerCase();
+  if (!AUDIO_CONTAINER_EXTENSIONS.has(ext)) return name;
+  const kinds = stagedStreamKinds(name);
+  if (!kinds) return name; // no ffprobe: keep the established path
+  if (!kinds.audio) {
+    throw new Error('reference audio has no audio track — a sound-only reference needs a clip with sound');
+  }
+  if (!kinds.video) return name;
+  const source = isAbsolute(name) ? resolve(name) : resolve(comfyInputDir, name);
+  const outputName = `mcp_audio_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}.m4a`;
+  const result = spawnSync(process.env.FFMPEG || 'ffmpeg', [
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-i', source, '-vn', '-map', '0:a:0', '-c:a', 'aac', '-b:a', '160k',
+    join(comfyInputDir, outputName),
+  ], { encoding: 'utf8', timeout: 300000 });
+  if (result.error?.code === 'ENOENT') {
+    throw new Error('ffmpeg is required to take a sound-only reference from a video clip but was not found');
+  }
+  if (result.status !== 0) {
+    throw new Error(`the reference clip's soundtrack could not be extracted: ${String(result.stderr || '').trim().slice(0, 300)}`);
+  }
+  // The staged container was only ever a carrier for its soundtrack; a file
+  // the MCP created itself is removed so its frames never reach a lane.
+  if (!isAbsolute(name) && /^mcp_audio_/.test(name)) {
+    try { unlinkSync(source); } catch { /* best effort */ }
+  }
+  return outputName;
 }
 
 function stageAudioBuffer(buffer, { mime = '', sourceName = '' } = {}) {
@@ -948,7 +1017,11 @@ function decodeBase64Audio(value) {
   if (!text) throw new Error('audio_base64 is empty');
   const dataUrl = text.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.*)$/is);
   const mime = dataUrl ? String(dataUrl[1] || '').trim().toLowerCase() : '';
-  if (mime && !mime.startsWith('audio/')) throw new Error(`audio_base64 data URL must be audio/*, got ${mime}`);
+  // A video container is accepted too: only its soundtrack is used (the
+  // studio's "sound only" motion reference), extracted by ensureStagedAudioOnly.
+  if (mime && !mime.startsWith('audio/') && !mime.startsWith('video/')) {
+    throw new Error(`audio_base64 data URL must be audio/* (or a video/* container whose soundtrack is wanted), got ${mime}`);
+  }
   let encoded = (dataUrl ? dataUrl[2] : text).replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/');
   if (!encoded || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('audio_base64 is not valid base64');
   encoded = encoded.padEnd(Math.ceil(encoded.length / 4) * 4, '=');
@@ -981,6 +1054,13 @@ async function stageAudioUrl(value) {
 // and URLs are staged, an absolute path is copied in, and a bare name is
 // trusted to already be in the input folder (same contract as ref images).
 async function audioSourceFromEntry(entry = {}) {
+  // Whatever the entry resolves to, only its soundtrack is wanted: a video
+  // container (the studio's "sound only" motion reference) is reduced to its
+  // audio track before the name is handed to the graph.
+  return ensureStagedAudioOnly(await audioSourceNameFromEntry(entry));
+}
+
+async function audioSourceNameFromEntry(entry = {}) {
   const audioBase64 = entry.audio_base64;
   if (audioBase64 !== undefined && audioBase64 !== null && String(audioBase64).trim() !== '') {
     return stageBase64Audio(audioBase64);
@@ -997,7 +1077,10 @@ async function audioSourceFromEntry(entry = {}) {
   const alreadyInput = inputRelativeName(source);
   if (alreadyInput) return alreadyInput;
   if (!detectAudioExtension(null, '', source)) {
-    throw new Error(`audio_path must be WAV, MP3, FLAC, OGG, M4A, or AAC: ${audioPath}`);
+    throw new Error(
+      `audio_path must be WAV, MP3, FLAC, OGG, M4A, or AAC — or a video clip (MP4/MOV/WEBM/MKV) whose soundtrack `
+      + `is wanted: ${audioPath}`,
+    );
   }
   mkdirSync(comfyInputDir, { recursive: true });
   const stagedName = `mcp_audio_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}${extname(source).toLowerCase()}`;
@@ -1232,6 +1315,35 @@ function h3ReferenceCanvas(width, height) {
 // name, and a gateway that cannot answer enforces nothing either way, so
 // refusing here would only add a failure mode. Null when the workflow carries
 // no measured budget at all — an unmeasured card is not a card that cannot.
+// The per-card budgets a workflow carries — `max_packed_rows_by_vram_gb`, keyed
+// by the card's marketing size in GB ("32": the 5090 the base number was
+// measured on, "96": the RTX PRO 6000) — as a list sorted by size. The base
+// `max_packed_rows` is what an unknown card gets.
+function motionReferenceBudgetTable(workflow) {
+  const table = workflow?.motion_reference_budget?.max_packed_rows_by_vram_gb;
+  if (!table || typeof table !== 'object') return [];
+  return Object.entries(table)
+    .map(([key, rows]) => ({ vramGb: Number(key), rows: Number(rows) }))
+    .filter((entry) => Number.isFinite(entry.vramGb) && entry.vramGb > 0 && entry.rows > 0)
+    .sort((a, b) => a.vramGb - b.vramGb);
+}
+
+// A card reports a little under its marketing size (a 32 GB 5090 publishes
+// 31.36 GiB, a 96 GB PRO 6000 95.0 GiB), so a table key matches a card that
+// reports at least this much less than it.
+const MOTION_REFERENCE_VRAM_KEY_TOLERANCE_GB = 1.5;
+
+// The budget entry for a card of `vramGb`: the largest key the card reaches.
+// Null when the table is empty or the card is smaller than every key — an
+// unknown card keeps the measured base, it is not assumed bigger.
+function motionReferenceBudgetForCard(workflow, vramGb) {
+  const size = Number(vramGb);
+  if (!(size > 0)) return null;
+  const fits = motionReferenceBudgetTable(workflow)
+    .filter((entry) => entry.vramGb <= size + MOTION_REFERENCE_VRAM_KEY_TOLERANCE_GB);
+  return fits.length ? fits[fits.length - 1] : null;
+}
+
 function motionReferenceRowBudget(workflow, lane) {
   const measured = Number(workflow?.motion_reference_budget?.max_packed_rows);
   if (!(measured > 0)) return null;
@@ -1239,15 +1351,35 @@ function motionReferenceRowBudget(workflow, lane) {
   const reduced = Number(workflow?.motion_reference_budget?.max_packed_rows_without_vram_headroom);
   const probed = Boolean(lane && lane.probed === true && Number.isFinite(Number(lane.vramHeadroomGb)));
   const laneHeadroom = probed ? Number(lane.vramHeadroomGb) : null;
+  const vramTotalGb = Number(lane?.vramTotalGb) > 0 ? Number(lane.vramTotalGb) : null;
+  // The budget is a property of the CARD, not the workflow: the base number
+  // was measured on a 32 GB 5090 (the whole packed sequence has to fit beside
+  // the resident DiT), and a 96 GB RTX PRO 6000 holds far more. The gateway
+  // reports the lane's card with its launch flags; the registry's per-card
+  // table says what that card holds. A lane the gateway could not ask, or a
+  // card the table does not list, keeps the measured base.
+  const card = motionReferenceBudgetForCard(workflow, vramTotalGb);
   // A lane without the flag is only held to a smaller budget when the registry
   // actually carries a smaller one. It does not today: --vram-headroom was
   // measured inert for the reference-mode OOM (2026-08-21, jobs b9f5b32d and
   // 103f6173 failed identically at 12 and 20), so both numbers are 85,000 and
   // the flag advice below stays dormant until a measurement separates them.
   if (probed && reduced > 0 && reduced < measured && laneHeadroom < requiredHeadroom) {
-    return { rows: reduced, measured, requiredHeadroom, lane: lane.lane, laneHeadroom, reducedByLane: true };
+    return {
+      rows: reduced, measured, requiredHeadroom, lane: lane.lane, laneHeadroom, reducedByLane: true,
+      vramTotalGb, cardBudget: null,
+    };
   }
-  return { rows: measured, measured, requiredHeadroom, lane: lane?.lane ?? null, laneHeadroom, reducedByLane: false };
+  return {
+    rows: card ? card.rows : measured,
+    measured,
+    requiredHeadroom,
+    lane: lane?.lane ?? null,
+    laneHeadroom,
+    reducedByLane: false,
+    vramTotalGb,
+    cardBudget: card ? { vramGb: card.vramGb, rows: card.rows } : null,
+  };
 }
 
 // Which lane this graph routes to, and what that lane's ComfyUI was launched
@@ -1256,15 +1388,20 @@ function motionReferenceRowBudget(workflow, lane) {
 // argv (POST /api/lanes/resolve). Never throws: an answer the guard cannot use
 // comes back as `probed: false` with the reason, and motionReferenceRowBudget()
 // decides what an unknown is worth.
-async function resolveLaneForGraph(promptGraph) {
+async function resolveLaneForGraph(promptGraph, runOn = '') {
   try {
     const answer = await requestJson('/api/lanes/resolve', {
       method: 'POST',
-      body: { graph: promptGraph },
+      // The same "Run on" pin the submit will carry: the budget is priced
+      // against the lane that will actually run the job.
+      body: { graph: promptGraph, ...(runOn ? { run_on: String(runOn) } : {}) },
       timeoutMs: 15000,
     });
     if (!answer || typeof answer !== 'object' || typeof answer.lane !== 'string') {
-      return { lane: null, remote: false, probed: false, vramHeadroomGb: null, error: 'the gateway did not name a lane' };
+      return {
+        lane: null, remote: false, probed: false, vramHeadroomGb: null, vramTotalGb: null,
+        error: 'the gateway did not name a lane',
+      };
     }
     const headroom = Number(answer.vram_headroom_gb);
     const probed = answer.probed === true && Number.isFinite(headroom);
@@ -1274,19 +1411,30 @@ async function resolveLaneForGraph(promptGraph) {
         + 'the motion-reference guard keeps the measured budget',
       );
     }
+    // The lane's card, from the same /system_stats read as the flags. An
+    // unknown card (older gateway, no device published) is null and keeps the
+    // measured base budget.
+    const vramTotalGb = Number(answer.vram_total_gb);
     return {
       lane: answer.lane,
       remote: answer.remote === true,
       probed,
       vramHeadroomGb: probed ? headroom : null,
+      vramTotalGb: probed && Number.isFinite(vramTotalGb) && vramTotalGb > 0 ? vramTotalGb : null,
       error: answer.error ? String(answer.error) : null,
     };
   } catch (error) {
+    // A refused pin (the pinned machine is gone) is the job's answer, not the
+    // guard's: surface it now rather than after every reference is staged.
+    if (error?.status === 409 && error?.machineSafe) throw error;
     console.error(
       `[media-studio-mcp] could not resolve the lane for the motion-reference guard (${error?.message || error}); `
       + 'keeping the measured budget',
     );
-    return { lane: null, remote: false, probed: false, vramHeadroomGb: null, error: String(error?.message || error) };
+    return {
+      lane: null, remote: false, probed: false, vramHeadroomGb: null, vramTotalGb: null,
+      error: String(error?.message || error),
+    };
   }
 }
 
@@ -1430,10 +1578,21 @@ function assertReferenceSlotsExist(workflow, args = {}) {
 }
 
 function assertMotionReferenceFitsTheCard(workflow, settings, lane) {
-  // Only runs with a motion clip attached: the cap is on reference VIDEO. Nine
-  // pictures on a 15s clip were never the problem and keep the full range.
+  // EVERY reference is priced, not just a motion clip. This used to return
+  // early unless a reference VIDEO was attached — "nine pictures on a 15s clip
+  // were never the problem" — and that was measured false on 2026-08-22: a 15s
+  // clip at 1216x704 with seven pictures and one sound reference (the motion
+  // clip's picture switched off, its audio kept) carries ~97,600 rows against
+  // an 85,000 budget and died in the MLP of block 0 (23.90 GiB + 5.24 GiB on a
+  // 31.36 GiB 5090; 5.24 GiB / 57,344 B per row = 98,116 rows including text).
+  // Pictures and soundtracks ride in the same packed sequence as the clip, and
+  // at 15s the OUTPUT alone is already 90,658 rows — so anything at all
+  // attached puts the run over. A run with no references keeps the published
+  // range: plain 15s text-to-video was measured at 90,658 rows and runs.
   const videos = Array.isArray(settings.referenceVideos) ? settings.referenceVideos.filter(Boolean) : [];
-  if (!videos.length) return;
+  const pictureCount = Number(settings.referenceImageCount) || 0;
+  const voiceCount = Number(settings.referenceAudioCount) || 0;
+  if (!videos.length && !pictureCount && !voiceCount) return;
   const budget = motionReferenceRowBudget(workflow, lane);
   if (!budget) return;
   const width = Number(settings.width);
@@ -1444,12 +1603,24 @@ function assertMotionReferenceFitsTheCard(workflow, settings, lane) {
   if (priced.total <= budget.rows) return;
   const rate = Number(settings.frameRate) || 24;
   const seconds = (value) => (value / rate).toFixed(1);
+  // The CLIP ceiling has to be floored, not rounded, before it is quoted. A
+  // clip length snaps UP to the lattice (normalizedGridFrameCount), so naming
+  // the rounded seconds of the last frame count that fits sends the user to a
+  // duration that snaps past it and is refused again — 311 frames is 12.958s,
+  // quoted as "13.0s", and 13s is 312 frames which snaps to 328. Measured
+  // 2026-08-22 against the live MCP: the refusal recommended 13.0s and then
+  // refused 13.0s with the same sentence. A reference TRIM needs no such care
+  // (a reference snaps DOWN), so it keeps the plain rounding.
+  const flooredSeconds = (value) => (Math.floor((value / rate) * 10) / 10).toFixed(1);
   const clipCeiling = motionReferenceClipCeilingFrames(workflow, settings, budget.rows);
   const trimCeiling = motionReferenceTrimCeilingSeconds(workflow, settings, budget.rows);
   const soundtrackRows = priced.videos.reduce((sum, item) => sum + item.audioRows, 0);
   const plural = videos.length === 1 ? '' : 's';
+  const perPicture = pictureCount ? Math.round(priced.pictureRows / pictureCount) : 0;
   const levers = [];
-  if (clipCeiling) levers.push(`shorten the clip to ${seconds(clipCeiling)}s`);
+  if (clipCeiling && Number(flooredSeconds(clipCeiling)) >= 1) {
+    levers.push(`shorten the clip to ${flooredSeconds(clipCeiling)}s`);
+  }
   if (trimCeiling && trimCeiling >= REF_VIDEO_MIN_SECONDS) {
     levers.push(
       `trim the reference video${plural} to ${trimCeiling.toFixed(1)}s or less — a reference shorter than `
@@ -1460,25 +1631,56 @@ function assertMotionReferenceFitsTheCard(workflow, settings, lane) {
   if (videos.some((reference) => !reference.compact)) {
     levers.push('stage the reference video compact (canvas "compact": about a third of the rows, the same motion)');
   }
-  levers.push('drop a reference video');
+  if (videos.length) levers.push('drop a reference video');
+  // Pictures are priced at the OUTPUT canvas, so each one costs a whole latent
+  // frame of the clip's own size — cheap next to a motion clip, decisive when
+  // the clip is long and they are all that is attached.
+  if (pictureCount) {
+    levers.push(
+      `send fewer reference pictures (${pictureCount} of them cost ${thousands(priced.pictureRows)} rows, `
+      + `${thousands(perPicture)} each)`,
+    );
+  }
+  if (priced.voiceRows) {
+    levers.push(voiceCount === 1
+      ? `drop the sound reference (it costs ${thousands(priced.voiceRows)} rows)`
+      : `drop a sound reference (${voiceCount} of them cost ${thousands(priced.voiceRows)} rows)`);
+  }
   // A lane held to the smaller ceiling is told WHY, and what restores the
   // full budget: the flag by name, the value the budget was measured with,
   // and that the tier's own provisioning passes it. That is the one sentence
   // the operator can act on; "100,000" alone reads as a smaller card.
+  // And a budget picked for the lane's card says so: the operator reading
+  // "215,000" on a 5090 lane, or "85,000" on a PRO 6000, has a routing
+  // problem (the wrong machine is selected), not a capacity one.
   const limit = budget.reducedByLane
     ? `${thousands(budget.rows)} on lane '${budget.lane}', whose ComfyUI runs `
       + `${budget.laneHeadroom > 0 ? `with --vram-headroom ${budget.laneHeadroom}` : 'without --vram-headroom'} — `
       + `the ${thousands(budget.measured)}-row budget was measured with --vram-headroom ${budget.requiredHeadroom}, `
       + 'which the minimax-tier provisioning passes; re-provision that machine, or relaunch its ComfyUI with the '
       + 'flag, to get the full budget back'
-    : thousands(budget.rows);
+    : budget.cardBudget
+      ? `${thousands(budget.rows)} on lane '${budget.lane}' (a ${budget.cardBudget.vramGb} GB card)`
+      : thousands(budget.rows);
+  // Name what is actually attached. A refusal that says "with 0 reference
+  // videos" when the run carries seven pictures and a soundtrack sends the
+  // user looking for a video they already removed.
+  const attached = [];
+  if (videos.length) attached.push(`${videos.length} reference video${plural}`);
+  if (pictureCount) attached.push(`${pictureCount} reference picture${pictureCount === 1 ? '' : 's'}`);
+  if (voiceCount) attached.push(`${voiceCount} sound reference${voiceCount === 1 ? '' : 's'}`);
+  const inventory = attached.length > 1
+    ? `${attached.slice(0, -1).join(', ')} and ${attached[attached.length - 1]}`
+    : attached[0];
   const error = new Error(
-    `a ${seconds(priced.frames)}s clip at ${width}x${height} does not fit this card with ${videos.length} `
-    + `reference video${plural} attached: together they carry ${thousands(priced.total)} packed rows — the clip `
-    + `itself, each reference encoded at its own canvas for min(its length, the clip's)`
-    + `${soundtrackRows ? ' plus its soundtrack' : ''}${priced.pictureRows ? ', and the reference pictures' : ''} `
+    `a ${seconds(priced.frames)}s clip at ${width}x${height} does not fit this card with ${inventory} `
+    + `attached: together they carry ${thousands(priced.total)} packed rows — the clip itself `
+    + `(${thousands(priced.outputVideoRows + priced.outputAudioRows)} rows at this length and canvas)`
+    + `${videos.length ? `, each reference video encoded at its own canvas for min(its length, the clip's)` : ''}`
+    + `${soundtrackRows ? ' plus its soundtrack' : ''}${priced.pictureRows ? `, the reference pictures (${thousands(priced.pictureRows)})` : ''}`
+    + `${priced.voiceRows ? `, and the sound references (${thousands(priced.voiceRows)})` : ''} `
     + `— and the limit here is ${limit}. Either ${levers.join(', or ')}. `
-    + 'Reference pictures cost the same whatever the length.',
+    + 'Every reference rides in the same sequence as the clip, so a longer clip leaves less room for them.',
   );
   // Survives machine-private redaction. This message is made of the card's
   // capacity and the canvas the caller already chose — row counts, a duration,
@@ -3053,6 +3255,10 @@ async function buildVideoPromptBody(args = {}) {
     // mistaken for a direct one.
     built.workflow = { ...built.workflow, routed_from: routed.from, routed_for: routed.for };
   }
+  // The studio's per-tab "Run on" pin rides top-level on the /prompt body; the
+  // gateway reads it there (and from extra_pnginfo.runOn) to route the submit.
+  // ComfyUI ignores the key, so it is harmless on the lane itself.
+  if (args.run_on && built.body && typeof built.body === 'object') built.body.run_on = String(args.run_on).slice(0, 128);
   return built;
 }
 
@@ -3129,17 +3335,26 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
   const suppliedReferenceVideos = Array.isArray(args.reference_videos)
     ? args.reference_videos.filter(Boolean)
     : [];
+  // ANY reference makes this a priced run: pictures and sound clips ride in the
+  // same packed sequence as the clip, and at 15s the output alone is 90,658 of
+  // the 5090's 85,000-row budget. Gating on a motion clip meant a 15s job with
+  // seven pictures was neither pre-flighted NOR priced against the card it was
+  // about to run on — it was checked against the default budget instead of the
+  // attached lane's, and then died on the card (2026-08-22, 23.90 + 5.24 GiB).
+  const suppliedReferenceCount = suppliedReferenceVideos.length
+    + (Array.isArray(args.reference_images) ? args.reference_images.filter(Boolean).length : 0)
+    + (Array.isArray(args.reference_audios) ? args.reference_audios.filter(Boolean).length : 0);
   // The budget depends on the lane (motionReferenceRowBudget): ask the gateway
-  // once, before the pre-flight, and price both checks against the same
-  // answer. Only a job with a motion clip on a workflow that carries a measured
-  // budget pays the round trip; everything else never asks.
-  const motionReferenceLane = suppliedReferenceVideos.length && motionReferenceRowBudget(workflow)
-    ? await resolveLaneForGraph(promptGraph)
+  // once, before the pre-flight, and price both checks against the same answer.
+  // Only a job carrying references on a workflow with a measured budget pays
+  // the round trip; a plain text-to-video never asks.
+  const motionReferenceLane = suppliedReferenceCount && motionReferenceRowBudget(workflow)
+    ? await resolveLaneForGraph(promptGraph, args.run_on)
     : null;
   const chainsFromMotionContext = args.motion_context_path !== undefined
     || args.motion_context_base64 !== undefined
     || args.motion_context_url !== undefined;
-  if (suppliedReferenceVideos.length && !chainsFromMotionContext) {
+  if (suppliedReferenceCount && !chainsFromMotionContext) {
     const preflightFrameRate = Number(args.frame_rate ?? defaults.frame_rate ?? 24) || 24;
     const preflightDuration = positiveFloat(
       args.duration_seconds ?? args.params?.duration_seconds,
@@ -4329,6 +4544,7 @@ function buildServer() {
     inputSchema: {
       workflow_id: z.string().optional().describe(`Registered workflow id. Defaults to ${defaultVideoWorkflowId()}. Use media_list_workflows to discover options.`),
       studio_lane: z.string().max(512).optional().describe('Opaque app-tab queue lane. Jobs from one lane run in order; different tabs and media studios remain independent.'),
+      run_on: z.string().max(128).optional().describe('The studio\'s per-tab "Run on" pin: the rented machine (rental id, e.g. "vast:48352597") this job runs on when that machine serves the workflow — it is tried ahead of the gateway\'s default routing order. Omit to follow the default. A pin naming a machine that is no longer attached is refused (409) rather than silently re-routed.'),
       prompt: z.string().min(1).optional().describe('Optional positive video prompt. Long natural-language prompts are preserved without a client-side character cap.'),
       reference_description: z.string().optional().describe('Ingredients IC-LoRA only: panel-by-panel description of the reference sheet. Omit only when prompt already contains the required Reference Sheet Description and Target Description headings.'),
       ingredient_images: z.array(z.object({
@@ -4418,7 +4634,9 @@ function buildServer() {
       })).max(3).optional().describe(
         'MiniMax H3 Reference mode: up to three voice (or music) reference clips, in order — clip N is the '
         + 'prompt\'s <Audio N>, numbered after any reference video\'s own soundtrack. Each clip 2-15s, 15s combined, '
-        + 'WAV/MP3/FLAC/OGG/M4A/AAC; requires at least one reference picture or video alongside. Clones the voice two ways: tag the prompt summary '
+        + 'WAV/MP3/FLAC/OGG/M4A/AAC — or a VIDEO clip (MP4/MOV/WEBM) whose soundtrack is wanted: only its audio track is '
+        + 'used, extracted here, its frames never staged ("sound only" motion reference); requires at least one reference '
+        + 'picture or video alongside. Clones the voice two ways: tag the prompt summary '
         + '[audio reuse] to reperform the clip\'s exact words (keep them verbatim, original language, inside <d>…</d>), '
         + 'or [audio reference] to lend only its timbre and delivery to NEW dialogue (never repeat the source words). '
         + 'Define each in subject_definitions, e.g. "<Audio 1> is the voice-timbre reference for <Subject 1> (S1)." '

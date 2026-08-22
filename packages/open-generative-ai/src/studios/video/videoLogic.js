@@ -33,7 +33,8 @@ import {
 import { isLocalAIAvailable } from '../../lib/localInferenceClient.js';
 import { resolveMediaSrc } from '../../lib/e2eMedia.js';
 import { personaIdentity } from '../../lib/personaId.js';
-import { referenceVideoCanvas } from '../../lib/h3References.js';
+import { routingLeaderFor } from '../../lib/rentedMachines.js';
+import { isSoundOnlyReference, referenceVideoCanvas } from '../../lib/h3References.js';
 import { getLang, t } from '../../lib/i18n.js';
 
 export const zh = () => getLang() === 'zh-CN';
@@ -279,7 +280,11 @@ export const motionReferencePackedRows = (s, id, clipSeconds) => {
   const refMax = Number(pricing.reference_video_max_seconds) || 15;
   const voiceMax = Number(pricing.reference_audio_max_seconds) || 15;
   const images = Array.isArray(s.referenceImageUrls) ? s.referenceImageUrls.filter(Boolean) : [];
-  const videos = Array.isArray(s.referenceVideos) ? s.referenceVideos.filter((item) => item?.url) : [];
+  const rows = Array.isArray(s.referenceVideos) ? s.referenceVideos.filter((item) => item?.url) : [];
+  // A sound-only row is a voice clip as far as the card is concerned: its
+  // soundtrack's rows, no frames.
+  const videos = rows.filter((item) => !isSoundOnlyReference(item));
+  const soundOnly = rows.filter((item) => isSoundOnlyReference(item));
   const audios = Array.isArray(s.referenceAudios) ? s.referenceAudios.filter((item) => item?.url) : [];
 
   const frames = latticeAtLeast(pricing.frame_grid, Number(clipSeconds) * rate);
@@ -294,31 +299,85 @@ export const motionReferencePackedRows = (s, id, clipSeconds) => {
     if (item?.useAudio) total += audioRows(seconds);
   }
   total += images.length * outRows;
-  const voiceSeconds = audios.reduce((sum, item) => sum + (Number(item?.durationSeconds) > 0 ? Number(item.durationSeconds) : voiceMax), 0);
+  const voiceSeconds = [...audios, ...soundOnly]
+    .reduce((sum, item) => sum + (Number(item?.durationSeconds) > 0 ? Number(item.durationSeconds) : voiceMax), 0);
   total += audioRows(Math.min(voiceSeconds, voiceMax));
   return total;
 };
 
-export const motionReferenceLimitFor = (s, id) => {
-  const videos = Array.isArray(s.referenceVideos) ? s.referenceVideos.filter((item) => item?.url) : [];
-  if (!videos.length) return null;
+// ── The card a run will land on ──────────────────────────────────────────────
+// The packed-row budget is a property of the CARD, not the workflow: the base
+// number was measured on a 32 GB 5090, and the catalog publishes the same
+// budget per card size (`max_packed_rows_by_vram_gb`). Which card that is, the
+// studio already knows: this tab's "Run on" pin when Rented is on (the gateway
+// tries `run_on` first), otherwise the routing leader among the attached
+// rentals — the same first-match rule the gateway applies. No machine known,
+// or a card the table does not list, keeps the measured base.
+const MOTION_REFERENCE_VRAM_KEY_TOLERANCE_GB = 1.5; // a "32 GB" card reports ~31.4 GiB
+
+export const servingMachineFor = (s, id, machines) => {
+  const list = Array.isArray(machines) ? machines.filter(Boolean) : [];
+  if (!list.length) return null;
+  if (s?.rentedOnly && s?.rentedMachineId) {
+    const pinned = list.find((machine) => String(machine?.rental_id) === String(s.rentedMachineId) && machine?.attached);
+    if (pinned) return pinned;
+  }
+  const model = getHivemindVideoModelById(id);
+  return routingLeaderFor(list, model ? { id: model.id, name: model.name, workflowId: model.workflowId } : { id }) || null;
+};
+
+export const motionReferenceBudgetRows = (pricing, vramGb) => {
+  const base = Number(pricing?.max_packed_rows);
+  if (!(base > 0)) return null;
+  const table = pricing?.max_packed_rows_by_vram_gb;
+  const size = Number(vramGb);
+  if (!table || typeof table !== 'object' || !(size > 0)) return { rows: base, vramGb: null };
+  const fits = Object.entries(table)
+    .map(([key, rows]) => ({ vramGb: Number(key), rows: Number(rows) }))
+    .filter((entry) => entry.vramGb > 0 && entry.rows > 0 && entry.vramGb <= size + MOTION_REFERENCE_VRAM_KEY_TOLERANCE_GB)
+    .sort((a, b) => a.vramGb - b.vramGb);
+  const best = fits.length ? fits[fits.length - 1] : null;
+  return best ? { rows: best.rows, vramGb: best.vramGb } : { rows: base, vramGb: null };
+};
+
+export const motionReferenceLimitFor = (s, id, machines) => {
+  // ANY attached reference caps the clip, not just a motion one. Pictures and
+  // sound references ride in the same packed sequence, and at 15s the output
+  // alone is already 90,658 rows of an 85,000 budget — so the picker offered a
+  // length the card could not hold whenever the motion clip's picture was
+  // switched off (measured 2026-08-22: 15s + 7 pictures + that clip's
+  // soundtrack = ~97,600 rows, OOM at the MLP of block 0 on a 5090).
+  // `videos` stays MOTION-only below: a sound-only row is a voice clip and
+  // never trims to the clip's length.
+  const rows = Array.isArray(s.referenceVideos) ? s.referenceVideos.filter((item) => item?.url) : [];
+  const videos = rows.filter((item) => !isSoundOnlyReference(item));
+  const pictureCount = Array.isArray(s.referenceImageUrls) ? s.referenceImageUrls.filter(Boolean).length : 0;
+  const voiceCount = (Array.isArray(s.referenceAudios) ? s.referenceAudios.filter((item) => item?.url).length : 0)
+    + rows.filter((item) => isSoundOnlyReference(item)).length;
+  if (!rows.length && !pictureCount && !voiceCount) return null;
   const model = getHivemindVideoModelById(id);
   const pricing = model?.motionReferencePricing;
   if (pricing && typeof pricing === 'object' && Number(pricing.max_packed_rows) > 0) {
-    const budget = Number(pricing.max_packed_rows);
+    const machine = servingMachineFor(s, id, machines);
+    const budget = motionReferenceBudgetRows(pricing, machine?.vram_gb);
     const durations = durationsFor(s, id).map(Number).filter((value) => value > 0);
     const priced = durations.map((seconds) => ({ seconds, rows: motionReferencePackedRows(s, id, seconds) }));
     // An unknown canvas prices as null — fall through to the published ceiling.
     if (priced.length && priced.every((entry) => Number.isFinite(entry.rows))) {
-      const fits = priced.filter((entry) => entry.rows <= budget).map((entry) => entry.seconds);
+      const fits = priced.filter((entry) => entry.rows <= budget.rows).map((entry) => entry.seconds);
       if (fits.length === durations.length) return null;
       const measured = videos.map((item) => Number(item?.durationSeconds)).filter((value) => value > 0);
       const longest = measured.length === videos.length ? Math.max(...measured) : Infinity;
       return {
         maxSeconds: fits.length ? Math.max(...fits) : 0,
         referenceVideoCount: videos.length,
+        referencePictureCount: pictureCount,
+        referenceSoundCount: voiceCount,
         longestReferenceSeconds: Number.isFinite(longest) ? longest : null,
         priced: true,
+        budgetRows: budget.rows,
+        cardVramGb: budget.vramGb,
+        machine: machine ? { rentalId: machine.rental_id, gpu: machine.gpu || null, vramGb: Number(machine.vram_gb) || null } : null,
       };
     }
   }
@@ -371,9 +430,9 @@ export const probeVideoDurationSeconds = (url) => new Promise((resolve) => {
 // The durations that will actually render, given everything else selected.
 // Never empty when the model offers any: if not even the shortest fits, the
 // canvas itself is the problem, and blanking the control would hide that.
-export const availableDurationsFor = (s, id) => {
+export const availableDurationsFor = (s, id, machines) => {
   const durations = durationsFor(s, id);
-  const limit = motionReferenceLimitFor(s, id);
+  const limit = motionReferenceLimitFor(s, id, machines);
   if (!limit) return durations;
   const fits = durations.filter((value) => Number(value) <= limit.maxSeconds);
   return fits.length ? fits : durations.slice(0, 1);
@@ -381,8 +440,8 @@ export const availableDurationsFor = (s, id) => {
 
 // Pull a selected duration back onto the list above. Returns the same value
 // when it already fits, so callers can assign unconditionally.
-export const clampDurationToMotionReference = (s, id) => {
-  const available = availableDurationsFor(s, id);
+export const clampDurationToMotionReference = (s, id, machines) => {
+  const available = availableDurationsFor(s, id, machines);
   if (!available.length) return s.duration;
   if (available.some((value) => Number(value) === Number(s.duration))) return s.duration;
   return available.reduce((best, value) => (Number(value) > Number(best) ? value : best), available[0]);
@@ -424,6 +483,8 @@ export function buildInitialSetup(c) {
       : isLocalVideoModel(defaultModel.id),
     // Rented is opt-in: a boot with no saved preference runs on this machine.
     rentedOnly: false,
+    // Per-tab "Run on" pin (a rental id); '' follows the Machines default.
+    rentedMachineId: '',
     imageMode: false,
     v2vMode: false,
     ar: defaultModel.inputs?.aspect_ratio?.default || '16:9',
@@ -716,6 +777,7 @@ export function applyRestoredPreferences(prev, preferences, c) {
     imageMode: !v2vModel && Boolean(i2vModel),
     localMode: preferences.localMode ?? isLocalVideoModel(target.id),
     rentedOnly: Boolean(preferences.rentedOnly && (preferences.localMode ?? isLocalVideoModel(target.id))),
+    rentedMachineId: typeof preferences.rentedMachineId === 'string' ? preferences.rentedMachineId : '',
   }, target);
   s = applyModelDefaults(s, c);
   const matchingDuration = durationsFor(s, s.modelId)

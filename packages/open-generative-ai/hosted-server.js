@@ -649,6 +649,8 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         seed: body.seed ?? -1,
       };
       if (body.studio_lane) payload.studio_lane = String(body.studio_lane).slice(0, 512);
+      // The studio's per-tab "Run on" pin — the gateway routes by it.
+      if (body.run_on) payload.run_on = String(body.run_on).slice(0, 128);
       if (selected.backend) payload.backend = selected.backend;
       if (selected.workflowFile) payload.workflow_file = selected.workflowFile;
       if (Array.isArray(body.loras)) payload.loras = body.loras;
@@ -861,6 +863,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         scale: Number(body.scale || 1.5),
       };
       if (body.prompt) payload.prompt = String(body.prompt);
+      if (body.run_on) payload.run_on = String(body.run_on).slice(0, 128);
       const submitted = await requestJson(`${ZIMAGE_URL}/api/upscale`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },

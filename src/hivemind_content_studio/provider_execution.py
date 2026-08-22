@@ -256,6 +256,7 @@ class ProviderExecutors:
                 duration_seconds=float(request.get("duration_seconds") or 4),
                 workflow_id=workflow_id or None,
                 studio_lane=str(_role_options(options, kind).get("studio_lane") or options.get("studio_lane") or ""),
+                run_on=str(_role_options(options, kind).get("run_on") or options.get("run_on") or ""),
                 output_dir=output_dir,
             )
         if provider in {"media-studio-mcp", "comfyui"} and kind == "keyframe":

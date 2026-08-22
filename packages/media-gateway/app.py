@@ -384,10 +384,10 @@ def _read_rental_attachments():
         # in this order too; sorting here means a hand-edited or older
         # registry still routes deterministically.
         entries = sorted(
-            (e for e in (data or {}).values() if isinstance(e, dict)),
-            key=lambda e: -(e.get("priority") or 0),
+            ((k, e) for k, e in (data or {}).items() if isinstance(e, dict)),
+            key=lambda item: -(item[1].get("priority") or 0),
         )
-        for entry in entries:
+        for rental_id, entry in entries:
             if not isinstance(entry, dict):
                 continue
             lane = re.sub(r"[^a-z0-9_-]", "", str(entry.get("lane") or "").strip().lower())
@@ -397,6 +397,9 @@ def _read_rental_attachments():
             lanes[lane] = {
                 "url": f"http://127.0.0.1:{port}",
                 "needles": [str(n).strip().lower() for n in entry.get("needles") or [] if str(n).strip()],
+                # The registry key is the rental id the studio shows (e.g.
+                # "vast:48352597") — what a per-tab "Run on" pin names.
+                "rental_id": str(rental_id),
             }
         _rental_lanes_state.update(mtime=stamp, lanes=lanes)
         return lanes
@@ -555,53 +558,74 @@ def vram_headroom_gb_from_argv(argv):
     return max(0.0, value)
 
 
-def comfy_lane_launch_args(lane, timeout=4.0):
-    """The argv ComfyUI on `lane` was launched with, read from its /system_stats.
+def _comfy_lane_system_probe(lane, timeout=4.0):
+    """One cached read of a lane's /system_stats: (argv, vram_total_gb).
 
-    Cached per lane for a minute: a lane's flags change only when its ComfyUI is
-    relaunched, and a reference job asks twice (pre-flight, then the check on
-    the staged files). Raises when the lane does not answer or does not publish
-    its argv — the caller decides what an unknown is worth."""
+    Cached per lane for a minute: a lane's flags and its card change only when
+    its ComfyUI is relaunched or the lane is re-attached, and a reference job
+    asks twice (pre-flight, then the check on the staged files). Raises when the
+    lane does not answer or does not publish its argv — the caller decides what
+    an unknown is worth. vram_total_gb is the first device's total VRAM in GiB
+    (None when the lane publishes no device)."""
     base = COMFY_LANES.get(lane, COMFY_HTTP_DEFAULT).rstrip('/')
     now = time.monotonic()
     with _lane_launch_args_lock:
         cached = _lane_launch_args_cache.get(lane)
         if cached and cached[0] == base and cached[1] > now:
-            return list(cached[2])
+            return list(cached[2]), (cached[3] if len(cached) > 3 else None)
     with urlopen(comfy_lane_request(lane, "/system_stats"), timeout=timeout) as response:
         if response.status >= 400:
             raise RuntimeError(f"answered HTTP {response.status}")
         payload = json.loads(response.read().decode("utf-8"))
-    argv = ((payload if isinstance(payload, dict) else {}).get("system") or {}).get("argv")
+    payload = payload if isinstance(payload, dict) else {}
+    argv = (payload.get("system") or {}).get("argv")
     if not isinstance(argv, list):
         raise RuntimeError("/system_stats carries no system.argv")
     argv = [str(item) for item in argv]
+    vram_total_gb = None
+    devices = payload.get("devices")
+    if isinstance(devices, list) and devices and isinstance(devices[0], dict):
+        try:
+            total = float(devices[0].get("vram_total"))
+        except (TypeError, ValueError):
+            total = 0.0
+        if total > 0:
+            vram_total_gb = round(total / (1024 ** 3), 2)
     with _lane_launch_args_lock:
-        _lane_launch_args_cache[lane] = (base, now + _LANE_LAUNCH_ARGS_TTL_S, list(argv))
-    return argv
+        _lane_launch_args_cache[lane] = (base, now + _LANE_LAUNCH_ARGS_TTL_S, list(argv), vram_total_gb)
+    return argv, vram_total_gb
+
+
+def comfy_lane_launch_args(lane, timeout=4.0):
+    """The argv ComfyUI on `lane` was launched with, read from its /system_stats."""
+    return _comfy_lane_system_probe(lane, timeout=timeout)[0]
 
 
 def comfy_lane_vram_headroom(lane, timeout=4.0):
-    """What the lane's ComfyUI was launched with, in the terms the budget needs.
+    """What the lane's ComfyUI was launched with, and on what card, in the terms
+    the motion-reference budget needs.
 
-    Returns {"lane", "remote", "vram_headroom_gb", "probed", "error"}:
-    vram_headroom_gb is the flag's value (0.0 = launched without it) once
-    probed, and None with an error string when the lane could not be asked.
-    Never raises — a lane that will not answer is the liveness probe's problem
-    to name at submit, not this one's."""
+    Returns {"lane", "remote", "vram_headroom_gb", "vram_total_gb", "probed",
+    "error"}: vram_headroom_gb is the flag's value (0.0 = launched without it)
+    once probed, vram_total_gb the lane's card in GiB (None when it publishes
+    no device), and both None with an error string when the lane could not be
+    asked. Never raises — a lane that will not answer is the liveness probe's
+    problem to name at submit, not this one's."""
     record = {
         "lane": lane,
         "remote": comfy_lane_is_remote(lane),
         "vram_headroom_gb": None,
+        "vram_total_gb": None,
         "probed": False,
         "error": None,
     }
     try:
-        argv = comfy_lane_launch_args(lane, timeout=timeout)
+        argv, vram_total_gb = _comfy_lane_system_probe(lane, timeout=timeout)
     except Exception as exc:
         record["error"] = f"{exc.__class__.__name__}: {exc}"
         return record
     record["vram_headroom_gb"] = vram_headroom_gb_from_argv(argv)
+    record["vram_total_gb"] = vram_total_gb
     record["probed"] = True
     return record
 
@@ -3142,13 +3166,71 @@ def _reshape_dims_to_image_aspect(image_path, width, height, *, multiple=32):
     )
 
 
-def comfy_lane_for_prompt_body(body):
+class ComfyLanePinError(RuntimeError):
+    """A "Run on" pin named a rented machine the gateway cannot route to."""
+
+
+def _run_on_from_comfy_prompt_body(body):
+    """The rented machine a /prompt body asks to run on — the studio's per-tab
+    "Run on" pin. Top-level `run_on`, or `extra_data.extra_pnginfo.runOn` for
+    callers that carry everything in the PNG info the way studioLane rides."""
+    try:
+        data = json.loads(
+            body.decode('utf-8', errors='replace')
+            if isinstance(body, (bytes, bytearray)) else body
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ''
+    if not isinstance(data, dict):
+        return ''
+    extra_data = data.get('extra_data') if isinstance(data.get('extra_data'), dict) else {}
+    extra_pnginfo = extra_data.get('extra_pnginfo') if isinstance(extra_data.get('extra_pnginfo'), dict) else {}
+    return str(
+        data.get('run_on')
+        or extra_pnginfo.get('runOn')
+        or extra_pnginfo.get('run_on')
+        or ''
+    ).strip()[:128]
+
+
+def comfy_lane_for_pin(run_on):
+    """The attached rental lane a "Run on" pin names; None when nothing is pinned.
+
+    The pin is the rental id the studio shows (the attachment registry's key,
+    e.g. "vast:48352597"); a lane name is accepted too. A pin naming a machine
+    that is no longer attached RAISES instead of falling back: the tab asked
+    for that box, and quietly spending another box's hours (or a local lane's
+    minutes) is exactly the surprise the pin exists to prevent. The studio
+    drops a stale pin on its next machine refresh; an agent gets the reason.
+    """
+    pin = str(run_on or '').strip()
+    if not pin:
+        return None
+    refresh_comfy_lanes()
+    for lane, spec in _read_rental_attachments().items():
+        if (spec.get('rental_id') == pin or lane == pin) and lane in COMFY_LANES:
+            return lane
+    raise ComfyLanePinError(
+        f"the rented machine this job is pinned to ({pin}) is no longer attached — "
+        "pick another machine under Run on, or send no run_on to follow the default routing"
+    )
+
+
+def comfy_lane_for_prompt_body(body, run_on=None):
     """Pick a configured Comfy lane from graph class/model names only.
 
     Rules are data-driven via COMFY_LANE_RULES, e.g.
     "anima=anima,qwen35,qwen3.5;sdxl=sdxl,pony". Prompt text is intentionally
     ignored; only class names and model-ish input values are inspected.
+
+    `run_on` is the studio's per-tab "Run on" pin: the pinned machine's rule
+    is tried FIRST, ahead of the priority order — the same thing the global
+    /select does, scoped to this one request. A pin whose machine does not
+    serve the graph falls through to the normal order (the pin settles which
+    of several capable boxes runs a job; it never sends a model to a box that
+    lacks it), and a pin naming a detached machine raises ComfyLanePinError.
     """
+    pinned = comfy_lane_for_pin(run_on)
     # Pick up a machine attached since this process started, so routing a
     # generation to a fresh rental needs no restart.
     refresh_comfy_lanes()
@@ -3167,14 +3249,18 @@ def comfy_lane_for_prompt_body(body):
                 if isinstance(value, str):
                     haystack.append(value.lower())
     text = ' '.join(haystack)
+    if pinned is not None:
+        pinned_needles = next((needles for lane, needles in COMFY_LANE_RULES if lane == pinned), [])
+        if any(needle in text for needle in pinned_needles):
+            return pinned
     for lane, needles in COMFY_LANE_RULES:
         if lane in COMFY_LANES and any(needle in text for needle in needles):
             return lane
     return 'default'
 
 
-def comfy_http_for_prompt_body(body):
-    return COMFY_LANES.get(comfy_lane_for_prompt_body(body), COMFY_HTTP_DEFAULT)
+def comfy_http_for_prompt_body(body, run_on=None):
+    return COMFY_LANES.get(comfy_lane_for_prompt_body(body, run_on=run_on), COMFY_HTTP_DEFAULT)
 
 
 def _is_modelish_input_key(key):
@@ -4104,7 +4190,7 @@ def run_comfy_api_image(job_id, prompt, options=None):
             rec["options"]["width"] = width
             rec["options"]["height"] = height
 
-        lane_url = comfy_http_for_prompt_body(json.dumps({"prompt": graph}))
+        lane_url = comfy_http_for_prompt_body(json.dumps({"prompt": graph}), run_on=options.get('run_on'))
         rec["lane"] = lane_url
         t0 = time.monotonic()
         client_id = f"zimage-auto-{job_id}"
@@ -5315,7 +5401,7 @@ def run_comfy_upscale(job_id, image_path, options=None):
             })
             graph["9"]["inputs"]["images"] = ["17", 0]
         body = json.dumps({"prompt": graph, "client_id": f"media-upscale-{job_id}"}).encode("utf-8")
-        lane_url = comfy_http_for_prompt_body(body)
+        lane_url = comfy_http_for_prompt_body(body, run_on=options.get('run_on'))
         rec["lane"] = lane_url
         t0 = time.monotonic()
         req = Request(f"{lane_url}/prompt", data=body, headers={"Content-Type": "application/json"})
@@ -6876,7 +6962,7 @@ def queue_native_mlx_biglove_job(prompt, image_path, options, workflow=None):
         "backend": "mlx-mxfp8-bigloves-klein3-edit",
         "created_at": now_iso(),
         "options": {
-            **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths', 'studio_lane'}},
+            **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths', 'studio_lane', 'run_on'}},
             **({'reference_images': len(uploaded_images)} if len(uploaded_images) > 1 else {}),
             **({'lora_count': len(options.get('loras') or [])} if options.get('loras') else {}),
         },
@@ -7184,7 +7270,7 @@ def queue_klein_character_sheet(prompt, reference_images, options, views, preset
         "backend": KLEIN_CHARACTER_SHEET_BACKEND,
         "mode": "character-sheet",
         "options": {
-            **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths', 'studio_lane'}},
+            **{k: v for k, v in options.items() if k not in {'negative_prompt', 'loras', 'image_paths', 'studio_lane', 'run_on'}},
             **({'reference_images': len(reference_images)} if len(reference_images) > 1 else {}),
             **({'lora_count': len(options.get('loras') or [])} if options.get('loras') else {}),
         },
@@ -10454,7 +10540,12 @@ class Handler(BaseHTTPRequestHandler):
         lane_name = "default"
         submit_route_meta = None
         if method == "POST" and target_path in {"/api/prompt", "/prompt"} and body:
-            lane_name = comfy_lane_for_prompt_body(body)
+            try:
+                lane_name = comfy_lane_for_prompt_body(body, run_on=_run_on_from_comfy_prompt_body(body))
+            except ComfyLanePinError as exc:
+                # Operational, like a dead tunnel: names the machine, carries no
+                # prompt content, and so survives machine-private redaction.
+                return self.send_json({"error": str(exc), "operational": True}, 409)
             upstream_base = COMFY_LANES.get(lane_name, COMFY_HTTP_DEFAULT)
         if method in ("GET", "HEAD"):
             history_match = re.match(r"^/(?:api/)?history/([^/?]+)$", target_path)
@@ -10957,7 +11048,12 @@ class Handler(BaseHTTPRequestHandler):
             graph = data.get("graph") if isinstance(data, dict) else None
             if not isinstance(graph, dict):
                 return self.send_json({"error": "graph (a ComfyUI API prompt graph) is required"}, 400)
-            lane = comfy_lane_for_prompt_body(json.dumps({"prompt": graph}).encode("utf-8"))
+            try:
+                lane = comfy_lane_for_prompt_body(
+                    json.dumps({"prompt": graph}).encode("utf-8"), run_on=data.get("run_on"),
+                )
+            except ComfyLanePinError as exc:
+                return self.send_json({"error": str(exc), "operational": True}, 409)
             return self.send_json({"ok": True, **comfy_lane_vram_headroom(lane)})
         if parsed.path == "/api/delete-input":
             try:
@@ -11092,7 +11188,14 @@ class Handler(BaseHTTPRequestHandler):
                     "refine_steps": data.get("refine_steps"),
                     "refine_denoise": data.get("refine_denoise"),
                     "seed": data.get("seed"),
+                    "run_on": data.get("run_on"),
                 }
+                # A stale "Run on" pin is refused here, before a job exists to
+                # fail, so the studio hears the reason instead of a dead job.
+                try:
+                    comfy_lane_for_pin(options.get("run_on"))
+                except ComfyLanePinError as exc:
+                    return self.send_json({"error": str(exc), "operational": True}, 409)
                 job_id = uuid.uuid4().hex[:12]
                 mode = "max" if str(data.get("mode") or "fast").lower() == "max" else "fast"
                 with jobs_lock:
@@ -11169,7 +11272,7 @@ class Handler(BaseHTTPRequestHandler):
                     content_length = 0
                 form = MultipartForm(self.rfile.read(content_length) if content_length > 0 else b'', ctype)
                 prompt = str(form.getfirst("prompt", "")).strip()
-                for key in ['backend', 'width', 'height', 'steps', 'cfg', 'guidance', 'seed', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'studio_lane']:
+                for key in ['backend', 'width', 'height', 'steps', 'cfg', 'guidance', 'seed', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'studio_lane', 'run_on']:
                     if key in form:
                         data[key] = form.getfirst(key)
                 image_item = form['image'] if 'image' in form else None
@@ -11202,10 +11305,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "prompt required"}, 400)
             options = {}
             if isinstance(data, dict):
-                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'sampler_name', 'scheduler', 'negative_prompt', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'couple_mode', 'couple_shared', 'couple_split', 'couple_direction', 'couple_pair', 'studio_lane']:
+                for key in ['width', 'height', 'steps', 'cfg', 'cfgScale', 'guidance', 'seed', 'sampler_name', 'scheduler', 'negative_prompt', 'mlx_cache_limit_gb', 'ref_boost', 'identity_strength', 'grounding_px', 'couple_mode', 'couple_shared', 'couple_split', 'couple_direction', 'couple_pair', 'studio_lane', 'run_on']:
                     if key in data:
                         options[key] = data.get(key)
                 _normalize_couple_options(options)
+                # The studio's per-tab "Run on" pin. Refused up front when it
+                # names a machine that is no longer attached: a queued job that
+                # fails seconds later would reach the tab as a bare failure.
+                try:
+                    comfy_lane_for_pin(options.get('run_on'))
+                except ComfyLanePinError as exc:
+                    return self.send_json({"error": str(exc), "operational": True}, 409)
             backend = str(data.get('backend', '') if isinstance(data, dict) else '')
             if wants_character_sheet:
                 # The Klein edit branch is the only lane that honors

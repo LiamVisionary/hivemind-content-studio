@@ -119,6 +119,17 @@ export function withSelection(machines, rentalId) {
     : machine));
 }
 
+// The attached order as THIS TAB's requests see it: the pinned machine first
+// (the gateway tries a `run_on` pin ahead of its priority order), then the
+// server's own order. A pin naming a machine that is not attached is inert —
+// the gateway has no lane for it — so the list comes back unchanged, and the
+// Rented panel drops the pin as stale.
+export function withPin(machines, pinned) {
+  const list = machines || [];
+  if (!pinned || !list.some((m) => m.rental_id === pinned && m.attached)) return list;
+  return withSelection(list, pinned);
+}
+
 // The machine a generation with this model would run on, if any.
 export function routingLeaderFor(machines, model) {
   return attachedOrder(machines).find((machine) => machineServesModel(machine, model)) || null;

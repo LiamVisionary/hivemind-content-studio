@@ -115,6 +115,7 @@ export async function importPersonaTransfer(text, { uploadFn, onProgress } = {})
       name: item.name,
       useAudio: item.useAudio,
       compact: item.compact,
+      ...(item.motion === false ? { motion: false } : {}),
     });
   }
   const audios = [];

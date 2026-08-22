@@ -263,17 +263,39 @@ def test_one_workspace_cannot_enumerate_anothers_runs(client):
     assert client.get(f"/api/runs/{mine}").status_code == 404
 
 
-def test_canvas_history_is_the_owners_machine_surface(client, tmp_path, monkeypatch):
-    """The canvas index reads MACHINE-wide sources, so only the owner holds it;
-    a sibling workspace's History must enumerate nothing it cannot open."""
-    output = tmp_path / "canvas-piece.png"
-    output.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
-    record = {
+def test_canvas_history_shows_each_workspace_only_its_own_gateway_outputs(client, tmp_path, monkeypatch):
+    """The canvas index reads MACHINE-wide sources (the gateway's output roots
+    and job log), where every workspace's video-studio clips land side by side.
+    The studio claims each gateway job it starts and each output it finishes
+    for the workspace that asked, and every History lists only what its scope
+    may see: a sibling its own clips, the owner everything unclaimed — and
+    neither the other's. (2026-08-22: a second workspace generated a video,
+    saw it in the studio, and found History empty — the whole gateway surface
+    was owner-only.)"""
+    def piece(name: str) -> str:
+        path = tmp_path / name
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+        return str(path)
+
+    records = [{
         "id": "job-1", "status": "success",
-        "created_at": "2026-08-21T00:00:00+00:00",
-        "finished_at": "2026-08-21T00:00:00+00:00",
-        "outputs": [str(output)],
-    }
+        "created_at": "2026-08-21T00:00:00+00:00", "finished_at": "2026-08-21T00:00:00+00:00",
+        "outputs": [piece("canvas-piece.png")],
+    }]
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_start",
+        lambda **_: {"job_id": "job-sib-1", "uploaded_names": [], "provider": "Media Studio"},
+    )
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_check",
+        lambda job_id, **_: {"status": "completed", "failed": False, "error": "",
+                             "video_url": "http://gateway/image/sibling-clip.mp4", "progress": 1.0},
+    )
+    # The gateway names the sealed form; claims and listings meet on the logical name.
+    monkeypatch.setattr(
+        "hivemind_content_studio.control_api.run_media_studio_video_finish",
+        lambda job_id, **_: {"job_id": job_id, "provider": "Media Studio", "gateway_output": "sibling-clip.mp4.e2e"},
+    )
     cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
     canvas_client = TestClient(build_control_app(
         orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
@@ -281,25 +303,63 @@ def test_canvas_history_is_the_owners_machine_surface(client, tmp_path, monkeypa
         operator_token="operator-secret",
         owner_access=OwnerAccess.for_testing(password=OWNER_PASSWORD, cipher=cipher),
         private_cipher=cipher,
-        canvas_history_fetcher=lambda: [dict(record)],
+        canvas_history_fetcher=lambda: [dict(record) for record in records],
+        canvas_media_fetcher=lambda name, requester_pub="": (b"sealed:" + Path(name).name.encode(), "application/vnd.hivemind.e2e+json"),
     ))
+
+    def basenames(view: dict) -> list[str]:
+        return sorted(item["output_basename"] for item in view["history"])
 
     _sign_in(canvas_client, 1, OWNER_PASSWORD)
     owner_view = canvas_client.get("/api/canvas/history").json()
-    assert [item["output_basename"] for item in owner_view["history"]] == ["canvas-piece.png"]
+    assert basenames(owner_view) == ["canvas-piece.png"]
+    owner_item = owner_view["history"][0]["history_id"]
     created = canvas_client.post("/api/accounts", json={"name": "Second", "password": "second-pass"})
     assert created.status_code == 201, created.text
     second = int(created.json()["account"]["id"])
-    owner_item = owner_view["history"][0]["history_id"]
+
+    # The sibling's clip lands at the gateway (a file record, id unrelated to
+    # the job) BEFORE the studio has finished the job — the owner's History,
+    # polling meanwhile, adopts it as unclaimed.
+    records.append({"id": "file-deadbeef", "status": "success", "created_at": "2026-08-22T00:28:00+00:00",
+                    "finished_at": "2026-08-22T00:28:00+00:00", "outputs": [piece("sibling-clip.mp4")]})
+    assert basenames(canvas_client.get("/api/canvas/history").json()) == ["canvas-piece.png", "sibling-clip.mp4"]
 
     canvas_client.post("/api/accounts/sign-out")
     _sign_in(canvas_client, second, "second-pass")
+    # Nothing is the sibling's yet: not the owner's piece, not an unclaimed clip.
+    assert canvas_client.get("/api/canvas/history").json()["history"] == []
+
+    # The sibling generates a video through the real start/poll path: start
+    # claims the job id, finishing it claims the output name.
+    queued = canvas_client.post("/api/media-studio/video/start",
+                                json={"prompt": "a clip of my own", "workflow_id": "ltx23-eros-fast", "duration_seconds": 2})
+    assert queued.status_code == 200, queued.text
+    assert queued.json()["job_id"] == "job-sib-1"
+    done = canvas_client.get("/api/media-studio/video/job/job-sib-1").json()
+    assert done.get("ok") is True and done["output"] == "sibling-clip.mp4.e2e", done
+    # A local-lane record the studio never finished (restart mid-run) is still
+    # found by the job id the gateway's workflow index lists it under.
+    records.append({"id": "job-sib-1", "status": "success", "created_at": "2026-08-22T00:30:00+00:00",
+                    "finished_at": "2026-08-22T00:30:00+00:00", "outputs": [piece("sibling-local.mp4")]})
+
     second_view = canvas_client.get("/api/canvas/history").json()
-    assert second_view["history"] == [] and second_view["pagination"]["total"] == 0
-    # The tiles' detail routes hide the owner's items outright.
+    assert basenames(second_view) == ["sibling-clip.mp4", "sibling-local.mp4"]
+    mine = next(item for item in second_view["history"] if item["output_basename"] == "sibling-clip.mp4")
+    media = canvas_client.get(f"/api/canvas/history/{mine['history_id']}/media")
+    assert media.status_code == 200 and media.content == b"sealed:sibling-clip.mp4"
+    assert media.headers["X-E2E-Media"] == "1"
+    # The owner's items stay hidden outright from the sibling's detail routes.
     assert canvas_client.get(f"/api/canvas/history/{owner_item}/media").status_code == 404
     assert canvas_client.get(f"/api/canvas/history/{owner_item}/workflow").status_code == 404
     assert canvas_client.delete(f"/api/canvas/history/{owner_item}", params={}).status_code in {404, 422}
+
+    # And in the other direction: the owner's History drops the clip it had
+    # adopted before the claim existed, and never lists the sibling's ids.
+    canvas_client.post("/api/accounts/sign-out")
+    _sign_in(canvas_client, 1, OWNER_PASSWORD)
+    assert basenames(canvas_client.get("/api/canvas/history").json()) == ["canvas-piece.png"]
+    assert canvas_client.get(f"/api/canvas/history/{mine['history_id']}/media").status_code == 404
 
 
 def test_one_workspace_cannot_read_anothers_sealed_blobs(client):

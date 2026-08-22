@@ -67,7 +67,7 @@ from .orchestrator import ContentOrchestrator
 from .prompt_history import PromptHistoryStore
 from .providers import provider_report, providers_for
 from .account_gate import account_gate_html
-from .account_scope import AccountWorkspaces, NoAccountInScope, RunClaims, bootstrap_accounts
+from .account_scope import AccountWorkspaces, GatewayOutputClaims, NoAccountInScope, RunClaims, bootstrap_accounts
 from .accounts import (
     ACCOUNT_COOKIE,
     SESSION_SECONDS,
@@ -327,6 +327,8 @@ class MediaStudioVideoBody(BaseModel):
     prompt: str = ""
     workflow_id: str = ""
     studio_lane: str = Field(default="", max_length=512)
+    # The studio's per-tab "Run on" pin (a rental id such as "vast:48352597").
+    run_on: str = Field(default="", max_length=128)
     reference_description: str = ""
     ingredient_images: list[MediaStudioIngredientImageBody] = []
     # MiniMax H3 Reference mode: discrete character/subject pictures carried into
@@ -952,6 +954,9 @@ def build_control_app(
     # of quietly serving account 1's library to whoever asked.
     account_store = AccountStore(state_dir / "accounts.sqlite3")
     run_claims = RunClaims(state_dir / "run-claims.sqlite3")
+    # The media gateway's outputs are the other machine-wide store: claimed per
+    # workspace at start/finish so each History lists only its own clips.
+    gateway_claims = GatewayOutputClaims(state_dir / "gateway-output-claims.sqlite3")
     workspaces = AccountWorkspaces(state_dir, cipher=cipher)
     # The owner account inherits whatever password the studio was already
     # configured with — env hash in production, injected hash under test — so
@@ -1178,14 +1183,16 @@ def build_control_app(
     def owner_visible(request: Request, value: dict[str, Any]) -> dict[str, Any]:
         return value if bool(getattr(request.state, "is_owner", False)) else machine_run_receipt(value)
 
-    def run_claim_visible(run_id: str, claimed: int | None) -> bool:
-        """May the current scope see this run at all?
+    def claim_visible(claimed: int | None) -> bool:
+        """May the current scope see an entry of a machine-wide store that
+        `claimed` (an account id, or None) asked for? Runs and gateway outputs
+        both answer this way.
 
         Every workspace enumerates only its own generations — in both
-        directions, so the owner does not see a sibling's runs either. What the
-        owner does hold is everything UNCLAIMED: runs that predate accounts,
-        runs started by agents holding a machine token (they resolve to owner
-        scope, so their claims already say owner), and runs whose workspace
+        directions, so the owner does not see a sibling's either. What the
+        owner does hold is everything UNCLAIMED: entries that predate accounts,
+        ones started by agents holding a machine token (they resolve to owner
+        scope, so their claims already say owner), and ones whose workspace
         has since been deleted — falling back beats stranding them invisibly.
         """
         scope = current_account.get()
@@ -1206,7 +1213,7 @@ def build_control_app(
             run = runs.get_run(run_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
-        if not run_claim_visible(run_id, run_claims.account_for(run_id)):
+        if not claim_visible(run_claims.account_for(run_id)):
             # Byte-identical to the KeyError detail above (str() of a KeyError
             # keeps its quotes), so absent and hidden cannot be told apart.
             raise HTTPException(status_code=404, detail=str(KeyError(f"Unknown run: {run_id}")))
@@ -2015,7 +2022,7 @@ def build_control_app(
                 raise HTTPException(status_code=400, detail="A saved reference image belongs to an unknown run") from None
             # Another workspace's run is "unknown" here too — reusing its
             # artifacts would read that workspace's media into this one.
-            if not run_claim_visible(source_run_id, run_claims.account_for(source_run_id)):
+            if not claim_visible(run_claims.account_for(source_run_id)):
                 raise HTTPException(status_code=400, detail="A saved reference image belongs to an unknown run")
             record = next(
                 (item for item in source_run["artifact_records"] if item.get("id") == reference.get("artifact_id")),
@@ -2103,7 +2110,7 @@ def build_control_app(
         claims = run_claims.accounts_for([str(value.get("run_id") or "") for value in values])
         values = [
             value for value in values
-            if run_claim_visible(str(value.get("run_id") or ""), claims.get(str(value.get("run_id") or "")))
+            if claim_visible(claims.get(str(value.get("run_id") or "")))
         ]
         return {"ok": True, "runs": values if request.state.is_owner else [machine_run_receipt(value) for value in values]}
 
@@ -2358,6 +2365,12 @@ def build_control_app(
             # Client-only E2E output: the gateway holds the sealed envelope and
             # no server can decrypt it. Serve it through the owner-gated proxy;
             # the browser's vault does the decryption (same as the History tab).
+            # Stamp whose clip it is while someone still knows: the gateway's
+            # listing is machine-wide, and this name is how the workspace's
+            # History finds the clip again (see GatewayOutputClaims).
+            scope = current_account.get()
+            if scope is not None:
+                gateway_claims.claim_output(gateway_output, scope.id)
             url = f"/api/media-studio/gateway/{urllib.parse.quote(gateway_output)}"
             return {
                 "ok": True,
@@ -2424,6 +2437,7 @@ def build_control_app(
                 resolution=body.resolution,
                 workflow_id=body.workflow_id.strip() or None,
                 studio_lane=body.studio_lane.strip(),
+                run_on=body.run_on.strip(),
                 loras=loras,
                 output_dir=outputs_root(),
                 requester_pub=_requester_pub(request),
@@ -2523,6 +2537,7 @@ def build_control_app(
                 resolution=body.resolution,
                 workflow_id=body.workflow_id.strip() or None,
                 studio_lane=body.studio_lane.strip(),
+                run_on=body.run_on.strip(),
                 seed=body.seed,
                 denoise=body.denoise,
                 negative_prompt=body.negative_prompt,
@@ -2544,6 +2559,11 @@ def build_control_app(
             # so the staged control-api copies are no longer needed either way.
             _unlink_staged_media_studio_sources(staged)
         job_id = str(queued["job_id"])
+        # The output name is only known at finish; the job id is the earlier
+        # handle, and the one that survives a studio restart mid-run.
+        scope = current_account.get()
+        if scope is not None:
+            gateway_claims.claim_job(job_id, scope.id)
         _prune_media_studio_video_jobs()
         signature, workflow, work_units = _video_timing_signature(body)
         estimate_seconds = generation_timings.estimate(
@@ -3020,15 +3040,29 @@ def build_control_app(
     def get_run(run_id: str, request: Request) -> dict:
         return owner_visible(request, require_visible_run(run_id))
 
-    def _canvas_is_owner_surface() -> bool:
-        """The canvas history indexes MACHINE-wide sources — ComfyUI's output
-        roots and the media gateway's job log — which only owner-level surfaces
-        (the passphrase-gated Canvas, agents on the machine token, the gateway
-        itself) ever write to. A workspace's own studio generations live in its
-        runs and media-studio stores instead. So the machine surface belongs to
-        the owner, and a sibling workspace enumerates none of it — its History
-        shows only what it can actually open."""
-        return scoped_account().is_owner
+    def _sync_canvas_history_for_scope() -> None:
+        """Index the machine-wide gateway history for the signed-in workspace.
+
+        The canvas store reads MACHINE-wide sources — ComfyUI's output roots
+        and the media gateway's job log — where every workspace's video-studio
+        clips land side by side: each sealed to the browser that asked for it,
+        but all listed together, and the gateway cannot tell whose is whose.
+        The studio can: every gateway job it starts and every output it
+        finishes is claimed for the workspace in scope (GatewayOutputClaims),
+        and a listing adopts only what that scope may see — its own claims,
+        plus, for the owner, everything unclaimed (pre-accounts outputs, agents
+        on the machine token, the passphrase-gated Canvas itself) or orphaned
+        by a deleted workspace. Records the scope may NOT see are purged from
+        its store as well, so a row adopted in the seconds before its claim was
+        written does not linger in the wrong History."""
+        records = fetch_canvas_history()
+        claimants = gateway_claims.claimants_for_records(records)
+        mine = [record for record, claimed in zip(records, claimants) if claim_visible(claimed)]
+        foreign = [record for record, claimed in zip(records, claimants) if not claim_visible(claimed)]
+        store = canvas_store()
+        store.sync(mine)
+        if foreign:
+            store.forget(foreign)
 
     @app.get("/api/canvas/history", dependencies=[Depends(require_owner)])
     def canvas_output_history(
@@ -3038,23 +3072,10 @@ def build_control_app(
         model: str = "",
         limit: int | None = None,
     ) -> dict:
-        if not _canvas_is_owner_surface():
-            # Also wipe anything this store adopted before the rule existed:
-            # rows are foreign filenames this workspace should never hold.
-            canvas_store().clear()
-            return {
-                "ok": True,
-                "source_preserved": True,
-                "privacy": "Canvas history is the owner workspace's machine-wide surface.",
-                "history": [],
-                "pagination": {"page": 1, "page_size": limit if limit is not None else page_size,
-                               "total": 0, "has_more": False},
-                "filters": {"formats": [], "models": []},
-            }
         sync_error = ""
         if page <= 1:
             try:
-                canvas_store().sync(fetch_canvas_history())
+                _sync_canvas_history_for_scope()
             except RuntimeError as exc:
                 sync_error = str(exc)
         result = canvas_store().page(
@@ -3075,8 +3096,9 @@ def build_control_app(
 
     @app.get("/api/canvas/history/{history_id}/workflow", dependencies=[Depends(require_owner)])
     def canvas_output_workflow(history_id: str) -> dict:
-        if not _canvas_is_owner_surface():
-            raise HTTPException(status_code=404, detail="Canvas output not found")
+        # Every detail route below resolves history_id through THIS workspace's
+        # store, which holds only rows it may see (sync above) — a sibling's
+        # ids are simply unknown here, so hidden and absent read the same.
         try:
             output_name = canvas_store().output_name(history_id)
         except KeyError:
@@ -3093,8 +3115,6 @@ def build_control_app(
 
     @app.post("/api/canvas/history/{history_id}/provenance", dependencies=[Depends(require_owner)])
     def remember_canvas_provenance(history_id: str, body: CanvasProvenanceBody) -> dict:
-        if not _canvas_is_owner_surface():
-            raise HTTPException(status_code=404, detail="Canvas output not found")
         try:
             metadata = canvas_store().remember_provenance(history_id, models=body.models, seeds=body.seeds)
         except KeyError:
@@ -3103,8 +3123,6 @@ def build_control_app(
 
     @app.delete("/api/canvas/history/{history_id}", dependencies=[Depends(require_owner)])
     def delete_canvas_history_output(history_id: str, body: ConfirmDeleteBody) -> dict:
-        if not _canvas_is_owner_surface():
-            raise HTTPException(status_code=404, detail="Canvas output not found")
         if not body.confirm:
             raise HTTPException(status_code=400, detail="Permanent deletion requires confirm=true")
         try:
@@ -3120,8 +3138,6 @@ def build_control_app(
 
     @app.get("/api/canvas/history/{history_id}/media", response_class=Response, dependencies=[Depends(require_owner)])
     def canvas_output_media(history_id: str, request: Request) -> Response:
-        if not _canvas_is_owner_surface():
-            raise HTTPException(status_code=404, detail="Canvas output not found")
         try:
             output_name = canvas_store().output_name(history_id)
         except KeyError:

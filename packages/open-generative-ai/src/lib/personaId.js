@@ -152,6 +152,11 @@ export function personaFromReferences({ images = [], videos = [], audios = [], g
         // given, so also part of the persona; absent on an older save reads as
         // off, which is the default a fresh row gets.
         compact: Boolean(item.compact),
+        // A clip switched to SOUND ONLY is a voice reference (<Audio N>), not a
+        // motion clip: that is what the model is given, so it is part of the
+        // persona too. Written only when set, so an older save reads unchanged;
+        // sound only always means the soundtrack is on.
+        ...(item.motion === false ? { motion: false, useAudio: true } : {}),
       })),
     audios: (Array.isArray(audios) ? audios : [])
       .filter((item) => item?.url)
@@ -201,7 +206,7 @@ function fingerprint(data) {
     // template writes about them, so it counts as an edit worth saving.
     gender: persona.gender,
     images: persona.images,
-    videos: persona.videos.map((item) => [item.url, item.useAudio, item.compact]),
+    videos: persona.videos.map((item) => [item.url, item.useAudio, item.compact, item.motion === false]),
     audios: persona.audios.map((item) => item.url),
   });
 }
@@ -330,6 +335,7 @@ export function buildPersonaExport({ name, persona, media = {}, exportedAt = '' 
   const videos = source.videos
     .map((item) => inline('videos', item.url, {
       name: item.name, useAudio: Boolean(item.useAudio), compact: Boolean(item.compact),
+      ...(item.motion === false ? { motion: false } : {}),
     }))
     .filter(Boolean);
   const audios = source.audios
@@ -392,6 +398,7 @@ export function parsePersonaExport(value) {
   const images = media(parsed.images, () => ({}));
   const videos = media(parsed.videos, (item) => ({
     name: String(item.name || ''), useAudio: Boolean(item.useAudio), compact: Boolean(item.compact),
+    ...(item.motion === false ? { motion: false, useAudio: true } : {}),
   }));
   const audios = media(parsed.audios, (item) => ({ name: String(item.name || '') }));
   if (!images.length && !videos.length && !audios.length) {

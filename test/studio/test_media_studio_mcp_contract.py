@@ -1,5 +1,6 @@
 import base64
 import io
+import contextlib
 import json
 import os
 import shutil
@@ -89,6 +90,22 @@ def test_video_tool_carries_the_app_tab_lane_to_the_gateway():
     assert "studio_lane: z.string().max(512).optional()" in video_schema
     assert "...(args.studio_lane ? { studioLane: args.studio_lane } : {})" in source
     assert "if (args.studio_lane) extraPngInfo.studioLane = args.studio_lane" in source
+
+
+def test_video_tool_carries_the_tabs_run_on_pin_to_the_gateway():
+    """The studio's per-tab "Run on" pin: accepted by the tool, priced against
+    the pinned lane by the motion-reference guard, and carried on the /prompt
+    body the gateway routes by — so two tabs can drive two rented boxes."""
+    source = MCP_SOURCE.read_text(encoding="utf-8")
+    video_tool = source.split("server.registerTool('media_generate_video'", 1)[1]
+    video_schema = video_tool.split("}, tool(async (args) =>", 1)[0]
+
+    assert "run_on: z.string().max(128).optional()" in video_schema
+    assert "resolveLaneForGraph(promptGraph, args.run_on)" in source
+    assert "body: { graph: promptGraph, ...(runOn ? { run_on: String(runOn) } : {}) }" in source
+    assert "built.body.run_on = String(args.run_on).slice(0, 128)" in source
+    # A refused pin is the job's answer, not something the guard swallows.
+    assert "if (error?.status === 409 && error?.machineSafe) throw error;" in source
 
 
 def test_video_loras_have_native_mlx_and_comfy_graph_parity():
@@ -1805,6 +1822,40 @@ def test_minimax_h3_reference_audio_fills_slots_in_order_and_prunes_the_rest(tmp
     assert [k for k in node["inputs"] if k.startswith("ref_images.")] == ["ref_images.ref_image_0"]
 
 
+def test_a_video_clip_sent_as_reference_audio_is_reduced_to_its_soundtrack(tmp_path):
+    """The studio's "sound only" motion reference: the clip travels in
+    reference_audios as the container it is, and only its audio track may reach
+    a lane — the MCP lifts the soundtrack into an AAC file and removes the
+    container it staged, so the frames the user chose not to send never leave
+    this machine. A silent clip has no soundtrack to lend and is refused by name."""
+    clip = _write_test_video(tmp_path / "talk.mp4", seconds=3, fps=24, with_audio=True)
+    data_url = "data:video/mp4;base64," + base64.b64encode(clip.read_bytes()).decode()
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "x", "duration_seconds": 5, "width": 1216, "height": 704,
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_audios": [{"audio_base64": data_url}],
+    })
+    loaders = [n for n in graph.values() if n["class_type"] == "LoadAudio"]
+    assert len(loaders) == 1
+    staged = loaders[0]["inputs"]["audio"]
+    assert staged.endswith(".m4a"), staged
+    path = tmp_path / "input" / staged
+    assert path.exists()
+    assert _probe(path, "v", "stream=codec_type") == "", "no video stream may survive"
+    assert _probe(path, "a", "stream=codec_type") == "audio"
+    # The container the MCP staged on the way in is gone.
+    leftovers = sorted(p.name for p in (tmp_path / "input").glob("mcp_audio_*") if p.name != staged)
+    assert leftovers == [], leftovers
+
+    silent = _write_test_video(tmp_path / "silent.mp4", seconds=3, fps=24, with_audio=False)
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+        "prompt": "x", "duration_seconds": 5, "width": 1216, "height": 704,
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "reference_audios": [{"audio_base64": "data:video/mp4;base64," + base64.b64encode(silent.read_bytes()).decode()}],
+    }, expect_refusal=True)
+    assert "has no audio track" in reply
+
+
 def test_reference_audio_cannot_be_the_sole_reference(tmp_path):
     """The model card is explicit: audio must accompany an image or video
     reference and can never be the only conditioning. Without the guard this
@@ -2301,18 +2352,70 @@ def test_a_long_clip_with_a_motion_reference_is_refused_before_it_is_staged(tmp_
     # The refusal names the lattice point that DOES fit: 141 frames of clip with
     # this reference (79,934 rows). Trimming the reference under the full clip
     # would have to go below the card's 2s floor, so that lever is not offered.
-    assert "shorten the clip to 5.9s" in reply
+    assert "shorten the clip to 5.8s" in reply
     assert "trim the reference" not in reply
 
 
-def test_the_same_long_clip_is_allowed_without_a_motion_reference(tmp_path):
-    """The cap is on reference VIDEO, not on duration: nine pictures cost a flat
-    amount however long the clip is, so the full range stays available."""
-    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
+def test_a_long_clip_is_refused_when_pictures_or_sound_are_all_that_is_attached(tmp_path):
+    """The budget is on the whole packed sequence, so a run with no motion clip
+    is still priced. This guard used to return early unless a reference VIDEO
+    was attached — "pictures cost a flat amount however long the clip is, so
+    the full range stays available" — and that was measured false on 2026-08-22:
+    a 15s clip at 1216x704 with seven pictures and the motion clip's soundtrack
+    (its picture switched off) died in the MLP of block 0 on a 5090, 23.90 GiB
+    allocated + 5.24 GiB requested of 31.36 GiB. 5.24 GiB over the 57,344 bytes
+    a row costs there is 98,116 rows, against a budget of 85,000.
+
+    At 15s the OUTPUT alone is 90,658 rows, so on this card ANY reference puts
+    the run over — which is why one picture is enough to refuse."""
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+         "reference_images": [{"image_base64": _TINY_PNG}]},
+        expect_refusal=True)
+    assert "does not fit this card" in reply
+    # 90,658 clip + 836 for the one picture.
+    assert "91,494 packed rows" in reply
+    # It names what is attached, not the video that is not: a refusal reading
+    # "with 0 reference videos" sends the user hunting for one they removed.
+    assert "with 1 reference picture attached" in reply
+    assert "reference video" not in reply.split("Either")[0]
+
+    # The shape Liam actually sent: seven pictures and the motion clip's audio
+    # kept while its picture was switched off. 90,658 + 7x836 + 1,200 for a
+    # sound reference of unmeasured length (priced at the 15s allowance).
+    reply = _capture_video_graph(
+        tmp_path, "minimax-h3-reference",
+        {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+         "reference_images": [{"image_base64": _TINY_PNG}] * 7,
+         "reference_audios": [{"audio_base64": _TINY_WAV}]},
+        expect_refusal=True)
+    # Refused by the PRE-FLIGHT, before a byte is staged: it prices a sound
+    # reference of unmeasured length at the full 15s allowance (1,200 rows).
+    # 97,710 against the 98,116 the card itself reported — the difference is
+    # the text conditioning, which the budget deliberately does not count.
+    assert "97,710 packed rows" in reply
+    assert "with 7 reference pictures and 1 sound reference attached" in reply
+    # The levers are the ones that exist here: no video to trim or stage
+    # compact, so it offers a shorter clip and fewer references, and prices
+    # them so the user can choose.
+    # Floored, not rounded: 311 frames is 12.958s, and asking for 13.0s snaps
+    # UP to 328 frames — the advice used to name a length that was refused
+    # again with the same sentence (measured live 2026-08-22).
+    assert "shorten the clip to 12.9s" in reply
+    assert "send fewer reference pictures (7 of them cost 5,852 rows, 836 each)" in reply
+    assert "drop the sound reference (it costs 1,200 rows)" in reply
+    assert "trim the reference" not in reply and "compact" not in reply
+
+
+def test_a_clip_with_nothing_attached_keeps_its_full_range(tmp_path):
+    """The budget bites only on a run that carries references. A plain 15s
+    text-to-video is 90,658 rows and was MEASURED to run (torch pool 27.16 GiB
+    on a 5090), so nothing here may refuse it."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
         "prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
-        "reference_images": [{"image_base64": _TINY_PNG}],
     })
-    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
     assert node["inputs"]["length"] == 362, "15s on the 17k+5 grid"
 
 
@@ -2382,18 +2485,91 @@ def test_a_lane_the_gateway_could_not_ask_keeps_the_measured_budget(tmp_path):
     assert node["inputs"]["length"] == 124
 
 
-def test_a_job_without_a_motion_reference_never_asks_the_gateway_which_lane(tmp_path):
-    """Only a reference-video job pays the round trip. Pictures alone were
-    never the problem, and the resolve route is answered by the gateway's
-    routing rules — an image-only H3 job must not be slowed by it, so the
-    harness is told to fail loudly if it is ever asked."""
+_LANE_ON_A_96GB_CARD = {"lane": "rental52", "remote": True, "vram_headroom_gb": 12.0, "vram_total_gb": 94.97,
+                        "probed": True, "error": None}
+_LANE_ON_A_32GB_CARD = {"lane": "rental48", "remote": True, "vram_headroom_gb": 12.0, "vram_total_gb": 31.36,
+                        "probed": True, "error": None}
+
+
+def test_the_budget_follows_the_card_the_lane_runs_on(tmp_path):
+    """The packed-row budget is a property of the CARD. 85,000 rows were
+    measured on a 32 GB 5090; the registry carries a per-card table and the
+    gateway reports the lane's card with its launch flags, so the same
+    198,370-row job (15 s clip + 15 s full-canvas reference) that no 5090
+    holds compiles on a lane running a 96 GB RTX PRO 6000 — where it was
+    measured to run (2026-08-22, the 161k-row as-sent job at a 64.5 GB peak)."""
+    long_clip = _write_test_video(tmp_path / "motion-long.mp4", seconds=15, fps=24)
+    request = {"prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 15}]}
+    graph = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 lane_resolution=_LANE_ON_A_96GB_CARD)
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    assert node["inputs"]["length"] == 362
+    # The 32 GB card keeps the measured base — and the refusal names the card,
+    # so "85,000" on a lane that should have been the PRO 6000 reads as a
+    # routing problem, not a capacity one.
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=_LANE_ON_A_32GB_CARD)
+    assert "198,370 packed rows" in reply
+    assert "the limit here is 85,000 on lane 'rental48' (a 32 GB card)" in reply
+    # A card the table does not list (or a lane the gateway could not size)
+    # is not assumed bigger: the measured base applies, plain.
+    unsized = {**_LANE_ON_A_96GB_CARD, "vram_total_gb": None}
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=unsized)
+    assert "the limit here is 85,000." in reply
+    tiny = {**_LANE_ON_A_96GB_CARD, "vram_total_gb": 23.5}
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=tiny)
+    assert "the limit here is 85,000." in reply
+
+
+def test_media_list_workflows_publishes_the_per_card_budget_table():
+    """The studio prices against the machine a run will land on, so the
+    listing carries the table next to the base number."""
+    raw = _call_mcp_tool("media_list_workflows", {"media_type": "video"})
+    # The HTTP body is the JSON-RPC envelope (SSE-framed or plain); the tool's
+    # own text is the JSON listing.
+    envelope = None
+    for line in raw.splitlines():
+        if line.startswith("data:"):
+            with contextlib.suppress(json.JSONDecodeError):
+                envelope = json.loads(line[5:].strip())
+    if envelope is None:
+        envelope = json.loads(raw)
+    text = next(part["text"] for part in envelope["result"]["content"] if part.get("type") == "text")
+    payload = json.loads(text)
+    h3 = next(w for w in payload["workflows"] if w["id"] == "minimax-h3")
+    assert h3["motion_reference_max_packed_rows"] == 85000
+    assert h3["motion_reference_max_packed_rows_by_vram_gb"]["32"] == 85000
+    assert h3["motion_reference_max_packed_rows_by_vram_gb"]["96"] > 85000
+    reference = next(w for w in payload["workflows"] if w["id"] == "minimax-h3-reference")
+    assert reference["motion_reference_max_packed_rows_by_vram_gb"] == h3["motion_reference_max_packed_rows_by_vram_gb"]
+
+
+def test_a_job_carrying_no_references_never_asks_the_gateway_which_lane(tmp_path):
+    """A plain text-to-video is never priced, so it must not pay the round trip
+    — the harness fails loudly if the resolve route is touched."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3", {
+        "prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
+    }, lane_resolution={"lane": "must-not-be-asked", "remote": True, "vram_headroom_gb": 0.0, "probed": True,
+                        "error": "the guard asked for a lane on a job with no references at all"})
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+    assert node["inputs"]["length"] == 362
+
+
+def test_a_picture_only_job_is_priced_against_the_card_it_will_run_on(tmp_path):
+    """Pictures count toward the budget, so a picture-only job MUST resolve its
+    lane: the same 15s run that cannot fit a 32 GB card fits a 96 GB one
+    (240,000 rows), and gating the lookup on a motion clip meant it was priced
+    against the default budget instead of the card actually attached."""
     graph = _capture_video_graph(tmp_path, "minimax-h3-reference", {
         "prompt": "x", "duration_seconds": 15, "width": 1216, "height": 704,
         "reference_images": [{"image_base64": _TINY_PNG}],
-    }, lane_resolution={"lane": "must-not-be-asked", "remote": True, "vram_headroom_gb": 0.0, "probed": True,
-                        "error": "the guard asked for a lane on a job with no motion reference"})
+    }, lane_resolution={"lane": "rental6000", "remote": True, "vram_headroom_gb": 12.0, "probed": True,
+                        "vram_total_gb": 96.0, "error": None})
     node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
-    assert node["inputs"]["length"] == 362
+    assert node["inputs"]["length"] == 362, "15s fits a 96 GB card with a picture attached"
 
 
 def test_reference_video_refuses_more_clips_than_it_has_slots(tmp_path):
@@ -2623,6 +2799,11 @@ def test_motion_reference_budget_mirror_matches_the_registry():
         # lane with no motion references, so it carries no budget by design.
         if workflow["id"].startswith("minimax-h3") and workflow.get("media_type") == "video":
             assert workflow["motion_reference_budget"]["max_packed_rows"] == _H3_MOTION_REFERENCE_PACKED_ROWS
+            # And the per-card table: the base on the 32 GB card, more on a
+            # 96 GB RTX PRO 6000. The degraded catalog must carry the same.
+            from hivemind_content_studio.media_catalog import _H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB
+            assert workflow["motion_reference_budget"]["max_packed_rows_by_vram_gb"] == _H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB
+            assert workflow["motion_reference_budget"]["max_packed_rows_by_vram_gb"]["32"] == _H3_MOTION_REFERENCE_PACKED_ROWS
 
     # And the fallback list the studio gets when the registry cannot be read
     # carries the ceiling rather than silently restoring the full range.
@@ -2733,8 +2914,10 @@ def test_an_impossible_motion_reference_clip_is_refused_before_anything_is_stage
     # The reason survives machine-private redaction, because it is the card's
     # capacity and the canvas the caller already chose — no prompt, no media.
     assert "does not fit this card" in body, body[:400]
-    # 124 frames of clip with this reference fit (76,782 rows).
-    assert "shorten the clip to 5.2s" in body
+    # 124 frames of clip with this reference fit (76,782 rows) — 5.167s, quoted
+    # FLOORED as 5.1s. Rounded to "5.2s" it named a length that snaps up to the
+    # next lattice point (141) and is refused again.
+    assert "shorten the clip to 5.1s" in body
     # Never reached the staging step, so it cannot have complained about the file.
     assert "never-staged-because" not in body
 
@@ -2789,7 +2972,7 @@ def test_a_lying_duration_hint_is_caught_on_the_staged_file(tmp_path):
     assert "does not fit this card" in reply
     # 60,192 + 810 + 74,448 = 135,450 rows. Priced at the clip's REAL canvas,
     # 141 frames of clip fit (79,020 rows).
-    assert "shorten the clip to 5.9s" in reply
+    assert "shorten the clip to 5.8s" in reply
 
 
 def test_a_compact_reference_costs_a_third_and_is_staged_inside_384x1152(tmp_path):

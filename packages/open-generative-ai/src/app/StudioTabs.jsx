@@ -5,6 +5,12 @@
 // its results and its settings. Contract with the studio (see src/lib/studioTabs.js):
 //   seed      — null on the original tab (restores persisted prefs), {boot:'fresh'}
 //               for a new blank tab, {boot:'clone', snapshot} for a duplicate.
+//   tabId     — stable id of this tab, used to claim the generations it started.
+//   primary   — this is the FIRST tab: it adopts the composer draft and any pending
+//               generation no open tab owns. Told explicitly rather than derived
+//               from a null seed, which every tab has once a reload restores them.
+//   openTabIds— the strip as it stands, so a tab can tell an ownerless job from one
+//               belonging to a tab that is still on screen.
 //   tabActive — this is the studio's front tab: it owns preference persistence and
 //               the one-shot handoffs (rented mode, workflow-selected events).
 //   active    — front tab AND the visible page: owns the prompt-insert bridge.
@@ -13,7 +19,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { getLang } from '../lib/i18n.js';
 import {
-  addTab, closeTab, consumeSeed, insertTabAfter, newTabState, selectTab, studioLaneId,
+  addTab, closeTab, consumeSeed, insertTabAfter, loadTabState, saveTabState, selectTab,
+  studioInstanceId, studioLaneId,
 } from '../lib/studioTabs.js';
 import { Icon } from '../ui/icons.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
@@ -75,15 +82,17 @@ function TabChip({ index, on, onSelect, onDuplicate, onClose, closable }) {
 }
 
 export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
-  const [state, setState] = useState(newTabState);
+  // Restored from sessionStorage, so a reload brings the whole strip back and every
+  // tab that was rendering can reclaim its run. Without this only Tab 1 survived and
+  // every other tab's generation was orphaned mid-flight.
+  const [state, setState] = useState(() => loadTabState(studioType));
   const [closeConfirm, setCloseConfirm] = useState(null); // id of a busy tab awaiting confirmation
   // Per-tab api handles, keyed by the (never-reused) tab id.
   const apisRef = useRef(new Map());
+  // Held for the life of the browser tab, not the life of this mount: a resumed
+  // generation must keep the scheduler lane it was submitted on.
   const instanceIdRef = useRef(null);
-  if (!instanceIdRef.current) {
-    instanceIdRef.current = globalThis.crypto?.randomUUID?.()
-      || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  }
+  if (!instanceIdRef.current) instanceIdRef.current = studioInstanceId();
 
   const apiFor = (id) => {
     if (!apisRef.current.has(id)) apisRef.current.set(id, { current: null });
@@ -96,6 +105,8 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
     const seeded = state.tabs.find((tab) => tab.seed);
     if (seeded) setState((prev) => consumeSeed(prev, seeded.id));
   }, [state]);
+
+  useEffect(() => { saveTabState(studioType, state); }, [studioType, state]);
 
   const duplicate = (id) => {
     const snapshot = apisRef.current.get(id)?.current?.snapshot?.();
@@ -112,6 +123,8 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
     if (apisRef.current.get(id)?.current?.isBusy?.()) setCloseConfirm(id);
     else forget(id);
   };
+
+  const openTabIds = state.tabs.map((tab) => tab.id);
 
   return (
     <>
@@ -150,6 +163,9 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
               active={active && front}
               tabActive={front}
               seed={tab.seed}
+              tabId={tab.id}
+              primary={tab.id === state.tabs[0].id && !tab.seed}
+              openTabIds={openTabIds}
               apiRef={apiFor(tab.id)}
               studioLane={studioLaneId(studioType, instanceIdRef.current, tab.id)}
             />

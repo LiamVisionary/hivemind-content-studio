@@ -16,6 +16,8 @@ import pytest
 from hivemind_content_studio.account_scope import (
     AccountPaths,
     AccountWorkspaces,
+    GatewayOutputClaims,
+    RunClaims,
     bootstrap_accounts,
     migrate_legacy_state,
 )
@@ -194,3 +196,29 @@ def test_bootstrap_leaves_an_existing_owner_password_alone(tmp_path):
     again = bootstrap_accounts(store=store, state_dir=state, legacy_password_hash="b" * 64)
     assert again.id == first.id
     assert store.password_hash(again.id) != "b" * 64
+
+
+def test_claim_ledgers_record_the_first_claimant_and_match_gateway_records(tmp_path):
+    runs = RunClaims(tmp_path / "run-claims.sqlite3")
+    runs.claim("run-a", 2)
+    runs.claim("run-a", 1)  # first claim wins: the creator is whoever was first in scope
+    assert runs.account_for("run-a") == 2 and runs.account_for("run-z") is None
+    assert runs.accounts_for(["run-a", "run-z", ""]) == {"run-a": 2}
+
+    gateway = GatewayOutputClaims(tmp_path / "gateway-output-claims.sqlite3")
+    gateway.claim_job("job-a", 2)
+    gateway.claim_output("clip.mp4.e2e", 2)   # the gateway names the sealed form…
+    gateway.claim_output("/roots/clip.mp4", 1)  # …the listing the logical one; same claim, first wins
+    gateway.claim_job("", 1)
+    gateway.claim_output("", 1)
+    assert gateway.account_for("job:") is None and gateway.account_for("output:") is None
+    records = [
+        {"id": "file-1", "outputs": ["/roots/clip.mp4.e2e"]},        # by output name
+        {"id": "job-a", "outputs": ["/roots/other.mp4"]},            # by job id
+        {"id": "job-a", "outputs": ["/roots/clip.mp4", "/x/y.mp4"]},  # output name wins, any output
+        {"id": "job-z", "outputs": []},
+        "not-a-record",
+    ]
+    assert gateway.claimants_for_records(records) == [2, 2, 2, None, None]
+    # Persisted: a fresh handle on the same file sees the same claims.
+    assert GatewayOutputClaims(tmp_path / "gateway-output-claims.sqlite3").account_for("job:job-a") == 2

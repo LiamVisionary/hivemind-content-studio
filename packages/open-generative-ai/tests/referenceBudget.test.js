@@ -177,3 +177,25 @@ test('counts stay right when every ration is blown at once', async () => {
     }
     assert.equal(report.ok, false);
 });
+
+test('a sound-only motion row spends an audio slot and audio seconds, never a video slot', async () => {
+    const { referenceBudgetReport } = await load();
+    const report = referenceBudgetReport({
+        images: ['/p'],
+        videos: [{ url: '/m.mov', useAudio: false }, { url: '/s.mov', motion: false, useAudio: true }],
+        audios: [],
+        durations: { '/m.mov': 6, '/s.mov': 9 },
+    });
+    assert.equal(report.counts.videos, 1);
+    assert.equal(report.counts.audioClips, 1);
+    assert.equal(report.counts.soundtracks, 1);
+    assert.equal(report.counts.total, 3);
+    assert.equal(report.seconds.video, 6);
+    assert.equal(report.seconds.audio, 9);
+    assert.deepEqual(report.problems, []);
+    // Sound only with no picture and no motion clip has nothing to attach to.
+    const alone = referenceBudgetReport({
+        images: [], videos: [{ url: '/s.mov', motion: false, useAudio: true }], audios: [], durations: { '/s.mov': 5 },
+    });
+    assert.ok(alone.problems.some((problem) => problem.code === 'audio-without-visual'));
+});

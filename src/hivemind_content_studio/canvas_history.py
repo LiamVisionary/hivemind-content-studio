@@ -56,6 +56,19 @@ def _sealed_output_path(logical: Path) -> Path | None:
     return None
 
 
+def logical_output_name(name: str) -> str:
+    """The basename a gateway output is listed under, whatever form it is
+    stored in: `clip.mp4` for `clip.mp4`, `clip.mp4.e2e` or `clip.mp4.zenc`."""
+    return _logical_output_path(Path(str(name or "")).expanduser()).name
+
+
+def _normalized_output_locator(output: object) -> Path:
+    """The one spelling of an output's location this index keys on. Every row
+    is digested from it, so anything that needs to find a row again (sync,
+    forget) must normalise the same way."""
+    return _logical_output_path(Path(str(output)).expanduser()).resolve()
+
+
 def _history_metadata(record: dict[str, Any], *, timestamp_source: str) -> dict[str, Any]:
     outputs = record.get("outputs") if isinstance(record.get("outputs"), list) else []
     return {
@@ -148,7 +161,7 @@ class CanvasHistoryStore:
                 outputs = record.get("outputs") if isinstance(record.get("outputs"), list) else []
                 for output in outputs:
                     stored = Path(str(output)).expanduser()
-                    logical = _logical_output_path(stored).resolve()
+                    logical = _normalized_output_locator(output)
                     output_name = logical.name
                     if not output_name:
                         continue
@@ -197,13 +210,41 @@ class CanvasHistoryStore:
     def clear(self) -> int:
         """Erase every indexed row.
 
-        For a store that synced records its account should never have held: the
-        machine-wide canvas surface belongs to the owner, and a non-owner store
-        that adopted it before that rule was enforced keeps thousands of
-        foreign filenames on disk until they are wiped."""
+        For a store that synced records its account should never have held: a
+        non-owner store that adopted the machine-wide canvas surface before
+        listings were scoped keeps thousands of foreign filenames on disk until
+        they are wiped."""
         with self._connect() as connection:
             removed = connection.execute("DELETE FROM canvas_history")
         return removed.rowcount
+
+    def forget(self, records: list[dict[str, Any]]) -> int:
+        """Drop the rows these gateway records would have produced.
+
+        The counterpart of sync for records the account may NOT hold: a row
+        adopted in the seconds before another workspace's claim on the same
+        output was written, or held from before listings were scoped. Keyed
+        on the same locator digest sync writes, so no row is decrypted."""
+        digests: list[str] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            outputs = record.get("outputs") if isinstance(record.get("outputs"), list) else []
+            for output in outputs:
+                locator = str(_normalized_output_locator(output))
+                if Path(locator).name:
+                    digests.append(self.cipher.digest(locator))
+        if not digests:
+            return 0
+        removed = 0
+        with self._connect() as connection:
+            for start in range(0, len(digests), 500):
+                chunk = digests[start:start + 500]
+                marks = ",".join("?" for _ in chunk)
+                removed += connection.execute(
+                    f"DELETE FROM canvas_history WHERE output_digest IN ({marks})", chunk
+                ).rowcount
+        return removed
 
     def list(self, *, limit: int = 300) -> list[dict[str, Any]]:
         return self.page(page=1, page_size=limit)["items"]

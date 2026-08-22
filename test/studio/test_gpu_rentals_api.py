@@ -176,7 +176,7 @@ def test_offers_filters_and_shape(tmp_path: Path, monkeypatch) -> None:
         "usd_per_hour": 0.402, "down_mbps": 755.0, "reliability": 0.9942,
         "geolocation": "South Korea, KR", "dlperf": None,
         # Time to first generation on THIS host, from the tier's download volume.
-        "setup_minutes": 4.6,
+        "setup_minutes": 4.6, "warm": False,
         # A listing with no cpu_ram says nothing about the box; None, not 0.
         "ram_gb": None,
         # Reported so the view can label hosting type, not filtered on.
@@ -2689,3 +2689,213 @@ def test_a_box_with_no_published_beacon_port_is_not_judged_on_silence(monkeypatc
     no_ports = _running_box(ports={}, start_date=time.time() - gpu_rentals.BEACON_SILENCE_SECONDS * 3)
     dto = gpu_rentals._instance_dto(_vast_instance(no_ports), probe=True)
     assert dto["phase"] == "provisioning", "a missing port map is not a dead host"
+
+
+# --- Quick resume: a resume the host is not honouring ------------------------
+
+
+def test_a_resume_the_host_ignores_is_flagged_after_the_grace_period(tmp_path: Path, monkeypatch) -> None:
+    """Vast: a stopped box restarts only "if GPU available" and sits in
+    "Scheduling" otherwise — "if stuck >30 seconds, GPU likely rented by
+    another user". The DTO says so instead of showing a spinner forever."""
+    client = _client(tmp_path, monkeypatch)
+    _fake_vast(monkeypatch, lambda m, p, b: {"instances": [_paused_instance()]})
+    gpu_rentals._write_paused_state({"vast:21": {"pending_reattach": False,
+                                                  "resumed_at": time.time() - gpu_rentals.RESUME_GRACE_SECONDS - 5}})
+    machine = client.get("/api/gpu-rentals").json()["rentals"][0]
+    assert machine["phase"] == "paused"
+    assert machine["resume_blocked"] is True
+    assert machine["resume_requested_at"] is not None
+    # Within the grace period it is just resuming.
+    gpu_rentals._write_paused_state({"vast:21": {"pending_reattach": False, "resumed_at": time.time()}})
+    machine = client.get("/api/gpu-rentals").json()["rentals"][0]
+    assert machine["resume_blocked"] is False
+
+
+def test_resume_records_when_it_was_asked_for(tmp_path: Path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    gpu_rentals._write_paused_state({"vast:21": {"was_attached": False}})
+
+    def handler(method, path, body):
+        if method == "GET":
+            return {"instances": [_paused_instance()]}
+        return {"success": True}
+
+    _fake_vast(monkeypatch, handler)
+    body = client.post("/api/gpu-rentals/21/resume").json()
+    assert body["resuming"] is True
+    assert gpu_rentals._read_paused_state()["vast:21"]["resumed_at"] > 0
+
+
+# --- warm volumes: the no-download provisioning path -------------------------
+
+
+class _FakeVolumeProvider:
+    """RunPod at the provider boundary: volumes and pods, recorded."""
+
+    def __init__(self) -> None:
+        self.volumes: list[dict] = []
+        self.specs: list = []
+        self.destroyed: list[str] = []
+
+    def create_network_volume(self, name, size_gb, data_center_id):
+        self.volumes.append({"name": name, "size": size_gb, "dataCenterId": data_center_id})
+        return f"vol{len(self.volumes)}"
+
+    def list_network_volumes(self):
+        return list(self.volumes)
+
+    def delete_network_volume(self, volume_id):
+        self.volumes = [v for v in self.volumes if v.get("id") != volume_id]
+
+
+def _warm_setup(tmp_path: Path, monkeypatch) -> tuple[_FakeVolumeProvider, list]:
+    _client(tmp_path, monkeypatch)  # MEDIA_STATE_ROOT under tmp_path
+    fake = _FakeVolumeProvider()
+    monkeypatch.setattr(gpu_rentals.rental_providers, "get", lambda key: fake)
+    rented: list[dict] = []
+
+    def fake_create_rental(tier, *args, **kwargs):
+        rented.append({"tier": tier, "kwargs": kwargs})
+        return {"rental_id": "runpod:stockpod", "provider": "runpod", "rentals": []}
+
+    monkeypatch.setattr(gpu_rentals, "create_rental", fake_create_rental)
+    monkeypatch.setattr(gpu_rentals, "destroy_rental", lambda rid: fake.destroyed.append(str(rid)))
+    return fake, rented
+
+
+def test_create_warm_volume_makes_the_volume_and_rents_a_stocking_box(tmp_path: Path, monkeypatch) -> None:
+    fake, rented = _warm_setup(tmp_path, monkeypatch)
+    out = gpu_rentals.create_warm_volume("minimax", "EU-RO-1")
+    assert fake.volumes == [{"name": "hivemind-warm-minimax-eu-ro-1", "size": gpu_rentals.tier_disk_gb("minimax"),
+                             "dataCenterId": "EU-RO-1"}]
+    assert out["state"] == "stocking" and out["volume_id"] == "vol1" and out["stocking_rental_id"] == "runpod:stockpod"
+    # The stocking box is an ordinary rental of the tier, handed the volume to fill.
+    assert rented[0]["tier"] == "minimax"
+    assert rented[0]["kwargs"]["_warm_volume"]["volume_id"] == "vol1"
+    assert rented[0]["kwargs"]["_label_note"] == "stock"
+    # Nothing is stocked yet, so a new rental would not pick it up.
+    assert gpu_rentals.warm_volume_for("minimax") is None
+    # A second call while stocking is refused rather than doubled.
+    with pytest.raises(gpu_rentals.GpuRentalError):
+        gpu_rentals.create_warm_volume("minimax", "EU-RO-1")
+
+
+def test_a_stocking_box_that_reports_ready_marks_the_volume_stocked_and_is_destroyed(tmp_path: Path, monkeypatch) -> None:
+    fake, _rented = _warm_setup(tmp_path, monkeypatch)
+    gpu_rentals.create_warm_volume("minimax", "EU-RO-1")
+    gpu_rentals._settle_warm_volumes([{"rental_id": "runpod:stockpod", "phase": "provisioning"}])
+    assert gpu_rentals.warm_volume_for("minimax") is None, "not until the box says ready"
+    gpu_rentals._settle_warm_volumes([{"rental_id": "runpod:stockpod", "phase": "ready"}])
+    entry = gpu_rentals.warm_volume_for("minimax")
+    assert entry and entry["state"] == "stocked" and entry["volume_id"] == "vol1"
+    assert fake.destroyed == ["runpod:stockpod"], "the volume outlives the box that filled it"
+    listed = gpu_rentals.list_warm_volumes()
+    assert listed[0]["tier"] == "minimax" and listed[0]["state"] == "stocked"
+
+
+def test_a_stocking_box_that_fails_marks_the_volume_error_and_keeps_it(tmp_path: Path, monkeypatch) -> None:
+    fake, _rented = _warm_setup(tmp_path, monkeypatch)
+    gpu_rentals.create_warm_volume("minimax", "EU-RO-1")
+    gpu_rentals._settle_warm_volumes([{"rental_id": "runpod:stockpod", "phase": "error",
+                                       "provision": {"detail": "download failed at 6/8"}}])
+    entry = gpu_rentals._read_warm_volumes()["runpod:minimax"]
+    assert entry["state"] == "error" and "download failed" in entry["detail"]
+    assert fake.volumes, "the volume is kept: a retry re-stocks in place"
+    # Re-stocking reuses the same volume (same data center) instead of creating another.
+    gpu_rentals.create_warm_volume("minimax", "EU-RO-1")
+    assert len(fake.volumes) == 1
+    assert gpu_rentals._read_warm_volumes()["runpod:minimax"]["state"] == "stocking"
+
+
+def test_a_new_rental_mounts_the_stocked_volume_and_a_cold_one_does_not(tmp_path: Path, monkeypatch) -> None:
+    """What the whole thing is for: create_rental hands the provider the
+    stocked volume (and its data center) so the box skips every download."""
+    _client(tmp_path, monkeypatch)
+    gpu_rentals._write_warm_volumes({"runpod:minimax": {
+        "provider": "runpod", "volume_id": "volX", "data_center_id": "EU-RO-1", "size_gb": 120,
+        "state": "stocked"}})
+    specs = []
+
+    class _Provider:
+        def create(self, spec):
+            specs.append(spec)
+            return "pod1"
+
+        @staticmethod
+        def ask_evaporated(exc):
+            return False
+
+    monkeypatch.setattr(gpu_rentals.rental_providers, "get", lambda key: _Provider())
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAA test")
+    monkeypatch.setattr(gpu_rentals, "_onstart_script", lambda tier: "#!/bin/bash\ntrue\n")
+    monkeypatch.setattr(gpu_rentals, "_assert_affordable", lambda *a, **k: None)
+    monkeypatch.setattr(gpu_rentals, "_forget_offers", lambda tier: None)
+    offer = {"provider": "runpod", "offer_id": "NVIDIA GeForce RTX 5090", "usd_per_hour": 0.89, "warm": True}
+    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], {}))
+    monkeypatch.setattr(gpu_rentals, "_rank_offers", lambda *a, **k: [offer])
+    out = gpu_rentals.create_rental("minimax", gpu_class="rtx5090")
+    assert out["rental_id"] == "runpod:pod1"
+    assert specs[0].network_volume_id == "volX" and specs[0].data_center_ids == ["EU-RO-1"]
+    specs.clear()
+    gpu_rentals.create_rental("minimax", gpu_class="rtx5090", warm=False)
+    assert specs[0].network_volume_id is None and specs[0].data_center_ids == []
+    # An offer the search could not quote warm (no secure price) stays cold
+    # even though a volume exists — never billed above its quote.
+    specs.clear()
+    offer["warm"] = False
+    gpu_rentals.create_rental("minimax", gpu_class="rtx5090")
+    assert specs[0].network_volume_id is None
+
+
+def test_offers_are_quoted_warm_at_the_secure_price_when_a_volume_is_stocked(tmp_path: Path, monkeypatch) -> None:
+    _client(tmp_path, monkeypatch)
+    from hivemind_content_studio.rental_providers import Offer as _Offer
+    cold = _Offer(provider="runpod", offer_id="NVIDIA GeForce RTX 5090", gpu_name="RTX 5090", usd_per_hour=0.69,
+                  vram_mb=32768, ram_gb=64.0, raw={"securePrice": 0.89, "communityPrice": 0.69})
+    ranked = gpu_rentals._rank_offers("minimax", [cold])
+    assert ranked[0]["usd_per_hour"] == 0.69 and ranked[0]["warm"] is False
+    gpu_rentals._write_warm_volumes({"runpod:minimax": {"provider": "runpod", "volume_id": "volX",
+                                                        "data_center_id": "EU-RO-1", "size_gb": 120, "state": "stocked"}})
+    ranked = gpu_rentals._rank_offers("minimax", [cold])
+    assert ranked[0]["usd_per_hour"] == 0.89 and ranked[0]["warm"] is True
+    assert ranked[0]["warm_volume_id"] == "volX" and ranked[0]["setup_minutes"] == gpu_rentals.WARM_SETUP_MINUTES
+    # No secure price known: not warm, community price kept.
+    nosecure = _Offer(provider="runpod", offer_id="NVIDIA GeForce RTX 5090", gpu_name="RTX 5090", usd_per_hour=0.69,
+                      vram_mb=32768, ram_gb=64.0, raw={"communityPrice": 0.69})
+    assert gpu_rentals._rank_offers("minimax", [nosecure])[0]["warm"] is False
+
+
+def test_a_stocking_rental_only_considers_the_volume_providers_offers(tmp_path: Path, monkeypatch) -> None:
+    """Ranked offers are cheapest-first across marketplaces; a Vast box cannot
+    mount a RunPod volume, so it must never be the box that "stocks" it."""
+    _client(tmp_path, monkeypatch)
+    specs = []
+
+    class _Provider:
+        def __init__(self, key):
+            self.key = key
+
+        def create(self, spec):
+            specs.append((self.key, spec))
+            return "pod1"
+
+        @staticmethod
+        def ask_evaporated(exc):
+            return False
+
+    monkeypatch.setattr(gpu_rentals.rental_providers, "get", lambda key: _Provider(key))
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAA test")
+    monkeypatch.setattr(gpu_rentals, "_onstart_script", lambda tier: "#!/bin/bash\ntrue\n")
+    monkeypatch.setattr(gpu_rentals, "_assert_affordable", lambda *a, **k: None)
+    monkeypatch.setattr(gpu_rentals, "_forget_offers", lambda tier: None)
+    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], {}))
+    monkeypatch.setattr(gpu_rentals, "_rank_offers", lambda *a, **k: [
+        {"provider": "vast", "offer_id": "123", "usd_per_hour": 0.60},
+        {"provider": "runpod", "offer_id": "NVIDIA GeForce RTX 5090", "usd_per_hour": 0.69},
+    ])
+    volume = {"provider": "runpod", "volume_id": "volX", "data_center_id": "EU-RO-1"}
+    out = gpu_rentals.create_rental("minimax", gpu_class="rtx5090", _warm_volume=volume, _label_note="stock")
+    assert out["rental_id"] == "runpod:pod1"
+    assert specs == [("runpod", specs[0][1])]
+    assert specs[0][1].network_volume_id == "volX" and "-stock-" in specs[0][1].label

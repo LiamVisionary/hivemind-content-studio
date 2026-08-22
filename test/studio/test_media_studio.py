@@ -872,12 +872,17 @@ def test_video_generation_forwards_the_grain_cleanup_choice(tmp_path: Path, monk
         duration_seconds=2,
         denoise="strong",
         studio_lane="video:window-a:2",
+        run_on="vast:48352597",
     )
     assert captured["denoise"] == "strong"
     assert captured["studio_lane"] == "video:window-a:2"
+    # The studio tab's "Run on" pin reaches the MCP verbatim, which hands it to
+    # the gateway that routes by it.
+    assert captured["run_on"] == "vast:48352597"
 
     start_video(prompt="a slow push in", duration_seconds=2)
     assert "denoise" not in captured
+    assert "run_on" not in captured
 
     # Unknown tiers are dropped rather than forwarded to the runner.
     start_video(prompt="a slow push in", duration_seconds=2, denoise="nuclear")
@@ -1246,11 +1251,15 @@ def test_motion_reference_pricing_publishes_what_the_studio_needs_to_price_a_run
 
     workflow = {
         "motion_reference_max_packed_rows": 85_000,
+        "motion_reference_max_packed_rows_by_vram_gb": {"32": 85_000, "96": 215_000, "bogus": 1, "48": "x"},
         "frame_grid": {"modulus": 17, "offset": 5},
         "defaults": {"frame_rate": 24},
     }
     pricing = motion_reference_pricing(workflow)
     assert pricing["max_packed_rows"] == 85_000
+    # The same budget per card size rides along (the base is the 32 GB card a
+    # 5090 is; a 96 GB RTX PRO 6000 holds far more); junk entries are dropped.
+    assert pricing["max_packed_rows_by_vram_gb"] == {"32": 85_000, "96": 215_000}
     assert pricing["frame_grid"] == {"modulus": 17, "offset": 5}
     assert pricing["frame_rate"] == 24
     # Rows per latent frame for the High 16:9 canvas (1216x704): 76*44/4.
@@ -1275,4 +1284,52 @@ def test_motion_reference_pricing_publishes_what_the_studio_needs_to_price_a_run
     models = media_catalog._built_in_video_models_with_limits()
     h3 = next(model for model in models if model.family == "minimax")
     assert h3.motion_reference_pricing["max_packed_rows"] == 85_000
+    assert h3.motion_reference_pricing["max_packed_rows_by_vram_gb"] == {"32": 85_000, "96": 240_000}
     assert h3.motion_reference_pricing["output_rows_per_latent_frame"]["high|16:9"] == 836
+
+
+def test_start_video_frame_count_follows_the_workflow_frame_grid(monkeypatch) -> None:
+    """A workflow that declares its own lattice gets the smallest grid point at
+    or above duration x rate — never LTX's +1. 8s of MiniMax H3 is 192 frames
+    (8.0s), not 193 -> 209 (8.7s): the one integer duration where the +1 crossed
+    a whole 17-frame step, so the MCP refused (86,364 rows) a clip the picker
+    had priced at 192 frames (79,832) and offered as the cap. LTX keeps +1."""
+    from hivemind_content_studio import media_studio
+
+    sent: list[dict] = []
+
+    class Client:
+        def call_tool(self, name, arguments, **_kwargs):
+            if name == "media_list_workflows":
+                return {"content": [{"type": "text", "text": json.dumps({"workflows": [
+                    {"id": "minimax-h3-reference", "frame_grid": {"modulus": 17, "offset": 5}},
+                    {"id": "ltx23-eros-v14-dmd"},
+                ]})}]}
+            sent.append(arguments)
+            return {"content": [{"type": "text", "text": json.dumps({"id": "job-1"})}]}
+
+    monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor, *_pub: Client())
+    media_studio._workflow_grid_cache.update({"key": None, "at": 0.0, "grids": {}})
+
+    for workflow_id, seconds, expected in (
+        ("minimax-h3-reference", 8, 192),
+        ("minimax-h3-reference", 5, 124),
+        ("minimax-h3-reference", 10, 243),
+        ("minimax-h3-reference", 3, 73),
+        ("ltx23-eros-v14-dmd", 8, 193),
+        ("ltx23-eros-v14-dmd", 5, 121),
+    ):
+        sent.clear()
+        with contextlib.suppress(Exception):
+            media_studio.start_video(prompt="a lighthouse", workflow_id=workflow_id, duration_seconds=seconds)
+        assert sent, f"{workflow_id} at {seconds}s never reached the MCP"
+        assert sent[0]["frames"] == expected, (workflow_id, seconds, sent[0]["frames"])
+        assert sent[0]["duration_seconds"] == seconds
+        assert sent[0]["frame_rate"] == 24
+
+    # The pure arithmetic, for the record: lattice -> snapped up, no lattice -> +1.
+    assert media_studio._request_frame_count({"modulus": 17, "offset": 5}, 8, 24) == 192
+    assert media_studio._request_frame_count({"modulus": 17, "offset": 5}, 8.5, 24) == 209
+    assert media_studio._request_frame_count({"modulus": 8, "offset": 1}, 8, 24) == 193
+    assert media_studio._request_frame_count(None, 8, 24) == 193

@@ -43,10 +43,10 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .accounts import Account, AccountStore
-from .canvas_history import CanvasHistoryStore
+from .canvas_history import CanvasHistoryStore, logical_output_name
 from .private_access import PrivateFieldCipher, read_vault_public_key
 from .prompt_history import PromptHistoryStore
 from .studio_state import StudioStateStore
@@ -189,16 +189,18 @@ class AccountWorkspaces:
             shutil.rmtree(root)
 
 
-class RunClaims:
-    """Which workspace each shared-store run belongs to.
+class _ClaimLedger:
+    """A persisted key → account map, first claim wins.
 
-    Runs are the one store that stays machine-wide — ids are minted by the
-    orchestrator and agents resume them by id across processes — so this is
-    the documented exception to the files-not-WHERE-clauses rule above: a
-    single map from run id to account id, written at creation time, the only
-    moment anyone knows who asked. A run with no claim predates accounts or
-    was started by a machine caller; both belong to the owner.
+    The documented exception to the files-not-WHERE-clauses rule above: a few
+    stores stay machine-wide, so the workspace that owns each entry is written
+    down once, at creation time — the only moment anyone knows who asked — and
+    every listing of that store filters on it. An entry with no claim predates
+    accounts or was started by a machine caller; both belong to the owner.
     """
+
+    table: str = ""
+    key_column: str = ""
 
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser().resolve()
@@ -206,8 +208,8 @@ class RunClaims:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute(
-                "CREATE TABLE IF NOT EXISTS run_claims ("
-                " run_id TEXT PRIMARY KEY,"
+                f"CREATE TABLE IF NOT EXISTS {self.table} ("
+                f" {self.key_column} TEXT PRIMARY KEY,"
                 " account_id INTEGER NOT NULL,"
                 " created_at TEXT NOT NULL)"
             )
@@ -217,38 +219,121 @@ class RunClaims:
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
 
-    def claim(self, run_id: str, account_id: int) -> None:
-        # First claim wins: a claim names the run's creator, and the creator
-        # is whoever was in scope when the run id first existed.
+    def claim(self, key: str, account_id: int) -> None:
+        # First claim wins: a claim names the entry's creator, and the creator
+        # is whoever was in scope when the key first existed.
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO run_claims(run_id, account_id, created_at) VALUES(?, ?, ?)"
-                " ON CONFLICT(run_id) DO NOTHING",
+                f"INSERT INTO {self.table}({self.key_column}, account_id, created_at) VALUES(?, ?, ?)"
+                f" ON CONFLICT({self.key_column}) DO NOTHING",
                 (
-                    str(run_id),
+                    str(key),
                     int(account_id),
                     datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
                 ),
             )
 
-    def account_for(self, run_id: str) -> int | None:
+    def account_for(self, key: str) -> int | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT account_id FROM run_claims WHERE run_id = ?", (str(run_id),)
+                f"SELECT account_id FROM {self.table} WHERE {self.key_column} = ?", (str(key),)
             ).fetchone()
         return int(row[0]) if row else None
 
-    def accounts_for(self, run_ids: list[str]) -> dict[str, int]:
+    def accounts_for(self, keys: list[str]) -> dict[str, int]:
         """One query for a whole listing, not one connection per row."""
-        cleaned = [str(run_id) for run_id in run_ids if run_id]
+        cleaned = list(dict.fromkeys(str(key) for key in keys if key))
         if not cleaned:
             return {}
-        marks = ",".join("?" for _ in cleaned)
+        found: dict[str, int] = {}
         with self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT run_id, account_id FROM run_claims WHERE run_id IN ({marks})", cleaned
-            ).fetchall()
-        return {str(run_id): int(account_id) for run_id, account_id in rows}
+            # SQLite caps bound parameters per statement (999 on older builds).
+            for start in range(0, len(cleaned), 500):
+                chunk = cleaned[start:start + 500]
+                marks = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"SELECT {self.key_column}, account_id FROM {self.table}"
+                    f" WHERE {self.key_column} IN ({marks})",
+                    chunk,
+                ).fetchall()
+                found.update({str(key): int(account_id) for key, account_id in rows})
+        return found
+
+
+class RunClaims(_ClaimLedger):
+    """Which workspace each shared-store run belongs to.
+
+    Runs are minted by the orchestrator and agents resume them by id across
+    processes, so the run store stays machine-wide and this map says whose
+    each run is. A run with no claim predates accounts or was started by a
+    machine caller; both belong to the owner.
+    """
+
+    table = "run_claims"
+    key_column = "run_id"
+
+
+class GatewayOutputClaims(_ClaimLedger):
+    """Which workspace each media-gateway generation belongs to.
+
+    The gateway's history is machine-wide too: every workspace's video-studio
+    clips land in the same output roots and the same job log, and that log
+    carries no notion of accounts — the requester key it does record names a
+    DEVICE, which two workspaces signed in from one browser share. So the
+    studio claims each gateway job it starts (by job id) and each output it
+    learns at finish (by logical filename), and the History sync filters the
+    gateway's records on those claims. The filename is the one handle every
+    gateway listing agrees on; a job id only reaches the listing when the
+    workflow index knows it, which a remote-lane harvest never is — so a job
+    the studio never got to finish (restarted mid-run) is found by id on a
+    local lane and otherwise stays with the owner as unclaimed.
+    """
+
+    table = "gateway_output_claims"
+    key_column = "claim_key"
+
+    @staticmethod
+    def job_key(job_id: str) -> str:
+        return "job:" + str(job_id or "").strip()
+
+    @staticmethod
+    def output_key(output_name: str) -> str:
+        # Claims and lookups meet on the LOGICAL name: the gateway lists
+        # `clip.mp4` for a file stored sealed as `clip.mp4.e2e`.
+        return "output:" + logical_output_name(output_name)
+
+    def claim_job(self, job_id: str, account_id: int) -> None:
+        if str(job_id or "").strip():
+            self.claim(self.job_key(job_id), account_id)
+
+    def claim_output(self, output_name: str, account_id: int) -> None:
+        if logical_output_name(output_name):
+            self.claim(self.output_key(output_name), account_id)
+
+    def claimants_for_records(self, records: list[dict[str, Any]]) -> list[int | None]:
+        """For each gateway history record (`id`, `outputs`), the account that
+        claimed it — by any of its output names first, else by its job id — or
+        None. One query for the whole listing."""
+        keys: list[str] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            keys.append(self.job_key(str(record.get("id") or "")))
+            for output in record.get("outputs") or []:
+                keys.append(self.output_key(str(output)))
+        claims = self.accounts_for(keys)
+        claimants: list[int | None] = []
+        for record in records:
+            claimed: int | None = None
+            if isinstance(record, dict):
+                for output in record.get("outputs") or []:
+                    claimed = claims.get(self.output_key(str(output)))
+                    if claimed is not None:
+                        break
+                if claimed is None:
+                    claimed = claims.get(self.job_key(str(record.get("id") or "")))
+            claimants.append(claimed)
+        return claimants
 
 
 def _move(source: Path, target: Path) -> bool:

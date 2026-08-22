@@ -200,3 +200,71 @@ test('the video boot state names its Source instead of leaving it undefined', as
     /rentedOnly: Boolean\(preferences\.rentedOnly && /,
   );
 });
+
+/* ---------------- per-tab "Run on" pin ---------------- */
+
+test('withPin puts the pinned box in front for THIS tab only, and is inert for an unattached pin', async () => {
+  const { withPin, isRoutingLeader } = await import('../src/lib/rentedMachines.js');
+  // Two H3 boxes; the GLOBAL priority says 48 leads.
+  const m47 = { rental_id: 'vast:47', attached: true, priority: 0, models_served: ['minimax_h3'] };
+  const m48 = { rental_id: 'vast:48', attached: true, priority: 3, models_served: ['minimax_h3'] };
+  const idle = { rental_id: 'vast:49', attached: false, priority: 0, models_served: ['minimax_h3'] };
+  const all = [m47, m48, idle];
+
+  assert.equal(isRoutingLeader(m48, withPin(all, '')), true, 'no pin: the server order stands');
+  assert.equal(isRoutingLeader(m47, withPin(all, 'vast:47')), true, 'pinned box leads this tab');
+  assert.equal(isRoutingLeader(m48, withPin(all, 'vast:47')), false);
+  // The input list is never mutated — the other tab's picker reads the same array.
+  assert.equal(m48.priority, 3);
+  assert.equal(isRoutingLeader(m48, all), true, 'the shared list still says 48 leads');
+  // A pin naming a box with no lane (idle / detached) does nothing: the gateway
+  // has nothing to route to, and the panel drops it as stale.
+  assert.equal(withPin(all, 'vast:49'), all);
+  assert.equal(withPin(all, 'vast:gone'), all);
+  assert.deepEqual(withPin(null, 'vast:47'), []);
+});
+
+test('the studios send the tab pin as run_on only in Rented mode, persist it, and copy it with the tab', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const read = (rel) => fs.readFileSync(new URL(path.join('..', rel), import.meta.url), 'utf8');
+  const image = read('src/studios/ImageStudio.jsx');
+  const video = read('src/studios/VideoStudio.jsx');
+
+  // Image: one helper, gated on the Rented source, spread into every generate/upscale call.
+  assert.match(image, /const runOn = \(\) => \(s\.rentedOnly && s\.rentedMachineId \? \{ run_on: s\.rentedMachineId \} : \{\}\);/);
+  const generateCalls = image.match(/studio_lane: studioLane,\n\s+\.\.\.runOn\(\),/g) || [];
+  assert.equal(generateCalls.length, 5, 'every localAI.generate call carries the pin');
+  assert.match(image, /localAI\.upscale\(\{[^}]*\.\.\.runOn\(\) \}\)/);
+  // Video: the hivemind request carries it, gated the same way.
+  assert.match(video, /\.\.\.\(setup\.rentedOnly && setup\.rentedMachineId \? \{ run_on: setup\.rentedMachineId \} : \{\}\),/);
+  // Both persist it alongside rentedOnly…
+  assert.match(image.match(/const currentImagePreferences = [\s\S]*?\n  \};/)[0], /rentedMachineId: s\.rentedMachineId/);
+  assert.match(video.match(/const currentVideoPreferences = [\s\S]*?\n  \}\);/)[0], /rentedMachineId: s\.setup\.rentedMachineId/);
+  // …and hand the panel the value + the writer, so the picker edits THIS tab.
+  assert.match(image, /<RentedSourceStatus engine=\{s\} page="image" pinned=\{s\.rentedMachineId \|\| ''\} onPin=\{pinMachine\} \/>/);
+  assert.match(video, /<RentedSourceStatus engine=\{s\} page="video" pinned=\{s\.setup\.rentedMachineId \|\| ''\} onPin=\{pinMachine\} \/>/);
+
+  const { IMAGE_TAB_FIELDS } = await import('../src/lib/studioTabs.js');
+  assert.ok(IMAGE_TAB_FIELDS.includes('rentedMachineId'), 'a duplicated image tab keeps its machine');
+  const { normalizeImagePreferences } = await import('../src/studios/image/imagePrefs.js');
+  assert.equal(normalizeImagePreferences({ modelId: 'm', rentedMachineId: ' vast:47 ' }).rentedMachineId, 'vast:47');
+  const { normalizeVideoPreferences } = await import('../src/lib/videoPreferences.js');
+  assert.equal(normalizeVideoPreferences({ modelId: 'm', rentedMachineId: 'vast:48' }).rentedMachineId, 'vast:48');
+  assert.equal(normalizeVideoPreferences({ modelId: 'm' }).rentedMachineId, '');
+});
+
+test('the Rented panel pins per tab instead of rewriting the global selection', async () => {
+  const fs = await import('node:fs');
+  const source = fs.readFileSync(new URL('../src/studios/RentedSourceStatus.jsx', import.meta.url), 'utf8');
+  // The picker used to POST /select — one global priority that every tab then
+  // followed, which is exactly the "tab 1 flipped when I switched in tab 2" bug.
+  assert.doesNotMatch(source, /\/select/);
+  assert.match(source, /onPin\(machine\.rental_id\)/);
+  // An idle/broken box is attached (plain attach: the global order is left alone) and only then pinned.
+  assert.match(source, /\/attach`, \{ method: 'POST' \}\);\n\s+onPin\(machine\.rental_id\);/);
+  // A pin whose machine is no longer attached is dropped — but never on an empty
+  // list, which is what an unreachable API looks like.
+  assert.match(source, /known\.length > 0\n\s+&& !known\.some\(\(machine\) => machine\.rental_id === pinned && machine\.attached\)/);
+  assert.match(source, /withPin\(known, pinned\)/);
+});

@@ -239,6 +239,11 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
             {rung?.fastest && <Pill tone="ok">fastest</Pill>}
             {rung?.gpu_class === bestValue && <Pill tone="ok">best value</Pill>}
             {rung?.estimate_basis === 'measured' && <Pill tone="honey">measured here</Pill>}
+            {rung?.warm && (
+              <Pill tone="ok" title={`A warm volume in ${rung.warm_data_center || 'its region'} already holds the models: the box mounts it and skips the download, ready in ~${rung.warm_setup_minutes ?? 3} min.`}>
+                warm · ~{rung.warm_setup_minutes ?? 3} min
+              </Pill>
+            )}
           </div>
           {/* The trap the ladder exists to expose. Said outright, because
               position on a one-dimensional slider cannot say it. */}
@@ -268,7 +273,9 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
               </small>
               <small className="text-[11px] text-ink3">
                 {rung.available} offer{rung.available === 1 ? '' : 's'} · ready in ~{rung.setup_minutes} min
-                {' '}({plan.download_gb}GB of models)
+                {rung.warm && rung.warm_setup_minutes != null && rung.setup_minutes !== rung.warm_setup_minutes
+                  ? ` (warm: ~${rung.warm_setup_minutes} min, no model download)`
+                  : ` (${plan.download_gb}GB of models)`}
               </small>
             </>
           ) : (
@@ -477,12 +484,18 @@ function StudioButtons({ machine, onUse, onDetach, busy, applying, leading, shar
 function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, onResume, attachBusy, applying, leading, shared }) {
   const ready = machine.phase === 'ready';
   const paused = machine.phase === 'paused';
+  // Resume was asked for and the host has not honoured it within the grace
+  // period: Vast's own guidance is that a restart stuck >30 s means the GPU
+  // is rented by someone else. Still "paused" (disk intact, still billing),
+  // but the row has to say so and show the way out.
+  const resumeBlocked = paused && Boolean(machine.resume_blocked);
+  const resuming = paused && !resumeBlocked && Boolean(machine.resume_requested_at);
   // A failed box reports Vast status "running" — it IS running, and billing,
   // it just cannot serve anything. Take the tone from the phase, not the host.
   const failed = machine.phase === 'error';
-  const pillStatus = ready ? 'succeeded' : paused ? 'waiting' : failed ? 'failed'
+  const pillStatus = ready ? 'succeeded' : resumeBlocked ? 'failed' : paused ? 'waiting' : failed ? 'failed'
     : machine.phase === 'provisioning' || machine.phase === 'booting' ? 'running' : machine.status;
-  const pillLabel = ready ? 'ready' : failed ? 'failed' : machine.phase;
+  const pillLabel = ready ? 'ready' : failed ? 'failed' : resumeBlocked ? 'resume blocked' : resuming ? 'resuming' : machine.phase;
   return (
     <Card className="flex flex-col gap-2 p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -518,8 +531,16 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
         <span className="ml-auto" />
         {machine.managed && (ready || paused) && (
           paused ? (
-            <Button variant="primary" size="sm" disabled={attachBusy} onClick={() => onResume(machine)}>
-              Resume
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={attachBusy}
+              onClick={() => onResume(machine)}
+              title={resumeBlocked
+                ? 'Ask the host again. If the GPU stays taken, destroy this machine and rent a fresh one.'
+                : 'Quick resume: the models are still on the disk, so the box is back in about a minute — if the host still has the GPU free.'}
+            >
+              {resumeBlocked ? 'Retry resume' : resuming ? 'Resuming…' : 'Quick resume'}
             </Button>
           ) : (
             <Button
@@ -527,9 +548,9 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
               size="sm"
               disabled={attachBusy}
               onClick={() => onPause(machine)}
-              title="Stops the GPU but keeps the disk — models stay downloaded, so resuming skips the model pull."
+              title="Quick resume: stops the GPU (and its hourly price) but keeps the disk with every model on it, so resuming takes about a minute instead of a fresh 15–30 minute provision. While paused you pay only for the disk — and the GPU is not reserved for you."
             >
-              Pause
+              Pause · Quick resume
             </Button>
           )
         )}
@@ -543,10 +564,22 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
         {machine.provider_label ? `${machine.provider_label} · ` : ''}
         {machine.label || `id ${machine.rental_id}`}
       </small>
-      {machine.managed && paused && (
+      {machine.managed && paused && !resumeBlocked && (
         <small className="text-[12px] text-ink3">
-          Paused — models stay on the disk{machine.disk_gb ? ` (${machine.disk_gb}GB)` : ''}; resuming skips the
-          model download. Destroy to stop paying for storage.
+          Quick resume — the models stay on the disk{machine.disk_gb ? ` (${machine.disk_gb}GB)` : ''}, so resuming
+          takes about a minute instead of a fresh provision (measured 40 s on a PRO 6000, 2026-08-22).
+          While paused you pay for the disk only (${(machine.paused_usd_per_hour ?? 0).toFixed(3)}/hr — marketplaces
+          often bill stopped storage at a higher rate than running). <b className="text-ink2">No guarantee:</b> the
+          GPU is released to the host while paused, and if someone else rents it your resume waits on
+          &ldquo;scheduling&rdquo; until it is free again. Destroy to stop paying for the disk.
+        </small>
+      )}
+      {machine.managed && resumeBlocked && (
+        <small className="text-[12px] text-warn">
+          Resume was asked for {machine.resume_requested_at ? `${Math.max(1, Math.round((Date.now() / 1000 - machine.resume_requested_at) / 60))} min ago` : 'a while ago'} and
+          the host has not given the GPU back — it is most likely rented by someone else right now. Your disk and models
+          are intact and still billing at ${(machine.paused_usd_per_hour ?? 0).toFixed(3)}/hr. Keep retrying, or destroy
+          this machine and rent a fresh one (a cold provision).
         </small>
       )}
       {machine.managed && !ready && !paused && <ProvisionStepper machine={machine} />}
@@ -568,6 +601,115 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
       )}
       {machine.comfy_url && <small className="text-[11px] text-ink3">ComfyUI: {machine.comfy_url}</small>}
     </Card>
+  );
+}
+
+// A warm volume: persistent storage on a cloud that keeps one (RunPod), stocked
+// once with a tier's models so every later rental in that region mounts it
+// and skips the download entirely (measured cold: 25 of 27 provisioning
+// minutes were the pull). Billed per GB-month whether or not a box is using
+// it; a stocking box is a normal rental of the tier, destroyed the moment it
+// reports ready.
+function WarmVolumesCard({ plans }) {
+  const [volumes, setVolumes] = useState(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [tier, setTier] = useState(plans?.[0]?.tier || 'minimax');
+  const [dataCenter, setDataCenter] = useState('EU-RO-1');
+  const load = useCallback(async () => {
+    try {
+      const body = await api('/api/gpu-rentals/warm-volumes');
+      setVolumes(body.volumes || []);
+      setError('');
+    } catch (e) {
+      setError(e.message);
+    }
+  }, []);
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 30_000);
+    return () => clearInterval(timer);
+  }, [load]);
+  const stock = async () => {
+    setBusy(true);
+    try {
+      await api('/api/gpu-rentals/warm-volumes', {
+        method: 'POST',
+        body: JSON.stringify({ tier, data_center_id: dataCenter.trim() }),
+      });
+      await load();
+      notifyRentedMachinesChanged();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const remove = async (volume) => {
+    if (!window.confirm(`Delete the warm volume for ${volume.tier_label || volume.tier} in ${volume.data_center_id}? The models on it are gone and the next rental downloads again.`)) return;
+    setBusy(true);
+    try {
+      await api(`/api/gpu-rentals/warm-volumes/${encodeURIComponent(volume.tier)}`, { method: 'DELETE' });
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="flex flex-col gap-3">
+      <SectionLabel>Warm regions</SectionLabel>
+      <Card className="flex flex-col gap-3 p-4">
+        <small className="text-[12px] text-ink2">
+          A warm region keeps a tier&rsquo;s models on a persistent volume (RunPod Secure Cloud) so a new machine
+          there mounts them and is ready in a few minutes instead of downloading ~60&ndash;100&nbsp;GB first.
+          The volume bills per GB-month while it exists; stocking it rents one machine for the time the download takes.
+        </small>
+        {error && <small className="text-[12px] text-danger">{error}</small>}
+        {volumes === null ? (
+          <Spinner size={13} className="text-honey" />
+        ) : volumes.length === 0 ? (
+          <small className="text-[12px] text-ink3">No warm regions yet.</small>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {volumes.map((v) => (
+              <div key={v.key} className="flex flex-wrap items-center gap-2 text-[12px]">
+                <StatusPill status={v.state === 'stocked' ? 'succeeded' : v.state === 'error' ? 'failed' : 'running'} label={v.state} />
+                <b className="text-ink1">{v.tier_label || v.tier}</b>
+                <span className="font-mono text-ink2">{v.provider} · {v.data_center_id} · {v.size_gb}GB</span>
+                {v.state === 'stocking' && v.stocking_rental_id && (
+                  <span className="text-ink3">stocking on {v.stocking_rental_id} — watch it under Active machines</span>
+                )}
+                {v.state === 'error' && <span className="text-warn">{v.detail}</span>}
+                <span className="ml-auto" />
+                {v.state === 'error' && (
+                  <Button size="sm" variant="neutral" disabled={busy} onClick={() => { setTier(v.tier); setDataCenter(v.data_center_id); stock(); }}>
+                    Retry stocking
+                  </Button>
+                )}
+                <Button size="sm" variant="danger" disabled={busy} onClick={() => remove(v)}>Delete</Button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <select className="rounded border border-line bg-bg1 px-2 py-1 text-[12px] text-ink1" value={tier} onChange={(e) => setTier(e.target.value)}>
+            {(plans || []).map((p) => <option key={p.tier} value={p.tier}>{p.tier_label || p.tier}</option>)}
+          </select>
+          <input
+            className="w-32 rounded border border-line bg-bg1 px-2 py-1 font-mono text-[12px] text-ink1"
+            value={dataCenter}
+            onChange={(e) => setDataCenter(e.target.value)}
+            placeholder="EU-RO-1"
+            title="RunPod data center id with storage support (e.g. EU-RO-1, EUR-IS-1, CA-MTL-3, US-IL-1)"
+          />
+          <Button size="sm" variant="primary" loading={busy} disabled={busy || !dataCenter.trim()} onClick={stock}>
+            Stock a warm region
+          </Button>
+        </div>
+      </Card>
+    </section>
   );
 }
 
@@ -956,9 +1098,11 @@ export function GpuMachinesView({ active }) {
                   ))}
                 </div>
               ) : (
-                <EmptyState icon="cpu" title="No machines running" hint="Rent one below — boxes come up provisioned with the studio models from R2 and are destroyed (not paused) to stop billing." />
+                <EmptyState icon="cpu" title="No machines running" hint="Rent one below — boxes come up provisioned with the studio models. Pause (Quick resume) keeps the disk for about a minute's restart; Destroy stops all billing." />
               )}
             </section>
+
+            <WarmVolumesCard plans={plans} />
 
             <section className="flex flex-col gap-3">
               <SectionLabel>Rent a machine</SectionLabel>

@@ -28,7 +28,9 @@ import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../lib/promptUtils.js';
 import { t, aspectRatioName } from '../lib/i18n.js';
-import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
+import {
+  savePendingJob, removePendingJob, getPendingJobs, pendingJobsForTab,
+} from '../lib/pendingJobs.js';
 import { imageDownloadName } from '../lib/downloadNames.js';
 import {
   isHivemindStudioEnabled, loadStudioGenerationHistory, referenceToLocalImageInput, saveStudioGenerationHistory,
@@ -202,6 +204,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // Rented source mode: local mechanically (lane rules route by model
     // server-side); filters the menu to models an attached machine serves.
     rentedOnly: Boolean(persistedImagePreferences?.rentedOnly && useLocalModel),
+    // This tab's "Run on" pin: the rented machine (rental id) every generation
+    // it sends in Rented mode carries as run_on. Restored with the tab's other
+    // settings; '' follows the Machines default.
+    rentedMachineId: persistedImagePreferences?.rentedMachineId || '',
     rentedMachines: [],
     rentedPending: [],
     rentedProvisioning: [],
@@ -338,7 +344,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   return engine;
 }
 
-export function ImageStudio({ active = true, tabActive = true, seed = null, apiRef = null, studioLane = '' } = {}) {
+export function ImageStudio({
+  active = true, tabActive = true, seed = null, apiRef = null, studioLane = '',
+  tabId = 0, primary = null, openTabIds = null,
+} = {}) {
   const engineRef = useRef(null);
   // The seed is read once, at mount — StudioTabs clears it afterwards, so every
   // later "am I the original tab?" question reads the captured value.
@@ -350,9 +359,17 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
   const [, setTick] = useState(0);
   const bump = () => setTick((n) => n + 1);
 
-  // The original tab restores the session (pending jobs, composer draft); new and
-  // duplicated tabs start clean and must not re-claim either.
-  const isPrimaryTab = !seedRef.current;
+  // The primary tab adopts the composer draft and any pending generation no open
+  // tab owns; new and duplicated tabs start clean. StudioTabs decides which tab
+  // that is — a reload restores every tab with a null seed, so the old "no seed =
+  // original tab" test would have made all of them primary at once. The fallback
+  // keeps a standalone mount (no StudioTabs) behaving as it always did.
+  const isPrimaryTab = primary == null ? !seedRef.current : Boolean(primary);
+  // This tab's own id, captured at mount: it stamps the generations this tab
+  // starts, which is how the tab reclaims them after a reload.
+  const tabIdRef = useRef(tabId);
+  const openTabIdsRef = useRef(openTabIds);
+  openTabIdsRef.current = openTabIds;
   // Front tab of this studio: owns preference persistence and one-shot handoffs.
   const tabActiveRef = useRef(tabActive);
   tabActiveRef.current = tabActive;
@@ -371,6 +388,18 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
   const compatibleLocalModels = () => ((s.rentedOnly && s.rentedMachines?.length)
     ? s.localImageModels.filter((m) => servedByAnyMachine(s.rentedMachines, m))
     : s.localImageModels);
+
+  // The tab's "Run on" pin rides every generation this tab sends while the
+  // source is Rented; the gateway tries that machine ahead of its default order.
+  const runOn = () => (s.rentedOnly && s.rentedMachineId ? { run_on: s.rentedMachineId } : {});
+  // Written by the Rented panel's picker ('' = follow the Machines default).
+  const pinMachine = (rentalId) => {
+    const next = rentalId || '';
+    if ((s.rentedMachineId || '') === next) return;
+    s.rentedMachineId = next;
+    persistImagePreferences();
+    bump();
+  };
   const ensureCompatibleLocalModel = () => {
     const compatible = compatibleLocalModels();
     const selected = compatible.find((model) => model.id === s.selectedLocalModel) || compatible[0] || null;
@@ -566,6 +595,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       imageMode: s.imageMode,
       useLocalModel: s.useLocalModel,
       rentedOnly: s.rentedOnly,
+      rentedMachineId: s.rentedMachineId,
       localModelId: s.selectedLocalModel,
       aspectRatio: s.selectedAr,
       resolution: s.selectedResolution,
@@ -1128,7 +1158,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         reader.onerror = () => reject(new Error('Could not read the image'));
         reader.readAsDataURL(blob);
       });
-      const result = await localAI.upscale({ image_base64: dataUrl, mode, scale: 1.5, prompt: entry.prompt || '' });
+      const result = await localAI.upscale({ image_base64: dataUrl, mode, scale: 1.5, prompt: entry.prompt || '', ...runOn() });
       if (!result?.url) throw new Error('Upscale finished without an image');
       addToHistory({
         id: `upscale-${entry.id || 'img'}-${mode}-${Date.now()}`,
@@ -1169,6 +1199,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       const result = await localAI.generate({
         model: model.id,
         studio_lane: studioLane,
+        ...runOn(),
         prompt: prompt || entry.prompt || '',
         image_base64: dataUrl,
         outpaint: {
@@ -1236,6 +1267,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
       const result = await localAI.generate({
         model: model.id,
         studio_lane: studioLane,
+        ...runOn(),
         prompt: prompt || '',
         image_base64: dataUrl,
         inpaint: { mask_base64: maskDataUrl, mask_expand: maskExpand, mask_influence: maskInfluence },
@@ -1297,6 +1329,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         const result = await localAI.generate({
           model: model.id,
           studio_lane: studioLane,
+          ...runOn(),
           prompt: editAnglePrompt(dialect, angle, extraPrompt),
           image_base64: dataUrl,
           seed: -1,
@@ -1346,6 +1379,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
         const result = await localAI.generate({
           model: model.id,
           studio_lane: studioLane,
+          ...runOn(),
           prompt: prompts[i],
           image_base64: dataUrl,
           seed: baseSeed + i,
@@ -1627,6 +1661,7 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           const res = await localAI.generate({
             model: s.selectedLocalModel,
             studio_lane: studioLane,
+            ...runOn(),
             prompt,
             // Not sent to workflows that ignore it — the UI says as much, and a field
             // the user can no longer see must not keep riding along in the payload.
@@ -1733,7 +1768,12 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           aspect_ratio: s.selectedAr,
           onRequestId: (rid) => {
             capturedRequestId = rid;
-            savePendingJob({ requestId: rid, studioType: 'image', historyMeta, maxAttempts: 60, interval: 2000, submittedAt: Date.now() });
+            // Stamped with the tab that started it, so it is that tab — and no
+            // other — that reclaims the run after a reload.
+            savePendingJob({
+              requestId: rid, studioType: 'image', historyMeta, tabId: tabIdRef.current,
+              maxAttempts: 60, interval: 2000, submittedAt: Date.now(),
+            });
           },
         };
         if (prompt) genParams.prompt = prompt;
@@ -1747,7 +1787,10 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
           aspect_ratio: s.selectedAr,
           onRequestId: (rid) => {
             capturedRequestId = rid;
-            savePendingJob({ requestId: rid, studioType: 'image', historyMeta, maxAttempts: 60, interval: 2000, submittedAt: Date.now() });
+            savePendingJob({
+              requestId: rid, studioType: 'image', historyMeta, tabId: tabIdRef.current,
+              maxAttempts: 60, interval: 2000, submittedAt: Date.now(),
+            });
           },
         };
         const qualityField = getCurrentQualityField(s.selectedModel);
@@ -1822,24 +1865,73 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
     if (mountedOnceRef.current) return undefined;
     mountedOnceRef.current = true;
 
-    // --- Resume any pending image generations from a previous session ---
-    // Only the original tab resumes: every tab shares one pending-job store, so a
-    // second tab polling it would race the first and double the history entry.
+    // --- Resume the generations this tab had in flight when the page went away ---
+    // Ownership is per TAB: a reload brings the whole strip back, and each tab
+    // reclaims the run IT started — otherwise one tab polls another's job and files
+    // the result in the wrong tab's history. This tab puts its own run back on the
+    // canvas; the primary tab additionally adopts the ownerless ones (a tab closed
+    // mid-render, or a job saved before jobs carried a tab id) into history.
     (async () => {
-      if (!isPrimaryTab) return;
-      const pending = getPendingJobs('image');
-      if (!pending.length) return;
       const apiKey = localStorage.getItem('muapi_key');
       if (!apiKey) return; // can't poll without key; jobs remain for next time
+      const claimed = pendingJobsForTab(getPendingJobs('image'), tabIdRef.current, {
+        primary: isPrimaryTab,
+        openTabIds: openTabIdsRef.current,
+      });
+      if (!claimed.length) return;
+      const ownTab = Number.isSafeInteger(Number(tabIdRef.current)) ? Number(tabIdRef.current) : null;
+      // The canvas shows one run, so restore this tab's newest job there and poll
+      // the rest quietly into history.
+      const live = ownTab == null ? undefined : claimed
+        .filter((job) => Number(job?.tabId) === ownTab)
+        .sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0))[0];
+      const silent = claimed.filter((job) => job !== live);
 
-      s.resumeRemaining = pending.length;
+      const pollJob = async (job) => {
+        const interval = Number(job.interval) || 2000;
+        const spent = Math.floor((Date.now() - (Number(job.submittedAt) || Date.now())) / interval);
+        const attemptsLeft = Math.max(1, (Number(job.maxAttempts) || 60) - spent);
+        const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, interval);
+        return result.outputs?.[0] || result.url || result.output?.url;
+      };
+
+      if (live && !s.generating) {
+        s.generating = true;
+        startImageProgress();
+        // A resumed job was configured before this mount, so its wall time is not a
+        // measurement of what the panels currently say — don't file it as one.
+        s.progressSignature = null;
+        // The true submit time, so elapsed covers the whole render rather than
+        // restarting the clock at the reload.
+        s.generationStartedAt = Number(live.submittedAt) || Date.now();
+        bump();
+        void (async () => {
+          try {
+            const url = await pollJob(live);
+            if (url) {
+              addToHistory({ id: live.requestId, url, ...live.historyMeta, timestamp: new Date().toISOString() });
+              finishImageProgress(true);
+              viewImage(url);
+            } else {
+              finishImageProgress(false);
+            }
+          } catch (e) {
+            console.warn('[ImageStudio] Image resume failed:', live.requestId, e.message);
+            finishImageProgress(false);
+          } finally {
+            removePendingJob(live.requestId);
+            s.generating = false;
+            bump();
+          }
+        })();
+      }
+
+      if (!silent.length) return;
+      s.resumeRemaining = silent.length;
       bump();
-      pending.forEach(async (job) => {
-        const elapsedAttempts = Math.floor((Date.now() - job.submittedAt) / job.interval);
-        const attemptsLeft = Math.max(1, job.maxAttempts - elapsedAttempts);
+      silent.forEach(async (job) => {
         try {
-          const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, job.interval);
-          const url = result.outputs?.[0] || result.url || result.output?.url;
+          const url = await pollJob(job);
           if (url) {
             addToHistory({ id: job.requestId, url, ...job.historyMeta, timestamp: new Date().toISOString() });
             void playCompletionPing();
@@ -2155,7 +2247,9 @@ export function ImageStudio({ active = true, tabActive = true, seed = null, apiR
               { value: 'rented', label: t('image.rented') },
             ]}
           />
-          {s.rentedOnly ? <RentedSourceStatus engine={s} page="image" /> : null}
+          {s.rentedOnly
+            ? <RentedSourceStatus engine={s} page="image" pinned={s.rentedMachineId || ''} onPin={pinMachine} />
+            : null}
           {/* Only ever visible when another local lane finished and is still
               sitting on real memory — see LaneMemoryNotice. Local work is the
               only work it can affect, so it stays out of the cloud lane. */}

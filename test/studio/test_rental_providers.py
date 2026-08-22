@@ -594,3 +594,52 @@ def test_a_lora_for_another_base_model_never_ships_to_the_wrong_tier(monkeypatch
     # The video tier serves Krea2 as well, so it carries that LoRA too.
     assert video == {"krea2/a.safetensors"}
     assert minimax == {"h3/b.safetensors"}
+
+
+def test_runpod_mounts_a_warm_volume_and_pins_the_pod_to_its_data_center(monkeypatch) -> None:
+    """The no-download path: a pod handed a stocked network volume mounts it
+    where the provisioning script expects the weights (/workspace), and is
+    scheduled only in the volume's data center — a network volume cannot be
+    attached across regions (RunPod docs). A pod without one sends none of
+    it, so a cold rental is byte-for-byte what it was."""
+    from hivemind_content_studio.rental_providers import LaunchSpec as _LaunchSpec
+    calls = []
+
+    def fake_request(method, path, payload=None):
+        calls.append((method, path, payload))
+        return {"id": "pod-w1"}
+
+    monkeypatch.setattr(runpod_provider, "request", fake_request)
+    monkeypatch.setenv("RUNPOD_API_KEY", "test")
+    spec = _LaunchSpec(image="img", disk_gb=120, label="x", onstart="#!/bin/bash\n", expose_ports=[18189],
+                       offer_id="NVIDIA GeForce RTX 5090", network_volume_id="vol-1", data_center_ids=["EU-RO-1"])
+    assert runpod_provider.PROVIDER.create(spec) == "pod-w1"
+    payload = calls[-1][2]
+    assert payload["networkVolumeId"] == "vol-1"
+    assert payload["dataCenterIds"] == ["EU-RO-1"]
+    assert payload["volumeMountPath"] == "/workspace"
+    assert payload["volumeInGb"] == 0, "the network volume replaces the pod's own volume disk"
+    cold = _LaunchSpec(image="img", disk_gb=120, label="x", onstart="#!/bin/bash\n", expose_ports=[18189],
+                       offer_id="NVIDIA GeForce RTX 5090")
+    runpod_provider.PROVIDER.create(cold)
+    payload = calls[-1][2]
+    assert "networkVolumeId" not in payload and "dataCenterIds" not in payload and "volumeMountPath" not in payload
+
+
+def test_runpod_network_volume_calls_go_to_the_rest_api(monkeypatch) -> None:
+    calls = []
+
+    def fake_request(method, path, payload=None):
+        calls.append((method, path, payload))
+        if method == "POST":
+            return {"id": "nv-9"}
+        if method == "GET":
+            return [{"id": "nv-9", "name": "hivemind-warm-minimax-eu-ro-1", "size": 120, "dataCenterId": "EU-RO-1"}]
+        return {}
+
+    monkeypatch.setattr(runpod_provider, "request", fake_request)
+    assert runpod_provider.PROVIDER.create_network_volume("hivemind-warm-minimax-eu-ro-1", 120, "EU-RO-1") == "nv-9"
+    assert calls[-1] == ("POST", "/networkvolumes", {"name": "hivemind-warm-minimax-eu-ro-1", "size": 120, "dataCenterId": "EU-RO-1"})
+    assert runpod_provider.PROVIDER.list_network_volumes()[0]["id"] == "nv-9"
+    runpod_provider.PROVIDER.delete_network_volume("nv-9")
+    assert calls[-1] == ("DELETE", "/networkvolumes/nv-9", None)

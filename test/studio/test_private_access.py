@@ -217,6 +217,26 @@ def test_canvas_gateway_history_distinguishes_file_fallback_from_durable_jobs(tm
     assert all("prompt" not in record for record in records.values())
 
 
+def test_canvas_history_forget_drops_exactly_the_named_records(tmp_path: Path) -> None:
+    """forget() is sync()'s counterpart for records a workspace may not hold:
+    keyed on the same locator digest, so a record naming the sealed file
+    removes the row synced from its logical name, and nothing else goes."""
+    root = tmp_path / "comfy"
+    root.mkdir()
+    (root / "mine.png").write_bytes(b"p")
+    (root / "theirs.mp4.e2e").write_bytes(b"sealed")
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    store = CanvasHistoryStore(tmp_path / "canvas.sqlite3", cipher=cipher)
+    mine = {"id": "job-1", "status": "success", "outputs": [str(root / "mine.png")]}
+    theirs = {"id": "file-2", "status": "success", "outputs": [str(root / "theirs.mp4")]}
+    store.sync([mine, theirs])
+    assert sorted(item["output_basename"] for item in store.list()) == ["mine.png", "theirs.mp4"]
+
+    assert store.forget([{"id": "other", "outputs": [str(root / "theirs.mp4.e2e")]}, "junk", {"outputs": []}]) == 1
+    assert [item["output_basename"] for item in store.list()] == ["mine.png"]
+    assert store.forget([theirs]) == 0  # already gone; idempotent
+
+
 def test_canvas_history_keeps_same_named_outputs_from_distinct_roots(tmp_path: Path) -> None:
     roots = [tmp_path / "comfy", tmp_path / "zimage"]
     for root in roots:

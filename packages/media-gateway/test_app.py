@@ -4438,7 +4438,8 @@ class RemoteComfyLaneTests(unittest.TestCase):
             with patch.object(app, 'urlopen', answering(['main.py', '--disable-metadata', '--vram-headroom', '12'])):
                 report = app.comfy_lane_vram_headroom('rental9')
             self.assertEqual(report, {
-                'lane': 'rental9', 'remote': True, 'vram_headroom_gb': 12.0, 'probed': True, 'error': None,
+                'lane': 'rental9', 'remote': True, 'vram_headroom_gb': 12.0, 'vram_total_gb': None,
+                'probed': True, 'error': None,
             })
             self.assertEqual(probes, ['http://127.0.0.1:18337/system_stats'])
             # Cached: the flags only change when ComfyUI is relaunched, and a
@@ -4469,6 +4470,49 @@ class RemoteComfyLaneTests(unittest.TestCase):
             self.assertIn('Connection refused', report['error'])
             with patch.object(app, 'urlopen', answering(['main.py', '--vram-headroom', '12'])):
                 self.assertEqual(app.comfy_lane_vram_headroom('rental9')['vram_headroom_gb'], 12.0)
+
+    def test_a_lanes_card_size_rides_with_its_launch_flags(self):
+        """The motion-reference budget is a property of the CARD: 85,000 packed
+        rows were measured on a 32 GB 5090, a 96 GB RTX PRO 6000 holds far more.
+        The same /system_stats read that carries the launch flags publishes the
+        device, so the lane report names the card in GiB — and a lane that
+        publishes no device says None, never a guess."""
+        app = load_app()
+        lanes = {'default': 'http://127.0.0.1:8188', 'rental9': 'http://127.0.0.1:18337'}
+
+        def answering(payload):
+            class Answer:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return json.dumps(payload).encode()
+            return lambda request, timeout=None: Answer()
+
+        pro6000 = {
+            "system": {"argv": ["main.py", "--vram-headroom", "12"]},
+            "devices": [{"name": "cuda:0 NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+                         "vram_total": 101_971_394_560, "vram_free": 100_000_000_000}],
+        }
+        with patch.object(app, 'COMFY_LANES', lanes), \
+             patch.object(app, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app, '_lane_launch_args_cache', {}):
+            with patch.object(app, 'urlopen', answering(pro6000)):
+                report = app.comfy_lane_vram_headroom('rental9')
+            self.assertEqual(report['probed'], True)
+            self.assertEqual(report['vram_headroom_gb'], 12.0)
+            self.assertEqual(report['vram_total_gb'], 94.97)
+            # Cached with the flags: no second probe inside the TTL.
+            with patch.object(app, 'urlopen', side_effect=AssertionError('must not re-probe inside the TTL')):
+                self.assertEqual(app.comfy_lane_vram_headroom('rental9')['vram_total_gb'], 94.97)
+
+        with patch.object(app, 'COMFY_LANES', lanes), \
+             patch.object(app, 'COMFY_REMOTE_LANES', {'rental9'}), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app, '_lane_launch_args_cache', {}):
+            with patch.object(app, 'urlopen', answering({"system": {"argv": ["main.py"]}, "devices": []})):
+                report = app.comfy_lane_vram_headroom('rental9')
+            self.assertEqual((report['probed'], report['vram_headroom_gb'], report['vram_total_gb']), (True, 0.0, None))
 
     def test_api_lanes_resolve_names_the_lane_a_graph_routes_to_and_its_headroom(self):
         """The MCP's motion-reference guard asks this before pricing a job: only
@@ -4521,7 +4565,7 @@ class RemoteComfyLaneTests(unittest.TestCase):
                 # The attached H3 box, launched without the flag.
                 self.assertEqual(answer, {
                     'ok': True, 'lane': 'rental47', 'remote': True,
-                    'vram_headroom_gb': 0.0, 'probed': True, 'error': None,
+                    'vram_headroom_gb': 0.0, 'vram_total_gb': None, 'probed': True, 'error': None,
                 })
                 # A graph no rental claims routes to the local default, which
                 # is probed the same way (a CUDA host running the studio
@@ -5040,6 +5084,230 @@ class RemoteComfyLaneTests(unittest.TestCase):
                     "48": {"lane": "rental48", "local_port": 18348, "needles": ["minimax_h3"], "priority": 3},
                 }))
                 self.assertEqual(app.comfy_lane_for_prompt_body(graph), 'rental47')
+
+    def _two_boxes_registry(self, registry):
+        # Two H3 boxes, same models. The GLOBAL priority says 48 leads.
+        registry.write_text(json.dumps({
+            "vast:47": {"lane": "rental47", "local_port": 18347, "needles": ["minimax_h3"], "priority": 0},
+            "vast:48": {"lane": "rental48", "local_port": 18348, "needles": ["minimax_h3"], "priority": 3},
+        }))
+
+    def test_a_run_on_pin_routes_the_request_ahead_of_the_priority_order(self):
+        # The studio's per-tab "Run on": two tabs, two boxes serving the same
+        # models. The global priority says 48 leads; the tab pinned to 47 still
+        # lands on 47 and the un-pinned tab follows the priority. Nothing global
+        # moves, so the two tabs drive the two boxes at once — and switching in
+        # one tab can never move the other (the bug this replaces: the picker
+        # rewrote the one global priority, so every tab followed the last click).
+        app = load_app()
+        graph = json.dumps({"prompt": {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}}).encode("utf-8")
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            with patch.object(app, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(app, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app, 'COMFY_LANE_RULES', []), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', set()):
+                self._two_boxes_registry(registry)
+                self.assertEqual(app.comfy_lane_for_prompt_body(graph), 'rental48')
+                self.assertEqual(app.comfy_lane_for_prompt_body(graph, run_on='vast:47'), 'rental47')
+                self.assertEqual(app.comfy_lane_for_prompt_body(graph, run_on='vast:48'), 'rental48')
+                # The lane name is accepted too (what the registry calls the box).
+                self.assertEqual(app.comfy_lane_for_prompt_body(graph, run_on='rental47'), 'rental47')
+                # Per request: the next un-pinned request still follows the priority.
+                self.assertEqual(app.comfy_lane_for_prompt_body(graph), 'rental48')
+                self.assertEqual(app.comfy_lane_for_prompt_body(graph, run_on=''), 'rental48')
+                self.assertEqual(
+                    app.comfy_http_for_prompt_body(graph, run_on='vast:47'), 'http://127.0.0.1:18347')
+
+    def test_a_run_on_pin_never_sends_a_model_to_a_box_that_lacks_it(self):
+        # The pin settles which of several CAPABLE boxes runs a job; it is not a
+        # way to queue a model on a box without it. Pinned to an H3 box, an LTX
+        # graph falls through to the normal order — the local ltx lane here.
+        app = load_app()
+        ltx_graph = json.dumps({"prompt": {"1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "ltx2310eros_v14.safetensors"},
+        }}}).encode("utf-8")
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            with patch.object(app, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(app, 'COMFY_LANES', {
+                     "default": "http://127.0.0.1:8188", "ltx": "http://127.0.0.1:8189"}), \
+                 patch.object(app, 'COMFY_LANE_RULES', [("ltx", ["ltx"])]), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', set()):
+                self._two_boxes_registry(registry)
+                self.assertEqual(app.comfy_lane_for_prompt_body(ltx_graph, run_on='vast:47'), 'ltx')
+
+    def test_a_run_on_pin_naming_a_detached_machine_is_refused_not_rerouted(self):
+        # The tab asked for THAT box. Quietly spending another box's hours is the
+        # surprise the pin exists to prevent, so a stale pin raises — the studio
+        # drops a stale pin on its next refresh, and an agent gets the reason.
+        app = load_app()
+        graph = json.dumps({"prompt": {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}}).encode("utf-8")
+        with TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "rental-lanes.json"
+            with patch.object(app, 'RENTAL_LANES_FILE', registry), \
+                 patch.dict(app._rental_lanes_state, {"mtime": None, "lanes": {}}, clear=False), \
+                 patch.object(app, 'COMFY_LANES', {"default": "http://127.0.0.1:8188"}), \
+                 patch.object(app, 'COMFY_LANE_RULES', []), \
+                 patch.object(app, 'COMFY_REMOTE_LANES', set()):
+                self._two_boxes_registry(registry)
+                with self.assertRaises(app.ComfyLanePinError) as caught:
+                    app.comfy_lane_for_prompt_body(graph, run_on='vast:99')
+                self.assertIn('vast:99', str(caught.exception))
+                self.assertIn('no longer attached', str(caught.exception))
+                # Detaching the pinned box turns a good pin stale on the next request.
+                self.assertEqual(app.comfy_lane_for_prompt_body(graph, run_on='vast:47'), 'rental47')
+                registry.write_text(json.dumps({
+                    "vast:48": {"lane": "rental48", "local_port": 18348, "needles": ["minimax_h3"], "priority": 3},
+                }))
+                with self.assertRaises(app.ComfyLanePinError):
+                    app.comfy_lane_for_prompt_body(graph, run_on='vast:47')
+                # No pin is no pin.
+                self.assertIsNone(app.comfy_lane_for_pin(''))
+                self.assertIsNone(app.comfy_lane_for_pin(None))
+
+    def test_a_prompt_body_carries_the_run_on_pin_top_level_or_in_the_png_info(self):
+        app = load_app()
+        self.assertEqual(
+            app._run_on_from_comfy_prompt_body(json.dumps({"prompt": {}, "run_on": "vast:47"})), 'vast:47')
+        self.assertEqual(
+            app._run_on_from_comfy_prompt_body(json.dumps({
+                "prompt": {}, "extra_data": {"extra_pnginfo": {"runOn": " vast:48 "}},
+            }).encode('utf-8')),
+            'vast:48')
+        self.assertEqual(app._run_on_from_comfy_prompt_body(b'{"prompt": {}}'), '')
+        self.assertEqual(app._run_on_from_comfy_prompt_body(b'not json'), '')
+        self.assertEqual(app._run_on_from_comfy_prompt_body(b'[]'), '')
+
+    def test_proxy_submit_and_lanes_resolve_route_by_the_run_on_pin_and_refuse_a_stale_one(self):
+        """Over HTTP: the MCP's submit (/comfy/api/prompt) and its budget guard
+        (/api/lanes/resolve) both honour the tab's pin, and a stale pin comes
+        back 409 + operational (so it survives machine-private redaction and
+        reaches the tab as the reason, not a bare failure)."""
+        from urllib.request import urlopen as real_urlopen, Request as RealRequest
+        from urllib.error import HTTPError as RealHTTPError
+        app = load_app()
+        graph = {"6": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors"},
+        }}
+
+        class Answer:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self): return json.dumps({"system": {"argv": ["main.py", "--vram-headroom", "12"]}}).encode()
+
+        def post(port, path, body):
+            request = RealRequest(
+                f'http://127.0.0.1:{port}{path}', data=json.dumps(body).encode('utf-8'),
+                headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                method='POST',
+            )
+            try:
+                with real_urlopen(request, timeout=5) as response:
+                    return response.status, json.loads(response.read().decode('utf-8'))
+            except RealHTTPError as error:
+                return error.code, json.loads(error.read().decode('utf-8') or '{}')
+
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        with TemporaryDirectory() as tmp, self._route_state(app, tmp), \
+             patch.object(app, 'TOKEN', 'test-token'), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app, 'COMFY_LANE_RULES', []), \
+             patch.object(app, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app, 'COMFY_LANE_TOKENS', {}), \
+             patch.object(app, '_lane_launch_args_cache', {}), \
+             patch.object(app, 'urlopen', return_value=Answer()), \
+             patch.object(app, 'vault_public_key_spki', return_value=None):
+            self._two_boxes_registry(Path(tmp, 'rental-lanes.json'))
+            server_thread.start()
+            try:
+                port = server.server_port
+                # The guard prices the PINNED lane, not the priority leader.
+                status, answer = post(port, '/api/lanes/resolve', {"graph": graph})
+                self.assertEqual((status, answer['lane']), (200, 'rental48'))
+                status, answer = post(port, '/api/lanes/resolve', {"graph": graph, "run_on": "vast:47"})
+                self.assertEqual((status, answer['lane']), (200, 'rental47'))
+                status, answer = post(port, '/api/lanes/resolve', {"graph": graph, "run_on": "vast:99"})
+                self.assertEqual(status, 409)
+                self.assertTrue(answer.get('operational'))
+                self.assertIn('vast:99', answer['error'])
+                # The submit: a stale pin is refused before anything is staged on
+                # any lane (no sealing key here, and we never reach that check).
+                status, answer = post(port, '/comfy/api/prompt', {"prompt": graph, "run_on": "vast:99"})
+                self.assertEqual(status, 409)
+                self.assertTrue(answer.get('operational'))
+                self.assertIn('vast:99', answer['error'])
+                # A good pin routes to its lane — the remote lane then asks for a
+                # sealing key, which is how we know it was rental47 being readied
+                # rather than the local default (which needs no key).
+                status, answer = post(port, '/comfy/api/prompt', {"prompt": graph, "run_on": "vast:47"})
+                self.assertEqual(status, 409)
+                self.assertIn('sealing key', answer['error'])
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_generate_api_refuses_a_stale_run_on_pin_before_queueing(self):
+        # An image tab pinned to a box that was destroyed meanwhile: refused up
+        # front with the reason, not a job that dies seconds later.
+        app = load_app()
+        server = app.ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        server_thread = app.threading.Thread(target=server.serve_forever, daemon=True)
+        captured = {}
+
+        def fake_start(media_type, options, runner, args):
+            captured.update(options=dict(options))
+            return None
+
+        with TemporaryDirectory() as tmp, self._route_state(app, tmp), \
+             patch.object(app, 'TOKEN', 'test-token'), \
+             patch.object(app, 'jobs', {}), \
+             patch.object(app, 'COMFY_LANES', {'default': 'http://127.0.0.1:8188'}), \
+             patch.object(app, 'COMFY_LANE_RULES', []), \
+             patch.object(app, 'COMFY_REMOTE_LANES', set()), \
+             patch.object(app, 'start_studio_generation_thread', side_effect=fake_start):
+            self._two_boxes_registry(Path(tmp, 'rental-lanes.json'))
+            server_thread.start()
+            try:
+                def generate(body):
+                    request = app.Request(
+                        f'http://127.0.0.1:{server.server_port}/api/generate',
+                        data=json.dumps(body).encode('utf-8'),
+                        headers={'Authorization': 'Bearer test-token', 'Content-Type': 'application/json'},
+                        method='POST',
+                    )
+                    try:
+                        with app.urlopen(request, timeout=5) as response:
+                            return response.status, json.loads(response.read().decode('utf-8'))
+                    except app.HTTPError as error:
+                        return error.code, json.loads(error.read().decode('utf-8') or '{}')
+
+                status, payload = generate({
+                    'backend': 'comfy-api-image', 'prompt': 'a pinned request', 'run_on': 'vast:99'})
+                self.assertEqual(status, 409)
+                self.assertTrue(payload.get('operational'))
+                self.assertIn('vast:99', payload['error'])
+                self.assertEqual(captured, {}, 'nothing was queued')
+                # A live pin rides into the runner's options, where the lane pick reads it.
+                status, payload = generate({
+                    'backend': 'comfy-api-image', 'prompt': 'a pinned request', 'run_on': 'vast:47'})
+                self.assertEqual(status, 202)
+                self.assertEqual(captured['options'].get('run_on'), 'vast:47')
+            finally:
+                server.shutdown()
+                server.server_close()
 
     def test_an_attached_rental_outranks_a_local_lane_that_serves_the_same_models(self):
         # The stack launcher prepends rental rules to COMFY_LANE_RULES at boot;

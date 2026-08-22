@@ -350,3 +350,37 @@ test('the compact switch travels in a persona export and comes back on import', 
     assert.equal(older.videos[0].compact, false);
     assert.equal(older.videos[0].useAudio, true);
 });
+
+// A clip switched to SOUND ONLY is a voice reference, not a motion clip — that
+// is what the model is given, so it is part of the persona: it saves, it
+// reloads as sound only, flipping it back counts as an edit, and it survives
+// export/import. An older save without the flag is a motion clip, as it was.
+test('a sound-only clip persists through save, reload, edit detection and export/import', async () => {
+    const {
+        personaFromReferences, applyPersonaToReferences, samePersonaReferences, buildPersonaExport, parsePersonaExport,
+    } = await load();
+    const soundOnly = personaFromReferences({
+        images: ['/api/media-studio/references/face.png'],
+        videos: [{ url: '/api/media-studio/references/talk.mov', name: 'talk.mov', motion: false, useAudio: false }],
+    });
+    assert.equal(soundOnly.videos[0].motion, false);
+    assert.equal(soundOnly.videos[0].useAudio, true, 'sound only always means the soundtrack is on');
+    const plain = personaFromReferences({ images: ['/x.png'], videos: [{ url: '/walk.mov', useAudio: true }] });
+    assert.equal('motion' in plain.videos[0], false, 'an older shape is written unchanged');
+
+    const back = applyPersonaToReferences(soundOnly);
+    assert.equal(back.videos[0].motion, false);
+
+    const asMotion = personaFromReferences({ ...soundOnly, videos: [{ ...soundOnly.videos[0], motion: true }] });
+    assert.ok(!samePersonaReferences(soundOnly, asMotion), 'switching back to motion is an edit worth saving');
+    assert.ok(samePersonaReferences(soundOnly, personaFromReferences(applyPersonaToReferences(soundOnly))), 'a reload is not');
+
+    const media = {
+        '/api/media-studio/references/face.png': 'data:image/png;base64,AAA',
+        '/api/media-studio/references/talk.mov': 'data:video/quicktime;base64,BBB',
+    };
+    const { document: doc } = buildPersonaExport({ name: 'Liam', persona: soundOnly, media });
+    const parsed = parsePersonaExport(JSON.stringify(doc));
+    assert.equal(parsed.videos[0].motion, false);
+    assert.equal(parsed.videos[0].useAudio, true);
+});

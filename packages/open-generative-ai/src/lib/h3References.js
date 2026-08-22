@@ -209,10 +209,15 @@ function retentionLines(labels, existing) {
   const unclaimed = (label) => !new RegExp(`^${label.replace(/[<>]/g, '\\$&')}:`, 'm').test(existing);
   const lines = [];
   labels.images.forEach((label) => { if (unclaimed(label)) lines.push(PICTURE_RETENTION(label)); });
-  // No picture → the first clip is the character reference; any further clip
-  // stays a motion reference.
-  const identityVideo = labels.images.length ? null : (labels.videos[0]?.video || null);
+  // No picture → the first MOTION clip is the character reference; any further
+  // clip stays a motion reference. A sound-only row is a voice clip: it gets
+  // the voice contract and no video line at all.
+  const identityVideo = labels.images.length ? null : (labels.videos.find((label) => label.video)?.video || null);
   labels.videos.forEach((label) => {
+    if (label.soundOnly) {
+      if (label.audio && unclaimed(label.audio)) lines.push(VOICE_RETENTION(label.audio));
+      return;
+    }
     if (label.audio && unclaimed(label.audio)) lines.push(SOUNDTRACK_RETENTION(label.audio, label.video));
     if (unclaimed(label.video)) {
       lines.push(label.video === identityVideo ? VIDEO_IDENTITY_RETENTION(label.video) : VIDEO_RETENTION(label.video));
@@ -253,16 +258,19 @@ export function referenceSubjectLine({ pictures = [], videos = [], gender = '' }
 
 /** The first voice the model will hear for <Subject 1>: a clip's soundtrack, else a voice clip. */
 export function referenceVoiceLabel(labels) {
+  // In the order the model numbers them: clip soundtracks, then the explicit
+  // voice clips, then sound-only rows (which ride after the explicit clips).
   const voices = [
-    ...(labels?.videos || []).filter((label) => label.audio).map((label) => label.audio),
+    ...(labels?.videos || []).filter((label) => label.audio && !label.soundOnly).map((label) => label.audio),
     ...(labels?.audios || []),
+    ...(labels?.videos || []).filter((label) => label.soundOnly && label.audio).map((label) => label.audio),
   ];
   return voices[0] || '';
 }
 
 function referenceFrame(written, labels, gender = '') {
   const voice = referenceVoiceLabel(labels);
-  const motion = labels.videos.map((label) => label.video);
+  const motion = labels.videos.map((label) => label.video).filter(Boolean);
   const pictures = labels.images;
   const lines = written ? written.split('\n') : [];
   const spoken = lines.filter((line) => line.includes('<d>'));
@@ -360,7 +368,9 @@ export const withMotionRetentionTags = (prompt, videos = []) => withReferenceTag
 // excluded — the exclusion nag is for the picture+clip case only.
 const EXCLUSION_HINT = /\b(do not carry|does not carry|don'?t carry|not carry|must not|do NOT|never carry|no[t]? .{0,24}(appearance|clothing|wardrobe|setting|background))\b/i;
 
-export function motionReferenceWarning({ prompt = '', videos = [], images = [] } = {}) {
+export function motionReferenceWarning({ prompt = '', videos: rows = [], images = [] } = {}) {
+  // Sound-only rows carry no <Video N>: only the motion rows are named.
+  const videos = motionReferenceRows(rows);
   if (!videos.length) return null;
   const text = String(prompt || '');
   const unnamed = videos
@@ -423,17 +433,60 @@ export function unscriptedTimeWarning({ prompt = '', durationSeconds = 0, videos
   return { kind: 'unscripted', spoken: round(spoken), duration, gap: round(gap) };
 }
 
+// ── Sound-only motion rows ───────────────────────────────────────────────────
+// A clip attached as a motion reference can be switched to SOUND ONLY: its
+// soundtrack is then a voice reference and its pixels are never sent — the
+// request carries it in reference_audios (after the explicit voice clips), the
+// MCP extracts the audio track, and the model sees a plain <Audio N>. It is
+// not a motion clip any more: no <Video N>, no video slot, no duration cap.
+// `motion: false` marks the row; an older row without the flag is motion.
+export function isSoundOnlyReference(item) {
+  return Boolean(item && typeof item === 'object' && item.motion === false);
+}
+
+export function motionReferenceRows(videos = []) {
+  return (videos || []).filter((item) => item && !isSoundOnlyReference(item));
+}
+
+export function soundOnlyReferenceRows(videos = []) {
+  return (videos || []).filter((item) => isSoundOnlyReference(item));
+}
+
+// The references exactly as the request (and so the model) sees them: motion
+// rows as videos, sound-only rows as voice clips after the explicit ones.
+export function referencesAsSent({ images = [], videos = [], audios = [] } = {}) {
+  return {
+    images,
+    videos: motionReferenceRows(videos),
+    audios: [...audios, ...soundOnlyReferenceRows(videos).map((item) => ({ ...item, fromVideo: true }))],
+  };
+}
+
+// Labels aligned with the rows as ATTACHED (labels.videos[i] is the i-th row
+// of the motion section, sound-only rows included), numbered the way the node
+// presents them: pictures; each motion clip's soundtrack <Audio k> just before
+// its <Video m>; then the standalone clips — the explicit voice clips first,
+// then the sound-only rows — all sharing one <Audio> counter. A sound-only row
+// labels as { video: '', audio: '<Audio k>', soundOnly: true }.
 export function referenceLabels({ images = [], videos = [], audios = [] } = {}) {
   const labels = { images: [], videos: [], audios: [] };
   images.forEach((_, index) => labels.images.push(`<Picture ${index + 1}>`));
   let audioOrdinal = 0;
-  videos.forEach((item, index) => {
+  let videoOrdinal = 0;
+  videos.forEach((item) => {
+    if (isSoundOnlyReference(item)) {
+      labels.videos.push({ video: '', audio: '', soundOnly: true });
+      return;
+    }
     labels.videos.push({
-      video: `<Video ${index + 1}>`,
+      video: `<Video ${(videoOrdinal += 1)}>`,
       audio: item?.useAudio ? `<Audio ${(audioOrdinal += 1)}>` : '',
     });
   });
   audios.forEach(() => labels.audios.push(`<Audio ${(audioOrdinal += 1)}>`));
+  labels.videos.forEach((label) => {
+    if (label.soundOnly) label.audio = `<Audio ${(audioOrdinal += 1)}>`;
+  });
   return labels;
 }
 
@@ -486,10 +539,14 @@ export function referenceBudgetReport({
     return Number.isFinite(value) && value > 0 ? value : null;
   };
 
-  const soundtracks = videos.filter((item) => item?.useAudio).length;
+  // A sound-only row is a voice clip, not a motion clip: it spends an audio
+  // slot and audio seconds, and nothing on the video side.
+  const motionRows = motionReferenceRows(videos);
+  const soundOnlyRows = soundOnlyReferenceRows(videos);
+  const soundtracks = motionRows.filter((item) => item?.useAudio).length + soundOnlyRows.length;
   // A soundtrack is its own reference and its own audio clip, which is the
   // whole reason a "9 pictures + 3 videos" row can be over budget.
-  const total = images.length + videos.length + audios.length + soundtracks;
+  const total = images.length + motionRows.length + audios.length + soundtracks;
   const audioClips = audios.length + soundtracks;
 
   let videoSeconds = 0;
@@ -498,7 +555,7 @@ export function referenceBudgetReport({
   let unmeasured = 0;
   const clips = [];
 
-  for (const item of videos) {
+  for (const item of motionRows) {
     const seconds = lengthOf(item);
     if (seconds == null) { unmeasured += 1; } else {
       measured += 1;
@@ -506,6 +563,14 @@ export function referenceBudgetReport({
       // Double-spend: the same seconds are billed to the audio total too.
       if (item?.useAudio) audioSeconds += seconds;
       clips.push({ kind: 'videos', url: referenceUrl(item), seconds: round1(seconds) });
+    }
+  }
+  for (const item of soundOnlyRows) {
+    const seconds = lengthOf(item);
+    if (seconds == null) { unmeasured += 1; } else {
+      measured += 1;
+      audioSeconds += seconds;
+      clips.push({ kind: 'audios', url: referenceUrl(item), seconds: round1(seconds) });
     }
   }
   for (const item of audios) {
@@ -525,7 +590,7 @@ export function referenceBudgetReport({
     problems.push({ code: 'over-audio-clips', count: audioClips, limit: H3_REFERENCE_LIMITS.audioClips, soundtracks });
   }
   // Audio is never the only thing attached — it has nothing to attach TO.
-  if (audioClips > 0 && images.length === 0 && videos.length === 0) {
+  if (audioClips > 0 && images.length === 0 && motionRows.length === 0) {
     problems.push({ code: 'audio-without-visual', count: audioClips });
   }
   for (const clip of clips) {
@@ -554,7 +619,7 @@ export function referenceBudgetReport({
       total,
       limit: H3_REFERENCE_LIMITS.totalReferences,
       pictures: images.length,
-      videos: videos.length,
+      videos: motionRows.length,
       audioClips,
       soundtracks,
     },

@@ -2,7 +2,8 @@
 // - studios mount once on first visit and are display-toggled thereafter, so an
 //   in-flight generation (local OR cloud) keeps running and its progress/results
 //   survive a tab switch. (The old app tore studios down on every nav, which lost
-//   local generations — there is no pending-job resume for the local path.)
+//   local generations outright.) A studio with unfinished work in the pending-job
+//   registry is also mounted at boot, so a reload resumes it wherever you landed.
 // - the visible studio receives active=true; only it owns the prompt-insert bridge.
 // - hub layer mounts once and is display-toggled forever (iframes keep state)
 // - navToken guards superseded navigations; page commits only after success
@@ -11,6 +12,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { toast, Toaster } from 'react-hot-toast';
 import { ExploreDock } from '../bridges/ExploreDock.jsx';
 import { MEDIA_DOWNLOAD_BLOCKED_EVENT } from '../lib/downloadMedia.js';
+import { getPendingJobs } from '../lib/pendingJobs.js';
 import { OutputRestoreDropZone } from './OutputRestoreDropZone.jsx';
 import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
 import { VaultUnlockModal } from '../bridges/VaultUnlockModal.jsx';
@@ -136,6 +138,35 @@ export function App() {
   useEffect(() => {
     navigate(initialPage());
   }, [navigate]);
+
+  // A generation outlives the page. Its job id is in sessionStorage and the backend
+  // keeps rendering, but only the studio that owns it can put the progress back —
+  // and a studio is normally loaded on first VISIT. Reload while looking at History
+  // or the Image studio and a running video therefore stayed invisible until the
+  // user happened to click Video. So any studio with unfinished work is mounted
+  // (hidden) at boot, which is enough for its tabs to reclaim their runs.
+  useEffect(() => {
+    const waiting = [...new Set(getPendingJobs().map((job) => String(job?.studioType || '')))]
+      .filter((studio) => STUDIO_LOADERS[studio]);
+    if (!waiting.length) return;
+    void (async () => {
+      for (const studio of waiting) {
+        if (loadedStudiosRef.current[studio]) continue;
+        let Component;
+        try {
+          Component = await loadWithRetry(STUDIO_LOADERS[studio]);
+        } catch (error) {
+          console.warn(`[studio] could not mount "${studio}" to resume its generations:`, error);
+          continue;
+        }
+        // Re-read the ref rather than closing over it: navigate() may have loaded
+        // this studio, or another one, while the import was in flight.
+        if (loadedStudiosRef.current[studio]) continue;
+        loadedStudiosRef.current = { ...loadedStudiosRef.current, [studio]: Component };
+        setStudioComps(loadedStudiosRef.current);
+      }
+    })();
+  }, []);
 
   // A refused download (sealed media this tab can't decrypt) has to say so — the
   // alternative was writing envelope JSON under a .mp4 name and letting the owner

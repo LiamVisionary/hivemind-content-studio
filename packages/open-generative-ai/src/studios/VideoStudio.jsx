@@ -31,7 +31,7 @@ import { CameraMotionMenu } from './video/CameraMotionMenu.jsx';
 import { applyRestylePrompt } from '../lib/h3RestylePresets.js';
 import { RestyleMenu } from './video/RestyleMenu.jsx';
 import { CharacterMenu } from './video/CharacterMenu.jsx';
-import { CastMenu } from './video/CastMenu.jsx';
+import { CastMenu, castApplication, characterCastMember } from './video/CastMenu.jsx';
 import { applyCharacterToPrompt } from '../lib/h3Characters.js';
 import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
@@ -48,7 +48,9 @@ import { personaIdentity } from '../lib/personaId.js';
 import { applyUgcVideoBrief, hasUgcVideoBrief, ugcSubjectLabel, ugcVariantAt } from '../lib/ugcMode.js';
 import { UgcMenu } from './UgcMenu.jsx';
 import { restoredHistoryEntry } from '../lib/restoredOutput.js';
-import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
+import {
+  savePendingJob, removePendingJob, getPendingJobs, pendingJobsForTab,
+} from '../lib/pendingJobs.js';
 import { videoDownloadName } from '../lib/downloadNames.js';
 import {
   isCompletionPingEnabled, setCompletionPingEnabled, subscribeCompletionPing,
@@ -290,6 +292,13 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // Shot sets already stored as an output, so rebuilding the same episode
     // does not file a second copy of it.
     chainSavedKeys: [],
+    // Who is in the shot. Held HERE rather than inside the Cast menu because a
+    // prompt loaded from the library has to be recast on its way into the
+    // composer, and a menu that only remembers its members while it is open
+    // cannot do that — which is how a fight loaded over a cast kept addressing
+    // the cast it was saved with.
+    cast: [],
+    castWarnings: [],
   };
 
   // A duplicate overlays the source tab's configuration on top of the defaults.
@@ -299,7 +308,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   return engine;
 }
 
-export function VideoStudio({ active = true, tabActive = true, seed = null, apiRef = null, studioLane = '' } = {}) {
+export function VideoStudio({
+  active = true, tabActive = true, seed = null, apiRef = null, studioLane = '',
+  tabId = 0, primary = null, openTabIds = null,
+} = {}) {
   const engineRef = useRef(null);
   // The seed is read once, at mount — StudioTabs clears it afterwards, so every
   // later "am I the original tab?" question reads the captured value.
@@ -312,9 +324,17 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   const mountedRef = useRef(true);
   const bump = () => { if (mountedRef.current) setTick((n) => n + 1); };
 
-  // The original tab restores the session (pending jobs, composer draft); new and
-  // duplicated tabs start clean and must not re-claim either.
-  const isPrimaryTab = !seedRef.current;
+  // The primary tab adopts the composer draft and any pending generation no open
+  // tab owns; new and duplicated tabs start clean. StudioTabs decides which tab
+  // that is — a reload restores every tab with a null seed, so the old "no seed =
+  // original tab" test would have made all of them primary at once. The fallback
+  // keeps a standalone mount (no StudioTabs) behaving as it always did.
+  const isPrimaryTab = primary == null ? !seedRef.current : Boolean(primary);
+  // This tab's own id, captured at mount: it stamps the generations this tab
+  // starts, which is how the tab reclaims them after a reload.
+  const tabIdRef = useRef(tabId);
+  const openTabIdsRef = useRef(openTabIds);
+  openTabIdsRef.current = openTabIds;
   // Front tab of this studio: owns preference persistence and one-shot handoffs.
   const tabActiveRef = useRef(tabActive);
   tabActiveRef.current = tabActive;
@@ -335,6 +355,10 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       s.rentedProvisioning = state.provisioning;
       s.rentedIdle = state.idle;
       s.rentedBroken = state.broken;
+      // The card a run lands on decides the motion-reference budget (the
+      // picker prices against this tab's pin, else the routing leader), so a
+      // machine change re-clamps the duration exactly like a setup change.
+      s.setup = withDurationThatFits(s.setup);
       const wanted = state.pending.length ? 8000 : 30000;
       if (timer?.every !== wanted) {
         if (timer) clearInterval(timer.id);
@@ -378,6 +402,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     // toggle reverts to Local on every reload (applyRestoredPreferences reads
     // it back, but nothing ever wrote it).
     rentedOnly: s.setup.rentedOnly,
+    rentedMachineId: s.setup.rentedMachineId || '',
     duration: s.setup.duration,
     aspectRatio: s.setup.ar,
     resolution: s.setup.resolution,
@@ -425,7 +450,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   // can actually render: a 10s chosen before the reference was attached would
   // otherwise survive silently and die on the card minutes into the run.
   const withDurationThatFits = (setup) => {
-    const duration = clampDurationToMotionReference(setup, setup.modelId);
+    const duration = clampDurationToMotionReference(setup, setup.modelId, s.rentedMachines);
     return Number(duration) === Number(setup.duration) ? setup : { ...setup, duration };
   };
 
@@ -438,6 +463,14 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   const selectRegularModel = (m) => commit(selectRegularModelTransition(s.setup, m, s.catalogs));
   const selectHiveModel = (m) => commit(selectHivemindWorkflowTransition(s.setup, m, s.catalogs));
   const selectV2VModel = (m) => commit(selectV2VModelTransition(s.setup, m, s.catalogs));
+
+  // This tab's "Run on" pin, written by the Rented panel's picker ('' = follow
+  // the Machines default). Part of `setup`, so it persists and copies with the tab.
+  const pinMachine = (rentalId) => {
+    const next = rentalId || '';
+    if ((s.setup.rentedMachineId || '') === next) return;
+    commit({ ...s.setup, rentedMachineId: next });
+  };
 
   const setLocalMode = (local, rented = false) => {
     const nextRented = Boolean(local && rented);
@@ -564,12 +597,51 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     focusPrompt();
   };
 
-  // H3 character quick-add — unlike camera/restyle phrases these are plain
-  // prompt text. The lib inserts the full source form (name, casting, series,
-  // year), enriching a bare name in place; re-picking is a no-op.
-  const addH3Character = (entry) => {
-    const next = applyCharacterToPrompt(s.setup.prompt, entry);
-    if (next !== s.setup.prompt) setPrompt(next);
+  // H3 character quick-add.
+  //
+  // With a cast set, a character IS a cast member: added as loose prompt text
+  // it would be erased by the next apply, since subject_definitions is always
+  // re-derived from the cast. So it joins the cast and the prompt is recast
+  // around it. Only the PROMPT — a character brings no media, so nothing that
+  // is attached has any business changing because a cartoon was picked.
+  //
+  // With no cast, it stays what it always was: plain prompt text carrying the
+  // full source form (name, casting, series, year), enriching a bare name in
+  // place, and — in a six-section prompt — defining a subject of its own rather
+  // than being appended past the end of the last section.
+  const addH3Character = (entry, limits) => {
+    if (limits && s.cast.length) {
+      const member = characterCastMember(entry);
+      if (s.cast.some((item) => item.key === member.key)) { focusPrompt(); return; }
+      const cast = [...s.cast, member];
+      const result = castApplication({
+        members: cast, prompt: s.setup.prompt, limits, durationSeconds: Number(s.setup.duration) || 0,
+      });
+      s.cast = cast;
+      s.castWarnings = result.warnings;
+      setPrompt(result.prompt);
+      toast.success(zh()
+        ? `已加入演员表 · ${entry.name} 为 <Subject ${cast.length}>`
+        : `${entry.name} joined the cast as <Subject ${cast.length}>`);
+      focusPrompt();
+      return;
+    }
+    const before = s.setup.prompt;
+    const next = applyCharacterToPrompt(before, entry);
+    if (next === before) { focusPrompt(); return; }
+    setPrompt(next);
+    // Defined as a subject of its own, which is a definition and not a scene:
+    // nothing in the description has it doing anything yet.
+    // The HIGHEST subject number, not a count of definition lines: a subject
+    // spends several lines on itself (what it is, how it is drawn, how it
+    // sounds) and counting those named Kratos as <Subject 5> when he was 3.
+    const highest = (text) => Math.max(0, ...[...String(text).matchAll(/<Subject (\d+)>/g)]
+      .map((hit) => Number(hit[1])));
+    if (highest(next) > highest(before)) {
+      toast.success(zh()
+        ? `${entry.name} 已定义为 <Subject ${highest(next)}> — 记得写进镜头描述`
+        : `${entry.name} defined as <Subject ${highest(next)}> — write them into the description`);
+    }
     focusPrompt();
   };
 
@@ -659,7 +731,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   // subjects are and what each reference may carry, AND the reference rows the
   // personas bring. Applying one without the other is how a prompt ends up
   // addressing a <Picture 7> that was never attached.
-  const applyCast = ({ prompt, images, videos, audios, persona }) => {
+  const applyCast = ({ prompt, images, videos, audios, persona, warnings }) => {
     // A cast can bring motion clips with it, which collapses the duration
     // range the same way attaching one by hand does.
     s.setup = withDurationThatFits({
@@ -672,12 +744,36 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
       // persona; anything else and the name would be a lie about what is loaded.
       persona: personaIdentity(persona),
     });
+    s.castWarnings = Array.isArray(warnings) ? warnings : [];
     updateComposerDraft({ prompt });
     bump();
     const total = images.length + videos.length + audios.length;
     toast.success(zh()
       ? `已应用演员表 · ${total} 个参考`
       : `Cast applied — ${total} reference${total === 1 ? '' : 's'} attached`);
+  };
+
+  // A prompt arriving from the library, recast on the way in.
+  //
+  // A saved prompt was written for whoever was in it when it was saved. Dropped
+  // into a composer that has a cast and left alone, it addresses the OLD one —
+  // the same half-rewritten state the Cast control exists to prevent, arriving
+  // through the other door. The references are deliberately NOT touched here:
+  // loading a prompt is not a request to reshuffle what is attached, and the
+  // recast reports any label the current rows cannot fill.
+  const loadPromptText = (text, limits) => {
+    if (!limits || !s.cast.length) {
+      setPrompt(text);
+      return;
+    }
+    const result = castApplication({
+      members: s.cast, prompt: text, limits, durationSeconds: Number(s.setup.duration) || 0,
+    });
+    s.castWarnings = result.warnings;
+    setPrompt(result.prompt);
+    toast.success(zh()
+      ? `已按当前演员表改写提示词 · ${s.cast.length} 位`
+      : `Prompt recast for your cast — ${s.cast.length} member${s.cast.length === 1 ? '' : 's'}`);
   };
 
   // LTX 2.3 first/middle/end keyframes (Hivemind local). Kept separate from the
@@ -1656,7 +1752,14 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     const onRequestId = (rid) => {
       capturedRequestId = rid;
       updateGenerationProgress({ stage: 'rendering' });
-      savePendingJob({ requestId: rid, studioType: 'video', historyMeta, maxAttempts: 900, interval: 2000, submittedAt: Date.now() });
+      savePendingJob({
+        requestId: rid, studioType: 'video', historyMeta,
+        // Which tab is rendering this, and under what name: the tab claims the job
+        // back after a reload, and the progress card has a model to show while it
+        // does (the prompt stays out of storage — the resumed entry is redacted).
+        tabId: tabIdRef.current, modelName: setup.modelName,
+        maxAttempts: 900, interval: 2000, submittedAt: Date.now(),
+      });
     };
 
     try {
@@ -1679,6 +1782,8 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
         const localParams = {
           model: setup.modelId,
           studio_lane: studioLane,
+          // The tab's "Run on" pin: tried ahead of the gateway's default order.
+          ...(setup.rentedOnly && setup.rentedMachineId ? { run_on: setup.rentedMachineId } : {}),
           workflow_id: workflowIdFromHivemindModelId(setup.modelId),
           prompt: prompt || '',
           aspect_ratio: matchStartFrameAr ? '' : setup.ar,
@@ -1778,6 +1883,10 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             requestId: jobId,
             studioType: 'video',
             kind: 'hivemind-local',
+            // The tab that started it reclaims it after a reload; the model name
+            // rides along so the resumed progress card names the run.
+            tabId: tabIdRef.current,
+            modelName: setup.modelName,
             historyMeta: { model: setup.modelId, aspect_ratio: setup.ar, duration: setup.duration },
             submittedAt: Date.now(),
           });
@@ -2090,6 +2199,19 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     return true;
   };
 
+  // Poll a muapi cloud job started before this mount. Attempts already spent while
+  // the page was gone are deducted, so a job doesn't win a fresh full budget every
+  // time the studio reloads.
+  const resumeCloudVideoJob = async (job) => {
+    const apiKey = localStorage.getItem('muapi_key');
+    if (!apiKey) throw new Error('Cloud generation cannot resume without an API key');
+    const interval = Number(job.interval) || 2000;
+    const spent = Math.floor((Date.now() - (Number(job.submittedAt) || Date.now())) / interval);
+    const attemptsLeft = Math.max(1, (Number(job.maxAttempts) || 900) - spent);
+    const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, interval);
+    return { id: job.requestId, url: result.outputs?.[0] || result.url || result.output?.url };
+  };
+
   /* ---------------- mount effects ---------------- */
 
   useEffect(() => {
@@ -2130,85 +2252,118 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
     // Discover the Hivemind local video workflows (with owner-unlock retry).
     void refreshHivemindWorkflows();
 
-    // Resume any pending video generations from a previous mount/session. Local
-    // Media Studio jobs poll the gateway job endpoint (no API key); remote muapi
-    // jobs poll muapi. A reload/remount otherwise drops the long local render.
-    // Only the original tab resumes: every tab shares one pending-job store, so a
-    // second tab polling it would race the first and double the history entry.
+    // Resume the generations this tab had in flight when the page went away.
+    //
+    // A render outlives the page: the job id is in sessionStorage and the backend
+    // keeps working, so a reload has to put the progress canvas back rather than
+    // present an idle studio over a machine that is still rendering. Local Media
+    // Studio jobs poll the gateway job endpoint (no API key); remote muapi jobs
+    // poll muapi.
+    //
+    // Ownership is per TAB, because the whole strip comes back and every tab that
+    // was rendering has its own run to reclaim. This tab restores ITS jobs live;
+    // the primary tab additionally adopts the ownerless ones (a tab closed while
+    // rendering, or a job saved before jobs carried a tab id) and lands those
+    // quietly in History, since there is no canvas of theirs left to restore to.
     (async () => {
-      if (!isPrimaryTab) return;
-      const pending = getPendingJobs('video');
-      if (!pending.length) return;
-      const localPending = pending.filter((job) => job.kind === 'hivemind-local');
-      const cloudPending = pending.filter((job) => job.kind !== 'hivemind-local');
+      const claimed = pendingJobsForTab(getPendingJobs('video'), tabIdRef.current, {
+        primary: isPrimaryTab,
+        openTabIds: openTabIdsRef.current,
+      // A cloud job can only be polled with the muapi key. Without one, leave it in
+      // the registry untouched for a session that has it, rather than claiming it
+      // and discarding it.
+      }).filter((job) => job.kind === 'hivemind-local' || localStorage.getItem('muapi_key'));
+      if (!claimed.length) return;
+      const mine = (job) => Number(job?.tabId) === Number(tabIdRef.current)
+        && Number.isSafeInteger(Number(tabIdRef.current));
 
-      // ── Local Media Studio: restore the live progress canvas and keep polling.
-      // Only one local render runs at a time, so resume the first pending job.
-      const localJob = localPending[0];
-      if (localJob && !s.generating) {
-        s.activeLocalJobId = localJob.requestId;
+      // The canvas can only show one run, so the tab restores its own newest job
+      // and everything else is polled silently into History.
+      const live = claimed.filter(mine).sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0))[0];
+      const silent = claimed.filter((job) => job !== live);
+
+      // ── This tab's own run: restore the live progress canvas and keep polling.
+      if (live && !s.generating) {
         s.generating = true;
         s.generateError = '';
         s.resultUrl = null;
         s.resultModel = null;
+        // A fresh controller so Cancel can still stop the resumed poll — without
+        // one, cancelling reset the UI while the poll kept running underneath and
+        // dropped its result into a studio the user had already moved on from.
+        s.abortController = new AbortController();
         startGenerationProgress({
-          aspectRatio: localJob.historyMeta?.aspect_ratio,
-          duration: localJob.historyMeta?.duration,
+          modelName: live.modelName,
+          model: live.historyMeta?.model,
+          aspectRatio: live.historyMeta?.aspect_ratio,
+          duration: live.historyMeta?.duration,
         }, { stage: 'rendering' });
         // Preserve the true submit time so elapsed / ETA reflect the whole render.
-        s.generationStartedAt = localJob.submittedAt || Date.now();
+        s.generationStartedAt = live.submittedAt || Date.now();
+        const isLocalJob = live.kind === 'hivemind-local';
+        if (isLocalJob) s.activeLocalJobId = live.requestId;
         bump();
-        (async () => {
+        void (async () => {
+          const signal = s.abortController?.signal;
           try {
-            const res = await pollHivemindVideoJob(localJob.requestId, {
-              onProgress: (info) => {
-                const data = (info && typeof info === 'object') ? info : { progress: info };
-                updateGenerationProgress({
-                  stage: 'rendering',
-                  progress: data.progress,
-                  estimateSeconds: data.estimateSeconds,
-                  step: data.step,
-                  stepTotal: data.stepTotal,
-                });
-              },
-            });
-            if (res && res.url) {
+            const res = isLocalJob
+              ? await pollHivemindVideoJob(live.requestId, {
+                signal,
+                onProgress: (info) => {
+                  const data = (info && typeof info === 'object') ? info : { progress: info };
+                  updateGenerationProgress({
+                    stage: 'rendering',
+                    progress: data.progress,
+                    estimateSeconds: data.estimateSeconds,
+                    step: data.step,
+                    stepTotal: data.stepTotal,
+                  });
+                },
+              })
+              : await resumeCloudVideoJob(live);
+            const url = res?.url;
+            if (url) {
               addToHistory({
-                id: res.id || localJob.requestId,
-                url: res.url,
-                model: localJob.historyMeta?.model,
-                aspect_ratio: localJob.historyMeta?.aspect_ratio,
-                duration: localJob.historyMeta?.duration,
+                id: res.id || live.requestId,
+                url,
+                ...live.historyMeta,
                 timestamp: new Date().toISOString(),
               });
-              showVideoInCanvas(res.url, localJob.historyMeta?.model, { fromGeneration: true });
+              showVideoInCanvas(url, live.historyMeta?.model, { fromGeneration: true });
             }
           } catch (e) {
-            console.warn('[VideoStudio] Local video resume failed:', localJob.requestId, e.message);
+            if (!e?.cancelled && e?.name !== 'AbortError') {
+              console.warn('[VideoStudio] Video resume failed:', live.requestId, e.message);
+              s.generateError = e.message;
+            }
             stopGenerationProgress();
-            s.generateError = e.message;
           } finally {
-            removePendingJob(localJob.requestId);
-            s.activeLocalJobId = null;
+            removePendingJob(live.requestId);
+            if (isLocalJob) s.activeLocalJobId = null;
+            s.abortController = null;
             s.generating = false;
             bump();
           }
         })();
       }
 
-      // ── Remote muapi jobs: silent poll into history (needs the API key).
-      if (!cloudPending.length) return;
-      const apiKey = localStorage.getItem('muapi_key');
-      if (!apiKey) return; // can't poll without key; jobs remain for next time
-      s.resumeRemaining = cloudPending.length;
+      // ── Adopted / surplus jobs: poll them to completion straight into History.
+      if (!silent.length) return;
+      s.resumeRemaining = silent.length;
       bump();
-      cloudPending.forEach(async (job) => {
-        const elapsedAttempts = Math.floor((Date.now() - job.submittedAt) / job.interval);
-        const attemptsLeft = Math.max(1, job.maxAttempts - elapsedAttempts);
+      silent.forEach(async (job) => {
         try {
-          const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, job.interval);
-          const url = result.outputs?.[0] || result.url || result.output?.url;
-          if (url) addToHistory({ id: job.requestId, url, ...job.historyMeta, timestamp: new Date().toISOString() });
+          const res = job.kind === 'hivemind-local'
+            ? await pollHivemindVideoJob(job.requestId)
+            : await resumeCloudVideoJob(job);
+          if (res?.url) {
+            addToHistory({
+              id: res.id || job.requestId,
+              url: res.url,
+              ...job.historyMeta,
+              timestamp: new Date().toISOString(),
+            });
+          }
         } catch (e) {
           console.warn('[VideoStudio] Pending job failed on resume:', job.requestId, e.message);
         } finally {
@@ -2512,10 +2667,38 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
   // the longer the clip is and the duration range collapses while one is
   // attached. Offer only what will actually render: the run used to be accepted
   // and then die minutes later on the card, after the references were staged.
-  const motionLimit = motionReferenceLimitFor(s.setup, s.setup.modelId);
-  const durationOptions = availableDurationsFor(s.setup, s.setup.modelId);
+  const motionLimit = motionReferenceLimitFor(s.setup, s.setup.modelId, s.rentedMachines);
+  const durationOptions = availableDurationsFor(s.setup, s.setup.modelId, s.rentedMachines);
   const fullDurationOptions = durationsFor(s.setup, s.setup.modelId);
   const durationCapped = Boolean(motionLimit) && durationOptions.length < fullDurationOptions.length;
+  // WHY the range collapsed. A motion clip is trimmed to the clip's length, so
+  // it is the clip's length that has to give; pictures and sound references
+  // cost the same at every length, so when they are all that is attached the
+  // honest advice is different — shorten the clip, or send fewer of them.
+  const motionCapHint = (() => {
+    if (!motionLimit) return null;
+    const longest = durationOptions[durationOptions.length - 1];
+    const card = motionLimit.cardVramGb ? ` on this ${motionLimit.cardVramGb} GB card` : '';
+    const bigger = motionLimit.cardVramGb && motionLimit.cardVramGb < 96
+      ? ' A bigger card (an RTX PRO 6000) lifts the cap.' : '';
+    const biggerZh = motionLimit.cardVramGb && motionLimit.cardVramGb < 96
+      ? '换用更大显存的显卡（RTX PRO 6000）可以提高上限。' : '';
+    if (motionLimit.referenceVideoCount > 0) {
+      return zh()
+        ? `最长 ${longest} 秒 — 动作参考会被裁剪到成片长度，因此长参考会把成片也限制在同样长度。改用 ${motionLimit.maxSeconds.toFixed(1)} 秒以内的动作参考，它会保留自身长度、占用更少显存，完整时长即可恢复；移除动作参考同样可以。参考图片无论多长都是固定开销。${biggerZh}`
+        : `Up to ${longest}s${card} — a motion reference is trimmed to the clip's own length, so a long reference caps the clip at the same length. Use a motion reference of ${motionLimit.maxSeconds.toFixed(1)}s or less and it keeps its own length instead, costing less and opening the full range. Removing it works too. Reference pictures cost the same whatever the length.${bigger}`;
+    }
+    const pics = motionLimit.referencePictureCount || 0;
+    const sounds = motionLimit.referenceSoundCount || 0;
+    const parts = [];
+    const partsZh = [];
+    if (pics) { parts.push(`${pics} reference picture${pics === 1 ? '' : 's'}`); partsZh.push(`${pics} 张参考图片`); }
+    if (sounds) { parts.push(`${sounds} sound reference${sounds === 1 ? '' : 's'}`); partsZh.push(`${sounds} 段参考音频`); }
+    const inventory = parts.join(' and ');
+    return zh()
+      ? `最长 ${longest} 秒 — 成片和${partsZh.join('、')}共用显卡上的同一段序列，成片越长留给参考的空间越少。参考的开销与时长无关，所以只能缩短成片，或少放几个参考。${biggerZh}`
+      : `Up to ${longest}s${card} — the clip and everything attached to it share one sequence on the card, and a longer clip leaves less room. Your ${inventory} cost the same at every length, so the clip is what has to give: shorten it, or send fewer references for the full range.${bigger}`;
+  })();
   const resolutionOptions = resolutionsFor(s.setup, s.setup.modelId);
   const qualityOptions = qualitiesFor(s.setup, s.catalogs, s.setup.modelId);
   const modeOptions = modesFor(s.setup.modelId);
@@ -2568,7 +2751,9 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
               { value: 'rented', label: t('image.rented') },
             ]}
           />
-          {s.setup.rentedOnly ? <RentedSourceStatus engine={s} page="video" /> : null}
+          {s.setup.rentedOnly
+            ? <RentedSourceStatus engine={s} page="video" pinned={s.setup.rentedMachineId || ''} onPin={pinMachine} />
+            : null}
         </div>
       ) : null}
 
@@ -2735,9 +2920,7 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
               <Field
                 label={zh() ? '时长' : 'Duration'}
                 hint={durationCapped
-                  ? (zh()
-                    ? `最长 ${durationOptions[durationOptions.length - 1]} 秒 — 动作参考会被裁剪到成片长度，因此长参考会把成片也限制在同样长度。改用 ${motionLimit.maxSeconds.toFixed(1)} 秒以内的动作参考，它会保留自身长度、占用更少显存，完整时长即可恢复；移除动作参考同样可以。参考图片无论多长都是固定开销。`
-                    : `Up to ${durationOptions[durationOptions.length - 1]}s — a motion reference is trimmed to the clip's own length, so a long reference caps the clip at the same length. Use a motion reference of ${motionLimit.maxSeconds.toFixed(1)}s or less and it keeps its own length instead, costing less and opening the full range. Removing it works too. Reference pictures cost the same whatever the length.`)
+                  ? motionCapHint
                   : (zh()
                     ? '最长 15 秒 — 模型约在 15 秒内保持人物与场景一致，因此不提供更长时长。'
                     : 'Up to 15s — the model keeps people and scenes consistent for about 15 seconds, so longer takes are not offered.')}
@@ -3397,7 +3580,10 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
             prompt={s.setup.prompt}
             modelSource={s.setup}
             capture={() => captureGenerationContext(s.setup.prompt)}
-            onLoadPrompt={({ prompt }) => { setPrompt(prompt); focusPrompt(); }}
+            onLoadPrompt={({ prompt }) => {
+              loadPromptText(prompt, referenceEntry ? referenceLimits() : null);
+              focusPrompt();
+            }}
             onLoadContext={(context) => restoreGenerationContext(context)}
           />
 
@@ -3426,16 +3612,18 @@ export function VideoStudio({ active = true, tabActive = true, seed = null, apiR
               {referenceEntry ? (
                 <CastMenu
                   prompt={s.setup.prompt}
+                  members={s.cast}
+                  onMembersChange={(next) => { s.cast = next; bump(); }}
+                  warnings={s.castWarnings}
                   durationSeconds={Number(s.setup.duration) || 0}
-                  limits={{
-                    images: referenceEntry.referenceSlots?.images || 9,
-                    audios: referenceEntry.referenceSlots?.audios || 3,
-                    videos: referenceEntry.referenceSlots?.videos || 3,
-                  }}
+                  limits={referenceLimits()}
                   onApply={applyCast}
                 />
               ) : null}
-              <CharacterMenu prompt={s.setup.prompt} onPick={addH3Character} />
+              <CharacterMenu
+                prompt={s.setup.prompt}
+                onPick={(entry) => addH3Character(entry, referenceEntry ? referenceLimits() : null)}
+              />
             </>
           ) : null}
 

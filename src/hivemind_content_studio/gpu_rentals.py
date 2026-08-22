@@ -124,6 +124,17 @@ DOWNLOAD_STALL_SECONDS = 90
 # ranged GET on the same URL, whose Content-Range carries the total.
 DOWNLOAD_CONNECTIONS = 8
 DOWNLOAD_SPLIT_MIN_BYTES = 512 * 1024 * 1024
+# A split object is pulled as CHUNK-sized pieces by a pool of CONNECTIONS
+# workers, not as CONNECTIONS fixed eighths. Measured 2026-08-22 on a Vast PRO
+# 6000 in Japan against the live bucket: eight connections to R2 opened at the
+# same moment ran 63, 44, 30 and 26 MB/s — and the other four under 7 MB/s for
+# minutes. With fixed eighths a file's wall time is its slowest connection's,
+# which is how the 15.7GB text encoder took 25 of a 27-minute provisioning
+# while the 21GB transformer beside it landed in four. A slow connection now
+# costs one chunk, and the next chunk is a fresh connection (R2 hands out a
+# different edge per connection), so the tail is bounded by CHUNK, not by the
+# file.
+DOWNLOAD_CHUNK_BYTES = 256 * 1024 * 1024
 # Every stream is retried at the shell level, resumed from its own byte offset,
 # on ANY failure — not curl's --retry, which (measured 2026-08-22) re-sends a
 # bare GET with no Range and truncates the output to zero on each retry, and
@@ -992,6 +1003,7 @@ def _download_lib_lines(
     stall: int = DOWNLOAD_STALL_SECONDS,
     conns: int = DOWNLOAD_CONNECTIONS,
     split: int = DOWNLOAD_SPLIT_MIN_BYTES,
+    chunk: int = DOWNLOAD_CHUNK_BYTES,
     tries: int = DOWNLOAD_STREAM_ATTEMPTS,
     pause: int | float = DOWNLOAD_RETRY_PAUSE_SECONDS,
     patience: int = DOWNLOAD_STREAM_PATIENCE_SECONDS,
@@ -1009,23 +1021,32 @@ def _download_lib_lines(
                connect, and cut a connection under the liveness floor.
     - plen     the object's length from a ONE-BYTE RANGED GET. Not a HEAD: R2
                returns 403 to a HEAD on a GET-presigned URL, which is what made
-               every R2 weight single-stream until 2026-08-22.
+               every R2 weight single-stream until 2026-08-22. Asked up to
+               three times unless the answer is a permanent 4xx: one missed
+               probe used to demote a 15GB weight to a single stream, silently.
     - stream   one ranged connection, retried on any error and RESUMED from the
                part's own length — curl's --retry neither resumes nor covers
                connection resets. Permanent 4xx answers fail at once. A server
                that ignores the range gets a marker so pget can fall back.
     - plain    one connection with no resume, for a server that gave no length.
-    - pget     the whole object: split when it is long enough and the length is
-               known; parts appended onto the first BY INDEX (a glob orders
-               part10 before part2 and silently scrambles the file) and moved
-               into place only at the verified length, so a partial is never
-               counted as a model. On failure $dest.err says what happened.
+    - wk       one pool worker: claims the next unclaimed chunk (mkdir is the
+               atomic lock) and streams it, until none are left or its stream
+               gives up.
+    - pget     the whole object: split into CHUNK pieces pulled by CONNS
+               workers when it is long enough and the length is known; each
+               piece is written into the object at its own offset as soon as
+               it lands (no serial copy at the end) and the object is moved
+               into place only when every piece is marked done and the length
+               verifies, so a partial is never counted as a model. On failure
+               $dest.err says what happened.
     - dlstart  <manifest> <models-dir>: one pget per manifest line, FILES
                set for dlwait. A file already at its full size is skipped.
-    - dlwait   the watcher: publishes progress until every file exists, and
-               otherwise leaves through the beacon with the cause. Running
-               jobs are sampled BEFORE the files are counted, so a fetch that
-               lands between the two reads is never called a failure.
+    - dlwait   the watcher: publishes progress — the file being fetched, the
+               bytes landed so far across every fetch and the rate since the
+               last poll — until every file exists, and otherwise leaves
+               through the beacon with the cause. Running jobs are sampled
+               BEFORE the files are counted, so a fetch that lands between the
+               two reads is never called a failure.
     """
     # bash arithmetic is integer-only: a fractional pause would make `again`
     # error out and the stream die without writing its .err.
@@ -1039,9 +1060,15 @@ def _download_lib_lines(
     return [
         f'c() {{ curl -sfL --connect-timeout {connect_timeout} --speed-limit {floor} --speed-time {stall} "$@"; }}',
         'sz() { [ -f "$1" ] && wc -c < "$1" | tr -d " " || echo 0; }',
-        "pn() { printf '%s.part%03d' \"$1\" $2; }",
-        "plen() { c -r 0-0 -o /dev/null -D - --max-filesize 1048576 \"$1\" | tr -d '\\r'"
-        " | awk 'tolower($1)==\"content-range:\"{sub(/.*\\//,\"\",$3); n=$3} END{print n}'; }",
+        "pn() { printf '%s.part%04d' \"$1\" $2; }",
+        # The probe's status rides on its last line (-w), so a permanent 4xx
+        # is told apart from a moment's trouble: the first is final, the
+        # second is asked again.
+        "plen() { a=0; while :; do o=$(c -r 0-0 -o /dev/null -D - --max-filesize 1048576"
+        " -w '\\n%{http_code}' \"$1\"); n=$(printf %s \"$o\" | tr -d '\\r'"
+        " | awk 'tolower($1)==\"content-range:\"{sub(/.*\\//,\"\",$3); n=$3} END{print n}')"
+        '; [ -n "$n" ] && { echo "$n"; return; }; hc=${o##*$\'\\n\'}'
+        "; case $hc in 40[0-79]|41[0-9]) return;; esac; a=$((a+1)); [ $a -ge 3 ] && return; sleep 1; done; }",
         # again <file> <rc> <code> <attempt> <ip|seconds>: 0 = paused, try
         # again; 1 = gave up and wrote <file>.err. Gives up on a permanent 4xx,
         # after PATIENCE seconds of consecutive failure (f0 = first failure;
@@ -1066,19 +1093,34 @@ def _download_lib_lines(
         'while :; do o=$(c -o "$d.dl" -w "$W" "$u"); rc=$?; hc=${o%%|*}',
         '[ $rc -eq 0 ] && { mv "$d.dl" "$d"; return 0; }',
         'rm -f "$d.dl"; a=$((a+1)); again "$d" $rc $hc $a "${o#*|}" || return 1; done; }',
-        'pget() { u=$1; d=$2; rm -f "$d".part* "$d.dl" "$d.err"; len=$(plen "$u")',
+        # wk <url> <dest> <chunk> <chunks> <len>: claim chunk j with mkdir (atomic
+        # on every filesystem we land on), stream it, move on; stop when a
+        # stream gives up (its .err is the file's verdict below) or says the
+        # server ignored the range (.nr).
+        # A finished piece is written into the object at its offset (dd, block
+        # = piece size, so seek is the piece index) and dropped, by the worker
+        # that fetched it: the object is assembled WHILE the pull runs, not
+        # copied whole afterwards — on a network volume that serial copy was
+        # minutes of "0MB/s" after the last byte landed (stocker 2026-08-22).
+        'wk() { u=$1; d=$2; k=$3; m=$4; len=$5; j=0; while [ $j -lt $m ]; do mkdir "$d.c$j" 2>/dev/null || { j=$((j+1)); continue; }'
+        '; s=$((j*k)); e=$((s+k-1)); [ $e -ge $len ] && e=$((len-1)); p=$(pn "$d" $j); stream "$u" "$p" $s $e || return'
+        '; if [ $m -eq 1 ]; then mv "$p" "$d.dl"; else dd if="$p" of="$d.dl" bs=$k seek=$j conv=notrunc 2>/dev/null && rm -f "$p"; fi'
+        ' && : > "$p.ok" || { echo "assemble $j" > "$p.err"; return 1; }; j=$((j+1)); done; }',
+        'pget() { u=$1; d=$2; rm -rf "$d".part* "$d".c[0-9]* "$d.dl" "$d.err"; len=$(plen "$u")',
         'case "$len" in ""|*[!0-9]*) plain "$u" "$d"; return;; esac',
-        f"n={conns}; [ $len -lt {split} ] && n=1",
-        "while :; do k=$(((len+n-1)/n)); i=0",
-        "while [ $i -lt $n ]; do s=$((i*k)); e=$((s+k-1)); [ $e -ge $len ] && e=$((len-1))"
-        '; stream "$u" "$(pn "$d" $i)" $s $e & i=$((i+1)); done; wait',
-        'set -- "$d".part*.nr; [ -e "$1" ] && { rm -f "$d".part*; n=1; continue; }',
-        'bad=""; i=0',
-        'while [ $i -lt $n ]; do p=$(pn "$d" $i); s=$((i*k)); w=$k; [ $((s+w)) -gt $len ] && w=$((len-s)); h=$(sz "$p")',
-        '[ $h -eq $w ] || { bad="part $i $h/${w}B"; [ -s "$p.err" ] && bad="part $i: $(cat "$p.err")"; break; }',
-        '[ $i -gt 0 ] && { cat "$p" >> "$d.part000" && rm -f "$p" || { bad="assemble $i"; break; }; }; i=$((i+1)); done',
-        '[ -z "$bad" ] && [ "$(sz "$d.part000")" = "$len" ] && { mv "$d.part000" "$d"; return 0; }',
-        'rm -f "$d".part*; echo "${bad:-size mismatch}" > "$d.err"; return 1; done; }',
+        f"n={conns}; k={chunk}; [ $len -lt {split} ] && n=1",
+        # One stream means one chunk, the whole object: that is also the
+        # fallback for a server that stops honouring ranges mid-way.
+        "while :; do [ $n -eq 1 ] && k=$len; m=$(((len+k-1)/k)); i=0",
+        'while [ $i -lt $n ]; do wk "$u" "$d" $k $m $len & i=$((i+1)); done; wait',
+        'set -- "$d".part*.nr; [ -e "$1" ] && { rm -rf "$d".part* "$d".c[0-9]* "$d.dl"; n=1; continue; }',
+        # Every piece must have been written in (its .ok marker), and the
+        # object must be exactly the probed length; then and only then is it
+        # moved into place. A piece's .err is the file's verdict.
+        'bad=""; j=0',
+        'while [ $j -lt $m ]; do p=$(pn "$d" $j); [ -e "$p.ok" ] || { bad="part $j"; [ -s "$p.err" ] && bad="part $j: $(cat "$p.err")"; break; }; j=$((j+1)); done',
+        '[ -z "$bad" ] && [ "$(sz "$d.dl")" = "$len" ] && { mv "$d.dl" "$d"; rm -rf "$d".part* "$d".c[0-9]*; return 0; }',
+        'rm -rf "$d".part* "$d".c[0-9]* "$d.dl"; echo "${bad:-size mismatch}" > "$d.err"; return 1; done; }',
         "dlstart() { FILES=(); while IFS=$'\\t' read -r u d; do [ -n \"$d\" ] || continue; FILES+=(\"$2/$d\")"
         '; mkdir -p "$2/${d%/*}"; [ -s "$2/$d" ] || pget "$u" "$2/$d" & done < "$1"; }',
         # One exit for both ways a download can end badly. Says "destroy it"
@@ -1086,11 +1128,18 @@ def _download_lib_lines(
         # half-provisioned box that launches ComfyUI anyway just fails later,
         # at generate time, where the cause is far harder to see.
         'dlfail() { beacon error "$dn" "download $1 at $dn/$t: ${why:-$cur} — destroy this machine and rent another"; exit 1; }',
-        "dlwait() { dl=$1; shift; t=$#",
-        'while :; do run=$(jobs -r); dn=0; cur=""; why=""',
+        # The detail while fetching: "<file> <GB landed across every fetch>
+        # <MB/s since the last poll>" — the two numbers this provisioning was
+        # blind to when one file crawled for 25 minutes. Part sizes are read
+        # with wc -c (stat, not a read) and the last line wins whether it is
+        # one file's or the total's. Empty once everything has landed.
+        "dlwait() { dl=$1; shift; t=$#; pb=0; pt=$(date +%s)",
+        'while :; do run=$(jobs -r); dn=0; cur=""; why=""; cb=0',
         'for f in "$@"; do if [ -s "$f" ]; then dn=$((dn+1)); else [ -z "$cur" ] && cur=${f##*/}'
+        "; cb=$((cb+$(wc -c \"$f\".part* \"$f.dl\" 2>/dev/null | awk '{s=$1} END{print s+0}')))"
         '; [ -s "$f.err" ] && why="$why${why:+; }${f##*/} ($(cat "$f.err"))"; fi; done',
-        'beacon downloading "$dn" "$cur"; [ $dn -eq $t ] && return 0',
+        'now=$(date +%s); r=$(((cb-pb)/(now-pt+1)/1048576)); [ $r -lt 0 ] && r=0; pb=$cb; pt=$now',
+        'beacon downloading "$dn" "${cur:+$cur $((cb/1073741824)).$((cb%1073741824*10/1073741824))GB ${r}MB/s}"; [ $dn -eq $t ] && return 0',
         f'[ -z "$run" ] && dlfail "failed"; [ "$(date +%s)" -ge "$dl" ] && dlfail "stalled {deadline // 60}min"; sleep {poll}; done; }}',
     ]
 
@@ -1855,6 +1904,9 @@ def _instance_dto(instance: Instance, probe: bool = False) -> dict:
         "tier": tier,
         "tier_label": TIERS[tier]["label"] if tier else None,
         "gpu_class": gpu_class,
+        # The card's marketing size in GB from the class table (the studio prices
+        # the H3 motion-reference budget against the machine a run will land on).
+        "vram_gb": GPU_CLASSES.get(gpu_class, {}).get("vram_gb") if gpu_class else None,
         "reference_job": TIERS[tier]["reference_job"] if tier else None,
         "seconds_per_generation": seconds,
         "estimate_basis": basis,
@@ -1866,6 +1918,17 @@ def _instance_dto(instance: Instance, probe: bool = False) -> dict:
         # the studios' machine picker writes this.
         "priority": (attachment or {}).get("priority", 0),
         "pending_reattach": bool(_read_paused_state().get(str(ref), {}).get("pending_reattach")),
+        # A Quick-resume that the host is not honouring: resume was asked for
+        # more than RESUME_GRACE_SECONDS ago and the box is still stopped. Vast
+        # keeps the disk and keeps billing it; the GPU itself was released and
+        # is most likely rented to someone else. The studio shows the way out
+        # (keep waiting, or destroy and rent fresh) instead of a spinner.
+        "resume_blocked": bool(
+            instance.state == "stopped"
+            and (_read_paused_state().get(str(ref), {}).get("resumed_at") or 0)
+            and time.time() - float(_read_paused_state().get(str(ref), {}).get("resumed_at") or 0) > RESUME_GRACE_SECONDS
+        ),
+        "resume_requested_at": _read_paused_state().get(str(ref), {}).get("resumed_at"),
         # The forward, not the process: a live ssh with a dead forward reads as
         # healthy to a pid check and hides the only fact that matters here.
         "tunnel_alive": bool(attachment and _tunnel_carrying_traffic(ref)),
@@ -2042,6 +2105,21 @@ def _rank_offers(tier: str, offers: list[Offer], limit: int = 8) -> list[dict]:
         dto["setup_minutes"] = (
             round(download_gb * 8 * 1000 / offer.down_mbps / 60, 1) if offer.down_mbps else None
         )
+        # A stocked warm volume on this provider: the box would mount it and
+        # skip the whole pull — but it then rents on Secure Cloud (network
+        # volumes live there), so it is quoted at the SECURE price or not
+        # quoted as warm at all. An offer the secure price is unknown for is
+        # left cold rather than billed above its quote.
+        volume = warm_volume_for(tier, offer.provider)
+        secure = (offer.raw or {}).get("securePrice") if volume else None
+        if volume and secure:
+            dto["usd_per_hour"] = round(float(secure), 4)
+            dto["warm"] = True
+            dto["warm_volume_id"] = volume["volume_id"]
+            dto["warm_data_center"] = volume["data_center_id"]
+            dto["setup_minutes"] = WARM_SETUP_MINUTES
+        else:
+            dto["warm"] = False
         dtos.append(dto)
     # The FLOOR already guarantees every candidate starts fast enough, so
     # rank by price inside that set. Ranking by time first paid 38% more
@@ -2105,6 +2183,13 @@ def rental_plan(tier: str, prefer: str = "balanced") -> dict:
             "usd_per_hour": price,
             "available": len(ranked),
             "setup_minutes": cheapest["setup_minutes"] if cheapest else None,
+            # A stocked warm volume serves this rung: at least one offer mounts
+            # it and skips the model pull. Its minutes and region travel with
+            # the flag so the card can say so even when the CHEAPEST offer is a
+            # cold marketplace box.
+            "warm": any(dto.get("warm") for dto in ranked),
+            "warm_setup_minutes": next((dto["setup_minutes"] for dto in ranked if dto.get("warm")), None),
+            "warm_data_center": next((dto.get("warm_data_center") for dto in ranked if dto.get("warm")), None),
             "seconds_per_generation": seconds,
             "estimate_basis": basis,
             # The number that actually decides which rung is worth it: a
@@ -2271,6 +2356,12 @@ def _probe_instances(instances: list[Instance]) -> list[dict]:
 def list_rentals() -> dict:
     raw = _all_instances()
     instances = _probe_instances(raw)
+    # A stocking box that reports ready has filled its warm volume: mark the
+    # volume stocked and destroy the box. Free — the DTOs are in hand.
+    try:
+        _settle_warm_volumes(instances)
+    except Exception as exc:  # never let bookkeeping take the Machines view down
+        print(f"[gpu-rentals] warm volume settle failed: {exc}", file=sys.stderr)
     # Free: the DTOs are already in hand, so the box that failed provisioning
     # goes away on the same poll that noticed it rather than billing until
     # someone reads the screen.
@@ -2342,7 +2433,16 @@ def create_rental(
     gpu_class: str | None = None,
     count: int = 1,
     max_usd_per_hour: float | None = None,
+    *,
+    warm: bool = True,
+    _warm_volume: dict | None = None,
+    _label_note: str | None = None,
 ) -> dict:
+    """... `warm`: mount the tier's stocked warm volume on providers that have
+    one (RunPod), so the box skips every weight download; False rents a cold
+    box even when a volume exists. `_warm_volume`/`_label_note` are how
+    create_warm_volume() rents the stocking box: the volume to fill, and a
+    label marker the settle step recognises."""
     if tier not in TIERS:
         raise GpuRentalError(f"unknown tier: {tier}", status_code=400)
     ladder = tier_gpu_classes(tier)
@@ -2373,7 +2473,16 @@ def create_rental(
     # client still parses, as Vast.
     pinned = RentalRef.parse(offer_id) if offer_id is not None else None
     preferred = [pinned] if pinned else []
+    # A stocking box exists to fill ONE provider's volume: an offer from any
+    # other marketplace would rent a cold box that cannot mount it and leave
+    # the volume empty, so those never enter the candidate list here.
+    if _warm_volume:
+        ranked = [dto for dto in ranked if dto["provider"] == _warm_volume.get("provider")]
+        preferred = [ref for ref in preferred if ref.provider == _warm_volume.get("provider")]
     price_of = {(dto["provider"], dto["offer_id"]): dto["usd_per_hour"] for dto in ranked}
+    # Offers quoted warm (secure price, stocked volume) are the only ones that
+    # mount the volume: a pinned offer the search did not price stays cold.
+    warm_ok = {(dto["provider"], dto["offer_id"]) for dto in ranked if dto.get("warm")}
     fresh = [
         RentalRef(dto["provider"], dto["offer_id"])
         for dto in ranked
@@ -2419,8 +2528,16 @@ def create_rental(
         while remaining and rented is None:
             candidate = remaining.pop(0)
             provider = rental_providers.get(candidate.provider)
-            label = f"{STUDIO_LABEL_PREFIX}{tier}-{gpu_class}-{uuid.uuid4().hex[:8]}"
+            note = f"-{_label_note}" if _label_note else ""
+            label = f"{STUDIO_LABEL_PREFIX}{tier}-{gpu_class}{note}-{uuid.uuid4().hex[:8]}"
             state["tried"] += 1
+            # The volume this box mounts, if its provider keeps one for the
+            # tier: the one being stocked, or the stocked one every later
+            # rental skips its downloads with. A volume pins the box to its
+            # data center; a provider without volumes ignores the fields.
+            volume = _warm_volume if _warm_volume and _warm_volume.get("provider") == candidate.provider \
+                else (warm_volume_for(tier, candidate.provider)
+                      if warm and not _warm_volume and (candidate.provider, candidate.native) in warm_ok else None)
             try:
                 native_id = provider.create(LaunchSpec(
                     image=comfy_image_for(candidate.provider),
@@ -2433,6 +2550,8 @@ def create_rental(
                     gpu_names=_gpu_names_for(tier, gpu_class),
                     min_ram_gb=TIERS[tier].get("min_ram_gb") or TIERS[tier]["min_vram_gb"],
                     min_down_mbps=tier_min_down_mbps(tier),
+                    network_volume_id=(volume or {}).get("volume_id"),
+                    data_center_ids=[volume["data_center_id"]] if volume and volume.get("data_center_id") else [],
                 ))
             except ProviderError as exc:
                 if not provider.ask_evaporated(exc):
@@ -3150,6 +3269,171 @@ def recent_bad_machine_ids(within_seconds: float = BAD_MACHINE_COOLDOWN_SECONDS)
     return bad | _shared_bad_machine_ids()
 
 
+# --- warm volumes ----------------------------------------------------------
+# The "no download at all" provisioning path. A persistent network volume on
+# RunPod is stocked ONCE with a tier's weights (by a normal rental of that tier
+# whose models directory is the volume, destroyed the moment it reports ready),
+# and every later rental of the tier in that data center mounts it at
+# /workspace: the provisioning script's `[ -s file ] || pget` skips every
+# weight, so the box goes boot -> node installs -> ComfyUI up. Measured
+# 2026-08-22: a cold Vast PRO 6000 spent 25 of its 27 provisioning minutes on
+# downloads. Vast has no volume that survives a box, so this is RunPod-only and
+# a Vast rental is never affected by it.
+#
+# Registry: one entry per (provider, tier) in rental-warm-volumes.json —
+#   {"provider", "volume_id", "data_center_id", "size_gb", "created_at",
+#    "state": "stocking" | "stocked" | "error", "stocking_rental_id",
+#    "stocked_at", "detail"}
+# The stocking rental is an ordinary managed rental (label carries "-stock-")
+# so every existing reaper, beacon and billing rule applies to it; what is
+# special is only that list_rentals() finishes the job: when it reports ready
+# the volume is marked stocked and the rental destroyed, when it reports error
+# the volume is marked error (and left, so the bytes already on it are not
+# thrown away — a retry re-stocks in place).
+
+WARM_VOLUME_PROVIDER = "runpod"
+
+# What a warm box costs in provisioning time: boot, node installs, ComfyUI up,
+# no weights to pull. Measured 2026-08-22: a RunPod 5090 in EU-RO-1 on the
+# stocked H3 volume went create -> "ComfyUI is up" in 144 s (the same tier
+# cold on a Vast PRO 6000 that morning: 27 min). Quoted as 3 to stay honest
+# about boot variance.
+WARM_SETUP_MINUTES = 3
+# How long a resumed box may stay stopped before the studio says the GPU is
+# probably gone. Vast's guidance is ">30 seconds"; a minute leaves room for
+# the marketplace's own polling without hiding the condition.
+RESUME_GRACE_SECONDS = 60
+
+
+def _warm_volumes_path() -> Path:
+    return MEDIA_STATE_ROOT / "rental-warm-volumes.json"
+
+
+def _read_warm_volumes() -> dict[str, dict]:
+    try:
+        data = json.loads(_warm_volumes_path().read_text())
+    except Exception:
+        return {}
+    return {k: v for k, v in (data or {}).items() if isinstance(v, dict)}
+
+
+def _write_warm_volumes(state: dict[str, dict]) -> None:
+    MEDIA_STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    _warm_volumes_path().write_text(json.dumps(state, indent=1))
+
+
+def warm_volume_for(tier: str, provider_key: str = WARM_VOLUME_PROVIDER) -> dict | None:
+    """The stocked volume a new rental of this tier should mount, or None."""
+    entry = _read_warm_volumes().get(f"{provider_key}:{tier}")
+    if entry and entry.get("state") == "stocked" and entry.get("volume_id"):
+        return entry
+    return None
+
+
+def list_warm_volumes() -> list[dict]:
+    out = []
+    for key, entry in sorted(_read_warm_volumes().items()):
+        provider_key, _, tier = key.partition(":")
+        out.append({"key": key, "provider": provider_key, "tier": tier,
+                    "tier_label": TIERS.get(tier, {}).get("label", tier), **entry})
+    return out
+
+
+def create_warm_volume(tier: str, data_center_id: str, *, gpu_class: str | None = None,
+                       offer_id: str | None = None,
+                       provider_key: str = WARM_VOLUME_PROVIDER, size_gb: int | None = None) -> dict:
+    """Create the volume and start stocking it: one managed rental of the tier
+    in that data center with the volume mounted. Idempotent per (provider,
+    tier): an existing entry is re-stocked in place instead of duplicated.
+
+    `offer_id` pins the stocking box's GPU type ("runpod:NVIDIA GeForce RTX
+    4090"). The box that fills the volume only downloads and boots ComfyUI, so
+    the cheapest type the data center has in stock is the right one — the
+    tier's own ladder (Blackwell-only for H3) is for the boxes that render.
+    """
+    if tier not in TIERS:
+        raise GpuRentalError(f"unknown tier: {tier}", status_code=400)
+    provider = rental_providers.get(provider_key)
+    if not hasattr(provider, "create_network_volume"):
+        raise GpuRentalError(f"{provider_key} has no persistent volumes", status_code=400)
+    key = f"{provider_key}:{tier}"
+    volumes = _read_warm_volumes()
+    entry = volumes.get(key) or {}
+    if entry.get("state") == "stocking" and entry.get("stocking_rental_id"):
+        raise GpuRentalError(f"a stocking rental is already running for {key}: "
+                             f"{entry['stocking_rental_id']}", status_code=409)
+    size = int(size_gb or tier_disk_gb(tier))
+    if not entry.get("volume_id") or entry.get("data_center_id") != data_center_id:
+        volume_id = provider.create_network_volume(
+            f"hivemind-warm-{tier}-{data_center_id.lower()}", size, data_center_id)
+        entry = {"provider": provider_key, "volume_id": volume_id, "data_center_id": data_center_id,
+                 "size_gb": size, "created_at": time.time()}
+    entry.update({"state": "stocking", "detail": "", "stocked_at": None, "stocking_rental_id": None})
+    volumes[key] = entry
+    _write_warm_volumes(volumes)
+    try:
+        rented = create_rental(tier, offer_id=offer_id, gpu_class=gpu_class, count=1,
+                               _warm_volume=entry, _label_note="stock")
+    except Exception as exc:
+        entry.update({"state": "error", "detail": f"could not rent a stocking box: {exc}"})
+        volumes[key] = entry
+        _write_warm_volumes(volumes)
+        raise
+    entry["stocking_rental_id"] = rented["rental_id"]
+    volumes[key] = entry
+    _write_warm_volumes(volumes)
+    return {"key": key, **entry}
+
+
+def delete_warm_volume(tier: str, provider_key: str = WARM_VOLUME_PROVIDER) -> dict:
+    key = f"{provider_key}:{tier}"
+    volumes = _read_warm_volumes()
+    entry = volumes.pop(key, None)
+    if not entry:
+        raise GpuRentalError(f"no warm volume for {key}", status_code=404)
+    if entry.get("stocking_rental_id"):
+        try:
+            destroy_rental(entry["stocking_rental_id"])
+        except Exception:
+            pass
+    rental_providers.get(provider_key).delete_network_volume(entry["volume_id"])
+    _write_warm_volumes(volumes)
+    return {"key": key, "deleted": True, **entry}
+
+
+def _settle_warm_volumes(instances: list[dict]) -> None:
+    """Called from list_rentals() with the DTOs it is about to return: a
+    stocking rental that reports ready has filled its volume — mark it stocked
+    and destroy the box (the volume outlives it); one that reports error marks
+    the volume error and is left to the reaper like any failed rental."""
+    volumes = _read_warm_volumes()
+    if not volumes:
+        return
+    by_id = {str(i.get("rental_id")): i for i in instances}
+    changed = False
+    for key, entry in volumes.items():
+        rid = entry.get("stocking_rental_id")
+        if entry.get("state") != "stocking" or not rid:
+            continue
+        dto = by_id.get(str(rid))
+        if dto is None:
+            continue
+        phase = dto.get("phase")
+        if phase == "ready":
+            entry.update({"state": "stocked", "stocked_at": time.time(), "stocking_rental_id": None,
+                          "detail": f"stocked by {rid}"})
+            changed = True
+            try:
+                destroy_rental(rid)
+            except Exception as exc:
+                entry["detail"] += f"; stocking box could not be destroyed: {exc}"
+        elif phase == "error":
+            entry.update({"state": "error", "detail": (dto.get("provision") or {}).get("detail") or "stocking failed"})
+            changed = True
+    if changed:
+        _write_warm_volumes(volumes)
+
+
 def pause_rental(rental_id: str | int) -> dict:
     """Stop the box but KEEP its disk: models stay downloaded, so resuming
     skips the whole model pull. Both marketplaces bill storage only while
@@ -3179,10 +3463,12 @@ def resume_rental(rental_id: str | int) -> dict:
     rental_providers.get(ref.provider).resume(ref.native)
     paused = _read_paused_state()
     entry = paused.pop(str(ref), {})
-    if entry.get("was_attached"):
-        # Cleared by attach_rental once the tunnel is actually back up; the
-        # Machines view watches this and re-attaches when the box reports ready.
-        paused[str(ref)] = {"pending_reattach": True}
+    # Remembered so the Machines view can tell a restart the host is honouring
+    # from one it is not: Vast documents that a stopped box restarts only "if
+    # GPU available" and sits in "Scheduling" otherwise — "if stuck >30
+    # seconds, GPU likely rented by another user". The flag below reads this.
+    paused[str(ref)] = {"pending_reattach": bool(entry.get("was_attached")),
+                        "resumed_at": time.time()}
     _write_paused_state(paused)
     return {"rental_id": str(ref), "resuming": True,
             "will_reattach": bool(entry.get("was_attached"))}
@@ -3366,6 +3652,26 @@ def register_gpu_rental_routes(app, require_owner) -> None:
     @app.delete("/api/gpu-rentals/{rental_id}", dependencies=[Depends(require_owner)])
     def gpu_rentals_destroy(rental_id: str) -> dict:
         return _guard(destroy_rental, rental_id)
+
+    # Warm volumes: the no-download provisioning path (RunPod network volumes
+    # stocked once per tier, mounted by every later rental in that region).
+    @app.get("/api/gpu-rentals/warm-volumes", dependencies=[Depends(require_owner)])
+    def gpu_rentals_warm_volumes() -> dict:
+        return _guard(lambda: {"volumes": list_warm_volumes(), "provider": WARM_VOLUME_PROVIDER})
+
+    @app.post("/api/gpu-rentals/warm-volumes", dependencies=[Depends(require_owner)])
+    def gpu_rentals_warm_volume_create(payload: dict = Body(default={})) -> dict:
+        tier = str(payload.get("tier") or "")
+        data_center_id = str(payload.get("data_center_id") or "").strip()
+        if not data_center_id:
+            raise HTTPException(status_code=400, detail="data_center_id is required")
+        gpu_class = payload.get("gpu_class") or None
+        return _guard(create_warm_volume, tier, data_center_id,
+                      gpu_class=str(gpu_class) if gpu_class else None)
+
+    @app.delete("/api/gpu-rentals/warm-volumes/{tier}", dependencies=[Depends(require_owner)])
+    def gpu_rentals_warm_volume_delete(tier: str) -> dict:
+        return _guard(delete_warm_volume, tier)
 
     @app.post("/api/gpu-rentals/{rental_id}/pause", dependencies=[Depends(require_owner)])
     def gpu_rentals_pause(rental_id: str) -> dict:

@@ -245,6 +245,125 @@ test('an empty composer is not silently cast into nothing', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// What "left as written" does NOT cover. Measured 2026-08-22: a fight recast
+// from SpongeBob onto Naruto rewrote the definitions and kept the spoken line's
+// "[English in SpongeBob SquarePants' voice … as voiced by Tom Kenny]" tag, so
+// half the prompt asked for one character and half for another.
+const SPONGEBOB_FIGHT = [
+    'subject_definitions:',
+    '<Subject 1> is the character shown in <Picture 1>: [appearance].',
+    '<Subject 1> speaks as S1.',
+    '<Subject 2> is SpongeBob SquarePants from the animated series SpongeBob SquarePants (1999).',
+    "<Subject 2> speaks as S2, in SpongeBob SquarePants' voice from SpongeBob SquarePants as voiced by Tom Kenny.",
+    '',
+    'summary:',
+    'A fight between <Subject 1> and SpongeBob SquarePants.',
+    '',
+    'detailed_description:',
+    '[Shot 1] <Subject 1> lands a punch and SpongeBob SquarePants reels backwards.',
+    "At 00:02.700, <Subject 2> (S2) says: <d>[English in SpongeBob SquarePants' voice from SpongeBob SquarePants as voiced by Tom Kenny] Ouch! That really hurt!</d>",
+    '',
+    'overall_soundscape:',
+    'Night street room tone.',
+].join('\n');
+
+test('recasting renames the voice inside the dialogue tag, not just the definitions', async () => {
+    const { applyCastToPrompt, castPersona, castCharacter, parseSixSections } = await load();
+    const { prompt } = applyCastToPrompt(SPONGEBOB_FIGHT, {
+        members: [
+            castPersona('Cheryl', CHERYL),
+            castCharacter('Naruto Uzumaki', 'Naruto Uzumaki from the anime series Naruto (2002)', {
+                voice: "Naruto Uzumaki's voice from Naruto",
+            }),
+        ],
+    });
+    const sections = parseSixSections(prompt);
+
+    // The tag is the cast's to write — the outgoing character's voice cannot
+    // survive in it, in ANY section.
+    assert.match(sections.detailed_description, /<d>\[English in Naruto Uzumaki's voice from Naruto\] Ouch!/);
+    assert.doesNotMatch(prompt, /Tom Kenny/);
+    // …and the prose that named the outgoing character now addresses the
+    // position that character held, so the next recast is exact too.
+    assert.match(sections.summary, /A fight between <Subject 1> and <Subject 2>\./);
+    assert.match(sections.detailed_description, /<Subject 1> lands a punch and <Subject 2> reels backwards\./);
+});
+
+test('a persona inheriting a spoken part loses the voice the previous member was asked for', async () => {
+    const { applyCastToPrompt, castPersona, parseSixSections } = await load();
+    // One member now, so what was <Subject 2>'s line belongs to nobody — but
+    // <Subject 1>'s tag must still stop naming a voice it does not have.
+    const { prompt } = applyCastToPrompt([
+        'subject_definitions:',
+        '<Subject 1> is SpongeBob SquarePants from the animated series SpongeBob SquarePants (1999).',
+        "<Subject 1> speaks as S1, in SpongeBob SquarePants' voice from SpongeBob SquarePants as voiced by Tom Kenny.",
+        '',
+        'detailed_description:',
+        "[Shot 1] <Subject 1> (S1) says: <d>[English in SpongeBob SquarePants' voice from SpongeBob SquarePants as voiced by Tom Kenny] Ouch!</d>",
+    ].join('\n'), { members: [castPersona('Dana', DANA)] });
+
+    assert.match(parseSixSections(prompt).detailed_description, /<d>\[English\] Ouch!<\/d>/);
+});
+
+test('a name left in the words that get SAID is reported, never rewritten', async () => {
+    const { applyCastToPrompt, castPersona, castCharacter, parseSixSections } = await load();
+    const { prompt, warnings } = applyCastToPrompt([
+        'subject_definitions:',
+        '<Subject 1> is the character shown in <Picture 1>: [appearance].',
+        '<Subject 1> speaks as S1.',
+        '<Subject 2> is SpongeBob SquarePants from the animated series SpongeBob SquarePants (1999).',
+        '',
+        'detailed_description:',
+        '[Shot 1] <Subject 1> (S1) says: <d>[English] Take that, SpongeBob SquarePants!</d>',
+    ].join('\n'), {
+        members: [
+            castPersona('Cheryl', CHERYL),
+            castCharacter('Naruto Uzumaki', 'Naruto Uzumaki from the anime series Naruto (2002)'),
+        ],
+    });
+
+    // Rewriting it would have the model read the label out loud.
+    assert.match(parseSixSections(prompt).detailed_description, /Take that, SpongeBob SquarePants!/);
+    assert.ok(warnings.some((text) => /still says .SpongeBob SquarePants./.test(text)));
+});
+
+test('speaker ids in carried prose follow the new speaking order', async () => {
+    const { applyCastToPrompt, castPersona, castCharacter, parseSixSections } = await load();
+    const { prompt } = applyCastToPrompt([
+        'subject_definitions:',
+        '<Subject 1> is the character shown in <Picture 1>: [appearance].',
+        '<Subject 1> speaks as S1.',
+        '<Subject 2> is SpongeBob SquarePants from the animated series (1999).',
+        '<Subject 2> speaks as S2.',
+        '',
+        'detailed_description:',
+        '[Shot 1] <Subject 2> (S2) says: <d>[English] I go first now.</d> <Subject 1> (S1) answers.',
+    ].join('\n'), {
+        members: [castPersona('Cheryl', CHERYL), castCharacter('SpongeBob', 'SpongeBob SquarePants (1999)')],
+        // The cartoon speaks first, so it is S1 and the persona becomes S2.
+        speakingOrder: [1, 0],
+    });
+    const description = parseSixSections(prompt).detailed_description;
+    assert.match(description, /<Subject 2> \(S1\) says:/);
+    assert.match(description, /<Subject 1> \(S2\) answers\./);
+});
+
+test('a label the cast cannot fill is reported instead of conditioning on nothing', async () => {
+    const { applyCastToPrompt, castPersona } = await load();
+    const { warnings } = applyCastToPrompt([
+        'subject_definitions:',
+        '<Subject 1> is the character shown in <Picture 1>: [appearance].',
+        '',
+        'detailed_description:',
+        '[Shot 1] <Subject 1> and <Subject 3> square up, lit exactly as <Picture 5> is lit.',
+    ].join('\n'), { members: [castPersona('Cheryl', CHERYL)] });
+
+    assert.ok(warnings.some((text) => /addresses <Picture 5>, but this cast fills 2 pictures/.test(text)));
+    assert.ok(warnings.some((text) => /addresses <Subject 3>, but this cast has 1 member/.test(text)));
+});
+
+
+// ---------------------------------------------------------------------------
 // Beats. Measured 2026-08-12: an 8s clip was handed ~14s of choreography as
 // prose, and the model dropped and reordered to fit — a one-word "Ouch!" landed
 // on the kick that was meant to provoke it instead of the punch that landed.
@@ -543,4 +662,58 @@ test('a persona is introduced by its gender, and asked for a matching voice when
     assert.match(unset, /<Subject 1> is the character shown in <Picture 1>, <Picture 2>/);
     assert.equal(castPersona('Cheryl', CHERYL).gender, '');
     assert.equal(castPersona('Cheryl', { ...CHERYL, gender: 'Woman' }).gender, 'female');
+});
+
+// ---------------------------------------------------------------------------
+// The wiring around the pure rules. CastMenu.jsx and VideoStudio.jsx are JSX,
+// which node:test cannot import, so these assert the shape of the source the
+// same way the other studio tests do (see personaBar.test.js).
+const fs = require('node:fs');
+const path = require('node:path');
+const read = (relative) => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
+
+test('the panel hands the catalog description of a voice to the compiler', () => {
+    // Naming a voice the model cannot place falls back to a generic adult male
+    // — a named SpongeBob came back as one (2026-08-13). The catalog carries a
+    // description of the timbre for exactly that, and the control that
+    // GENERATES the starter prompt was dropping it while the starter kept it.
+    assert.match(
+        read('src/studios/video/CastMenu.jsx'),
+        /voiceQuality: member\.useVoice \? String\(member\.entry\?\.voiceQuality \|\| ''\) : ''/,
+    );
+});
+
+test('the cast lives in the studio, so a loaded prompt can be recast on the way in', () => {
+    const studio = read('src/studios/VideoStudio.jsx');
+    // Held in the engine, not inside the menu: a menu only remembers its
+    // members while it is open, and a prompt can arrive while it is shut.
+    assert.match(studio, /^\s*cast: \[\],$/m);
+    assert.match(studio, /members=\{s\.cast\}/);
+    assert.match(studio, /onMembersChange=\{\(next\) => \{ s\.cast = next; bump\(\); \}\}/);
+    // Every prompt from the library goes through the recast, and it changes the
+    // PROMPT only — loading a prompt is not a request to reshuffle attachments.
+    assert.match(studio, /onLoadPrompt=\{\(\{ prompt \}\) => \{\s*loadPromptText\(prompt,/);
+    const loader = /const loadPromptText = \(text, limits\) => \{[\s\S]*?\n  \};/.exec(studio);
+    assert.ok(loader, 'the loader exists');
+    assert.doesNotMatch(loader[0], /referenceImageUrls|referenceVideos|referenceAudios/);
+});
+
+// A persona clip switched to SOUND ONLY is a voice reference and nothing else:
+// it binds the voice, never introduces the subject by sight, and writes no
+// <Video N> line — with no picture beside it the name has to introduce them.
+test('a persona clip switched to sound only is a voice reference, not the character reference', async () => {
+    const { compileCastPrompt, castPersona } = await load();
+    const soundOnly = castPersona('Liam', { images: ['/l.jpg'], videos: [{ url: '/liam.mov', motion: false, useAudio: true }], audios: [], gender: 'male' });
+    const { prompt } = compileCastPrompt({ members: [soundOnly], speakingOrder: [0], template: { summary: 'x' } });
+    assert.match(prompt, /<Subject 1> is the man shown in <Picture 1>/);
+    assert.match(prompt, /<Audio 1> is the voice-timbre reference for <Subject 1>/);
+    assert.match(prompt, /<Audio 1>: reference — only the timbre carries/);
+    assert.doesNotMatch(prompt, /<Video 1>/);
+
+    const noPicture = castPersona('Liam', { images: [], videos: [{ url: '/liam.mov', motion: false, useAudio: true }], audios: [], gender: 'male' });
+    const named = compileCastPrompt({ members: [noPicture], speakingOrder: [0], template: { summary: 'x' } }).prompt;
+    assert.match(named, /<Subject 1> is a man, Liam/);
+    assert.match(named, /<Audio 1> is the voice-timbre reference for <Subject 1>/);
+    assert.doesNotMatch(named, /<Video 1>/);
+    assert.doesNotMatch(named, /IS the person in this clip/);
 });

@@ -534,21 +534,81 @@ test('each video row carries a Compact switch beside its sound switch, held off 
 
     // The row: a per-video toggle, with the hint that says what it buys and
     // when it is off, and a disabled state that gives the reason instead.
-    const sound = menu.indexOf("{zh() ? '含原声' : 'sound'}");
+    // The control strip under the row reads Motion · Sound · Compact: the sound
+    // switch first, Compact right after it — and Compact is held off both while
+    // no picture is attached and on a sound-only row (which sends no pixels).
+    const motion = menu.indexOf("{zh() ? '动作' : 'Motion'}");
+    const sound = menu.indexOf("{zh() ? '声音' : 'Sound'}");
     const compact = menu.indexOf("{zh() ? '紧凑' : 'Compact'}");
-    assert.ok(sound > 0 && compact > sound, 'Compact sits beside the sound toggle on the video row');
+    assert.ok(motion > 0 && sound > motion && compact > sound, 'Compact sits beside the sound toggle on the video row');
     assert.match(menu, /Stage this clip small \(384 px\) — same motion, 3x cheaper\. Off when the clip is the character reference\./);
     assert.match(menu, /Off while no picture is attached: this clip is the character reference, and identity needs pixels\./);
-    assert.match(menu, /disabled=\{compactLocked\}/);
-    assert.match(menu, /aria-pressed=\{!compactLocked && Boolean\(item\?\.compact\)\}/, 'a locked row reads as off whatever it holds');
+    assert.match(menu, /disabled=\{compactLocked \|\| !motionOn\}/);
+    assert.match(menu, /A sound-only reference sends no pixels\./);
+    assert.match(menu, /on=\{!compactLocked && motionOn && Boolean\(item\?\.compact\)\}/, 'a locked or sound-only row reads as off whatever it holds');
 
     // The lock is the shared rule, not a second opinion: no picture attached.
     assert.match(menu, /import \{[^}]*referenceVideoCompactLocked[^}]*\} from '\.\.\/\.\.\/lib\/h3References\.js'/s);
     assert.match(menu, /compactLocked=\{kind === 'videos' && referenceVideoCompactLocked\(\{ images \}\)\}/);
     // Toggling flips THAT row only, the same way the sound switch does.
-    assert.match(menu, /onToggleCompact=\{\(index\) => emit\('videos', videos\.map\(\(item, i\) => \(\s*i === index \? \{ \.\.\.item, compact: !item\.compact \} : item\s*\)\)\)\}/);
+    assert.match(menu, /onToggleCompact=\{\(index\) => emit\('videos', videos\.map\(\(item, i\) => \(\s*i === index && !isSoundOnlyReference\(item\) \? \{ \.\.\.item, compact: !item\.compact \} : item\s*\)\)\)\}/);
     // Default OFF on every way a clip arrives — picked, dropped, or prepped in
     // place (which spreads the row and so keeps what it had).
     assert.match(menu, /\{ url, name, useAudio: false, compact: false \}/);
     assert.match(menu, /\(\{ \.\.\.item, useAudio: false, compact: false \}\)/);
+});
+
+// A motion row switched to SOUND ONLY is a voice clip to the model: it rides in
+// reference_audios after the explicit clips, takes a plain <Audio N> there, and
+// has no <Video N> — so it cannot be the character reference, cannot be named
+// as a motion clip, and never trims to the clip's length.
+test('a sound-only motion row labels as a standalone <Audio N> after the explicit voice clips', async () => {
+    const {
+        referenceLabels, referenceVoiceLabel, withReferenceTags, motionReferenceWarning, referencesAsSent,
+        isSoundOnlyReference, motionReferenceRows, soundOnlyReferenceRows,
+    } = await import('../src/lib/h3References.js');
+    const videos = [
+        { url: '/a.mov', useAudio: true },
+        { url: '/b.mov', motion: false, useAudio: true },
+        { url: '/c.mov' },
+    ];
+    assert.deepEqual(videos.map(isSoundOnlyReference), [false, true, false]);
+    assert.deepEqual(motionReferenceRows(videos).map((v) => v.url), ['/a.mov', '/c.mov']);
+    assert.deepEqual(soundOnlyReferenceRows(videos).map((v) => v.url), ['/b.mov']);
+
+    const labels = referenceLabels({ images: ['/p'], videos, audios: [{ url: '/v.wav' }] });
+    assert.deepEqual(labels.videos, [
+        { video: '<Video 1>', audio: '<Audio 1>' },
+        { video: '', audio: '<Audio 3>', soundOnly: true },
+        { video: '<Video 2>', audio: '' },
+    ]);
+    assert.deepEqual(labels.audios, ['<Audio 2>']);
+    // The first voice the model hears is the clip soundtrack; with only an
+    // explicit clip and a sound-only row, the explicit clip comes first.
+    assert.equal(referenceVoiceLabel(labels), '<Audio 1>');
+    assert.equal(referenceVoiceLabel(referenceLabels({
+        videos: [{ url: '/b.mov', motion: false, useAudio: true }], audios: [{ url: '/v' }],
+    })), '<Audio 1>');
+    assert.equal(referenceVoiceLabel(referenceLabels({ videos: [{ url: '/b.mov', motion: false, useAudio: true }] })), '<Audio 1>');
+
+    // As sent: motion rows stay videos, the sound-only row rides after the explicit clip.
+    const sent = referencesAsSent({ images: ['/p'], videos, audios: [{ url: '/v.wav' }] });
+    assert.deepEqual(sent.videos.map((v) => v.url), ['/a.mov', '/c.mov']);
+    assert.deepEqual(sent.audios.map((a) => a.url), ['/v.wav', '/b.mov']);
+
+    // The prompt warning names motion clips only, numbered as the model numbers them.
+    assert.deepEqual(motionReferenceWarning({ prompt: 'x', videos }).labels, ['<Video 1>', '<Video 2>']);
+    assert.equal(motionReferenceWarning({ prompt: 'x', videos: [{ url: '/b.mov', motion: false, useAudio: true }] }), null);
+
+    // Tags: the sound-only row is bound as a voice, and no <Video> is written for it.
+    const tagged = withReferenceTags('', { images: ['/p'], videos: [{ url: '/b.mov', motion: false, useAudio: true }], audios: [] });
+    assert.match(tagged, /<Audio 1> is the voice-timbre reference for <Subject 1>/);
+    assert.doesNotMatch(tagged, /<Video 1>/);
+    // In a sectioned prompt the retention contract is the voice one.
+    const sectioned = withReferenceTags(
+        'summary: x\ndetailed_description: <d>hi</d>\noverall_soundscape: y\nnon_diegetic_music: none\nsubject_definitions: z\nretention_analysis: \n',
+        { images: ['/p'], videos: [{ url: '/b.mov', motion: false, useAudio: true }], audios: [] },
+    );
+    assert.match(sectioned, /<Audio 1>: /);
+    assert.doesNotMatch(sectioned, /<Video 1>/);
 });
