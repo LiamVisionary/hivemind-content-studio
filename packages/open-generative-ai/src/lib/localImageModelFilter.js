@@ -1,8 +1,16 @@
+// A lane takes references under one of two grammars. `image_path`/`image_base64`
+// /`image_url` is the single-source shape (Klein's edit, Krea 2's identity);
+// `reference_images` is the ordered multi-slot shape the H3 lanes speak, where
+// position IS the label (<Picture 1>..<Picture N>). Both mean the UploadPicker
+// is live. Keep this list in step with toHostedImageModel's `supportsImage` in
+// hosted-local-models.js, which derives the same capability server-side.
+const IMAGE_INPUT_FIELDS = ['image_path', 'image_base64', 'image_url', 'reference_images'];
+
 export function localModelSupportsImageInput(model) {
     return Boolean(
         model?.supportsImage
         || model?.requires?.image
-        || model?.accepts?.some(field => ['image_path', 'image_base64', 'image_url'].includes(field))
+        || model?.accepts?.some(field => IMAGE_INPUT_FIELDS.includes(field))
     );
 }
 

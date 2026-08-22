@@ -74,7 +74,10 @@ function toHostedImageModel(workflow) {
     promptHelper: normalizePromptHelper(workflow.prompt_helper),
     requires: workflow.requires || { prompt: true, image: false },
     accepts,
-    supportsImage: accepts.some((field) => ['image_path', 'image_base64', 'image_url'].includes(field)),
+    // Two reference grammars, one capability: the single-source image_* fields
+    // and `reference_images`, the ordered multi-slot shape H3 speaks. Mirrored
+    // by IMAGE_INPUT_FIELDS in src/lib/localImageModelFilter.js.
+    supportsImage: accepts.some((field) => ['image_path', 'image_base64', 'image_url', 'reference_images'].includes(field)),
     maxReferenceImages: Number(workflow.max_reference_images || 0),
     aspectRatios: Array.isArray(workflow.aspect_ratios) && workflow.aspect_ratios.length
       ? workflow.aspect_ratios

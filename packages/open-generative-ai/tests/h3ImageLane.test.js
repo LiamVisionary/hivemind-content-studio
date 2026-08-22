@@ -88,3 +88,33 @@ test('the H3 weights are named so the existing rental lane routes it', () => {
     assert.match(loader.inputs.fl2va_model, /minimax_h3/);
     assert.match(loader.inputs.ref2va_model, /minimax_h3/);
 });
+
+test('the graph has no LoadImage nodes, because the Director loads its own', () => {
+    const h3 = loadHostedImageModels(REGISTRY).find((model) => model.id === 'minimax-h3-image');
+    const graph = JSON.parse(fs.readFileSync(h3.workflowFile, 'utf8'));
+    const director = Object.values(graph).find((n) => n.class_type === 'H3StudioDirector');
+
+    // h3studio/image_inputs.py collect_images(): when media_{N} is unlinked but
+    // media_filename_{N} names a file in ComfyUI input storage, the Director
+    // loads it itself. That is why the still-image graph carries none of the
+    // nine LoadImage nodes its video sibling pre-wires — the gateway sets the
+    // filenames instead (_apply_h3_studio_director in media-gateway/app.py).
+    assert.equal(Object.values(graph).filter((n) => n.class_type === 'LoadImage').length, 0);
+    // And nothing else in the graph may claim to carry a reference.
+    assert.ok(!('media_1' in director.inputs), 'no dangling media link in the exported graph');
+});
+
+test('the lane advertises the reference grammar the gateway actually reads', () => {
+    const registry = JSON.parse(fs.readFileSync(REGISTRY, 'utf8'));
+    const entry = (registry.workflows || []).find((w) => w.id === 'minimax-h3-image');
+
+    // `reference_images` is what flips the studio's UploadPicker on
+    // (localModelSupportsImageInput). It was advertised here before any send
+    // path existed; these two must not drift apart again.
+    assert.ok(entry.accepts.includes('reference_images'));
+    assert.equal(entry.max_reference_images, 9);
+    assert.equal(entry.reference_slots.images, 9);
+    // The Director's own cap (h3studio/constants.py MAX_REFERENCE_IMAGES).
+    assert.equal(entry.reference_slots.videos, 0, 'the still lane takes pictures only');
+    assert.equal(entry.reference_slots.audios, 0);
+});

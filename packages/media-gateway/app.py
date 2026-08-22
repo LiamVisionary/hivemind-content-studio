@@ -207,6 +207,9 @@ AUTO_WORKFLOW_DIRS = [
     for entry in (os.environ.get("ZIMG_AUTO_WORKFLOW_DIRS", "").split(os.pathsep) if os.environ.get("ZIMG_AUTO_WORKFLOW_DIRS") else [])
     if entry.strip()
 ] or [COMFY / "workflows" / "auto"]
+# Registry-shipped API graphs (workflow-registry.json `workflow_file`). Same
+# executor as a drop-in, different provenance: these ride in the repo.
+REGISTRY_WORKFLOW_DIR = BASE / "workflows"
 COMFY_HTTP = COMFY_HTTP_DEFAULT
 MAX_JSON_BODY_BYTES = int(os.environ.get("MEDIA_GATEWAY_MAX_JSON_BODY_BYTES", str(25 * 1024 * 1024)))
 
@@ -3659,6 +3662,48 @@ def stage_inline_image_base64(value):
     return target
 
 
+def _reference_image_path(value):
+    """A caller-named reference path; a bare name is ComfyUI-input-relative."""
+    path = Path(str(value)).expanduser()
+    return path if path.is_absolute() else COMFY_INPUT_DIR / str(value)
+
+
+def collect_reference_image_paths(data, uploaded_image=None):
+    """Every reference a generation request attached, in the order it sent them.
+
+    Order is load-bearing for lanes that address references by index (H3 names
+    them <Picture 1>..<Picture N>), so this preserves the caller's sequence:
+    the inline/multipart image first, then image_path, then the images_base64
+    and image_paths lists. Duplicates drop to their first position. Raises
+    ValueError when an inline image cannot be decoded.
+    """
+    paths = [uploaded_image] if uploaded_image is not None else []
+    if isinstance(data, dict):
+        maybe_image = str(data.get('image_path', '') or '')
+        if maybe_image:
+            paths.append(_reference_image_path(maybe_image))
+        extra_b64 = data.get('images_base64')
+        if isinstance(extra_b64, list):
+            for value in extra_b64:
+                staged = stage_inline_image_base64(value)
+                if staged is not None:
+                    paths.append(staged)
+        extra_paths = data.get('image_paths')
+        if isinstance(extra_paths, list):
+            for value in extra_paths:
+                text = str(value or '').strip()
+                if text:
+                    paths.append(_reference_image_path(text))
+    seen = set()
+    deduped = []
+    for path in paths:
+        resolved = str(Path(path).resolve())
+        if resolved not in seen:
+            seen.add(resolved)
+            deduped.append(Path(resolved))
+    return deduped
+
+
 def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
     started = now_iso()
     options = options or {}
@@ -3793,9 +3838,16 @@ def run_comfy_klein3_edit(job_id, prompt, image_path, options=None):
 
 
 def _load_auto_api_workflow(workflow_file):
-    """Load + validate an auto-detected API-format graph from an allowed folder."""
+    """Load + validate an API-format graph from an allowed folder.
+
+    Two roots, both read-only to a client: the user's drop-in folders, and the
+    gateway's OWN workflows/ directory — the graphs the registry ships and
+    names by `workflow_file` (loadHostedImageModels resolves them to absolute
+    paths). Without the second root a registered comfy-api-image lane could
+    never load its own graph.
+    """
     path = Path(str(workflow_file or "")).expanduser().resolve()
-    allowed_roots = [root.resolve() for root in AUTO_WORKFLOW_DIRS]
+    allowed_roots = [root.resolve() for root in AUTO_WORKFLOW_DIRS + [REGISTRY_WORKFLOW_DIR]]
     if path.suffix.lower() != ".json" or not any(str(path).startswith(f"{root}{os.sep}") for root in allowed_roots):
         raise RuntimeError("workflow file is outside the auto-workflow folders")
     if not path.is_file():
@@ -4087,6 +4139,159 @@ def _auto_apply_couple_regions(node, pos_key, prompt, options):
     inputs[pos_key] = "\n".join(([shared_line] if shared_line is not None else []) + regions)
 
 
+# ---- H3 Studio graphs -------------------------------------------------------
+#
+# The MiniMax H3 still-image lane is not a KSampler graph: one H3StudioDirector
+# node owns prompt, canvas, seed, route and references, and the sampler is a
+# SamplerCustomAdvanced fed from it. Everything below patches THAT node.
+H3_STUDIO_DIRECTOR_CLASS = "H3StudioDirector"
+# h3studio/constants.py MAX_REFERENCE_IMAGES. The Director declares
+# media_{1..9}/media_filename_{1..9} optional inputs; collect_images() loads a
+# reference from ComfyUI input storage when only the filename is set, so a
+# headless graph needs no LoadImage nodes of its own.
+H3_STUDIO_MAX_REFERENCES = 9
+
+
+def _h3_studio_director_id(graph):
+    """The Director node's id, or None when this is not an H3 Studio graph."""
+    for node_id, node in (graph or {}).items():
+        if isinstance(node, dict) and str(node.get("class_type")) == H3_STUDIO_DIRECTOR_CLASS:
+            return str(node_id)
+    return None
+
+
+def _h3_studio_reference_names(options):
+    """Ordered ComfyUI-input filenames for this run's references.
+
+    Order is load-bearing: the compiler labels them <Picture 1>..<Picture N> by
+    the same index the caller sent them in. The Director reads a reference by
+    name out of ComfyUI's input storage, so anything staged elsewhere (a
+    multipart upload lands in the gateway's own upload dir) is copied in —
+    which is also what makes push_prompt_inputs_to_lane find it for a rental.
+    """
+    values = options.get("reference_image_paths") or []
+    if len(values) > H3_STUDIO_MAX_REFERENCES:
+        raise RuntimeError(f"H3 Studio accepts at most {H3_STUDIO_MAX_REFERENCES} reference images")
+    comfy_input = COMFY_INPUT_DIR.resolve()
+    names = []
+    for value in values:
+        path = Path(str(value)).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError(f"reference image is missing: {path.name}")
+        if not _is_under(path, comfy_input):
+            comfy_input.mkdir(parents=True, exist_ok=True)
+            staged = comfy_input / safe_name(path.name)
+            staged.write_bytes(path.read_bytes())
+            path = staged
+        names.append(path.name)
+    return names
+
+
+def _h3_studio_megapixels(options):
+    """Canvas AREA for the Director, which sizes from aspect_ratio + megapixels.
+
+    An explicit width+height is exact and routes through aspect_ratio "custom"
+    instead. Otherwise the studio's Resolution tier (`base_size`, the short
+    side) is what the user actually chose, so it is converted to the area the
+    Director understands — dropping it would silently pin every H3 still to the
+    graph's own default.
+    """
+    explicit = options.get("megapixels")
+    if explicit is not None:
+        return float_option(options, "megapixels", 1.0, 0.20, 8.50)
+    short_side = int_option(options, "base_size", 0, 0, 8192)
+    if short_side <= 0:
+        return None
+    ratio = _h3_studio_aspect_ratio(str(options.get("aspect_ratio") or "1:1"))
+    long_side = round(short_side * ratio)
+    return max(0.20, min(8.50, (short_side * long_side) / 1_000_000))
+
+
+def _h3_studio_aspect_ratio(text):
+    """Long-side / short-side for an "W:H" label; 1.0 when it cannot be read."""
+    left, _, right = str(text or "").partition(":")
+    try:
+        width, height = float(left), float(right)
+    except ValueError:
+        return 1.0
+    if width <= 0 or height <= 0:
+        return 1.0
+    return max(width, height) / min(width, height)
+
+
+def _apply_h3_studio_director(graph, director_id, prompt, options, rec):
+    """Drive an H3 Studio graph from a studio generation request.
+
+    Only inputs the Director already declares are touched. Numeric ranges are
+    clamped here (ComfyUI does not enforce widget min/max at submit); the enum
+    widgets are passed through, because ComfyUI DOES validate combos and its
+    rejection names the offending value better than a duplicated table here
+    would.
+    """
+    inputs = graph[director_id].setdefault("inputs", {})
+
+    if str(prompt or "").strip():
+        inputs["prompt"] = str(prompt)
+
+    seed = resolve_seed_option(options)
+    # The Director owns the seed (RandomNoise reads its noise_seed output), and
+    # its widget is unsigned — a negative would be clamped to 0 on the box.
+    inputs["seed"] = max(0, int(seed))
+    rec["options"]["seed"] = inputs["seed"]
+
+    width = int_option(options, "width", 0, 0, 16384)
+    height = int_option(options, "height", 0, 0, 16384)
+    if width > 0 and height > 0:
+        # plan_resolution() takes the RATIO from aspect_ratio (width/height
+        # only when it is literally "custom") and the AREA from megapixels —
+        # always, custom included. Both have to be set or the canvas silently
+        # drifts: dimensions alone render the graph's 1:1 default, and a
+        # "custom" ratio alone keeps the default area (1024x576 came back as
+        # 1632x928 in exactly that case).
+        inputs["width"] = width
+        inputs["height"] = height
+        inputs["aspect_ratio"] = "custom"
+        inputs["megapixels"] = round(max(0.20, min(8.50, (width * height) / 1_000_000)), 2)
+        rec["options"]["width"] = width
+        rec["options"]["height"] = height
+        rec["options"]["megapixels"] = inputs["megapixels"]
+    else:
+        requested_ratio = str(options.get("aspect_ratio") or "").strip()
+        if requested_ratio:
+            inputs["aspect_ratio"] = requested_ratio
+            rec["options"]["aspect_ratio"] = requested_ratio
+        megapixels = _h3_studio_megapixels(options)
+        if megapixels is not None:
+            inputs["megapixels"] = round(megapixels, 2)
+            rec["options"]["megapixels"] = inputs["megapixels"]
+
+    if options.get("adherence") is not None:
+        inputs["adherence"] = float_option(options, "adherence", 0.85, 0.0, 1.0)
+        rec["options"]["adherence"] = inputs["adherence"]
+    for key in ("route", "sampling_profile", "frame_profile"):
+        value = str(options.get(key) or "").strip()
+        if value:
+            inputs[key] = value
+            rec["options"][key] = value
+
+    # References. Every slot is written explicitly — including the empty ones —
+    # so a re-used graph cannot carry a previous run's filename, and the
+    # ordinals stay dense from 1.
+    names = _h3_studio_reference_names(options)
+    for ordinal in range(1, H3_STUDIO_MAX_REFERENCES + 1):
+        name = names[ordinal - 1] if ordinal <= len(names) else ""
+        inputs[f"media_filename_{ordinal}"] = name
+        inputs[f"media_type_{ordinal}"] = "image"
+    if names:
+        rec["reference_images"] = len(names)
+        # 1 reference resolves to image_to_image (FL2VA first-frame anchor) and
+        # 2+ to reference_edit (REF2VA) unless the caller pinned `route`. That
+        # is the node's own auto-routing, recorded so the history says which
+        # path a run actually took.
+        rec["options"].setdefault("route", str(inputs.get("route") or "auto"))
+    return names
+
+
 def run_comfy_api_image(job_id, prompt, options=None):
     """Generic runner for auto-detected API-format ComfyUI image workflows.
 
@@ -4112,86 +4317,110 @@ def run_comfy_api_image(job_id, prompt, options=None):
         workflow_path, graph = _load_auto_api_workflow(options.get("workflow_file"))
         rec["workflow"] = workflow_path.stem
 
-        sampler = next(
-            (node for node in graph.values() if str(node.get("class_type")) in _AUTO_SAMPLER_CLASSES),
-            None,
-        )
-        if sampler is None:
-            raise RuntimeError(f"{workflow_path.name} has no KSampler node to drive")
-        sampler_inputs = sampler.setdefault("inputs", {})
+        director_id = _h3_studio_director_id(graph)
+        if director_id:
+            # An H3 Studio graph: one Director owns prompt/canvas/seed/route
+            # and the references, so none of the KSampler patching below
+            # applies (its sampler is a SamplerCustomAdvanced with no
+            # positive/negative inputs to follow).
+            _apply_h3_studio_director(graph, director_id, prompt, options, rec)
+        else:
+            sampler = next(
+                (node for node in graph.values() if str(node.get("class_type")) in _AUTO_SAMPLER_CLASSES),
+                None,
+            )
+            if sampler is None:
+                raise RuntimeError(f"{workflow_path.name} has no KSampler node to drive")
+            sampler_inputs = sampler.setdefault("inputs", {})
 
-        seed = resolve_seed_option(options)
-        for seed_key in ("seed", "noise_seed"):
-            if seed_key in sampler_inputs:
-                sampler_inputs[seed_key] = seed
-                rec["options"]["seed"] = seed
-                break
-        if options.get("steps"):
-            sampler_inputs["steps"] = int_option(options, "steps", int(sampler_inputs.get("steps") or 8), 1, 60)
-        if options.get("cfg") is not None or options.get("guidance") is not None:
-            default_cfg = float(sampler_inputs.get("cfg") or 1.0)
-            sampler_inputs["cfg"] = float_option(options, "cfg", float_option(options, "guidance", default_cfg, 0.0, 20.0), 0.0, 20.0)
+            seed = resolve_seed_option(options)
+            for seed_key in ("seed", "noise_seed"):
+                if seed_key in sampler_inputs:
+                    sampler_inputs[seed_key] = seed
+                    rec["options"]["seed"] = seed
+                    break
+            if options.get("steps"):
+                sampler_inputs["steps"] = int_option(options, "steps", int(sampler_inputs.get("steps") or 8), 1, 60)
+            if options.get("cfg") is not None or options.get("guidance") is not None:
+                default_cfg = float(sampler_inputs.get("cfg") or 1.0)
+                sampler_inputs["cfg"] = float_option(options, "cfg", float_option(options, "guidance", default_cfg, 0.0, 20.0), 0.0, 20.0)
 
-        # Positive prompt: follow the sampler's positive conditioning upstream.
-        positive_ref = sampler_inputs.get("positive")
-        pos_node_id, pos_key = _auto_find_text_node(graph, positive_ref[0]) if isinstance(positive_ref, list) and positive_ref else (None, None)
-        if pos_node_id is None:
-            raise RuntimeError(f"{workflow_path.name} has no reachable prompt text node")
-        negative = str(options.get("negative_prompt") or "").strip()
-        regional = "advanced_mapping" in (graph[pos_node_id].get("inputs") or {})
-        couple_on = bool(options.get("couple_mode"))
-        negative_handled = False
-        if regional and couple_on:
-            _auto_apply_couple_regions(graph[pos_node_id], pos_key, prompt, options)
-            rec["couple_mode"] = True
-            if _auto_split_regional_negative(graph, sampler_inputs, pos_node_id, negative):
-                negative_handled = True
-        elif regional and str(prompt or "").strip():
-            # Couple/regional graphs run single-subject by default: splice the
-            # regional node out for full-canvas conditioning; regions only
-            # when couple mode is explicitly enabled.
-            if _auto_bypass_regional_prompt_node(graph, pos_node_id, prompt, negative):
-                rec["couple_bypassed"] = True
-                negative_handled = True
-            else:
-                graph[pos_node_id]["inputs"][pos_key] = _auto_fit_regional_prompt(graph[pos_node_id], prompt)
+            # Positive prompt: follow the sampler's positive conditioning upstream.
+            positive_ref = sampler_inputs.get("positive")
+            pos_node_id, pos_key = _auto_find_text_node(graph, positive_ref[0]) if isinstance(positive_ref, list) and positive_ref else (None, None)
+            if pos_node_id is None:
+                raise RuntimeError(f"{workflow_path.name} has no reachable prompt text node")
+            negative = str(options.get("negative_prompt") or "").strip()
+            regional = "advanced_mapping" in (graph[pos_node_id].get("inputs") or {})
+            couple_on = bool(options.get("couple_mode"))
+            negative_handled = False
+            if regional and couple_on:
+                _auto_apply_couple_regions(graph[pos_node_id], pos_key, prompt, options)
+                rec["couple_mode"] = True
                 if _auto_split_regional_negative(graph, sampler_inputs, pos_node_id, negative):
                     negative_handled = True
-        elif str(prompt or "").strip():
-            graph[pos_node_id]["inputs"][pos_key] = str(prompt)
+            elif regional and str(prompt or "").strip():
+                # Couple/regional graphs run single-subject by default: splice the
+                # regional node out for full-canvas conditioning; regions only
+                # when couple mode is explicitly enabled.
+                if _auto_bypass_regional_prompt_node(graph, pos_node_id, prompt, negative):
+                    rec["couple_bypassed"] = True
+                    negative_handled = True
+                else:
+                    graph[pos_node_id]["inputs"][pos_key] = _auto_fit_regional_prompt(graph[pos_node_id], prompt)
+                    if _auto_split_regional_negative(graph, sampler_inputs, pos_node_id, negative):
+                        negative_handled = True
+            elif str(prompt or "").strip():
+                graph[pos_node_id]["inputs"][pos_key] = str(prompt)
 
-        # Negative prompt: only when it resolves to a DIFFERENT node (regional
-        # prompt nodes expose positive+negative from one node — leave those).
-        negative_ref = sampler_inputs.get("negative")
-        if not negative_handled and negative and isinstance(negative_ref, list) and negative_ref:
-            neg_node_id, neg_key = _auto_find_text_node(graph, negative_ref[0])
-            if neg_node_id is not None and neg_node_id != pos_node_id:
-                graph[neg_node_id]["inputs"][neg_key] = negative
+            # Negative prompt: only when it resolves to a DIFFERENT node (regional
+            # prompt nodes expose positive+negative from one node — leave those).
+            negative_ref = sampler_inputs.get("negative")
+            if not negative_handled and negative and isinstance(negative_ref, list) and negative_ref:
+                neg_node_id, neg_key = _auto_find_text_node(graph, negative_ref[0])
+                if neg_node_id is not None and neg_node_id != pos_node_id:
+                    graph[neg_node_id]["inputs"][neg_key] = negative
 
-        # User LoRAs: validated against the local catalog, chained above the
-        # model loader. Only the count is recorded — names stay client-side.
-        requested_loras = options.get("loras") or []
-        if requested_loras:
-            resolved = resolve_lora_selection(requested_loras)
-            applied = _auto_apply_model_loras(graph, sampler_inputs, resolved)
-            if applied:
-                rec["loras_applied"] = applied
+            # User LoRAs: validated against the local catalog, chained above the
+            # model loader. Only the count is recorded — names stay client-side.
+            requested_loras = options.get("loras") or []
+            if requested_loras:
+                resolved = resolve_lora_selection(requested_loras)
+                applied = _auto_apply_model_loras(graph, sampler_inputs, resolved)
+                if applied:
+                    rec["loras_applied"] = applied
 
-        # Dimensions: patch every node that carries a width+height pair so
-        # latent size and regional-prompt canvases stay consistent.
-        width = int(options.get("width") or 0)
-        height = int(options.get("height") or 0)
-        if width > 0 and height > 0:
-            for node in graph.values():
-                inputs = node.get("inputs") or {}
-                if isinstance(inputs.get("width"), (int, float)) and isinstance(inputs.get("height"), (int, float)):
-                    inputs["width"] = width
-                    inputs["height"] = height
-            rec["options"]["width"] = width
-            rec["options"]["height"] = height
+            # Dimensions: patch every node that carries a width+height pair so
+            # latent size and regional-prompt canvases stay consistent.
+            width = int(options.get("width") or 0)
+            height = int(options.get("height") or 0)
+            if width > 0 and height > 0:
+                for node in graph.values():
+                    inputs = node.get("inputs") or {}
+                    if isinstance(inputs.get("width"), (int, float)) and isinstance(inputs.get("height"), (int, float)):
+                        inputs["width"] = width
+                        inputs["height"] = height
+                rec["options"]["width"] = width
+                rec["options"]["height"] = height
 
-        lane_url = comfy_http_for_prompt_body(json.dumps({"prompt": graph}), run_on=options.get('run_on'))
+        body = json.dumps({"prompt": graph})
+        lane_name = comfy_lane_for_prompt_body(body, run_on=options.get('run_on'))
+        lane_url = COMFY_LANES.get(lane_name, COMFY_HTTP_DEFAULT)
         rec["lane"] = lane_url
+        # A rented lane's outputs never touch this disk, so the local
+        # history/collect path below cannot see them. Remote runs go through
+        # the same push -> route -> sealed-harvest flow as the /comfy proxy.
+        remote = comfy_lane_is_remote(lane_name)
+        pushed_inputs = []
+        if remote:
+            transport_error = comfy_lane_transport_error(lane_name) or comfy_lane_liveness_error(lane_name)
+            if transport_error:
+                raise RuntimeError(transport_error)
+            if not vault_public_key_spki():
+                raise RuntimeError(
+                    f"lane '{lane_name}' is remote and its outputs must be sealed: create the owner vault first"
+                )
+            pushed_inputs = push_prompt_inputs_to_lane(body, lane_name)
         t0 = time.monotonic()
         client_id = f"zimage-auto-{job_id}"
         try:
@@ -4208,43 +4437,62 @@ def run_comfy_api_image(job_id, prompt, options=None):
         rec["comfy_prompt_id"] = prompt_id
         with jobs_lock:
             jobs[job_id] = rec
-        history = None
-        for _ in range(300):
-            time.sleep(2)
-            try:
-                payload = urlopen(f"{lane_url}/history/{prompt_id}", timeout=10).read().decode("utf-8")
-                data = json.loads(payload or "{}")
-                if prompt_id in data:
-                    history = data[prompt_id]
-                    break
-            except Exception:
-                pass
-        if history is None:
-            raise RuntimeError(f"auto workflow timed out waiting for prompt {prompt_id}")
-        status = history.get("status") or {}
-        if status.get("status_str") != "success" or not status.get("completed"):
-            raise RuntimeError(f"auto workflow failed: {status}")
-        outputs = []
-        for node_out in (history.get("outputs") or {}).values():
-            for img in node_out.get("images") or []:
-                name = safe_name(img.get("filename") or "")
-                subfolder = img.get("subfolder") or ""
-                typ = img.get("type") or "output"
-                root = COMFY_OUTPUT_DIR if typ == "output" else COMFY_INPUT_DIR
-                p = (root / subfolder / name).resolve()
-                # The privacy sweeper may seal the plaintext (.zenc or .e2e)
-                # before this check runs — any sealed form counts as existing.
-                if existing_output_path(p):
-                    outputs.append(str(p))
-        if not outputs:
-            raise RuntimeError("auto workflow completed without output images")
+        if remote:
+            record_comfy_prompt_route(
+                prompt_id, lane_name, pushed_inputs=pushed_inputs, client_id=client_id,
+            )
+            # Watched inline rather than on a daemon thread: this IS the job's
+            # worker, and the watcher already owns harvest, scrub and the
+            # failure record.
+            route = watch_remote_comfy_prompt(prompt_id) or {}
+            if route.get("status") != "harvested":
+                raise RuntimeError(route.get("error") or "remote generation did not complete")
+            logical_names = [str(name) for name in route.get("outputs") or []]
+            outputs = [str(path) for path in map(find_output_logical_path, logical_names) if path]
+            if not outputs:
+                raise RuntimeError("remote workflow completed without output images")
+        else:
+            history = None
+            for _ in range(300):
+                time.sleep(2)
+                try:
+                    payload = urlopen(f"{lane_url}/history/{prompt_id}", timeout=10).read().decode("utf-8")
+                    data = json.loads(payload or "{}")
+                    if prompt_id in data:
+                        history = data[prompt_id]
+                        break
+                except Exception:
+                    pass
+            if history is None:
+                raise RuntimeError(f"auto workflow timed out waiting for prompt {prompt_id}")
+            status = history.get("status") or {}
+            if status.get("status_str") != "success" or not status.get("completed"):
+                raise RuntimeError(f"auto workflow failed: {status}")
+            outputs = []
+            for node_out in (history.get("outputs") or {}).values():
+                for img in node_out.get("images") or []:
+                    name = safe_name(img.get("filename") or "")
+                    subfolder = img.get("subfolder") or ""
+                    typ = img.get("type") or "output"
+                    root = COMFY_OUTPUT_DIR if typ == "output" else COMFY_INPUT_DIR
+                    p = (root / subfolder / name).resolve()
+                    # The privacy sweeper may seal the plaintext (.zenc or .e2e)
+                    # before this check runs — any sealed form counts as existing.
+                    if existing_output_path(p):
+                        outputs.append(str(p))
+            if not outputs:
+                raise RuntimeError("auto workflow completed without output images")
+            logical_names = [Path(p).name for p in outputs]
         # Record the vault-sealed setup so "Load in Studio" can recover the exact
         # prompt/seed/model for a studio output (which carries no mobile envelope).
         try:
-            record_studio_workflow_setup([Path(p).name for p in outputs], graph, rec.get("comfy_prompt_id"), rec.get("workflow"))
+            record_studio_workflow_setup(logical_names, graph, rec.get("comfy_prompt_id"), rec.get("workflow"))
         except Exception as exc:
             print(f"[workflow-index] studio record skipped: {exc}", file=sys.stderr)
-        outputs = encrypt_outputs(outputs, job_id=job_id)
+        # A harvested remote output is already a sealed envelope; sealing it
+        # again would wrap the envelope, not the image.
+        if not remote:
+            outputs = encrypt_outputs(outputs, job_id=job_id)
         rec.update({
             "status": "success",
             "finished_at": now_iso(),
@@ -11334,6 +11582,21 @@ class Handler(BaseHTTPRequestHandler):
                 options['workflow_file'] = str(data.get('workflow_file', '') if isinstance(data, dict) else '')
                 if isinstance(data, dict) and isinstance(data.get('loras'), list):
                     options['loras'] = data.get('loras')
+                if isinstance(data, dict):
+                    # H3 Studio graphs size from aspect_ratio + megapixels (or
+                    # the studio's Resolution tier) and pick their own sampler
+                    # from a profile, so none of these reach the request
+                    # through the shared width/height/steps keys above.
+                    for key in ('aspect_ratio', 'base_size', 'megapixels', 'sampling_profile',
+                                'frame_profile', 'route', 'adherence'):
+                        if key in data:
+                            options[key] = data.get(key)
+                    try:
+                        options['reference_image_paths'] = [
+                            str(path) for path in collect_reference_image_paths(data, uploaded_image)
+                        ]
+                    except ValueError as exc:
+                        return self.send_json({"error": str(exc)}, 400)
                 job_id = uuid.uuid4().hex[:12]
                 with jobs_lock:
                     jobs[job_id] = {
@@ -11489,42 +11752,9 @@ class Handler(BaseHTTPRequestHandler):
                 native_loras = _native_loras_from_generation_request(data, ['Flux.2 Klein 9B'])
                 if native_loras:
                     options['loras'] = native_loras
-                # Collect every reference the caller sent — Klein conditions on
-                # up to BIGLOVE_KLEIN3_MAX_REFERENCES images (identity across
-                # views, character sheets). Order: inline/multipart image first,
-                # then image_path, then the images_base64 / image_paths lists.
-                reference_images = [uploaded_image] if uploaded_image is not None else []
-                if isinstance(data, dict):
-                    maybe_image = str(data.get('image_path', '') or '')
-                    if maybe_image:
-                        p = Path(maybe_image).expanduser()
-                        if not p.is_absolute():
-                            p = COMFY_INPUT_DIR / maybe_image
-                        reference_images.append(p)
-                    extra_b64 = data.get('images_base64')
-                    if isinstance(extra_b64, list):
-                        for value in extra_b64:
-                            staged = stage_inline_image_base64(value)
-                            if staged is not None:
-                                reference_images.append(staged)
-                    extra_paths = data.get('image_paths')
-                    if isinstance(extra_paths, list):
-                        for value in extra_paths:
-                            text = str(value or '').strip()
-                            if not text:
-                                continue
-                            p = Path(text).expanduser()
-                            if not p.is_absolute():
-                                p = COMFY_INPUT_DIR / text
-                            reference_images.append(p)
-                seen_refs = set()
-                deduped_refs = []
-                for p in reference_images:
-                    resolved_ref = str(Path(p).resolve())
-                    if resolved_ref not in seen_refs:
-                        seen_refs.add(resolved_ref)
-                        deduped_refs.append(Path(resolved_ref))
-                reference_images = deduped_refs[:BIGLOVE_KLEIN3_MAX_REFERENCES]
+                # Klein conditions on up to BIGLOVE_KLEIN3_MAX_REFERENCES
+                # images (identity across views, character sheets).
+                reference_images = collect_reference_image_paths(data, uploaded_image)[:BIGLOVE_KLEIN3_MAX_REFERENCES]
                 if not reference_images:
                     return self.send_json({"error": "image required for BigLoveKlein3 edit"}, 400)
                 uploaded_image = reference_images[0]

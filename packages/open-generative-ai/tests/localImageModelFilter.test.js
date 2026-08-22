@@ -51,3 +51,38 @@ test('a negative prompt is flagged as inactive at guidance 1', async () => {
     assert.equal(negativePromptNeedsGuidance(7), false);
     assert.equal(negativePromptNeedsGuidance(undefined), false); // unknown: no claim
 });
+
+test('the ordered multi-slot reference grammar counts as image input', async () => {
+    const { localModelSupportsImageInput } = await import('../src/lib/localImageModelFilter.js');
+
+    // The H3 still-image lane takes nine ordered references and names none of
+    // the single-source image_* fields — it declares `reference_images`, the
+    // same grammar its video sibling speaks. Reading only the image_* list
+    // rendered the UploadPicker disabled on a lane with nine live slots.
+    const h3 = {
+        id: 'minimax-h3-image',
+        requires: { prompt: true, image: false },
+        accepts: ['prompt', 'width', 'height', 'seed', 'aspect_ratio', 'reference_images'],
+        maxReferenceImages: 9,
+    };
+    assert.equal(localModelSupportsImageInput(h3), true);
+
+    // Still a real gate: a text-only lane stays refused.
+    assert.equal(localModelSupportsImageInput({ id: 'z-image', accepts: ['prompt', 'seed'] }), false);
+});
+
+test('the registry mapper derives the same reference capability server-side', async () => {
+    const { createRequire } = await import('node:module');
+    const path = await import('node:path');
+    const require = createRequire(import.meta.url);
+    const { loadHostedImageModels } = require('../hosted-local-models.js');
+    const { localModelSupportsImageInput } = await import('../src/lib/localImageModelFilter.js');
+
+    const registry = path.join(import.meta.dirname, '../../media-gateway/workflow-registry.json');
+    const h3 = loadHostedImageModels(registry).find((model) => model.id === 'minimax-h3-image');
+
+    // /local-ai/models reported supportsImage:false while advertising nine
+    // reference slots. The mapper and the client filter must not disagree.
+    assert.equal(h3.supportsImage, true, 'the API tells the truth about the nine slots');
+    assert.equal(localModelSupportsImageInput(h3), true);
+});
