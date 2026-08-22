@@ -2928,3 +2928,50 @@ def test_a_stocking_rental_only_considers_the_volume_providers_offers(tmp_path: 
     assert out["rental_id"] == "runpod:pod1"
     assert specs == [("runpod", specs[0][1])]
     assert specs[0][1].network_volume_id == "volX" and "-stock-" in specs[0][1].label
+
+
+# --- warm volume cost: the spend with no machine to remind you of it ---------
+
+
+def test_warm_volume_monthly_cost_follows_runpods_tiered_rate() -> None:
+    """RunPod's published network-volume price (docs read 2026-08-22): the
+    first 1TB is $0.07/GB/month, anything beyond it $0.05."""
+    assert gpu_rentals.warm_volume_monthly_usd(120) == 8.4
+    assert gpu_rentals.warm_volume_monthly_usd(1024) == 71.68
+    # 1TB at 0.07 plus 1TB at 0.05 — not 2TB at either rate.
+    assert gpu_rentals.warm_volume_monthly_usd(2048) == 122.88
+    assert gpu_rentals.warm_volume_monthly_usd(0) == 0.0
+
+
+def test_warm_volume_accrues_from_creation_not_from_when_it_finished_stocking() -> None:
+    """Storage bills the moment the volume exists — a volume whose stocking box
+    failed is still charging for the bytes on it."""
+    created = 1_000_000.0
+    entry = {"size_gb": 120, "created_at": created, "state": "error"}
+    costs = gpu_rentals.warm_volume_costs(entry, now=created + 24 * 3600)
+    assert costs["usd_per_month"] == 8.4
+    assert costs["age_hours"] == 24.0
+    # A day of an $8.40 month: 8.40 / 730.5 * 24.
+    assert costs["usd_accrued"] == pytest.approx(0.276, abs=0.002)
+    # A full month of accrual lands on the quoted monthly rate.
+    month = gpu_rentals.warm_volume_costs(entry, now=created + gpu_rentals.WARM_VOLUME_HOURS_PER_MONTH * 3600)
+    assert month["usd_accrued"] == pytest.approx(8.4, abs=0.01)
+
+
+def test_a_warm_volume_with_no_creation_time_reports_unknown_spend_not_zero() -> None:
+    """An unknown start must never render as "$0.00 so far" — that reads as
+    free, which is the one thing a volume is not."""
+    costs = gpu_rentals.warm_volume_costs({"size_gb": 120})
+    assert costs["usd_per_month"] == 8.4
+    assert costs["usd_accrued"] is None and costs["age_hours"] is None
+
+
+def test_the_warm_volume_listing_carries_the_rate_and_the_running_total(tmp_path: Path, monkeypatch) -> None:
+    _client(tmp_path, monkeypatch)
+    gpu_rentals._write_warm_volumes({"runpod:minimax": {
+        "provider": "runpod", "volume_id": "volX", "data_center_id": "EU-RO-1", "size_gb": 120,
+        "state": "stocked", "created_at": time.time() - 3600}})
+    listed = gpu_rentals.list_warm_volumes()[0]
+    assert listed["usd_per_month"] == 8.4
+    assert listed["age_hours"] == pytest.approx(1.0, abs=0.05)
+    assert listed["usd_accrued"] == pytest.approx(8.4 / 730.5, abs=0.001)

@@ -272,9 +272,16 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
                 {rung.usd_per_generation ? ` · $${rung.usd_per_generation.toFixed(4)} per generation` : ''}
               </small>
               <small className="text-[11px] text-ink3">
-                {rung.available} offer{rung.available === 1 ? '' : 's'} · ready in ~{rung.setup_minutes} min
-                {rung.warm && rung.warm_setup_minutes != null && rung.setup_minutes !== rung.warm_setup_minutes
-                  ? ` (warm: ~${rung.warm_setup_minutes} min, no model download)`
+                {/* A warm rung must never quote the download size: the whole
+                    point is that this box mounts the models instead of pulling
+                    them. Keying that off the two minute-figures DIFFERING was
+                    wrong — when the cheapest offer is itself the warm one they
+                    are equal, and the rung then advertised "66GB of models" for
+                    a rental that downloads nothing. */}
+                {rung.available} offer{rung.available === 1 ? '' : 's'} · ready in ~
+                {rung.warm ? (rung.warm_setup_minutes ?? rung.setup_minutes) : rung.setup_minutes} min
+                {rung.warm
+                  ? ' · models already on a warm volume, nothing to download'
                   : ` (${plan.download_gb}GB of models)`}
               </small>
             </>
@@ -610,6 +617,24 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
 // minutes were the pull). Billed per GB-month whether or not a box is using
 // it; a stocking box is a normal rental of the tier, destroyed the moment it
 // reports ready.
+// A warm region is the one piece of studio spend with no row in Machines to
+// remind you it exists, so the card carries both numbers: the rate, and what
+// it has actually cost since it was created. A total under a cent renders as
+// "<$0.01" — "$0.00" reads as free, which is the one thing it is not.
+const warmUsd = (value) => {
+  if (value == null || Number.isNaN(Number(value))) return null;
+  const n = Number(value);
+  if (n > 0 && n < 0.01) return '<$0.01';
+  return `$${n.toFixed(2)}`;
+};
+const warmAge = (hours) => {
+  if (hours == null || Number.isNaN(Number(hours))) return null;
+  const h = Number(hours);
+  if (h < 1) return 'under an hour';
+  if (h < 48) return `${Math.round(h)}h`;
+  return `${(h / 24).toFixed(h < 240 ? 1 : 0)}d`;
+};
+
 function WarmVolumesCard({ plans }) {
   const [volumes, setVolumes] = useState(null);
   const [error, setError] = useState('');
@@ -646,7 +671,12 @@ function WarmVolumesCard({ plans }) {
     }
   };
   const remove = async (volume) => {
-    if (!window.confirm(`Delete the warm volume for ${volume.tier_label || volume.tier} in ${volume.data_center_id}? The models on it are gone and the next rental downloads again.`)) return;
+    const saving = warmUsd(volume.usd_per_month);
+    if (!window.confirm(
+      `Delete the warm volume for ${volume.tier_label || volume.tier} in ${volume.data_center_id}?`
+      + `${saving ? ` This stops ${saving}/month.` : ''}`
+      + ' The models on it are gone and the next rental there downloads them again (~25 min).',
+    )) return;
     setBusy(true);
     try {
       await api(`/api/gpu-rentals/warm-volumes/${encodeURIComponent(volume.tier)}`, { method: 'DELETE' });
@@ -664,7 +694,9 @@ function WarmVolumesCard({ plans }) {
         <small className="text-[12px] text-ink2">
           A warm region keeps a tier&rsquo;s models on a persistent volume (RunPod Secure Cloud) so a new machine
           there mounts them and is ready in a few minutes instead of downloading ~60&ndash;100&nbsp;GB first.
-          The volume bills per GB-month while it exists; stocking it rents one machine for the time the download takes.
+          Storage is <b>$0.07/GB per month</b> (first 1&nbsp;TB) and bills from the moment the volume is created
+          until you delete it &mdash; whether or not a machine is attached. Stocking it also rents one machine for
+          the length of the download.
         </small>
         {error && <small className="text-[12px] text-danger">{error}</small>}
         {volumes === null ? (
@@ -678,6 +710,19 @@ function WarmVolumesCard({ plans }) {
                 <StatusPill status={v.state === 'stocked' ? 'succeeded' : v.state === 'error' ? 'failed' : 'running'} label={v.state} />
                 <b className="text-ink1">{v.tier_label || v.tier}</b>
                 <span className="font-mono text-ink2">{v.provider} · {v.data_center_id} · {v.size_gb}GB</span>
+                {v.usd_per_month != null && (
+                  <span
+                    className="font-mono text-ink2"
+                    title={`${v.size_gb}GB at RunPod's network-volume rate ($0.07/GB/month for the first 1TB). Billed from creation until the volume is deleted, whether or not a machine is attached.`}
+                  >
+                    {warmUsd(v.usd_per_month)}/mo
+                    {v.usd_accrued != null && (
+                      <span className="text-ink3">
+                        {' · '}{warmUsd(v.usd_accrued)} so far{warmAge(v.age_hours) ? ` (${warmAge(v.age_hours)})` : ''}
+                      </span>
+                    )}
+                  </span>
+                )}
                 {v.state === 'stocking' && v.stocking_rental_id && (
                   <span className="text-ink3">stocking on {v.stocking_rental_id} — watch it under Active machines</span>
                 )}
@@ -692,6 +737,12 @@ function WarmVolumesCard({ plans }) {
               </div>
             ))}
           </div>
+        )}
+        {volumes && volumes.length > 1 && (
+          <small className="text-[12px] text-ink2">
+            Together: <b>{warmUsd(volumes.reduce((sum, v) => sum + (Number(v.usd_per_month) || 0), 0))}/mo</b>
+            {' · '}{warmUsd(volumes.reduce((sum, v) => sum + (Number(v.usd_accrued) || 0), 0))} so far.
+          </small>
         )}
         <div className="flex flex-wrap items-center gap-2">
           <select className="rounded border border-line bg-bg1 px-2 py-1 text-[12px] text-ink1" value={tier} onChange={(e) => setTier(e.target.value)}>

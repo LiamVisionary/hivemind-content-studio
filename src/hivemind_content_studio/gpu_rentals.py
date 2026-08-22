@@ -3311,6 +3311,58 @@ def recent_bad_machine_ids(within_seconds: float = BAD_MACHINE_COOLDOWN_SECONDS)
 
 WARM_VOLUME_PROVIDER = "runpod"
 
+# RunPod network-volume storage, from their published pricing (read 2026-08-22
+# at docs.runpod.io/storage/network-volumes): the first 1 TB is $0.07/GB/month,
+# anything beyond it $0.05. A volume bills from the moment it is created until
+# it is deleted — whether or not any pod is attached to it, and whether or not
+# it ever gets used again. That is exactly why the studio shows a RUNNING TOTAL
+# next to the rate: a warm region is the one piece of studio spend with no
+# machine in the Machines list to remind you it exists, and $8.40/month is
+# invisible until someone goes looking for it.
+WARM_VOLUME_USD_PER_GB_MONTH = 0.07
+WARM_VOLUME_USD_PER_GB_MONTH_ABOVE_1TB = 0.05
+WARM_VOLUME_FIRST_TIER_GB = 1024
+# The month the per-month rate is quoted against, in hours (365.25/12*24). Used
+# to turn the rate into the hourly accrual the total is built from.
+WARM_VOLUME_HOURS_PER_MONTH = 730.5
+
+
+def warm_volume_monthly_usd(size_gb: float) -> float:
+    """What a volume of this size costs for a month, on RunPod's tiered rate."""
+    size = max(0.0, float(size_gb or 0))
+    first = min(size, WARM_VOLUME_FIRST_TIER_GB)
+    beyond = max(0.0, size - WARM_VOLUME_FIRST_TIER_GB)
+    return round(
+        first * WARM_VOLUME_USD_PER_GB_MONTH
+        + beyond * WARM_VOLUME_USD_PER_GB_MONTH_ABOVE_1TB,
+        4,
+    )
+
+
+def warm_volume_costs(entry: dict, now: float | None = None) -> dict:
+    """Rate and running total for one warm volume.
+
+    `usd_accrued` runs from the volume's creation, not from when it finished
+    stocking: RunPod bills the storage the moment the volume exists, and a
+    volume whose stocking box failed is still charging for the bytes on it.
+    Absent when we do not know when it was created — an unknown start must
+    read as unknown, never as zero spent.
+    """
+    monthly = warm_volume_monthly_usd(entry.get("size_gb"))
+    hourly = monthly / WARM_VOLUME_HOURS_PER_MONTH if monthly else 0.0
+    created = entry.get("created_at")
+    try:
+        created = float(created)
+    except (TypeError, ValueError):
+        created = None
+    age_hours = max(0.0, ((now if now is not None else time.time()) - created) / 3600) if created else None
+    return {
+        "usd_per_month": monthly,
+        "usd_per_hour": round(hourly, 6),
+        "age_hours": round(age_hours, 2) if age_hours is not None else None,
+        "usd_accrued": round(hourly * age_hours, 4) if age_hours is not None else None,
+    }
+
 # What a warm box costs in provisioning time: boot, node installs, ComfyUI up,
 # no weights to pull. Measured 2026-08-22: a RunPod 5090 in EU-RO-1 on the
 # stocked H3 volume went create -> "ComfyUI is up" in 144 s (the same tier
@@ -3350,10 +3402,12 @@ def warm_volume_for(tier: str, provider_key: str = WARM_VOLUME_PROVIDER) -> dict
 
 def list_warm_volumes() -> list[dict]:
     out = []
+    now = time.time()
     for key, entry in sorted(_read_warm_volumes().items()):
         provider_key, _, tier = key.partition(":")
         out.append({"key": key, "provider": provider_key, "tier": tier,
-                    "tier_label": TIERS.get(tier, {}).get("label", tier), **entry})
+                    "tier_label": TIERS.get(tier, {}).get("label", tier), **entry,
+                    **warm_volume_costs(entry, now)})
     return out
 
 
