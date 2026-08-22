@@ -270,3 +270,90 @@ test('a motion reference caps the duration range at the measured ceiling', async
     assert.match(videoStudio, /s\.setup = withDurationThatFits\(nextSetup\)/);
     assert.equal((videoStudio.match(/withDurationThatFits\(\{/g) || []).length, 3, 'every non-commit setup write re-clamps');
 });
+
+// The published per-canvas ceiling assumes the worst of everything (a reference
+// as long as the clip at the node's largest canvas, nine pictures, the full
+// voice allowance, soundtrack on) — right for refusing an impossible run, wrong
+// for the slider once the user has done the things that make a run fit. When
+// the catalog publishes the pricing inputs, the picker prices THIS setup with
+// the guard's arithmetic. Measured 2026-08-22: Liam's real job (7 pictures,
+// 13.3s phone clip at the full canvas, sound on) is ~144k rows against 85k, and
+// the same clip staged compact, trimmed to 6s, sound off, 3 pictures is ~82k —
+// it renders at 10s; the old slider still said 5.
+test('with pricing published the picker prices the actual attachments, and Compact lifts the ceiling', async () => {
+    const restore = stubBrowserGlobals();
+    const originalFetch = global.fetch;
+    const response = (ok, body) => ({ ok, json: async () => body });
+    global.fetch = async (url) => {
+        if (String(url).startsWith('/api/simple/prompts')) return response(true, { prompts: [] });
+        return response(true, catalogWith([
+            {
+                id: 'minimax-h3',
+                label: 'MiniMax H3',
+                family: 'minimax',
+                accepts: ['prompt'],
+                defaults: {},
+                aspect_ratios: ['16:9', '9:16'],
+                default_duration_seconds: 5,
+                motion_reference_max_seconds: { 'high|16:9': 5.167, 'high|9:16': 5.167 },
+                motion_reference_pricing: {
+                    max_packed_rows: 85000,
+                    frame_grid: { modulus: 17, offset: 5 },
+                    frame_rate: 24,
+                    output_rows_per_latent_frame: { 'high|16:9': 836, 'high|9:16': 836, 'standard|16:9': 336 },
+                    reference_rows_per_latent_frame: { full: 1056, compact: 432 },
+                    audio_rows_per_second: 80,
+                    reference_video_max_seconds: 15,
+                    reference_audio_max_seconds: 15,
+                    reference_picture_slots: 9,
+                },
+            },
+        ]));
+    };
+    try {
+        const studio = await import('../src/lib/hivemindStudio.js');
+        const logic = await import('../src/studios/video/videoLogic.js');
+        const context = await studio.loadHivemindStudioContext({ refresh: true });
+        const [h3] = context.videoModels;
+        assert.equal(h3.motionReferencePricing.max_packed_rows, 85000, 'the pricing reaches the client');
+
+        const pictures = (n) => Array.from({ length: n }, (_, i) => `blob:pic-${i}`);
+        const setup = (extra) => ({ modelId: h3.id, ar: '16:9', resolution: 'High', duration: 15, referenceVideos: [], referenceImageUrls: [], referenceAudios: [], ...extra });
+
+        // No motion clip: nothing to price, the full range stays.
+        assert.equal(logic.motionReferenceLimitFor(setup({ referenceImageUrls: pictures(7) }), h3.id), null);
+
+        // Liam's job as sent: 7 pictures, the 13.3s clip at the full canvas, soundtrack on.
+        const asSent = setup({ referenceImageUrls: pictures(7), referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, useAudio: true }] });
+        assert.equal(logic.motionReferencePackedRows(asSent, h3.id, 5), 77334);
+        assert.equal(logic.motionReferencePackedRows(asSent, h3.id, 6), 96366);
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id).maxSeconds, 5);
+        assert.equal(logic.motionReferenceLimitFor(asSent, h3.id).priced, true);
+
+        // The same clip staged compact, trimmed to 6s, soundtrack off, three pictures: 10s fits, 11 does not.
+        const compact = setup({ referenceImageUrls: pictures(3), referenceVideos: [{ url: 'blob:phone', durationSeconds: 6, useAudio: false, compact: true }] });
+        assert.equal(logic.motionReferencePackedRows(compact, h3.id, 10), 81654);
+        assert.equal(logic.motionReferencePackedRows(compact, h3.id, 11), 90128);
+        assert.equal(logic.motionReferenceLimitFor(compact, h3.id).maxSeconds, 10);
+        assert.deepEqual(logic.availableDurationsFor(compact, h3.id), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert.equal(logic.clampDurationToMotionReference(compact, h3.id), 10);
+
+        // Compact but the whole 13.3s clip: 8s is the lattice point that still fits.
+        const compactLong = setup({ referenceImageUrls: pictures(3), referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, useAudio: false, compact: true }] });
+        assert.equal(logic.motionReferenceLimitFor(compactLong, h3.id).maxSeconds, 8);
+
+        // Compact is held to "full" with no picture attached — the clip is then the
+        // character reference and identity needs pixels — so it prices at the full canvas.
+        const identityClip = setup({ referenceImageUrls: [], referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, useAudio: false, compact: true }] });
+        const withPics = setup({ referenceImageUrls: pictures(1), referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, useAudio: false, compact: true }] });
+        assert.ok(logic.motionReferencePackedRows(identityClip, h3.id, 8) > logic.motionReferencePackedRows(withPics, h3.id, 8));
+
+        // An unknown canvas (a tier|aspect the pricing does not list) falls back to
+        // the published ceiling rather than guessing.
+        const unknownCanvas = setup({ ar: '4:3', referenceImageUrls: pictures(3), referenceVideos: [{ url: 'blob:phone', durationSeconds: 13.3, compact: true }] });
+        assert.equal(logic.motionReferenceLimitFor(unknownCanvas, h3.id), null, 'no published ceiling for that canvas either');
+    } finally {
+        global.fetch = originalFetch;
+        restore();
+    }
+});

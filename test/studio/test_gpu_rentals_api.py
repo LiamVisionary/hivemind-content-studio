@@ -144,6 +144,8 @@ def test_gpu_rental_routes_require_owner(tmp_path: Path, monkeypatch) -> None:
     assert client.get("/api/gpu-rentals/offers").status_code == 401
     assert client.post("/api/gpu-rentals", json={}).status_code == 401
     assert client.delete("/api/gpu-rentals/123").status_code == 401
+    assert client.delete("/api/gpu-rentals/failures").status_code == 401
+    assert client.delete("/api/gpu-rentals/failures/vast:123").status_code == 401
 
 
 def test_offers_filters_and_shape(tmp_path: Path, monkeypatch) -> None:
@@ -1789,6 +1791,63 @@ def test_create_does_not_retry_the_pinned_offer_in_the_fresh_list(tmp_path: Path
     assert attempts == ["/v0/asks/50/", "/v0/asks/51/"], "the dead pin must not be tried twice"
 
 
+def test_create_refuses_a_fallback_priced_past_the_quote(tmp_path: Path, monkeypatch) -> None:
+    """The button shows one number. When that ask is gone and the next host is
+    more than a few cents dearer, stop and re-quote — do not rent it quietly
+    (2026-08-22: quoted $0.596/hr, silently rented $0.640/hr)."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
+
+    def handler(method, path, payload):
+        if path == "/v0/asks/41/":  # the quoted ask, gone by the click
+            raise gpu_rentals.GpuRentalError("Vast API PUT failed: error 404/3603: no_such_ask", status_code=502)
+        if path == "/v0/bundles/":
+            return {"offers": [{"id": 41, "gpu_name": "RTX 5090", "dph_total": 0.596},
+                               {"id": 42, "gpu_name": "RTX 5090", "dph_total": 0.640}]}
+        raise AssertionError(f"must not rent the pricier ask: {path}")
+
+    calls = _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    response = client.post("/api/gpu-rentals", json={
+        "tier": "minimax", "gpu_class": "rtx5090", "offer_id": 41, "provider": "vast",
+        "max_usd_per_hour": 0.596})
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "0.596" in detail and "0.640" in detail and "Nothing was rented" in detail
+    assert [c[1] for c in calls] == ["/v0/bundles/", "/v0/asks/41/"]
+    # And the stale snapshot is gone, so the next plan poll re-prices the card.
+    assert not [k for k in gpu_rentals._offer_cache if k.startswith("minimax:")]
+
+
+def test_create_takes_a_fallback_within_a_few_cents_and_reports_the_price(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
+
+    def handler(method, path, payload):
+        if path == "/v0/asks/41/":
+            raise gpu_rentals.GpuRentalError("no_such_ask", status_code=502)
+        if path == "/v0/bundles/":
+            return {"offers": [{"id": 41, "gpu_name": "RTX 5090", "dph_total": 0.596},
+                               {"id": 43, "gpu_name": "RTX 5090", "dph_total": 0.6133},
+                               {"id": 42, "gpu_name": "RTX 5090", "dph_total": 0.640}]}
+        assert path == "/v0/asks/43/", path
+        return {"new_contract": 7003, "success": True}
+
+    calls = _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+    body = client.post("/api/gpu-rentals", json={
+        "tier": "minimax", "gpu_class": "rtx5090", "offer_id": 41, "provider": "vast",
+        "max_usd_per_hour": 0.596}).json()
+    assert body["offer_id"] == "43"
+    # The bill and the quote, side by side, so the UI can say they differ.
+    assert body["usd_per_hour"] == 0.6133
+    assert body["quoted_usd_per_hour"] == 0.596
+    assert [c[1] for c in calls] == ["/v0/bundles/", "/v0/asks/41/", "/v0/asks/43/"]
+
+
+def test_rent_price_cap_is_two_cents_or_three_percent() -> None:
+    assert gpu_rentals.rent_price_cap(0.596) == 0.616   # 2 cents wins below ~$0.67
+    assert gpu_rentals.rent_price_cap(1.00) == 1.03     # 3% wins above it
+
+
 def test_create_surfaces_a_retryable_error_when_the_whole_market_moved(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
 
@@ -2026,6 +2085,69 @@ def test_a_failed_destroy_is_recorded_and_does_not_break_the_list(
     assert recorded[0]["destroy_error"] == "vast is down"
     # Still failed, so the next sweep tries again rather than forgetting it.
     assert "vast:31" in gpu_rentals._read_failure_state()["seen"]
+
+
+def test_a_dismissed_failure_leaves_the_view_but_its_host_stays_barred(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Each failure notice is the user's to clear — one at a time or all at
+    once — but clearing the notice must not forget the host that caused it,
+    or cheapest-first ranking hands the same machine straight back."""
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(gpu_rentals, "PROVISION_FAILURE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(gpu_rentals, "destroy_rental", lambda rid: None)
+    gpu_rentals.reap_failed_rentals([
+        {**_failed_dto("vast:31"), "machine_id": 144917},
+        {**_failed_dto("vast:32"), "machine_id": 555},
+        {**_failed_dto("runpod:abc"), "machine_id": 777},
+    ])
+    assert [f["rental_id"] for f in gpu_rentals.recent_rental_failures()] == ["vast:31", "vast:32", "runpod:abc"]
+
+    def handler(method, path, payload):
+        # "failures" is a literal route segment. If it ever fell through to the
+        # {rental_id} destroy route, THIS is where Vast would hear about it.
+        assert method == "GET", f"dismissing a notice must not touch the marketplace: {method} {path}"
+        return {"instances": []}
+
+    _fake_vast(monkeypatch, handler)
+    client = _client(tmp_path, monkeypatch)
+
+    body = client.delete("/api/gpu-rentals/failures/vast:31").json()
+    assert body["dismissed"] == 1
+    assert [f["rental_id"] for f in body["failures"]] == ["vast:32", "runpod:abc"]
+    # Persisted, not a per-response filter: the list endpoint agrees on the
+    # next poll, and the notice does not come back after a reload.
+    assert [f["rental_id"] for f in client.get("/api/gpu-rentals").json()["failures"]] == ["vast:32", "runpod:abc"]
+    # Dismissed is not forgotten — the host is still out of the running.
+    assert {144917, 555, 777} <= gpu_rentals.recent_bad_machine_ids()
+
+    # A second dismissal of the same rental is a no-op, not an error.
+    assert client.delete("/api/gpu-rentals/failures/vast:31").json()["dismissed"] == 0
+
+    body = client.delete("/api/gpu-rentals/failures").json()
+    assert body["dismissed"] == 2
+    assert body["failures"] == []
+    assert client.get("/api/gpu-rentals").json()["failures"] == []
+    assert {144917, 555, 777} <= gpu_rentals.recent_bad_machine_ids()
+    # The log itself is intact: every entry is still there, just stamped.
+    log = gpu_rentals._read_failure_state()["log"]
+    assert len(log) == 3 and all(e["dismissed_at"] for e in log)
+
+
+def test_dismissing_by_rental_matches_older_bare_vast_ids(tmp_path: Path, monkeypatch) -> None:
+    """The log predates provider-scoped ids, so a bare int entry must answer
+    to the "vast:N" form the view sends — and a destroy that kept failing
+    re-records the same rental each sweep; one dismissal clears them all."""
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "state")
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    gpu_rentals._write_failure_state({"seen": {}, "log": [
+        {"rental_id": 31, "machine_id": 1, "destroyed_at": now - 10},
+        {"rental_id": "vast:31", "machine_id": 1, "destroyed_at": now, "destroy_error": "vast is down"},
+        {"rental_id": "vast:40", "machine_id": 2, "destroyed_at": now},
+    ]})
+    assert gpu_rentals.dismiss_rental_failures("vast:31")["dismissed"] == 2
+    assert [f["rental_id"] for f in gpu_rentals.recent_rental_failures()] == ["vast:40"]
 
 
 def test_pause_detaches_then_stops_keeping_the_disk(tmp_path: Path, monkeypatch) -> None:

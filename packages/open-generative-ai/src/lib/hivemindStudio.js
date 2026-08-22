@@ -218,6 +218,14 @@ export function mapHivemindWorkflowModels(catalog) {
         motionReferenceMaxSeconds: workflow.motion_reference_max_seconds && typeof workflow.motion_reference_max_seconds === 'object'
             ? workflow.motion_reference_max_seconds
             : null,
+        // The inputs behind that ceiling — budget, frame lattice, rows per
+        // canvas, full vs compact reference rows, audio row rate — so the
+        // picker can price the run ACTUALLY being sent (compact staging, a
+        // trimmed clip, fewer pictures, no soundtrack) instead of the
+        // pessimistic per-canvas worst case. Null without a measured budget.
+        motionReferencePricing: workflow.motion_reference_pricing && typeof workflow.motion_reference_pricing === 'object'
+            ? workflow.motion_reference_pricing
+            : null,
         // Registered sampling-step default — distinguishes a full-step lane
         // (H3's 15) from a distilled turbo build (4-8), and labels the studio's
         // step presets truthfully.

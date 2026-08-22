@@ -33,6 +33,7 @@ import {
 import { isLocalAIAvailable } from '../../lib/localInferenceClient.js';
 import { resolveMediaSrc } from '../../lib/e2eMedia.js';
 import { personaIdentity } from '../../lib/personaId.js';
+import { referenceVideoCanvas } from '../../lib/h3References.js';
 import { getLang, t } from '../../lib/i18n.js';
 
 export const zh = () => getLang() === 'zh-CN';
@@ -230,10 +231,98 @@ export const durationsFor = (s, id) => {
 // already inside the ceiling, or a workflow with no measured budget. An
 // UNMEASURED card is not a card that cannot do it, so those keep the full range
 // rather than being guessed at.
+// ── Pricing the run the studio is ACTUALLY about to send ─────────────────────
+//
+// The published per-canvas ceiling above assumes the worst of everything: a
+// reference as long as the clip at the node's largest reference canvas, every
+// picture slot filled, the full voice allowance, soundtrack on. That is right
+// for refusing an impossible run and wrong for the slider once the user has
+// done the things that make a run fit — staged the clip compact, trimmed it,
+// left the soundtrack out, attached three pictures instead of nine. So when
+// the catalog publishes the pricing inputs (motion_reference_pricing), the
+// picker prices THIS setup with the guard's own arithmetic (packedSequenceRows
+// in the MCP / _h3_packed_rows in media_studio.py) and only drops the durations
+// that really do not fit. The guard at submit stays the authority; an
+// un-measured clip length counts as the 15s maximum, and a clip whose canvas
+// the browser has not seen is priced at the node's largest ("full") canvas —
+// compact staging prices at its own, smaller box.
+const H3_LATTICE = { modulus: 17, offset: 5 };
+const latticeAtLeast = (grid, value) => {
+  const modulus = Number(grid?.modulus) || H3_LATTICE.modulus;
+  const offset = ((Number(grid?.offset) || H3_LATTICE.offset) % modulus + modulus) % modulus;
+  const floor = offset > 0 ? offset : modulus;
+  const raw = Math.max(floor, Math.round(value));
+  return raw + ((offset - (raw % modulus)) % modulus + modulus) % modulus;
+};
+const latticeAtMost = (grid, value) => {
+  const modulus = Number(grid?.modulus) || H3_LATTICE.modulus;
+  const offset = ((Number(grid?.offset) || H3_LATTICE.offset) % modulus + modulus) % modulus;
+  const raw = Math.floor(value);
+  const floor = offset > 0 ? offset : modulus;
+  if (raw < floor) return 0;
+  return raw - ((raw - offset) % modulus + modulus) % modulus;
+};
+const h3VideoLatentFrames = (frames) => (frames <= 5 ? 2 : Math.floor((frames - 5) / 17) * 5 + 2);
+
+// Packed rows of ONE run: the clip, each motion clip at its staged canvas for
+// min(its length, the clip's) plus its soundtrack, the pictures, the voice
+// clips. null when the model publishes no pricing or the canvas is unknown.
+export const motionReferencePackedRows = (s, id, clipSeconds) => {
+  const pricing = getHivemindVideoModelById(id)?.motionReferencePricing;
+  if (!pricing || typeof pricing !== 'object') return null;
+  const rate = Number(pricing.frame_rate) || 24;
+  const tier = String(s.resolution || 'standard').trim().toLowerCase() || 'standard';
+  const outRows = Number(pricing.output_rows_per_latent_frame?.[`${tier}|${String(s.ar || '').trim()}`]);
+  if (!(outRows > 0)) return null;
+  const audioRows = (seconds) => Math.round(Math.max(0, seconds) * (Number(pricing.audio_rows_per_second) || 80) / 2) * 2;
+  const refRows = pricing.reference_rows_per_latent_frame || {};
+  const refMax = Number(pricing.reference_video_max_seconds) || 15;
+  const voiceMax = Number(pricing.reference_audio_max_seconds) || 15;
+  const images = Array.isArray(s.referenceImageUrls) ? s.referenceImageUrls.filter(Boolean) : [];
+  const videos = Array.isArray(s.referenceVideos) ? s.referenceVideos.filter((item) => item?.url) : [];
+  const audios = Array.isArray(s.referenceAudios) ? s.referenceAudios.filter((item) => item?.url) : [];
+
+  const frames = latticeAtLeast(pricing.frame_grid, Number(clipSeconds) * rate);
+  let total = h3VideoLatentFrames(frames) * outRows + audioRows(frames / rate);
+  for (const item of videos) {
+    const own = Number(item?.durationSeconds) > 0 ? Number(item.durationSeconds) : refMax;
+    const seconds = Math.min(own, refMax);
+    const effective = latticeAtMost(pricing.frame_grid, Math.min(Math.round(seconds * rate), frames));
+    const canvas = referenceVideoCanvas(item, { images });
+    const perLatent = Number(refRows[canvas]) || Number(refRows.full) || 0;
+    total += h3VideoLatentFrames(effective) * perLatent;
+    if (item?.useAudio) total += audioRows(seconds);
+  }
+  total += images.length * outRows;
+  const voiceSeconds = audios.reduce((sum, item) => sum + (Number(item?.durationSeconds) > 0 ? Number(item.durationSeconds) : voiceMax), 0);
+  total += audioRows(Math.min(voiceSeconds, voiceMax));
+  return total;
+};
+
 export const motionReferenceLimitFor = (s, id) => {
   const videos = Array.isArray(s.referenceVideos) ? s.referenceVideos.filter((item) => item?.url) : [];
   if (!videos.length) return null;
-  const limits = getHivemindVideoModelById(id)?.motionReferenceMaxSeconds;
+  const model = getHivemindVideoModelById(id);
+  const pricing = model?.motionReferencePricing;
+  if (pricing && typeof pricing === 'object' && Number(pricing.max_packed_rows) > 0) {
+    const budget = Number(pricing.max_packed_rows);
+    const durations = durationsFor(s, id).map(Number).filter((value) => value > 0);
+    const priced = durations.map((seconds) => ({ seconds, rows: motionReferencePackedRows(s, id, seconds) }));
+    // An unknown canvas prices as null — fall through to the published ceiling.
+    if (priced.length && priced.every((entry) => Number.isFinite(entry.rows))) {
+      const fits = priced.filter((entry) => entry.rows <= budget).map((entry) => entry.seconds);
+      if (fits.length === durations.length) return null;
+      const measured = videos.map((item) => Number(item?.durationSeconds)).filter((value) => value > 0);
+      const longest = measured.length === videos.length ? Math.max(...measured) : Infinity;
+      return {
+        maxSeconds: fits.length ? Math.max(...fits) : 0,
+        referenceVideoCount: videos.length,
+        longestReferenceSeconds: Number.isFinite(longest) ? longest : null,
+        priced: true,
+      };
+    }
+  }
+  const limits = model?.motionReferenceMaxSeconds;
   if (!limits || typeof limits !== 'object') return null;
   // The server falls back to the standard tier for an unset resolution, so the
   // lookup has to agree or the picker would quote a ceiling from a canvas the

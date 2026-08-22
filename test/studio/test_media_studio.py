@@ -1230,3 +1230,49 @@ def test_h3_packed_rows_prices_the_measured_jobs():
                               pictures=7, voice_seconds=0)
     assert trimmed == 95_092
     assert trimmed > _H3_MOTION_REFERENCE_PACKED_ROWS
+
+
+def test_motion_reference_pricing_publishes_what_the_studio_needs_to_price_a_run():
+    """The per-canvas ceiling assumes the worst of everything; the studio needs
+    the inputs to price the run it is actually sending (compact staging, a
+    trimmed clip, fewer pictures, no soundtrack) with the guard's arithmetic."""
+    from hivemind_content_studio import media_catalog
+    from hivemind_content_studio.media_studio import (
+        _h3_packed_rows,
+        _H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX,
+        _H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX,
+        motion_reference_pricing,
+    )
+
+    workflow = {
+        "motion_reference_max_packed_rows": 85_000,
+        "frame_grid": {"modulus": 17, "offset": 5},
+        "defaults": {"frame_rate": 24},
+    }
+    pricing = motion_reference_pricing(workflow)
+    assert pricing["max_packed_rows"] == 85_000
+    assert pricing["frame_grid"] == {"modulus": 17, "offset": 5}
+    assert pricing["frame_rate"] == 24
+    # Rows per latent frame for the High 16:9 canvas (1216x704): 76*44/4.
+    assert pricing["output_rows_per_latent_frame"]["high|16:9"] == 836
+    assert pricing["reference_rows_per_latent_frame"] == {
+        "full": _H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX,
+        "compact": _H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX,
+    }
+    assert pricing["reference_rows_per_latent_frame"] == {"full": 1056, "compact": 432}
+    assert pricing["audio_rows_per_second"] == 80
+    assert pricing["reference_video_max_seconds"] == 15
+    # The studio's arithmetic and the server's agree on the worst case the
+    # published ceiling is built from: a 5s High clip with a 13.3s full-canvas
+    # reference, soundtrack on, 7 pictures, no voice — 77,334 rows.
+    rows = _h3_packed_rows(workflow["frame_grid"], 24, 1216, 704, 120, reference_seconds=13.3,
+                           pictures=7, voice_seconds=0)
+    assert rows == 77_334
+    # No measured budget, no pricing.
+    assert motion_reference_pricing({"frame_grid": {"modulus": 17, "offset": 5}}) == {}
+    # The degraded catalog carries it too, so the picker keeps pricing when the
+    # live registry is unreachable.
+    models = media_catalog._built_in_video_models_with_limits()
+    h3 = next(model for model in models if model.family == "minimax")
+    assert h3.motion_reference_pricing["max_packed_rows"] == 85_000
+    assert h3.motion_reference_pricing["output_rows_per_latent_frame"]["high|16:9"] == 836

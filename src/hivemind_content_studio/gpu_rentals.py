@@ -1901,6 +1901,28 @@ def _instance_dto(instance: Instance, probe: bool = False) -> dict:
 # --- public operations ------------------------------------------------------
 
 _offer_cache: dict[str, tuple[float, list[Offer], int]] = {}
+
+# How far above the quoted price a fallback may land before we stop and
+# re-quote instead. The Rent button shows ONE number; the ask behind it can be
+# gone by the time the click arrives, and the old behaviour was to take the
+# next-cheapest host in silence — measured 2026-08-22: quoted $0.596/hr, rented
+# $0.640/hr (+7.4%), nothing said. "A few cents either side" is what the button
+# promised, so that is the contract: 2 cents or 3%, whichever is more.
+RENT_PRICE_TOLERANCE_USD = 0.02
+RENT_PRICE_TOLERANCE_FRACTION = 0.03
+
+
+def rent_price_cap(quoted_usd_per_hour: float) -> float:
+    return round(quoted_usd_per_hour + max(RENT_PRICE_TOLERANCE_USD,
+                                           RENT_PRICE_TOLERANCE_FRACTION * quoted_usd_per_hour), 4)
+
+
+def _forget_offers(tier: str) -> None:
+    """Drop the cached market for a tier. Renting consumes an ask (and a
+    refusal means the snapshot was already wrong), so the next plan poll has
+    to see the live market, not the 45s-old one the card was drawn from."""
+    for key in [k for k in _offer_cache if k.startswith(f"{tier}:")]:
+        _offer_cache.pop(key, None)
 OFFER_CACHE_SECONDS = 45
 
 
@@ -2319,6 +2341,7 @@ def create_rental(
     prefer: str = "balanced",
     gpu_class: str | None = None,
     count: int = 1,
+    max_usd_per_hour: float | None = None,
 ) -> dict:
     if tier not in TIERS:
         raise GpuRentalError(f"unknown tier: {tier}", status_code=400)
@@ -2350,12 +2373,30 @@ def create_rental(
     # client still parses, as Vast.
     pinned = RentalRef.parse(offer_id) if offer_id is not None else None
     preferred = [pinned] if pinned else []
+    price_of = {(dto["provider"], dto["offer_id"]): dto["usd_per_hour"] for dto in ranked}
     fresh = [
         RentalRef(dto["provider"], dto["offer_id"])
         for dto in ranked
         if not pinned or (dto["provider"], dto["offer_id"]) != (pinned.provider, pinned.native)
     ]
+    # The price the user clicked bounds what the fallbacks may cost. The pin
+    # IS that price and is always tried; everything after it has to land
+    # within a few cents or we stop and re-quote rather than quietly renting
+    # a pricier host. No cap (older clients, agents) keeps the old behaviour.
+    cap = rent_price_cap(max_usd_per_hour) if max_usd_per_hour else None
+    if cap is not None:
+        fresh = [ref for ref in fresh if price_of.get((ref.provider, ref.native), 0.0) <= cap]
     if not preferred and not fresh:
+        cheapest_now = ranked[0]["usd_per_hour"] if ranked else None
+        if cap is not None and cheapest_now is not None:
+            _forget_offers(tier)
+            raise GpuRentalError(
+                f"the ${max_usd_per_hour:.3f}/hr quote is gone — the cheapest "
+                f"{GPU_CLASSES.get(gpu_class, {}).get('label', gpu_class)} now is "
+                f"${cheapest_now:.3f}/hr. Nothing was rented; the quote has been refreshed, "
+                "rent again to take it at that price",
+                status_code=409,
+            )
         raise GpuRentalError("no offers currently match the tier filters", status_code=409)
     # Cheapest quote in the qualifying set, and the account it would be spent
     # from. Absent only when the caller pinned an offer the search no longer
@@ -2402,12 +2443,34 @@ def create_rental(
                 continue
             rented = {"rental_id": str(RentalRef(candidate.provider, native_id)),
                       "provider": candidate.provider, "label": label,
-                      "tier": tier, "gpu_class": gpu_class, "offer_id": candidate.native}
+                      "tier": tier, "gpu_class": gpu_class, "offer_id": candidate.native,
+                      # What this machine bills, so the UI can say when it is
+                      # not the number the user clicked. A pin the search no
+                      # longer lists was rented at the quoted price by
+                      # definition — that IS the ask the quote came from.
+                      "usd_per_hour": price_of.get((candidate.provider, candidate.native),
+                                                   max_usd_per_hour)}
             created.append(rented)
         if rented is None:
             break
 
+    # Either way the market we shopped from is not the market any more: we
+    # consumed an ask, or learned the snapshot was stale. Re-price on the
+    # next poll instead of showing the pre-rent card for another 45s.
+    _forget_offers(tier)
+
     if not created:
+        if cap is not None:
+            # Everything within tolerance evaporated; name what is left so the
+            # refreshed card and this message agree.
+            over = [dto["usd_per_hour"] for dto in ranked if dto["usd_per_hour"] > cap]
+            tail = f" — the cheapest left is ${min(over):.3f}/hr" if over else ""
+            raise GpuRentalError(
+                f"the ${max_usd_per_hour:.3f}/hr quote was taken before the order landed, and "
+                f"nothing within a few cents of it is left{tail}. Nothing was rented; the quote "
+                "has been refreshed, rent again to take the new price",
+                status_code=409,
+            ) from state["last_error"]
         raise GpuRentalError(
             f"all {state['tried']} candidate offers were taken before we could rent them — "
             "the market moved; try again",
@@ -2418,6 +2481,7 @@ def create_rental(
     result = dict(created[0])
     result["rentals"] = created
     result["requested"] = count
+    result["quoted_usd_per_hour"] = max_usd_per_hour
     if len(created) < count:
         result["partial"] = (
             f"rented {len(created)} of {count} — the rest of the matching offers were "
@@ -2988,9 +3052,48 @@ def reap_failed_rentals(instances: list[dict]) -> list[dict]:
 
 
 def recent_rental_failures(within_seconds: float = 6 * 3600) -> list[dict]:
-    """Failures still worth showing — the machine they describe is gone."""
+    """Failures still worth showing — the machine they describe is gone.
+
+    A failure the user has dismissed from the Machines view stays in the log
+    (its host is still held out of the next search) but is no longer shown.
+    """
     cutoff = time.time() - within_seconds
-    return [e for e in _read_failure_state()["log"] if (e.get("destroyed_at") or 0) >= cutoff]
+    return [
+        e for e in _read_failure_state()["log"]
+        if (e.get("destroyed_at") or 0) >= cutoff and not e.get("dismissed_at")
+    ]
+
+
+def _same_rental(left: Any, right: Any) -> bool:
+    """Older log entries carry a bare Vast int; the view sends "vast:31"."""
+    try:
+        return str(RentalRef.parse(left)) == str(RentalRef.parse(right))
+    except ProviderError:
+        return str(left) == str(right)
+
+
+def dismiss_rental_failures(rental_id: str | None = None) -> dict:
+    """Hide recorded failures from the Machines view — one rental's, or all.
+
+    Dismissing is not forgetting: the entry stays in the log so the host that
+    failed is still barred from the next search (recent_bad_machine_ids reads
+    the same log). Only the notice goes away. A rental can have several
+    entries — a destroy that kept failing re-records each sweep — and one
+    dismissal covers all of them: they are the same failure.
+    """
+    state = _read_failure_state()
+    now = time.time()
+    dismissed = 0
+    for entry in state["log"]:
+        if entry.get("dismissed_at"):
+            continue
+        if rental_id is not None and not _same_rental(entry.get("rental_id"), rental_id):
+            continue
+        entry["dismissed_at"] = now
+        dismissed += 1
+    if dismissed:
+        _write_failure_state(state)
+    return {"dismissed": dismissed, "failures": recent_rental_failures()}
 
 
 # How long a host that just failed us stays out of the running. Long enough to
@@ -3220,6 +3323,16 @@ def register_gpu_rental_routes(app, require_owner) -> None:
     def gpu_rental_loras_remove(lora_id: str) -> dict:
         return _guard(remove_rental_lora, lora_id)
 
+    # Same ordering rule: "failures" is a literal segment, and a DELETE on it
+    # must dismiss notices, never reach gpu_rentals_destroy as a rental id.
+    @app.delete("/api/gpu-rentals/failures", dependencies=[Depends(require_owner)])
+    def gpu_rental_failures_dismiss_all() -> dict:
+        return _guard(dismiss_rental_failures, None)
+
+    @app.delete("/api/gpu-rentals/failures/{rental_id}", dependencies=[Depends(require_owner)])
+    def gpu_rental_failures_dismiss(rental_id: str) -> dict:
+        return _guard(dismiss_rental_failures, rental_id)
+
     @app.post("/api/gpu-rentals", status_code=201, dependencies=[Depends(require_owner)])
     def gpu_rentals_create(payload: dict = Body(default={})) -> dict:
         tier = str(payload.get("tier") or "image")
@@ -3234,6 +3347,12 @@ def register_gpu_rental_routes(app, require_owner) -> None:
         prefer = str(payload.get("prefer") or "balanced")
         gpu_class = payload.get("gpu_class") or None
         count = payload.get("count") or 1
+        # The price the user clicked. Bounds the fallbacks; absent from older
+        # clients, which keep the uncapped behaviour.
+        try:
+            max_usd_per_hour = float(payload.get("max_usd_per_hour")) if payload.get("max_usd_per_hour") else None
+        except (TypeError, ValueError):
+            max_usd_per_hour = None
         return _guard(
             create_rental,
             tier,
@@ -3241,6 +3360,7 @@ def register_gpu_rental_routes(app, require_owner) -> None:
             prefer,
             str(gpu_class) if gpu_class else None,
             int(count),
+            max_usd_per_hour=max_usd_per_hour,
         )
 
     @app.delete("/api/gpu-rentals/{rental_id}", dependencies=[Depends(require_owner)])

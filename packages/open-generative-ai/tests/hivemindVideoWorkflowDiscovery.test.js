@@ -106,6 +106,10 @@ test('video workflow discovery recovers after an owner-session startup race', as
             // duration range is not narrowed: only a workflow that HAS one
             // (MiniMax H3) drops the lengths a motion clip cannot render.
             motionReferenceMaxSeconds: null,
+            // ...and without a budget there is nothing to price a run against
+            // either; MiniMax H3 publishes both, so its picker prices the
+            // actual attachments instead of the per-canvas worst case.
+            motionReferencePricing: null,
             tags: ['video', 'workflow', 'local'],
         });
         assert.equal(updates.length, 2);

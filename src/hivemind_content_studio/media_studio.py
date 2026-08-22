@@ -1191,6 +1191,67 @@ def _grid_frames_at_least(grid: dict[str, Any] | None, value: float) -> int:
     return raw + ((offset - (raw % modulus)) % modulus)
 
 
+# "compact" staging fits a motion clip inside 384x1152 (either orientation),
+# never upscaled — the MCP's REF_VIDEO_COMPACT_* box — so its worst case is
+# (1152/16 * 384/16) / 4 rows per latent frame. Mirrors
+# H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX in media-studio-mcp.mjs.
+_H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX = 432
+
+
+def motion_reference_pricing(workflow: dict[str, Any]) -> dict[str, Any]:
+    """The facts the studio needs to price a run's packed rows ITSELF.
+
+    `motion_reference_duration_limits` below publishes one pessimistic ceiling
+    per canvas (a reference as long as the clip, at the node's largest
+    reference canvas, every picture slot filled, the full voice allowance).
+    That is the right number to refuse an impossible run, but it is the wrong
+    number to show on the duration slider once the user has done the things
+    that make a run fit — staged the clip compact, trimmed it, left the
+    soundtrack out, attached three pictures instead of nine. So the studio
+    gets the inputs and prices the run it is actually about to send, with the
+    same arithmetic as `_h3_packed_rows` / packedSequenceRows() in the MCP:
+    the budget, the frame lattice, the output rows per latent frame for each
+    canvas, the reference rows per latent frame for full vs compact staging,
+    and the audio row rate. The guard at submit stays the authority.
+
+    Empty when the workflow has no measured budget — unmeasured is not the
+    same as impossible.
+    """
+    try:
+        budget = float(workflow.get("motion_reference_max_packed_rows"))
+    except (TypeError, ValueError):
+        return {}
+    if budget <= 0:
+        return {}
+    grid = workflow.get("frame_grid") if isinstance(workflow.get("frame_grid"), dict) else None
+    defaults = workflow.get("defaults") if isinstance(workflow.get("defaults"), dict) else {}
+    try:
+        rate = float(defaults.get("frame_rate") or 24)
+    except (TypeError, ValueError):
+        rate = 24.0
+    if rate <= 0:
+        rate = 24.0
+    output_rows = {
+        f"{tier_name}|{aspect}": _h3_rows_per_latent_frame(width, height)
+        for tier_name, dimensions in _VIDEO_TIER_DIMENSIONS.items()
+        for aspect, (width, height) in dimensions.items()
+    }
+    return {
+        "max_packed_rows": budget,
+        "frame_grid": dict(grid) if grid else None,
+        "frame_rate": rate,
+        "output_rows_per_latent_frame": output_rows,
+        "reference_rows_per_latent_frame": {
+            "full": _H3_REFERENCE_ROWS_PER_LATENT_FRAME_MAX,
+            "compact": _H3_REFERENCE_COMPACT_ROWS_PER_LATENT_FRAME_MAX,
+        },
+        "audio_rows_per_second": _H3_AUDIO_LATENT_FPS * _H3_AUDIO_LATENT_ROWS_PER_FRAME,
+        "reference_video_max_seconds": _H3_REFERENCE_VIDEO_MAX_SECONDS,
+        "reference_audio_max_seconds": _H3_REFERENCE_AUDIO_MAX_SECONDS,
+        "reference_picture_slots": _H3_REFERENCE_PICTURE_SLOTS,
+    }
+
+
 def motion_reference_duration_limits(workflow: dict[str, Any]) -> dict[str, float]:
     """Longest clip each canvas can render with a MOTION REFERENCE at least as long.
 

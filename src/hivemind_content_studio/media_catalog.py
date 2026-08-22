@@ -43,6 +43,13 @@ class MediaModel:
     # no measured budget — unmeasured is not the same as impossible, so those
     # keep the full range.
     motion_reference_max_seconds: dict | None = None
+    # The inputs behind those ceilings (budget, frame lattice, rows per canvas,
+    # full vs compact reference rows, audio row rate), so the studio can price
+    # the run it is ACTUALLY about to send — compact staging, a trimmed clip,
+    # fewer pictures, no soundtrack — instead of showing the pessimistic
+    # per-canvas ceiling above. See motion_reference_pricing. None without a
+    # measured budget.
+    motion_reference_pricing: dict | None = None
     # The workflow's registered sampling-step default. Lets the studio label its
     # step presets truthfully ("Standard (15 steps)") and tell a full-step lane
     # from a distilled one (a turbo build's 4-8 steps must not get a 32-step
@@ -209,17 +216,20 @@ def _built_in_video_models_with_limits() -> tuple[MediaModel, ...]:
 
     A degraded catalog still has to refuse a length the card cannot render.
     """
-    from .media_studio import motion_reference_duration_limits
+    from .media_studio import motion_reference_duration_limits, motion_reference_pricing
 
-    limits = motion_reference_duration_limits({
+    built_in = {
         "motion_reference_max_packed_rows": _H3_MOTION_REFERENCE_PACKED_ROWS,
         "frame_grid": _H3_FRAME_GRID,
         "defaults": {"frame_rate": _H3_FRAME_RATE},
-    })
+    }
+    limits = motion_reference_duration_limits(built_in)
+    pricing = motion_reference_pricing(built_in) or None
     if not limits:
         return BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS
     return tuple(
-        replace(model, motion_reference_max_seconds=limits) if model.family == "minimax" else model
+        replace(model, motion_reference_max_seconds=limits, motion_reference_pricing=pricing)
+        if model.family == "minimax" else model
         for model in BUILT_IN_MEDIA_STUDIO_VIDEO_MODELS
     )
 
@@ -244,7 +254,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
         # 30s); the remembered registry above keeps the answer honest.
         return _media_studio_fallback_models(), False
     try:
-        from .media_studio import list_media_studio_workflows, motion_reference_duration_limits
+        from .media_studio import list_media_studio_workflows, motion_reference_duration_limits, motion_reference_pricing
 
         workflows = list_media_studio_workflows("video")
     except Exception:
@@ -272,6 +282,7 @@ def _media_studio_registry(status: dict | None = None) -> tuple[tuple[MediaModel
             aspect_ratios=tuple(str(value) for value in workflow.get("aspect_ratios", []) if str(value).strip()),
             default_duration_seconds=float(defaults["duration_seconds"]) if defaults.get("duration_seconds") is not None else None,
             motion_reference_max_seconds=motion_reference_duration_limits(workflow) or None,
+            motion_reference_pricing=motion_reference_pricing(workflow) or None,
             default_steps=float(defaults["steps"]) if defaults.get("steps") is not None else None,
             beta=bool(workflow.get("beta")),
             routing_only=bool(workflow.get("routing_only")),

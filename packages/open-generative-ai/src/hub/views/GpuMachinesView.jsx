@@ -3,7 +3,7 @@
 // the hosted customer billing gateway). Tier presets, prices, and expected
 // speeds come from the server; this view only renders and confirms.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Card, EmptyState, Pill, SectionLabel, Segmented, Spinner } from '../../ui/kit.jsx';
+import { Button, Card, EmptyState, IconButton, Pill, SectionLabel, Segmented, Spinner } from '../../ui/kit.jsx';
 import { api } from '../hubData.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, requestRentedMode } from '../../lib/rentedMachines.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
@@ -21,6 +21,26 @@ function formatSeconds(seconds) {
   if (!seconds) return '—';
   if (seconds >= 90) return `${(seconds / 60).toFixed(1)} min`;
   return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+}
+
+// What one failure says about the NEXT rental. Different failures used to
+// share one verdict; each row now carries its own. A host that never starts
+// its container IS a bad host. The beacon reports two distinct download
+// endings: "failed" (a stream gave up after its resumed retries, or the object
+// was refused — the reason carries the last curl/HTTP error) and "stalled"
+// (still crawling at the deadline). Neither indicts the tier, and the failed
+// host is held out of the next search either way.
+function failureVerdict(reason = '') {
+  if (/never started/i.test(reason)) {
+    return 'The host never started its container, so this is the machine rather than the tier — renting again normally lands on a different one.';
+  }
+  if (/download failed/i.test(reason)) {
+    return 'A weight download gave up: one stream exhausted its retries, or the object was refused — the reason names the last error. That host is held out for a day, so renting the same tier again lands on a different one.';
+  }
+  if (/download stalled/i.test(reason)) {
+    return 'A weight download was still crawling at the deadline — usually the host\'s link rather than the tier. That host is held out for a day, so the same tier is still worth retrying.';
+  }
+  return 'Often the machine rather than the tier — renting again normally lands on a different one.';
 }
 
 // The rung that produces a generation for the least money. Not the cheapest
@@ -293,8 +313,16 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
           variant="primary"
           loading={busy}
           disabled={busy || !rung?.usd_per_hour || affordable < 1}
-          title="Rents at the price quoted above; the market moves, so the machine may land a few cents either side."
-          onClick={() => onRent({ tier: plan.tier, gpu_class: rung.gpu_class, count: machines })}
+          title="Rents the ask quoted above. If it is gone by the time the click lands, the next host is taken only within a few cents of the quote — otherwise nothing is rented and the price refreshes."
+          onClick={() => onRent({
+            tier: plan.tier,
+            gpu_class: rung.gpu_class,
+            count: machines,
+            // The exact ask the quote came from, and the number on the button:
+            // the server tries that ask first and bounds any fallback to it.
+            offer: rung.offers?.[0] || null,
+            usd_per_hour: rung.usd_per_hour,
+          })}
         >
           {busy ? 'Provisioning…' : machines > 1 ? `Rent ${machines} machines` : 'Rent machine'}
         </Button>
@@ -551,6 +579,11 @@ export function GpuMachinesView({ active }) {
   // list by design, and a machine that silently disappears while the credit
   // drops is worse than no automation at all.
   const [failures, setFailures] = useState([]);
+  // Failures dismissed from this screen. The server stamps them too (they stay
+  // out of the list across reloads, and the host stays barred), but a poll
+  // that was already in flight when the dismissal went out would bring the
+  // row back for one cycle on its way in — so the view also keeps its own set.
+  const dismissedRef = useRef(new Set());
   const [error, setError] = useState('');
   // A failed poll that still has good data on screen — reported as a chip, not
   // as an error that wipes the view.
@@ -568,7 +601,9 @@ export function GpuMachinesView({ active }) {
       const rentalData = await api('/api/gpu-rentals');
       setRentals(rentalData.rentals || []);
       setAccount(rentalData.account || null);
-      setFailures(rentalData.failures || []);
+      setFailures((rentalData.failures || []).filter(
+        (failure) => !dismissedRef.current.has(String(failure.rental_id)),
+      ));
       hasDataRef.current = true;
       if (withOffers) {
         const tierKeys = rentalData.tiers || ['image', 'video'];
@@ -622,19 +657,42 @@ export function GpuMachinesView({ active }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefer]);
 
-  const rent = async ({ tier, gpu_class: gpuClass, count }) => {
+  const rent = async ({ tier, gpu_class: gpuClass, count, offer, usd_per_hour: quoted }) => {
     setRenting(true);
     try {
       const body = await api('/api/gpu-rentals', {
         method: 'POST',
-        body: JSON.stringify({ tier, gpu_class: gpuClass, count, prefer }),
+        body: JSON.stringify({
+          tier,
+          gpu_class: gpuClass,
+          count,
+          prefer,
+          // Pin the quoted ask and bound the fallbacks to its price: a rent
+          // that silently landed on the next-cheapest host (+7.4% on
+          // 2026-08-22) is how the card and the bill came to disagree.
+          ...(offer ? { offer_id: offer.offer_id, provider: offer.provider } : {}),
+          ...(quoted ? { max_usd_per_hour: quoted } : {}),
+        }),
       });
+      // Re-price first — the server drops its market snapshot on every rent,
+      // and refresh() clears the banner, so the notices below must come after.
+      await refresh(true);
+      const notices = [];
       // A batch can come up short when asks evaporate mid-flight; those
       // machines are already billing, so say it rather than silently
       // returning fewer than asked.
-      setError(body.partial ? `Heads up — ${body.partial}.` : '');
-      await refresh(false);
+      if (body.partial) notices.push(body.partial);
+      // Landed within tolerance but not on the quoted number: say so, with
+      // both figures, instead of leaving the user to notice on the bill.
+      const landed = body.usd_per_hour;
+      if (quoted && landed && Math.abs(landed - quoted) >= 0.0005) {
+        notices.push(`rented at $${landed.toFixed(3)}/hr, not the $${quoted.toFixed(3)}/hr quoted — that ask was taken, and the next host was within a few cents`);
+      }
+      setError(notices.length ? `Heads up — ${notices.join('; ')}.` : '');
     } catch (err) {
+      // A refusal means the quote was stale: re-price the card so the number
+      // on the button and the message agree, then show why nothing rented.
+      try { await refresh(true); } catch { /* the message below still stands */ }
       setError(err.message);
     } finally {
       setRenting(false);
@@ -757,6 +815,28 @@ export function GpuMachinesView({ active }) {
     }
   };
 
+  // One notice, or every notice. Optimistic: the row goes the moment it is
+  // clicked, and only comes back if the server refused to remember it.
+  const dismissFailures = async (rentalId = null) => {
+    const ids = rentalId === null
+      ? failures.map((failure) => String(failure.rental_id))
+      : [String(rentalId)];
+    ids.forEach((id) => dismissedRef.current.add(id));
+    setFailures((current) => current.filter((failure) => !dismissedRef.current.has(String(failure.rental_id))));
+    try {
+      await api(
+        rentalId === null
+          ? '/api/gpu-rentals/failures'
+          : `/api/gpu-rentals/failures/${encodeURIComponent(rentalId)}`,
+        { method: 'DELETE' },
+      );
+    } catch (err) {
+      ids.forEach((id) => dismissedRef.current.delete(id));
+      setError(`Could not dismiss the failure notice — ${err.message}`);
+      refresh(false);
+    }
+  };
+
   const loading = rentals === null && !error;
 
   return (
@@ -778,40 +858,45 @@ export function GpuMachinesView({ active }) {
           </Card>
         )}
         {failures.length > 0 && (
-          <Card className="mb-4 flex flex-col gap-2 border-danger/40 p-3">
-            <b className="text-[12px] text-danger">
-              {failures.length === 1 ? 'A machine failed to provision and was destroyed'
-                : `${failures.length} machines failed to provision and were destroyed`}
-            </b>
+          <section className="mb-4 flex flex-col gap-2" aria-label="Provisioning failures">
+            <div className="flex items-center justify-between gap-3">
+              <b className="text-[12px] text-danger">
+                {failures.length === 1 ? 'A machine failed to provision and was destroyed'
+                  : `${failures.length} machines failed to provision and were destroyed`}
+              </b>
+              {failures.length > 1 && (
+                <Button size="sm" variant="ghost" onClick={() => dismissFailures()}>
+                  Dismiss all
+                </Button>
+              )}
+            </div>
             {failures.map((failure) => (
-              <div key={`${failure.rental_id}-${failure.destroyed_at}`} className="flex flex-col">
-                <small className="text-[12px] text-ink2">
-                  {failure.gpu || failure.gpu_class} · {failure.reason}
-                </small>
-                <small className="text-[11px] text-ink3">
-                  Ran {formatSeconds((failure.uptime_hours || 0) * 3600)} before failing
-                  {failure.usd_spent ? ` · $${failure.usd_spent.toFixed(2)} spent, not refundable` : ''}
-                  {failure.destroy_error ? ` · could not destroy it: ${failure.destroy_error}` : ''}
-                </small>
-              </div>
+              <Card
+                key={`${failure.rental_id}-${failure.destroyed_at}`}
+                className="flex items-start gap-3 border-danger/40 p-3"
+                data-failure-row={failure.rental_id}
+              >
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <small className="text-[12px] text-ink2">
+                    {failure.gpu || failure.gpu_class} · {failure.reason}
+                  </small>
+                  <small className="text-[11px] text-ink3">
+                    Ran {formatSeconds((failure.uptime_hours || 0) * 3600)} before failing
+                    {failure.usd_spent ? ` · $${failure.usd_spent.toFixed(2)} spent, not refundable` : ''}
+                    {failure.destroy_error ? ` · could not destroy it: ${failure.destroy_error}` : ''}
+                  </small>
+                  <small className="text-[11px] text-ink3">{failureVerdict(failure.reason)}</small>
+                </div>
+                <IconButton
+                  icon="x"
+                  size="sm"
+                  label="Dismiss this failure"
+                  className="-mr-1 -mt-1"
+                  onClick={() => dismissFailures(failure.rental_id)}
+                />
+              </Card>
             ))}
-            <small className="text-[11px] text-ink3">
-              {/* Different failures used to share one verdict. A host that
-                  never starts its container IS a bad host. The beacon reports
-                  two distinct download endings: "failed" (a stream gave up
-                  after its resumed retries, or the object was refused — the
-                  reason carries the last curl/HTTP error) and "stalled" (still
-                  crawling at the deadline). Neither indicts the tier, and the
-                  failed host is held out of the next search either way. */}
-              {failures.every((failure) => /never started/i.test(failure.reason || ''))
-                ? 'The host never started its container, so this is the machine rather than the tier — renting again normally lands on a different one.'
-                : failures.every((failure) => /download failed/i.test(failure.reason || ''))
-                  ? 'A weight download gave up: one stream exhausted its retries, or the object was refused — the reason names the last error. That host is held out for a day, so renting the same tier again lands on a different one.'
-                  : failures.every((failure) => /download stalled/i.test(failure.reason || ''))
-                    ? 'A weight download was still crawling at the deadline — usually the host\'s link rather than the tier. That host is held out for a day, so the same tier is still worth retrying.'
-                    : 'Often the machine rather than the tier — renting again normally lands on a different one.'}
-            </small>
-          </Card>
+          </section>
         )}
         {loading ? (
           // A bare centred spinner on an otherwise empty page reads as "broken",
