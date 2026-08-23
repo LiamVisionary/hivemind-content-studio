@@ -467,6 +467,22 @@ export function VideoStudio({
       : `Re-timed ${fitted.moved.length} shots to fit ${fitted.to}s — the prompt was written for about ${Math.round(fitted.from)}s.`);
   };
 
+  // A prompt arriving WHOLE from somewhere that is not the keyboard — a starter,
+  // a saved library entry, the Shot Builder, the hub's insert bridge, a canvas
+  // restore. Every one of these is written against a length of its own and lands
+  // in a composer whose length was decided by something else: the H3 starters are
+  // fixed 15s scripts (00:00 / 00:05 / 00:10), and attaching references caps the
+  // clip at 10s, so the third beat arrives already past the end. Refit on the way
+  // IN — accepting a prompt is the moment the user expects it to change.
+  //
+  // Deliberately NOT on setPrompt: that also runs on every keystroke, and
+  // re-timing mid-edit would fight someone typing a timestamp.
+  const adoptPrompt = (text) => {
+    const fitted = fitShotTimeline(text, Number(s.setup.duration) || 0);
+    if (fitted.changed) announceRefit(fitted);
+    return fitted.prompt;
+  };
+
   const withDurationThatFits = (setup) => {
     const duration = clampDurationToMotionReference(setup, setup.modelId, s.rentedMachines);
     if (Number(duration) === Number(setup.duration)) return setup;
@@ -797,14 +813,14 @@ export function VideoStudio({
   // recast reports any label the current rows cannot fill.
   const loadPromptText = (text, limits) => {
     if (!limits || !s.cast.length) {
-      setPrompt(text);
+      setPrompt(adoptPrompt(text));
       return;
     }
     const result = castApplication({
       members: s.cast, prompt: text, limits, durationSeconds: Number(s.setup.duration) || 0,
     });
     s.castWarnings = result.warnings;
-    setPrompt(result.prompt);
+    setPrompt(adoptPrompt(result.prompt));
     toast.success(zh()
       ? `已按当前演员表改写提示词 · ${s.cast.length} 位`
       : `Prompt recast for your cast — ${s.cast.length} member${s.cast.length === 1 ? '' : 's'}`);
@@ -2450,7 +2466,7 @@ export function VideoStudio({
     const offInsert = registerPromptInserter((text) => {
       const current = s.setup.prompt;
       const needsNewline = current && !current.endsWith('\n');
-      setPrompt(`${current}${needsNewline ? '\n' : ''}${text}`);
+      setPrompt(adoptPrompt(`${current}${needsNewline ? '\n' : ''}${text}`));
       focusPrompt();
     });
     const offSet = registerStudioSetupLoader('video', (setup) => {
@@ -2487,7 +2503,7 @@ export function VideoStudio({
         focusPrompt();
         return;
       }
-      setPrompt(setup?.primaryPrompt || '');
+      setPrompt(adoptPrompt(setup?.primaryPrompt || ''));
       // Canvas-bridge restores carry no captured context, but the clip is still
       // worth putting back on the canvas.
       if (setup?.output?.url) adoptRestoredOutput(setup.output, null, s.setup.modelId);
@@ -3683,16 +3699,12 @@ export function VideoStudio({
                 durationSeconds={Number(s.setup.duration) || 0}
                 {...attachedReferences()}
                 durations={referenceDurations()}
-                // The one finding with a mechanical fix. Covers the case the
-                // other two refit paths cannot: a prompt PASTED at a duration
-                // that never changed, from a helper that was never opened —
-                // which is most of how a 15s script meets a 10s clip.
-                onRefit={() => {
-                  const fitted = fitShotTimeline(s.setup.prompt, Number(s.setup.duration) || 0);
-                  if (!fitted.changed) return;
-                  announceRefit(fitted);
-                  commit({ ...s.setup, prompt: fitted.prompt });
-                }}
+                // The one finding with a mechanical fix, and the last door:
+                // adoptPrompt catches a prompt arriving from somewhere, and
+                // withDurationThatFits catches the length changing under one
+                // already written. This catches the rest — text TYPED or PASTED
+                // straight into the composer, which nothing else can see.
+                onRefit={() => commit({ ...s.setup, prompt: adoptPrompt(s.setup.prompt) })}
               />
             </>
           ) : null}
@@ -4017,7 +4029,7 @@ export function VideoStudio({
         references={attachedReferences()}
         firstFrame={s.setup.imageUrl || ''}
         lastFrame={s.setup.endImageUrl || ''}
-        onApply={(text) => { setPrompt(text); focusPrompt(); }}
+        onApply={(text) => { setPrompt(adoptPrompt(text)); focusPrompt(); }}
       />
 
       {/* targetModel is the workflow id, not the picker id: the helper chooses its
@@ -4072,13 +4084,8 @@ export function VideoStudio({
         onUse={(prompt) => {
           // The helper IS told the clip length, and small models overshoot it
           // anyway — measured 2026-08-09, a "[Shot 3] At 00:07.800" on a clip
-          // set to 5 seconds. A shot stamped at or past the end never renders,
-          // so refit on the way IN: accepting the helper's text is the moment
-          // the user expects it to change, where doing it at submit would be a
-          // silent edit of a prompt they had already read.
-          const fitted = fitShotTimeline(prompt, Number(s.setup.duration) || 0);
-          if (fitted.changed) announceRefit(fitted);
-          const incoming = fitted.prompt;
+          // set to 5 seconds.
+          const incoming = adoptPrompt(prompt);
           // A helper result that omits a label would silently unbind that
           // reference. Re-applying the scaffold puts back only what is missing.
           setPrompt(refsArmed

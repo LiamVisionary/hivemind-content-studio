@@ -99,3 +99,32 @@ test('the check that fires is exactly the one the button clears', async () => {
         'refitting must clear the finding that offered the button',
     );
 });
+
+test('a starter loaded onto a shorter clip than it declares comes out fitted', () => {
+    // The bug this run: references cap the clip at 10s, the H3 starters are
+    // fixed 15s scripts, and loading one from the Prompts menu pasted the 15s
+    // timing verbatim — the third beat arrived already past the end. The fix is
+    // adoptPrompt() in VideoStudio, which runs exactly this on the way IN at
+    // every door a whole prompt arrives through (starter, saved library, Shot
+    // Builder, the hub insert bridge, a canvas restore, the helper).
+    const capped = [5, 8, 10];
+    for (const entry of DEFAULT_PROMPTS) {
+        for (const part of entry.parts || []) {
+            for (const duration of capped) {
+                if (duration >= part.durationSeconds) continue;
+                const fitted = fitShotTimeline(part.prompt, duration);
+                assert.deepEqual(
+                    timelineOverruns(fitted.prompt, duration), [],
+                    `${entry.id} / ${part.label} still overruns a ${duration}s clip`,
+                );
+            }
+        }
+    }
+
+    // Named outright, because it is the one Liam hit: part 1 of the H3 Korean
+    // home video is 00:00 / 00:05 / 00:10 and has to survive the 10s cap.
+    const korean = DEFAULT_PROMPTS.find((entry) => entry.id === 'korean-home-video-h3');
+    const first = fitShotTimeline(korean.parts[0].prompt, 10);
+    assert.equal(first.changed, true, 'a 15s script pasted onto a 10s clip must be re-timed');
+    assert.equal(shotStartTimes(first.prompt).every((shot) => shot.seconds < 10), true);
+});
