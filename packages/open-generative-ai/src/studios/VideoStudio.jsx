@@ -20,6 +20,7 @@ import { toast } from 'react-hot-toast';
 
 import { muapi } from '../lib/muapi.js';
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
+import { fitShotTimeline } from '../lib/shotTimeline.js';
 import { isWan2gpModelId } from '../lib/localModels.js';
 import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
@@ -459,7 +460,28 @@ export function VideoStudio({
   // otherwise survive silently and die on the card minutes into the run.
   const withDurationThatFits = (setup) => {
     const duration = clampDurationToMotionReference(setup, setup.modelId, s.rentedMachines);
-    return Number(duration) === Number(setup.duration) ? setup : { ...setup, duration };
+    if (Number(duration) === Number(setup.duration)) return setup;
+    // The clip just got shorter than what is written into the prompt. An H3
+    // prompt carries its own timeline — "[Shot 3] At 00:10.000" — and a shot
+    // stamped at or past the new end is a beat that NEVER RENDERS: the model
+    // runs out of clip before reaching it and the last thing described is
+    // silently missing. The starters make this certain rather than likely, they
+    // are fixed scripts (the Korean home video is 15s: 00:00 / 00:05 / 00:10),
+    // so choosing a length the reference budget allows used to throw the third
+    // beat away without a word. Refit the anchors instead, and say so.
+    //
+    // Only on a duration CHANGE, never on every commit: this runs on each
+    // keystroke in the prompt box too, and re-timing mid-edit would fight
+    // someone typing a timestamp.
+    const fitted = fitShotTimeline(setup.prompt, duration);
+    if (!fitted.changed) return { ...setup, duration };
+    // Said out loud: this edits the user's own words, so it may never be
+    // silent. The alternative — leaving it — is a beat that disappears with no
+    // message at all, which is what happened before.
+    toast(zh()
+      ? `已按 ${fitted.to}秒 重新排布 ${fitted.moved.length} 个镜头的时间点（原脚本约 ${Math.round(fitted.from)}秒）。`
+      : `Re-timed ${fitted.moved.length} shots to fit ${fitted.to}s — the prompt was written for about ${Math.round(fitted.from)}s.`);
+    return { ...setup, duration, prompt: fitted.prompt };
   };
 
   const commit = (nextSetup, { persist = true } = {}) => {
