@@ -246,6 +246,14 @@ class PromptHelperGenerateBody(BaseModel):
     # guessing. Only the gender: the persona's name is sealed to the owner's
     # vault and never reaches this host.
     personaGender: str | None = None
+    # Who is in the shot, one entry per <Subject N>, as the studio's cast
+    # compiler sees it: {"subject": 1, "kind": "persona" | "character",
+    # "gender": "", "name": "", "voice": bool, "look": ""}. A persona's name
+    # is vault-sealed and is discarded unread; a character's is public. When
+    # present this supersedes personaGender, which only knew about one person.
+    # Validated defensively in prompt_profiles.normalize_cast (it lands inside
+    # an instruction), so the field is a plain list here.
+    cast: list | None = None
     # The clip length the studio is set to, so the written timeline fits inside it.
     durationSeconds: float | None = None
     # The start frame itself, as a data URL, for models with a projector: an
@@ -824,7 +832,7 @@ def _write_inline_media(
 
 
 def _write_inline_image(value: str, destination_dir: Path) -> Path:
-    return _write_inline_media(
+    written = _write_inline_media(
         value,
         destination_dir,
         field_name="image_base64",
@@ -832,6 +840,14 @@ def _write_inline_image(value: str, destination_dir: Path) -> Path:
         default_suffix=".png",
         max_bytes=_MAX_PRIVATE_IMAGE_BYTES,
     )
+    # An iPhone HEIC becomes a JPEG here too. The multipart upload route above
+    # has done this since 2026-08-22 because ComfyUI's LoadImage has no HEIC
+    # decoder, but this route was missed — and it is the one a SAVED reference
+    # comes back through: sealed media can only be decrypted in the browser, so
+    # reuse arrives as image_base64 rather than as an upload. A Hive Persona ID
+    # built from iPhone photos therefore reached the lane as .heic no matter how
+    # many times the pictures were re-attached.
+    return media_posters.transcode_opaque_image(written) or written
 
 
 def _write_inline_video(value: str, destination_dir: Path) -> Path:
@@ -1800,7 +1816,8 @@ def build_control_app(
             {"role": "system", "content": prompt_profiles.system_prompt(
                 profile, duration_seconds=body.durationSeconds, character_notes=notes,
                 continuation=body.isContinuation, previous_prompt=body.previousPrompt,
-                ugc=body.ugc, references=body.references, persona_gender=body.personaGender)},
+                ugc=body.ugc, references=body.references, persona_gender=body.personaGender,
+                cast=body.cast)},
             {"role": "user", "content": idea},
         ]
         # Revising is the same conversation with the current draft in it, so

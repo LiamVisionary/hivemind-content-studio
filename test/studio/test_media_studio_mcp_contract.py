@@ -1649,7 +1649,7 @@ def _oriented_heic_bytes():
     return buffer.getvalue()
 
 
-@pytest.mark.parametrize("delivery", ["data_url", "raw_base64", "image_path"])
+@pytest.mark.parametrize("delivery", ["data_url", "raw_base64", "image_path", "already_staged"])
 def test_heic_references_are_staged_as_upright_jpegs(tmp_path, monkeypatch, delivery):
     """An iPhone photo arrives as HEIC. Every lane opens staged pictures through
     ComfyUI's LoadImage, i.e. plain Pillow, which cannot read HEIC — so the MCP
@@ -1665,8 +1665,20 @@ def test_heic_references_are_staged_as_upright_jpegs(tmp_path, monkeypatch, deli
         arguments = {"image_base64": "data:image/heic;base64," + base64.b64encode(heic).decode()}
     elif delivery == "raw_base64":
         arguments = {"image_base64": base64.b64encode(heic).decode()}
-    else:
+    elif delivery == "image_path":
         source = tmp_path / "IMG_0001.HEIC"
+        source.write_bytes(heic)
+        arguments = {"image_path": str(source)}
+    else:
+        # The case that got away: a file ALREADY inside the Comfy input dir was
+        # handed to the graph untouched, on the reasoning that re-copying it
+        # would only make a duplicate. Being in the right folder is not the same
+        # as being readable — and this is precisely where the studio's inline
+        # image_base64 route put Liam's seven iPhone photos, so a Hive Persona
+        # ID reached a rented GPU as .heic on every run.
+        staging = tmp_path / "input"
+        staging.mkdir(parents=True, exist_ok=True)
+        source = staging / "media-studio-input-abcdefgh.heic"
         source.write_bytes(heic)
         arguments = {"image_path": str(source)}
 
@@ -1686,7 +1698,13 @@ def test_heic_references_are_staged_as_upright_jpegs(tmp_path, monkeypatch, deli
     assert top[0] > 200 and top[2] < 60, f"red should be on top after the rotation, got {top}"
     assert bottom[2] > 200 and bottom[0] < 60, f"blue should be below after the rotation, got {bottom}"
     staged = [path.name for path in (tmp_path / "input").iterdir()]
-    assert not [name for name in staged if name.lower().endswith((".heic", ".heif"))], staged
+    if delivery != "already_staged":
+        assert not [name for name in staged if name.lower().endswith((".heic", ".heif"))], staged
+    else:
+        # The original is left where it was found — it belongs to whoever staged
+        # it — but it is no longer what the graph points at, and only files the
+        # graph names are pushed to a lane.
+        assert source.name in staged
 
 
 def test_a_heic_that_cannot_be_converted_is_refused_not_staged_raw(tmp_path, monkeypatch):

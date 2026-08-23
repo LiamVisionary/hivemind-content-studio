@@ -1988,10 +1988,22 @@ function stageLtxErosImage(imagePathOrName, fallbackName) {
   if (!isAbsolute(value)) return value;
   const source = resolve(value);
   if (!existsSync(source)) throw new Error(`image_path not found: ${value}`);
-  const alreadyInput = inputRelativeName(source);
-  if (alreadyInput) return alreadyInput;
+  const opaque = OPAQUE_IMAGE_EXTENSIONS.has(extname(source).toLowerCase());
+  // A file already inside the input dir is normally handed straight to the
+  // graph — re-copying it would only make a duplicate. A HEIC is the exception:
+  // being in the right FOLDER does not make it a picture the lane can open, and
+  // the early return here was quietly exempting the one path that puts HEIC
+  // there. The studio's inline image_base64 route writes what the browser sends
+  // under its own media type, so a Hive Persona ID saved from iPhone photos
+  // reached a rented GPU as seven .heic files (verified in the push records for
+  // 2026-08-22 and 2026-08-23) while the multipart upload route beside it has
+  // converted them since 2026-08-22.
+  if (!opaque) {
+    const alreadyInput = inputRelativeName(source);
+    if (alreadyInput) return alreadyInput;
+  }
   mkdirSync(comfyInputDir, { recursive: true });
-  if (OPAQUE_IMAGE_EXTENSIONS.has(extname(source).toLowerCase())) {
+  if (opaque) {
     const stagedName = safeCopyName(source, '.jpg');
     writeFileSync(join(comfyInputDir, stagedName), transcodeOpaqueImage(readFileSync(source)));
     return stagedName;

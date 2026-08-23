@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from hivemind_content_studio.approval_ledger import ApprovalLedger
-from hivemind_content_studio.control_api import _write_inline_video, build_control_app
+from hivemind_content_studio.control_api import _write_inline_image, _write_inline_video, build_control_app
 from hivemind_content_studio.orchestrator import ContentOrchestrator
 from hivemind_content_studio.private_access import ENCRYPTED_PREFIX, OwnerAccess, PrivateFieldCipher, read_private_text
 from hivemind_content_studio.run_store import RunStore
@@ -2190,6 +2190,43 @@ def test_a_heic_reference_is_stored_as_a_jpeg_the_browser_and_the_lane_can_both_
     # Nothing of the original container is left behind, sealed or not.
     store = _reference_store(tmp_path)
     assert [path.name for path in store.iterdir() if ".heic" in path.name.lower()] == []
+
+
+def test_a_heic_reused_from_the_vault_is_staged_for_the_lane_as_a_jpeg(tmp_path: Path) -> None:
+    """The other door into the same problem, and the one a Hive Persona ID uses.
+
+    A saved reference is sealed to the owner vault, so this host can never read
+    it again — reuse arrives as image_base64 from the browser rather than as an
+    upload, and this route wrote whatever media type it was handed. Liam's seven
+    iPhone photos therefore went to a rented GPU as .heic every single run
+    (confirmed in the lane push records), no matter how often they were
+    re-attached, while the upload route beside it had been converting since
+    2026-08-22. ComfyUI reads staged pictures with plain Pillow and has no HEIC
+    decoder, so those are not pictures once they arrive.
+    """
+    encoded = base64.b64encode(_heic_bytes(orientation=6)).decode()
+
+    written = _write_inline_image(f"data:image/heic;base64,{encoded}", tmp_path)
+
+    assert written.suffix == ".jpg", written.name
+    assert written.read_bytes().startswith(b"\xff\xd8\xff")
+    with Image.open(written) as staged:
+        assert staged.format == "JPEG"
+        # Orientation 6 on 64x48 displays upright as 48x64 — baked into pixels,
+        # because the lane never looks at EXIF.
+        assert staged.size == (48, 64)
+    # And the container it came in is not left lying in the staging directory.
+    assert [path.name for path in tmp_path.iterdir() if path.suffix.lower() in {".heic", ".heif"}] == []
+
+
+def test_an_inline_heic_that_will_not_decode_is_still_staged(tmp_path: Path) -> None:
+    """Same rule as the upload route: the transcode is a convenience, never a
+    new way to lose a picture someone attached."""
+    encoded = base64.b64encode(b"\x00\x00\x00\x18ftypheic-not-really").decode()
+
+    written = _write_inline_image(f"data:image/heic;base64,{encoded}", tmp_path)
+
+    assert written.suffix == ".heic", written.name
 
 
 def test_a_heic_that_will_not_decode_is_kept_as_uploaded(tmp_path: Path, monkeypatch) -> None:
