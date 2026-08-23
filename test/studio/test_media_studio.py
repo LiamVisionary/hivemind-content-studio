@@ -1283,8 +1283,13 @@ def test_motion_reference_pricing_publishes_what_the_studio_needs_to_price_a_run
     # live registry is unreachable.
     models = media_catalog._built_in_video_models_with_limits()
     h3 = next(model for model in models if model.family == "minimax")
-    assert h3.motion_reference_pricing["max_packed_rows"] == 85_000
-    assert h3.motion_reference_pricing["max_packed_rows_by_vram_gb"] == {"32": 85_000, "96": 240_000}
+    # 76,000 / 161,000 since the 2026-08-23 recalibration: both are now the
+    # largest run PROVEN clean on that card, not a midpoint between a success
+    # and a failure. (The synthetic workflow above keeps its own arbitrary
+    # numbers on purpose — it is testing pass-through and junk-dropping, not
+    # the calibration.)
+    assert h3.motion_reference_pricing["max_packed_rows"] == 76_000
+    assert h3.motion_reference_pricing["max_packed_rows_by_vram_gb"] == {"32": 76_000, "96": 161_000}
     assert h3.motion_reference_pricing["output_rows_per_latent_frame"]["high|16:9"] == 836
 
 

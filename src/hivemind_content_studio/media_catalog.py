@@ -205,11 +205,18 @@ _last_live_media_studio_models: tuple[MediaModel, ...] = ()
 # the last degradation bug, where the fallback list quietly stripped H3
 # reference mode. test_media_studio_mcp_contract pins these equal to the
 # registry, so the two cannot drift apart unnoticed.
-_H3_MOTION_REFERENCE_PACKED_ROWS = 85_000
+# 76,000 since 2026-08-23: the previous 85,000 was interpolated between a
+# 76,600-row run that worked and a 95,092-row run that thrashed and died, and a
+# job at ~80,400 counted rows then OOM'd inside that gap. A budget is the
+# largest run PROVEN clean on the card, never a midpoint.
+_H3_MOTION_REFERENCE_PACKED_ROWS = 76_000
 # The same budget per card ("32": the 5090 the base number was measured on,
 # "96": the RTX PRO 6000 Blackwell). Pinned equal to the registry's
 # max_packed_rows_by_vram_gb by the same contract test.
-_H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB = {"32": 85_000, "96": 240_000}
+# 96GB is 161,000 for the same reason: the only thing proven on a PRO 6000 is
+# that the ~161k-row job ran (134s a step, job 185f117f). 240,000 was another
+# interpolation and would have reproduced the 32GB failure on the bigger card.
+_H3_MOTION_REFERENCE_PACKED_ROWS_BY_VRAM_GB = {"32": 76_000, "96": 161_000}
 _H3_FRAME_GRID = {"modulus": 17, "offset": 5}
 _H3_FRAME_RATE = 24
 
