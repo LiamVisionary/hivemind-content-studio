@@ -458,6 +458,15 @@ export function VideoStudio({
   // canvas or the references change, pull the selected duration back onto what
   // can actually render: a 10s chosen before the reference was attached would
   // otherwise survive silently and die on the card minutes into the run.
+  // Said out loud wherever it happens: refitting edits the user's own words, so
+  // it may never be silent. The alternative — leaving it — is a beat that
+  // disappears with no message at all, which is what happened before.
+  const announceRefit = (fitted) => {
+    toast(zh()
+      ? `已按 ${fitted.to}秒 重新排布 ${fitted.moved.length} 个镜头的时间点（原脚本约 ${Math.round(fitted.from)}秒）。`
+      : `Re-timed ${fitted.moved.length} shots to fit ${fitted.to}s — the prompt was written for about ${Math.round(fitted.from)}s.`);
+  };
+
   const withDurationThatFits = (setup) => {
     const duration = clampDurationToMotionReference(setup, setup.modelId, s.rentedMachines);
     if (Number(duration) === Number(setup.duration)) return setup;
@@ -475,12 +484,7 @@ export function VideoStudio({
     // someone typing a timestamp.
     const fitted = fitShotTimeline(setup.prompt, duration);
     if (!fitted.changed) return { ...setup, duration };
-    // Said out loud: this edits the user's own words, so it may never be
-    // silent. The alternative — leaving it — is a beat that disappears with no
-    // message at all, which is what happened before.
-    toast(zh()
-      ? `已按 ${fitted.to}秒 重新排布 ${fitted.moved.length} 个镜头的时间点（原脚本约 ${Math.round(fitted.from)}秒）。`
-      : `Re-timed ${fitted.moved.length} shots to fit ${fitted.to}s — the prompt was written for about ${Math.round(fitted.from)}s.`);
+    announceRefit(fitted);
     return { ...setup, duration, prompt: fitted.prompt };
   };
 
@@ -4056,16 +4060,25 @@ export function VideoStudio({
         // to the owner's vault and this host never learns what it is called.
         personaGender={s.setup.persona?.gender || ''}
         onUse={(prompt) => {
+          // The helper IS told the clip length, and small models overshoot it
+          // anyway — measured 2026-08-09, a "[Shot 3] At 00:07.800" on a clip
+          // set to 5 seconds. A shot stamped at or past the end never renders,
+          // so refit on the way IN: accepting the helper's text is the moment
+          // the user expects it to change, where doing it at submit would be a
+          // silent edit of a prompt they had already read.
+          const fitted = fitShotTimeline(prompt, Number(s.setup.duration) || 0);
+          if (fitted.changed) announceRefit(fitted);
+          const incoming = fitted.prompt;
           // A helper result that omits a label would silently unbind that
           // reference. Re-applying the scaffold puts back only what is missing.
           setPrompt(refsArmed
-            ? withReferenceTags(prompt, {
+            ? withReferenceTags(incoming, {
               images: s.setup.referenceImageUrls || [],
               videos: s.setup.referenceVideos || [],
               audios: s.setup.referenceAudios || [],
               gender: s.setup.persona?.gender || '',
             })
-            : prompt);
+            : incoming);
           focusPrompt();
         }}
       />
