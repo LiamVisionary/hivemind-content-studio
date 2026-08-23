@@ -71,3 +71,31 @@ test('every H3 starter fits the length it declares', () => {
         }
     }
 });
+
+test('the check that fires is exactly the one the button clears', async () => {
+    // Prompt Check already flagged this ("[Shot 3] cuts at 10.0s but the clip is
+    // 10.0s — that shot never happens"); what was missing was a way to act on
+    // it. These two have to agree, or the button appears and changes nothing —
+    // or worse, does not appear on a prompt it could fix.
+    const { checkH3Prompt } = await import('../src/lib/h3PromptCheck.js');
+    const prompt = [
+        'integrated_multimodal_description: A man sits.',
+        '[Shot 2] At 00:05.000, he walks. [Shot 3] At 00:10.000, he hangs laundry.',
+        'overall_soundscape: Birds.',
+        'non_diegetic_music: N/A',
+    ].join('\n');
+
+    const before = checkH3Prompt({ prompt, durationSeconds: 10 });
+    assert.ok(
+        before.findings.some((finding) => finding.code === 'cut-past-end'),
+        'the shape Liam sent must raise cut-past-end at 10s',
+    );
+
+    const fitted = fitShotTimeline(prompt, 10);
+    assert.equal(fitted.changed, true);
+    const after = checkH3Prompt({ prompt: fitted.prompt, durationSeconds: 10 });
+    assert.deepEqual(
+        after.findings.filter((finding) => finding.code === 'cut-past-end'), [],
+        'refitting must clear the finding that offered the button',
+    );
+});

@@ -3683,6 +3683,16 @@ export function VideoStudio({
                 durationSeconds={Number(s.setup.duration) || 0}
                 {...attachedReferences()}
                 durations={referenceDurations()}
+                // The one finding with a mechanical fix. Covers the case the
+                // other two refit paths cannot: a prompt PASTED at a duration
+                // that never changed, from a helper that was never opened —
+                // which is most of how a 15s script meets a 10s clip.
+                onRefit={() => {
+                  const fitted = fitShotTimeline(s.setup.prompt, Number(s.setup.duration) || 0);
+                  if (!fitted.changed) return;
+                  announceRefit(fitted);
+                  commit({ ...s.setup, prompt: fitted.prompt });
+                }}
               />
             </>
           ) : null}
