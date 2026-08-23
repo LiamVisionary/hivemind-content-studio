@@ -4439,6 +4439,9 @@ class RemoteComfyLaneTests(unittest.TestCase):
                 report = app.comfy_lane_vram_headroom('rental9')
             self.assertEqual(report, {
                 'lane': 'rental9', 'remote': True, 'vram_headroom_gb': 12.0, 'vram_total_gb': None,
+                # What this card size has proven, so the guard can bound a
+                # predicted budget by observed reality (None until it runs).
+                'row_observations': None,
                 'probed': True, 'error': None,
             })
             self.assertEqual(probes, ['http://127.0.0.1:18337/system_stats'])
@@ -4565,7 +4568,8 @@ class RemoteComfyLaneTests(unittest.TestCase):
                 # The attached H3 box, launched without the flag.
                 self.assertEqual(answer, {
                     'ok': True, 'lane': 'rental47', 'remote': True,
-                    'vram_headroom_gb': 0.0, 'vram_total_gb': None, 'probed': True, 'error': None,
+                    'vram_headroom_gb': 0.0, 'vram_total_gb': None, 'row_observations': None,
+                    'probed': True, 'error': None,
                 })
                 # A graph no rental claims routes to the local default, which
                 # is probed the same way (a CUDA host running the studio
@@ -6244,3 +6248,69 @@ class H3StudioImageLaneTests(unittest.TestCase):
         self.assertIn('sealed', record['error'])
         # Nothing was uploaded to a box whose results we could not have read.
         self.assertEqual(staged, [])
+
+
+class RowObservationTests(unittest.TestCase):
+    """The card is the authority on its own limit.
+
+    A packed-row budget is a PREDICTION, and 2026-08-23 proved predictions go
+    wrong in the dangerous direction: 85,000 was interpolated between a clean
+    76,600-row run and a fatal 95,092-row one, and a job at ~80,400 rows died
+    inside the gap. So each outcome is recorded against the card SIZE (not the
+    machine — rentals are destroyed and re-rented constantly) and the guard is
+    bounded by it.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.app = load_app()
+        self.app.H3_ROW_OBSERVATIONS_FILE = Path(self._dir.name) / "h3-row-observations.json"
+
+    def tearDown(self):
+        self._dir.cleanup()
+
+    def test_a_clean_run_only_ever_raises_what_the_card_is_known_to_hold(self):
+        self.app.record_row_observation(31.36, 60_000, "clean")
+        self.app.record_row_observation(31.36, 76_600, "clean")
+        # A SMALLER clean run proves nothing new — the ceiling does not drop
+        # because someone rendered something short.
+        self.app.record_row_observation(31.36, 40_000, "clean")
+        self.assertEqual(self.app.row_observations_for(31.36)["clean_rows"], 76_600)
+
+    def test_an_oom_only_ever_lowers_it_and_keeps_the_smallest_seen(self):
+        self.app.record_row_observation(31.36, 95_092, "oom")
+        self.app.record_row_observation(31.36, 80_890, "oom")
+        self.app.record_row_observation(31.36, 142_366, "oom")
+        self.assertEqual(self.app.row_observations_for(31.36)["oom_rows"], 80_890)
+
+    def test_observations_are_keyed_by_card_size_so_they_outlive_the_machine(self):
+        """A rental is destroyed and re-rented daily; the card it was is what
+        repeats. 31.36 GiB and 31.4 GiB are the same 32 GB card."""
+        self.app.record_row_observation(31.36, 80_890, "oom")
+        self.assertEqual(self.app.row_observations_for(31.4)["oom_rows"], 80_890)
+        # A 96 GB card is a different question entirely and shares nothing.
+        self.assertIsNone(self.app.row_observations_for(95.0))
+
+    def test_junk_is_ignored_rather_than_recorded_as_a_limit(self):
+        for bad in ((None, 80_000, "oom"), (31.36, 0, "oom"), (31.36, None, "clean"),
+                    (31.36, 80_000, "sideways"), (0, 80_000, "oom")):
+            self.assertIsNone(self.app.record_row_observation(*bad))
+        self.assertIsNone(self.app.row_observations_for(31.36))
+
+    def test_an_out_of_memory_is_told_apart_from_every_other_failure(self):
+        self.assertTrue(self.app._looks_like_an_out_of_memory(
+            "SamplerCustomAdvanced (node 14) failed — OutOfMemoryError: Allocation on device 0"))
+        self.assertTrue(self.app._looks_like_an_out_of_memory("CUDA out of memory"))
+        # A node that simply could not find a file must never shrink a budget.
+        self.assertFalse(self.app._looks_like_an_out_of_memory(
+            "LoadImage (node 120) failed — cannot open reference.png"))
+        self.assertFalse(self.app._looks_like_an_out_of_memory(""))
+
+    def test_the_priced_row_count_rides_the_prompt_body_like_run_on(self):
+        body = json.dumps({"prompt": {"1": {"class_type": "X"}}, "packed_rows": 76_600,
+                           "run_on": "vast:1"}).encode()
+        self.assertEqual(self.app._packed_rows_from_comfy_prompt_body(body), 76_600)
+        # Absent, junk, or non-positive: no claim about the run at all.
+        for missing in (b'{"prompt":{}}', b'{"prompt":{},"packed_rows":"lots"}',
+                        b'{"prompt":{},"packed_rows":0}', b'not json'):
+            self.assertIsNone(self.app._packed_rows_from_comfy_prompt_body(missing))

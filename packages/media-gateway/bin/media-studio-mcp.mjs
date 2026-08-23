@@ -1344,6 +1344,12 @@ function motionReferenceBudgetForCard(workflow, vramGb) {
   return fits.length ? fits[fits.length - 1] : null;
 }
 
+// A card that ran out of memory at N rows is held under N, not at it: the exact
+// failure point moves with allocator fragmentation, so the observed number is a
+// boundary to stay clear of rather than a target to aim at. Mirrors
+// OOM_OBSERVATION_SAFETY in the gateway, which records the observations.
+const OOM_OBSERVATION_SAFETY = 0.95;
+
 function motionReferenceRowBudget(workflow, lane) {
   const measured = Number(workflow?.motion_reference_budget?.max_packed_rows);
   if (!(measured > 0)) return null;
@@ -1370,8 +1376,27 @@ function motionReferenceRowBudget(workflow, lane) {
       vramTotalGb, cardBudget: null,
     };
   }
+  // What the CARD has proven outranks what the registry predicted, in both
+  // directions: a run that FINISHED raises the ceiling to itself, a run that
+  // ran OUT OF MEMORY pulls it under that point. This is the whole difference
+  // between a measured limit and an interpolated one — 85,000 was the midpoint
+  // between a clean 76,600 and a fatal 95,092, and a job at ~80,400 rows died
+  // inside that gap (2026-08-23). The gateway records both outcomes per card
+  // size; here they bound the prediction.
+  const predicted = card ? card.rows : measured;
+  const observed = lane && typeof lane.rowObservations === 'object' && lane.rowObservations
+    ? lane.rowObservations : null;
+  const cleanRows = Number(observed?.clean_rows) > 0 ? Math.round(Number(observed.clean_rows)) : 0;
+  const oomRows = Number(observed?.oom_rows) > 0 ? Math.round(Number(observed.oom_rows)) : 0;
+  // A card that OOM'd at N is not asked for N again: the failure point moves
+  // with the allocator's fragmentation, so the ceiling sits just under it.
+  const oomCeiling = oomRows ? Math.floor(oomRows * OOM_OBSERVATION_SAFETY) : 0;
+  let rows = predicted;
+  let boundedBy = null;
+  if (cleanRows > rows) { rows = cleanRows; boundedBy = 'clean'; }
+  if (oomCeiling && oomCeiling < rows) { rows = oomCeiling; boundedBy = 'oom'; }
   return {
-    rows: card ? card.rows : measured,
+    rows,
     measured,
     requiredHeadroom,
     lane: lane?.lane ?? null,
@@ -1379,6 +1404,10 @@ function motionReferenceRowBudget(workflow, lane) {
     reducedByLane: false,
     vramTotalGb,
     cardBudget: card ? { vramGb: card.vramGb, rows: card.rows } : null,
+    predicted,
+    boundedBy,
+    observedCleanRows: cleanRows || null,
+    observedOomRows: oomRows || null,
   };
 }
 
@@ -1421,6 +1450,11 @@ async function resolveLaneForGraph(promptGraph, runOn = '') {
       probed,
       vramHeadroomGb: probed ? headroom : null,
       vramTotalGb: probed && Number.isFinite(vramTotalGb) && vramTotalGb > 0 ? vramTotalGb : null,
+      // What runs on a card this size have actually done — the gateway keeps
+      // one record per card size, so it survives a machine being destroyed and
+      // re-rented, which is the normal life of a rental.
+      rowObservations: answer.row_observations && typeof answer.row_observations === 'object'
+        ? answer.row_observations : null,
       error: answer.error ? String(answer.error) : null,
     };
   } catch (error) {
@@ -1653,6 +1687,15 @@ function assertMotionReferenceFitsTheCard(workflow, settings, lane) {
   // And a budget picked for the lane's card says so: the operator reading
   // "215,000" on a 5090 lane, or "85,000" on a PRO 6000, has a routing
   // problem (the wrong machine is selected), not a capacity one.
+  // When the number came from the card rather than the registry, say so: an
+  // operator who reads "76,000" and knows the registry says 76,000 learns
+  // nothing, but "72,300 — this card ran out of memory at 76,100 on 2026-08-23"
+  // explains a ceiling that moved on its own.
+  const observedNote = budget.boundedBy === 'oom'
+    ? ` — bounded by this card size running out of memory at ${thousands(budget.observedOomRows)} rows`
+    : budget.boundedBy === 'clean'
+      ? ` — raised to the largest run this card size has completed (${thousands(budget.observedCleanRows)} rows)`
+      : '';
   const limit = budget.reducedByLane
     ? `${thousands(budget.rows)} on lane '${budget.lane}', whose ComfyUI runs `
       + `${budget.laneHeadroom > 0 ? `with --vram-headroom ${budget.laneHeadroom}` : 'without --vram-headroom'} — `
@@ -1660,8 +1703,8 @@ function assertMotionReferenceFitsTheCard(workflow, settings, lane) {
       + 'which the minimax-tier provisioning passes; re-provision that machine, or relaunch its ComfyUI with the '
       + 'flag, to get the full budget back'
     : budget.cardBudget
-      ? `${thousands(budget.rows)} on lane '${budget.lane}' (a ${budget.cardBudget.vramGb} GB card)`
-      : thousands(budget.rows);
+      ? `${thousands(budget.rows)} on lane '${budget.lane}' (a ${budget.cardBudget.vramGb} GB card)${observedNote}`
+      : `${thousands(budget.rows)}${observedNote}`;
   // Name what is actually attached. A refusal that says "with 0 reference
   // videos" when the run carries seven pictures and a soundtrack sends the
   // user looking for a video they already removed.

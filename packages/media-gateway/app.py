@@ -619,6 +619,7 @@ def comfy_lane_vram_headroom(lane, timeout=4.0):
         "remote": comfy_lane_is_remote(lane),
         "vram_headroom_gb": None,
         "vram_total_gb": None,
+        "row_observations": None,
         "probed": False,
         "error": None,
     }
@@ -629,6 +630,9 @@ def comfy_lane_vram_headroom(lane, timeout=4.0):
         return record
     record["vram_headroom_gb"] = vram_headroom_gb_from_argv(argv)
     record["vram_total_gb"] = vram_total_gb
+    # What this card size has actually done, so the guard can bound a predicted
+    # budget by observed reality in both directions.
+    record["row_observations"] = row_observations_for(vram_total_gb)
     record["probed"] = True
     return record
 
@@ -2003,8 +2007,23 @@ def watch_remote_comfy_prompt(prompt_id, poll_seconds=5, timeout_seconds=7200):
         # staged inputs and partial outputs need cleaning up like any other.
         pass
     elif failed:
-        update_comfy_prompt_route(prompt_id, status="error", error=remote_comfy_failure_message(history))
+        failure = remote_comfy_failure_message(history)
+        # The card just told us where its limit is. Record it against the card
+        # size so every later run on a card like this is held under it — this is
+        # the difference between a limit that is measured and one that is
+        # guessed, and it is why the same OOM does not arrive twice.
+        route = comfy_prompt_route(prompt_id) or {}
+        if _looks_like_an_out_of_memory(failure) and route.get("packed_rows"):
+            record_row_observation(route.get("card_vram_gb"), route.get("packed_rows"),
+                                   "oom", lane=route.get("lane"))
+        update_comfy_prompt_route(prompt_id, status="error", error=failure)
     else:
+        # It finished: this many rows are PROVEN on a card this size, which is
+        # the only thing allowed to raise a budget.
+        route = comfy_prompt_route(prompt_id) or {}
+        if route.get("packed_rows"):
+            record_row_observation(route.get("card_vram_gb"), route.get("packed_rows"),
+                                   "clean", lane=route.get("lane"))
         try:
             harvest_remote_comfy_outputs(prompt_id, history)
         except Exception as exc:
@@ -3171,6 +3190,112 @@ def _reshape_dims_to_image_aspect(image_path, width, height, *, multiple=32):
 
 class ComfyLanePinError(RuntimeError):
     """A "Run on" pin named a rented machine the gateway cannot route to."""
+
+
+# --- what the card itself has proven ------------------------------------------
+# A packed-row budget is a PREDICTION of a physical limit, and predictions have
+# been wrong in both directions: 85,000 was interpolated between a clean run and
+# a failure, and a job inside that gap died (2026-08-23). So the gateway records
+# what actually happens on each card and the guard is bounded by it — never
+# above a run that OOM'd, never below one that finished. The card is the
+# authority; the registry number is only where it starts.
+#
+# Keyed by the card's VRAM in whole GiB, because that is what decides capacity
+# and it survives a machine being destroyed and re-rented. Free VRAM is NOT read
+# for this: under cudaMallocAsync an idle healthy box already reports ~6 GiB
+# "used" that belongs to no model, so a live reading would shrink budgets on a
+# card that is perfectly empty.
+H3_ROW_OBSERVATIONS_FILE = GATEWAY_STATE_DIR / "h3-row-observations.json"
+_row_observations_lock = threading.Lock()
+# A card that OOM'd at N rows is not asked to do N again: the guard is held a
+# little under it, because the failure point is not exactly reproducible (the
+# allocator's fragmentation moves it).
+OOM_OBSERVATION_SAFETY = 0.95
+
+
+def _read_row_observations():
+    try:
+        data = json.loads(H3_ROW_OBSERVATIONS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {k: v for k, v in (data or {}).items() if isinstance(v, dict)}
+
+
+def _card_key(vram_total_gb):
+    try:
+        card = int(round(float(vram_total_gb)))
+    except (TypeError, ValueError):
+        return None
+    return str(card) if card > 0 else None
+
+
+def record_row_observation(vram_total_gb, rows, outcome, *, lane=None):
+    """Remember that a run of `rows` packed rows finished, or ran out of memory,
+    on a card of this size. Never raises: bookkeeping must not take a generation
+    down with it."""
+    key = _card_key(vram_total_gb)
+    try:
+        rows = int(rows)
+    except (TypeError, ValueError):
+        return None
+    if not key or rows <= 0 or outcome not in ("clean", "oom"):
+        return None
+    try:
+        with _row_observations_lock:
+            data = _read_row_observations()
+            entry = data.get(key) or {}
+            if outcome == "clean":
+                # The largest run PROVEN to finish. Only ever grows, and only
+                # from a run that really completed.
+                entry["clean_rows"] = max(int(entry.get("clean_rows") or 0), rows)
+            else:
+                seen = entry.get("oom_rows")
+                entry["oom_rows"] = min(int(seen), rows) if seen else rows
+            entry[f"{outcome}_at"] = datetime.now(timezone.utc).isoformat()
+            if lane:
+                entry[f"{outcome}_lane"] = str(lane)
+            entry["samples"] = int(entry.get("samples") or 0) + 1
+            data[key] = entry
+            H3_ROW_OBSERVATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            H3_ROW_OBSERVATIONS_FILE.write_text(json.dumps(data, indent=1), encoding="utf-8")
+            return dict(entry)
+    except Exception as exc:
+        print(f"[comfy-lanes] could not record a row observation: {exc}", file=sys.stderr)
+        return None
+
+
+def row_observations_for(vram_total_gb):
+    """What this card size has proven, for the guard to bound itself by."""
+    key = _card_key(vram_total_gb)
+    if not key:
+        return None
+    entry = _read_row_observations().get(key)
+    return dict(entry) if entry else None
+
+
+def _looks_like_an_out_of_memory(message):
+    text = str(message or "").lower()
+    return "outofmemory" in text or "out of memory" in text
+
+
+def _packed_rows_from_comfy_prompt_body(body):
+    """The row count the MCP priced this graph at, if it said. Sent alongside
+    `run_on` and stripped before the graph reaches ComfyUI — it is our
+    bookkeeping, not a node input."""
+    try:
+        data = json.loads(
+            body.decode("utf-8", errors="replace")
+            if isinstance(body, (bytes, bytearray)) else body
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        rows = int(data.get("packed_rows"))
+    except (TypeError, ValueError):
+        return None
+    return rows if rows > 0 else None
 
 
 def _run_on_from_comfy_prompt_body(body):
@@ -10891,10 +11016,22 @@ class Handler(BaseHTTPRequestHandler):
                         "error": f"could not stage inputs on remote lane '{lane_name}': {e}",
                         "operational": True,
                     }, 502)
+            # What the MCP priced this graph at, and the card it is about to run
+            # on: the pair that turns an OOM (or a clean finish) into a fact
+            # about this card size rather than an anecdote.
+            priced_rows = _packed_rows_from_comfy_prompt_body(body)
+            card_vram_gb = None
+            if priced_rows:
+                try:
+                    card_vram_gb = _comfy_lane_system_probe(lane_name)[1]
+                except Exception:
+                    card_vram_gb = None
             submit_route_meta = {
                 "lane": lane_name,
                 "requester_spki": requester_spki,
                 "pushed_inputs": pushed_inputs,
+                "packed_rows": priced_rows,
+                "card_vram_gb": card_vram_gb,
                 # Staging a reference job's inputs (above) runs inside this
                 # request and can outlast the caller's timeout. Keeping the
                 # submitter's own client_id is what lets it find the job again
@@ -10924,6 +11061,12 @@ class Handler(BaseHTTPRequestHandler):
                             pushed_inputs=submit_route_meta["pushed_inputs"],
                             client_id=submit_route_meta["client_id"],
                         )
+                        if submit_route_meta.get("packed_rows"):
+                            update_comfy_prompt_route(
+                                submitted_pid,
+                                packed_rows=submit_route_meta["packed_rows"],
+                                card_vram_gb=submit_route_meta["card_vram_gb"],
+                            )
                         if comfy_lane_is_remote(submit_route_meta["lane"]):
                             threading.Thread(target=watch_remote_comfy_prompt, args=(submitted_pid,), daemon=True).start()
                 ctype = r.headers.get("Content-Type", mimetypes.guess_type(target_path)[0] or "application/octet-stream")

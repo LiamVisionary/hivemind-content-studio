@@ -3089,3 +3089,56 @@ def test_a_motion_reference_clip_that_fits_is_not_refused_and_redaction_still_ho
     assert "does not fit this card" not in body, body[:400]
     assert "MediaStudioError" in body
     assert "/nonexistent/clip.mp4" not in body
+
+
+_LANE_THAT_OOMD = {
+    "lane": "rental48", "remote": True, "vram_headroom_gb": 12.0, "probed": True,
+    "vram_total_gb": 31.36, "error": None,
+    # This card ran out of memory BELOW the registry's prediction — the case
+    # that actually protects a user, and the one a static table can never know.
+    "row_observations": {"oom_rows": 70_000},
+}
+_LANE_THAT_PROVED_MORE = {
+    "lane": "rental48", "remote": True, "vram_headroom_gb": 12.0, "probed": True,
+    "vram_total_gb": 31.36, "error": None,
+    "row_observations": {"clean_rows": 79_000},
+}
+
+
+def test_a_card_that_ran_out_of_memory_lowers_the_ceiling_under_that_point(tmp_path):
+    """The card is the authority on its own limit. A budget is a PREDICTION —
+    85,000 was interpolated between a clean 76,600 and a fatal 95,092, and a job
+    at ~80,400 rows died inside that gap on 2026-08-23. An OOM now pulls the
+    ceiling under the point that failed, so the same run cannot be offered
+    twice, and the refusal says the card taught it rather than the registry."""
+    long_clip = _write_test_video(tmp_path / "m.mp4", seconds=10, fps=24)
+    request = {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 10}]}
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=_LANE_THAT_OOMD)
+    # 70,000 x 0.95 = 66,500 — UNDER the failure, not at it: the exact point
+    # moves with the allocator's fragmentation, so the observed number is a
+    # boundary to stay clear of rather than a target to aim at.
+    assert "the limit here is 66,500" in reply
+    assert "running out of memory at 70,000 rows" in reply
+    # And an OOM never RAISES anything: a card that died at 70,000 is not
+    # thereby licensed to attempt the registry's 76,000.
+    assert "76,000" not in reply.split("the limit here is")[1][:40]
+
+
+def test_a_run_that_finished_is_the_only_thing_that_raises_a_ceiling(tmp_path):
+    """The other direction, and the rule that keeps it honest: a budget may rise
+    to a run that ACTUALLY COMPLETED on that card, never to a guess between
+    one that did and one that did not."""
+    long_clip = _write_test_video(tmp_path / "m2.mp4", seconds=10, fps=24)
+    request = {"prompt": "x", "duration_seconds": 10, "width": 1216, "height": 704,
+               "reference_videos": [{"video_path": str(long_clip), "duration_seconds": 10}]}
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=_LANE_THAT_PROVED_MORE)
+    assert "the limit here is 79,000" in reply
+    assert "largest run this card size has completed" in reply
+    # And with nothing observed it is the registry's number, plainly.
+    reply = _capture_video_graph(tmp_path, "minimax-h3-reference", request,
+                                 expect_refusal=True, lane_resolution=_LANE_ON_A_32GB_CARD)
+    assert "the limit here is 76,000 on lane 'rental48' (a 32 GB card)" in reply
+    assert "running out of memory at" not in reply
