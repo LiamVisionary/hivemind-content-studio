@@ -222,3 +222,69 @@ test('the parts are exported so the builder can read the same timeline', async (
     assert.deepEqual([...referenceTagsIn('<Picture 1> and <Video 2>').Video], [2]);
     assert.deepEqual(sectionsIn(SIX).length, 6);
 });
+
+// A blank that reaches the model is not a blank, it is an instruction. Liam
+// generated on 2026-08-23 with the dialogue stub still in the prompt and the
+// clip read it out loud in his cloned voice, while the unfilled <Subject 1>
+// blank left the pasted starter's "A Korean man in his early twenties" as the
+// only description of a person in the whole prompt — so that is who it drew.
+test("the scaffold's own blanks are errors, named by the section holding them", async () => {
+    const { checkH3Prompt } = await load();
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const refs = { images: ['p1', 'p2'], videos: [], audios: [{ url: 'a1' }] };
+    const frame = withReferenceTags('', { ...refs, gender: 'male' });
+
+    const findings = checkH3Prompt({ prompt: frame, durationSeconds: 8, ...refs })
+        .findings.filter((finding) => finding.code === 'placeholder-left');
+
+    const subject = findings.find((finding) => finding.blank === 'write it out');
+    assert.ok(subject, 'an unwritten <Subject 1> must be flagged');
+    assert.equal(subject.level, 'error');
+    assert.equal(subject.where, 'subject_definitions');
+
+    const line = findings.find((finding) => finding.blank === 'Write the line you want spoken here');
+    assert.ok(line, 'the dialogue stub must be flagged — the model says it out loud');
+    assert.equal(line.where, 'detailed_description');
+
+    // Filling them in clears the findings; nothing here fires on real writing.
+    const written = frame
+        .replace(/\[hair[^\]]*\]/, 'a man in his thirties, short dark hair, black t-shirt')
+        .replace('[setting]', 'a kitchen counter').replace('[lighting]', 'flat morning light')
+        .replace(/Write the line you want spoken here — this is what the cloned voice says\./, 'Morning.');
+    assert.deepEqual(
+        checkH3Prompt({ prompt: written, durationSeconds: 8, ...refs })
+            .findings.filter((finding) => finding.code === 'placeholder-left'),
+        [],
+    );
+});
+
+test('every blank the scaffolds write is one the check knows about', async () => {
+    // The list in SCAFFOLD_BLANKS is literal text, so it can go stale the moment
+    // a scaffold gains a new [bracket]. This walks what the writers actually
+    // emit and fails until the new one is listed — otherwise a fresh placeholder
+    // ships straight to the model with nothing watching for it.
+    const { SCAFFOLD_BLANKS } = await load();
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const { composeH3Prompt } = await import('../src/lib/h3Shots.js');
+
+    const scaffolds = [
+        withReferenceTags('', { images: ['p1'], videos: [], audios: [{ url: 'a1' }], gender: 'female' }),
+        withReferenceTags('', { images: [], videos: [{ url: 'v1', motion: true }], audios: [], gender: '' }),
+        withReferenceTags('', { images: [], videos: [], audios: [], gender: '' }),
+        composeH3Prompt({ mode: 'reference', shots: [{}] }),
+        composeH3Prompt({ mode: 'text', shots: [{}] }),
+    ];
+
+    // H3's own grammar is full of legitimate brackets, and those are not blanks:
+    // [Shot 2] is a marker, [English] is a language tag, [audio reference] is
+    // the summary's audio contract.
+    const grammar = /^\[(Shot \d+|audio (reference|reuse)|[A-Z][a-z]+)\]$/;
+    const covered = (span) => SCAFFOLD_BLANKS.some((blank) => span.toLowerCase().includes(blank.toLowerCase()));
+
+    for (const scaffold of scaffolds) {
+        for (const [span] of scaffold.matchAll(/\[[^\]\n]*\]/g)) {
+            if (grammar.test(span)) continue;
+            assert.ok(covered(span), `SCAFFOLD_BLANKS does not cover ${span}`);
+        }
+    }
+});

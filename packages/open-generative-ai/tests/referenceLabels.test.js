@@ -639,3 +639,62 @@ test('a sound-only motion row labels as a standalone <Audio N> after the explici
     assert.match(sectioned, /<Audio 1>: /);
     assert.doesNotMatch(sectioned, /<Video 1>/);
 });
+
+// The bug: arming references over a prompt already written in H3's THREE-FIELD
+// format sent it down the "no format at all" path, which files whatever is in
+// the box as the shot. The whole prompt — its own field headers included — was
+// flattened onto one line inside detailed_description, its soundscape thrown
+// away for boilerplate, and a second [Shot 1] stapled to the front. Liam armed
+// his Hive Persona ID over the Korean home-video starter and got a stranger
+// with his voice: the only description of a person left in the prompt was the
+// starter's "A Korean man in his early twenties".
+test('a three-field prompt is CONVERTED into the reference format, not swallowed by it', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    const written = [
+        'integrated_multimodal_description: Grainy camcorder footage. [Shot 1] A Korean man in his early',
+        'twenties (S1) sits on a wall.',
+        '',
+        'overall_soundscape: Birdsong, a distant motorcycle, wind in the leaves.',
+        '',
+        'non_diegetic_music: N/A',
+    ].join('\n');
+
+    const out = withReferenceTags(written, {
+        images: ['p1', 'p2'],
+        videos: [{ url: 'v1', useAudio: true, motion: false }],
+        audios: [],
+        gender: 'male',
+    });
+
+    // Field by field, in their new homes.
+    assert.match(out, /^detailed_description:\nGrainy camcorder footage\. \[Shot 1\] A Korean man/m);
+    assert.match(out, /^overall_soundscape:\nBirdsong, a distant motorcycle, wind in the leaves\.$/m);
+    assert.match(out, /^non_diegetic_music:\nN\/A$/m);
+
+    // The three field headers are GONE — nested inside detailed_description they
+    // read to the model as part of the shot.
+    assert.equal(/integrated_multimodal_description/.test(out), false);
+    assert.equal((out.match(/overall_soundscape:/g) || []).length, 1);
+    assert.equal((out.match(/non_diegetic_music:/g) || []).length, 1);
+
+    // One [Shot 1], not two, and the description keeps its own line breaks.
+    assert.equal((out.match(/\[Shot 1\]/g) || []).length, 1);
+    assert.match(out, /early\ntwenties \(S1\)/);
+
+    // The author's soundscape wins over the frame's "A quiet interior"
+    // boilerplate — losing it is how a written scene goes silent.
+    assert.equal(/A quiet interior/.test(out), false);
+});
+
+test('a composer with loose text still gets the frame, and its blanks', async () => {
+    const { withReferenceTags } = await import('../src/lib/h3References.js');
+    // Nothing about the conversion may change what happens to plain text: it is
+    // the shot, it gets a [Shot 1] of its own, and with no soundscape written
+    // the boilerplate — including the sentence that stops invented speech — is
+    // still what fills the section.
+    const out = withReferenceTags('She waits by the window.', {
+        images: ['p1'], videos: [], audios: [{ url: 'a1' }], gender: 'female',
+    });
+    assert.match(out, /^detailed_description:\n\[Shot 1\] She waits by the window\.$/m);
+    assert.match(out, /No other speakers, no music/);
+});

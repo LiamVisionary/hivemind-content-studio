@@ -140,6 +140,23 @@ export function describeCheckFinding(finding) {
       return zh()
         ? `提示词里写了 ${finding.tag}，但只挂了 ${finding.attached} 个——这个标签会被忽略。`
         : `The prompt names ${finding.tag} but only ${finding.attached} ${finding.attached === 1 ? 'is' : 'are'} attached — that tag is ignored.`;
+    case 'placeholder-left': {
+      const where = finding.where ? sectionName(finding.where) : '';
+      // Each blank fails in its own way, so each says what the clip will do.
+      if (finding.blank === 'Write the line you want spoken here') {
+        return zh()
+          ? '台词还是占位文字——模型会把「Write the line you want spoken here」原样念出来，用的正是克隆的声音。'
+          : 'The dialogue is still the placeholder — the model will read “Write the line you want spoken here” out loud, in the cloned voice.';
+      }
+      if (finding.blank === 'write it out') {
+        return zh()
+          ? `${where || '主体定义'} 里的 <Subject 1> 还是空白。H3 从文字里认人的程度不亚于从图片，所以描述里写的是谁，出来的就是谁——不是你挂的参考。`
+          : `<Subject 1> is still blank in ${where || 'subject_definitions'}. H3 takes identity from the words as much as from the pictures, so whoever the description describes is who you get — not the references you attached.`;
+      }
+      return zh()
+        ? `${where || '提示词'} 里还留着占位文字「${finding.blank}」，模型会照着它生成。`
+        : `${where || 'The prompt'} still carries the placeholder “${finding.blank}” — the model will act on it.`;
+    }
     case 'pictures-unnamed':
       return zh()
         ? `挂了 ${finding.count} 张图片，但提示词里没有 <Picture N> 或 <Subject N>——模型不知道该拿它们做什么。`

@@ -35,6 +35,39 @@ export const H3_PROMPT_LIMITS = Object.freeze({
 
 const SECTIONS = ['subject_definitions', 'summary', 'retention_analysis', 'detailed_description', 'overall_soundscape', 'non_diegetic_music'];
 
+/**
+ * The blanks the studio's own scaffolds leave for the author to fill.
+ *
+ * Every one of them is a sentence the model will happily act on. Liam generated
+ * on 2026-08-23 with the dialogue stub still in place and the clip said the stub
+ * out loud, in his cloned voice; the subject blank in the same prompt meant the
+ * only description of a person was the one the pasted starter carried, so the
+ * clip showed a stranger with his voice. A blank that reaches the model is not a
+ * blank, it is an instruction.
+ *
+ * Matched as literal text rather than "any [bracket]", because H3's own grammar
+ * is full of legitimate brackets — [Shot 2], [English], [audio reference].
+ * referenceFrameBlanksTest in the suite pins that every blank the scaffolds
+ * actually write appears here, so a new placeholder cannot be added silently.
+ */
+export const SCAFFOLD_BLANKS = Object.freeze([
+  'write it out',
+  'describe what is heard',
+  'Write the line you want spoken here',
+  '[setting]',
+  '[lighting]',
+]);
+
+/** Which of the six sections an offset falls inside, or '' above the first one. */
+function sectionHolding(text, at) {
+  let name = '';
+  for (const match of String(text).matchAll(new RegExp(`(?:^|\\n)\\s*(${SECTIONS.join('|')})\\s*:`, 'gi'))) {
+    if (match.index > at) break;
+    name = match[1].toLowerCase();
+  }
+  return name;
+}
+
 const error = (code, data = {}) => ({ level: 'error', code, ...data });
 const warn = (code, data = {}) => ({ level: 'warn', code, ...data });
 
@@ -164,6 +197,13 @@ export function checkH3Prompt({
   // H3 renders the audio. A prompt with no soundscape at all gets whatever the
   // model invents, which is the single most common surprise in a finished clip.
   if (!sections.includes('overall_soundscape')) findings.push(warn('no-soundscape'));
+
+  // ── blanks the scaffold left behind ───────────────────────────────────────
+  for (const blank of SCAFFOLD_BLANKS) {
+    const at = text.toLowerCase().indexOf(blank.toLowerCase());
+    if (at < 0) continue;
+    findings.push(error('placeholder-left', { blank, where: sectionHolding(text, at) }));
+  }
 
   // ── the shot timeline ─────────────────────────────────────────────────────
   const shots = shotMarkers(text);

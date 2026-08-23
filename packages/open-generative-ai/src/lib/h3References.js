@@ -191,6 +191,58 @@ const AUDIO_SUMMARY_TAG = '[audio reference]';
 // rewritten around them.
 const SIX_SECTION_FORMAT = /^(summary|retention_analysis|detailed_description):[ \t]*$/m;
 
+// H3's OTHER native format, and the one nearly everything in the studio writes
+// when no reference is attached: three fields, each opened on its own line with
+// its body running on after the colon. Every non-reference starter is in it,
+// composeH3Prompt() emits it for the text and frame-anchored modes, and the
+// prompt helper returns it.
+//
+// It was invisible here until 2026-08-23, and the cost was severe. Arming
+// references over a three-field prompt sent it down the "no format at all"
+// path, which files whatever is in the box as the SHOT — so the entire prompt,
+// its own field headers included, was flattened onto one line inside
+// detailed_description, its soundscape thrown away for the boilerplate one, and
+// <Subject 1> left as an unfilled [write it out] blank. Liam armed his Hive
+// Persona ID over the Korean home-video starter and got a stranger: the only
+// description of a person in the prompt was the starter's "A Korean man in his
+// early twenties", so that is who the model drew, while the voice — bound
+// properly through <Audio 1> — was his.
+//
+// The two formats hold the same material, so this is a conversion and not a
+// rewrite: the description, the soundscape and the music are the author's and
+// carry across untouched; only the three sections a reference prompt adds
+// (who the subjects are, what the shot is, what each reference may carry) are
+// written here.
+const FIELD_FORMAT_FIELDS = ['integrated_multimodal_description', 'overall_soundscape', 'non_diegetic_music'];
+
+/**
+ * Split a three-field prompt into `{ lead, integrated_multimodal_description,
+ * overall_soundscape, non_diegetic_music }`, or null when it is not one.
+ *
+ * `lead` is anything written above the first field — composeH3Prompt() puts the
+ * frame-alignment sentence there — so that converting can carry it rather than
+ * drop text the author wrote.
+ */
+export function parseFieldPrompt(text) {
+  const source = String(text || '');
+  const pattern = new RegExp(`(?:^|\\n)[ \\t]*(${FIELD_FORMAT_FIELDS.join('|')})[ \\t]*:[ \\t]*`, 'g');
+  const marks = [];
+  let match = pattern.exec(source);
+  while (match) {
+    marks.push({ name: match[1], start: match.index, bodyAt: match.index + match[0].length });
+    match = pattern.exec(source);
+  }
+  // The description field is the one that makes it this format; a bare
+  // "overall_soundscape:" under a six-section prompt is not.
+  if (!marks.some((mark) => mark.name === 'integrated_multimodal_description')) return null;
+  const fields = { lead: source.slice(0, marks[0].start).trim() };
+  marks.forEach((mark, index) => {
+    const end = index + 1 < marks.length ? marks[index + 1].start : source.length;
+    fields[mark.name] = source.slice(mark.bodyAt, end).trim();
+  });
+  return fields;
+}
+
 function insertIntoSection(prompt, sectionName, block) {
   const section = prompt.match(new RegExp(`^${sectionName}:[ \\t]*$`, 'm'));
   if (!section) return null;
@@ -268,13 +320,30 @@ export function referenceVoiceLabel(labels) {
   return voices[0] || '';
 }
 
+const DESCRIPTION_PLACEHOLDER = 'Medium shot of <Subject 1> against [setting], in [lighting]. '
+  + '<Subject 1> looks into the lens to speak, then holds a beat of stillness.';
+
+function describedShot(prose) {
+  if (!prose) return `[Shot 1] ${DESCRIPTION_PLACEHOLDER}`;
+  return /\[Shot\s+\d+\]/.test(prose) ? prose : `[Shot 1] ${prose}`;
+}
+
 function referenceFrame(written, labels, gender = '') {
   const voice = referenceVoiceLabel(labels);
   const motion = labels.videos.map((label) => label.video).filter(Boolean);
   const pictures = labels.images;
-  const lines = written ? written.split('\n') : [];
+  // A three-field prompt is CONVERTED field by field. Anything else is loose
+  // text, and loose text is the shot.
+  const fields = parseFieldPrompt(written);
+  const source = fields
+    ? [fields.lead, fields.integrated_multimodal_description].filter(Boolean).join('\n\n')
+    : String(written || '');
+  const lines = source ? source.split('\n') : [];
   const spoken = lines.filter((line) => line.includes('<d>'));
-  const prose = lines.filter((line) => !line.includes('<d>')).join(' ').trim();
+  // Joined on newlines, not spaces: a description written as several shots is
+  // several lines, and folding it into one paragraph loses the shape H3 reads
+  // the timeline from.
+  const prose = lines.filter((line) => !line.includes('<d>')).join('\n').trim();
 
   const subject = [referenceSubjectLine({ pictures, videos: motion, gender })];
   // Binding the voice to the subject AND to the speaker id is what keeps a
@@ -305,17 +374,24 @@ function referenceFrame(written, labels, gender = '') {
     // Except a line they had already written: speech belongs on its own line
     // under the shot, and folding it into the shot text would both bury it and
     // earn them a second, placeholder line underneath.
-    `[Shot 1] ${prose || 'Medium shot of <Subject 1> against [setting], in [lighting]. <Subject 1> looks into the lens to speak, then holds a beat of stillness.'}`,
+    //
+    // "[Shot 1]" only when the description does not already carry its own shot
+    // headers. Adding one in front of a timeline that opens with [Shot 1] gave
+    // the prompt two of them and made the first cut unreadable.
+    describedShot(prose),
     ...(spoken.length ? spoken : (voice ? [DIALOGUE_STUB] : [])),
     '',
     'overall_soundscape:',
-    voice
-      // The sentence that would have prevented four seconds of invented speech.
+    // The author's own soundscape is the more specific instruction, so it
+    // carries. The boilerplate below is for a composer that had none — and the
+    // voice sentence in it is the one that prevented four seconds of invented
+    // speech, so it is kept for exactly that case.
+    fields?.overall_soundscape || (voice
       ? "A quiet interior. Only <Subject 1>'s voice, close and dry, over faint room tone. No other speakers, no music, and no speech before or after the line above."
-      : 'A quiet interior with faint room tone. No speech and no music.',
+      : 'A quiet interior with faint room tone. No speech and no music.'),
     '',
     'non_diegetic_music:',
-    'none',
+    fields?.non_diegetic_music || 'none',
   ].join('\n');
 }
 
