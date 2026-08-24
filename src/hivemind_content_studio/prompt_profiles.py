@@ -622,6 +622,229 @@ def normalize_persona_gender(value: str | None) -> str:
     return key if key in _PERSONA_GENDER_CLAUSES else ""
 
 
+# The cast: WHO is in the shot, one entry per <Subject N>, the way the studio's
+# own compiler sees it (castPrompt.js). Two kinds, and the difference is only
+# whether a member brings media:
+#
+#   persona   — a real person defined by attached reference pictures/clips. It
+#               is addressed ONLY by its label; its name is sealed to the
+#               owner's vault and never reaches this host, so any name that
+#               arrives for one is discarded unread.
+#   character — a name H3 already knows ("SpongeBob SquarePants"). Public, and
+#               written by that name.
+#
+# Without this the helper knows at most one persona's gender and nothing about
+# anybody else in the shot, so a two-person cast comes back as one woman and a
+# stranger it invented — or the cartoon gets the woman's lines.
+_CAST_LIMIT = 9
+_CAST_TEXT_LIMIT = 300
+_CAST_KINDS = ("persona", "character")
+# The English a cast line needs, keyed like personaGenderWords() in
+# personaId.js: the noun, the pronoun pair to print, and the possessive
+# determiner ("her lines"). Unset reads as non-binary here — "a person",
+# they/them — because the helper must not guess a gender the studio left open.
+_CAST_WORDS = {
+    "female": {"noun": "woman", "pronouns": "she/her", "her": "her"},
+    "male": {"noun": "man", "pronouns": "he/him", "her": "his"},
+    "nonbinary": {"noun": "person", "pronouns": "they/them", "her": "their"},
+    "": {"noun": "person", "pronouns": "they/them", "her": "their"},
+}
+
+
+def _cast_text(value: Any) -> str:
+    """Free text from a cast member, made safe to sit inside an instruction:
+    one line, no angle brackets (a look that reads "<Subject 3>" would mint a
+    label), capped so a runaway field cannot crowd out the format rules."""
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(re.sub(r"[<>]", "", value).split())
+    return text[:_CAST_TEXT_LIMIT]
+
+
+def _cast_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return str(value or "").strip().lower() in ("true", "1", "yes")
+
+
+def _possessive(name: str) -> str:
+    """SpongeBob SquarePants' voice, but Willow's voice — the same rule as
+    characterVoiceText() in h3Characters.js, so the helper's tag and the
+    studio's tag read the same."""
+    return f"{name}'" if name.endswith("s") or name.endswith("S") else f"{name}'s"
+
+
+def normalize_cast(cast: Any) -> list[dict]:
+    """The cast as the clause reads it, or [] when nothing usable was sent.
+
+    Defensive on purpose: this is client-supplied JSON that lands inside an
+    instruction. An item that is not a dict, has no known ``kind``, or is a
+    character without a name is dropped rather than repaired; ``subject`` is
+    kept when it is a real 1..9 integer and otherwise derived from the
+    member's position among the kept members; strings are trimmed, flattened
+    and capped; a persona's ``name`` is discarded unread (it is vault-sealed
+    and must never be written into a prompt on this host); at most nine
+    members survive, because H3 has nine subject slots."""
+    if not isinstance(cast, list):
+        return []
+    members: list[dict] = []
+    for item in cast:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower() if isinstance(item.get("kind"), str) else ""
+        if kind not in _CAST_KINDS:
+            continue
+        name = "" if kind == "persona" else _cast_text(item.get("name"))
+        if kind == "character" and not name:
+            continue
+        subject = item.get("subject")
+        if isinstance(subject, bool) or not isinstance(subject, int) or not 1 <= subject <= _CAST_LIMIT:
+            subject = len(members) + 1
+        members.append({
+            "subject": subject,
+            "kind": kind,
+            "gender": normalize_persona_gender(item.get("gender") if isinstance(item.get("gender"), str) else None),
+            "name": name,
+            "voice": _cast_flag(item.get("voice")),
+            "look": _cast_text(item.get("look")),
+        })
+        if len(members) >= _CAST_LIMIT:
+            break
+    return members
+
+
+def _references_attached(references: dict | None) -> bool:
+    if not isinstance(references, dict):
+        return False
+    videos = references.get("videos") or []
+    return bool(
+        int(references.get("images") or 0) > 0
+        or int(references.get("audios") or 0) > 0
+        or (isinstance(videos, list) and len(videos) > 0)
+    )
+
+
+def _cast_member_line(member: dict, *, reference_mode: bool, h3: bool) -> str:
+    words = _CAST_WORDS[member["gender"]]
+    noun, pronouns, her = words["noun"], words["pronouns"], words["her"]
+    label = f"<Subject {member['subject']}>"
+    look = member["look"]
+    if member["kind"] == "persona":
+        if reference_mode:
+            line = (
+                f"- {label} is a {noun} ({pronouns}): a real person, defined only by the attached "
+                "reference pictures and clips."
+            )
+            if member["voice"]:
+                line += (
+                    f" A reference clip carries {her} voice, so {her} lines take the plain language tag — "
+                    f"\"{label} (Sx) says: <d>[English] …</d>\" — and the timbre comes from the clip."
+                )
+            else:
+                kind = f", in a {noun}'s voice" if member["gender"] in ("female", "male") else ""
+                line += (
+                    f" Nothing carries {her} voice: a line for {label} is written only if the brief asks, "
+                    f"under the plain tag \"<d>[English] …</d>\"{kind}."
+                )
+            if look:
+                line += (
+                    f" Use this only for how {label} is lit and framed, never to re-describe or contradict "
+                    f"the references: {look}."
+                )
+            return line
+        # Text mode: no pictures are attached, so the person cannot be
+        # rendered from references and is written from what the studio said.
+        if look:
+            line = (
+                f"- Subject {member['subject']}: a {noun} ({pronouns}), described as \"{look}\" — a real person "
+                "whose reference pictures are NOT attached to this run, so write this person from that "
+                "description and nothing else."
+            )
+        else:
+            line = (
+                f"- Subject {member['subject']}: a {noun} ({pronouns}) — a real person whose reference pictures "
+                f"are NOT attached to this run, so write this person simply as \"a {noun}\" / \"the {noun}\"."
+            )
+        return line + " Never give this person a name."
+    # A known character: public name, written into the scene by that name.
+    # Its voice is named inside the dialogue language tag, never referenced —
+    # dialogueTag() in castPrompt.js, and characterVoiceText() for the form.
+    name = member["name"]
+    who = f"{name} ({pronouns})" if member["gender"] else name
+    speaker = label if reference_mode else name
+    if member["voice"]:
+        voice = (
+            f" When {speaker} speaks, name the character's own voice inside the language tag — "
+            f"\"{label + ' (Sx) says: ' if reference_mode else ''}<d>[English in {_possessive(name)} voice from …] …</d>\", "
+            f"filling in the work after \"from\" (and the performer when the facts give one), or "
+            f"\"[English in {_possessive(name)} voice]\" when the work is unknown."
+        )
+    else:
+        voice = f" {_possessive(speaker)} lines take the plain tag \"<d>[English] …</d>\" — do not name a voice."
+    if reference_mode:
+        line = f"- {label} is {who}: a character the model already knows, written under that label." + voice
+    else:
+        line = (
+            f"- Subject {member['subject']}: {who} — a character the model already knows. Write {name} by full "
+            "name plus the work it comes from at first mention, and keep that character in the scene."
+        )
+        if h3:
+            line += voice
+    if look:
+        line += f" Appearance: {look}."
+    return line
+
+
+# The closing rules for a cast in reference mode. The persona line is the
+# same rule _UGC_REFERENCE_CLAUSE enforces for UGC, for the same measured
+# reason: a described person beats an attached picture of somebody else.
+_CAST_REFERENCE_RULES = (
+    "\nRules for the cast:\n"
+    "- A persona is addressed ONLY by its label. Never give it a name, an age, a face, a hairstyle, "
+    "a build or clothing: the references decide what the person looks like, and a description written "
+    "here overrides them — the clip comes back as somebody else.\n"
+    "- subject_definitions and retention_analysis are the studio's: it rewrites them from the cast, "
+    "so one short line per label is enough there.\n"
+    "- summary, detailed_description, overall_soundscape and non_diegetic_music are yours, and every "
+    "<Subject N> listed above appears in them with something to do — nobody stands in the background "
+    "unused.\n"
+    "- Pronouns follow the gender given per member; give each speaking member its own (Sx) id in the "
+    "order first heard, and write every spoken line as \"<Subject N> (Sx) says: <d>[…] …</d>\"."
+)
+
+
+def _cast_clause(cast: Any, references: dict | None = None, *, reference_mode: bool | None = None, h3: bool = True) -> str:
+    """Who is in the shot, for the writer — or '' when no usable cast was sent.
+
+    ``reference_mode`` says the shot is conditioned on reference media, so a
+    persona is a <Subject N> the studio binds to its pictures and the helper
+    addresses only by label; defaults to whether ``references`` carries
+    anything. In text mode a persona has no pictures, so it is written from
+    its look and gender in prose, and a character by full name plus source.
+    ``h3`` gates the parts that only mean something in H3's format (the <d>
+    tag, (Sx) ids)."""
+    members = normalize_cast(cast)
+    if not members:
+        return ""
+    if reference_mode is None:
+        reference_mode = _references_attached(references)
+    count = len(members)
+    lines = "\n".join(_cast_member_line(member, reference_mode=reference_mode, h3=h3) for member in members)
+    if reference_mode:
+        head = (
+            f"\n\nThe cast — who is in this shot — is fixed by the studio: {count} member"
+            f"{'s' if count != 1 else ''}, already labelled. Address every one of them ONLY by its label:\n"
+        )
+        return head + lines + _CAST_REFERENCE_RULES
+    head = (
+        f"\n\nThe cast — who is in this shot — is fixed by the studio: {count} member"
+        f"{'s' if count != 1 else ''}. Every one of them appears in the scene with something to do:\n"
+    )
+    return head + lines
+
+
 def system_prompt(
     profile: str,
     *,
@@ -632,6 +855,7 @@ def system_prompt(
     ugc: bool = False,
     references: dict | None = None,
     persona_gender: str | None = None,
+    cast: list | None = None,
 ) -> str:
     """The instruction, with the clip length folded in when the studio knows it.
 
@@ -668,7 +892,15 @@ def system_prompt(
     ``persona_gender`` is the loaded Hive Persona's saved gender (female /
     male / nonbinary). Without it the helper picks a gender from the idea —
     usually "she", since that is what most of the examples it has seen were —
-    and a male persona's prompt comes back about a woman."""
+    and a male persona's prompt comes back about a woman.
+
+    ``cast`` is who is in the shot, one entry per <Subject N> —
+    ``{"subject": 1, "kind": "persona" | "character", "gender": "", "name":
+    "", "voice": bool, "look": ""}`` — the same cast the studio's own compiler
+    (castPrompt.js) allocates. It supersedes ``persona_gender``, which only
+    ever knew about one person: with a cast present the per-member genders
+    carry, and the single-persona clause is not written. A persona's name is
+    never used (it is vault-sealed); a character's is public and written."""
     system = PROFILES.get(profile, PROFILES[DEFAULT_VIDEO_PROFILE])["system"]
     if ugc:
         if profile == DEFAULT_IMAGE_PROFILE:
@@ -692,11 +924,23 @@ def system_prompt(
     reference_clause = _reference_inventory_clause(references, duration_seconds)
     if reference_clause and profile == "minimax-h3-reference":
         system += reference_clause
+    # The cast, when the studio sent one, is the fuller truth: every member's
+    # kind, gender and voice, not just one persona's gender. So it wins over
+    # ``persona_gender``, which stays for a client that only knows the one.
+    # Reference mode is the reference profile or attached references; the
+    # H3-only parts (<d> tags, (Sx) ids) are gated on the profile family.
+    members = normalize_cast(cast)
+    if members:
+        system += _cast_clause(
+            members, references,
+            reference_mode=(profile == "minimax-h3-reference" or _references_attached(references)),
+            h3=profile.startswith("minimax-h3"),
+        )
     # ``persona_gender`` is the loaded Hive Persona's saved gender. It applies
     # to every profile — a Seedance paragraph needs "the woman"/"her" as much
     # as an H3 prompt does — and the H3 profiles additionally get the label form.
     gender = normalize_persona_gender(persona_gender)
-    if gender:
+    if gender and not members:
         system += _PERSONA_GENDER_CLAUSES[gender]
         if profile.startswith("minimax-h3"):
             system += _PERSONA_GENDER_H3_SUFFIX.format(noun=_PERSONA_GENDER_NOUNS[gender])
@@ -897,3 +1141,105 @@ def ugc_has_music(prompt: str) -> bool:
     if not match:
         return False
     return match.group(1).strip().lower().rstrip(".") not in {"n/a", "na", "none"}
+
+
+# ---------------------------------------------------------------------------
+# Persona look: a person described from their reference pictures
+# ---------------------------------------------------------------------------
+#
+# A Hive Persona carries a saved LOOK — hair, face, build, wardrobe in a line
+# or two — that the cast writes into <Subject N>'s definition (personaId.js,
+# _cast_member_line above). Typing it by hand is the step owners skip, and a
+# blank look is what lets a prompt re-describe the person as a stranger. So the
+# helper can write it from the persona's own pictures: one instruction, shaped
+# around what a video model needs to keep a person consistent and nothing else.
+# Told in the negative as much as the positive because a vision model's habit
+# is to describe the PHOTO (the smile, the beach, the bokeh) and to identify
+# people it thinks it recognises — both useless here, the second unwanted.
+LOOK_DESCRIPTION_SYSTEM_PROMPT = """\
+You describe how a person looks, for a video model that must keep that person consistent from shot to shot.
+
+You are shown one to three photos of the SAME person. Write ONE compact description of that person — about 25 to 60 words, one line or two, with no line breaks, no lists, no headings and no preamble — covering, where visible: hair (colour, length, style, and facial hair if any); the notable features of the face (beard, moustache, glasses, freckles, piercings, dimples, a strong jaw, eye colour when clear); build; skin tone when it is clear; and the wardrobe as seen (garments, their colours, anything distinctive such as a hat, jewellery or a logo). Those are the things the video model needs to keep the person consistent, so they come first and nothing else is added.
+
+Rules:
+- Never name the person or guess who they are, even if you think you recognise them.
+- Do not mention the photos, the camera, the lighting, the background, the setting, the pose or what the person is doing. Describe the person only.
+- Age only as a broad band when it is obvious ("{age_band}"), never a number.
+- Where a noun is needed write "{noun} with …" (at most once, at the start), and otherwise avoid pronouns: describe features directly ("short dark hair, a trimmed beard, a navy crew-neck sweater").
+- When the photos disagree (a hat in one and not the others), describe what is constant and mark the variable item as occasional ("sometimes a grey beanie").
+- Output only the description text: no label such as "Description:", no quotes, no markdown, no explanation."""
+
+# The noun form for each saved gender — the same words the cast uses
+# (_CAST_WORDS / personaGenderWords in personaId.js), so the look the helper
+# writes and the subject line the cast writes call the person the same thing.
+# Unset reads as "a person": the helper must not assign a gender the studio
+# left open, and the description has to stay usable when it is set later.
+_LOOK_NOUNS = {"female": "a woman", "male": "a man", "nonbinary": "a person", "": "a person"}
+_LOOK_AGE_BANDS = {"female": "in her thirties", "male": "in his thirties", "nonbinary": "in their thirties", "": "in their thirties"}
+_LOOK_GENDER_CLAUSES = {
+    "female": "\n\nThe person is a woman: write \"a woman with …\" where the noun is needed.",
+    "male": "\n\nThe person is a man: write \"a man with …\" where the noun is needed.",
+    "nonbinary": (
+        "\n\nThe person is non-binary: write \"a person with …\" where the noun is needed, and never "
+        "\"a woman\" or \"a man\"."
+    ),
+    "": (
+        "\n\nThe person's gender was not given: write \"a person with …\" where the noun is needed, and do "
+        "not assert one."
+    ),
+}
+
+
+def look_system_prompt(gender: str | None = None) -> str:
+    """The look instruction for a persona of the given saved gender.
+
+    ``gender`` is the studio's own vocabulary (female / male / nonbinary, or
+    '' / None for unset), normalised the same way the generate route's
+    ``persona_gender`` is. It fixes the one noun the description may use —
+    "a woman with …" / "a man with …" / "a person with …" — so the helper does
+    not read a gender off the pictures that contradicts the saved one."""
+    key = normalize_persona_gender(gender)
+    return (
+        LOOK_DESCRIPTION_SYSTEM_PROMPT.format(noun=_LOOK_NOUNS[key], age_band=_LOOK_AGE_BANDS[key])
+        + _LOOK_GENDER_CLAUSES[key]
+    )
+
+
+# What the frontend stores is bounded at PERSONA_LOOK_MAX = 600 (personaId.js);
+# the helper's answer is held shorter so a verbose model's third sentence never
+# crowds the cast line it lands in.
+LOOK_MAX_CHARS = 400
+_LOOK_FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
+# "Description:", "**Look:**", "Appearance -", "Here is the description:" …
+_LOOK_LABEL = re.compile(
+    r"^(?:here(?:'s| is)(?: the| a| your)?(?: compact| short)? )?"
+    r"(?:description|look|appearance|answer|output|person|result)\s*[:\-–—]\s*",
+    re.IGNORECASE,
+)
+_LOOK_WRAPPERS = "\"'`*_“”‘’«»"
+
+
+def normalize_look(text: str) -> str:
+    """The helper's answer as the persona will store it, or '' when nothing is left.
+
+    Small vision models wrap the line in quotes, bold it, fence it, or start it
+    with "Description:" even when told not to — each is mechanical to undo and
+    each would otherwise land verbatim in a subject definition. Whitespace is
+    collapsed to one line (the stored look is one or two lines, never a
+    paragraph) and the result is capped at a word boundary."""
+    look = _LOOK_FENCE.sub("", (text or "").strip())
+    look = " ".join(look.split())
+    for _ in range(3):
+        before = look
+        look = look.strip().strip(_LOOK_WRAPPERS).strip()
+        look = look.lstrip("-•· ").strip()
+        look = _LOOK_LABEL.sub("", look, count=1).strip()
+        if look == before:
+            break
+    if len(look) > LOOK_MAX_CHARS:
+        cut = look[:LOOK_MAX_CHARS]
+        # Back up to the last word, then lose a dangling comma or semicolon.
+        if " " in cut:
+            cut = cut[: cut.rfind(" ")]
+        look = cut.rstrip(" ,;:—–-")
+    return look

@@ -290,15 +290,17 @@ def start_video(
     references = [Path(str(item)).expanduser().resolve() for item in (reference_images or [])]
     if len(references) > 9:
         raise ValueError("At most 9 reference images are supported")
-    for reference in references:
+    # Staged paths stay out of these messages: they name a temp directory
+    # under the owner's home, and the text reaches the studio's toast.
+    for index, reference in enumerate(references, start=1):
         if not reference.is_file():
-            raise FileNotFoundError(f"Reference image not found: {reference}")
+            raise FileNotFoundError(f"Reference image {index} could not be read")
     audio_references = [Path(str(item)).expanduser().resolve() for item in (reference_audios or [])]
     if len(audio_references) > 3:
         raise ValueError("At most 3 reference audio clips are supported")
-    for reference in audio_references:
+    for index, reference in enumerate(audio_references, start=1):
         if not reference.is_file():
-            raise FileNotFoundError(f"Reference audio not found: {reference}")
+            raise FileNotFoundError(f"Voice clip {index} could not be read")
     video_references = [
         {
             "video_path": Path(str(item.get("video_path") or "")).expanduser().resolve(),
@@ -309,24 +311,26 @@ def start_video(
     ]
     if len(video_references) > 3:
         raise ValueError("At most 3 reference videos are supported")
-    for reference in video_references:
+    for index, reference in enumerate(video_references, start=1):
         if not reference["video_path"].is_file():
-            raise FileNotFoundError(f"Reference video not found: {reference['video_path']}")
+            raise FileNotFoundError(f"Motion clip {index} could not be read")
     if video is not None and not video.is_file():
-        raise FileNotFoundError(f"Input video not found: {video}")
+        raise FileNotFoundError("The source video could not be read")
     if motion_context is not None and not motion_context.is_file():
-        raise FileNotFoundError(f"Motion-context clip not found: {motion_context}")
+        raise FileNotFoundError("The previous shot's clip could not be read")
     if motion_context is not None and video is not None:
         raise ValueError("A motion-context clip seeds a new shot and cannot be combined with a source video")
     if image is not None and not image.is_file():
-        raise FileNotFoundError(f"Input image not found: {image}")
+        raise FileNotFoundError("The start image could not be read")
     if middle is not None and not middle.is_file():
-        raise FileNotFoundError(f"Middle keyframe image not found: {middle}")
+        raise FileNotFoundError("The middle keyframe image could not be read")
     if end is not None and not end.is_file():
-        raise FileNotFoundError(f"End keyframe image not found: {end}")
-    missing_ingredient = next((item["image_path"] for item in ingredients if not item["image_path"].is_file()), None)
+        raise FileNotFoundError("The end keyframe image could not be read")
+    missing_ingredient = next(
+        (index for index, item in enumerate(ingredients, start=1) if not item["image_path"].is_file()), None
+    )
     if missing_ingredient is not None:
-        raise FileNotFoundError(f"Ingredient reference not found: {missing_ingredient}")
+        raise FileNotFoundError(f"Ingredient reference {missing_ingredient} could not be read")
     if video is None and image is None and not ingredients and not prompt.strip():
         raise FileNotFoundError("An input image, source video, ingredient reference, or prompt is required")
     head_swap = task == "head-swap"
@@ -1500,6 +1504,68 @@ def _out_of_memory_advice(reason: str) -> str:
         " length, so it grows as the clip does. Try a shorter duration first, then a lower"
         " resolution, then fewer references."
     )
+
+
+# Where a path names the person or the machine: home directories, temp
+# staging, rental workspaces and mounted volumes. Only these roots are
+# reduced to basenames, so an API route like /api/generate in an HTTP error
+# still reads as the route it was.
+# Inner segments may carry single spaces ("Application Support"); the last
+# one may not, so "x.gguf is missing" keeps its sentence.
+_PRIVATE_PATH_RE = re.compile(
+    r"(?<![\w/])/(?:Users|home|private|tmp|var|opt|root|workspace|Volumes|mnt|srv)"
+    r"(?:/[\w.@+%~-]+(?: [\w.@+%~-]+)*)*/[\w.@+%~-]+/?"
+)
+_URL_TOKEN_RE = re.compile(r"([?&](?:token|api_key|key)=)[^&\s]+", re.IGNORECASE)
+
+
+def _private_path_basename(match: "re.Match[str]") -> str:
+    parts = [part for part in match.group(0).split("/") if part]
+    # "/Users/liam" on its own: the basename IS the user name. Say nothing.
+    if len(parts) <= 2:
+        return "…"
+    return parts[-1]
+
+
+def sanitize_error_detail(text: object, limit: int = 300) -> str:
+    """A runner/gateway error as one sentence the owner may be shown.
+
+    What arrives here is whatever a failed lane wrote: a RuntimeError with
+    4 KB of STDOUT/STDERR pasted under it, a Python traceback, an absolute
+    path under the owner's home directory, a URL carrying the gateway token.
+    The toast keeps the FIRST informative line (the last line of a traceback,
+    since that is the exception), the last non-empty stderr line when a dump
+    is attached, absolute private paths reduced to basenames, tokens
+    redacted, and the whole thing capped — while the out-of-memory
+    translation stays first, because that one already says the useful thing.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    advice = _out_of_memory_advice(raw)
+    if advice:
+        return advice
+    head, stderr_section = raw, ""
+    if "STDERR:" in head:
+        head, _, stderr_section = head.partition("STDERR:")
+        stderr_section = stderr_section.partition("STDOUT:")[0]
+    if "STDOUT:" in head:
+        head = head.partition("STDOUT:")[0]
+    lines = [line.strip() for line in head.splitlines() if line.strip()]
+    if not lines:
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    chosen = lines[-1] if lines[0].lower().startswith("traceback") else lines[0]
+    stderr_lines = [line.strip() for line in stderr_section.splitlines() if line.strip()]
+    if stderr_lines and stderr_lines[-1] != chosen:
+        chosen = f"{chosen} — {stderr_lines[-1]}"
+    chosen = " ".join(chosen.split())
+    chosen = _URL_TOKEN_RE.sub(r"\1[redacted]", chosen)
+    chosen = _PRIVATE_PATH_RE.sub(_private_path_basename, chosen)
+    if len(chosen) > limit:
+        chosen = chosen[: max(1, limit - 1)].rstrip() + "…"
+    return chosen
 
 
 def _generation_error(payload: Any) -> str:

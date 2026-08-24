@@ -2712,10 +2712,37 @@ def scrub_record_workflows(out):
     return out
 
 
+_RUNNER_OUTPUT_TAIL_LINES = 3
+
+
+def runner_output_tail(text, lines=_RUNNER_OUTPUT_TAIL_LINES):
+    """The last few lines of a runner's stderr, paths reduced to basenames.
+
+    Native runners take the prompt on argv, so a traceback or an argparse echo
+    in their output can carry it — and the job record used to persist 4 KB of
+    stdout AND stderr into history.jsonl and serve both to any token-bearing
+    caller. Three scrubbed lines keep "why did it fail" without the dump."""
+    kept = [line.strip() for line in str(text or "").splitlines() if line.strip()][-lines:]
+    return "\n".join(_sanitized_remote_error_text(line) for line in kept)
+
+
 def private_rec(rec):
     out = dict(rec or {})
+    prompt_text = out.get("prompt") if isinstance(out.get("prompt"), str) else ""
     if "prompt" in out:
         out["prompt"] = PRIVATE_PROMPT_LABEL
+    # Applied at the persistence AND serving chokepoint (public_record calls
+    # this too), so no runner path can write its console into history.
+    out.pop("runner_stdout", None)
+    if "runner_stderr" in out:
+        tail = runner_output_tail(out.get("runner_stderr"))
+        if tail and len(prompt_text.strip()) >= 8 and prompt_text.strip() != PRIVATE_PROMPT_LABEL:
+            # The prompt rode on argv; a traceback line can echo it verbatim.
+            tail = tail.replace(" ".join(prompt_text.split()), PRIVATE_PROMPT_LABEL)
+        if tail:
+            out["runner_stderr"] = tail
+        else:
+            out.pop("runner_stderr", None)
     return scrub_record_workflows(out)
 
 
@@ -10216,7 +10243,9 @@ def download_civitai_version(version_id, file_id=None, progress_cb=None, token_o
                 message = body.strip()
             if message:
                 message = message.rstrip('. ') + '.'
-            token_hint = f" Configure CIVITAI_TOKEN or write it to {CIVITAI_TOKEN_FILE}, or pass civitai_key/civitai_token in the request body." if not civitai_token(token_override) else ""
+            # No path here: the token-file location named the owner's home
+            # directory in a toast. Settings is where the token is added.
+            token_hint = " This model needs a Civitai token — add it in Settings." if not civitai_token(token_override) else ""
             raise RuntimeError(f"Civitai download requires authenticated Civitai access for version {version_id}. {message}{token_hint}".strip()) from e
         raise
     with r:
@@ -10233,17 +10262,23 @@ def download_civitai_version(version_id, file_id=None, progress_cb=None, token_o
         if progress_cb:
             progress_cb(done, total)
         cancelled = False
-        with tmp.open('wb') as f:
-            while True:
-                if should_cancel and should_cancel():
-                    cancelled = True
-                    break
-                chunk = r.read(1024*1024)
-                if not chunk: break
-                f.write(chunk)
-                done += len(chunk)
-                if progress_cb:
-                    progress_cb(done, total)
+        try:
+            with tmp.open('wb') as f:
+                while True:
+                    if should_cancel and should_cancel():
+                        cancelled = True
+                        break
+                    chunk = r.read(1024*1024)
+                    if not chunk: break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress_cb:
+                        progress_cb(done, total)
+        except Exception:
+            # A reset or a full disk used to leave the .part behind (only the
+            # cancel path cleaned up); the partial file is the only trace.
+            tmp.unlink(missing_ok=True)
+            raise
         if cancelled:
             # Leave nothing half-written behind: the partial file is the only trace.
             tmp.unlink(missing_ok=True)

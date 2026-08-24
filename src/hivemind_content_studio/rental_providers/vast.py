@@ -13,7 +13,7 @@ from typing import Any
 
 import requests
 
-from . import Instance, LaunchSpec, Offer, OfferQuery, Provider, ProviderError, register
+from . import Instance, LaunchSpec, Offer, OfferQuery, Provider, ProviderError, register, response_error_text
 
 # Vast is mid-migration to /api/v1 and deprecating v0 per-endpoint. Probed
 # 2026-08-05: instances LIST is v1-only (v0 returns deprecated_endpoint), but
@@ -63,7 +63,7 @@ def request(method: str, path: str, payload: dict | None = None) -> dict:
         time.sleep(float(body.get("retry_after") or 2))
         response, body = _send()
     if response.status_code >= 400 or body.get("error"):
-        detail = body.get("msg") or body.get("error") or response.text[:200]
+        detail = body.get("msg") or body.get("error") or response_error_text(response.text, response.status_code)
         raise ProviderError(f"Vast API {method} {path} failed: {detail}", status_code=502)
     return body
 

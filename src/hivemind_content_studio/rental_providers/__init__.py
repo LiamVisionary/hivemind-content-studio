@@ -37,6 +37,18 @@ class ProviderError(RuntimeError):
         self.status_code = status_code
 
 
+def response_error_text(body_text: str, status_code: int, limit: int = 200) -> str:
+    """The readable part of a failed marketplace response.
+
+    A Cloudflare or maintenance page comes back as HTML; pasting its first
+    200 characters into the toast read ``<!DOCTYPE html><html lang="en">…``.
+    Say what it is instead."""
+    text = str(body_text or "").strip()
+    if text.startswith("<"):
+        return f"the marketplace returned an error page (HTTP {status_code})"
+    return text[:limit] or f"HTTP {status_code}"
+
+
 @dataclass(frozen=True)
 class RentalRef:
     """A rental id that says which marketplace it belongs to.

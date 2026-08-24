@@ -93,3 +93,40 @@ def test_tuple_builders_scrub_at_the_source():
         blob = json.dumps(build())
         assert SECRET not in blob and NEGATIVE not in blob
         assert "CLIPTextEncode" in blob, "graph structure should survive"
+
+
+def test_runner_console_output_is_not_persisted_or_served():
+    """Native runners take the prompt on argv, so a traceback or an argparse
+    echo in their console can carry it — and the job record used to persist
+    4 KB of stdout AND stderr into history.jsonl and serve both to any
+    token-bearing caller. private_rec (the persistence AND serving chokepoint)
+    drops stdout and keeps three path-scrubbed stderr lines."""
+    gw = _load_gateway()
+    record = {
+        "id": "job-2",
+        "status": "error",
+        "prompt": SECRET,
+        "outputs": [],
+        "runner_stdout": "progress 1\nprogress 2\nusage: runner --prompt " + SECRET,
+        "runner_stderr": (
+            "Traceback (most recent call last):\n"
+            '  File "/Users/liam/comfy/ltx-2-mlx/run.py", line 9, in <module>\n'
+            "    main(" + SECRET + ")\n"
+            "FileNotFoundError: /Users/liam/Library/Application Support/models/ltx.safetensors\n"
+        ),
+    }
+    at_rest = gw.private_rec(record)
+    assert "runner_stdout" not in at_rest
+    stderr_lines = at_rest["runner_stderr"].splitlines()
+    assert len(stderr_lines) == 3
+    assert "/Users/liam" not in at_rest["runner_stderr"]
+    assert "ltx.safetensors" in stderr_lines[-1]
+    # The prompt rode on argv and the traceback echoed it: redacted too.
+    assert SECRET not in json.dumps(at_rest)
+    assert gw.PRIVATE_PROMPT_LABEL in at_rest["runner_stderr"]
+    served = json.dumps(gw.public_record(record))
+    assert "runner_stdout" not in served and "/Users/liam" not in served
+    assert "progress 1" not in served and SECRET not in served
+    # A record without console output is untouched.
+    assert "runner_stderr" not in gw.private_rec({"id": "job-3", "outputs": []})
+    assert gw.runner_output_tail("") == ""

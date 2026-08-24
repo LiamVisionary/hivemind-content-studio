@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -55,6 +56,7 @@ from .machine_privacy import machine_operation_receipt, machine_run_receipt
 from .media_catalog import media_catalog
 from .media_studio import (
     normalized_requester_pub,
+    sanitize_error_detail,
     cancel_video as run_media_studio_video_cancel,
     check_video as run_media_studio_video_check,
     finish_video as run_media_studio_video_finish,
@@ -109,6 +111,33 @@ from .studio_state import StudioStateStore
 from .vault_store import VaultStore
 from .template_catalog import template_report
 from .unified_runtime import unified_runtime_snapshot
+
+
+class AccountLocked(Exception):
+    """No session and no bearer: answered as the middleware's sign-in shape.
+
+    Raised by ``require_control`` so the machine-allowed routes (generate,
+    poll, runs) refuse an expired browser session with the SAME body the
+    owner-gated routes use — ``{"detail": "Sign in to a workspace",
+    "privacy": "account-locked"}`` — instead of an operator-token message."""
+
+
+ACCOUNT_LOCKED_DETAIL = "Sign in to a workspace"
+UNEXPECTED_ERROR_DETAIL = "The studio server hit an unexpected error. Check the control API log."
+
+
+def _validation_sentence(errors: list[Any]) -> str:
+    """FastAPI's 422 array as one sentence: "steps: Input should be less than
+    or equal to 100 · duration_seconds: …". Every studio wrapper does
+    ``payload.detail || …`` and rendered the array as ``[object Object]``."""
+    parts: list[str] = []
+    for error in errors or []:
+        if not isinstance(error, dict):
+            continue
+        location = [str(part) for part in (error.get("loc") or []) if str(part) not in {"body", "query", "path", "header"}]
+        message = str(error.get("msg") or "is invalid").strip()
+        parts.append(f"{'.'.join(location)}: {message}" if location else message)
+    return " · ".join(parts) or "The request was not valid"
 
 
 class CancelBody(BaseModel):
@@ -269,15 +298,42 @@ class PromptHelperGenerateBody(BaseModel):
     revision: str | None = None
 
 
+class PromptHelperDescribeLookBody(BaseModel):
+    """Ask the loaded helper to write a Hive Persona's LOOK from its pictures."""
+
+    # One to three reference pictures of the SAME person, as data URLs. Like a
+    # start frame, they go only to the llama-server this process spawned on
+    # 127.0.0.1 and are never written anywhere. Counted and checked in the
+    # route (not a validator) so a refusal does not echo the pictures back.
+    images: list[str]
+    # The persona's saved gender — "female" / "male" / "nonbinary" — so the
+    # description says "a woman with …" instead of reading one off the
+    # pictures; '' / absent writes "a person with …".
+    gender: str | None = None
+    # Which loaded helper to ask. Absent → whichever one is loaded, because the
+    # persona editor does not own the picker the way the composer's helper does.
+    modelId: str | None = None
+
+
 class MediaStudioLoraBody(BaseModel):
     id: str
     strength: float = 1.0
 
 
+# Generous ceilings, stated once. A prompt the MCP would refuse for length
+# used to fail LATE with a gateway message; a 422 here names the field, and
+# the validation handler below turns it into a sentence.
+_MAX_PROMPT_CHARS = 20_000
+_MAX_DESCRIPTION_CHARS = 1_000
+_MAX_ID_CHARS = 64
+
+
 class MediaStudioIngredientImageBody(BaseModel):
     image_base64: str | None = None
     image_reference: str | None = None
-    description: str = ""
+    # Bounded like a prompt; the runner's own 1,000-character cut is reported
+    # in the response's warnings rather than applied in silence.
+    description: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
 
 
 @dataclass(slots=True)
@@ -295,6 +351,9 @@ class _StagedVideoInputs:
     reference_images: list[Path] = field(default_factory=list)
     reference_audios: list[Path] = field(default_factory=list)
     reference_videos: list[dict[str, Any]] = field(default_factory=list)
+    # Anything staging changed about the request on the owner's behalf (a
+    # shortened note), so the response can say so instead of cutting silently.
+    warnings: list[str] = field(default_factory=list)
 
     def paths(self) -> list[Path]:
         return [
@@ -332,12 +391,12 @@ class MediaStudioReferenceVideoBody(BaseModel):
 
 
 class MediaStudioVideoBody(BaseModel):
-    prompt: str = ""
-    workflow_id: str = ""
+    prompt: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
+    workflow_id: str = Field(default="", max_length=256)
     studio_lane: str = Field(default="", max_length=512)
     # The studio's per-tab "Run on" pin (a rental id such as "vast:48352597").
     run_on: str = Field(default="", max_length=128)
-    reference_description: str = ""
+    reference_description: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
     ingredient_images: list[MediaStudioIngredientImageBody] = []
     # MiniMax H3 Reference mode: discrete character/subject pictures carried into
     # the clip in order (reference N is the prompt's <Picture N>). Distinct from
@@ -361,8 +420,10 @@ class MediaStudioVideoBody(BaseModel):
     # THE task. Decided once in the studio (src/lib/videoTasks.js) and forwarded
     # verbatim; nothing downstream re-derives the job from which media arrived.
     task: Literal["generate", "extend", "head-swap"] = "generate"
-    duration_seconds: float = 4
-    aspect_ratio: str = ""
+    # Bounded here, not only in the estimate: NaN, a negative or 1e9 used to
+    # reach the runner untouched and fail a minute later in its own words.
+    duration_seconds: float = Field(default=4, gt=0, le=60)
+    aspect_ratio: str = Field(default="", max_length=16)
     # "max" is the ~1.0MP native-canvas tier (MiniMax H3's trained 768px short
     # edge); the studio only offers it for minimax-family workflows.
     resolution: Literal["", "standard", "high", "max"] = ""
@@ -373,11 +434,11 @@ class MediaStudioVideoBody(BaseModel):
     # Negative prompt. On the distilled local lanes this is applied through NAG
     # (guidance inside cross-attention); those run cfg=1, where a CFG-style
     # negative prompt does nothing at all.
-    negative_prompt: str = ""
+    negative_prompt: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
     # NAG strength. Omitted uses the runner default; <=1 disables guidance.
-    nag_scale: float | None = None
-    head_swap_lora_strength: float | None = None
-    head_swap_backend: str | None = None
+    nag_scale: float | None = Field(default=None, ge=0, le=100)
+    head_swap_lora_strength: float | None = Field(default=None, ge=-10, le=10)
+    head_swap_backend: str | None = Field(default=None, max_length=_MAX_ID_CHARS)
     head_swap_face_enhancer: bool = False
     # None = leave the workflow's own default alone; only an explicit choice
     # overrides the registered graph.
@@ -653,6 +714,8 @@ def _sniffed_media_suffix(data: bytes, *, audio: bool) -> str:
 _PRIVATE_MEDIA_SUFFIX = ".zenc"
 _MAX_PRIVATE_IMAGE_BYTES = 32 * 1024 * 1024
 _MAX_PRIVATE_VIDEO_BYTES = 100 * 1024 * 1024
+# One number per kind of file: inline voice clips and uploaded ones share it.
+_MAX_PRIVATE_AUDIO_BYTES = 25 * 1024 * 1024
 
 
 def _private_media_sidecar(path: Path) -> Path:
@@ -791,24 +854,28 @@ def _write_inline_media(
     mime_suffixes: dict[str, str],
     default_suffix: str,
     max_bytes: int,
+    label: str = "",
 ) -> Path:
+    # ``label`` is what the owner sees ("Picture 2", "Motion clip 1"); the
+    # field name is the wire name and only stands in when no label was given.
+    what = label or field_name
     raw = value.strip()
     if not raw:
-        raise ValueError(f"{field_name} is required")
+        raise ValueError(f"{what} is required")
     suffix = default_suffix
     encoded = raw
     mime = ""
     if raw.startswith("data:"):
         header, separator, body = raw.partition(",")
         if not separator:
-            raise ValueError(f"{field_name} data URL is missing its comma separator")
+            raise ValueError(f"{what} is not a valid data URL (missing its comma separator)")
         mime = header.removeprefix("data:").split(";", 1)[0].lower()
         suffix = mime_suffixes.get(mime, "")
         encoded = body
     try:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise ValueError(f"{field_name} is not valid base64") from exc
+        raise ValueError(f"{what} is not valid base64") from exc
     if not suffix:
         # The label is one we do not know. Ask the bytes before refusing: a
         # media type is what the client CALLS the file, and recorders invent
@@ -817,13 +884,13 @@ def _write_inline_media(
         suffix = _sniffed_media_suffix(data, audio=field_name.startswith("audio"))
     if not suffix:
         raise ValueError(
-            f"{field_name} data URL has unsupported media type {mime or 'unknown'} "
+            f"{what} has an unsupported media type ({mime or 'unknown'}) "
             f"and its contents are not a recognised media container"
         )
     if not data:
-        raise ValueError(f"{field_name} decoded to an empty file")
+        raise ValueError(f"{what} decoded to an empty file")
     if len(data) > max_bytes:
-        raise ValueError(f"{field_name} is too large; max {max_bytes // 1024 // 1024} MB")
+        raise ValueError(f"{what} is too large; max {max_bytes // 1024 // 1024} MB")
     destination_dir.mkdir(parents=True, exist_ok=True)
     descriptor, filename = tempfile.mkstemp(prefix="media-studio-input-", suffix=suffix, dir=destination_dir)
     with os.fdopen(descriptor, "wb") as handle:
@@ -831,7 +898,7 @@ def _write_inline_media(
     return Path(filename)
 
 
-def _write_inline_image(value: str, destination_dir: Path) -> Path:
+def _write_inline_image(value: str, destination_dir: Path, *, label: str = "") -> Path:
     written = _write_inline_media(
         value,
         destination_dir,
@@ -839,6 +906,7 @@ def _write_inline_image(value: str, destination_dir: Path) -> Path:
         mime_suffixes=_INLINE_IMAGE_SUFFIXES,
         default_suffix=".png",
         max_bytes=_MAX_PRIVATE_IMAGE_BYTES,
+        label=label,
     )
     # An iPhone HEIC becomes a JPEG here too. The multipart upload route above
     # has done this since 2026-08-22 because ComfyUI's LoadImage has no HEIC
@@ -850,18 +918,19 @@ def _write_inline_image(value: str, destination_dir: Path) -> Path:
     return media_posters.transcode_opaque_image(written) or written
 
 
-def _write_inline_video(value: str, destination_dir: Path) -> Path:
+def _write_inline_video(value: str, destination_dir: Path, *, label: str = "") -> Path:
     return _write_inline_media(
         value,
         destination_dir,
         field_name="video_base64",
         mime_suffixes=_INLINE_VIDEO_SUFFIXES,
         default_suffix=".mp4",
-        max_bytes=100 * 1024 * 1024,
+        max_bytes=_MAX_PRIVATE_VIDEO_BYTES,
+        label=label,
     )
 
 
-def _write_inline_audio(value: str, destination_dir: Path) -> Path:
+def _write_inline_audio(value: str, destination_dir: Path, *, label: str = "") -> Path:
     # Reference clips are 15 seconds at most, so even lossless stereo stays
     # small; the cap is here to reject non-audio payloads, not to bound length.
     return _write_inline_media(
@@ -870,7 +939,8 @@ def _write_inline_audio(value: str, destination_dir: Path) -> Path:
         field_name="audio_base64",
         mime_suffixes=_INLINE_AUDIO_SUFFIXES,
         default_suffix=".wav",
-        max_bytes=25 * 1024 * 1024,
+        max_bytes=_MAX_PRIVATE_AUDIO_BYTES,
+        label=label,
     )
 
 
@@ -1036,7 +1106,40 @@ def build_control_app(
     except Exception as exc:  # startup must survive a partial legacy layout
         print(f"[content-studio] run privacy migration warning: {exc}", file=sys.stderr)
 
-    app = FastAPI(title="Hivemind Content Studio", version="0.2.0")
+    @contextlib.asynccontextmanager
+    async def _lifespan(application: FastAPI):
+        # Startup work registers on app.state.startup_hooks (here and in
+        # gpu_rentals) instead of the deprecated @app.on_event("startup"),
+        # which was the source of ~900 warnings per test run.
+        for hook in list(getattr(application.state, "startup_hooks", []) or []):
+            hook()
+        yield
+
+    app = FastAPI(title="Hivemind Content Studio", version="0.2.0", lifespan=_lifespan)
+    app.state.startup_hooks = []
+
+    @app.exception_handler(AccountLocked)
+    async def _account_locked(request: Request, exc: AccountLocked) -> JSONResponse:
+        return JSONResponse({"detail": ACCOUNT_LOCKED_DETAIL, "privacy": "account-locked"}, status_code=401)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_failed(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # ``detail`` is a STRING here on purpose (see _validation_sentence);
+        # the structured list stays under ``errors`` for developers. No
+        # ``input`` echo: a body field can be a prompt or a picture.
+        errors = [
+            {key: value for key, value in error.items() if key in {"loc", "msg", "type"}}
+            for error in exc.errors()
+            if isinstance(error, dict)
+        ]
+        return JSONResponse({"detail": _validation_sentence(errors), "errors": errors}, status_code=422)
+
+    @app.exception_handler(Exception)
+    async def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        # JSON, not Starlette's plain-text "Internal Server Error", and never
+        # str(exc): an exception message can carry a path or a prompt.
+        return JSONResponse({"detail": UNEXPECTED_ERROR_DETAIL}, status_code=500)
+
     unlock_failures: dict[str, deque[float]] = defaultdict(deque)
     repository_root = Path(__file__).resolve().parents[2]
     open_gen_dist = repository_root / "packages/open-generative-ai/dist"
@@ -1127,9 +1230,31 @@ def build_control_app(
             for token in (configured_control_token, configured_operator_token)
         )
 
+    def _set_session_cookie(response: Response, request: Request, account: Account) -> None:
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        response.set_cookie(
+            ACCOUNT_COOKIE,
+            account_access.issue(account.id),
+            max_age=account_access.session_seconds,
+            httponly=True,
+            secure=request.url.scheme == "https" or forwarded == "https",
+            # Lax, not Strict: a studio link opened from Slack or Notes is a
+            # top-level navigation from another site, and Strict drops the
+            # cookie on it — so a signed-in person landed on the gate and had
+            # to reload. Lax still withholds the cookie from cross-site POSTs.
+            samesite="lax",
+            path="/",
+        )
+
+    # Past this age (half the session) an authenticated request re-issues the
+    # cookie, so a tab that stays in use never expires mid-generation. The old
+    # fixed 24 h cookie was only ever written at sign-in.
+    SESSION_SLIDE_AFTER_SECONDS = account_access.session_seconds // 2
+
     @app.middleware("http")
     async def enforce_account_boundary(request: Request, call_next):
-        signed_in = account_access.account_id(request.cookies.get(ACCOUNT_COOKIE))
+        session_cookie = request.cookies.get(ACCOUNT_COOKIE)
+        signed_in = account_access.account_id(session_cookie)
         # A cookie for a workspace that has since been deleted proves nothing.
         account = account_store.get(signed_in) if signed_in else None
         request.state.account = account
@@ -1162,8 +1287,17 @@ def build_control_app(
                     )
             else:
                 response = await call_next(request)
+                if account is not None:
+                    remaining = account_access.remaining_seconds(session_cookie)
+                    if remaining is not None and remaining < SESSION_SLIDE_AFTER_SECONDS:
+                        _set_session_cookie(response, request, account)
         finally:
             current_account.reset(token)
+        if request.url.path.startswith("/assets/"):
+            # Vite fingerprints every bundle under /assets, so these are
+            # immutable; no-store here re-downloaded the whole app on every
+            # page load over the tailnet.
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
         response.headers.setdefault("Cache-Control", "no-store")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -1171,9 +1305,15 @@ def build_control_app(
         return response
 
     def require_control(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
+        supplied = authorization.removeprefix("Bearer ").strip() if authorization else ""
+        if not supplied and getattr(request.state, "account", None) is None:
+            # No bearer and no session: a browser whose cookie expired, or the
+            # dev server with none. That is "sign in", in the same shape the
+            # middleware answers everywhere else — not an operator-token
+            # lecture (and not a 503 about an unconfigured token).
+            raise AccountLocked()
         if len(configured_control_token) < 12:
             raise HTTPException(status_code=503, detail="Operator mutations are disabled until CONTENT_STUDIO_CONTROL_TOKEN is configured")
-        supplied = authorization.removeprefix("Bearer ").strip() if authorization else ""
         if not hmac.compare_digest(supplied, configured_control_token):
             raise HTTPException(status_code=401, detail="Valid operator bearer token required")
 
@@ -1269,17 +1409,14 @@ def build_control_app(
     # ── accounts: the sign-in gate ────────────────────────────────────────────
 
     def _sign_in(response: JSONResponse, request: Request, account: Account) -> JSONResponse:
-        forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
-        response.set_cookie(
-            ACCOUNT_COOKIE,
-            account_access.issue(account.id),
-            max_age=account_access.session_seconds,
-            httponly=True,
-            secure=request.url.scheme == "https" or forwarded == "https",
-            samesite="strict",
-            path="/",
-        )
+        _set_session_cookie(response, request, account)
         return response
+
+    def _session_remaining_seconds(request: Request) -> int:
+        """Seconds the current session has left — the real number, not the
+        constant, so a tab can warn before (rather than after) it lapses."""
+        remaining = account_access.remaining_seconds(request.cookies.get(ACCOUNT_COOKIE))
+        return int(remaining) if remaining is not None else SESSION_SECONDS
 
     def _relying_party(request: Request) -> RelyingParty:
         forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
@@ -1293,15 +1430,27 @@ def build_control_app(
         )
 
     def _throttle_key(request: Request, account_id: int | None) -> str:
-        address = request.client.host if request.client else "unknown"
-        return f"{address}:{account_id if account_id is not None else 'any'}"
+        # Behind the tailnet / Hivemind Link proxy every browser shares the
+        # proxy's address, so five wrong passwords from ANY device locked the
+        # owner tile for everyone. The first hop of x-forwarded-for is the
+        # browser; the socket address is the fallback.
+        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+        address = forwarded or (request.client.host if request.client else "unknown")
+        return f"{address[:64]}:{account_id if account_id is not None else 'any'}"
+
+    def _retry_wording(seconds: float) -> str:
+        whole = max(1, int(seconds) + 1)
+        if whole >= 90:
+            minutes = max(1, round(whole / 60))
+            return f"{minutes} minute{'s' if minutes != 1 else ''}"
+        return f"{whole} second{'s' if whole != 1 else ''}"
 
     def _guard_throttle(key: str) -> None:
         wait = login_throttle.retry_after(key)
         if wait > 0:
             raise HTTPException(
                 status_code=429,
-                detail=f"Too many attempts. Try again in {int(wait) + 1}s.",
+                detail=f"Too many attempts. Try again in {_retry_wording(wait)}.",
                 headers={"Retry-After": str(int(wait) + 1)},
             )
 
@@ -1317,7 +1466,7 @@ def build_control_app(
             "ok": True,
             "accounts": [entry.public() for entry in account_store.list_accounts()],
             "signed_in_as": account.id if account else None,
-            "expires_in_seconds": SESSION_SECONDS,
+            "expires_in_seconds": _session_remaining_seconds(request) if account else SESSION_SECONDS,
         }
 
     @app.post("/api/accounts/unlock")
@@ -1345,7 +1494,7 @@ def build_control_app(
     @app.post("/api/accounts/sign-out")
     def sign_out() -> JSONResponse:
         response = JSONResponse({"ok": True})
-        response.delete_cookie(ACCOUNT_COOKIE, path="/", samesite="strict")
+        response.delete_cookie(ACCOUNT_COOKIE, path="/", samesite="lax")
         return response
 
     @app.post("/api/accounts", status_code=201)
@@ -1387,7 +1536,9 @@ def build_control_app(
     @app.post("/api/accounts/{account_id}/rename")
     def rename_account(account_id: int, body: AccountRenameBody, request: Request) -> dict:
         actor = getattr(request.state, "account", None)
-        if actor is None or (actor.id != account_id and not actor.is_owner):
+        if actor is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        if actor.id != account_id and not actor.is_owner:
             raise HTTPException(status_code=403, detail="You can only rename your own workspace")
         try:
             return {"ok": True, "account": account_store.rename(account_id, body.name).public()}
@@ -1487,7 +1638,7 @@ def build_control_app(
             "ok": True,
             "unlocked": account is not None,
             "account": account.public() if account else None,
-            "expires_in_seconds": OWNER_SESSION_SECONDS,
+            "expires_in_seconds": _session_remaining_seconds(request) if account else OWNER_SESSION_SECONDS,
         }
 
     @app.post("/api/owner/unlock")
@@ -1510,8 +1661,8 @@ def build_control_app(
     @app.post("/api/owner/lock")
     def owner_lock() -> JSONResponse:
         response = JSONResponse({"ok": True})
-        response.delete_cookie(ACCOUNT_COOKIE, path="/", samesite="strict")
-        response.delete_cookie(access.cookie_name, path="/", samesite="strict")
+        response.delete_cookie(ACCOUNT_COOKIE, path="/", samesite="lax")
+        response.delete_cookie(access.cookie_name, path="/", samesite="lax")
         return response
 
     def _studio_shell() -> Response:
@@ -1625,6 +1776,10 @@ def build_control_app(
                 "local-ai/model-preview/",
                 "local-ai/civitai-download/",
             )
+        ) or (
+            # Stopping an image job at the gateway: one id segment, then "cancel".
+            request.method == "POST"
+            and re.fullmatch(r"local-ai/job/[A-Za-z0-9_.:%-]+/cancel", path) is not None
         )
         if path not in allowed and not dynamic_local_ai_route:
             raise HTTPException(status_code=404, detail="OpenGen bridge route not found")
@@ -1649,12 +1804,18 @@ def build_control_app(
             except urllib.error.HTTPError as exc:
                 return exc.read(), exc.code, exc.headers.get("content-type", "application/json")
             except (OSError, urllib.error.URLError) as exc:
-                raise RuntimeError("OpenGen local inference bridge is unavailable") from exc
+                timed_out = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
+                if timed_out:
+                    raise RuntimeError("The local inference bridge did not answer within 190 s") from exc
+                raise RuntimeError("The local inference bridge is unavailable") from exc
 
         try:
             content, status, content_type = await asyncio.to_thread(forward)
         except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from None
+            # Both keys: the studio wrappers read ``detail``, the bridge shim
+            # (hosted-local-ai.js) reads ``error`` — so the Models view used to
+            # show a bare "HTTP 503" for this.
+            return JSONResponse({"detail": str(exc), "error": str(exc)}, status_code=503)
         return Response(content=content, status_code=status, media_type=content_type.split(";", 1)[0])
 
     def _build_simple_catalog() -> dict:
@@ -1738,11 +1899,12 @@ def build_control_app(
             _kick_simple_catalog_refresh()
         return simple_catalog_cache["payload"] or cached
 
-    @app.on_event("startup")
     def _warm_simple_catalog() -> None:
         # Build the catalog once at boot so even the first studio open after a
         # stack restart gets an instant model list.
         _kick_simple_catalog_refresh()
+
+    app.state.startup_hooks.append(_warm_simple_catalog)
 
     # ---- prompt helper -------------------------------------------------
     #
@@ -1753,7 +1915,7 @@ def build_control_app(
 
     @app.get("/api/prompt-helper/runtime", dependencies=[Depends(require_owner)])
     def prompt_helper_runtime() -> dict:
-        return local_llm.runtime().snapshot()
+        return {"ok": True, **local_llm.runtime().snapshot()}
 
     @app.post("/api/prompt-helper/load", dependencies=[Depends(require_owner)])
     def prompt_helper_load(body: PromptHelperLoadBody) -> dict:
@@ -1776,7 +1938,7 @@ def build_control_app(
     # reaches into the machine's running services.
     @app.get("/api/lanes/memory", dependencies=[Depends(require_owner)])
     def lanes_memory() -> dict:
-        return comfy_lanes.snapshot()
+        return {"ok": True, **comfy_lanes.snapshot()}
 
     @app.post("/api/lanes/free", dependencies=[Depends(require_owner)])
     def lanes_free(body: LaneFreeBody) -> dict:
@@ -1952,6 +2114,7 @@ def build_control_app(
                 for fault in faults:
                     warnings.append(f"Reads as produced rather than filmed: {fault}.")
         return {
+            "ok": True,
             "prompt": prompt,
             "profile": profile,
             # Say when the continuation rules were in force, so a prompt written
@@ -1964,6 +2127,65 @@ def build_control_app(
             # show that something happened even when the change is three words.
             "changedLines": edited,
         }
+
+    # A Hive Persona's LOOK (hair, face, build, wardrobe in a line or two) is
+    # what the cast writes into <Subject N>'s definition; written by the loaded
+    # helper from the persona's own pictures so it is not a field owners skip.
+    # Same runtime, same chat call, same owner gate as the prompt helper above —
+    # the pictures go only to the llama-server this process spawned, and
+    # neither they nor the answer are logged.
+    @app.post("/api/prompt-helper/describe-look", dependencies=[Depends(require_owner)])
+    def prompt_helper_describe_look(body: PromptHelperDescribeLookBody) -> dict:
+        images = [str(item or "").strip() for item in (body.images or [])]
+        if not images:
+            raise HTTPException(status_code=422, detail="Attach at least one picture to describe")
+        if len(images) > 3:
+            raise HTTPException(status_code=422, detail="Attach at most three pictures — the clearest ones")
+        for item in images:
+            _header, separator, payload = item.partition(",")
+            if not item.startswith("data:image/") or not separator or not payload.strip():
+                raise HTTPException(
+                    status_code=422, detail="Each picture must be an image data URL (data:image/…;base64,…)")
+        runtime = local_llm.runtime()
+        loaded = runtime.loaded_model_ids()
+        model_id = (body.modelId or "").strip()
+        if model_id and model_id not in loaded:
+            raise HTTPException(status_code=409, detail=f"{model_id} is not loaded. Load it first.")
+        if not model_id:
+            if not loaded:
+                raise HTTPException(
+                    status_code=409, detail="No helper model is loaded. Load one in the prompt helper first.")
+            model_id = loaded[0]
+        if not runtime.model_sees_images(model_id):
+            # Said up front rather than letting a blind model describe pictures
+            # it was never shown — that answer reads exactly like a real one.
+            raise HTTPException(
+                status_code=409,
+                detail="The loaded helper model cannot see pictures — load a vision-capable one "
+                       "(e.g. Swarm Scout or Qwen3.6)",
+            )
+        count = "one photo" if len(images) == 1 else f"{len(images)} photos"
+        messages = [
+            {"role": "system", "content": prompt_profiles.look_system_prompt(body.gender)},
+            {"role": "user", "content": f"Here {'is' if len(images) == 1 else 'are'} {count} of the same person. "
+                                        "Write the description."},
+        ]
+        try:
+            # Every picture rides the one user turn (local_llm.chat attaches
+            # them all to the last user message). Cooler than the prompt
+            # writer: a look is a reading of the pictures, not a draft.
+            answer = runtime.chat(model_id=model_id, messages=messages, images=images, temperature=0.3)
+        except local_llm.LocalLlmEmptyAnswer:
+            answer = ""
+        except local_llm.LocalLlmError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        look = prompt_profiles.normalize_look(answer)
+        if not look:
+            # Nothing came back, or nothing survived the clean-up (a model that
+            # answered with just quotes or a fence). Either way: not a look.
+            raise HTTPException(
+                status_code=502, detail="The helper returned nothing — try again or load a larger model")
+        return {"ok": True, "look": look}
 
     @app.get("/api/templates")
     def templates() -> dict:
@@ -2141,7 +2363,12 @@ def build_control_app(
 
     @app.post("/api/runs", status_code=201, dependencies=[Depends(require_owner_or_control)])
     def create_run(body: StudioRunDraft, request: Request) -> dict:
-        run = execute_draft(body)
+        try:
+            run = execute_draft(body)
+        except ValueError as exc:
+            # "A run requires at least one step" and its siblings: the
+            # caller's brief, not the server.
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         record_prompt(body, source="advanced", run_id=run["run_id"])
         return owner_visible(request, run)
 
@@ -2259,6 +2486,7 @@ def build_control_app(
         reference_images: list[Path] = []
         reference_audios: list[Path] = []
         reference_videos: list[dict[str, Any]] = []
+        warnings: list[str] = []
         has_private_reference = body.image_reference or body.video_reference or any(
             item.image_reference for item in [*body.ingredient_images, *body.reference_images]
         ) or any(item.audio_reference for item in body.reference_audios) or any(
@@ -2271,14 +2499,21 @@ def build_control_app(
                 raise ValueError("At most 12 ingredient reference images are supported")
             for index, item in enumerate(body.ingredient_images):
                 if item.image_base64:
-                    source = _write_inline_image(item.image_base64, media_studio_input_root)
+                    source = _write_inline_image(
+                        item.image_base64, media_studio_input_root, label=f"Ingredient {index + 1}")
                 elif item.image_reference:
                     source = stage_media_studio_reference(item.image_reference)
                 else:
                     raise ValueError(f"Ingredient reference {index + 1} has no image")
+                description = item.description.strip()
+                if len(description) > _MAX_DESCRIPTION_CHARS:
+                    description = description[:_MAX_DESCRIPTION_CHARS]
+                    warnings.append(
+                        f"Ingredient {index + 1}'s note was shortened to {_MAX_DESCRIPTION_CHARS} characters."
+                    )
                 ingredient_images.append({
                     "image_path": source,
-                    "description": item.description.strip()[:1000],
+                    "description": description,
                 })
             # Reference-mode pictures: order is load-bearing (<Picture N> in the
             # prompt is the Nth entry), so stage them in the order received.
@@ -2286,7 +2521,8 @@ def build_control_app(
                 raise ValueError("At most 9 reference images are supported")
             for index, item in enumerate(body.reference_images):
                 if item.image_base64:
-                    reference_images.append(_write_inline_image(item.image_base64, media_studio_input_root))
+                    reference_images.append(_write_inline_image(
+                        item.image_base64, media_studio_input_root, label=f"Picture {index + 1}"))
                 elif item.image_reference:
                     reference_images.append(stage_media_studio_reference(item.image_reference))
                 else:
@@ -2298,7 +2534,8 @@ def build_control_app(
                 raise ValueError("At most 3 reference audio clips are supported")
             for index, audio_item in enumerate(body.reference_audios):
                 if audio_item.audio_base64:
-                    reference_audios.append(_write_inline_audio(audio_item.audio_base64, media_studio_input_root))
+                    reference_audios.append(_write_inline_audio(
+                        audio_item.audio_base64, media_studio_input_root, label=f"Voice clip {index + 1}"))
                 elif audio_item.audio_reference:
                     reference_audios.append(stage_media_studio_reference(audio_item.audio_reference))
                 else:
@@ -2307,7 +2544,8 @@ def build_control_app(
                 raise ValueError("At most 3 reference videos are supported")
             for index, video_item in enumerate(body.reference_videos):
                 if video_item.video_base64:
-                    staged_reference = _write_inline_video(video_item.video_base64, media_studio_input_root)
+                    staged_reference = _write_inline_video(
+                        video_item.video_base64, media_studio_input_root, label=f"Motion clip {index + 1}")
                 elif video_item.video_reference:
                     staged_reference = stage_media_studio_reference(video_item.video_reference)
                 else:
@@ -2324,13 +2562,14 @@ def build_control_app(
             if body.video_reference:
                 video = stage_media_studio_reference(body.video_reference)
             elif body.video_base64:
-                video = _write_inline_video(body.video_base64, media_studio_input_root)
+                video = _write_inline_video(body.video_base64, media_studio_input_root, label="The source video")
             if body.motion_context_base64:
                 if video is not None:
                     raise ValueError("A motion-context clip seeds a new shot and cannot be combined with a source video")
-                motion_context = _write_inline_video(body.motion_context_base64, media_studio_input_root)
+                motion_context = _write_inline_video(
+                    body.motion_context_base64, media_studio_input_root, label="The previous shot's clip")
             if body.image_base64:
-                image = _write_inline_image(body.image_base64, media_studio_input_root)
+                image = _write_inline_image(body.image_base64, media_studio_input_root, label="The start image")
             elif body.image_reference:
                 image = stage_media_studio_reference(body.image_reference)
             if video is None and image is None and not ingredient_images and not body.prompt.strip():
@@ -2343,9 +2582,10 @@ def build_control_app(
             # server-side reference path to stage here.
             if video is None:
                 if body.middle_image_base64:
-                    middle = _write_inline_image(body.middle_image_base64, media_studio_input_root)
+                    middle = _write_inline_image(
+                        body.middle_image_base64, media_studio_input_root, label="The middle keyframe")
                 if body.end_image_base64:
-                    end = _write_inline_image(body.end_image_base64, media_studio_input_root)
+                    end = _write_inline_image(body.end_image_base64, media_studio_input_root, label="The end keyframe")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return _StagedVideoInputs(
@@ -2358,6 +2598,7 @@ def build_control_app(
             reference_images=reference_images,
             reference_audios=reference_audios,
             reference_videos=reference_videos,
+            warnings=warnings,
         )
 
     def _validated_media_studio_loras(body: MediaStudioVideoBody) -> list[dict[str, Any]]:
@@ -2377,6 +2618,9 @@ def build_control_app(
                 source.unlink()
 
     def _finalize_media_studio_video(result: dict[str, Any], started: float) -> dict[str, Any]:
+        # A finished clip must show in History on the next open, not after the
+        # sync cache's TTL — whichever way it is stored below.
+        _forget_canvas_sync()
         gateway_output = Path(str(result.get("gateway_output") or "")).name
         if gateway_output:
             # Client-only E2E output: the gateway holds the sealed envelope and
@@ -2428,9 +2672,23 @@ def build_control_app(
             "media_url": url,
         }
 
+    def _media_studio_start_failure(exc: Exception, request: Request) -> HTTPException:
+        """The HTTP shape of a failed start. A client mistake (a missing input,
+        an impossible combination — ValueError/FileNotFoundError) is a 400 the
+        studio can act on; the gateway or lane not answering (RuntimeError,
+        TimeoutError) stays a 503. Either way the text is sanitized: a raw
+        runner message carries staged paths under the owner's home and, on a
+        traceback, whatever argv the runner echoed."""
+        owner = bool(getattr(request.state, "is_owner", False))
+        detail = sanitize_error_detail(str(exc)) if owner else "Media generation failed"
+        status = 400 if isinstance(exc, (FileNotFoundError, ValueError)) else 503
+        return HTTPException(status_code=status, detail=detail or "Media generation failed")
+
     @app.post("/api/media-studio/video", dependencies=[Depends(require_owner_or_control)])
     async def generate_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
-        staged = _staged_media_studio_video_inputs(body, request)
+        # Decoding up to 3x100 MB of inline clips (plus HEIC transcodes and
+        # reference decrypts) happens in a worker thread, not on the loop.
+        staged = await asyncio.to_thread(_staged_media_studio_video_inputs, body, request)
         loras = _validated_media_studio_loras(body)
         started = time.perf_counter()
         try:
@@ -2460,14 +2718,15 @@ def build_control_app(
                 requester_pub=_requester_pub(request),
             )
         except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
-            detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
-            raise HTTPException(status_code=503, detail=detail) from None
+            raise _media_studio_start_failure(exc, request) from None
         finally:
             _unlink_staged_media_studio_sources(staged)
         try:
             response = _finalize_media_studio_video(result, started)
         except RuntimeError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from None
+            raise HTTPException(status_code=502, detail=sanitize_error_detail(str(exc))) from None
+        if staged.warnings:
+            response = {**response, "warnings": list(staged.warnings)}
         return response if bool(getattr(request.state, "is_owner", False)) else machine_operation_receipt(response)
 
     # Job-based variant: high-resolution runs take tens of minutes, far beyond
@@ -2526,11 +2785,15 @@ def build_control_app(
                     )
         except Exception as exc:
             if entry.get("status") != "cancelled":
-                entry.update(status="error", detail=str(exc) or "Media generation failed")
+                # One sanitizer between a lane's failure text and the toast: a
+                # native-LTX or local-Comfy failure used to arrive as 4 KB of
+                # runner output with absolute paths (and, via argv echoes,
+                # possibly the prompt) — against the privacy boundary.
+                entry.update(status="error", detail=sanitize_error_detail(str(exc)) or "Media generation failed")
 
     @app.post("/api/media-studio/video/start", dependencies=[Depends(require_owner_or_control)])
     async def start_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
-        staged = _staged_media_studio_video_inputs(body, request)
+        staged = await asyncio.to_thread(_staged_media_studio_video_inputs, body, request)
         loras = _validated_media_studio_loras(body)
         started = time.perf_counter()
         try:
@@ -2569,8 +2832,7 @@ def build_control_app(
                 requester_pub=_requester_pub(request),
             )
         except (FileNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
-            detail = str(exc) if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
-            raise HTTPException(status_code=503, detail=detail) from None
+            raise _media_studio_start_failure(exc, request) from None
         finally:
             # start_video uploads the inputs to the gateway before returning,
             # so the staged control-api copies are no longer needed either way.
@@ -2606,6 +2868,7 @@ def build_control_app(
             "job_id": job_id,
             "status": "running",
             **({"estimate_seconds": estimate_seconds} if estimate_seconds else {}),
+            **({"warnings": list(staged.warnings)} if staged.warnings else {}),
         }
 
     @app.get("/api/media-studio/video/job/{job_id}", dependencies=[Depends(require_owner_or_control)])
@@ -2643,7 +2906,12 @@ def build_control_app(
             response = entry["response"]
             return response if bool(getattr(request.state, "is_owner", False)) else machine_operation_receipt(response)
         if entry["status"] in ("error", "cancelled"):
-            detail = entry.get("detail") if bool(getattr(request.state, "is_owner", False)) else "Media generation failed"
+            # HTTP 200 with ok:false on purpose: a cancel is terminal but not an
+            # error, and the studio's poller reads this shape (hivemindStudio.js).
+            detail = (
+                sanitize_error_detail(entry.get("detail")) if bool(getattr(request.state, "is_owner", False))
+                else "Media generation failed"
+            )
             return {"ok": False, "status": entry["status"], "detail": detail or "Generation cancelled"}
         elapsed_seconds = round(max(0.0, time.perf_counter() - float(entry.get("started") or time.perf_counter())), 1)
         return {
@@ -2830,7 +3098,12 @@ def build_control_app(
         if not suffix:
             raise HTTPException(status_code=415, detail="Reference must be a supported image, video, or audio clip")
         is_video = content_type in _INLINE_VIDEO_SUFFIXES or suffix in set(_INLINE_VIDEO_SUFFIXES.values())
-        max_bytes = _MAX_PRIVATE_VIDEO_BYTES if is_video else _MAX_PRIVATE_IMAGE_BYTES
+        is_audio = content_type in _INLINE_AUDIO_SUFFIXES or suffix in set(_INLINE_AUDIO_SUFFIXES.values())
+        max_bytes = (
+            _MAX_PRIVATE_VIDEO_BYTES if is_video
+            else _MAX_PRIVATE_AUDIO_BYTES if is_audio
+            else _MAX_PRIVATE_IMAGE_BYTES
+        )
         body = await file.read(max_bytes + 1)
         await file.close()
         if not body:
@@ -2838,57 +3111,65 @@ def build_control_app(
         if len(body) > max_bytes:
             raise HTTPException(status_code=413, detail=f"Media reference is too large; max {max_bytes // 1024 // 1024} MB")
 
-        references_root().mkdir(parents=True, exist_ok=True)
-        name = f"reference-{secrets.token_hex(16)}{suffix}"
-        reference = (references_root() / name).resolve()
-        reference.write_bytes(body)
-        # An iPhone HEIC is stored as a JPEG: the browser has no HEIC decoder
-        # (so the tile drew broken) and neither does the lane's ComfyUI (so the
-        # run would have failed at LoadImage). Like the poster below, this can
-        # only happen NOW, while the plaintext is still here. A HEIC that will
-        # not decode is kept as uploaded — today's behaviour, never a lost upload.
-        transcoded = media_posters.transcode_opaque_image(reference)
-        if transcoded is not None:
-            reference = transcoded
-            name = reference.name
-            suffix = reference.suffix
-        # Build the thumbnail NOW, while the plaintext is still here. Once sealed
-        # the host can never read this file again, so this is the only moment a
-        # poster can be made server-side — and without one, drawing a 32px tile
-        # costs the browser the whole asset.
-        poster = _build_reference_poster(reference, kind=_reference_kind_for_suffix(suffix))
-        # Seal to the owner vault (client-only E2E) so this host holds no decrypt
-        # key. Reuse is client-side: the browser decrypts and re-sends base64 (the
-        # server can no longer stage a sealed reference). Legacy Keychain .zenc is
-        # only a no-vault fallback.
-        spki = _vault_public_key()
-        try:
-            if spki:
-                media_type = mimetypes.guess_type(reference.name)[0] or "image/png"
-                seal_private_media_e2e(reference, spki, media_type=media_type)
-            else:
-                _encrypt_private_media(reference, cipher, scope="media-studio-reference")
-            # The poster is sealed the same way, so the privacy contract is
-            # unchanged: the host keeps no readable copy of either.
-            if poster is not None:
-                _seal_reference_poster(poster, spki)
-        except Exception as exc:
-            with contextlib.suppress(FileNotFoundError):
-                reference.unlink()
-            with contextlib.suppress(FileNotFoundError):
-                e2e_media_sidecar(reference).unlink()
-            if poster is not None:
-                _remove_reference_poster(poster)
-            raise HTTPException(status_code=503, detail="Reference image could not be secured") from exc
-        if not (_private_media_exists(reference) or e2e_media_exists(reference)):
-            raise HTTPException(status_code=503, detail="Reference image could not be secured")
-        url = f"/api/media-studio/references/{urllib.parse.quote(name)}"
-        return {
-            "ok": True,
-            "url": url,
-            "encrypted_at_rest": True,
-            "poster_url": _reference_poster_url(reference),
-        }
+        def _store(suffix: str) -> dict[str, Any]:
+            """Write, transcode, poster and seal — in a worker thread. A 100 MB
+            clip's HEIC decode, ffmpeg poster and sealing used to run on the
+            event loop, where every other tab's job poll queued behind it."""
+            references_root().mkdir(parents=True, exist_ok=True)
+            name = f"reference-{secrets.token_hex(16)}{suffix}"
+            reference = (references_root() / name).resolve()
+            reference.write_bytes(body)
+            # An iPhone HEIC is stored as a JPEG: the browser has no HEIC decoder
+            # (so the tile drew broken) and neither does the lane's ComfyUI (so the
+            # run would have failed at LoadImage). Like the poster below, this can
+            # only happen NOW, while the plaintext is still here. A HEIC that will
+            # not decode is kept as uploaded — today's behaviour, never a lost upload.
+            transcoded = media_posters.transcode_opaque_image(reference)
+            if transcoded is not None:
+                reference = transcoded
+                name = reference.name
+                suffix = reference.suffix
+            # Build the thumbnail NOW, while the plaintext is still here. Once sealed
+            # the host can never read this file again, so this is the only moment a
+            # poster can be made server-side — and without one, drawing a 32px tile
+            # costs the browser the whole asset.
+            poster = _build_reference_poster(reference, kind=_reference_kind_for_suffix(suffix))
+            # Seal to the owner vault (client-only E2E) so this host holds no decrypt
+            # key. Reuse is client-side: the browser decrypts and re-sends base64 (the
+            # server can no longer stage a sealed reference). Legacy Keychain .zenc is
+            # only a no-vault fallback.
+            spki = _vault_public_key()
+            try:
+                if spki:
+                    media_type = mimetypes.guess_type(reference.name)[0] or "image/png"
+                    seal_private_media_e2e(reference, spki, media_type=media_type)
+                else:
+                    _encrypt_private_media(reference, cipher, scope="media-studio-reference")
+                # The poster is sealed the same way, so the privacy contract is
+                # unchanged: the host keeps no readable copy of either.
+                if poster is not None:
+                    _seal_reference_poster(poster, spki)
+            except Exception as exc:
+                with contextlib.suppress(FileNotFoundError):
+                    reference.unlink()
+                with contextlib.suppress(FileNotFoundError):
+                    e2e_media_sidecar(reference).unlink()
+                if poster is not None:
+                    _remove_reference_poster(poster)
+                raise HTTPException(status_code=503, detail="Reference image could not be secured") from exc
+            if not (_private_media_exists(reference) or e2e_media_exists(reference)):
+                raise HTTPException(status_code=503, detail="Reference image could not be secured")
+            url = f"/api/media-studio/references/{urllib.parse.quote(name)}"
+            return {
+                "ok": True,
+                "url": url,
+                "encrypted_at_rest": True,
+                "poster_url": _reference_poster_url(reference),
+            }
+
+        # to_thread copies the request's context, so the account-scoped roots
+        # and the vault key resolve to the same workspace inside the worker.
+        return await asyncio.to_thread(_store, suffix)
 
     @app.post("/api/media-studio/references/{filename}/poster", dependencies=[Depends(require_owner)])
     async def upload_media_studio_reference_poster(filename: str, file: UploadFile = File(...)) -> dict:
@@ -3081,6 +3362,27 @@ def build_control_app(
         if foreign:
             store.forget(foreign)
 
+    # A sync reads the gateway's history, walks both output roots and writes
+    # sqlite; a History poll repeated all of it every tick. Remembered per
+    # workspace for a few seconds, dropped the moment a job finishes in this
+    # process (see _finalize_media_studio_video) and skippable with ?refresh=1.
+    CANVAS_SYNC_TTL_SECONDS = 10.0
+    canvas_sync_at: dict[int | None, float] = {}
+
+    def _scope_key() -> int | None:
+        scope = current_account.get()
+        return scope.id if scope is not None else None
+
+    def _forget_canvas_sync(scope_id: int | None = None) -> None:
+        canvas_sync_at.pop(scope_id if scope_id is not None else _scope_key(), None)
+
+    def _sync_canvas_history_cached(*, refresh: bool = False) -> None:
+        key = _scope_key()
+        if not refresh and time.monotonic() - canvas_sync_at.get(key, 0.0) < CANVAS_SYNC_TTL_SECONDS:
+            return
+        _sync_canvas_history_for_scope()
+        canvas_sync_at[key] = time.monotonic()
+
     @app.get("/api/canvas/history", dependencies=[Depends(require_owner)])
     def canvas_output_history(
         page: int = 1,
@@ -3088,11 +3390,12 @@ def build_control_app(
         format: str = "",
         model: str = "",
         limit: int | None = None,
+        refresh: bool = False,
     ) -> dict:
         sync_error = ""
         if page <= 1:
             try:
-                _sync_canvas_history_for_scope()
+                _sync_canvas_history_cached(refresh=refresh)
             except RuntimeError as exc:
                 sync_error = str(exc)
         result = canvas_store().page(
@@ -3151,6 +3454,15 @@ def build_control_app(
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from None
         removed_rows = canvas_store().delete(history_id)
+        _forget_canvas_sync()
+        if not int(result.get("deleted_files") or 0) and not int(result.get("history_records") or 0):
+            # Nothing on disk and no gateway record: the output was already
+            # gone. The stale row is cleared above; say so rather than
+            # reporting a deletion that did not happen.
+            raise HTTPException(
+                status_code=404,
+                detail="That output was already gone; its History row has been cleared.",
+            )
         return {"ok": True, "removed_history_rows": removed_rows, **result}
 
     @app.get("/api/canvas/history/{history_id}/media", response_class=Response, dependencies=[Depends(require_owner)])
@@ -3242,7 +3554,14 @@ def build_control_app(
     @app.post("/api/runs/{run_id}/retry", dependencies=[Depends(require_owner_or_control)])
     def retry(run_id: str, body: RetryBody, request: Request) -> dict:
         require_visible_run(run_id)
-        return owner_visible(request, runs.retry_step(run_id, body.step_id))
+        try:
+            return owner_visible(request, runs.retry_step(run_id, body.step_id))
+        except KeyError as exc:
+            # An unknown step id. str() of a KeyError keeps its quotes; the
+            # message inside is the store's own sentence.
+            raise HTTPException(status_code=404, detail=str(exc.args[0] if exc.args else exc)) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
 
     @app.post("/api/runs/{run_id}/cancel", dependencies=[Depends(require_owner_or_control)])
     def cancel(run_id: str, body: CancelBody, request: Request) -> dict:

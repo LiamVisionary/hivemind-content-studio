@@ -478,8 +478,8 @@ class AccountAccess:
         signature = hmac.new(self.signing_secret, payload.encode("ascii"), hashlib.sha256).digest()
         return f"{payload}.{b64url(signature)}"
 
-    def account_id(self, token: str | None, *, now: int | None = None) -> int | None:
-        """The account this cookie proves, or None when absent/expired/forged."""
+    def _verified(self, token: str | None, *, now: int | None = None) -> tuple[int, int] | None:
+        """(account id, seconds remaining) for a genuine, unexpired cookie."""
         if not token:
             return None
         try:
@@ -489,11 +489,24 @@ class AccountAccess:
             if not hmac.compare_digest(unb64url(encoded_signature), expected):
                 return None
             current = int(time.time()) if now is None else int(now)
-            if int(expires_text) <= current:
+            remaining = int(expires_text) - current
+            if remaining <= 0:
                 return None
-            return int(account_text)
+            return int(account_text), remaining
         except (TypeError, ValueError, base64.binascii.Error):
             return None
+
+    def account_id(self, token: str | None, *, now: int | None = None) -> int | None:
+        """The account this cookie proves, or None when absent/expired/forged."""
+        verified = self._verified(token, now=now)
+        return verified[0] if verified else None
+
+    def remaining_seconds(self, token: str | None, *, now: int | None = None) -> int | None:
+        """How long this cookie is still good for, or None when it proves
+        nothing. What lets a session SLIDE (re-issued once it is past half its
+        life) and lets the picker report a real expiry instead of the constant."""
+        verified = self._verified(token, now=now)
+        return verified[1] if verified else None
 
 
 # ── WebAuthn verification ────────────────────────────────────────────────────

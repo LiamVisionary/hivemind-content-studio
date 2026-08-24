@@ -144,7 +144,9 @@ def test_memory_route_returns_the_snapshot(tmp_path: Path, monkeypatch) -> None:
     with patch.object(comfy_lanes, "snapshot", return_value=snapshot):
         response = client.get("/api/lanes/memory")
     assert response.status_code == 200
-    assert response.json() == snapshot
+    # ok:true rides along like on every other studio route; the snapshot itself
+    # is untouched.
+    assert response.json() == {"ok": True, **snapshot}
 
 
 def test_free_route_reports_what_it_freed(tmp_path: Path, monkeypatch) -> None:

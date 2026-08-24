@@ -96,7 +96,11 @@ def test_owner_unlock_uses_same_password_and_24_hour_browser_session(tmp_path: P
     assert unlocked.status_code == 200
     assert unlocked.json()["expires_in_seconds"] == 24 * 60 * 60
     assert "HttpOnly" in unlocked.headers["set-cookie"]
-    assert "SameSite=strict" in unlocked.headers["set-cookie"]
+    # Lax, not Strict: a studio link opened from another app is a top-level
+    # navigation from another site, and Strict dropped the cookie on it, so a
+    # signed-in person landed on the gate. Lax still withholds it from
+    # cross-site POSTs.
+    assert "SameSite=lax" in unlocked.headers["set-cookie"]
     shell = client.get("/").text
     assert 'id="app"' in shell
     # The bundle name is content-hashed, so read it out of the shell rather than

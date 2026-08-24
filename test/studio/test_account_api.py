@@ -323,7 +323,11 @@ def test_canvas_history_shows_each_workspace_only_its_own_gateway_outputs(client
     # polling meanwhile, adopts it as unclaimed.
     records.append({"id": "file-deadbeef", "status": "success", "created_at": "2026-08-22T00:28:00+00:00",
                     "finished_at": "2026-08-22T00:28:00+00:00", "outputs": [piece("sibling-clip.mp4")]})
-    assert basenames(canvas_client.get("/api/canvas/history").json()) == ["canvas-piece.png", "sibling-clip.mp4"]
+    # A page-1 listing re-indexes the gateway at most every few seconds per
+    # workspace (the History poll used to walk both output roots every tick);
+    # ?refresh=1 is the explicit re-index, and what this step needs — the
+    # owner's previous listing was milliseconds ago.
+    assert basenames(canvas_client.get("/api/canvas/history?refresh=1").json()) == ["canvas-piece.png", "sibling-clip.mp4"]
 
     canvas_client.post("/api/accounts/sign-out")
     _sign_in(canvas_client, second, "second-pass")
@@ -343,7 +347,7 @@ def test_canvas_history_shows_each_workspace_only_its_own_gateway_outputs(client
     records.append({"id": "job-sib-1", "status": "success", "created_at": "2026-08-22T00:30:00+00:00",
                     "finished_at": "2026-08-22T00:30:00+00:00", "outputs": [piece("sibling-local.mp4")]})
 
-    second_view = canvas_client.get("/api/canvas/history").json()
+    second_view = canvas_client.get("/api/canvas/history?refresh=1").json()
     assert basenames(second_view) == ["sibling-clip.mp4", "sibling-local.mp4"]
     mine = next(item for item in second_view["history"] if item["output_basename"] == "sibling-clip.mp4")
     media = canvas_client.get(f"/api/canvas/history/{mine['history_id']}/media")
@@ -358,7 +362,7 @@ def test_canvas_history_shows_each_workspace_only_its_own_gateway_outputs(client
     # adopted before the claim existed, and never lists the sibling's ids.
     canvas_client.post("/api/accounts/sign-out")
     _sign_in(canvas_client, 1, OWNER_PASSWORD)
-    assert basenames(canvas_client.get("/api/canvas/history").json()) == ["canvas-piece.png"]
+    assert basenames(canvas_client.get("/api/canvas/history?refresh=1").json()) == ["canvas-piece.png"]
     assert canvas_client.get(f"/api/canvas/history/{mine['history_id']}/media").status_code == 404
 
 

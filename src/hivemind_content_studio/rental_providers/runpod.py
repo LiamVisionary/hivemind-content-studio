@@ -46,7 +46,7 @@ from typing import Any
 
 import requests
 
-from . import Instance, LaunchSpec, Offer, OfferQuery, Provider, ProviderError, register
+from . import Instance, LaunchSpec, Offer, OfferQuery, Provider, ProviderError, register, response_error_text
 
 REST_BASE = "https://rest.runpod.io/v1"
 GRAPHQL_URL = "https://api.runpod.io/graphql"
@@ -92,7 +92,8 @@ def request(method: str, path: str, payload: dict | None = None) -> Any:
         elif isinstance(body, list) and body and isinstance(body[0], dict):
             detail = str(body[0].get("error") or "")
         raise ProviderError(
-            f"RunPod API {method} {path} failed: {detail or response.text[:200]}",
+            f"RunPod API {method} {path} failed: "
+            f"{detail or response_error_text(response.text, response.status_code)}",
             status_code=502,
         )
     return body
@@ -116,7 +117,10 @@ def graphql(query: str) -> dict:
     except ValueError:
         body = {}
     if response.status_code >= 400 or body.get("errors"):
-        detail = str(body.get("errors") or response.text[:200])[:200]
+        detail = (
+            str(body.get("errors"))[:200] if body.get("errors")
+            else response_error_text(response.text, response.status_code)
+        )
         raise ProviderError(f"RunPod GraphQL failed: {detail}", status_code=502)
     return body.get("data") or {}
 

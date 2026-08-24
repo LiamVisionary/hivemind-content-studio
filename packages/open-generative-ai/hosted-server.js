@@ -49,7 +49,18 @@ function readBody(req, max = MAX_REQUEST_BODY) {
     let size = 0;
     req.on('data', d => {
       size += d.length;
-      if (size > max) { reject(new Error('request body too large')); req.destroy(); return; }
+      if (size > max) {
+        const tooLarge = new Error('request body too large');
+        tooLarge.status = 413;
+        reject(tooLarge);
+        // Stop reading but do not destroy the socket yet: destroying it here
+        // tore the connection down before the 413 could be written, so the
+        // caller saw a reset instead of an answer. Node closes the connection
+        // itself once the response is out, because the body was never drained.
+        req.removeAllListeners('data');
+        req.pause();
+        return;
+      }
       chunks.push(d);
     });
     req.on('end', () => resolve(Buffer.concat(chunks)));
@@ -71,8 +82,13 @@ function requestJson(url, options = {}) {
         const text = Buffer.concat(chunks).toString('utf8');
         let data = {};
         try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-        if (up.statusCode < 200 || up.statusCode >= 300) reject(new Error(data.error || `HTTP ${up.statusCode}`));
-        else resolve(data);
+        if (up.statusCode < 200 || up.statusCode >= 300) {
+          // Carry the upstream status: the gateway's own 400 ("URL must be from
+          // civitai.com") and 404 ("unknown LoRA") used to reach the browser as 502.
+          const failure = new Error(data.error || `HTTP ${up.statusCode}`);
+          failure.status = up.statusCode;
+          reject(failure);
+        } else resolve(data);
       });
     });
     r.on('error', reject);
@@ -119,6 +135,52 @@ function requestBuffer(url, headers = {}, options = {}) {
     r.on('error', reject);
     r.on('timeout', () => r.destroy(new Error('request timed out')));
     r.end();
+  });
+}
+
+// The HTTP status a failed upstream call should be answered with: the upstream's
+// own 4xx/5xx when it gave one, 413 for our own body cap, 502 otherwise.
+function upstreamStatus(error) {
+  const status = Number(error && error.status);
+  return Number.isInteger(status) && status >= 400 && status <= 599 ? status : 502;
+}
+
+// Hosts a caller-supplied reference URL may NOT point at: this process sits on
+// the machine, so a fetch to loopback, link-local or a private range would reach
+// services the browser itself cannot. The media gateway is the one exception —
+// same machine, same trust — so a generated output can be re-used as a source.
+function isPrivateHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host || host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0') return true;
+  if (host === '::1' || host === '::' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')) return true;
+  const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  return a === 127 || a === 10 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+}
+function isGatewayHost(parsed) {
+  try {
+    const gateway = new URL(ZIMAGE_URL);
+    return parsed.hostname === gateway.hostname && (parsed.port || (parsed.protocol === 'https:' ? '443' : '80')) === (gateway.port || (gateway.protocol === 'https:' ? '443' : '80'));
+  } catch { return false; }
+}
+// A source picture the generate route fetches on the caller's behalf. Bounded
+// like an upload (the studio's own image cap) and never from a private host.
+const REFERENCE_FETCH_MAX_BYTES = 32 * 1024 * 1024;
+async function fetchReferenceImage(value) {
+  let parsed;
+  try { parsed = new URL(String(value)); } catch {
+    const bad = new Error('That reference URL is not valid'); bad.status = 400; throw bad;
+  }
+  if (!/^https?:$/.test(parsed.protocol) || (!isGatewayHost(parsed) && isPrivateHost(parsed.hostname))) {
+    const refused = new Error('That reference URL cannot be fetched from here — send the picture as image_base64');
+    refused.status = 400;
+    throw refused;
+  }
+  return requestBuffer(parsed.toString(), {}, {
+    maxBytes: REFERENCE_FETCH_MAX_BYTES,
+    maxRedirects: 3,
+    allowHost: (host) => !isPrivateHost(host),
   });
 }
 
@@ -363,7 +425,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       });
       return sendJson(res, 200, result);
     } catch (error) {
-      return sendJson(res, 502, { error: error.message });
+      return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
   if (pathname === '/local-ai/civitai-download' && req.method === 'POST') {
@@ -390,7 +452,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       });
       return sendJson(res, 202, job);
     } catch (error) {
-      return sendJson(res, 502, { error: error.message });
+      return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
   if (pathname.startsWith('/local-ai/civitai-download/') && req.method === 'DELETE') {
@@ -405,7 +467,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       });
       return sendJson(res, 200, job);
     } catch (error) {
-      return sendJson(res, 502, { error: error.message });
+      return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
   if (pathname.startsWith('/local-ai/civitai-download/') && req.method === 'GET') {
@@ -419,13 +481,20 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       });
       return sendJson(res, 200, job);
     } catch (error) {
-      return sendJson(res, 502, { error: error.message });
+      return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
   if (pathname.startsWith('/local-ai/loras/')) {
     const token = readToken();
     if (!token) return sendJson(res, 500, { error: 'Z-Image token unavailable' });
-    const modelId = decodeURIComponent(pathname.slice('/local-ai/loras/'.length));
+    let modelId = '';
+    try {
+      modelId = decodeURIComponent(pathname.slice('/local-ai/loras/'.length));
+    } catch {
+      // "%zz" throws URIError; outside a try it was an unhandled rejection that
+      // took the whole bridge down for every caller.
+      return sendJson(res, 400, { error: 'Invalid workflow id' });
+    }
     // Registry workflows first, then auto-discovered drop-ins (listModels merges both),
     // then the base models the caller carries from the MCP catalog — that last path is
     // what keeps MCP-only video workflows working without a hand-kept id list here.
@@ -454,7 +523,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       }));
       return sendJson(res, 200, { model: modelId, supported: true, baseModels: catalog.baseModels || resolvedBaseModels, loras });
     } catch (e) {
-      return sendJson(res, 502, { error: e.message });
+      return sendJson(res, upstreamStatus(e), { error: e.message });
     }
   }
   if (pathname === '/local-ai/lora-updates' && req.method === 'GET') {
@@ -471,7 +540,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       });
       return sendJson(res, 200, data);
     } catch (error) {
-      return sendJson(res, 502, { error: error.message });
+      return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
   if (pathname === '/local-ai/library' && req.method === 'GET') {
@@ -495,7 +564,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         tags: (data.tags || []).slice(0, 60),
       });
     } catch (error) {
-      return sendJson(res, 502, { error: error.message });
+      return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
   if (pathname === '/local-ai/civitai-search' && req.method === 'GET') {
@@ -524,7 +593,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         nextCursor: String((data.metadata || {}).nextCursor || ''),
       });
     } catch (error) {
-      return sendJson(res, 502, { error: error.message });
+      return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
   if (pathname === '/local-ai/civitai-base-models' && req.method === 'GET') {
@@ -540,7 +609,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         currentBaseModels: (data.currentBaseModels || []).map(String),
       });
     } catch (error) {
-      return sendJson(res, 502, { error: error.message });
+      return sendJson(res, upstreamStatus(error), { error: error.message });
     }
   }
   // Card art for anything that is not a LoRA (those have their own cached route):
@@ -603,6 +672,36 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       return sendText(res, 404, 'not found');
     }
   }
+  // Stop a running image job at the gateway. The studio's Cancel used to stop
+  // only its own poll; the render kept burning the lane behind it. Matched
+  // before the GET job route below, which would read "cancel" as the id.
+  const cancelMatch = pathname.match(/^\/local-ai\/job\/([^/]+)\/cancel$/);
+  if (cancelMatch && req.method === 'POST') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { ok: false, error: 'Z-Image token unavailable' });
+    let id = '';
+    try { id = decodeURIComponent(cancelMatch[1]); } catch { return sendJson(res, 400, { ok: false, error: 'Invalid job id' }); }
+    if (!/^[a-zA-Z0-9_.:-]+$/.test(id)) return sendJson(res, 400, { ok: false, error: 'Invalid job id' });
+    try {
+      const outcome = await requestJson(`${ZIMAGE_URL}/api/job/${encodeURIComponent(id)}/cancel`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 30000,
+      });
+      // The gateway's receipt, with one status word the studio can show:
+      // interrupted = the backend accepted the stop; stopped = it is verifiably
+      // no longer holding the lane (false: the next job queues behind it).
+      return sendJson(res, 200, {
+        ok: true,
+        status: 'cancelled',
+        id: String(outcome.id || id),
+        known: Boolean(outcome.known),
+        interrupted: Boolean(outcome.interrupted),
+        stopped: Boolean(outcome.stopped),
+        ...(outcome.backend_state ? { backend_state: outcome.backend_state } : {}),
+      });
+    } catch (e) { return sendJson(res, upstreamStatus(e), { ok: false, status: 'error', error: e.message }); }
+  }
   if (pathname.startsWith('/local-ai/job/')) {
     const token = readToken();
     if (!token) return sendJson(res, 500, { status: 'error', error: 'Z-Image token unavailable' });
@@ -625,7 +724,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
           : 'image';
       }
       return sendJson(res, 200, job);
-    } catch (e) { return sendJson(res, 502, { status: 'error', error: e.message }); }
+    } catch (e) { return sendJson(res, upstreamStatus(e), { status: 'error', error: e.message }); }
   }
   if (pathname === '/local-ai/generate' && req.method === 'POST') {
     const token = readToken();
@@ -636,6 +735,9 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
       if (!selected) return sendJson(res, 400, { error: `Unknown local image workflow: ${body.model || '(missing)'}` });
       if (selected.requires?.image && !body.image_base64 && !body.image_url) {
         return sendJson(res, 400, { error: `${selected.name} requires a source image` });
+      }
+      if (selected.requires?.prompt !== false && !String(body.prompt || '').trim()) {
+        return sendJson(res, 400, { error: 'Write a prompt first' });
       }
       const modelType = selected.family === 'z-image' ? 'z-image' : 'sdxl';
       const [arWidth, arHeight] = arToDimensions(body.aspect_ratio || '1:1', modelType, body.base_size);
@@ -719,7 +821,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
           if (value.startsWith('data:')) {
             extras.push(value);
           } else if (/^https?:\/\//i.test(value)) {
-            const source = await requestBuffer(value);
+            const source = await fetchReferenceImage(value);
             if (/hivemind\.e2e/i.test(String(source.contentType))) {
               return sendJson(res, 400, {
                 error: 'A reference in images_base64 is end-to-end encrypted — decrypt it in the browser and send a data URL.',
@@ -747,7 +849,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
             error: 'A saved reference image has to be sent as image_base64 — this host cannot read a sealed reference path.',
           });
         }
-        const source = await requestBuffer(body.image_url);
+        const source = await fetchReferenceImage(body.image_url);
         if (/hivemind\.e2e/i.test(String(source.contentType))) {
           return sendJson(res, 400, {
             error: 'That reference is end-to-end encrypted — decrypt it in the browser and send image_base64.',
@@ -761,7 +863,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         body: JSON.stringify(payload),
       });
       return sendJson(res, 202, submitted);
-    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+    } catch (e) { return sendJson(res, upstreamStatus(e), { error: e.message }); }
   }
   if (pathname === '/local-ai/interpolate' && req.method === 'POST') {
     const token = readToken();
@@ -781,7 +883,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         timeout: 180000,
       });
       return sendJson(res, 202, submitted);
-    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+    } catch (e) { return sendJson(res, upstreamStatus(e), { error: e.message }); }
   }
   if (pathname === '/local-ai/smart-mask' && req.method === 'POST') {
     const token = readToken();
@@ -802,7 +904,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         timeout: 120000,
       });
       return sendJson(res, 202, submitted);
-    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+    } catch (e) { return sendJson(res, upstreamStatus(e), { error: e.message }); }
   }
   if (pathname === '/local-ai/ltx-director' && req.method === 'POST') {
     const token = readToken();
@@ -828,7 +930,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         timeout: 120000,
       });
       return sendJson(res, 202, submitted);
-    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+    } catch (e) { return sendJson(res, upstreamStatus(e), { error: e.message }); }
   }
   if (pathname === '/local-ai/episode' && req.method === 'POST') {
     const token = readToken();
@@ -849,7 +951,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         timeout: 180000,
       });
       return sendJson(res, 202, submitted);
-    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+    } catch (e) { return sendJson(res, upstreamStatus(e), { error: e.message }); }
   }
   if (pathname === '/local-ai/upscale' && req.method === 'POST') {
     const token = readToken();
@@ -870,7 +972,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         body: JSON.stringify(payload),
       });
       return sendJson(res, 202, submitted);
-    } catch (e) { return sendJson(res, 502, { error: e.message }); }
+    } catch (e) { return sendJson(res, upstreamStatus(e), { error: e.message }); }
   }
   return sendJson(res, 404, { error: 'not found' });
 }
@@ -894,14 +996,28 @@ function serveStatic(res, pathname) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const u = new URL(req.url, `http://${req.headers.host || HOST}`);
+  let u;
+  try {
+    u = new URL(req.url, `http://${req.headers.host || HOST}`);
+  } catch {
+    return sendJson(res, 400, { error: 'Invalid request URL' });
+  }
   try {
     if (u.pathname === '/health' || u.pathname === '/healthz') return sendJson(res, 200, { ok: true, service: 'Open Generative AI Hosted', hosted: true, zimage: ZIMAGE_URL });
-    if (u.pathname.startsWith('/local-ai/')) return handleLocalAi(req, res, u.pathname, u.searchParams);
+    // Awaited, so a rejection inside a route lands in THIS catch instead of
+    // escaping as an unhandled rejection (which terminates Node 22).
+    if (u.pathname.startsWith('/local-ai/')) return await handleLocalAi(req, res, u.pathname, u.searchParams);
     if (u.pathname.startsWith('/api/')) return sendJson(res, 501, { error: 'Cloud Muapi proxy is not enabled in hosted mode; use local Z-Image or the desktop app API-key flow.' });
     return serveStatic(res, u.pathname);
   } catch (e) {
-    return sendJson(res, 500, { error: e.message });
+    if (res.headersSent) { try { res.end(); } catch { /* already closed */ } return undefined; }
+    return sendJson(res, 500, { error: 'The local inference bridge hit an unexpected error' });
   }
+});
+// Last line of defence: log the kind of failure (never a payload — requests
+// carry prompts and pictures) and keep serving the other callers.
+process.on('unhandledRejection', (reason) => {
+  const name = reason && reason.name ? reason.name : typeof reason;
+  console.error(`[open-generative-ai-hosted] unhandled rejection (${name}); the bridge stays up`);
 });
 server.listen(PORT, HOST, () => console.log(`[open-generative-ai-hosted] http://${HOST}:${PORT}`));

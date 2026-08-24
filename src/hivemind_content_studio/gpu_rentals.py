@@ -3610,6 +3610,33 @@ def _reaper_loop() -> None:
             delay = REAPER_INTERVAL_SECONDS
 
 
+# POST /api/gpu-rentals is money. A retry after a proxy timeout (the Hivemind
+# Link leg is 190 s), a second tab, or a refresh mid-request used to rent a
+# SECOND billing machine. Two guards, both in-process: a client-generated
+# ``request_id`` whose result is replayed for a while, and one rent in flight
+# per tier at a time.
+RENTAL_REQUEST_TTL_SECONDS = 600.0
+_rental_requests: dict[str, tuple[float, dict]] = {}
+_rental_requests_lock = threading.Lock()
+_rentals_in_flight: set[str] = set()
+_rentals_in_flight_lock = threading.Lock()
+RENTAL_IN_FLIGHT_DETAIL = "A rental is already being placed for this tier — wait for it to appear in the list"
+
+
+def _replayed_rental(request_id: str) -> dict | None:
+    now = time.monotonic()
+    with _rental_requests_lock:
+        for key in [key for key, (at, _) in _rental_requests.items() if now - at > RENTAL_REQUEST_TTL_SECONDS]:
+            _rental_requests.pop(key, None)
+        entry = _rental_requests.get(request_id)
+    return dict(entry[1]) if entry else None
+
+
+def _remember_rental(request_id: str, result: dict) -> None:
+    with _rental_requests_lock:
+        _rental_requests[request_id] = (time.monotonic(), dict(result))
+
+
 def register_gpu_rental_routes(app, require_owner) -> None:
     """Attach the owner-gated rental routes to the control API app."""
     from fastapi import Body, Depends, HTTPException
@@ -3622,8 +3649,11 @@ def register_gpu_rental_routes(app, require_owner) -> None:
             # inside rental_providers/ is the base class, and catching only the
             # subclass would turn a Vast 429 into an unhandled 500.
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except requests.RequestException as exc:
+            # A ConnectionError/Timeout out of the provider session is not a
+            # ProviderError; Machines offline used to be a plain-text 500.
+            raise HTTPException(status_code=503, detail="The GPU marketplace is unreachable") from exc
 
-    @app.on_event("startup")
     def _start_rental_reaper() -> None:
         # Warm each marketplace connection off the request path. The first
         # call in a fresh process pays DNS + TLS — measured at ~7s against a
@@ -3642,6 +3672,14 @@ def register_gpu_rental_routes(app, require_owner) -> None:
             return
         threading.Thread(target=_reaper_loop, name="gpu-rental-reaper", daemon=True).start()
 
+    # The control app runs these from its lifespan handler; an app without
+    # that list (another host embedding these routes) gets the event hook.
+    hooks = getattr(app.state, "startup_hooks", None)
+    if isinstance(hooks, list):
+        hooks.append(_start_rental_reaper)
+    else:
+        app.add_event_handler("startup", _start_rental_reaper)
+
     @app.get("/api/gpu-rentals/offers", dependencies=[Depends(require_owner)])
     def gpu_rental_offers(tier: str = "image", prefer: str = "balanced",
                           gpu_class: str | None = None) -> dict:
@@ -3657,7 +3695,9 @@ def register_gpu_rental_routes(app, require_owner) -> None:
 
     @app.get("/api/gpu-rentals", dependencies=[Depends(require_owner)])
     def gpu_rentals_index() -> dict:
-        return _guard(list_rentals)
+        # ok:true like the rest of the studio API (additive; the list is
+        # under its own keys).
+        return {"ok": True, **_guard(list_rentals)}
 
     # The rental-LoRA routes come before the {rental_id} ones: Starlette
     # matches in registration order, and a literal "loras" segment must never
@@ -3706,22 +3746,48 @@ def register_gpu_rental_routes(app, require_owner) -> None:
             offer_id = f"{provider}:{offer_id}"
         prefer = str(payload.get("prefer") or "balanced")
         gpu_class = payload.get("gpu_class") or None
-        count = payload.get("count") or 1
+        try:
+            count = int(payload.get("count") or 1)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="count must be a whole number") from None
+        if not 1 <= count <= MAX_BATCH_MACHINES:
+            raise HTTPException(status_code=400, detail=f"count must be between 1 and {MAX_BATCH_MACHINES}")
         # The price the user clicked. Bounds the fallbacks; absent from older
         # clients, which keep the uncapped behaviour.
         try:
             max_usd_per_hour = float(payload.get("max_usd_per_hour")) if payload.get("max_usd_per_hour") else None
         except (TypeError, ValueError):
             max_usd_per_hour = None
-        return _guard(
-            create_rental,
-            tier,
-            str(offer_id) if offer_id is not None else None,
-            prefer,
-            str(gpu_class) if gpu_class else None,
-            int(count),
-            max_usd_per_hour=max_usd_per_hour,
-        )
+        # Optional, client-generated (a UUID per click). The same id inside
+        # RENTAL_REQUEST_TTL_SECONDS answers with the same result and rents
+        # nothing new.
+        request_id = str(payload.get("request_id") or "").strip()[:128]
+        if request_id:
+            replayed = _replayed_rental(request_id)
+            if replayed is not None:
+                return replayed
+        with _rentals_in_flight_lock:
+            if tier in _rentals_in_flight:
+                raise HTTPException(status_code=409, detail=RENTAL_IN_FLIGHT_DETAIL)
+            _rentals_in_flight.add(tier)
+        try:
+            result = _guard(
+                create_rental,
+                tier,
+                str(offer_id) if offer_id is not None else None,
+                prefer,
+                str(gpu_class) if gpu_class else None,
+                count,
+                max_usd_per_hour=max_usd_per_hour,
+            )
+        finally:
+            with _rentals_in_flight_lock:
+                _rentals_in_flight.discard(tier)
+        if isinstance(result, dict):
+            result = {"ok": True, **result}
+        if request_id and isinstance(result, dict):
+            _remember_rental(request_id, result)
+        return result
 
     @app.delete("/api/gpu-rentals/{rental_id}", dependencies=[Depends(require_owner)])
     def gpu_rentals_destroy(rental_id: str) -> dict:

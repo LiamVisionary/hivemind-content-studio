@@ -1048,3 +1048,423 @@ def test_the_persona_gender_tells_the_writer_what_to_call_the_subject() -> None:
     assert prompt_profiles.normalize_persona_gender("dragon") == ""
     assert prompt_profiles.system_prompt("minimax-h3-reference", persona_gender="dragon") == plain
     assert prompt_profiles.system_prompt("minimax-h3-reference", persona_gender=None) == plain
+
+
+# --- the cast -----------------------------------------------------------------
+#
+# Who is in the shot, per <Subject N>, the way the studio's compiler
+# (castPrompt.js) sees it. persona_gender only ever knew about one person.
+
+_CAST_TWO = [
+    # A persona's name is vault-sealed; one arriving here is a bug upstream and
+    # must be discarded unread — so a loud one is sent on purpose.
+    {"subject": 1, "kind": "persona", "gender": "female", "name": "SEALED-NAME-MUST-NOT-APPEAR",
+     "voice": True, "look": "lit from a window on the left"},
+    {"subject": 2, "kind": "character", "gender": "", "name": "SpongeBob SquarePants", "voice": True, "look": ""},
+]
+
+
+def test_the_cast_tells_the_writer_who_is_in_the_shot_in_reference_mode() -> None:
+    """Reference mode: every member is a <Subject N> the helper addresses only
+    by label; a persona's lines take the plain language tag (the clip carries
+    the timbre), a known character's voice is named inside the tag, and the
+    bookkeeping sections are left to the studio."""
+    references = {"images": 2, "audios": 1, "videos": []}
+    body = prompt_profiles.system_prompt("minimax-h3-reference", references=references, cast=_CAST_TWO)
+    clause = body[body.index("The cast — who is in this shot"):]
+
+    assert "2 members, already labelled. Address every one of them ONLY by its label" in clause
+    assert (
+        "<Subject 1> is a woman (she/her): a real person, defined only by the attached reference "
+        "pictures and clips. A reference clip carries her voice, so her lines take the plain language "
+        'tag — "<Subject 1> (Sx) says: <d>[English] …</d>"'
+    ) in clause
+    # The look steers light and framing, never identity.
+    assert "how <Subject 1> is lit and framed, never to re-describe or contradict the references: lit from a window on the left." in clause
+    assert "<Subject 2> is SpongeBob SquarePants: a character the model already knows, written under that label." in clause
+    # The possessive follows characterVoiceText(): a name ending in s takes a bare apostrophe.
+    assert "<d>[English in SpongeBob SquarePants' voice from …] …</d>" in clause
+    assert '"[English in SpongeBob SquarePants\' voice]" when the work is unknown' in clause
+    # Section ownership, as compileCastPrompt() divides it.
+    assert "subject_definitions and retention_analysis are the studio's" in clause
+    assert "summary, detailed_description, overall_soundscape and non_diegetic_music are yours" in clause
+    assert "every <Subject N> listed above appears in them with something to do" in clause
+    assert "A persona is addressed ONLY by its label. Never give it a name" in clause
+    # The reference inventory is still there, before the cast.
+    assert "<Picture 1> through <Picture 2>" in body
+    assert body.index("The run carries exactly these references") < body.index("The cast — who is in this shot")
+
+
+def test_a_persona_member_with_no_voice_clip_is_said_so() -> None:
+    """castPrompt.js writes "speaks as S1, in a woman's voice" when no clone is
+    attached — left unsaid, an unvoiced subject comes back as a generic adult
+    male whoever is on screen — so the helper is told the same."""
+    cast = [{"subject": 1, "kind": "persona", "gender": "male", "voice": False}]
+    body = prompt_profiles.system_prompt("minimax-h3-reference", references={"images": 1}, cast=cast)
+    assert "<Subject 1> is a man (he/him)" in body
+    assert "Nothing carries his voice: a line for <Subject 1> is written only if the brief asks" in body
+    assert "in a man's voice" in body
+    # A silent known character keeps the plain tag rather than a named voice.
+    quiet = prompt_profiles.system_prompt("minimax-h3-reference", references={"images": 1}, cast=[
+        {"subject": 1, "kind": "character", "name": "Willow", "voice": False},
+    ])
+    assert "<Subject 1>'s lines take the plain tag \"<d>[English] …</d>\" — do not name a voice." in quiet
+    assert "Willow's voice" not in quiet
+
+
+def test_the_cast_in_text_mode_describes_a_persona_and_names_a_character() -> None:
+    """No references: a persona cannot be rendered, so it is written from its
+    look and gender in prose and never given a name; a character is written by
+    full name plus source and must appear. Non-H3 profiles get no <d> tags."""
+    body = prompt_profiles.system_prompt("minimax-h3-t2v", cast=_CAST_TWO)
+    clause = body[body.index("The cast — who is in this shot"):]
+    assert "2 members. Every one of them appears in the scene with something to do" in clause
+    assert (
+        'Subject 1: a woman (she/her), described as "lit from a window on the left" — a real person whose '
+        "reference pictures are NOT attached to this run, so write this person from that description and "
+        "nothing else. Never give this person a name."
+    ) in clause
+    assert "<Subject 1>" not in clause
+    assert (
+        "Subject 2: SpongeBob SquarePants — a character the model already knows. Write SpongeBob SquarePants "
+        "by full name plus the work it comes from at first mention, and keep that character in the scene."
+    ) in clause
+    assert "<d>[English in SpongeBob SquarePants' voice from …] …</d>" in clause
+
+    # Without a look the persona is simply "a woman" / "the woman".
+    bare = prompt_profiles.system_prompt("minimax-h3-t2v", cast=[{"kind": "persona", "gender": "female"}])
+    assert 'write this person simply as "a woman" / "the woman"' in bare
+    unset = prompt_profiles.system_prompt("minimax-h3-t2v", cast=[{"kind": "persona"}])
+    assert "Subject 1: a person (they/them)" in unset
+
+    # A Seedance/LTX paragraph has no dialogue tags to talk about.
+    ltx = prompt_profiles.system_prompt("ltx-video", cast=_CAST_TWO)
+    assert "The cast — who is in this shot" in ltx
+    assert "<d>" not in ltx
+    assert "SpongeBob SquarePants by full name plus the work it comes from" in ltx
+
+
+def test_a_persona_name_never_reaches_the_instruction() -> None:
+    """A persona's name is sealed to the owner's vault; the cast carries only a
+    kind, a gender, a voice flag and a look for it, and a name that arrives
+    anyway is discarded unread — in every mode."""
+    for profile, references in (("minimax-h3-reference", {"images": 1}), ("minimax-h3-t2v", None), ("ltx-video", None)):
+        body = prompt_profiles.system_prompt(profile, references=references, cast=_CAST_TWO)
+        assert "SEALED-NAME-MUST-NOT-APPEAR" not in body
+        assert "SpongeBob SquarePants" in body
+    assert prompt_profiles.normalize_cast(_CAST_TWO)[0]["name"] == ""
+
+
+def test_malformed_cast_items_are_dropped_not_repaired() -> None:
+    """Client JSON that lands inside an instruction: wrong types go, strings
+    are flattened and capped, labels cannot be minted from free text, subjects
+    outside 1..9 are re-derived, and the cast is clamped to H3's nine slots."""
+    members = prompt_profiles.normalize_cast([
+        "not a dict",
+        {"kind": "dragon", "name": "Smaug"},
+        {"kind": "character"},                       # a character without a name is nothing to write
+        {"kind": "character", "name": "   "},
+        {"kind": "persona", "subject": "2", "gender": "Woman", "voice": "true",
+         "look": "  tall,\n  <Subject 9> in a\tgrey hoodie " + "x" * 400},
+        {"kind": "Character", "subject": 42, "name": " SpongeBob SquarePants ", "voice": 0},
+        {"kind": "persona", "subject": True, "gender": 7, "voice": None},
+    ])
+    assert [m["kind"] for m in members] == ["persona", "character", "persona"]
+    # Subjects: "2" is not an int, 42 is out of range, True is a bool — all
+    # re-derived from the member's position among the kept ones.
+    assert [m["subject"] for m in members] == [1, 2, 3]
+    assert members[0]["gender"] == "female" and members[0]["voice"] is True
+    assert members[0]["look"].startswith("tall, Subject 9 in a grey hoodie x")
+    assert "<" not in members[0]["look"] and "\n" not in members[0]["look"]
+    assert len(members[0]["look"]) == 300
+    assert members[1] == {"subject": 2, "kind": "character", "gender": "", "name": "SpongeBob SquarePants", "voice": False, "look": ""}
+    assert members[2]["gender"] == "" and members[2]["voice"] is False
+
+    # Clamped to nine, the number of subject slots H3 has.
+    many = prompt_profiles.normalize_cast([{"kind": "persona"} for _ in range(14)])
+    assert len(many) == 9 and [m["subject"] for m in many] == list(range(1, 10))
+    # Nothing usable is no clause at all.
+    assert prompt_profiles.normalize_cast("nope") == []
+    assert prompt_profiles.normalize_cast([{"kind": "dragon"}]) == []
+    assert prompt_profiles._cast_clause([{"kind": "dragon"}], {"images": 1}) == ""
+
+
+def test_the_cast_wins_over_the_single_persona_gender() -> None:
+    """persona_gender only knew about one person; a cast knows everybody's.
+    With a cast present the one-person clause is not written at all, so the
+    two can never disagree about who is on screen."""
+    only_gender = prompt_profiles.system_prompt("minimax-h3-reference", references={"images": 1}, persona_gender="male")
+    assert 'The person on screen is a man. Call him "the man"' in only_gender
+
+    both = prompt_profiles.system_prompt(
+        "minimax-h3-reference", references={"images": 1}, persona_gender="male",
+        cast=[{"subject": 1, "kind": "persona", "gender": "female", "voice": True}],
+    )
+    assert "The person on screen is" not in both
+    assert "<Subject 1> is a woman (she/her)" in both
+    # An unusable cast falls back to the single-persona clause, unchanged.
+    fallback = prompt_profiles.system_prompt(
+        "minimax-h3-reference", references={"images": 1}, persona_gender="male", cast=[{"kind": "dragon"}],
+    )
+    assert fallback == only_gender
+
+
+def test_no_cast_leaves_every_instruction_exactly_as_it_was() -> None:
+    """The regression guard: the argument defaults to None, and None or an
+    empty list must produce the byte-identical instruction the helper wrote
+    before the cast existed — for every profile and every other clause."""
+    combos = [
+        ("minimax-h3-reference", {}),
+        ("minimax-h3-reference", {"persona_gender": "female", "duration_seconds": 8,
+                                  "references": {"images": 2, "audios": 1, "videos": [{"useAudio": True, "seconds": 4}]}}),
+        ("minimax-h3-reference", {"ugc": True, "references": {"images": 1}}),
+        ("minimax-h3-t2v", {"persona_gender": "male", "duration_seconds": 6,
+                            "character_notes": ["SpongeBob SquarePants — from the animated series SpongeBob SquarePants (1999)"]}),
+        ("minimax-h3-i2v", {"ugc": True, "continuation": True, "previous_prompt": "the shot before"}),
+        ("ltx-video", {"persona_gender": "nonbinary", "duration_seconds": 5}),
+        ("image", {"ugc": True}),
+    ]
+    for profile, kwargs in combos:
+        before = prompt_profiles.system_prompt(profile, **kwargs)
+        assert prompt_profiles.system_prompt(profile, cast=None, **kwargs) == before
+        assert prompt_profiles.system_prompt(profile, cast=[], **kwargs) == before
+        assert "The cast — who is in this shot" not in before
+
+
+def test_the_route_folds_the_cast_into_the_system_prompt(
+    tmp_path: Path, monkeypatch, captured_system,
+) -> None:
+    """The field rides the generate request and reaches system_prompt; a
+    persona's name is discarded before anything is written, and a malformed
+    member never reaches the instruction either."""
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post("/api/prompt-helper/generate", json={
+        "modelId": "some-gguf", "idea": "she teases the sponge about his tie",
+        "targetModel": "minimax-h3-reference",
+        "references": {"images": 1, "videos": [], "audios": 1, "audioSeconds": [3.2]},
+        "personaGender": "male",
+        "cast": _CAST_TWO + ["garbage", {"kind": "dragon"}],
+    })
+
+    assert response.status_code == 200
+    system = captured_system[0]
+    assert "<Subject 1> is a woman (she/her)" in system
+    assert "<Subject 2> is SpongeBob SquarePants" in system
+    assert "SEALED-NAME-MUST-NOT-APPEAR" not in system
+    assert "dragon" not in system and "garbage" not in system
+    # The cast superseded the one-person gender.
+    assert "The person on screen is" not in system
+
+    # Absent, the request reads exactly as it always did.
+    client.post("/api/prompt-helper/generate", json={
+        "modelId": "some-gguf", "idea": "she teases the sponge about his tie",
+        "targetModel": "minimax-h3-reference", "references": {"images": 1},
+        "personaGender": "male",
+    })
+    assert "The cast — who is in this shot" not in captured_system[1]
+    assert 'The person on screen is a man. Call him "the man"' in captured_system[1]
+
+
+# ---------------------------------------------------------------------------
+# /api/prompt-helper/describe-look — a persona's look, read from its pictures
+# ---------------------------------------------------------------------------
+
+_JPEG_URL = "data:image/jpeg;base64,/9j/AAAA"
+_PNG_URL = "data:image/png;base64,iVBORw0KGgoAAAA"
+
+
+class _LookRuntime:
+    """A loaded, seeing helper that answers with whatever it was built with."""
+
+    def __init__(self, answer: str, *, loaded=("scout/scout-Q4.gguf",), vision: bool = True) -> None:
+        self.answer = answer
+        self.loaded = list(loaded)
+        self.vision = vision
+        self.calls: list[dict] = []
+
+    def loaded_model_ids(self):
+        return list(self.loaded)
+
+    def model_sees_images(self, model_id):
+        return self.vision
+
+    def chat(self, *, model_id, messages, images=None, image=None, **kwargs):
+        self.calls.append({"model_id": model_id, "messages": messages, "images": images,
+                           "image": image, **kwargs})
+        return self.answer
+
+
+def _look_client(tmp_path: Path, monkeypatch, runtime) -> TestClient:
+    monkeypatch.setattr(control_api.local_llm, "runtime", lambda: runtime)
+    return _client(tmp_path, monkeypatch)
+
+
+def test_describe_look_returns_a_cleaned_one_line_look(tmp_path: Path, monkeypatch) -> None:
+    """The happy path, with the slips a small vision model makes undone: a
+    quoted, labelled, line-broken answer comes back as one plain line."""
+    runtime = _LookRuntime('"Description: a man with short dark hair,\n\na trimmed beard\nand glasses."')
+    client = _look_client(tmp_path, monkeypatch, runtime)
+
+    response = client.post("/api/prompt-helper/describe-look", json={
+        "images": [_JPEG_URL, _PNG_URL], "gender": "male", "modelId": "scout/scout-Q4.gguf",
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True, "look": "a man with short dark hair, a trimmed beard and glasses.",
+    }
+    # Both pictures rode the ONE user turn, through the same chat() the prompt
+    # helper uses; the gendered instruction was the system turn.
+    assert len(runtime.calls) == 1
+    call = runtime.calls[0]
+    assert call["model_id"] == "scout/scout-Q4.gguf"
+    assert call["images"] == [_JPEG_URL, _PNG_URL]
+    assert call["messages"][0]["role"] == "system"
+    assert '"a man with …"' in call["messages"][0]["content"]
+    assert call["messages"][-1]["role"] == "user"
+    assert "2 photos" in call["messages"][-1]["content"]
+
+
+def test_describe_look_uses_whatever_is_loaded_when_no_model_is_named(tmp_path: Path, monkeypatch) -> None:
+    runtime = _LookRuntime("a woman with a silver bob.", loaded=("big/vision-Q4.gguf",))
+    client = _look_client(tmp_path, monkeypatch, runtime)
+
+    response = client.post("/api/prompt-helper/describe-look", json={"images": [_JPEG_URL]})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["look"] == "a woman with a silver bob."
+    assert runtime.calls[0]["model_id"] == "big/vision-Q4.gguf"
+    assert "one photo" in runtime.calls[0]["messages"][-1]["content"]
+
+
+@pytest.mark.parametrize("images", [
+    [],
+    [_JPEG_URL, _JPEG_URL, _JPEG_URL, _JPEG_URL],
+    ["https://example.com/photo.jpg"],
+    ["data:image/jpeg;base64,"],
+    [_JPEG_URL, "not a data url"],
+])
+def test_describe_look_refuses_bad_pictures_before_asking_the_model(
+    tmp_path: Path, monkeypatch, images: list[str],
+) -> None:
+    """Zero pictures, four pictures, or anything that is not an image data
+    URL is a 422 — and the model is never asked."""
+    runtime = _LookRuntime("should not be reached")
+    client = _look_client(tmp_path, monkeypatch, runtime)
+
+    response = client.post("/api/prompt-helper/describe-look", json={"images": images, "gender": "female"})
+
+    assert response.status_code == 422, response.text
+    assert runtime.calls == []
+    # The refusal never echoes the pictures back.
+    assert _JPEG_URL not in response.text
+
+
+def test_describe_look_says_so_when_nothing_is_loaded(tmp_path: Path, monkeypatch) -> None:
+    runtime = _LookRuntime("unreached", loaded=())
+    client = _look_client(tmp_path, monkeypatch, runtime)
+
+    nothing = client.post("/api/prompt-helper/describe-look", json={"images": [_JPEG_URL]})
+    assert nothing.status_code == 409
+    assert "No helper model is loaded" in nothing.json()["detail"]
+
+    # A named model that is not the loaded one is the same refusal, by name.
+    named = client.post("/api/prompt-helper/describe-look", json={
+        "images": [_JPEG_URL], "modelId": "other/model.gguf",
+    })
+    assert named.status_code == 409
+    assert named.json()["detail"] == "other/model.gguf is not loaded. Load it first."
+    assert runtime.calls == []
+
+
+def test_describe_look_refuses_a_model_that_cannot_see(tmp_path: Path, monkeypatch) -> None:
+    """A blind model would happily describe pictures it was never shown, and
+    that answer reads exactly like a real one — so it is refused up front."""
+    runtime = _LookRuntime("a man with a beard", vision=False)
+    client = _look_client(tmp_path, monkeypatch, runtime)
+
+    response = client.post("/api/prompt-helper/describe-look", json={"images": [_JPEG_URL]})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "The loaded helper model cannot see pictures — load a vision-capable one "
+        "(e.g. Swarm Scout or Qwen3.6)"
+    )
+    assert runtime.calls == []
+
+
+@pytest.mark.parametrize("answer", ['""', "```\n```", "   ", "**Description:**"])
+def test_describe_look_reports_an_empty_answer_as_a_502(tmp_path: Path, monkeypatch, answer: str) -> None:
+    client = _look_client(tmp_path, monkeypatch, _LookRuntime(answer))
+
+    response = client.post("/api/prompt-helper/describe-look", json={"images": [_JPEG_URL]})
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "The helper returned nothing — try again or load a larger model"
+
+
+def test_describe_look_treats_the_runtimes_empty_answer_the_same_way(tmp_path: Path, monkeypatch) -> None:
+    """local_llm.chat raises its own typed error for an empty completion; the
+    route turns that into the same 502, not the generate route's 400."""
+    class EmptyRuntime(_LookRuntime):
+        def chat(self, **kwargs):
+            raise local_llm.LocalLlmEmptyAnswer("Local model returned an empty prompt.")
+
+    client = _look_client(tmp_path, monkeypatch, EmptyRuntime("unused"))
+    response = client.post("/api/prompt-helper/describe-look", json={"images": [_JPEG_URL]})
+    assert response.status_code == 502
+    assert "returned nothing" in response.json()["detail"]
+
+
+def test_describe_look_is_owner_gated(tmp_path: Path, monkeypatch) -> None:
+    runtime = _LookRuntime("a man with a beard")
+    client = _look_client(tmp_path, monkeypatch, runtime)
+    assert client.post("/api/owner/lock").status_code in (200, 204)
+    response = client.post("/api/prompt-helper/describe-look", json={"images": [_JPEG_URL]})
+    assert response.status_code in (401, 403)
+    assert runtime.calls == []
+
+
+def test_the_look_instruction_fixes_the_noun_to_the_saved_gender() -> None:
+    """"a woman with …" / "a man with …" / "a person with …": the same nouns the
+    cast writes, so the helper's look and the subject line agree. Unset and
+    non-binary both read "a person" — the helper must not assign a gender."""
+    female = prompt_profiles.look_system_prompt("female")
+    male = prompt_profiles.look_system_prompt("male")
+    assert '"a woman with …"' in female and '"a man with …"' not in female
+    assert '"a man with …"' in male and '"a woman with …"' not in male
+    for unset in ("nonbinary", "", None, "dragon"):
+        system = prompt_profiles.look_system_prompt(unset)
+        assert '"a person with …"' in system
+        assert '"a woman with …"' not in system and '"a man with …"' not in system
+    # The shape of the job, whatever the gender.
+    for system in (female, male, prompt_profiles.look_system_prompt(None)):
+        assert "SAME person" in system
+        assert "Never name the person" in system
+        assert "Do not mention the photos" in system
+        assert "no line breaks" in system and "no lists" in system
+        assert "25 to 60 words" in system
+    assert "in his thirties" in male and "in her thirties" in female
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ('"A woman with long red hair and freckles."', "A woman with long red hair and freckles."),
+    ("**Description:** a man with a beard\n\nand glasses.", "a man with a beard and glasses."),
+    ("```\nLook: “a person with curly hair”\n```", "a person with curly hair"),
+    ("Here is the description: a woman with a bob.", "a woman with a bob."),
+    ("- Appearance — a man with a buzz cut", "a man with a buzz cut"),
+    ("", ""),
+    ("''", ""),
+])
+def test_the_look_is_unwrapped_and_flattened(raw: str, expected: str) -> None:
+    assert prompt_profiles.normalize_look(raw) == expected
+
+
+def test_the_look_is_capped_at_a_word_boundary() -> None:
+    long = " ".join(f"word{i}," for i in range(200))
+    look = prompt_profiles.normalize_look(long)
+    assert len(look) <= prompt_profiles.LOOK_MAX_CHARS
+    assert not look.endswith(",") and look.endswith(("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"))
+    assert look.split()[-1].startswith("word")
+

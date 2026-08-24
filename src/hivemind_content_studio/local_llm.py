@@ -110,6 +110,8 @@ SAFETY_MARGIN_BYTES = 4 * 1024**3
 
 LOAD_TIMEOUT_SECONDS = 240
 _STDERR_RING_LINES = 60
+# How long one disk scan of the model roots stands in for the next.
+SCAN_CACHE_SECONDS = 10.0
 
 _GGUF_MAGIC = b"GGUF"
 _GGUF_STRING = 8
@@ -165,10 +167,23 @@ class LoadedModel:
     stderr: deque
     # Started with a projector, so an image sent to it is actually read.
     vision: bool = False
+    # True from spawn until /health answers. A load takes up to
+    # LOAD_TIMEOUT_SECONDS, and during it the entry is already registered (so
+    # a second load does not start a second server) — but it is not LOADED:
+    # the picker must not say so, and chat must not try it.
+    loading: bool = False
 
 
 class LocalLlmError(RuntimeError):
     """A prompt-helper failure with a message safe to show the owner."""
+
+
+class LocalLlmEmptyAnswer(LocalLlmError):
+    """The model answered, but with nothing in it once reasoning is stripped.
+
+    Its own type so a caller can tell "try again" apart from "not loaded" or
+    "did not answer" without reading the message; still a LocalLlmError, so
+    every existing ``except`` keeps catching it."""
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +475,23 @@ def _lmstudio_loaded_models(base_url: str, timeout: float = 1.5) -> list[dict[st
 # ---------------------------------------------------------------------------
 
 
+_LLAMA_PATH_RE = re.compile(r"(?<![\w/])/(?:[\w.@+%~-]+/)+[\w.@+%~-]+")
+
+
+def _llama_stderr_summary(lines: list[str], *, limit: int = 240) -> str:
+    """What llama-server said before it died, fit for a toast.
+
+    It is launched with ``--model <absolute path>`` and its loader echoes that
+    path, so the raw last lines named the GGUF under the owner's home. Prefer
+    the one line that says "error"; reduce every path to its basename."""
+    cleaned = [" ".join(str(line).split()) for line in lines if str(line).strip()]
+    if not cleaned:
+        return ""
+    chosen = next((line for line in reversed(cleaned) if "error" in line.lower()), cleaned[-1])
+    chosen = _LLAMA_PATH_RE.sub(lambda match: Path(match.group(0)).name, chosen)
+    return chosen[: limit - 1].rstrip() + "…" if len(chosen) > limit else chosen
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -494,6 +526,8 @@ class LocalLlmRuntime:
         self._lock = threading.RLock()
         self._state_path = state_path
         self._measurements = self._read_measurements()
+        # The disk scan behind snapshot(): (root mtimes, taken at, result).
+        self._scan_cache: tuple[tuple[tuple[str, float], ...], float, tuple] | None = None
         atexit.register(self.unload_all)
 
     # -- measured memory ---------------------------------------------------
@@ -520,6 +554,8 @@ class LocalLlmRuntime:
         if resident_bytes <= self._measurements.get(model_id, 0):
             return
         self._measurements[model_id] = resident_bytes
+        # The scan carries each model's measured size, so it is stale now.
+        self._scan_cache = None
         if self._state_path is None:
             return
         try:
@@ -548,11 +584,37 @@ class LocalLlmRuntime:
             if entry.process.poll() is not None:
                 self._loaded.pop(model_id, None)
 
+    def _scan_models_cached(self) -> tuple[list[LocalLlmModel], list[UnavailableModel]]:
+        """scan_models(), remembered for a few seconds.
+
+        Every runtime poll re-walked each model root with rglob and read each
+        GGUF header, so the picker felt slow to open on a big model directory.
+        The cache is keyed on the roots' mtimes (a model added or removed at
+        the top level invalidates it at once) and expires on its own, so a
+        new file deeper in the tree still shows within the TTL. Fit and the
+        loaded set are NOT cached — those are recomputed on every call."""
+        roots = _model_roots()
+        stamps = []
+        for root in roots:
+            try:
+                stamps.append((str(root), root.stat().st_mtime))
+            except OSError:
+                stamps.append((str(root), 0.0))
+        key = tuple(stamps)
+        now = time.monotonic()
+        cached = self._scan_cache
+        if cached is not None and cached[0] == key and now - cached[1] < SCAN_CACHE_SECONDS:
+            return cached[2]
+        result = scan_models(self._measurements)
+        self._scan_cache = (key, now, result)
+        return result
+
     def snapshot(self) -> dict[str, Any]:
         """Everything the picker needs to decide what is safe to load."""
         with self._lock:
             self._reap()
-            loaded_ids = set(self._loaded)
+            loaded_ids = {model_id for model_id, entry in self._loaded.items() if not entry.loading}
+            loading_ids = {model_id for model_id, entry in self._loaded.items() if entry.loading}
             reclaimable = sum(entry.estimated_bytes for entry in self._loaded.values())
             loaded = [
                 {
@@ -562,6 +624,7 @@ class LocalLlmRuntime:
                     "startedAt": entry.started_at,
                     "estimatedBytes": entry.estimated_bytes,
                     "contextTokens": entry.context_tokens,
+                    "loading": bool(entry.loading),
                 }
                 for entry in self._loaded.values()
             ]
@@ -570,11 +633,16 @@ class LocalLlmRuntime:
         available = _available_memory_bytes()
         external = _lmstudio_loaded_models(self._lmstudio_url)
         models = []
-        runnable, unavailable = scan_models(self._measurements)
+        runnable, unavailable = self._scan_models_cached()
         for model in runnable:
             need = model.estimated_load_bytes + SAFETY_MARGIN_BYTES
             if model.id in loaded_ids:
                 fit = "loaded"
+            elif model.id in loading_ids:
+                # Its server is up but not answering /health yet. Not
+                # "loaded" — a Write against it would be refused — and not
+                # "fits" either, or the picker would offer to load it again.
+                fit = "loading"
             elif need <= available:
                 fit = "fits"
             elif need <= available + reclaimable:
@@ -593,7 +661,7 @@ class LocalLlmRuntime:
                     "fit": fit,
                     # Ships a projector, so it can look at a start frame. Once
                     # loaded the running server's answer replaces the guess.
-                    "vision": (self._loaded[model.id].vision if model.id in loaded_ids
+                    "vision": (self._loaded[model.id].vision if model.id in loaded_ids | loading_ids
                                else _projector_for(Path(model.path)) is not None),
                 }
             )
@@ -617,6 +685,16 @@ class LocalLlmRuntime:
         }
 
     # -- lifecycle ---------------------------------------------------------
+
+    def loaded_model_ids(self) -> list[str]:
+        """Ids of the llama-servers this process has up right now.
+
+        The cheap answer to "is anything loaded?": ``snapshot()`` also says so,
+        but it rescans the model roots and probes LM Studio on the way, which a
+        request that only needs to pick a loaded model should not pay for."""
+        with self._lock:
+            self._reap()
+            return [model_id for model_id, entry in self._loaded.items() if not entry.loading]
 
     def model_sees_images(self, model_id: str) -> bool:
         """Whether an image sent to this model is actually read.
@@ -645,8 +723,11 @@ class LocalLlmRuntime:
         model = self._model_by_id(model_id)
         with self._lock:
             self._reap()
-            if model_id in self._loaded:
-                return self.snapshot()
+            current = self._loaded.get(model_id)
+            if current is not None:
+                # A second load while the first is still coming up (another
+                # tab, a double click) says "loading" and starts nothing.
+                return {**self.snapshot(), "status": "loading" if current.loading else "loaded"}
             if unload_others:
                 for other in list(self._loaded):
                     self._unload_locked(other)
@@ -696,7 +777,7 @@ class LocalLlmRuntime:
             if resident:
                 entry.estimated_bytes = resident
                 self._record_measurement(model_id, resident)
-            return self.snapshot()
+            return {**self.snapshot(), "status": "loaded"}
 
         raise last_error or LocalLlmError(f"Could not start llama-server for {model_id}.")
 
@@ -746,6 +827,7 @@ class LocalLlmRuntime:
             context_tokens=self._context_tokens,
             stderr=ring,
             vision=projector is not None,
+            loading=True,
         )
         self._loaded[model_id] = entry
         return entry
@@ -755,12 +837,13 @@ class LocalLlmRuntime:
         url = f"http://127.0.0.1:{entry.port}/health"
         while time.time() < deadline:
             if entry.process.poll() is not None:
-                tail = " | ".join(list(entry.stderr)[-4:])
+                tail = _llama_stderr_summary(list(entry.stderr)[-6:])
                 raise LocalLlmError(f"llama-server exited while loading {entry.model_id}. {tail}".strip())
             try:
                 request = urllib.request.Request(url, headers={"Authorization": f"Bearer {entry.api_key}"})
                 with urllib.request.urlopen(request, timeout=2) as response:
                     if response.status == 200:
+                        entry.loading = False
                         return
             except (urllib.error.URLError, OSError, TimeoutError):
                 pass
@@ -808,13 +891,22 @@ class LocalLlmRuntime:
         max_tokens: int = 2048,
         timeout: float = 180.0,
         image: str | None = None,
+        # Several pictures in ONE turn (the persona look is read from up to
+        # three photos of the same person). ``image`` stays for the single
+        # start-frame callers; both land on the same user message, in order.
+        images: list[str] | None = None,
     ) -> str:
         with self._lock:
             self._reap()
             entry = self._loaded.get(model_id)
         if entry is None:
             raise LocalLlmError(f"{model_id} is not loaded. Load it first.")
-        if image:
+        if entry.loading:
+            # Asking now gets "Connection refused" in urlopen's words; say
+            # what is actually happening.
+            raise LocalLlmError(f"{model_id} is still loading — try again in a moment.")
+        attached = [url for url in ([image] if image else []) + list(images or []) if url]
+        if attached:
             # Attach to the LAST user turn, so a corrective follow-up does not
             # re-send the image and double the vision cost.
             messages = [dict(message) for message in messages]
@@ -822,7 +914,7 @@ class LocalLlmRuntime:
                 if message.get("role") == "user":
                     message["content"] = [
                         {"type": "text", "text": message.get("content") or ""},
-                        {"type": "image_url", "image_url": {"url": image}},
+                        *({"type": "image_url", "image_url": {"url": url}} for url in attached),
                     ]
                     break
         body = json.dumps(
@@ -861,7 +953,7 @@ class LocalLlmRuntime:
                 "The model spent its whole answer budget reasoning without writing a prompt. "
                 "Try a smaller idea, or pick a non-reasoning model."
             )
-        raise LocalLlmError("Local model returned an empty prompt.")
+        raise LocalLlmEmptyAnswer("Local model returned an empty prompt.")
 
 
 _THINK_RE = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.IGNORECASE | re.DOTALL)
