@@ -17,8 +17,10 @@ import { OutputRestoreDropZone } from './OutputRestoreDropZone.jsx';
 import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
 import { VaultUnlockModal } from '../bridges/VaultUnlockModal.jsx';
 import { Spinner } from '../ui/kit.jsx';
+import { ErrorBoundary } from './ErrorBoundary.jsx';
 import { HUB_PAGES, isKnownPage } from './navConfig.jsx';
 import { Shell } from './Shell.jsx';
+import { pingApiStatus } from './statusStore.js';
 import { StudioTabs } from './StudioTabs.jsx';
 
 // Studios that open in tabs. Each tab is a separate mount of the same studio, so
@@ -70,17 +72,20 @@ export function App() {
   const pageRef = useRef(null);
   const loadedStudiosRef = useRef({}); // synchronous mirror of studioComps for navigate()
 
-  const navigate = useCallback(async (target) => {
+  const navigate = useCallback(async (target, { fromHistory = false } = {}) => {
     if (!isKnownPage(target)) return;
     if (target === pageRef.current) return; // active-tab re-press: keep the live view
     const token = ++navTokenRef.current;
 
     // Keep the URL shareable without reloads; written up front so a stale-chunk
-    // recovery reload lands on the requested page.
+    // recovery reload lands on the requested page. The first route replaces
+    // (no ghost entry behind the app); later ones push so the browser's Back and
+    // Forward move between pages instead of leaving the app.
     try {
       const url = new URL(window.location.href);
       url.searchParams.set('page', target);
-      window.history.replaceState(null, '', url);
+      if (pageRef.current === null || fromHistory) window.history.replaceState({ page: target }, '', url);
+      else window.history.pushState({ page: target }, '', url);
     } catch { /* non-critical */ }
 
     if (HUB_PAGES[target]) {
@@ -90,6 +95,7 @@ export function App() {
       } catch (error) {
         console.error(`[studio] failed to load hub view "${target}":`, error);
         recoverFromStaleChunks(error);
+        toast.error("Couldn't open that page — check the connection and try again.");
         return;
       }
       if (token !== navTokenRef.current) return;
@@ -111,6 +117,7 @@ export function App() {
       } catch (error) {
         console.error(`[studio] failed to load "${target}" view:`, error);
         recoverFromStaleChunks(error);
+        toast.error("Couldn't open that studio — check the connection and try again.");
         return;
       }
     }
@@ -121,6 +128,18 @@ export function App() {
       setStudioComps(loadedStudiosRef.current);
     }
     setPage(target);
+  }, []);
+
+  // ⌘, / Ctrl+, opens Settings (the one app-wide shortcut; the composers own ⌘↵).
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === ',' && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        setSettingsOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   // Inbound router API — hubApp/explore-dock dispatch window 'navigate' events;
@@ -134,9 +153,13 @@ export function App() {
     return () => window.removeEventListener('navigate', onNavigate);
   }, [navigate]);
 
-  // Initial route.
+  // Initial route, then Back/Forward: the URL is the source of truth.
   useEffect(() => {
     navigate(initialPage());
+    void pingApiStatus();
+    const onPopState = () => { void navigate(initialPage(), { fromHistory: true }); };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
   }, [navigate]);
 
   // A generation outlives the page. Its job id is in sessionStorage and the backend
@@ -183,8 +206,14 @@ export function App() {
   const isHub = Boolean(HUB_PAGES[page]);
 
   return (
-    <>
+    <ErrorBoundary label="The studio" fallback={AppCrash}>
       <Shell page={page} onNavigate={navigate} onOpenSettings={() => setSettingsOpen(true)}>
+        {/* First studio chunk still loading: a centred spinner instead of a black area. */}
+        {page === null ? (
+          <div className="grid min-h-0 flex-1 place-items-center" aria-busy="true">
+            <Spinner size={22} className="text-ink3" />
+          </div>
+        ) : null}
         {/* Studio layer — each visited studio mounts once and is display-toggled,
             so in-flight generations survive tab switches. Only the visible studio
             is active (owns the prompt-insert bridge). */}
@@ -192,14 +221,20 @@ export function App() {
           const visible = p === page && !isHub;
           return (
             <div key={p} className={visible ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-              {TABBED_STUDIOS.has(p)
-                ? <StudioTabs Studio={Comp} studioType={p} active={visible} />
-                : <Comp active={visible} />}
+              <ErrorBoundary label={p === 'mcp-cli' ? 'The Agents & API page' : `The ${p} studio`}>
+                {TABBED_STUDIOS.has(p)
+                  ? <StudioTabs Studio={Comp} studioType={p} active={visible} />
+                  : <Comp active={visible} />}
+              </ErrorBoundary>
             </div>
           );
         })}
         {/* Hub layer — mounted once, display-toggled forever (iframe state) */}
-        {HubComp ? <HubComp visible={isHub} view={isHub ? HUB_PAGES[page] : null} /> : null}
+        {HubComp ? (
+          <ErrorBoundary label="This page">
+            <HubComp visible={isHub} view={isHub ? HUB_PAGES[page] : null} />
+          </ErrorBoundary>
+        ) : null}
       </Shell>
 
       {settingsOpen ? (
@@ -221,6 +256,12 @@ export function App() {
       <Toaster
         position="bottom-right"
         toastOptions={{
+          // One baseline for the whole app: success messages are short and
+          // confirm an action (3.5 s); errors need to be read (6 s); plain notices
+          // sit in between. Call sites only override for genuinely long copy.
+          duration: 4500,
+          success: { duration: 3500, iconTheme: { primary: 'var(--ok)', secondary: 'var(--bg-0)' } },
+          error: { duration: 6000, iconTheme: { primary: 'var(--danger)', secondary: 'var(--bg-0)' } },
           style: {
             background: 'var(--bg-3)',
             color: 'var(--ink-1)',
@@ -229,10 +270,27 @@ export function App() {
             fontSize: '13px',
             boxShadow: 'var(--shadow-pop)',
           },
-          success: { iconTheme: { primary: 'var(--ok)', secondary: 'var(--bg-0)' } },
-          error: { iconTheme: { primary: 'var(--danger)', secondary: 'var(--bg-0)' } },
         }}
       />
-    </>
+    </ErrorBoundary>
+  );
+}
+
+// Whole-app fallback: the shell itself failed, so there is no sidebar to lean on.
+function AppCrash({ error, retry }) {
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-bg0 px-6 text-center text-ink1">
+      <div className="text-base font-semibold">Hivemind Content Studio hit an error</div>
+      <div className="max-w-md text-[13px] leading-relaxed text-ink3">
+        Nothing was lost on the server side — running generations keep running. Reload to pick them back up.
+      </div>
+      <div className="max-w-lg rounded-md border border-line1 bg-bg2 px-3 py-2 font-mono text-[11px] text-ink2 break-words">
+        {String(error?.message || error || 'Unknown error').slice(0, 240)}
+      </div>
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={retry} className="h-9 rounded-md bg-honey px-4 text-[13px] font-semibold text-on-honey hover:bg-honey-bright">Try again</button>
+        <button type="button" onClick={() => window.location.reload()} className="h-9 rounded-md border border-line1 bg-bg2 px-4 text-[13px] font-medium text-ink1 hover:border-line2">Reload page</button>
+      </div>
+    </div>
   );
 }

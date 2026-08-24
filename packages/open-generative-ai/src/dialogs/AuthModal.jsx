@@ -57,14 +57,17 @@ export function AuthModal({ onClose, onSaved }) {
           <Button type="submit" variant="primary" size="lg" className="w-full">
             {t('auth.initBtn')}
           </Button>
+          {/* The icon says "opens muapi.ai in a new tab"; the label must not
+              carry its own arrow as well (the zh string still ends in one). */}
           <a
             href="https://muapi.ai/access-keys"
             target="_blank"
             rel="noreferrer"
+            title="Opens muapi.ai in a new tab"
             className="inline-flex items-center justify-center gap-1.5 py-1.5 text-center text-xs font-medium text-ink3 transition-colors hover:text-ink1"
           >
-            {t('auth.createKey')}
-            <Icon name="external" size={12} />
+            {String(t('auth.createKey')).replace(/\s*→\s*$/, '')}
+            <Icon name="external" size={12} aria-hidden="true" />
           </a>
         </div>
       </form>

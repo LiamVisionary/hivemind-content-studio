@@ -14,6 +14,7 @@
 // manual reload.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mapHivemindWorkflowModels } from '../../lib/hivemindStudio.js';
+import { getLang } from '../../lib/i18n.js';
 import { localAI } from '../../lib/localInferenceClient.js';
 import { Button, IconButton, Segmented, Spinner } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
@@ -23,10 +24,12 @@ import { CivitaiBrowser } from './models/CivitaiBrowser.jsx';
 import { InstalledAssets } from './models/InstalledAssets.jsx';
 import { RunnableModels } from './models/RunnableModels.jsx';
 
-const TABS = [
-  { value: 'models', label: 'Models' },
-  { value: 'installed', label: 'Installed' },
-  { value: 'discover', label: 'Discover' },
+const zh = () => getLang() === 'zh-CN';
+
+const TABS = () => [
+  { value: 'models', label: zh() ? '模型' : 'Models' },
+  { value: 'installed', label: zh() ? '已安装' : 'Installed' },
+  { value: 'discover', label: zh() ? '发现' : 'Discover' },
 ];
 
 export function ModelsView({ active }) {
@@ -48,12 +51,16 @@ export function ModelsView({ active }) {
     setLoading(true);
     setError('');
     try {
+      // A dead workflow catalog used to be swallowed into an empty Models tab
+      // ("No matching models"); it is reported in the banner like the library.
+      let modelsError = '';
       const [localModels, installed] = await Promise.all([
-        localAI.listModels().catch(() => []),
+        localAI.listModels().catch((err) => { modelsError = err?.message || 'Could not read the local workflow catalog.'; return []; }),
         localAI.listLibrary(),
       ]);
       setModels(Array.isArray(localModels) ? localModels : []);
       setLibrary(installed);
+      if (modelsError) setError(`Workflow catalog: ${modelsError}`);
     } catch (err) {
       setError(err.message || 'Could not reach the local model bridge.');
     } finally {
@@ -73,21 +80,21 @@ export function ModelsView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker="Local runtime"
-        title="Models"
+        kicker={zh() ? '本地运行时' : 'Local runtime'}
+        title={zh() ? '模型' : 'Models'}
         right={
           <>
             {loading ? <Spinner size={14} className="text-honey" /> : null}
-            <Segmented options={TABS} value={tab} onChange={setTab} />
-            <IconButton icon="refresh" label="Rescan installed models" onClick={() => void load()} />
+            <Segmented options={TABS()} value={tab} onChange={setTab} />
+            <IconButton icon="refresh" label={zh() ? '重新扫描已安装的模型' : 'Rescan installed models'} onClick={() => void load()} />
           </>
         }
       />
 
       {error ? (
         <div className="flex items-center justify-between gap-3 border-b border-line1 bg-danger-tint px-4 py-2 md:px-5">
-          <span className="min-w-0 truncate text-xs text-danger">{error}</span>
-          <Button size="sm" onClick={() => void load()}>Retry</Button>
+          <span className="min-w-0 truncate text-xs text-danger" title={error}>{error}</span>
+          <Button size="sm" onClick={() => void load()}>{zh() ? '重试' : 'Retry'}</Button>
         </div>
       ) : null}
 

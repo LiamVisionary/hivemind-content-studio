@@ -162,8 +162,15 @@ test('duplicating a tab copies configuration, never results or run state', () =>
     }
     // The video studio keeps its whole configuration in one immutable `setup`
     // object (model, mode, duration, aspect, seed, keyframes, advanced values).
-    for (const field of ['setup', 'videoLoraSelectionsByModel', 'sharedIngredientSelections']) {
+    for (const field of ['setup', 'videoLoraSelectionsByModel', 'sharedIngredientSelections',
+        // The cast, the prompt's stand-ins and the Shots timeline are part of the setup too.
+        'cast', 'standIns', 'shotTimeline']) {
         assert.ok(VIDEO_TAB_FIELDS.includes(field), `video tabs must copy ${field}`);
+    }
+    // Image: what each reference supplies, the UGC deal counters and the open
+    // Custom tile travel with the references they describe.
+    for (const field of ['referenceRoles', 'ugcVariantIndex', 'ugcRoomIndex', 'customArOpen']) {
+        assert.ok(IMAGE_TAB_FIELDS.includes(field), `image tabs must copy ${field}`);
     }
 });
 

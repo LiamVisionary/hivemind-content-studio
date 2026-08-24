@@ -156,6 +156,16 @@ export function resetVaultSession() {
     lockVault();
 }
 
+// Lock must not leave the per-tab passphrase handoff behind: the sign-in gate
+// stashes it for 24 h and only the hub data layer used to remove it (and only
+// in tabs that had visited a hub page). Called from the topbar Lock button.
+export function clearOwnerHandoff() {
+    try {
+        sessionStorage.removeItem(PASSPHRASE_KEY);
+        sessionStorage.removeItem(VAULT_HINT_KEY);
+    } catch { /* storage unavailable */ }
+}
+
 // ── in-app unlock (tab has a valid owner cookie but no per-tab passphrase) ───
 //
 // The owner gate's lock screen never runs in that tab, so nothing stashed the
@@ -199,18 +209,39 @@ export async function unlockOwnerSession(password) {
 }
 
 // ── owner-session-gated ciphertext blob transport ────────────────────────────
+//
+// Both calls THROW on a non-OK response. A missing blob is not an error: the
+// server answers 200 with `ciphertext: null` for one that was never written, so
+// anything non-OK (a lapsed session, a 400, a 5xx) is a real failure. Returning
+// null for a failed READ used to make a lapsed session look like an empty
+// library, and the next save then replaced the whole sealed library with one
+// entry; an unchecked WRITE reported "Saved" for an entry the server never kept.
+async function vaultBlobError(response, fallback) {
+    let detail = '';
+    try {
+        const payload = await response.json();
+        const raw = payload?.detail ?? payload?.error ?? '';
+        // FastAPI validation errors arrive as an array of { msg } objects.
+        detail = Array.isArray(raw) ? raw.map((item) => item?.msg || String(item)).join(' · ') : String(raw || '');
+    } catch { /* no JSON body */ }
+    const error = new Error(detail || `${fallback} (${response.status})`);
+    error.status = response.status;
+    return error;
+}
+
 export async function getVaultBlob(namespace, key) {
     const response = await fetch(`/api/vault/blob/${namespace}/${key}`, { credentials: 'same-origin', cache: 'no-store' });
-    if (!response.ok) return null;
+    if (!response.ok) throw await vaultBlobError(response, 'Could not read from your vault');
     const payload = await response.json();
     return payload.ciphertext || null;
 }
 
 export async function putVaultBlob(namespace, key, ciphertext) {
-    await fetch(`/api/vault/blob/${namespace}/${key}`, {
+    const response = await fetch(`/api/vault/blob/${namespace}/${key}`, {
         method: 'PUT',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ciphertext }),
     });
+    if (!response.ok) throw await vaultBlobError(response, 'Could not write to your vault');
 }

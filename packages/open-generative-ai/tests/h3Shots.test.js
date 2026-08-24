@@ -202,3 +202,45 @@ test('the timeline end is the furthest of duration, cuts and beats', async () =>
     assert.equal(timelineEndSec([a, b], 8), 12);
     assert.equal(timelineEndSec([a], 8), 8);
 });
+
+// The reverse direction: a prompt that already has [Shot N] blocks can seed the
+// builder, so it does not open on one blank shot over three written ones.
+test('the shots already written into a prompt are read back out, stamps and all', async () => {
+    const { parseShotBlocks, timelineShotsFromPrompt, newShot, composeH3Prompt } = await load();
+    assert.deepEqual(parseShotBlocks(''), []);
+    assert.deepEqual(parseShotBlocks('A quiet street, no shot markers.'), []);
+
+    const prompt = [
+        'integrated_multimodal_description: Handheld documentary footage. [Shot 1] She looks up from the letter. (S1) says: <d>[English] Not yet.</d>',
+        '[Shot 2] At 00:05.500, the shot cross-dissolves to a wide of the empty street. Rain starts.',
+        '[Shot 3] At 00:10.000, the shot cuts to her hands. She folds the page.',
+        '',
+        'overall_soundscape: rain on glass',
+        '',
+        'non_diegetic_music: N/A',
+    ].join('\n');
+    const blocks = parseShotBlocks(prompt);
+    assert.equal(blocks.length, 3);
+    assert.equal(blocks[0].cutSec, 0);
+    assert.match(blocks[0].text, /^She looks up from the letter\./);
+    assert.match(blocks[0].text, /<d>\[English\] Not yet\.<\/d>$/, 'dialogue stays in the text');
+    assert.equal(blocks[1].cutSec, 5.5);
+    assert.equal(blocks[1].transition, 'the shot cross-dissolves to');
+    assert.equal(blocks[1].cutTo, 'a wide of the empty street');
+    assert.equal(blocks[1].text, 'Rain starts.');
+    assert.equal(blocks[2].cutSec, 10);
+    assert.equal(blocks[2].transition, 'the shot cuts to');
+    assert.equal(blocks[2].cutTo, 'her hands');
+    assert.equal(blocks[2].text, 'She folds the page.', 'the section headers after the last shot are not swallowed');
+
+    // And they become builder shots that re-serialize with the same cuts.
+    const shots = timelineShotsFromPrompt(prompt);
+    assert.equal(shots.length, 3);
+    assert.equal(shots[1].cutSec, 5.5);
+    assert.equal(shots[2].cutTo, 'her hands');
+    const out = composeH3Prompt({ mode: 'text', shots });
+    assert.match(out, /\[Shot 2\] At 00:05\.500, the shot cross-dissolves to a wide of the empty street\. Rain starts\./);
+    assert.match(out, /\[Shot 3\] At 00:10\.000, the shot cuts to her hands\. She folds the page\./);
+    // A fresh shot is still fresh.
+    assert.equal(newShot().cutSec, 0);
+});

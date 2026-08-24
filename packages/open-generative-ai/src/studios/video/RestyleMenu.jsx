@@ -15,8 +15,9 @@ export function RestyleMenu({ activeId, onApply }) {
       width="w-[19rem]"
       trigger={(open, toggle) => (
         <ChipButton
-          icon="sparkles"
-          label={active ? `${zh() ? '风格' : 'Style'} · ${active.label}` : (zh() ? '风格' : 'Style')}
+          icon="wand"
+          label={zh() ? '风格' : 'Style'}
+          value={active ? active.label : ''}
           active={open || Boolean(active)}
           onClick={toggle}
           title={zh()

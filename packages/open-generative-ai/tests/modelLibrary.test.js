@@ -75,15 +75,29 @@ test('a Civitai link is version-pinned, and absent when the sidecar has no model
 test('search params only carry an explicit rating choice', async () => {
     const { civitaiSearchParams, DEFAULT_CIVITAI_FILTERS } = await import('../src/lib/modelLibrary.js');
 
-    const any = civitaiSearchParams('  krea  ', DEFAULT_CIVITAI_FILTERS);
+    // "Any rating" is an explicit choice away from the default, which is safe.
+    assert.equal(DEFAULT_CIVITAI_FILTERS.nsfw, 'false');
+    const any = civitaiSearchParams('  krea  ', { ...DEFAULT_CIVITAI_FILTERS, nsfw: '' });
     assert.equal(any.query, 'krea');
     assert.equal(any.primaryFileOnly, true);
     assert.equal('nsfw' in any, false);
 
-    const safe = civitaiSearchParams('', { ...DEFAULT_CIVITAI_FILTERS, nsfw: 'false' });
+    const safe = civitaiSearchParams('', DEFAULT_CIVITAI_FILTERS);
     assert.equal(safe.nsfw, 'false');
     // An empty query means "browse", not "search for nothing".
     assert.equal('query' in safe, false);
+    assert.equal('cursor' in safe, false);
+});
+
+test('a cursor continues the search and later pages merge without repeats', async () => {
+    const { civitaiSearchParams, mergeCivitaiResults, DEFAULT_CIVITAI_FILTERS } = await import('../src/lib/modelLibrary.js');
+    assert.equal(civitaiSearchParams('x', DEFAULT_CIVITAI_FILTERS, ' abc ').cursor, 'abc');
+
+    const page1 = [{ id: 1, versionId: 10 }, { id: 2, versionId: 20 }];
+    const page2 = [{ id: 2, versionId: 20 }, { id: 3, versionId: 30 }];
+    const merged = mergeCivitaiResults(page1, page2);
+    assert.deepEqual(merged.map((item) => item.id), [1, 2, 3]);
+    assert.deepEqual(mergeCivitaiResults([], page1), page1);
 });
 
 test('installed detection matches on either the version or the file id', async () => {

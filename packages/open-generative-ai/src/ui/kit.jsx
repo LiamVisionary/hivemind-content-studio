@@ -141,22 +141,30 @@ export function ActionButton({ icon, label, className = '', ...rest }) {
   );
 }
 
+// Sizes: xs 24px (dense rows, card corners), sm 28, md 36, lg 44.
+const ICON_BTN_DIMS = {
+  xs: 'h-6 w-6 rounded-sm',
+  sm: 'h-ctl-sm w-[28px] rounded-md',
+  md: 'h-ctl-md w-[36px] rounded-md',
+  lg: 'h-ctl-lg w-[44px] rounded-md',
+};
+const ICON_BTN_GLYPH = { xs: 12, sm: 14, md: 17, lg: 18 };
+
 export function IconButton({ icon, label, size = 'md', active = false, className = '', ...rest }) {
-  const dims = size === 'sm' ? 'h-ctl-sm w-[28px]' : size === 'lg' ? 'h-ctl-lg w-[44px]' : 'h-ctl-md w-[36px]';
   return (
     <button
       type="button"
       title={label}
       aria-label={label}
       className={cx(
-        'grid shrink-0 place-items-center rounded-md transition-colors duration-150',
-        dims,
+        'grid shrink-0 place-items-center transition-colors duration-150',
+        ICON_BTN_DIMS[size] || ICON_BTN_DIMS.md,
         active ? 'bg-honey-tint text-honey' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
         className,
       )}
       {...rest}
     >
-      <Icon name={icon} size={size === 'sm' ? 14 : 17} />
+      <Icon name={icon} size={ICON_BTN_GLYPH[size] || 17} />
     </button>
   );
 }
@@ -184,7 +192,7 @@ export function Field({ label, hint, error, children, className = '', labelRight
 }
 
 const INPUT_BASE =
-  'w-full rounded-md border border-line1 bg-bg2 px-3 text-[13px] text-ink1 placeholder:text-ink3 transition-colors duration-150 hover:border-line2 focus:border-honey/60 focus:shadow-none disabled:opacity-40';
+  'w-full rounded-md border border-line1 bg-bg2 px-3 text-[13px] text-ink1 placeholder:text-ink3 transition-colors duration-150 hover:border-line2 focus:border-honey/60 disabled:opacity-40';
 
 export function TextInput({ className = '', ...rest }) {
   const id = useContext(FieldIdContext);
@@ -231,6 +239,7 @@ export function Segmented({ options, value, onChange, size = 'md', className = '
           <button
             key={val}
             type="button"
+            aria-pressed={on}
             onClick={() => onChange(val)}
             className={cx(
               'rounded-[7px] font-medium transition-colors duration-150',
@@ -345,13 +354,16 @@ export function Toggle({ checked, onChange, label, disabled = false }) {
   );
 }
 
-export function Slider({ value, min = 0, max = 100, step = 1, onChange, onCommit, mono = true, format }) {
+export function Slider({ value, min = 0, max = 100, step = 1, onChange, onCommit, mono = true, format, className = '', ...rest }) {
+  const id = useContext(FieldIdContext);
   const pct = ((value - min) / (max - min)) * 100;
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-2.5">
+    <div className={cx('flex min-w-0 flex-1 items-center gap-2.5', className)}>
       <input
+        id={id}
         type="range"
         className="hive-range flex-1"
+        {...rest}
         style={{ '--fill': `${pct}%` }}
         min={min}
         max={max}
@@ -496,7 +508,8 @@ export function Spinner({ size = 16, className = '' }) {
       height={size}
       viewBox="0 0 24 24"
       fill="none"
-      className={cx('animate-[hive-spin_0.7s_linear_infinite]', className)}
+      className={cx('hive-motion-keep animate-[hive-spin_0.7s_linear_infinite]', className)}
+      role="status"
       aria-label="Loading"
     >
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.2" strokeWidth="2.5" />
@@ -505,17 +518,23 @@ export function Spinner({ size = 16, className = '' }) {
   );
 }
 
-export function ProgressBar({ value = null, className = '' }) {
-  // value 0..1, or null for indeterminate
+export function ProgressBar({ value = null, className = '', tone = 'honey', label }) {
+  // value 0..1, or null for indeterminate. tone 'danger' marks a failed transfer.
+  const fill = tone === 'danger' ? 'bg-danger' : tone === 'ok' ? 'bg-ok' : 'bg-honey';
+  const pct = value == null ? null : Math.max(0, Math.min(100, value * 100));
   return (
-    <div className={cx('h-1 w-full overflow-hidden rounded-full bg-bg3', className)}>
-      {value == null ? (
-        <div className="h-full w-1/4 rounded-full bg-honey animate-[hive-indeterminate_1.2s_ease-in-out_infinite]" />
+    <div
+      className={cx('h-1 w-full overflow-hidden rounded-full bg-bg3', className)}
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={pct == null ? undefined : Math.round(pct)}
+    >
+      {pct == null ? (
+        <div className={cx('hive-motion-keep h-full w-1/4 rounded-full animate-[hive-indeterminate_1.2s_ease-in-out_infinite]', fill)} />
       ) : (
-        <div
-          className="h-full rounded-full bg-honey transition-[width] duration-200"
-          style={{ width: `${Math.max(0, Math.min(100, value * 100))}%` }}
-        />
+        <div className={cx('h-full rounded-full transition-[width] duration-200', fill)} style={{ width: `${pct}%` }} />
       )}
     </div>
   );
@@ -656,12 +675,6 @@ export function StudioLayout({ panel, panelTitle = 'Settings', composer, compose
           <aside className="hidden w-[320px] shrink-0 flex-col gap-4 overflow-y-auto border-r border-line1 bg-bg1 p-4 lg:flex">
             {panel}
           </aside>
-          {/* Mobile: floating toggle + sheet */}
-          <div className="absolute bottom-24 left-3 z-30 lg:hidden">
-            <Button icon="sliders" size="md" onClick={() => setPanelOpen(true)}>
-              {panelTitle}
-            </Button>
-          </div>
           {panelOpen ? (
             <div className="fixed inset-0 z-40 flex lg:hidden" role="dialog" aria-modal="true">
               <div className="absolute inset-0 bg-scrim" onClick={() => setPanelOpen(false)} />
@@ -678,6 +691,15 @@ export function StudioLayout({ panel, panelTitle = 'Settings', composer, compose
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
+        {/* Below lg the panel lives in a sheet; its opener sits in its own row so it
+            can never cover the composer (a floating button used to sit on the chips). */}
+        {panel ? (
+          <div className="flex shrink-0 items-center border-t border-line1 bg-bg1 px-3 py-1.5 lg:hidden">
+            <Button icon="sliders" size="sm" onClick={() => setPanelOpen(true)} aria-haspopup="dialog" aria-expanded={panelOpen}>
+              {panelTitle}
+            </Button>
+          </div>
+        ) : null}
         {composer ? <ComposerSlot drop={composerDrop}>{composer}</ComposerSlot> : null}
       </div>
     </div>

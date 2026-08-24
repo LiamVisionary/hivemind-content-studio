@@ -2,18 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0c0c0e" />
+    <meta name="color-scheme" content="dark" />
     <meta name="description" content="Hivemind Content Studio — a private, unified AI media studio. Image, video, cinema, lip sync, ComfyUI canvas, durable production runs, and local model management in one app." />
     <title>Hivemind Content Studio</title>
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="apple-touch-icon" href="/app-icon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <script>
       // Installable-app shell (adapted from Mix-Studio, GPL-3.0): the worker
       // caches only the offline page + icons and only intercepts navigations,
       // so dev servers, the owner gate, APIs and sealed media are unaffected.
-      if ('serviceWorker' in navigator && location.port !== '5273') { // skip the vite dev server
+      if ('serviceWorker' in navigator && !/^5\d{3}$/.test(location.port)) { // skip the vite dev servers (5173/5273/…)
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('/service-worker.js').catch(() => {});
         });

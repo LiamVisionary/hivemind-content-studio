@@ -20,17 +20,17 @@ import {
   zoomAroundAnchor,
 } from '../../lib/compareMath.js';
 import { Icon } from '../../ui/icons.jsx';
-import { cx } from '../../ui/kit.jsx';
+import { Segmented, cx } from '../../ui/kit.jsx';
 
-function ModeButton({ active, label, onClick }) {
+// Zoom / fit controls in the header — a small labelled button, not a bare glyph.
+function ZoomButton({ label, title, onClick }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={cx(
-        'rounded-sm px-2 py-1 text-[11px] font-semibold transition-colors',
-        active ? 'bg-honey text-bg0' : 'text-ink2 hover:text-ink1',
-      )}
+      title={title}
+      aria-label={title}
+      className="rounded-sm px-2 py-1 text-[11px] font-semibold text-ink2 transition-colors hover:bg-bg2 hover:text-ink1"
     >
       {label}
     </button>
@@ -104,10 +104,22 @@ export function CompareViewer({ beforeUrl, afterUrl, beforeLabel = 'Original', a
     return clampSplit(((e.clientX - rect.left) / rect.width) * 100);
   };
 
-  const onWheel = (e) => {
+  // Wheel zoom. React registers `wheel` passively at the root, so a React
+  // onWheel cannot preventDefault (it logs an intervention per tick) — the
+  // listener goes on the stage element directly, non-passive. Kept in a ref
+  // so the effect does not rebind on every zoom/pan change.
+  const onWheelRef = useRef(null);
+  onWheelRef.current = (e) => {
     e.preventDefault();
     setZoomAnchored(zoom * (e.deltaY < 0 ? WHEEL_ZOOM_IN : WHEEL_ZOOM_OUT), anchorFromEvent(e));
   };
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return undefined;
+    const handler = (e) => onWheelRef.current?.(e);
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
 
   const onPointerDown = (e) => {
     // Capture can throw (released/synthetic pointers); dragging still works
@@ -165,8 +177,19 @@ export function CompareViewer({ beforeUrl, afterUrl, beforeLabel = 'Original', a
     }
   };
 
+  // Escape belongs to the topmost dialog only (same rule as Modal): this
+  // viewer is portaled over the image viewer, so the check is whether the last
+  // [role="dialog"] in the DOM is this one.
+  const rootRef = useRef(null);
+  const isTopmostDialog = () => {
+    const dialogs = document.querySelectorAll('[role="dialog"]');
+    const top = dialogs[dialogs.length - 1];
+    return Boolean(top && rootRef.current && top === rootRef.current);
+  };
+
   useEffect(() => {
     const onKey = (e) => {
+      if (!isTopmostDialog()) return;
       if (e.key === 'Escape') { onClose?.(); return; }
       if (e.key === '+' || e.key === '=') setZoomAnchored(zoom * WHEEL_ZOOM_IN);
       else if (e.key === '-') setZoomAnchored(zoom * WHEEL_ZOOM_OUT);
@@ -206,7 +229,7 @@ export function CompareViewer({ beforeUrl, afterUrl, beforeLabel = 'Original', a
   );
 
   return createPortal(
-    <div className="fixed inset-0 z-[110] flex flex-col bg-bg0/95 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label="Compare original and upscaled">
+    <div ref={rootRef} className="fixed inset-0 z-[110] flex flex-col bg-bg0/95 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label={`Compare ${beforeLabel.toLowerCase()} and ${afterLabel.toLowerCase()}`}>
       <div className="flex shrink-0 items-center gap-2 border-b border-line1 px-4 py-2.5">
         <span className="text-sm font-semibold text-ink1">Compare</span>
         <span className="hidden font-mono text-[11px] text-ink3 sm:inline">
@@ -215,16 +238,21 @@ export function CompareViewer({ beforeUrl, afterUrl, beforeLabel = 'Original', a
           {natural ? `${afterLabel} ${natural.width}×${natural.height}` : afterLabel}
         </span>
         <div className="ml-auto flex items-center gap-1.5">
+          <Segmented
+            size="sm"
+            value={mode}
+            onChange={setMode}
+            options={[
+              { value: 'reveal', label: 'Reveal' },
+              { value: 'pan', label: 'Pan' },
+            ]}
+          />
           <div className="flex items-center rounded-md border border-line1 bg-bg1 p-0.5">
-            <ModeButton active={mode === 'reveal'} label="Reveal" onClick={() => setMode('reveal')} />
-            <ModeButton active={mode === 'pan'} label="Pan" onClick={() => setMode('pan')} />
-          </div>
-          <div className="flex items-center rounded-md border border-line1 bg-bg1 p-0.5">
-            <ModeButton label="−" onClick={() => setZoomAnchored(zoom * WHEEL_ZOOM_OUT)} />
-            <span className="min-w-11 px-1 text-center font-mono text-[11px] text-ink2">{Math.round(zoom * 100)}%</span>
-            <ModeButton label="+" onClick={() => setZoomAnchored(zoom * WHEEL_ZOOM_IN)} />
-            <ModeButton label="Fit" onClick={resetFit} />
-            <ModeButton label="1:1" onClick={goActualSize} />
+            <ZoomButton label="−" title="Zoom out (−)" onClick={() => setZoomAnchored(zoom * WHEEL_ZOOM_OUT)} />
+            <span className="min-w-11 px-1 text-center font-mono text-[11px] text-ink2" aria-live="polite">{Math.round(zoom * 100)}%</span>
+            <ZoomButton label="+" title="Zoom in (+)" onClick={() => setZoomAnchored(zoom * WHEEL_ZOOM_IN)} />
+            <ZoomButton label="Fit" title="Fit to screen (0)" onClick={resetFit} />
+            <ZoomButton label="1:1" title="Actual size (1)" onClick={goActualSize} />
           </div>
           <button
             type="button"
@@ -241,7 +269,6 @@ export function CompareViewer({ beforeUrl, afterUrl, beforeLabel = 'Original', a
         ref={stageRef}
         className={cx('relative min-h-0 flex-1 overflow-hidden', mode === 'reveal' ? 'cursor-col-resize' : 'cursor-grab')}
         style={{ touchAction: 'none' }}
-        onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

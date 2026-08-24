@@ -2,10 +2,13 @@
 // media, credentials, or provider payloads). Baseline for the phase-2 agent.
 // Summary tiles, per-provider routing evidence, and recent attempts, all from
 // the /api/telemetry/generations shape via hubData formatters.
-import { Card, EmptyState, SectionLabel, Spinner } from '../../ui/kit.jsx';
-import { formatTelemetryDuration, providerLabel, titleCase, useHub } from '../hubData.js';
+import { getLang } from '../../lib/i18n.js';
+import { Card, EmptyState, Pill, SectionLabel, Spinner } from '../../ui/kit.jsx';
+import { formatTelemetryDuration, humanize, providerLabel, useHub } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
+
+const zh = () => getLang() === 'zh-CN';
 
 function Tile({ label, value, detail }) {
   return (
@@ -28,12 +31,24 @@ export function TelemetryView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker="Generation operations"
-        title="Telemetry"
-        subtitle="Local metadata only · no prompts, media, credentials, or provider payloads"
-      />
+        kicker={zh() ? '生成运营' : 'Generation operations'}
+        title={zh() ? '遥测' : 'Telemetry'}
+        subtitle={zh()
+          ? '仅智能体路由的制作 · 仅本地元数据，无提示词、媒体、凭据或提供商负载'
+          : 'Agent-routed productions only · local metadata, no prompts, media, credentials, or provider payloads'}
+      >
+        {telemetry && s.apiOnline === false ? <Pill tone="warn" dot>{zh() ? '离线 · 显示上次读取' : 'Offline · showing the last reading'}</Pill> : null}
+      </HubToolbar>
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
-        {!telemetry ? (
+        {!telemetry && s.apiOnline === false ? (
+          // The last refresh failed and nothing was ever loaded: an offline
+          // state, not a spinner that never ends.
+          <EmptyState
+            icon="plug"
+            title={zh() ? '工作室 API 不可达' : 'Studio API unreachable'}
+            hint={zh() ? '遥测来自本地控制 API。它恢复后会自动重试。' : 'Telemetry comes from the local control API. It retries on its own once the API is back.'}
+          />
+        ) : !telemetry ? (
           <div className="grid flex-1 place-items-center py-16"><Spinner size={22} className="text-ink2" /></div>
         ) : (
           <div className="flex flex-col gap-6">
@@ -65,7 +80,11 @@ export function TelemetryView({ active }) {
                     ))}
                   </div>
                 ) : (
-                  <EmptyState icon="pulse" title="No generation samples yet" hint="Agent-routed image, video, voice, and music attempts will appear here." />
+                  <EmptyState
+                    icon="pulse"
+                    title={zh() ? '还没有生成样本' : 'No generation samples yet'}
+                    hint={zh() ? '规划器运行中的图像、视频、语音和音乐尝试会显示在这里 — 工作室的生成不计入。' : 'Image, video, voice, and music attempts made by Planner runs appear here — studio generations are not counted.'}
+                  />
                 )}
               </section>
 
@@ -77,7 +96,7 @@ export function TelemetryView({ active }) {
                       <div key={`${attempt.run_id}-${i}`} className="flex flex-col gap-1 rounded-lg border border-line1 bg-bg2 p-3">
                         <div className="flex items-center gap-2">
                           <StatusPill status={attempt.status} />
-                          <b className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink1">{titleCase(attempt.kind)} · {providerLabel(attempt.provider)}</b>
+                          <b className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink1">{humanize(attempt.kind)} · {providerLabel(attempt.provider)}</b>
                         </div>
                         <small className="text-[11px] text-ink3">
                           <span className="font-mono">{attempt.model || 'automatic'}</span> · {formatTelemetryDuration(attempt.duration_ms)} · ${Number(attempt.charged_usd || 0).toFixed(2)}
@@ -89,7 +108,11 @@ export function TelemetryView({ active }) {
                     ))}
                   </div>
                 ) : (
-                  <EmptyState icon="pulse" title="No recent attempts" hint="Telemetry begins when a run dispatches a generation intent." />
+                  <EmptyState
+                    icon="pulse"
+                    title={zh() ? '没有最近的尝试' : 'No recent attempts'}
+                    hint={zh() ? '当一个运行分派生成意图时，遥测开始。' : 'Telemetry begins when a run dispatches a generation intent.'}
+                  />
                 )}
               </section>
             </div>

@@ -39,6 +39,9 @@ export function blockedReason(model, { unloadOthers = true } = {}) {
     if (model.fit === 'needs_unload') {
         return `Needs ${formatBytes(model.estimatedLoadBytes)} — turn on "Unload others first" to make room.`;
     }
+    // The server reports 'loading' while llama-server is still coming up (up to a
+    // few minutes for a big model); it is not a memory problem.
+    if (model.fit === 'loading') return 'Still loading — it will be ready in a moment.';
     return `Needs ${formatBytes(model.estimatedLoadBytes)}, which is more than this machine can free right now.`;
 }
 
@@ -46,6 +49,7 @@ export function blockedReason(model, { unloadOthers = true } = {}) {
 export function modelStatus(model) {
     if (!model) return '';
     if (model.fit === 'loaded') return 'Loaded';
+    if (model.fit === 'loading') return 'Loading…';
     const size = formatBytes(model.estimatedLoadBytes);
     // "measured" means the number came from a real load, not the size heuristic.
     return model.measured ? `${size} in RAM` : `~${size} in RAM`;
@@ -64,7 +68,7 @@ export function externalHold(snapshot) {
 /** Loaded-first, then largest-first, so the useful rows are at the top. */
 export function sortModels(models) {
     return [...(Array.isArray(models) ? models : [])].sort((a, b) => {
-        const loaded = (m) => (m.fit === 'loaded' ? 0 : 1);
+        const loaded = (m) => (m.fit === 'loaded' || m.fit === 'loading' ? 0 : 1);
         if (loaded(a) !== loaded(b)) return loaded(a) - loaded(b);
         return (b.sizeBytes || 0) - (a.sizeBytes || 0);
     });
@@ -103,4 +107,41 @@ export function preferredModelId(models, { lastUsedId = '', loadedId = '' } = {}
         || selectable(loadedId)
         || rows.find((row) => canSelect(row, { unloadOthers: true }))?.id
         || '';
+}
+
+const GENDER_WORD = { female: 'woman', male: 'man', nonbinary: 'person' };
+
+/**
+ * One line saying who and what the helper has been told about, built from the
+ * `cast` (lib/promptWeave.js castSubjects()) and `references` props the dialog
+ * sends — so the user can see the helper knows, rather than having to trust it:
+ *   "Subject 1 (woman, look set) · Subject 2 Willow (known character) · 3 pictures, 1 clip"
+ * Empty string when there is nothing to say.
+ */
+export function describeWritingFor({ cast = [], references = null } = {}) {
+    const parts = [];
+    (Array.isArray(cast) ? cast : []).forEach((member, index) => {
+        if (!member) return;
+        const subject = `Subject ${member.subject || index + 1}`;
+        const notes = [];
+        if (member.kind === 'character') {
+            notes.push('known character');
+        } else {
+            const word = GENDER_WORD[String(member.gender || '').toLowerCase()];
+            if (word) notes.push(word);
+            if (member.look) notes.push('look set');
+        }
+        if (member.voice) notes.push('voice');
+        const name = member.kind === 'character' && member.name ? ` ${member.name}` : '';
+        parts.push(`${subject}${name}${notes.length ? ` (${notes.join(', ')})` : ''}`);
+    });
+    const counts = [];
+    const images = Number(references?.images) || 0;
+    const videos = Array.isArray(references?.videos) ? references.videos.length : 0;
+    const audios = Number(references?.audios) || 0;
+    if (images) counts.push(`${images} picture${images === 1 ? '' : 's'}`);
+    if (videos) counts.push(`${videos} clip${videos === 1 ? '' : 's'}`);
+    if (audios) counts.push(`${audios} voice clip${audios === 1 ? '' : 's'}`);
+    if (counts.length) parts.push(counts.join(', '));
+    return parts.join(' · ');
 }

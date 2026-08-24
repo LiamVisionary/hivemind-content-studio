@@ -4,7 +4,7 @@ import { getCivitaiDownloads, subscribeCivitaiDownloads } from '../lib/civitaiDo
 import { getRentalLoras, refreshRentalLoras, subscribeRentalLoras } from '../lib/rentalLoras.js';
 import { mediaSealFailure, peekResolvedMediaSrc, resolveMediaSrc, subscribeMediaSealFailures } from '../lib/e2eMedia.js';
 import { captureImagePoster, captureVideoPoster, peekMediaPoster } from '../lib/mediaPoster.js';
-import { ensureLibraryLoaded, isLibraryLoaded, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
+import { ensureLibraryLoaded, isLibraryLoaded, isLibraryUnreadable, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
 import { getLang, setLang, t, tf } from '../lib/i18n.js';
 
 // Same-origin API media is served as an E2E envelope (ciphertext JSON). Pointing
@@ -199,6 +199,12 @@ export function useSavedLibrary(library) {
     entries: peekLibrary(library),
     loading: !isLibraryLoaded(library),
     locked: false,
+    // A read that FAILED (lapsed session, server error) — distinct from locked
+    // and from empty, so the menu can say "couldn't open" with a Retry instead
+    // of the "nothing saved yet" hint that invites a save over the real library.
+    error: '',
+    // The blob is there but this key cannot open it; writes need confirming.
+    unreadable: isLibraryUnreadable(library),
   }));
   const aliveRef = useRef(true);
 
@@ -206,16 +212,30 @@ export function useSavedLibrary(library) {
   // unlocks, and the message we show tells them to go and unlock — so opening the
   // menu again has to actually re-check instead of showing that message forever.
   const read = useCallback(() => {
-    setState((prev) => ({ ...prev, loading: true }));
+    setState((prev) => ({ ...prev, loading: true, error: '' }));
     ensureLibraryLoaded(library)
-      .then(() => { if (aliveRef.current) setState({ entries: peekLibrary(library), loading: false, locked: false }); })
-      .catch((error) => { if (aliveRef.current) setState({ entries: [], loading: false, locked: Boolean(error?.locked) }); });
+      .then(() => {
+        if (aliveRef.current) {
+          setState({ entries: peekLibrary(library), loading: false, locked: false, error: '', unreadable: isLibraryUnreadable(library) });
+        }
+      })
+      .catch((error) => {
+        if (!aliveRef.current) return;
+        const locked = Boolean(error?.locked);
+        setState({
+          entries: [],
+          loading: false,
+          locked,
+          error: locked ? '' : (error?.message || 'Could not open your library.'),
+          unreadable: false,
+        });
+      });
   }, [library]);
 
   useEffect(() => {
     aliveRef.current = true;
     const off = subscribeLibrary(() => {
-      if (aliveRef.current) setState((prev) => ({ ...prev, entries: peekLibrary(library) }));
+      if (aliveRef.current) setState((prev) => ({ ...prev, entries: peekLibrary(library), unreadable: isLibraryUnreadable(library) }));
     });
     if (!isLibraryLoaded(library)) read();
     return () => { aliveRef.current = false; off(); };

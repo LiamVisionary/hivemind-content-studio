@@ -4,10 +4,11 @@
 // as-is. Exactly one sheet ('stitched' | a sheet url | '') conditions the next
 // generation. Media srcs resolve through useMediaSrc (E2E decrypt, fail-open);
 // the stitched preview is already an object URL and renders directly.
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { Icon } from '../../ui/icons.jsx';
-import { Button, Pill, SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
+import { Button, Pill, SectionLabel, Spinner, TextInput, cx } from '../../ui/kit.jsx';
+import { ConfirmModal } from '../../ui/Modal.jsx';
 import { zh } from './videoLogic.js';
 
 function RefImage({ url, alt, className }) {
@@ -68,6 +69,8 @@ export function IngredientsPanel({
 }) {
   const viewsInputRef = useRef(null);
   const sheetsInputRef = useRef(null);
+  // "Clear" deletes every uploaded view and sheet — irreversible, so it asks.
+  const [confirmClear, setConfirmClear] = useState(false);
   const maximum = Number(model?.ingredientInputs?.max_images || 12);
   const selectedSheetEntry = sheets.find((sheet) => sheet.url === selectedSheet) || null;
 
@@ -80,7 +83,7 @@ export function IngredientsPanel({
   const previewStatus = previewMatches ? preview.status : 'loading';
 
   return (
-    <section className="flex flex-col gap-3 border-t border-line1 pt-4" aria-label={zh() ? '配料参考' : 'Ingredient references'}>
+    <section className="flex flex-col gap-3" aria-label={zh() ? '配料参考' : 'Ingredient references'}>
       <input
         ref={viewsInputRef}
         type="file"
@@ -136,7 +139,7 @@ export function IngredientsPanel({
             size="sm"
             variant="danger"
             title={zh() ? '移除所有配料参考和配料表' : 'Remove all ingredient references and sheets'}
-            onClick={onClear}
+            onClick={() => setConfirmClear(true)}
           >
             {zh() ? '清除' : 'Clear'}
           </Button>
@@ -222,14 +225,14 @@ export function IngredientsPanel({
           </div>
 
           {selectedSheetEntry ? (
-            <input
+            <TextInput
               type="text"
               maxLength={1000}
               value={selectedSheetEntry.description || ''}
               placeholder={zh() ? '描述这张配料表的每个画面（可选）' : 'Describe every panel in this sheet (optional)'}
               aria-label={zh() ? '所选配料表的描述' : 'Description for the selected ingredients sheet'}
               onChange={(e) => onSheetDescription(selectedSheetEntry.url, e.target.value)}
-              className="w-full rounded-md border border-line1 bg-bg2 px-2.5 py-2 text-[11px] text-ink1 outline-none transition-colors placeholder:text-ink3 focus:border-honey/60"
+              className="text-[11px]"
             />
           ) : null}
         </div>
@@ -245,20 +248,20 @@ export function IngredientsPanel({
             {selection.map((item, index) => (
               <div key={item.url} className="grid grid-cols-[48px_minmax(0,1fr)_28px] items-center gap-2 rounded-md border border-line1 bg-bg2 p-1.5">
                 <RefImage url={item.url} alt={`Ingredient reference ${index + 1}`} className="h-12 w-12 rounded-sm bg-bg0 object-contain" />
-                <input
+                <TextInput
                   type="text"
                   maxLength={1000}
                   value={item.description || ''}
                   placeholder={`${zh() ? '视图' : 'View'} ${index + 1}: ${zh() ? '正面、侧面、全身…' : 'front, profile, full body…'}`}
                   aria-label={`Description for ingredient reference ${index + 1}`}
                   onChange={(e) => onViewDescription(index, e.target.value)}
-                  className="min-w-0 rounded-md border border-line1 bg-bg2 px-2.5 py-2 text-[11px] text-ink1 outline-none transition-colors placeholder:text-ink3 focus:border-honey/60"
+                  className="min-w-0 text-[11px]"
                 />
                 <button
                   type="button"
                   title={`${zh() ? '移除配料参考' : 'Remove ingredient reference'} ${index + 1}`}
                   aria-label={`Remove ingredient reference ${index + 1}`}
-                  className="grid h-7 w-7 place-items-center rounded-sm bg-danger-tint text-danger transition-colors hover:border hover:border-danger/40"
+                  className="grid h-7 w-7 place-items-center rounded-sm border border-transparent bg-danger-tint text-danger transition-colors hover:border-danger/40"
                   onClick={() => onRemoveView(index)}
                 >
                   <Icon name="x" size={13} />
@@ -274,6 +277,17 @@ export function IngredientsPanel({
           <Spinner size={12} /> <span>{zh() ? '正在合成拼接配料表…' : 'Composing stitched sheet…'}</span>
         </div>
       ) : null}
+
+      <ConfirmModal
+        open={confirmClear}
+        onClose={() => setConfirmClear(false)}
+        onConfirm={() => { setConfirmClear(false); onClear(); }}
+        title={zh() ? '清除配料参考？' : 'Clear ingredient references?'}
+        body={zh()
+          ? `将删除 ${selection.length} 个视图和 ${sheets.length} 张配料表的上传文件。此操作无法撤销。`
+          : `This deletes the uploads behind ${selection.length} view${selection.length === 1 ? '' : 's'} and ${sheets.length} sheet${sheets.length === 1 ? '' : 's'}. It cannot be undone.`}
+        confirmLabel={zh() ? '清除' : 'Clear'}
+      />
     </section>
   );
 }

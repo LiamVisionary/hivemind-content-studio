@@ -18,8 +18,9 @@ test('both pickers dismiss from a region that includes their trigger', () => {
         // not on the floating panel: with it on the panel, the trigger's pointerdown
         // dismissed and its click re-opened, so the panel never closed from there.
         // It suspends while a full-size preview is up, or closing the preview
-        // (scrim/Escape) would also tear down the panel underneath it.
-        assert.match(source, /const rootRef = useDismissable\(panelOpen && !preview\w+, \(\) => setPanelOpen\(false\)\)/, `${file} names the dismissable region rootRef`);
+        // (scrim/Escape) would also tear down the panel underneath it — and
+        // likewise while a delete confirm raised from the panel is up.
+        assert.match(source, /const rootRef = useDismissable\(panelOpen && !preview\w+(?: && !\w+)*, \(\) => setPanelOpen\(false\)\)/, `${file} names the dismissable region rootRef`);
         assert.match(source, /ref=\{rootRef\}/, `${file} attaches it to the wrapper`);
         assert.doesNotMatch(source, /ref=\{panelRef\}/, `${file} no longer scopes dismissal to the panel alone`);
     }
@@ -121,9 +122,13 @@ test('clearing the start frame keeps a local workflow selected', () => {
     // as an optional input: falling back to allT2V[0] unmounted the picker mid-edit
     // and discarded the middle/end frames.
     assert.match(body, /if \(isHivemindVideoModelId\(s\.modelId\)\) return s;/);
+    // The fallback itself respects the tab's Source (defaultTextToVideoModelFor):
+    // `c.allT2V[0]` is the first CLOUD model, which is what hopped a Local
+    // session onto Seedance Lite.
+    assert.doesNotMatch(body, /c\.allT2V\[0\]/, 'no bare cloud-first fallback');
     assert.ok(
-        body.indexOf('isHivemindVideoModelId(s.modelId)') < body.indexOf('c.allT2V[0]'),
-        'the local-workflow guard runs before the cloud t2v fallback',
+        body.indexOf('isHivemindVideoModelId(s.modelId)') < body.indexOf('defaultTextToVideoModelFor(s, c)'),
+        'the local-workflow guard runs before the text-to-video fallback',
     );
 
     // One predicate for "this model shows start/middle/end slots", shared by the

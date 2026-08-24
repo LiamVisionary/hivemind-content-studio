@@ -93,3 +93,42 @@ export function applyCameraMotionPrompt(prompt, previousPhrase, value) {
 export function cameraMotionById(id) {
   return MOTION_BY_ID.get(String(id || '')) || null;
 }
+
+/**
+ * The motion ids whose composed phrase is written in `prompt` — the reverse of
+ * cameraMotionPhrase. Exact: the candidates found in a "Camera motion: …"
+ * sentence are re-composed and accepted only when that phrase appears verbatim,
+ * so a hand-edited sentence reads as no selection rather than a guess.
+ *
+ * The studio uses this to reconcile the Camera chip with a prompt restored
+ * from the encrypted composer: the ids persist in plaintext settings and the
+ * phrase persists with the prompt, and the two must agree or re-applying
+ * stacks a second "Camera motion:" sentence.
+ */
+export function cameraMotionIdsInPrompt(prompt) {
+  const source = String(prompt || '');
+  const sentences = source.match(/Camera motion:[^.]*\./gi) || [];
+  for (const candidateSentence of sentences) {
+    const body = candidateSentence.toLowerCase();
+    const found = CAMERA_MOTIONS
+      .map((motion) => {
+        const atClause = body.indexOf(motion.clause.toLowerCase());
+        const atStep = body.indexOf(motion.step.toLowerCase());
+        const at = [atClause, atStep].filter((index) => index >= 0).sort((a, b) => a - b)[0];
+        return at === undefined ? null : { id: motion.id, at };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.at - b.at)
+      .map((entry) => entry.id);
+    // Pick the longest prefix whose composed phrase is the sentence itself —
+    // "zoom in optically" also appears inside a longer compound clause, so the
+    // raw hit list can carry an extra member the phrase never had.
+    for (let count = Math.min(found.length, MAX_CAMERA_MOTIONS); count >= 1; count -= 1) {
+      for (let start = 0; start + count <= found.length; start += 1) {
+        const ids = found.slice(start, start + count);
+        if (cameraMotionPhrase(ids).toLowerCase() === candidateSentence.trim().toLowerCase()) return ids;
+      }
+    }
+  }
+  return [];
+}

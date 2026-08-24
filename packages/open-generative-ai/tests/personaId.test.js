@@ -261,11 +261,27 @@ test('the summary and the identity label say it, loading hands it back', async (
     const { personaSummary, personaIdentity, applyPersonaToReferences } = await load();
     assert.equal(personaSummary({ ...CHERYL, gender: 'female' }), 'Female · 2 pictures · 1 motion clip · 1 voice clip');
     assert.equal(personaSummary(CHERYL), '2 pictures · 1 motion clip · 1 voice clip');
-    assert.deepEqual(personaIdentity({ id: 'p1', name: 'Cheryl', gender: 'woman' }), { id: 'p1', name: 'Cheryl', gender: 'female' });
-    assert.deepEqual(personaIdentity({ id: 'p1', name: 'Cheryl' }), { id: 'p1', name: 'Cheryl', gender: '' });
+    assert.deepEqual(personaIdentity({ id: 'p1', name: 'Cheryl', gender: 'woman' }), { id: 'p1', name: 'Cheryl', gender: 'female', look: '' });
+    assert.deepEqual(personaIdentity({ id: 'p1', name: 'Cheryl' }), { id: 'p1', name: 'Cheryl', gender: '', look: '' });
+    // The look rides with the identity — one or two lines, whitespace
+    // collapsed, bounded — so the cast can write it into the definition.
+    assert.deepEqual(
+        personaIdentity({ id: 'p1', name: 'Cheryl', look: '  auburn hair,\n freckles  ' }),
+        { id: 'p1', name: 'Cheryl', gender: '', look: 'auburn hair, freckles' },
+    );
     assert.equal(personaIdentity(null), null);
     assert.equal(personaIdentity({ id: 'p1' }), null, 'no name, no persona');
     assert.equal(applyPersonaToReferences({ ...CHERYL, gender: 'male' }).gender, 'male');
+});
+
+test('the look is part of the persona payload and of what counts as an edit', async () => {
+    const { personaFromReferences, samePersonaReferences } = await load();
+    const plain = personaFromReferences(CHERYL);
+    assert.equal('look' in plain, false, 'an older save reads unchanged');
+    const looked = personaFromReferences({ ...CHERYL, look: 'auburn hair, freckles, grey hoodie' });
+    assert.equal(looked.look, 'auburn hair, freckles, grey hoodie');
+    assert.equal(samePersonaReferences(plain, looked), false, 'changing the look is an edit worth saving');
+    assert.equal(samePersonaReferences(looked, { ...CHERYL, look: 'auburn hair, freckles, grey hoodie' }), true);
 });
 
 test('gender words and template tokens render for each persona, female by default', async () => {

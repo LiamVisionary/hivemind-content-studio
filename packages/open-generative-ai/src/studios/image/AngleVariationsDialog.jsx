@@ -10,7 +10,7 @@ import {
   ANGLE_ELEVATIONS,
 } from '../../lib/editAngles.js';
 import { Modal } from '../../ui/Modal.jsx';
-import { ActionButton, cx } from '../../ui/kit.jsx';
+import { ActionButton, Field, TextArea, cx } from '../../ui/kit.jsx';
 
 // Compass order for the picker — reads as a walk around the subject.
 const AZIMUTH_ORDER = ['front', 'front-right', 'right', 'back-right', 'back', 'back-left', 'left', 'front-left'];
@@ -94,17 +94,15 @@ export function AngleVariationsDialog({ entry, modelName, busy, progress, onClos
             </div>
           </div>
         </div>
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Extra guidance (optional)</span>
-          <textarea
+        <Field label="Extra guidance (optional)">
+          <TextArea
             rows={2}
             value={extra}
             onChange={(e) => setExtra(e.target.value)}
             disabled={busy}
             placeholder="Anything to keep or emphasize while the viewpoint changes"
-            className="w-full resize-none rounded-md border border-line1 bg-bg0 px-2.5 py-2 text-[13px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 focus:border-honey/50 disabled:opacity-60"
           />
-        </label>
+        </Field>
         {entry?.prompt ? (
           <p className="truncate text-[11px] text-ink3" title={entry.prompt}>Source prompt: {entry.prompt}</p>
         ) : null}

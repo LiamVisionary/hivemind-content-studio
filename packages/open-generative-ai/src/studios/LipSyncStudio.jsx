@@ -15,12 +15,18 @@
 // - Preferences persist to 'lipsync_generation_preferences' via the shared
 //   normalizer in lib/studioPreferences.js — one definition, which the
 //   persistence test exercises directly.
-// - History persists to 'lipsync_history' (slice 0..30), same entry shape.
+// - History ('lipsync_history', slice 0..30, same entry shape) goes through the
+//   studio history helpers in lib/hivemindStudio.js: in studio mode they are
+//   no-ops, so a prompt never lands on disk in the clear — the same rule the
+//   Image and Video studios follow. Standalone keeps plain localStorage.
 // - Every media src goes through useMediaSrc (E2E decrypt, fail-open); the download
-//   filename resolves from the unencrypted entry.url so E2E blob URLs still match.
+//   filename is model-derived (downloadNames.js) through the one shared downloader.
 // - alert() → toast.error(); the error no longer hijacks the Generate button label.
 //   Result video autoplays MUTED with native controls (an explicit unmute affordance)
 //   instead of the old muted=false autoplay browsers block. (Documented deviation.)
+// - A portrait picked from the studio's sealed references only exists on this
+//   machine; MUAPI fetches by URL, so — exactly like the Image studio — the owner
+//   is asked before a decrypted copy is uploaded (lib/cloudReferenceUpload.js).
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
@@ -28,9 +34,13 @@ import { toast } from 'react-hot-toast';
 import { muapi } from '../lib/muapi.js';
 import { lipsyncModels, imageLipSyncModels, videoLipSyncModels, getResolutionsForLipSyncModel } from '../lib/models.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
-import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
-import { t } from '../lib/i18n.js';
+import { videoDownloadName } from '../lib/downloadNames.js';
+import { formatElapsed } from '../lib/genProgress.js';
+import { loadStudioGenerationHistory, saveStudioGenerationHistory } from '../lib/hivemindStudio.js';
+import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
+import { toastMuapiError } from './lipsync/muapiErrorToast.jsx';
+import { getLang, t } from '../lib/i18n.js';
 
 import { useMediaSrc } from '../hooks/hooks.js';
 import { registerPromptInserter } from '../app/promptTarget.js';
@@ -39,13 +49,17 @@ import {
   Button, Card, EmptyState, IconButton, Pill, ProgressBar, SectionLabel, Segmented, Spinner, StudioLayout, cx,
 } from '../ui/kit.jsx';
 import { ChipButton, Menu } from '../ui/Menu.jsx';
-import { Modal } from '../ui/Modal.jsx';
+import { ConfirmModal, Modal } from '../ui/Modal.jsx';
 
 import { UploadPicker } from './UploadPicker.jsx';
+import { MetaRow } from './lipsync/MetaRow.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { LIPSYNC_PREFERENCES_KEY, normalizeLipSyncPreferences } from '../lib/studioPreferences.js';
 
 const LIPSYNC_HISTORY_KEY = 'lipsync_history';
+const LIPSYNC_HISTORY_LIMIT = 30;
+
+const zh = () => getLang() === 'zh-CN';
 
 function createEngine() {
   let persisted = null;
@@ -60,11 +74,6 @@ function createEngine() {
   const selectedResolution = initialResolutions.includes(persisted?.resolution)
     ? persisted.resolution
     : (initialModel.inputs?.resolution?.default || initialResolutions[0] || '');
-  let history = [];
-  try {
-    const saved = JSON.parse(localStorage.getItem(LIPSYNC_HISTORY_KEY) || '[]');
-    if (Array.isArray(saved)) history = saved;
-  } catch { /* ignore */ }
   return {
     inputMode,
     selectedModel,
@@ -76,23 +85,22 @@ function createEngine() {
     audioFileName: '',
     videoUploading: false,
     audioUploading: false,
+    imageUploading: false,
     prompt: '',
-    history,
+    history: loadStudioGenerationHistory(LIPSYNC_HISTORY_KEY),
     generating: false,
+    startedAt: 0,
     viewerUrl: null,
     authOpen: false,
     resumeRemaining: 0,
+    confirmDelete: null,
+    // A portrait held only on this machine that the owner has not yet agreed to
+    // upload to MUAPI, and the ones already agreed to (per session) — same shape
+    // as the Image studio's cloudRefConfirm / cloudRefApproved.
+    cloudRefConfirm: null,
+    cloudRefApproved: new Set(),
+    cloudRefUploads: new Map(),
   };
-}
-
-function MetaRow({ label, value }) {
-  if (value == null || value === '') return null;
-  return (
-    <div className="flex items-baseline gap-3">
-      <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{label}</span>
-      <span className="min-w-0 break-words font-mono text-xs leading-relaxed text-ink1">{String(value)}</span>
-    </div>
-  );
 }
 
 function AudioPreview({ url }) {
@@ -104,7 +112,7 @@ function AudioPreview({ url }) {
 // Video / audio upload slot with a tri-state (empty → uploading → ready). Ready state
 // shows the filename with an explicit remove control (the old code inverted the tile's
 // click to clear, which read as "open/preview") and, for audio, an audition player.
-function FileSlot({ kind, label, icon, url, fileName, uploading, onOpen, onClear }) {
+function FileSlot({ kind, label, emptyLabel, icon, url, fileName, uploading, onOpen, onClear }) {
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-xs font-medium text-ink2">{label}</span>
@@ -114,8 +122,8 @@ function FileSlot({ kind, label, icon, url, fileName, uploading, onOpen, onClear
             <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-honey-tint text-honey">
               <Icon name={icon} size={14} />
             </span>
-            <span className="min-w-0 flex-1 truncate text-xs text-ink1" title={fileName}>{fileName || 'Ready'}</span>
-            <IconButton icon="x" label="Remove" size="sm" onClick={onClear} />
+            <span className="min-w-0 flex-1 truncate text-xs text-ink1" title={fileName}>{fileName || (zh() ? '已就绪' : 'Ready')}</span>
+            <IconButton icon="x" label={zh() ? '移除' : 'Remove'} size="sm" onClick={onClear} />
           </div>
           {kind === 'audio' ? <AudioPreview url={url} /> : null}
         </div>
@@ -127,7 +135,7 @@ function FileSlot({ kind, label, icon, url, fileName, uploading, onOpen, onClear
           className="flex h-[52px] items-center justify-center gap-2 rounded-md border border-dashed border-line1 bg-bg2 px-3 text-xs font-medium text-ink2 transition-colors hover:border-line2 hover:text-ink1 disabled:opacity-50"
         >
           {uploading ? <Spinner size={14} className="text-honey" /> : <Icon name={icon} size={16} />}
-          <span>{uploading ? 'Uploading…' : `Upload ${label.toLowerCase()}`}</span>
+          <span>{uploading ? (zh() ? '上传中…' : 'Uploading…') : emptyLabel}</span>
         </button>
       )}
     </div>
@@ -169,7 +177,7 @@ function LipSyncModelMenu({ models, selectedId, onSelect }) {
   );
 }
 
-function LipSyncVideoCard({ entry, active, onOpen, onDownload }) {
+function LipSyncVideoCard({ entry, active, onOpen, onDownload, onDelete }) {
   const src = useMediaSrc(entry.url);
   return (
     <div
@@ -193,16 +201,21 @@ function LipSyncVideoCard({ entry, active, onOpen, onDownload }) {
         <div className="truncate text-[11px] text-ink1">{entry.prompt || '—'}</div>
         <div className="truncate font-mono text-[10px] text-ink3">{entry.model || ''}</div>
       </div>
-      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-        <button
-          type="button"
-          title={t('lipsync.download')}
-          aria-label="Download clip"
-          className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-ink1 transition-colors hover:border-line2 hover:bg-bg1"
+      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+        <IconButton
+          icon="download"
+          size="sm"
+          label={t('lipsync.download')}
+          className="border border-line1 bg-bg0/80 text-ink1 hover:border-line2 hover:bg-bg1"
           onClick={(e) => { e.stopPropagation(); onDownload(); }}
-        >
-          <Icon name="download" size={13} />
-        </button>
+        />
+        <IconButton
+          icon="trash"
+          size="sm"
+          label={zh() ? '从历史记录中移除' : 'Remove from history'}
+          className="border border-line1 bg-bg0/80 text-ink1 hover:border-danger hover:bg-danger-tint hover:text-danger"
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+        />
       </div>
     </div>
   );
@@ -210,17 +223,30 @@ function LipSyncVideoCard({ entry, active, onOpen, onDownload }) {
 
 function LipSyncViewer({ url, entry, generating, onClose, onNew, onRegenerate, onDownload }) {
   const src = useMediaSrc(url);
+  let created = '';
+  if (entry?.timestamp) {
+    const when = new Date(entry.timestamp);
+    created = Number.isNaN(when.getTime()) ? String(entry.timestamp) : when.toLocaleString();
+  }
   return (
     <Modal
       open
       onClose={onClose}
-      title="Lip sync result"
+      title={zh() ? '唇语同步结果' : 'Lip sync result'}
       size="xl"
       footer={
         <>
           <Button variant="ghost" onClick={onNew}>{t('lipsync.new')}</Button>
-          <Button variant="neutral" loading={generating} onClick={onRegenerate}>{t('lipsync.regenerate')}</Button>
-          <Button variant="primary" onClick={onDownload}>{t('lipsync.download')}</Button>
+          <Button
+            variant="neutral"
+            icon="refresh"
+            loading={generating}
+            onClick={onRegenerate}
+            title={zh() ? '用当前的输入再运行一次' : 'Runs again with the current inputs'}
+          >
+            {t('lipsync.regenerate')}
+          </Button>
+          <Button variant="primary" icon="download" onClick={onDownload}>{t('lipsync.download')}</Button>
         </>
       }
     >
@@ -230,10 +256,15 @@ function LipSyncViewer({ url, entry, generating, onClose, onNew, onRegenerate, o
           <video src={src} controls controlsList="nodownload" loop autoPlay muted playsInline className="max-h-[56vh] w-auto max-w-full object-contain" />
         </div>
         <div className="flex flex-col gap-1.5">
-          <MetaRow label="Prompt" value={entry?.prompt} />
-          <MetaRow label="Model" value={entry?.model} />
-          <MetaRow label="Created" value={entry?.timestamp} />
-          <MetaRow label="Id" value={entry?.id} />
+          <MetaRow label={zh() ? '提示词' : 'Prompt'} value={entry?.prompt} mono={false} />
+          <MetaRow label={zh() ? '模型' : 'Model'} value={entry?.model} />
+          <MetaRow label={zh() ? '生成时间' : 'Created'} value={created} mono={false} />
+          {entry?.id ? (
+            <div className="flex items-baseline gap-3">
+              <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{zh() ? '请求 ID' : 'Request id'}</span>
+              <span className="min-w-0 break-all font-mono text-[11px] leading-relaxed text-ink3">{String(entry.id)}</span>
+            </div>
+          ) : null}
         </div>
       </div>
     </Modal>
@@ -262,9 +293,19 @@ export function LipSyncStudio({ active = true } = {}) {
     try { localStorage.setItem(LIPSYNC_PREFERENCES_KEY, JSON.stringify(prefs)); } catch { /* quota */ }
   };
 
+  const saveHistory = () => saveStudioGenerationHistory(LIPSYNC_HISTORY_KEY, s.history, LIPSYNC_HISTORY_LIMIT);
+
   const addToHistory = (entry) => {
     s.history.unshift(entry);
-    try { localStorage.setItem(LIPSYNC_HISTORY_KEY, JSON.stringify(s.history.slice(0, 30))); } catch { /* quota */ }
+    s.history = s.history.slice(0, LIPSYNC_HISTORY_LIMIT);
+    saveHistory();
+    bump();
+  };
+
+  const removeFromHistory = (entry) => {
+    s.history = s.history.filter((item) => item !== entry);
+    if (s.viewerUrl === entry.url) s.viewerUrl = null;
+    saveHistory();
     bump();
   };
 
@@ -323,40 +364,90 @@ export function LipSyncStudio({ active = true } = {}) {
       setUrl(url);
       setName(file.name);
     } catch (err) {
-      toast.error(`${failLabel}: ${err.message}`);
+      toastMuapiError(err, { prefix: failLabel });
     } finally {
       setUploading(false);
       bump();
     }
   };
 
+  const uploadVideo = (file) => uploadTo(file, {
+    setUploading: (v) => { s.videoUploading = v; },
+    setUrl: (u) => { s.uploadedVideoUrl = u; },
+    setName: (n) => { s.videoFileName = n; },
+    retry: () => videoInputRef.current?.click(),
+    failLabel: zh() ? '视频上传失败' : 'Video upload failed',
+  });
+
+  const uploadAudio = (file) => uploadTo(file, {
+    setUploading: (v) => { s.audioUploading = v; },
+    setUrl: (u) => { s.uploadedAudioUrl = u; },
+    setName: (n) => { s.audioFileName = n; },
+    retry: () => audioInputRef.current?.click(),
+    failLabel: zh() ? '音频上传失败' : 'Audio upload failed',
+  });
+
+  // A portrait dropped on the composer: same upload the picker does, minus the
+  // picker's thumbnail/history bookkeeping (the chip still shows the result).
+  const uploadPortrait = (file) => uploadTo(file, {
+    setUploading: (v) => { s.imageUploading = v; },
+    setUrl: (u) => { s.uploadedImageUrl = u; },
+    setName: () => {},
+    retry: () => uploadPortrait(file),
+    failLabel: zh() ? '人像上传失败' : 'Portrait upload failed',
+  });
+
   const handleVideoFile = async (e) => {
     const file = e.target.files[0];
     if (videoInputRef.current) videoInputRef.current.value = '';
     if (!file) return;
-    await uploadTo(file, {
-      setUploading: (v) => { s.videoUploading = v; },
-      setUrl: (u) => { s.uploadedVideoUrl = u; },
-      setName: (n) => { s.videoFileName = n; },
-      retry: () => videoInputRef.current?.click(),
-      failLabel: 'Video upload failed',
-    });
+    await uploadVideo(file);
   };
 
   const handleAudioFile = async (e) => {
     const file = e.target.files[0];
     if (audioInputRef.current) audioInputRef.current.value = '';
     if (!file) return;
-    await uploadTo(file, {
-      setUploading: (v) => { s.audioUploading = v; },
-      setUrl: (u) => { s.uploadedAudioUrl = u; },
-      setName: (n) => { s.audioFileName = n; },
-      retry: () => audioInputRef.current?.click(),
-      failLabel: 'Audio upload failed',
-    });
+    await uploadAudio(file);
   };
 
-  const downloadFile = downloadMedia;
+  // Files dropped anywhere on the composer, filed by what they are. The window-
+  // level restore zone used to catch these and answer "No saved settings found".
+  const composerDrop = {
+    accepts: (dataTransfer) => Array.from(dataTransfer?.types || []).includes('Files'),
+    hint: zh() ? '拖放人像、视频或音频文件' : 'Drop a portrait, clip or audio file',
+    onDrop: (dataTransfer) => {
+      const files = Array.from(dataTransfer?.files || []);
+      if (!files.length) return;
+      const kindOf = (file) => {
+        const mime = String(file.type || '').toLowerCase();
+        if (mime.startsWith('audio/')) return 'audio';
+        if (mime.startsWith('video/')) return 'video';
+        if (mime.startsWith('image/')) return 'image';
+        // An empty MIME (HEIC on some platforms): go by the extension.
+        if (/\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(file.name)) return 'audio';
+        if (/\.(mp4|mov|webm|m4v|mkv)$/i.test(file.name)) return 'video';
+        if (/\.(png|jpe?g|webp|heic|heif|avif|gif|bmp|tiff?)$/i.test(file.name)) return 'image';
+        return '';
+      };
+      const picked = { audio: null, video: null, image: null };
+      files.forEach((file) => { const kind = kindOf(file); if (kind && !picked[kind]) picked[kind] = file; });
+      if (!picked.audio && !picked.video && !picked.image) {
+        toast.error(zh() ? '只能附加图片、视频或音频文件。' : 'Only an image, a video or an audio file can be attached here.');
+        return;
+      }
+      if (picked.audio) void uploadAudio(picked.audio);
+      if (picked.image) {
+        if (s.inputMode === 'image') void uploadPortrait(picked.image);
+        else toast(zh() ? '把输入切换到“人像图”再附加图片。' : 'Switch Input to Portrait image to attach a picture.');
+      }
+      if (picked.video) {
+        if (s.inputMode === 'video') void uploadVideo(picked.video);
+        else toast(zh() ? '把输入切换到“视频”再附加视频。' : 'Switch Input to Video to attach a clip.');
+      }
+    },
+    busy: s.videoUploading || s.audioUploading || s.imageUploading,
+  };
 
   const generate = async () => {
     const model = getCurrentModel();
@@ -366,6 +457,7 @@ export function LipSyncStudio({ active = true } = {}) {
     if (!s.uploadedAudioUrl) { toast.error(t('lipsync.noAudioAlert')); return; }
     if (s.inputMode === 'image' && !s.uploadedImageUrl) { toast.error(t('lipsync.noImageAlert')); return; }
     if (s.inputMode === 'video' && !s.uploadedVideoUrl) { toast.error(t('lipsync.noVideoAlert')); return; }
+    if (s.generating) return;
 
     const apiKey = localStorage.getItem('muapi_key');
     if (!apiKey) {
@@ -375,7 +467,20 @@ export function LipSyncStudio({ active = true } = {}) {
       return;
     }
 
+    // A portrait held only on this machine (a sealed studio reference, an inline
+    // data URL) cannot be fetched by MUAPI: it has to be decrypted here and a
+    // plaintext copy uploaded. Stop and ask first; confirming re-enters generate().
+    if (s.inputMode === 'image') {
+      const awaitingApproval = referencesNeedingApproval([s.uploadedImageUrl], s.cloudRefApproved);
+      if (awaitingApproval.length) {
+        s.cloudRefConfirm = { sources: awaitingApproval, model: model?.name || s.selectedModel };
+        bump();
+        return;
+      }
+    }
+
     s.generating = true;
+    s.startedAt = Date.now();
     bump();
 
     let capturedRequestId = null;
@@ -394,7 +499,10 @@ export function LipSyncStudio({ active = true } = {}) {
       };
 
       if (s.inputMode === 'image') {
-        lipsyncParams.image_url = s.uploadedImageUrl;
+        // Approved above: a local portrait is decrypted and uploaded once (cached
+        // per source); an already-public URL passes straight through.
+        const [imageUrl] = await resolveCloudReferences([s.uploadedImageUrl], { cache: s.cloudRefUploads });
+        lipsyncParams.image_url = imageUrl;
       } else {
         lipsyncParams.video_url = s.uploadedVideoUrl;
       }
@@ -419,9 +527,10 @@ export function LipSyncStudio({ active = true } = {}) {
     } catch (e) {
       if (capturedRequestId) removePendingJob(capturedRequestId);
       console.error(e);
-      toast.error(`Error: ${e.message}`);
+      toastMuapiError(e, { prefix: zh() ? '唇语同步失败' : 'Lip sync failed' });
     } finally {
       s.generating = false;
+      s.startedAt = 0;
       bump();
     }
   };
@@ -451,7 +560,14 @@ export function LipSyncStudio({ active = true } = {}) {
       const pending = getPendingJobs('lipsync');
       if (!pending.length) return;
       const apiKey = localStorage.getItem('muapi_key');
-      if (!apiKey) return; // can't poll without a key; jobs remain for next time
+      if (!apiKey) {
+        // Can't poll without a key; the jobs stay queued for the next visit —
+        // but say so, or "nothing happened" is all the user sees.
+        toast(zh()
+          ? `有 ${pending.length} 个未完成的唇语同步在等待 MUAPI 密钥 — 在设置中填写后即可恢复。`
+          : `${pending.length} pending lip sync ${pending.length === 1 ? 'job is' : 'jobs are'} waiting for your MUAPI key — add it in Settings to resume.`);
+        return;
+      }
       s.resumeRemaining = pending.length;
       bump();
       pending.forEach(async (job) => {
@@ -461,8 +577,10 @@ export function LipSyncStudio({ active = true } = {}) {
           const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, job.interval);
           const url = result.outputs?.[0] || result.url || result.output?.url;
           if (url) addToHistory({ id: job.requestId, url, ...job.historyMeta, timestamp: new Date().toISOString() });
+          else toast.error(zh() ? '一个未完成的唇语同步没有返回视频。' : 'A pending lip sync finished without a video.');
         } catch (e) {
           console.warn('[LipSyncStudio] Pending job failed:', job.requestId, e.message);
+          toastMuapiError(e, { prefix: zh() ? '无法恢复未完成的唇语同步（可能已过期）' : "Couldn't recover a pending lip sync — it may have expired" });
         } finally {
           removePendingJob(job.requestId);
           s.resumeRemaining -= 1;
@@ -476,10 +594,16 @@ export function LipSyncStudio({ active = true } = {}) {
   }, []);
 
   // Explore dock / hub bridges insert into this studio's prompt — only while it is
-  // the visible studio (studios stay mounted-hidden after first visit).
+  // the visible studio (studios stay mounted-hidden after first visit). A model
+  // with no prompt field has nowhere to put the text: say so instead of taking
+  // it into a box that is not on screen.
   useEffect(() => {
     if (!active) return undefined;
     return registerPromptInserter((text) => {
+      if (!getCurrentModel()?.hasPrompt) {
+        toast(zh() ? '当前模型没有提示词输入框 — 换一个带提示词的模型再插入。' : 'This lip sync model has no prompt field — pick one with a prompt to insert text.');
+        return;
+      }
       const current = s.prompt;
       const needsNewline = current && !current.endsWith('\n');
       s.prompt = `${current}${needsNewline ? '\n' : ''}${text}`;
@@ -498,20 +622,30 @@ export function LipSyncStudio({ active = true } = {}) {
     el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
   });
 
+  // Elapsed readout on the progress card: MUAPI gives no progress, so time is
+  // the only honest thing to show while a clip is out.
+  useEffect(() => {
+    if (!s.generating) return undefined;
+    const id = window.setInterval(bump, 1000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.generating]);
+
   const model = getCurrentModel();
   const resolutions = getResolutionsForLipSyncModel(s.selectedModel);
   const viewerEntry = s.viewerUrl ? s.history.find((e) => e.url === s.viewerUrl) : null;
+  const downloadEntry = (entry) => downloadMedia(entry.url, videoDownloadName(entry.model, entry.id));
 
   const panel = (
     <>
       <div className="flex flex-col gap-2">
-        <SectionLabel>Model</SectionLabel>
+        <SectionLabel>{zh() ? '模型' : 'Model'}</SectionLabel>
         <LipSyncModelMenu models={getCurrentModels()} selectedId={s.selectedModel} onSelect={selectModel} />
       </div>
 
       {resolutions.length > 0 ? (
         <div className="flex flex-col gap-2">
-          <SectionLabel>Resolution</SectionLabel>
+          <SectionLabel>{zh() ? '分辨率' : 'Resolution'}</SectionLabel>
           <Segmented
             size="sm"
             value={s.selectedResolution}
@@ -522,6 +656,11 @@ export function LipSyncStudio({ active = true } = {}) {
       ) : null}
 
       {model?.description ? <p className="text-xs leading-relaxed text-ink3">{model.description}</p> : null}
+
+      <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-ink3">
+        <Icon name="cloud" size={12} className="mt-px shrink-0" />
+        {zh() ? '在 MUAPI（云端）运行 — 你附加的文件会上传到那里。' : 'Runs on MUAPI (cloud) — files you attach are uploaded there.'}
+      </p>
     </>
   );
 
@@ -543,7 +682,7 @@ export function LipSyncStudio({ active = true } = {}) {
         {s.inputMode === 'image' ? (
           <div className="flex flex-col gap-1.5">
             <span className="text-xs font-medium text-ink2">{t('lipsync.portraitImage')}</span>
-            <div>
+            <div className="flex items-center gap-2">
               <UploadPicker
                 values={s.uploadedImageUrl ? [s.uploadedImageUrl] : []}
                 onChange={(urls) => { s.uploadedImageUrl = urls[0] || null; bump(); }}
@@ -553,12 +692,14 @@ export function LipSyncStudio({ active = true } = {}) {
                 accept="image/*"
                 label={t('lipsync.portraitImage')}
               />
+              {s.imageUploading ? <Spinner size={14} className="text-honey" /> : null}
             </div>
           </div>
         ) : (
           <FileSlot
             kind="video"
             label={t('lipsync.video')}
+            emptyLabel={zh() ? '上传视频' : 'Upload video'}
             icon="video"
             url={s.uploadedVideoUrl}
             fileName={s.videoFileName}
@@ -570,7 +711,8 @@ export function LipSyncStudio({ active = true } = {}) {
 
         <FileSlot
           kind="audio"
-          label="Audio"
+          label={zh() ? '音频' : 'Audio'}
+          emptyLabel={zh() ? '上传音频' : 'Upload audio'}
           icon="mic"
           url={s.uploadedAudioUrl}
           fileName={s.audioFileName}
@@ -587,6 +729,9 @@ export function LipSyncStudio({ active = true } = {}) {
           placeholder={t('lipsync.promptPlaceholder')}
           value={s.prompt}
           onChange={(e) => { s.prompt = e.target.value; bump(); }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void generate(); }
+          }}
           className="max-h-[150px] min-h-[52px] w-full resize-none overflow-y-auto rounded-lg border border-line1 bg-bg1 px-3 py-2.5 text-[15px] leading-relaxed text-ink1 outline-none transition-colors placeholder:text-ink3 focus:border-honey/40 md:max-h-[200px]"
         />
       ) : null}
@@ -597,7 +742,14 @@ export function LipSyncStudio({ active = true } = {}) {
           {model?.name || '—'}
         </Pill>
         <div className="flex-1" />
-        <Button variant="primary" size="lg" loading={s.generating} onClick={generate} className="min-w-[130px]">
+        <Button
+          variant="primary"
+          size="lg"
+          loading={s.generating}
+          onClick={generate}
+          title={zh() ? '生成（⌘/Ctrl+Enter）' : 'Generate (⌘/Ctrl+Enter)'}
+          className="min-w-[130px]"
+        >
           {s.generating ? t('common.generating') : t('common.generate')}
         </Button>
       </div>
@@ -609,21 +761,22 @@ export function LipSyncStudio({ active = true } = {}) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <StudioLayout panel={panel} panelTitle="Lip sync settings" composer={composer}>
+      <StudioLayout panel={panel} panelTitle={zh() ? '唇语同步设置' : 'Lip sync settings'} composer={composer} composerDrop={composerDrop}>
         <div className="flex flex-col gap-4 p-4 md:p-5">
           {s.generating ? (
             <Card className="flex items-center gap-3 p-4">
               <Spinner size={16} className="text-honey" />
               <span className="text-[13px] text-ink2">{t('common.generating')}</span>
-              <div className="flex-1"><ProgressBar value={null} /></div>
+              <div className="flex-1"><ProgressBar value={null} label={t('common.generating')} /></div>
+              <span className="shrink-0 font-mono text-[11px] text-ink3">{formatElapsed(Date.now() - s.startedAt)}</span>
             </Card>
           ) : null}
 
           {s.history.length === 0 && !s.generating ? (
             <EmptyState
               icon="mic"
-              title="No lip sync clips yet"
-              hint="Pick a model, attach a portrait or video plus an audio track, then press Generate."
+              title={zh() ? '还没有唇语同步片段' : 'No lip sync clips yet'}
+              hint={zh() ? '选择模型，附加人像或视频以及一段音频，然后按生成。' : 'Pick a model, attach a portrait or video plus an audio track, then press Generate.'}
               className="flex-1"
             />
           ) : (
@@ -639,7 +792,8 @@ export function LipSyncStudio({ active = true } = {}) {
                     entry={entry}
                     active={s.viewerUrl ? s.viewerUrl === entry.url : idx === 0}
                     onOpen={() => { s.viewerUrl = entry.url; bump(); }}
-                    onDownload={() => downloadFile(entry.url, `lipsync-${entry.id || idx}.mp4`)}
+                    onDownload={() => downloadEntry(entry)}
+                    onDelete={() => { s.confirmDelete = entry; bump(); }}
                   />
                 ))}
               </div>
@@ -656,7 +810,36 @@ export function LipSyncStudio({ active = true } = {}) {
           onClose={() => { s.viewerUrl = null; bump(); }}
           onNew={newClip}
           onRegenerate={() => { s.viewerUrl = null; bump(); void generate(); }}
-          onDownload={() => downloadFile(s.viewerUrl, `lipsync-${viewerEntry?.id || 'clip'}.mp4`)}
+          onDownload={() => (viewerEntry ? downloadEntry(viewerEntry) : downloadMedia(s.viewerUrl, videoDownloadName(s.selectedModel, 'clip')))}
+        />
+      ) : null}
+
+      <ConfirmModal
+        open={Boolean(s.confirmDelete)}
+        onClose={() => { s.confirmDelete = null; bump(); }}
+        onConfirm={() => { const entry = s.confirmDelete; s.confirmDelete = null; if (entry) removeFromHistory(entry); }}
+        title={zh() ? '从历史记录中移除这个片段？' : 'Remove this clip from history?'}
+        body={zh() ? '只会从此工作室的列表中移除，不会删除任何文件。' : 'It leaves this studio’s list only — no file is deleted.'}
+        confirmLabel={zh() ? '移除' : 'Remove'}
+        cancelLabel={zh() ? '取消' : 'Cancel'}
+      />
+
+      {s.cloudRefConfirm ? (
+        <ConfirmModal
+          open
+          title={zh() ? '上传这张人像到 MUAPI？' : 'Upload this portrait to MUAPI?'}
+          body={zh()
+            ? `这张人像只保存在这台电脑上（已加密）。${s.cloudRefConfirm.model} 在云端运行并通过 URL 读取图片，继续将把解密后的副本上传到 MUAPI — 这些数据会离开你的电脑。`
+            : `This portrait is stored privately on this machine. ${s.cloudRefConfirm.model} runs in the cloud and reads it by URL, so continuing uploads a decrypted copy to MUAPI — those bytes leave your machine and are out of your control.`}
+          confirmLabel={zh() ? '上传并生成' : 'Upload and generate'}
+          cancelLabel={zh() ? '取消' : 'Cancel'}
+          onClose={() => { s.cloudRefConfirm = null; bump(); }}
+          onConfirm={() => {
+            s.cloudRefConfirm.sources.forEach((source) => s.cloudRefApproved.add(source));
+            s.cloudRefConfirm = null;
+            bump();
+            void generate();
+          }}
         />
       ) : null}
 
@@ -677,7 +860,9 @@ export function LipSyncStudio({ active = true } = {}) {
         ? createPortal(
           <div className="fixed left-1/2 top-4 z-[200] flex -translate-x-1/2 items-center gap-2.5 rounded-lg border border-line1 bg-bg1 px-4 py-2.5 text-[13px] text-ink1 shadow-pop">
             <Spinner size={14} className="text-honey" />
-            <span>{`Resuming ${s.resumeRemaining} pending generation${s.resumeRemaining > 1 ? 's' : ''}…`}</span>
+            <span>{zh()
+              ? `正在恢复 ${s.resumeRemaining} 个未完成的生成…`
+              : `Resuming ${s.resumeRemaining} pending generation${s.resumeRemaining > 1 ? 's' : ''}…`}</span>
           </div>,
           document.body,
         )

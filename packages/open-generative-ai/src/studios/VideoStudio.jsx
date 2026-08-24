@@ -27,13 +27,17 @@ import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
-import { applyCameraMotionPrompt, cameraMotionPhrase, normalizeCameraMotions } from '../lib/cameraMotion.js';
+import { applyCameraMotionPrompt, cameraMotionIdsInPrompt, cameraMotionPhrase, normalizeCameraMotions } from '../lib/cameraMotion.js';
 import { CameraMotionMenu } from './video/CameraMotionMenu.jsx';
 import { applyRestylePrompt } from '../lib/h3RestylePresets.js';
 import { RestyleMenu } from './video/RestyleMenu.jsx';
-import { CharacterMenu } from './video/CharacterMenu.jsx';
-import { CastMenu, castApplication, characterCastMember } from './video/CastMenu.jsx';
-import { applyCharacterToPrompt } from '../lib/h3Characters.js';
+import { CastStrip } from './video/CastStrip.jsx';
+import {
+  castPersonaIdentity, castRenderGender, castRows, castSubjects, isWovenForReference,
+  reconcileCast, toCastMember, weavePrompt, weaveTarget,
+} from '../lib/promptWeave.js';
+import { allocateCast } from '../lib/castPrompt.js';
+import { liveStandIns } from '../lib/subjectTemplate.js';
 import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
@@ -74,18 +78,17 @@ import {
   selectableHivemindModelId,
   saveStudioGenerationHistory,
   uploadFileToHivemindStudio,
-  workflowIdFromHivemindModelId,
-} from '../lib/hivemindStudio.js';
+  workflowIdFromHivemindModelId, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
 import { t, tf, aspectRatioName } from '../lib/i18n.js';
 
 import { registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
 import { basenameOf, rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
-import { useMediaSrc } from '../hooks/hooks.js';
+import { useMediaPoster, useMediaSrc } from '../hooks/hooks.js';
 import { Icon } from '../ui/icons.jsx';
 import {
   AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, Field, IconButton, NativeSelect,
-  Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextInput, Toggle, cx,
+  Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput, Toggle, cx,
 } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
@@ -103,7 +106,6 @@ import {
   referenceKindForFile,
   referenceKindsInDrag,
   referenceUrl,
-  withReferenceTags,
 } from '../lib/h3References.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import {
@@ -130,7 +132,7 @@ import {
   aspectRatiosFor, durationsFor, resolutionsFor, modesFor, qualitiesFor, effectNamesFor,
   motionReferenceLimitFor, availableDurationsFor, clampDurationToMotionReference, probeVideoDurationSeconds,
   deriveControlVisibility, deriveExtendBanner, derivePromptUi,
-  applyRestoredPreferences, applyGenerationContext,
+  applyRestoredPreferences, applyGenerationContext, restylePresetIdInPrompt,
   startFrameSelectedTransition, startFrameClearedTransition, clearVideoUploadTransition,
   videoUploadedTransition, selectV2VModelTransition, selectRegularModelTransition,
   selectHivemindWorkflowTransition, newPromptTransition, extendTransition,
@@ -139,7 +141,7 @@ import {
   normalizeVideoGenerationProgress, normalizeSamplerSteps, classifyVideoGenerationStage, formatVideoGenerationElapsed,
   computeSmoothProgress, supportsSpectrum, supportsFastHighRes, supportsQualitySteps,
   closestVideoAspectRatio, imageDimensions, redactPrivateHistoryEntry,
-  groupModelTiers, activeTierFor, tierPairFor,
+  groupModelTiers, activeTierFor, tierPairFor, servingMachineFor,
 } from './video/videoLogic.js';
 
 // Re-export the spec-listed pure helpers so tests/other callers keep importing
@@ -153,24 +155,48 @@ export {
 
 /* ---------------- media leaves (E2E-transparent) ---------------- */
 
-function ResultVideo({ url }) {
+// `unmuted` — the clip reached the canvas through a user gesture (a strip
+// click, Regenerate, a timeline pick), so it may play with sound; a clip that
+// lands on its own (a finished generation, a restore) stays muted, which is
+// what autoplay policy allows. H3 renders dialogue and soundscape, and a
+// result that always started silent gave no cue that there was any.
+function ResultVideo({ url, unmuted = false, hasAudio = false }) {
   const src = useMediaSrc(url);
   return (
-    <video
-      src={src}
-      controls controlsList="nodownload"
-      loop
-      autoPlay
-      muted
-      playsInline
-      className="max-h-[58vh] w-auto max-w-full rounded-lg border border-line1 bg-bg0 object-contain"
-    />
+    <div className="relative">
+      <video
+        src={src}
+        controls controlsList="nodownload"
+        loop
+        autoPlay
+        muted={!unmuted}
+        playsInline
+        className="max-h-[58vh] w-auto max-w-full rounded-lg border border-line1 bg-bg0 object-contain"
+      />
+      {hasAudio ? (
+        <Pill tone="neutral" className="pointer-events-none absolute left-2 top-2 gap-1 bg-bg0/80">
+          <Icon name="sound" size={11} />
+          {zh() ? '有声' : 'Sound'}
+        </Pill>
+      ) : null}
+    </div>
   );
 }
 
+// Strip tiles draw ONE decoded frame as an <img> (useMediaPoster), not a <video>
+// per entry: thirty live media elements each holding a decoder for a 200px
+// tile, and the frame re-decoded on every remount, was the cost of the old
+// way. The clip itself is decrypted once (cached) and reused when it goes on
+// the canvas.
 function HistoryThumb({ url }) {
-  const src = useMediaSrc(url);
-  return <video src={src} muted preload="metadata" className="aspect-square w-full bg-bg0 object-cover" />;
+  const { poster, resolved, pending } = useMediaPoster(url, { kind: 'video' });
+  if (poster) return <img src={poster} alt="" className="aspect-video w-full bg-bg0 object-contain" />;
+  if (!resolved || pending) return <div className="aspect-video w-full animate-pulse bg-bg2" aria-label={zh() ? '解密中' : 'Decrypting'} />;
+  return (
+    <div className="grid aspect-video w-full place-items-center bg-bg0 text-ink3">
+      <Icon name="film" size={18} />
+    </div>
+  );
 }
 
 function ProgressPreview({ url }) {
@@ -262,6 +288,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // Job id of the in-flight LOCAL Media Studio render, mirrored to sessionStorage
     // (pendingJobs) so a tab switch / reload can resume its live progress.
     activeLocalJobId: null,
+    // Request id of the in-flight CLOUD (muapi) job, for the same reason: Cancel
+    // has to drop its pending-job record, or a reload resumes a run the user
+    // already gave up on.
+    activeCloudRequestId: null,
     // AbortController for the in-flight generation poll — the Cancel button aborts
     // it to stop polling immediately (independent of the backend interrupt).
     abortController: null,
@@ -281,6 +311,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     promptHelperOpen: false,
     resumeRemaining: 0,
     deleteTarget: null,
+    // A pending "attach this clip?" question: { lines, resolve } while the
+    // ConfirmModal is up (confirmSourceVideoSwitch), else null.
+    sourceSwitchConfirm: null,
     persistTimer: null,
     // A History "Load in Studio" that arrived before the workflow catalog did,
     // held until the catalog can resolve its model.
@@ -302,6 +335,11 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // the cast it was saved with.
     cast: [],
     castWarnings: [],
+    // The stand-ins of the prompt in the composer — which words of a loaded
+    // starter are the person it was written about (subjectTemplate.js), kept
+    // until a cast member takes their place. Persisted with the prompt in the
+    // encrypted composer draft; never in the plaintext settings store.
+    standIns: [],
     // The shot timeline inside ONE generation — cuts, camera, timed beats and
     // dialogue. Held here rather than in the dialog for the same reason the
     // cast is: a builder that forgot its shots every time it closed would be a
@@ -425,6 +463,18 @@ export function VideoStudio({
     fastHighRes: s.setup.fastHighRes,
     motionContextUrl: s.setup.motionContextUrl,
     motionContextIndex: s.setup.motionContextIndex,
+    // Advanced / Task settings. normalizeVideoPreferences already had fields
+    // for these; nothing wrote them, so they reset on every reload.
+    spectrum: s.setup.spectrum,
+    nagScale: s.setup.nagScale,
+    detailerStrength: s.setup.detailerStrength,
+    videoTask: s.setup.videoTask,
+    headSwapBackend: s.setup.headSwapBackend,
+    headSwapFaceEnhancer: s.setup.headSwapFaceEnhancer,
+    headSwapLoraStrength: s.setup.headSwapLoraStrength,
+    // Selections only (ids) — the phrases live with the prompt, encrypted.
+    cameraMotionIds: s.setup.cameraMotionIds,
+    restylePresetId: s.setup.restylePresetId,
     advancedValues: s.setup.advancedValues,
     loraSelections: Object.fromEntries(s.videoLoraSelectionsByModel),
     ingredientSelections: s.sharedIngredientSelections,
@@ -481,6 +531,156 @@ export function VideoStudio({
     const fitted = fitShotTimeline(text, Number(s.setup.duration) || 0);
     if (fitted.changed) announceRefit(fitted);
     return fitted.prompt;
+  };
+
+  /* ---------------- the weave ---------------- */
+  //
+  // One rule for every door into the composer — see lib/promptWeave.js. Who is
+  // in the shot is DERIVED from what is attached (reconcileCast): whoever is in
+  // your references is <Subject 1> without a menu, a loaded Persona ID names
+  // them, a picked character joins them. Weaving recasts the prompt onto that
+  // cast, binds a loaded starter's stand-in, writes the rows the cast occupies
+  // and re-times the shots to the run's length — in one pass, from every door.
+  const isH3 = () => /minimax-h3/.test(s.setup.modelId || '');
+  const referenceLaneEntry = () => (isHivemindVideoModelId(s.setup.modelId)
+    ? referenceWorkflowForHivemindModel(s.setup.modelId)
+    : null);
+  const weaveLimits = () => {
+    const entry = referenceLaneEntry();
+    return {
+      images: entry?.referenceSlots?.images || 9,
+      audios: entry?.referenceSlots?.audios || 3,
+      videos: entry?.referenceSlots?.videos || 3,
+    };
+  };
+  const currentRows = () => ({
+    images: Array.isArray(s.setup.referenceImageUrls) ? s.setup.referenceImageUrls : [],
+    videos: Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : [],
+    audios: Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : [],
+  });
+  const weaveTargetNow = () => weaveTarget({
+    h3: isH3(), referenceLane: Boolean(referenceLaneEntry()), rows: currentRows(),
+  });
+  const syncCast = () => {
+    s.cast = reconcileCast(s.cast, currentRows(), { persona: s.setup.persona });
+    return s.cast;
+  };
+  // The cast and the stand-ins persist WITH the prompt, in the encrypted
+  // composer draft — a persona's name is sealed to the owner's vault and the
+  // plaintext settings store must never learn it.
+  const rememberCast = () => updateComposerDraft({ cast: s.cast, standIns: s.standIns });
+  const setRows = (rows) => {
+    s.setup = withDurationThatFits({
+      ...s.setup,
+      referenceImageUrls: rows.images,
+      referenceVideos: rows.videos,
+      referenceAudios: rows.audios,
+    });
+  };
+  const runWeave = (text, { standIns, scaffold = false } = {}) => weavePrompt(text, {
+    cast: s.cast,
+    limits: weaveLimits(),
+    durationSeconds: Number(s.setup.duration) || 0,
+    target: weaveTargetNow(),
+    standIns: standIns === undefined ? s.standIns : standIns,
+    scaffold,
+  });
+  // A snapshot the Undo on a weave toast restores.
+  const weaveSnapshot = () => ({
+    prompt: s.setup.prompt, cast: s.cast, standIns: s.standIns, rows: currentRows(), persona: s.setup.persona,
+  });
+  const restoreWeaveSnapshot = (snapshot) => {
+    // "+ New" snapshots the whole setup (frames, clip, model) as well.
+    if (snapshot.setup) s.setup = { ...snapshot.setup };
+    s.cast = snapshot.cast;
+    s.standIns = snapshot.standIns;
+    setRows(snapshot.rows);
+    s.setup = { ...s.setup, persona: snapshot.persona };
+    setPrompt(snapshot.prompt);
+    rememberCast();
+  };
+  const announceWeave = (message, snapshot) => {
+    toast((instance) => (
+      <span className="flex items-center gap-3">
+        <span>{message}</span>
+        <button
+          type="button"
+          className="font-semibold text-honey hover:underline"
+          onClick={() => { restoreWeaveSnapshot(snapshot); toast.dismiss(instance.id); }}
+        >
+          {zh() ? '撤销' : 'Undo'}
+        </button>
+      </span>
+    ), { duration: 7000 });
+  };
+  // A prompt arriving through ANY door — a starter, the library, the helper,
+  // the Shot Builder, the hub's insert bridge, a canvas restore, the Weave
+  // button, or the attach that changed who is in the shot. `standIns` rides
+  // with a freshly rendered starter; undefined means "what the composer holds".
+  const acceptPrompt = (text, { standIns, scaffold = false, announce = true } = {}) => {
+    syncCast();
+    const woven = runWeave(text, { standIns, scaffold });
+    if (announce && woven.refit.changed) announceRefit(woven.refit);
+    s.standIns = woven.standIns;
+    s.castWarnings = woven.warnings;
+    if (woven.rows) {
+      setRows(woven.rows);
+      // The rows only still ARE one saved character when the cast is that one
+      // persona; anything else and the name would be a lie about what is loaded.
+      s.setup = { ...s.setup, persona: personaIdentity(woven.persona) };
+    }
+    setPrompt(woven.prompt);
+    rememberCast();
+    return woven;
+  };
+  // Members changed — added, removed, reordered, restyled. Members carry their
+  // own media, so the rows they occupy are written FIRST (the reconcile that
+  // follows must see every member's references attached), then the prompt is
+  // woven onto the new cast.
+  const applyMembers = (next) => {
+    s.cast = Array.isArray(next) ? next : [];
+    if (referenceLaneEntry()) {
+      const { images, videos, audios } = allocateCast(s.cast.map(toCastMember), { limits: weaveLimits() });
+      setRows({ images, videos, audios });
+    }
+    return acceptPrompt(s.setup.prompt);
+  };
+  // The rows changed by hand — a file dropped, a row removed, a Persona ID
+  // loaded. The cast follows, and a written prompt has the new cast woven in;
+  // an empty composer waits for text (there is nothing to weave into yet).
+  // "Draft from pictures" on a cast member: up to three of its pictures are
+  // decrypted in the browser and shown to the loaded local helper, which
+  // writes the look (hair, face, build, wardrobe). Only the bytes travel — never
+  // the persona's name — and only to the loopback llama-server.
+  const draftLookFor = async (member) => {
+    const urls = (member?.data?.images || []).slice(0, 3);
+    if (!urls.length) throw new Error(zh() ? '这位成员没有图片。' : 'This member has no pictures.');
+    const images = (await Promise.all(urls.map((url) => mediaSourceToDataUrl(url, 'image').catch(() => null)))).filter(Boolean);
+    if (!images.length) throw new Error(zh() ? '无法读取图片。' : 'Could not read the pictures.');
+    const response = await fetch('/api/prompt-helper/describe-look', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ images, gender: member?.data?.gender || '' }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.detail || payload?.error || (zh() ? '助手没有返回外貌描述。' : 'The helper did not return a look.'));
+    }
+    return String(payload.look || '');
+  };
+
+  const afterRowsChanged = () => {
+    const before = weaveSnapshot();
+    syncCast();
+    rememberCast();
+    if (weaveTargetNow() === 'reference' && s.cast.length && s.setup.prompt.trim()) {
+      const woven = acceptPrompt(s.setup.prompt);
+      if (woven.prompt !== before.prompt) {
+        announceWeave(zh() ? '已把参考织入提示词' : 'Wove your references into the prompt', before);
+      }
+    }
+    bump();
   };
 
   const withDurationThatFits = (setup) => {
@@ -614,9 +814,13 @@ export function VideoStudio({
   const ugcPersona = () => {
     const images = s.setup.referenceImageUrls || [];
     if (!images.length || !videoRequestPlan(s.setup).sendReferenceImages) return null;
+    // The look comes from whoever holds the rows in the cast (a loaded persona
+    // or the anonymous references member edited on the strip).
+    const holder = s.cast.find((member) => member.kind === 'persona');
     return {
       name: s.setup.persona?.name || '',
-      gender: s.setup.persona?.gender || '',
+      gender: s.setup.persona?.gender || holder?.data?.gender || '',
+      look: s.setup.persona?.look || holder?.data?.look || '',
       images,
       videos: s.setup.referenceVideos || [],
       audios: s.setup.referenceAudios || [],
@@ -644,54 +848,6 @@ export function VideoStudio({
     updateComposerDraft({ prompt });
     persistVideoPreferences();
     bump();
-    focusPrompt();
-  };
-
-  // H3 character quick-add.
-  //
-  // With a cast set, a character IS a cast member: added as loose prompt text
-  // it would be erased by the next apply, since subject_definitions is always
-  // re-derived from the cast. So it joins the cast and the prompt is recast
-  // around it. Only the PROMPT — a character brings no media, so nothing that
-  // is attached has any business changing because a cartoon was picked.
-  //
-  // With no cast, it stays what it always was: plain prompt text carrying the
-  // full source form (name, casting, series, year), enriching a bare name in
-  // place, and — in a six-section prompt — defining a subject of its own rather
-  // than being appended past the end of the last section.
-  const addH3Character = (entry, limits) => {
-    if (limits && s.cast.length) {
-      const member = characterCastMember(entry);
-      if (s.cast.some((item) => item.key === member.key)) { focusPrompt(); return; }
-      const cast = [...s.cast, member];
-      const result = castApplication({
-        members: cast, prompt: s.setup.prompt, limits, durationSeconds: Number(s.setup.duration) || 0,
-      });
-      s.cast = cast;
-      s.castWarnings = result.warnings;
-      setPrompt(result.prompt);
-      toast.success(zh()
-        ? `已加入演员表 · ${entry.name} 为 <Subject ${cast.length}>`
-        : `${entry.name} joined the cast as <Subject ${cast.length}>`);
-      focusPrompt();
-      return;
-    }
-    const before = s.setup.prompt;
-    const next = applyCharacterToPrompt(before, entry);
-    if (next === before) { focusPrompt(); return; }
-    setPrompt(next);
-    // Defined as a subject of its own, which is a definition and not a scene:
-    // nothing in the description has it doing anything yet.
-    // The HIGHEST subject number, not a count of definition lines: a subject
-    // spends several lines on itself (what it is, how it is drawn, how it
-    // sounds) and counting those named Kratos as <Subject 5> when he was 3.
-    const highest = (text) => Math.max(0, ...[...String(text).matchAll(/<Subject (\d+)>/g)]
-      .map((hit) => Number(hit[1])));
-    if (highest(next) > highest(before)) {
-      toast.success(zh()
-        ? `${entry.name} 已定义为 <Subject ${highest(next)}> — 记得写进镜头描述`
-        : `${entry.name} defined as <Subject ${highest(next)}> — write them into the description`);
-    }
     focusPrompt();
   };
 
@@ -750,7 +906,7 @@ export function VideoStudio({
   // the family's reference workflow and replaces the start/end frames.
   const onCharacterRefsChange = (urls) => {
     s.setup = { ...s.setup, referenceImageUrls: (Array.isArray(urls) ? urls : []).filter(Boolean) };
-    bump();
+    afterRowsChanged();
   };
 
   // Voice clips (<Audio N>) and motion clips (<Video N>) of the same Reference
@@ -758,7 +914,7 @@ export function VideoStudio({
   // whether its own soundtrack rides along.
   const onReferenceAudiosChange = (items) => {
     s.setup = { ...s.setup, referenceAudios: (Array.isArray(items) ? items : []).filter((item) => item?.url) };
-    bump();
+    afterRowsChanged();
   };
 
   const onReferenceVideosChange = (items) => {
@@ -766,7 +922,7 @@ export function VideoStudio({
       ...s.setup,
       referenceVideos: (Array.isArray(items) ? items : []).filter((item) => item?.url),
     });
-    bump();
+    afterRowsChanged();
   };
 
   // Which Hive Persona ID the three reference rows currently ARE — set when one
@@ -774,56 +930,58 @@ export function VideoStudio({
   // deleted. Purely a label: it never adds or removes a reference itself.
   const onPersonaChange = (next) => {
     s.setup = { ...s.setup, persona: personaIdentity(next) };
+    // The name belongs to whoever holds the rows: the cast member is renamed
+    // (and learns the persona's gender and look) rather than doubled — and a
+    // written prompt is re-woven, since its definition just changed.
+    syncCast();
+    if (weaveTargetNow() === 'reference' && s.cast.length && s.setup.prompt.trim()) acceptPrompt(s.setup.prompt, { announce: false });
+    rememberCast();
     bump();
   };
 
-  // A cast writes both halves in one step: the prompt sections that say who the
-  // subjects are and what each reference may carry, AND the reference rows the
-  // personas bring. Applying one without the other is how a prompt ends up
-  // addressing a <Picture 7> that was never attached.
-  const applyCast = ({ prompt, images, videos, audios, persona, warnings }) => {
-    // A cast can bring motion clips with it, which collapses the duration
-    // range the same way attaching one by hand does.
-    s.setup = withDurationThatFits({
-      ...s.setup,
-      prompt,
-      referenceImageUrls: images,
-      referenceVideos: videos,
-      referenceAudios: audios,
-      // The rows only still ARE one saved character when the cast is that one
-      // persona; anything else and the name would be a lie about what is loaded.
-      persona: personaIdentity(persona),
-    });
-    s.castWarnings = Array.isArray(warnings) ? warnings : [];
-    updateComposerDraft({ prompt });
-    bump();
-    const total = images.length + videos.length + audios.length;
-    toast.success(zh()
-      ? `已应用演员表 · ${total} 个参考`
-      : `Cast applied — ${total} reference${total === 1 ? '' : 's'} attached`);
-  };
-
-  // A prompt arriving from the library, recast on the way in.
-  //
-  // A saved prompt was written for whoever was in it when it was saved. Dropped
-  // into a composer that has a cast and left alone, it addresses the OLD one —
-  // the same half-rewritten state the Cast control exists to prevent, arriving
-  // through the other door. The references are deliberately NOT touched here:
-  // loading a prompt is not a request to reshuffle what is attached, and the
-  // recast reports any label the current rows cannot fill.
-  const loadPromptText = (text, limits) => {
-    if (!limits || !s.cast.length) {
-      setPrompt(adoptPrompt(text));
-      return;
+  // The Cast menu: members added, removed, reordered or restyled. Every change
+  // applies at once — writing the prompt without the rows (or the rows without
+  // the prompt) is how a prompt ends up addressing a <Picture 7> that was never
+  // attached, so there is no separate step to forget.
+  const applyCast = (members, { announce = true } = {}) => {
+    const before = weaveSnapshot();
+    const woven = applyMembers(members);
+    const total = (woven.rows?.images.length || 0) + (woven.rows?.videos.length || 0) + (woven.rows?.audios.length || 0);
+    // An attribute edit (gender, look, a character's style) re-weaves silently
+    // — a toast per keystroke in the look box is noise; add / remove / reorder
+    // announce, with Undo.
+    if (announce && (woven.prompt !== before.prompt || JSON.stringify(woven.rows) !== JSON.stringify(before.rows))) {
+      announceWeave(
+        zh()
+          ? `已应用演员表 · ${s.cast.length} 位 · ${total} 个参考`
+          : `Cast woven in — ${s.cast.length} member${s.cast.length === 1 ? '' : 's'}, ${total} reference${total === 1 ? '' : 's'}`,
+        before,
+      );
     }
-    const result = castApplication({
-      members: s.cast, prompt: text, limits, durationSeconds: Number(s.setup.duration) || 0,
-    });
-    s.castWarnings = result.warnings;
-    setPrompt(adoptPrompt(result.prompt));
-    toast.success(zh()
-      ? `已按当前演员表改写提示词 · ${s.cast.length} 位`
-      : `Prompt recast for your cast — ${s.cast.length} member${s.cast.length === 1 ? '' : 's'}`);
+  };
+
+  // A prompt arriving from the library or the starters, woven on the way in.
+  //
+  // A saved prompt was written for whoever was in it when it was saved, and a
+  // starter for a stand-in. Dropped into a composer with a cast and left alone,
+  // it addresses the OLD one — the half-rewritten state the weave exists to
+  // prevent. `standIns` are the starter's own record of which words are the
+  // person; the references are deliberately NOT reshuffled by loading a prompt.
+  const loadPromptText = (text, { standIns = [] } = {}) => {
+    const before = weaveSnapshot();
+    const woven = acceptPrompt(text, { standIns });
+    if (!s.cast.length) return;
+    if (weaveTargetNow() === 'reference') {
+      announceWeave(
+        zh()
+          ? `已按当前演员表改写提示词 · ${s.cast.length} 位`
+          : `Prompt woven onto your cast — ${s.cast.length} member${s.cast.length === 1 ? '' : 's'}`,
+        before,
+      );
+    } else if (woven.prompt !== fitShotTimeline(text, Number(s.setup.duration) || 0).prompt) {
+      // Changed by the cast, not merely re-timed.
+      announceWeave(zh() ? '已把演员表织入提示词' : 'Cast woven into the prompt', before);
+    }
   };
 
   // LTX 2.3 first/middle/end keyframes (Hivemind local). Kept separate from the
@@ -872,10 +1030,12 @@ export function VideoStudio({
     else videoFileInputRef.current?.click();
   };
 
-  // Spells out both consequences and lets you back out. A native confirm is
-  // deliberate here: this fires from a file-input change handler, and a modal
-  // that resolves asynchronously would let the upload start before the answer.
-  const confirmSourceVideoSwitch = (cost) => {
+  // Spells out both consequences and lets you back out — as a ConfirmModal
+  // that RESOLVES: the file is already captured by the handler that asks, and
+  // nothing uploads until the answer lands, so the async dialog costs nothing.
+  // (The native confirm it replaces was the last one left in the
+  // studios.)
+  const confirmSourceVideoSwitch = (cost) => new Promise((resolve) => {
     const lines = [];
     if (cost.switchesModel) {
       lines.push(zh()
@@ -887,8 +1047,14 @@ export function VideoStudio({
         ? `已添加的 ${cost.droppedReferences} 个参考会被移除（源视频与参考模式不能同时使用）。`
         : `Your ${cost.droppedReferences} attached reference${cost.droppedReferences === 1 ? '' : 's'} will be removed — a source clip and reference mode cannot be used together.`);
     }
-    lines.push(zh() ? '继续吗？' : 'Continue?');
-    return window.confirm(lines.join('\n\n'));
+    s.sourceSwitchConfirm = { lines, resolve };
+    bump();
+  });
+  const answerSourceSwitch = (answer) => {
+    const pending = s.sourceSwitchConfirm;
+    s.sourceSwitchConfirm = null;
+    bump();
+    pending?.resolve(answer);
   };
 
   const handleVideoFile = async (file) => {
@@ -919,7 +1085,7 @@ export function VideoStudio({
     // clears reference mode. Ask before doing either, and ask BEFORE the
     // upload so declining costs nothing.
     const cost = sourceVideoSwitchCost({ setup: s.setup, target: useHivemind ? preferredHive : null });
-    if (cost && !confirmSourceVideoSwitch(cost)) return;
+    if (cost && !(await confirmSourceVideoSwitch(cost))) return;
     if (!useHivemind && !localStorage.getItem('muapi_key')) {
       s.authRetry = () => videoFileInputRef.current?.click();
       s.authOpen = true;
@@ -1247,10 +1413,12 @@ export function VideoStudio({
 
   /* ---------------- canvas / history ---------------- */
 
-  const showVideoInCanvas = (url, model, { fromGeneration = false, anchorChain = true } = {}) => {
+  const showVideoInCanvas = (url, model, { fromGeneration = false, anchorChain = true, userInitiated = false } = {}) => {
     s.contextStore.view(url);
     s.resultUrl = url;
     s.resultModel = model;
+    // Sound follows a gesture: only a clip the user asked for plays unmuted.
+    s.resultUnmuted = Boolean(userInitiated);
     // Which chain the timeline is showing. Anchored to a SHOT, so previewing
     // the joined cut (a blob URL that is in no history) does not collapse the
     // timeline that produced it.
@@ -1291,7 +1459,7 @@ export function VideoStudio({
       s.lastGenerationId = null;
       s.lastGenerationModel = null;
     }
-    showVideoInCanvas(entry.url, entry.model);
+    showVideoInCanvas(entry.url, entry.model, { userInitiated: true });
   };
 
   const confirmDeleteHistoryEntry = () => {
@@ -1617,9 +1785,11 @@ export function VideoStudio({
 
   /* ---------------- canvas action buttons ---------------- */
 
+  // Only clears the canvas. It used to restore the viewed clip's settings too —
+  // with the composer visible under the result, anything typed while the clip
+  // was on screen was replaced by the clip's old prompt the moment this was
+  // pressed, with no undo. Regenerate and drag-to-restore still restore.
   const backToSetup = () => {
-    const viewed = s.contextStore.getViewed();
-    if (viewed) restoreGenerationContext(viewed);
     s.resultUrl = null;
     s.resultModel = null;
     bump();
@@ -1639,15 +1809,30 @@ export function VideoStudio({
     bump();
     void generate();
   };
+  // "+ New" clears the prompt, the references, the persona and the frames in
+  // one press — offered back through the same Undo toast the weave uses, since
+  // there is no confirm and a press can land a second early.
   const newPrompt = () => {
+    const before = { ...weaveSnapshot(), setup: s.setup };
+    const hadSomething = Boolean(before.prompt.trim())
+      || before.rows.images.length || before.rows.videos.length || before.rows.audios.length
+      || Boolean(s.setup.imageUrl) || Boolean(s.setup.videoUrl);
     s.setup = newPromptTransition(s.setup, s.catalogs);
     s.lastSubmittedContext = null;
     s.contextStore.clearViewed();
     s.resultUrl = null;
     s.resultModel = null;
+    // The cast follows the rows it was derived from; the stand-ins belonged to
+    // the prompt that is gone.
+    s.cast = [];
+    s.standIns = [];
+    s.castWarnings = [];
+    rememberCast();
+    updateComposerDraft({ prompt: '' });
     persistVideoPreferences();
     bump();
     focusPrompt();
+    if (hadSomething) announceWeave(zh() ? '已清空提示词与输入' : 'Cleared the prompt and its inputs', before);
   };
   const extend = () => {
     if (!s.lastGenerationId) return;
@@ -1704,14 +1889,28 @@ export function VideoStudio({
       // Same honesty as the source panel: name the actual blocker.
       toast.error(
         s.rentedBroken?.length
-          ? 'Lost the connection to your rented machine — reconnect it from the Source panel or Machines.'
+          ? (zh() ? '与租用机器的连接已断开——请在“来源”面板或“机器”页重新连接。' : 'Lost the connection to your rented machine — reconnect it from the Source panel or Machines.')
           : s.rentedIdle?.length
-            ? 'Your rented machine is not connected to this studio yet — click "Use it here" in the Source panel.'
+            ? (zh() ? '租用机器尚未接入本工作室——请在“来源”面板点击“用于本工作室”。' : 'Your rented machine is not connected to this studio yet — click "Use it here" in the Source panel.')
             : s.rentedProvisioning?.length
-              ? 'Your rented machine is still coming online — the Machines view shows its progress.'
-              : 'No rented machine is serving this model. Rent one in Machines, or switch the source to Local.',
+              ? (zh() ? '租用机器仍在上线中——“机器”页可查看进度。' : 'Your rented machine is still coming online — the Machines view shows its progress.')
+              : (zh() ? '没有租用机器在运行此模型。请在“机器”页租用一台，或把来源切回本地。' : 'No rented machine is serving this model. Rent one in Machines, or switch the source to Local.'),
       );
       return;
+    }
+    // The last door: text TYPED straight into the composer, which no other
+    // pass can see. References attached under a prompt that never mentions
+    // them is the one shape H3 reliably turns into a stranger — so the weave
+    // runs here too, visibly, before anything is sent. The composer shows
+    // exactly what the model gets.
+    syncCast();
+    if (weaveTargetNow() === 'reference' && s.cast.length && s.setup.prompt.trim()
+        && !isWovenForReference(s.setup.prompt)) {
+      const before = weaveSnapshot();
+      const woven = acceptPrompt(s.setup.prompt);
+      if (woven.prompt !== before.prompt) {
+        announceWeave(zh() ? '发送前已把参考织入提示词' : 'Wove your references into the prompt before sending', before);
+      }
     }
     const prompt = s.setup.prompt.trim();
     const setup = s.setup;
@@ -1730,6 +1929,14 @@ export function VideoStudio({
     const hasIngredientReferences = isHivemindLocal && Boolean(model?.supportsIngredientImages) && activeItems.length > 0;
 
     // ── Validation (aborts stay aborts; alert() → toast.error()) ──────────────
+    // Head swap needs BOTH media; the readiness line under the Task strip was
+    // display-only, so the request went out as a plain generation tagged
+    // head-swap with no clip and failed on the backend.
+    const swapCheck = headSwapReadiness(setup);
+    if (swapCheck.active && !swapCheck.ready) {
+      toast.error(`${zh() ? '还需要：' : 'Still needed: '}${swapCheck.missing.join(zh() ? '、' : ' and ')}`);
+      return;
+    }
     if (isHivemindVideoInput) {
       if (!model?.supportsVideoInput) {
         toast.error(zh() ? '此本地工作流不支持源视频延长。' : 'This local workflow does not support source-video extension.');
@@ -1798,9 +2005,17 @@ export function VideoStudio({
 
     let hadError = false;
     let capturedRequestId = null;
+    // This run's own signal. cancelGeneration() nulls s.abortController the
+    // moment it fires, so the checks below read the captured one: a poll that
+    // resolved in the same tick as Cancel must still count as cancelled, or the
+    // "cancelled" clip lands on the canvas and plays the ping anyway.
+    const runSignal = s.abortController.signal;
+    const cancelledMarker = () => Object.assign(new Error('Generation cancelled'), { cancelled: true });
+    const settled = (res) => { if (runSignal.aborted) throw cancelledMarker(); return res; };
     const historyMeta = { prompt, model: setup.modelId, aspect_ratio: setup.ar, duration: setup.duration };
     const onRequestId = (rid) => {
       capturedRequestId = rid;
+      s.activeCloudRequestId = rid;
       updateGenerationProgress({ stage: 'rendering' });
       savePendingJob({
         requestId: rid, studioType: 'video', historyMeta,
@@ -1845,7 +2060,9 @@ export function VideoStudio({
           seed: resolvedSeed,
           denoise: setup.denoise || '',
           negative_prompt: String(setup.negativePrompt || '').trim(),
-          ...(Number.isFinite(Number(setup.nagScale)) ? { nag_scale: Number(setup.nagScale) } : {}),
+          // typeof, not Number(): the "Default" option stores null, and
+          // Number(null) is 0 — which sent nag_scale: 0 (NAG off) for "Default".
+          ...(typeof setup.nagScale === 'number' && Number.isFinite(setup.nagScale) ? { nag_scale: setup.nagScale } : {}),
           ...(Number(setup.detailerStrength) > 0 ? { detailer_strength: Number(setup.detailerStrength) } : {}),
           loras: loraGenerationPayload(currentVideoLoraSelection()),
           ...(hasIngredientReferences ? {
@@ -1927,6 +2144,9 @@ export function VideoStudio({
         // Mirror the started job to sessionStorage so a tab switch / reload can
         // resume its live progress. Prompt text is deliberately NOT persisted
         // (it stays private); the resumed history entry is redacted anyway.
+        // The server trims what it must (an over-long ingredient note) and says
+        // so; pass it on instead of letting the cut happen silently.
+        localParams.onWarning = (message) => toast(message, { duration: 6000 });
         localParams.onJobId = (jobId) => {
           s.activeLocalJobId = jobId;
           savePendingJob({
@@ -1941,8 +2161,8 @@ export function VideoStudio({
             submittedAt: Date.now(),
           });
         };
-        localParams.signal = s.abortController?.signal;
-        const res = await generateHivemindVideo(localParams);
+        localParams.signal = runSignal;
+        const res = settled(await generateHivemindVideo(localParams));
         if (res && res.url) {
           const genId = res.id || Date.now().toString();
           s.lastGenerationId = null;
@@ -1983,7 +2203,7 @@ export function VideoStudio({
           studio_lane: studioLane,
         };
         if (setup.imageMode && setup.imageUrl) localParams.image = setup.imageUrl;
-        const res = await localAI.generate(localParams);
+        const res = settled(await localAI.generate(localParams));
         if (res && res.url) {
           s.lastGenerationId = null;
           s.lastGenerationModel = null;
@@ -1997,10 +2217,10 @@ export function VideoStudio({
 
       // ─── Remote V2V ────────────────────────────────────────────────────────
       if (setup.v2vMode) {
-        const v2vParams = { model: setup.modelId, video_url: setup.videoUrl, onRequestId };
+        const v2vParams = { model: setup.modelId, video_url: setup.videoUrl, onRequestId, signal: runSignal };
         if (model?.imageField && setup.imageUrl) v2vParams.image_url = setup.imageUrl;
         if (model?.hasPrompt && prompt) v2vParams.prompt = prompt;
-        const res = await muapi.processV2V(v2vParams);
+        const res = settled(await muapi.processV2V(v2vParams));
         if (res && res.url) {
           if (capturedRequestId) removePendingJob(capturedRequestId);
           const genId = res.id || capturedRequestId || Date.now().toString();
@@ -2020,6 +2240,7 @@ export function VideoStudio({
           model: setup.modelId,
           image_url: setup.imageUrl,
           onRequestId,
+          signal: runSignal,
           ...getAdvancedVideoPayload(model, setup.advancedValues),
         };
         i2vParams.prompt = prompt || '';
@@ -2030,7 +2251,7 @@ export function VideoStudio({
         if (setup.quality) i2vParams.quality = setup.quality;
         if (setup.mode) i2vParams.mode = setup.mode;
         if (setup.effectName) i2vParams.name = setup.effectName;
-        const res = await muapi.generateI2V(i2vParams);
+        const res = settled(await muapi.generateI2V(i2vParams));
         if (res && res.url) {
           if (capturedRequestId) removePendingJob(capturedRequestId);
           const genId = res.id || capturedRequestId || Date.now().toString();
@@ -2045,7 +2266,7 @@ export function VideoStudio({
       }
 
       // ─── Remote T2V (+ Seedance extend) ────────────────────────────────────
-      const params = { model: setup.modelId, onRequestId, ...getAdvancedVideoPayload(model, setup.advancedValues) };
+      const params = { model: setup.modelId, onRequestId, signal: runSignal, ...getAdvancedVideoPayload(model, setup.advancedValues) };
       if (prompt) params.prompt = prompt;
       if (isExtendMode) params.request_id = s.lastGenerationId;
       else params.aspect_ratio = setup.ar;
@@ -2053,7 +2274,7 @@ export function VideoStudio({
       if (resolutionsFor(setup, setup.modelId).length > 0) params.resolution = setup.resolution;
       if (setup.quality) params.quality = setup.quality;
       if (setup.mode) params.mode = setup.mode;
-      const res = await muapi.generateVideo(params);
+      const res = settled(await muapi.generateVideo(params));
       if (res && res.url) {
         if (capturedRequestId) removePendingJob(capturedRequestId);
         const genId = res.id || capturedRequestId || Date.now().toString();
@@ -2075,15 +2296,16 @@ export function VideoStudio({
       } else {
         console.error(e);
         // Errors no longer vanish into the button label: a persistent, copyable
-        // callout in the canvas plus a toast.
-        s.generateError = e.message;
-        toast.error(e.message);
+        // callout in the canvas (ONCE — not a callout and a toast saying the
+        // same thing), with a Try again. A non-Error throw still gets a message.
+        s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
       }
     } finally {
       if (typeof unsubscribeProgress === 'function') unsubscribeProgress();
       // This mount owns the local job to completion; clear its resume marker so
       // the next mount doesn't re-poll a finished render.
       if (s.activeLocalJobId) { removePendingJob(s.activeLocalJobId); s.activeLocalJobId = null; }
+      if (s.activeCloudRequestId) { removePendingJob(s.activeCloudRequestId); s.activeCloudRequestId = null; }
       s.abortController = null;
       s.generating = false;
       if (!hadError) s.generateError = '';
@@ -2098,7 +2320,10 @@ export function VideoStudio({
   // never resolved a URL) still unblocks the studio for the next generation.
   const cancelGeneration = () => {
     const jobId = s.activeLocalJobId;
-    // 1) Stop the client poll loop right away.
+    const cloudId = s.activeCloudRequestId;
+    // 1) Stop the client poll loop right away. The cloud path reads the same
+    //    signal (muapi.pollForResult), so a remote job stops being watched the
+    //    moment this fires instead of landing minutes later.
     try { s.abortController?.abort(); } catch { /* no-op */ }
     // 2) Best-effort backend interrupt (local Media Studio job + wan2gp/localAI).
     //    The reply distinguishes "accepted" from "actually let go": a Comfy
@@ -2109,18 +2334,23 @@ export function VideoStudio({
     if (jobId) {
       void cancelHivemindVideoJob(jobId).then((result) => {
         if (result?.stopped === false) {
-          toast.loading(zh()
+          // A plain toast with a lifetime: toast.loading() has none, and the
+          // old one sat on screen for the rest of the session.
+          toast(zh()
             ? '正在停止：租用机器需完成当前步骤才能释放，新的生成会排在其后。'
-            : 'Still stopping — the machine finishes its current step before it frees up. A new generation will queue behind it.');
+            : 'Still stopping — the machine finishes its current step before it frees up. A new generation will queue behind it.', { duration: 6000 });
         } else {
           toast.success(zh() ? '已取消生成。' : 'Generation cancelled.');
         }
       });
     }
     try { localAI.cancelGeneration?.(); } catch { /* not all runtimes support it */ }
-    // 3) Reset local generation state unconditionally.
+    // 3) Reset local generation state unconditionally. The cloud job's pending
+    //    record goes too — a reload must not resume a run the user gave up on.
     if (jobId) removePendingJob(jobId);
+    if (cloudId) removePendingJob(cloudId);
     s.activeLocalJobId = null;
+    s.activeCloudRequestId = null;
     s.abortController = null;
     stopGenerationProgress();
     s.generating = false;
@@ -2252,13 +2482,13 @@ export function VideoStudio({
   // Poll a muapi cloud job started before this mount. Attempts already spent while
   // the page was gone are deducted, so a job doesn't win a fresh full budget every
   // time the studio reloads.
-  const resumeCloudVideoJob = async (job) => {
+  const resumeCloudVideoJob = async (job, { signal = null } = {}) => {
     const apiKey = localStorage.getItem('muapi_key');
     if (!apiKey) throw new Error('Cloud generation cannot resume without an API key');
     const interval = Number(job.interval) || 2000;
     const spent = Math.floor((Date.now() - (Number(job.submittedAt) || Date.now())) / interval);
     const attemptsLeft = Math.max(1, (Number(job.maxAttempts) || 900) - spent);
-    const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, interval);
+    const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, interval, { signal });
     return { id: job.requestId, url: result.outputs?.[0] || result.url || result.output?.url };
   };
 
@@ -2289,12 +2519,45 @@ export function VideoStudio({
         next.prompt = savedPrompt;
         changed = true;
       }
+      // The Camera / Style chips answer for the PROMPT: their ids came back from
+      // plaintext settings and the phrase they stand for came back with the
+      // prompt, and they can disagree (a prompt cleared or replaced since the
+      // ids were saved). Reconcile from the prompt — a chip that claimed a
+      // phrase the prompt lacked made re-applying stack a second sentence.
+      const restoredPrompt = String(next.prompt || '');
+      const cameraIds = cameraMotionIdsInPrompt(restoredPrompt);
+      if (JSON.stringify(cameraIds) !== JSON.stringify(s.setup.cameraMotionIds || [])) {
+        next.cameraMotionIds = cameraIds;
+        changed = true;
+      }
+      const restyleId = restylePresetIdInPrompt(restoredPrompt);
+      if ((restyleId || null) !== (s.setup.restylePresetId || null)) {
+        next.restylePresetId = restyleId;
+        changed = true;
+      }
       if (typeof savedNegative === 'string' && savedNegative && !String(s.setup.negativePrompt || '').trim()) {
         next.negativePrompt = savedNegative;
         changed = true;
       }
+      // The cast rides with the prompt it was woven into. Its members carry
+      // their own media, so the reference rows come back with it — a reload no
+      // longer strands a prompt that addresses <Picture 1> over empty rows.
+      const rowsEmpty = !(s.setup.referenceImageUrls?.length || s.setup.referenceVideos?.length || s.setup.referenceAudios?.length);
+      if (Array.isArray(saved.cast) && saved.cast.length && !s.cast.length && rowsEmpty) {
+        s.cast = saved.cast;
+        s.standIns = Array.isArray(saved.standIns) ? saved.standIns : [];
+        const rows = castRows(s.cast);
+        next.referenceImageUrls = rows.images;
+        next.referenceVideos = rows.videos;
+        next.referenceAudios = rows.audios;
+        next.persona = personaIdentity(castPersonaIdentity(s.cast));
+        changed = true;
+      } else if (Array.isArray(saved.standIns) && saved.standIns.length && !s.standIns.length) {
+        s.standIns = saved.standIns;
+      }
       if (changed) {
         s.setup = next;
+        syncCast();
         bump();
       }
     });
@@ -2352,6 +2615,7 @@ export function VideoStudio({
         s.generationStartedAt = live.submittedAt || Date.now();
         const isLocalJob = live.kind === 'hivemind-local';
         if (isLocalJob) s.activeLocalJobId = live.requestId;
+        else s.activeCloudRequestId = live.requestId;
         bump();
         void (async () => {
           const signal = s.abortController?.signal;
@@ -2370,7 +2634,9 @@ export function VideoStudio({
                   });
                 },
               })
-              : await resumeCloudVideoJob(live);
+              : await resumeCloudVideoJob(live, { signal });
+            // Resolved in the same tick as Cancel: still cancelled.
+            if (signal?.aborted) throw Object.assign(new Error('Generation cancelled'), { cancelled: true });
             const url = res?.url;
             if (url) {
               addToHistory({
@@ -2383,13 +2649,14 @@ export function VideoStudio({
             }
           } catch (e) {
             if (!e?.cancelled && e?.name !== 'AbortError') {
-              console.warn('[VideoStudio] Video resume failed:', live.requestId, e.message);
-              s.generateError = e.message;
+              console.warn('[VideoStudio] Video resume failed:', live.requestId, e?.message);
+              s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
             }
             stopGenerationProgress();
           } finally {
             removePendingJob(live.requestId);
             if (isLocalJob) s.activeLocalJobId = null;
+            else s.activeCloudRequestId = null;
             s.abortController = null;
             s.generating = false;
             bump();
@@ -2466,7 +2733,7 @@ export function VideoStudio({
     const offInsert = registerPromptInserter((text) => {
       const current = s.setup.prompt;
       const needsNewline = current && !current.endsWith('\n');
-      setPrompt(adoptPrompt(`${current}${needsNewline ? '\n' : ''}${text}`));
+      acceptPrompt(`${current}${needsNewline ? '\n' : ''}${text}`);
       focusPrompt();
     });
     const offSet = registerStudioSetupLoader('video', (setup) => {
@@ -2503,7 +2770,7 @@ export function VideoStudio({
         focusPrompt();
         return;
       }
-      setPrompt(adoptPrompt(setup?.primaryPrompt || ''));
+      acceptPrompt(setup?.primaryPrompt || '');
       // Canvas-bridge restores carry no captured context, but the clip is still
       // worth putting back on the canvas.
       if (setup?.output?.url) adoptRestoredOutput(setup.output, null, s.setup.modelId);
@@ -2702,9 +2969,9 @@ export function VideoStudio({
     : 0;
   const advancedHint = [
     activeVideoLoras ? `${activeVideoLoras} LoRA${activeVideoLoras === 1 ? '' : 's'}` : '',
-    activeIngredients ? `${activeIngredients} ingredient${activeIngredients === 1 ? '' : 's'}` : '',
     String(s.setup.negativePrompt || '').trim() ? (zh() ? '负面' : 'negative') : '',
     s.setup.detailerStrength ? (zh() ? '细节增强' : 'detailer') : '',
+    s.setup.spectrum === false ? (zh() ? '快速采样关' : 'Spectrum off') : '',
   ].filter(Boolean).join(' · ');
 
   const arOptions = aspectRatiosFor(s.setup, s.setup.modelId);
@@ -2760,7 +3027,14 @@ export function VideoStudio({
     if (videoTask === 'head-swap') return zh() ? '换脸' : 'Head swap';
     if (isHivemindVideoInputMode(s.setup)) return zh() ? '延长上传的镜头' : 'Extend uploaded shot';
     if (model?.requiresRequestId) return zh() ? '延长' : 'Extend';
-    if (s.setup.imageMode) return zh() ? '图片 → 视频' : 'Image → video';
+    // From the request plan, not from imageMode: every local workflow is
+    // selected with imageMode true (the frame is an optional input), so H3
+    // read "Image → video" with nothing attached — and with references armed.
+    const plan = videoRequestPlan(s.setup);
+    if (plan.sendReferenceImages) return zh() ? '参考 → 视频' : 'Reference → video';
+    if (plan.sendMotionContext) return zh() ? '接续场景' : 'Continue scene';
+    const hasFrame = isHivemindVideoModelId(s.setup.modelId) ? Boolean(s.setup.imageUrl) : s.setup.imageMode;
+    if (hasFrame) return zh() ? '图片 → 视频' : 'Image → video';
     return zh() ? '文本 → 视频' : 'Text → video';
   })();
 
@@ -2770,8 +3044,16 @@ export function VideoStudio({
   const progressStageLabel = t(`video.progress.${s.progress.stage}`);
   const progressPct = Math.max(0, Math.min(1, Number(s.progressDisplay) || 0));
   const progressValueLabel = `${Math.round(progressPct * 100)}%`;
-  const progressElapsed = formatVideoGenerationElapsed(Date.now() - s.generationStartedAt);
-  const progressEta = Number(s.progressEstimateSec) > 0 ? formatVideoGenerationElapsed(s.progressEstimateSec * 1000) : null;
+  const progressElapsedMs = Date.now() - s.generationStartedAt;
+  const progressElapsed = formatVideoGenerationElapsed(progressElapsedMs);
+  // What is LEFT, not the whole estimate again: past the estimate the honest
+  // word is "finishing", not a countdown that went negative.
+  const progressRemainingMs = Number(s.progressEstimateSec) > 0 ? s.progressEstimateSec * 1000 - progressElapsedMs : null;
+  const progressEta = progressRemainingMs == null
+    ? null
+    : (progressRemainingMs > 0
+      ? `${zh() ? '约剩 ' : '~'}${formatVideoGenerationElapsed(progressRemainingMs)}${zh() ? '' : ' left'}`
+      : (zh() ? '即将完成…' : 'finishing…'));
   const progressSteps = s.progressSteps?.total
     ? tf('video.progress.step', s.progressSteps.step, s.progressSteps.total)
     : null;
@@ -3102,6 +3384,35 @@ export function VideoStudio({
         </div>
       ) : null}
 
+      {/* The LTX Ingredients workflow's ONLY input, as its own section — it used
+          to live inside the collapsed Advanced disclosure, so "Open LTX
+          Ingredients" showed a panel with no place to add any. */}
+      {ingredientModel ? (
+        <IngredientsPanel
+          model={ingredientModel}
+          selection={s.sharedIngredientSelections}
+          sheets={s.sharedIngredientSheets}
+          selectedSheet={s.selectedIngredientSheet}
+          preview={s.ingredientSheetPreview}
+          previewSignature={ingredientSignature}
+          uploadMessage={s.ingredientUploadMessage}
+          activeCount={activeIngredientSheetItems(ingredientModel, {
+            selectedSheet: s.selectedIngredientSheet,
+            selections: s.sharedIngredientSelections,
+            sheets: s.sharedIngredientSheets,
+          }).length}
+          onAddViews={addIngredientViews}
+          onAddSheets={addIngredientSheets}
+          onClear={clearIngredients}
+          onToggleSheet={toggleIngredientSheetSelection}
+          onRemoveSheet={removeIngredientSheet}
+          onRemoveView={removeIngredientView}
+          onViewDescription={updateIngredientViewDescription}
+          onSheetDescription={updateIngredientSheetDescription}
+          onRetryPreview={() => refreshIngredientSheetPreview({ force: true })}
+        />
+      ) : null}
+
       <CollapsibleSection title={zh() ? '高级' : 'Advanced'} hint={advancedHint} storageKey="video.advanced">
         {supportsSpectrum(model) ? (
           <Field
@@ -3144,14 +3455,14 @@ export function VideoStudio({
                 ? '通过 NAG 生效（快速/精简通道 cfg=1，普通负面提示词无效）。'
                 : 'Applied through NAG. The fast and Lite lanes run cfg=1, where an ordinary negative prompt does nothing.'}
             >
-              <textarea
+              <TextArea
                 rows={2}
                 value={s.setup.negativePrompt || ''}
                 onChange={(e) => setNegativePrompt(e.target.value)}
                 placeholder={zh()
                   ? '模糊, 解剖错误, 多余手指, 水印'
                   : 'blurry, bad anatomy, extra fingers, deformed hands, watermark'}
-                className="w-full resize-y rounded-md border border-line1 bg-bg2 px-2.5 py-2 text-xs text-ink1 outline-none placeholder:text-ink3 focus:border-honey/60"
+                className="resize-y text-xs"
               />
             </Field>
             {String(s.setup.negativePrompt || '').trim() ? (
@@ -3181,8 +3492,10 @@ export function VideoStudio({
           <Field
             label={zh() ? '细节增强' : 'Detailer'}
             hint={s.setup.detailerStrength
-              ? "Lightricks' IC-LoRA Detailer runs a second sampling pass over the clip to add fine texture. Roughly doubles generation time."
-              : 'Off — one pass, exactly as fast as before.'}
+              ? (zh()
+                ? 'Lightricks 的 IC-LoRA 细节增强会对片段再做一次采样以补足细节纹理，生成时间约为两倍。'
+                : "Lightricks' IC-LoRA Detailer runs a second sampling pass over the clip to add fine texture. Roughly doubles generation time.")
+              : (zh() ? '关闭 — 单次采样，速度不变。' : 'Off — one pass, exactly as fast as before.')}
           >
             <NativeSelect
               value={String(s.setup.detailerStrength || 0)}
@@ -3200,17 +3513,17 @@ export function VideoStudio({
             label={zh() ? '颗粒清理' : 'Grain cleanup'}
             hint={s.setup.denoise
               ? (s.setup.denoise === 'strong'
-                ? 'Motion-adaptive temporal pass + a spatial pass. Re-encodes after generation.'
-                : 'Motion-adaptive temporal pass: averages static grain, leaves moving detail alone.')
-              : 'Off — the clip is saved exactly as the model rendered it.'}
+                ? (zh() ? '运动自适应的时域去噪加一次空域去噪，生成后重新编码。' : 'Motion-adaptive temporal pass + a spatial pass. Re-encodes after generation.')
+                : (zh() ? '运动自适应的时域去噪：平均静态颗粒，保留运动细节。' : 'Motion-adaptive temporal pass: averages static grain, leaves moving detail alone.'))
+              : (zh() ? '关闭 — 按模型渲染的原样保存。' : 'Off — the clip is saved exactly as the model rendered it.')}
           >
             <NativeSelect
               value={s.setup.denoise || ''}
               onChange={(e) => commit({ ...s.setup, denoise: e.target.value })}
             >
-              <option value="">Off</option>
-              <option value="light">Light</option>
-              <option value="strong">Strong</option>
+              <option value="">{zh() ? '关闭' : 'Off'}</option>
+              <option value="light">{zh() ? '轻度' : 'Light'}</option>
+              <option value="strong">{zh() ? '强' : 'Strong'}</option>
             </NativeSelect>
           </Field>
         ) : null}
@@ -3258,32 +3571,6 @@ export function VideoStudio({
             </Field>
           );
         })}
-      {ingredientModel ? (
-        <IngredientsPanel
-          model={ingredientModel}
-          selection={s.sharedIngredientSelections}
-          sheets={s.sharedIngredientSheets}
-          selectedSheet={s.selectedIngredientSheet}
-          preview={s.ingredientSheetPreview}
-          previewSignature={ingredientSignature}
-          uploadMessage={s.ingredientUploadMessage}
-          activeCount={activeIngredientSheetItems(ingredientModel, {
-            selectedSheet: s.selectedIngredientSheet,
-            selections: s.sharedIngredientSelections,
-            sheets: s.sharedIngredientSheets,
-          }).length}
-          onAddViews={addIngredientViews}
-          onAddSheets={addIngredientSheets}
-          onClear={clearIngredients}
-          onToggleSheet={toggleIngredientSheetSelection}
-          onRemoveSheet={removeIngredientSheet}
-          onRemoveView={removeIngredientView}
-          onViewDescription={updateIngredientViewDescription}
-          onSheetDescription={updateIngredientSheetDescription}
-          onRetryPreview={() => refreshIngredientSheetPreview({ force: true })}
-        />
-      ) : null}
-
       {loraModel ? (
         <div className="border-t border-line1 pt-4">
           <LoraSection
@@ -3502,6 +3789,31 @@ export function VideoStudio({
       ) : null}
 
       <div className="flex flex-col gap-2 rounded-lg border border-line1 bg-bg1 p-2.5 transition-colors focus-within:border-honey/40">
+        {/* WHO is in the shot — every way of adding someone lands here, and the
+            weave recasts the prompt the moment it changes. Every family shows
+            it: on H3 a person from pictures becomes <Subject N> in reference
+            mode, and on every model a known character is written into the
+            scene by its source form. */}
+        {!promptUi.disabled ? (
+          <CastStrip
+            members={s.cast}
+            onMembersChange={applyCast}
+            target={weaveTargetNow()}
+            referenceLane={Boolean(referenceEntry)}
+            h3={isH3()}
+            woven={isWovenForReference(s.setup.prompt)}
+            promptEmpty={!s.setup.prompt.trim()}
+            warnings={s.castWarnings}
+            onAttach={() => { s.referencesOpenRequest = (s.referencesOpenRequest || 0) + 1; bump(); }}
+            onWeave={() => {
+              const before = weaveSnapshot();
+              const woven = acceptPrompt(s.setup.prompt, { scaffold: true });
+              if (woven.prompt !== before.prompt) announceWeave(zh() ? '已把参考织入提示词' : 'Wove your references into the prompt', before);
+              focusPrompt();
+            }}
+            onDraftLook={draftLookFor}
+          />
+        ) : null}
         <textarea
           ref={promptRef}
           rows={1}
@@ -3509,241 +3821,298 @@ export function VideoStudio({
           disabled={promptUi.disabled}
           value={s.setup.prompt}
           onChange={(e) => setPrompt(e.target.value)}
+          // ⌘/Ctrl+Enter generates, the same as every other composer; the same
+          // guards as the button, so it can never start what the button refuses.
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey)) return;
+            e.preventDefault();
+            if (rentedBlocked || s.generating) return;
+            void generate();
+          }}
           className="max-h-[150px] min-h-[40px] w-full resize-none overflow-y-auto border-none bg-transparent px-1 pt-1 text-[15px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 disabled:opacity-50 md:max-h-[250px]"
         />
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          {ltxFramesVisible ? (
-            // LTX 2.3: one control with Start / Middle / End rows (all optional).
-            <FrameSlotsPicker
-              label={zh() ? '关键帧' : 'Frames'}
-              slots={[
-                { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
-                { key: 'middle', label: zh() ? '中间帧' : 'Middle', url: s.setup.ltxMiddleUrl },
-                { key: 'end', label: zh() ? '结束帧' : 'End', url: s.setup.ltxEndUrl },
-              ]}
-              onSlotChange={(key, url) => {
-                const value = url ? [url] : [];
-                if (key === 'start') onStartFrameChange(value);
-                else if (key === 'middle') onLtxMiddleFrameChange(value);
-                else onLtxEndFrameChange(value);
-              }}
-              uploadFn={uploadFnForFrame}
-              requireApiKey={frameRequiresApiKey}
-              autoOpen={s.framesPanelAutoOpen}
-            />
-          ) : chainArmed ? (
-            // Scene chaining replaces the start frame: the armed clip's tail IS
-            // the opening of this shot, so the picker gives way to the chain chip.
-            <div
-              className="flex items-center gap-1.5 rounded-md border border-honey/40 bg-honey-tint px-2 py-1"
-              title={zh()
-                ? '接续的画面会延续上一段的运动与环境音，但场景要靠提示词维持：保留原有的风格与主体描述，先按上一段的收尾构图停一拍，再写接下来发生什么。'
-                : "The pinned frames carry motion and room tone — the SCENE carries through the prompt. Keep the shot's style and subject words, hold the previous closing framing for a beat, then describe what happens next."}
-            >
-              <Icon name="film" size={13} className="text-honey" />
-              <span className="text-xs font-medium text-honey">
-                {zh() ? `接续第 ${chainShot} 段` : `Continuing shot ${chainShot}`}
-              </span>
-              <button
-                type="button"
-                title={zh() ? '退出场景接续' : 'Leave scene chaining'}
-                aria-label={zh() ? '退出场景接续' : 'Leave scene chaining'}
-                className="grid h-4 w-4 place-items-center rounded text-honey transition-colors hover:bg-honey/20"
-                onClick={clearMotionContext}
+        {/* Two groups: the chips wrap as a group, Generate stays pinned at the
+            right on every width. One flex-wrap row held both, so below ~1280px
+            the primary button dropped to a second row, left-aligned, under the
+            chips — the one control a first-timer looks for, in the wrong place. */}
+        <div className="flex items-end gap-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            {ltxFramesVisible ? (
+              // LTX 2.3: one control with Start / Middle / End rows (all optional).
+              <FrameSlotsPicker
+                label={zh() ? '关键帧' : 'Frames'}
+                slots={[
+                  { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
+                  { key: 'middle', label: zh() ? '中间帧' : 'Middle', url: s.setup.ltxMiddleUrl },
+                  { key: 'end', label: zh() ? '结束帧' : 'End', url: s.setup.ltxEndUrl },
+                ]}
+                onSlotChange={(key, url) => {
+                  const value = url ? [url] : [];
+                  if (key === 'start') onStartFrameChange(value);
+                  else if (key === 'middle') onLtxMiddleFrameChange(value);
+                  else onLtxEndFrameChange(value);
+                }}
+                uploadFn={uploadFnForFrame}
+                requireApiKey={frameRequiresApiKey}
+                autoOpen={s.framesPanelAutoOpen}
+              />
+            ) : chainArmed ? (
+              // Scene chaining replaces the start frame: the armed clip's tail IS
+              // the opening of this shot, so the picker gives way to the chain chip.
+              <div
+                className="flex items-center gap-1.5 rounded-md border border-honey/40 bg-honey-tint px-2 py-1"
+                title={zh()
+                  ? '接续的画面会延续上一段的运动与环境音，但场景要靠提示词维持：保留原有的风格与主体描述，先按上一段的收尾构图停一拍，再写接下来发生什么。'
+                  : "The pinned frames carry motion and room tone — the SCENE carries through the prompt. Keep the shot's style and subject words, hold the previous closing framing for a beat, then describe what happens next."}
               >
-                <Icon name="x" size={11} />
-              </button>
-            </div>
-          ) : endFrameVisible ? (
-            // First/last-frame models (H3 FL2VA, remote FLF): ONE control with
-            // Start / End rows, same pattern as the LTX three-slot picker —
-            // never two lookalike icon buttons side by side. Armed character
-            // references replace these frames for the run, but the picker stays
-            // mounted (dimmed, with a note) — hiding it stranded an already-set
-            // start frame with no way to change it or add the end frame.
-            <FrameSlotsPicker
-              label={zh() ? '关键帧' : 'Frames'}
-              slots={[
-                { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
-                { key: 'end', label: zh() ? '结束帧（可选）' : 'End (optional)', url: s.setup.endImageUrl },
-              ]}
-              onSlotChange={(key, url) => {
-                const value = url ? [url] : [];
-                if (key === 'start') onStartFrameChange(value);
-                else onEndFrameChange(value);
-              }}
-              uploadFn={uploadFnForFrame}
-              requireApiKey={frameRequiresApiKey}
-              inactiveNote={refsArmed
-                ? (zh() ? '已附加角色参考——生成时将使用参考，替代首尾帧' : 'Character references replace these frames while attached')
-                : ''}
-            />
-          ) : (
-            <UploadPicker
-              values={s.setup.imageUrl ? [s.setup.imageUrl] : []}
-              onChange={onStartFrameChange}
-              uploadFn={uploadFnForFrame}
-              requireApiKey={frameRequiresApiKey}
-              maxImages={1}
-              accept="image/*"
-              compact
-              label={zh() ? '起始帧' : 'Start frame'}
-              ignored={refsArmed}
-            />
-          )}
-
-          {referenceEntry ? (
-            // One control for all three reference kinds. The slot counts come
-            // from the workflow entry rather than being restated here, so the
-            // panel can never offer a slot the graph has not wired.
-            <ReferencesMenu
-              images={Array.isArray(s.setup.referenceImageUrls) ? s.setup.referenceImageUrls : []}
-              audios={Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : []}
-              videos={Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : []}
-              prompt={s.setup.prompt}
-              onPromptChange={(next) => { setPrompt(next); focusPrompt(); }}
-              durationSeconds={Number(s.setup.duration) || 0}
-              limits={{
-                images: referenceEntry.referenceSlots?.images || 9,
-                audios: referenceEntry.referenceSlots?.audios || 3,
-                videos: referenceEntry.referenceSlots?.videos || 3,
-              }}
-              onChange={{
-                images: onCharacterRefsChange,
-                audios: onReferenceAudiosChange,
-                videos: onReferenceVideosChange,
-              }}
-              persona={s.setup.persona || null}
-              onPersonaChange={onPersonaChange}
-              uploadFn={uploadFnForFrame}
-              requireApiKey={frameRequiresApiKey}
-            />
-          ) : null}
-
-          <input
-            ref={videoFileInputRef}
-            type="file"
-            accept="video/*"
-            className="hidden"
-            onChange={(e) => { void handleVideoFile(e.target.files?.[0]); e.target.value = ''; }}
-          />
-          <IconButton
-            icon={attachedClipUrl() ? 'film' : 'video'}
-            label={attachedClipUrl()
-              ? `${s.setup.videoName || slotLabels.video} — ${zh() ? '点击清除' : 'click to clear'}`
-              : `${zh() ? '上传' : 'Upload'} ${slotLabels.video}${slotLabels.videoHint ? ` — ${slotLabels.videoHint}` : ''}`}
-            active={Boolean(attachedClipUrl())}
-            className="border border-line1"
-            onClick={onVideoRefClick}
-          />
-          {s.videoUploading ? <Spinner size={14} className="text-honey" /> : null}
-
-          <SavedPromptsMenu
-            section="video"
-            prompt={s.setup.prompt}
-            modelSource={s.setup}
-            capture={() => captureGenerationContext(s.setup.prompt)}
-            onLoadPrompt={({ prompt }) => {
-              loadPromptText(prompt, referenceEntry ? referenceLimits() : null);
-              focusPrompt();
-            }}
-            onLoadContext={(context) => restoreGenerationContext(context)}
-          />
-
-          <CameraMotionMenu
-            selectedIds={s.setup.cameraMotionIds || []}
-            onApply={applyCameraMotions}
-          />
-
-          <UgcMenu
-            mode="video"
-            active={hasUgcVideoBrief(s.setup.prompt)}
-            variantIndex={Number.isInteger(s.setup.ugcVariantIndex) ? s.setup.ugcVariantIndex : null}
-            gender={s.setup.persona?.gender || ''}
-            subject={ugcSubjectLabel(ugcPersona())}
-            durationSeconds={Number(s.setup.duration) || null}
-            verticalAvailable={aspectRatiosFor(s.setup, s.setup.modelId).includes('9:16')}
-            onArm={applyUgc}
-          />
-
-          {/* Restyle presets + character quick-add are tuned for the MiniMax H3 family. */}
-          {/minimax-h3/.test(s.setup.modelId || '') ? (
-            <>
-              <RestyleMenu activeId={s.setup.restylePresetId || null} onApply={applyRestyle} />
-              {/* The cast needs reference slots to put its personas in, so it
-                  only appears on a workflow that has them. */}
-              {referenceEntry ? (
-                <CastMenu
-                  prompt={s.setup.prompt}
-                  members={s.cast}
-                  onMembersChange={(next) => { s.cast = next; bump(); }}
-                  warnings={s.castWarnings}
-                  durationSeconds={Number(s.setup.duration) || 0}
-                  limits={referenceLimits()}
-                  onApply={applyCast}
-                />
-              ) : null}
-              <CharacterMenu
-                prompt={s.setup.prompt}
-                onPick={(entry) => addH3Character(entry, referenceEntry ? referenceLimits() : null)}
+                <Icon name="film" size={13} className="text-honey" />
+                <span className="text-xs font-medium text-honey">
+                  {zh() ? `接续第 ${chainShot} 段` : `Continuing shot ${chainShot}`}
+                </span>
+                <button
+                  type="button"
+                  title={zh() ? '退出场景接续' : 'Leave scene chaining'}
+                  aria-label={zh() ? '退出场景接续' : 'Leave scene chaining'}
+                  className="grid h-4 w-4 place-items-center rounded text-honey transition-colors hover:bg-honey/20"
+                  onClick={clearMotionContext}
+                >
+                  <Icon name="x" size={11} />
+                </button>
+              </div>
+            ) : endFrameVisible ? (
+              // First/last-frame models (H3 FL2VA, remote FLF): ONE control with
+              // Start / End rows, same pattern as the LTX three-slot picker —
+              // never two lookalike icon buttons side by side. Armed character
+              // references replace these frames for the run, but the picker stays
+              // mounted (dimmed, with a note) — hiding it stranded an already-set
+              // start frame with no way to change it or add the end frame.
+              <FrameSlotsPicker
+                label={zh() ? '关键帧' : 'Frames'}
+                slots={[
+                  { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
+                  { key: 'end', label: zh() ? '结束帧（可选）' : 'End (optional)', url: s.setup.endImageUrl },
+                ]}
+                onSlotChange={(key, url) => {
+                  const value = url ? [url] : [];
+                  if (key === 'start') onStartFrameChange(value);
+                  else onEndFrameChange(value);
+                }}
+                uploadFn={uploadFnForFrame}
+                requireApiKey={frameRequiresApiKey}
+                inactiveNote={refsArmed
+                  ? (zh() ? '已附加角色参考——生成时将使用参考，替代首尾帧' : 'Character references replace these frames while attached')
+                  : ''}
               />
-              {/* The timeline inside one generation, and the gate in front of
-                  it. Both read H3's own grammar, so both are H3-only. */}
-              <ShotBuilderChip
-                timeline={s.shotTimeline}
-                onOpen={() => { s.shotBuilderOpen = true; bump(); }}
+            ) : (
+              // Labelled, not the compact square: it sits beside labelled chips,
+              // and an unlabelled icon next to "Clip" read as a second clip button.
+              <UploadPicker
+                values={s.setup.imageUrl ? [s.setup.imageUrl] : []}
+                onChange={onStartFrameChange}
+                uploadFn={uploadFnForFrame}
+                requireApiKey={frameRequiresApiKey}
+                maxImages={1}
+                accept="image/*"
+                label={zh() ? '起始帧' : 'Start frame'}
+                ignored={refsArmed}
               />
-              <PromptCheckMenu
+            )}
+
+            {referenceEntry ? (
+              // One control for all three reference kinds. The slot counts come
+              // from the workflow entry rather than being restated here, so the
+              // panel can never offer a slot the graph has not wired.
+              <ReferencesMenu
+                images={Array.isArray(s.setup.referenceImageUrls) ? s.setup.referenceImageUrls : []}
+                audios={Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : []}
+                videos={Array.isArray(s.setup.referenceVideos) ? s.setup.referenceVideos : []}
                 prompt={s.setup.prompt}
+                // The explicit Weave lives in ONE place now — Prompt Check, and
+                // the cast strip's own readout — so the panel no longer shows a
+                // third copy of the button. (It still accepts onWeave; nothing
+                // is passed.)
                 durationSeconds={Number(s.setup.duration) || 0}
-                {...attachedReferences()}
-                durations={referenceDurations()}
-                // The one finding with a mechanical fix, and the last door:
-                // adoptPrompt catches a prompt arriving from somewhere, and
-                // withDurationThatFits catches the length changing under one
-                // already written. This catches the rest — text TYPED or PASTED
-                // straight into the composer, which nothing else can see.
-                onRefit={() => commit({ ...s.setup, prompt: adoptPrompt(s.setup.prompt) })}
+                limits={{
+                  images: referenceEntry.referenceSlots?.images || 9,
+                  audios: referenceEntry.referenceSlots?.audios || 3,
+                  videos: referenceEntry.referenceSlots?.videos || 3,
+                }}
+                onChange={{
+                  images: onCharacterRefsChange,
+                  audios: onReferenceAudiosChange,
+                  videos: onReferenceVideosChange,
+                }}
+                persona={s.setup.persona || null}
+                onPersonaChange={onPersonaChange}
+                // What the strip already knows about the person in the rows —
+                // so "Save as persona" starts from it.
+                personaSeed={(() => {
+                  const holder = s.cast.find((member) => member.kind === 'persona');
+                  return holder ? { gender: holder.data?.gender || '', look: holder.data?.look || '' } : null;
+                })()}
+                uploadFn={uploadFnForFrame}
+                requireApiKey={frameRequiresApiKey}
+                openRequest={s.referencesOpenRequest || 0}
+              />
+            ) : null}
+
+            <input
+              ref={videoFileInputRef}
+              type="file"
+              accept="video/*"
+              className="hidden"
+              onChange={(e) => { void handleVideoFile(e.target.files?.[0]); e.target.value = ''; }}
+            />
+            {/* A labelled chip like its neighbours. On H3 this arms scene
+                chaining (continueSceneFrom), not the LTX extension graph, so the
+                title says that rather than the generic slot hint. */}
+            <ChipButton
+              icon="video"
+              label={zh() ? '片段' : 'Clip'}
+              value={attachedClipUrl() ? (s.setup.videoName || (zh() ? '已附加' : 'attached')) : ''}
+              active={Boolean(attachedClipUrl())}
+              chevron={false}
+              disabled={s.videoUploading}
+              aria-label={attachedClipUrl()
+                ? `${s.setup.videoName || slotLabels.video} — ${zh() ? '点击清除' : 'click to clear'}`
+                : (chainCapableEntryFor(s.setup.modelId)
+                  ? (zh() ? '从一段片段接续' : 'Continue from a clip')
+                  : `${zh() ? '上传' : 'Upload'} ${slotLabels.video}`)}
+              title={attachedClipUrl()
+                ? `${s.setup.videoName || slotLabels.video} — ${zh() ? '点击清除' : 'click to clear'}`
+                : (chainCapableEntryFor(s.setup.modelId)
+                  ? (zh()
+                    ? '从一段片段接续：下一个镜头从它的结尾开始（画面与环境音衔接）'
+                    : 'Continue from a clip — the next shot picks up where it ends, motion and room tone carrying across')
+                  : `${zh() ? '上传' : 'Upload'} ${slotLabels.video}${slotLabels.videoHint ? ` — ${slotLabels.videoHint}` : ''}`)}
+              onClick={onVideoRefClick}
+            />
+            {s.videoUploading ? <Spinner size={14} className="text-honey" /> : null}
+
+            {/* The prompt-writing chips mean nothing on a tool whose prompt is
+                disabled (a watermark remover), so they go with the textarea. */}
+            {promptUi.disabled ? null : (
+            <>
+              <SavedPromptsMenu
+                section="video"
+                prompt={s.setup.prompt}
+                modelSource={s.setup}
+                // Starters render for whoever holds <Subject 1> — the loaded
+                // persona, or the first cast member — so the pronouns already fit
+                // before the stand-in is bound.
+                renderGender={castRenderGender(s.cast) || s.setup.persona?.gender || ''}
+                standIns={liveStandIns(s.setup.prompt, s.standIns)}
+                capture={() => captureGenerationContext(s.setup.prompt)}
+                onLoadPrompt={({ prompt, standIns }) => {
+                  loadPromptText(prompt, { standIns: standIns || [] });
+                  focusPrompt();
+                }}
+                onLoadContext={(context) => restoreGenerationContext(context)}
+              />
+
+              <CameraMotionMenu
+                selectedIds={s.setup.cameraMotionIds || []}
+                onApply={applyCameraMotions}
+              />
+
+              {/* Restyle presets, the UGC brief ([Shot 1] HOOK … / (S1) says …),
+                  the Shot Builder and Prompt Check all write H3's own grammar, so
+                  every one of them is H3-only — the UGC brief used to land in LTX
+                  and cloud prompts too. */}
+              {isH3() ? (
+                <>
+                  <UgcMenu
+                    mode="video"
+                    active={hasUgcVideoBrief(s.setup.prompt)}
+                    variantIndex={Number.isInteger(s.setup.ugcVariantIndex) ? s.setup.ugcVariantIndex : null}
+                    gender={s.setup.persona?.gender || ''}
+                    subject={ugcSubjectLabel(ugcPersona())}
+                    durationSeconds={Number(s.setup.duration) || null}
+                    verticalAvailable={aspectRatiosFor(s.setup, s.setup.modelId).includes('9:16')}
+                    onArm={applyUgc}
+                  />
+                  <RestyleMenu activeId={s.setup.restylePresetId || null} onApply={applyRestyle} />
+                  {/* The cast needs reference slots to put its personas in, so it
+                      only appears on a workflow that has them. */}
+                  {/* The timeline inside one generation, and the gate in front of
+                      it. Both read H3's own grammar, so both are H3-only. */}
+                  <ShotBuilderChip
+                    timeline={s.shotTimeline}
+                    prompt={s.setup.prompt}
+                    onOpen={() => { s.shotBuilderOpen = true; bump(); }}
+                  />
+                  <PromptCheckMenu
+                    prompt={s.setup.prompt}
+                    durationSeconds={Number(s.setup.duration) || 0}
+                    {...attachedReferences()}
+                    durations={referenceDurations()}
+                    // The one finding with a mechanical fix, and the last door:
+                    // adoptPrompt catches a prompt arriving from somewhere, and
+                    // withDurationThatFits catches the length changing under one
+                    // already written. This catches the rest — text TYPED or PASTED
+                    // straight into the composer, which nothing else can see.
+                    onRefit={() => commit({ ...s.setup, prompt: adoptPrompt(s.setup.prompt) })}
+                    onWeave={() => {
+                      const before = weaveSnapshot();
+                      const woven = acceptPrompt(s.setup.prompt, { scaffold: true });
+                      if (woven.prompt !== before.prompt) announceWeave(zh() ? '已把参考织入提示词' : 'Wove your references into the prompt', before);
+                      focusPrompt();
+                    }}
+                    onRefine={() => { s.promptHelperOpen = true; bump(); }}
+                  />
+                </>
+              ) : null}
+
+              {/* The helper, named for what it does here: it refines what is in
+                  the box — told the cast, the lane, the clip length and the
+                  attached references — rather than replacing it. A labelled chip,
+                  not an icon: this is the one button a first-timer needs to find.
+                  `value`, not `label`: ChipButton paints a label muted, and this is
+                  an action, not a menu. */}
+              <ChipButton
+                icon="sparkles"
+                value={zh() ? '润色' : 'Refine'}
+                chevron={false}
+                disabled={!s.setup.prompt.trim()}
+                onClick={() => { s.promptHelperOpen = true; bump(); }}
+                title={zh()
+                  ? '让本地助手按当前模型的提示词指南、演员表和片长改写提示词'
+                  : "Rewrite what is in the box with the local helper — it knows this model's prompting guide, the cast, the lane and the clip length"}
               />
             </>
-          ) : null}
-
-          <IconButton
-            icon="sparkles"
-            label={zh() ? '提示词助手' : 'Prompt helper'}
-            className="border border-line1"
-            disabled={!s.setup.prompt.trim()}
-            onClick={() => { s.promptHelperOpen = true; bump(); }}
-          />
+            )}
+          </div>
 
           {/* Mode and model read out in the left panel — no duplicate badges here. */}
-          <div className="min-w-2 flex-1" />
-
-          <Button
-            variant="primary"
-            size="lg"
-            loading={s.generating}
-            disabled={rentedBlocked}
-            onClick={generate}
-            title={rentedBlocked
-              ? 'Rent a machine (or switch the source to Local) to generate.'
-              : t('video.generateTooltip')}
-            className="min-w-[130px]"
-          >
-            {generateLabel}
-          </Button>
-          {s.generating ? (
+          <div className="ml-auto flex shrink-0 items-center gap-2">
             <Button
-              variant="danger"
+              variant="primary"
               size="lg"
-              onClick={cancelGeneration}
-              title={zh() ? '取消当前生成并重置状态' : 'Cancel the current generation and reset'}
-              className="min-w-[100px]"
+              loading={s.generating}
+              disabled={rentedBlocked || (swapState.active && !swapState.ready)}
+              onClick={generate}
+              title={rentedBlocked
+                ? (zh() ? '请先租用机器（或把来源切回本地）再生成。' : 'Rent a machine (or switch the source to Local) to generate.')
+                : (swapState.active && !swapState.ready)
+                  ? `${zh() ? '还需要：' : 'Still needed: '}${swapState.missing.join(zh() ? '、' : ' and ')}`
+                  : `${t('video.generateTooltip')} (⌘/Ctrl+Enter)`}
+              className="min-w-[130px]"
             >
-              {zh() ? '取消' : 'Cancel'}
+              {generateLabel}
             </Button>
-          ) : null}
+            {s.generating ? (
+              <Button
+                variant="danger"
+                size="lg"
+                onClick={cancelGeneration}
+                title={zh() ? '取消当前生成并重置状态' : 'Cancel the current generation and reset'}
+                className="min-w-[100px]"
+              >
+                {zh() ? '取消' : 'Cancel'}
+              </Button>
+            ) : null}
+          </div>
         </div>
       </div>
     </div>
@@ -3765,10 +4134,27 @@ export function VideoStudio({
           {s.generateError ? (
             <div className="flex items-start justify-between gap-3 rounded-md border border-danger/40 bg-danger-tint px-3.5 py-3">
               <div className="min-w-0">
-                <div className="text-xs font-semibold text-danger">{zh() ? '生成失败' : 'Generation failed'}</div>
+                <div className="text-xs font-semibold text-danger">
+                  {zh() ? '生成失败' : 'Generation failed'}
+                  {(() => {
+                    // Name the box when the run was promised to a rented one —
+                    // "it failed" on a rental means a different next step.
+                    if (!s.setup.rentedOnly) return '';
+                    const machine = servingMachineFor(s.setup, s.setup.modelId, s.rentedMachines);
+                    if (!machine) return zh() ? '（租用机器）' : ' on the rented machine';
+                    return zh()
+                      ? `（租用机器 ${machine.gpu || ''} ${machine.rental_id || ''}）`
+                      : ` on ${machine.gpu || 'the rented machine'} (${machine.rental_id || 'rented'})`;
+                  })()}
+                </div>
                 <div className="mt-1 break-words font-mono text-xs text-danger/90">{s.generateError}</div>
               </div>
-              <IconButton icon="x" label={zh() ? '关闭' : 'Dismiss'} size="sm" onClick={() => { s.generateError = ''; bump(); }} />
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Button size="sm" variant="neutral" icon="refresh" onClick={() => { s.generateError = ''; bump(); void generate(); }}>
+                  {zh() ? '重试' : 'Try again'}
+                </Button>
+                <IconButton icon="x" label={zh() ? '关闭' : 'Dismiss'} size="sm" onClick={() => { s.generateError = ''; bump(); }} />
+              </div>
             </div>
           ) : null}
 
@@ -3792,14 +4178,21 @@ export function VideoStudio({
               <ProgressBar value={progressPct} />
               <div className="flex items-center justify-between font-mono text-[11px] text-ink3">
                 <span>{progressStageLabel}{progressDetail ? ` · ${progressDetail}` : ''}</span>
-                <span>{t('video.progress.elapsed')} {progressElapsed}{progressEta ? ` / ~${progressEta}` : ''}</span>
+                <span>{t('video.progress.elapsed')} {progressElapsed}{progressEta ? ` · ${progressEta}` : ''}</span>
               </div>
             </Card>
           ) : null}
 
           {s.resultUrl ? (
             <div className="flex flex-col items-center gap-3">
-              <ResultVideo key={s.resultUrl} url={s.resultUrl} />
+              <ResultVideo
+                key={s.resultUrl}
+                url={s.resultUrl}
+                unmuted={Boolean(s.resultUnmuted)}
+                // H3 renders audio with every clip; other lanes are silent
+                // unless a join carried sound through.
+                hasAudio={/minimax/.test(String(s.resultModel || '')) || (s.chainCombined?.url === s.resultUrl && Boolean(s.chainCombined?.audioJoined))}
+              />
               <div className="flex flex-wrap items-center justify-center gap-2">
                 <Button variant="neutral" icon="chevronLeft" onClick={backToSetup}>{t('video.backToSetup')}</Button>
                 <Button variant="neutral" icon="refresh" onClick={regenerate}>{t('video.regenerate')}</Button>
@@ -3851,7 +4244,7 @@ export function VideoStudio({
                   ) : null;
                 })()}
                 <Button
-                  variant="primary"
+                  variant="neutral"
                   icon="download"
                   onClick={() => {
                     const entry = s.generationHistory.find((e) => e.url === s.resultUrl);
@@ -3890,7 +4283,7 @@ export function VideoStudio({
                 // ancestors) would otherwise collapse the timeline you are
                 // browsing. Only a generation or a pick from the strip below
                 // moves it.
-                onSelect={(url, model) => showVideoInCanvas(url, model, { anchorChain: false })}
+                onSelect={(url, model) => showVideoInCanvas(url, model, { anchorChain: false, userInitiated: true })}
                 onToggleExcluded={toggleChainShot}
                 onExport={(shot) => downloadFile(shot.url, videoDownloadName(shot.model, shot.id))}
                 onBuild={() => void buildChainCut(timeline.includedUrls, timeline.key)}
@@ -3926,49 +4319,48 @@ export function VideoStudio({
                         } catch { /* non-critical */ }
                       }}
                       onClick={() => openHistoryEntry(entry)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') openHistoryEntry(entry); }}
+                      onKeyDown={(e) => {
+                        if (e.key !== 'Enter' && e.key !== ' ') return;
+                        e.preventDefault();
+                        openHistoryEntry(entry);
+                      }}
                     >
                       <HistoryThumb url={entry.url} />
-                      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-bg0/90 to-transparent p-2 pt-6 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-bg0/90 to-transparent p-2 pt-6 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
                         <div className="truncate text-[11px] text-ink1">
                           {entry.prompt_private ? (zh() ? '私密提示词（已隐去）' : 'Private prompt (hidden)') : (entry.prompt || '—')}
                         </div>
                         <div className="truncate font-mono text-[10px] text-ink3">{entry.model || ''}</div>
                       </div>
-                      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                      {/* Visible on keyboard focus too, not only under a pointer. */}
+                      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
                         {chainCapableEntryFor(entry.model) ? (
-                          <button
-                            type="button"
-                            title={zh() ? '接续场景：下一个镜头从这段结尾继续' : 'Continue scene: the next shot picks up where this clip ends'}
-                            aria-label={zh() ? '接续场景' : 'Continue scene'}
-                            className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-ink1 transition-colors hover:border-honey/40 hover:bg-bg1"
+                          <IconButton
+                            icon="arrowRight"
+                            size="sm"
+                            label={zh() ? '接续场景：下一个镜头从这段结尾继续' : 'Continue scene: the next shot picks up where this clip ends'}
+                            className="border border-line1 bg-bg0/80 hover:border-honey/40"
                             onClick={(e) => { e.stopPropagation(); continueSceneFrom(entry.url, entry.model); }}
-                          >
-                            <Icon name="arrowRight" size={13} />
-                          </button>
+                          />
                         ) : null}
-                        <button
-                          type="button"
-                          title={t('video.download')}
-                          aria-label={zh() ? '下载视频' : 'Download video'}
-                          className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-ink1 transition-colors hover:border-line2 hover:bg-bg1"
+                        <IconButton
+                          icon="download"
+                          size="sm"
+                          label={zh() ? '下载视频' : 'Download video'}
+                          className="border border-line1 bg-bg0/80 hover:border-line2"
                           onClick={(e) => {
                             e.stopPropagation();
                             // No `|| idx` — see ImageStudio: the seal keys off entry.id.
                             downloadFile(entry.url, videoDownloadName(entry.model, entry.id));
                           }}
-                        >
-                          <Icon name="download" size={13} />
-                        </button>
-                        <button
-                          type="button"
-                          title={zh() ? '删除' : 'Delete'}
-                          aria-label={zh() ? '从历史记录中删除' : 'Delete from history'}
-                          className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-danger transition-colors hover:border-danger/40 hover:bg-bg1"
+                        />
+                        <IconButton
+                          icon="trash"
+                          size="sm"
+                          label={zh() ? '从列表中删除' : 'Remove from the strip'}
+                          className="border border-line1 bg-bg0/80 text-danger hover:border-danger/40"
                           onClick={(e) => { e.stopPropagation(); s.deleteTarget = entry; bump(); }}
-                        >
-                          <Icon name="trash" size={13} />
-                        </button>
+                        />
                       </div>
                     </div>
                   );
@@ -4019,8 +4411,11 @@ export function VideoStudio({
       {/* Same gate as the chip: the grammar it writes ([Shot N], <d>, the six
           sections) is H3's, so switching to another family closes it rather
           than leaving an H3 dialog open over a Seedance run. */}
+      {/* Mounted only while open: its memo work (compose + check) otherwise
+          ran on every composer keystroke with the dialog closed. */}
+      {Boolean(s.shotBuilderOpen) && isH3() ? (
       <ShotBuilderDialog
-        open={Boolean(s.shotBuilderOpen) && /minimax-h3/.test(s.setup.modelId || '')}
+        open
         onClose={() => { s.shotBuilderOpen = false; bump(); }}
         timeline={s.shotTimeline}
         onTimelineChange={(next) => { s.shotTimeline = next; bump(); }}
@@ -4029,8 +4424,9 @@ export function VideoStudio({
         references={attachedReferences()}
         firstFrame={s.setup.imageUrl || ''}
         lastFrame={s.setup.endImageUrl || ''}
-        onApply={(text) => { setPrompt(adoptPrompt(text)); focusPrompt(); }}
+        onApply={(text) => { acceptPrompt(text); focusPrompt(); }}
       />
+      ) : null}
 
       {/* targetModel is the workflow id, not the picker id: the helper chooses its
           guidance from it, and 10Eros 1.3/1.4 want a different prompt shape than
@@ -4081,21 +4477,17 @@ export function VideoStudio({
         // Only the gender travels, never the name: the saved persona is sealed
         // to the owner's vault and this host never learns what it is called.
         personaGender={s.setup.persona?.gender || ''}
+        // Who is in the shot, by slot — so the helper writes <Subject N> into
+        // the scene instead of inventing a stranger. Names travel only for
+        // known characters; a persona's is vault-sealed.
+        cast={castSubjects(s.cast)}
         onUse={(prompt) => {
-          // The helper IS told the clip length, and small models overshoot it
-          // anyway — measured 2026-08-09, a "[Shot 3] At 00:07.800" on a clip
-          // set to 5 seconds.
-          const incoming = adoptPrompt(prompt);
-          // A helper result that omits a label would silently unbind that
-          // reference. Re-applying the scaffold puts back only what is missing.
-          setPrompt(refsArmed
-            ? withReferenceTags(incoming, {
-              images: s.setup.referenceImageUrls || [],
-              videos: s.setup.referenceVideos || [],
-              audios: s.setup.referenceAudios || [],
-              gender: s.setup.persona?.gender || '',
-            })
-            : incoming);
+          // The helper's draft is a prompt arriving through a door like any
+          // other: woven onto the cast (its own definitions are replaced by
+          // the cast's, which are the truth about what is attached) and
+          // re-timed — small models overshoot the clip length anyway,
+          // measured 2026-08-09.
+          acceptPrompt(prompt);
           focusPrompt();
         }}
       />
@@ -4105,8 +4497,25 @@ export function VideoStudio({
         onClose={() => { s.deleteTarget = null; bump(); }}
         onConfirm={confirmDeleteHistoryEntry}
         title={zh() ? '删除视频' : 'Delete video'}
-        body={zh() ? '从历史记录中移除这个视频。此操作无法撤销。' : 'Remove this video from your history. This cannot be undone.'}
+        body={zh() ? '从本次会话的列表中移除这个视频（它仍保留在历史记录中心）。' : 'Remove this video from this session\'s strip. It stays in the History hub.'}
         confirmLabel={zh() ? '删除' : 'Delete'}
+      />
+
+      {/* Attaching a source clip costs a model switch and/or the attached
+          references — said out loud, with a way out, before anything uploads. */}
+      <ConfirmModal
+        open={Boolean(s.sourceSwitchConfirm)}
+        tone="primary"
+        onClose={() => answerSourceSwitch(false)}
+        onConfirm={() => answerSourceSwitch(true)}
+        title={zh() ? '附加这段片段？' : 'Attach this clip?'}
+        body={(
+          <div className="flex flex-col gap-2 text-[13px] leading-relaxed text-ink2">
+            {(s.sourceSwitchConfirm?.lines || []).map((line) => <p key={line}>{line}</p>)}
+          </div>
+        )}
+        confirmLabel={zh() ? '切换并附加' : 'Switch and attach'}
+        cancelLabel={zh() ? '保持不变' : 'Keep as is'}
       />
 
       {s.resumeRemaining > 0

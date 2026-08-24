@@ -172,3 +172,61 @@ export function imageTimingProfile({ settings = {}, model = null, loraCount = 0,
         work: steps * Math.max(0.01, (width * height) / 1_000_000),
     };
 }
+
+// Seed field text -> seed. Only a whole non-negative number is an explicit
+// seed; anything else (blank, junk, negatives, fractions) means "random".
+// `parseInt(value) || -1` read a typed 0 as random while the field showed 0.
+export function parseSeedInput(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return -1;
+    const n = Number(text);
+    return Number.isInteger(n) && n >= 0 ? n : -1;
+}
+
+// How many references a restored setup may bring back: the LOCAL model's slot
+// count when the run was local, the cloud model's i2i slot count otherwise.
+// Sizing a local Klein restore off the cloud model's limit (nano-banana = 1)
+// dropped every reference but the first. An unknown local model (discovery
+// not landed yet) fails open to however many were captured — the discovery
+// pass trims the picker later if it must.
+export function restoredReferenceLimit({ imageMode, useLocalModel, localModel = null, cloudLimit = 1, referenceCount = 0 }) {
+    if (!imageMode) return 1;
+    if (useLocalModel) {
+        if (localModel) return Math.max(1, Number(localModel.maxReferenceImages) || 1);
+        return Math.max(1, Number(referenceCount) || 0);
+    }
+    return Math.max(1, Number(cloudLimit) || 1);
+}
+
+// Whether a change in the reference count has to rewrite the prompt's
+// reference-ownership block: either roles were held, or the prompt still
+// carries a block (a saved prompt brought one in). A prompt with neither is
+// left byte-for-byte alone — applyReferenceRoles would otherwise trim it.
+export function referenceRolesNeedRewrite(prompt, roles, heading) {
+    if (Array.isArray(roles) && roles.length) return true;
+    return Boolean(heading) && String(prompt || '').includes(heading);
+}
+
+// "Start fresh": the engine fields that go back to a blank canvas. Everything
+// session-bound to the LAST image — prompt, references and their roles, the
+// region boxes, couple character text, the enhancer, the failure callout, the
+// viewed setup — but NOT the model, source, aspect or saved tuning.
+export function startFreshPatch() {
+    return {
+        prompt: '',
+        uploadedImageUrls: [],
+        imageMode: false,
+        referenceRoles: [],
+        regions: [],
+        coupleShared: '',
+        coupleA: '',
+        coupleB: '',
+        enhancerOpen: false,
+        enhanceBase: '',
+        enhanceTags: new Set(),
+        enhanceCopied: false,
+        generateError: '',
+        viewerUrl: null,
+        lastSubmittedContext: null,
+    };
+}

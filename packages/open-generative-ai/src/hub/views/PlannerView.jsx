@@ -7,27 +7,31 @@
 // generation cards, composer restore, advanced-form state. This file is the
 // redesigned skin — no page hero, workspace-first, one honey accent, route
 // pickers as labelled ChipButton+Menu rows (not chip soup).
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { registerPromptInserter } from '../../app/promptTarget.js';
 import { useMediaSrc } from '../../hooks/hooks.js';
+import { getLang } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../../ui/Menu.jsx';
 import {
-  Button, Card, EmptyState, Field, IconButton, NativeSelect, SectionLabel,
+  Button, Card, EmptyState, Field, IconButton, NativeSelect, Pill, SectionLabel,
   Segmented, Spinner, TextArea, TextInput, Toggle, cx,
 } from '../../ui/kit.jsx';
 import {
   addScene, addSimpleImages, attachmentRole, buildRunGenerationCards, capabilityNote,
-  clearLoadedCanvasSetup, createSimpleRun, createWorkflowRun, hubState, insertPromptIntoComposer,
+  clearLoadedCanvasSetup, clearRestoredComposer, createSimpleRun, createWorkflowRun, hubState,
+  humanize, insertPromptIntoComposer,
   lane, MEDIA_SOURCE_OPTIONS, mediaSourceKind, providerLabel, providerRolesForLane,
   registerHubFocus, registerThreadScroller,
   removeScene, removeSimpleImage, ROUTE_AUTH_SECTIONS, routePickerMatches, routePickerProviders,
-  runTitle, selectedRoutePickerItem, setComposer, setMediaRoute, setProviderRole, setRouteValue,
+  runDisplayTitle, selectedRoutePickerItem, setComposer, setMediaRoute, setProviderRole, setRouteValue,
   setSelectedLane, setSelectedRunId, setStudioMode, setWorkflow, STUDIO_MODES, submitSimplePrompt,
   TEMPLATE_CATEGORY_LABELS, titleCase, togglePlatform, updateScene, useHub,
 } from '../hubData.js';
 import { GenerationCard } from '../components/GenerationCard.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
+
+const zh = () => getLang() === 'zh-CN';
 
 const MODE_OPTIONS = Object.entries(STUDIO_MODES).map(([value, mode]) => ({ value, label: mode.label }));
 
@@ -114,21 +118,35 @@ function RoutePickerList({ kind, close, value, onChange }) {
 }
 
 function RoutePicker({ kind, label, icon, route, onRouteChange, up = true }) {
-  useHub();
+  const s = useHub();
   const selected = selectedRoutePickerItem(kind, route);
   const providers = routePickerProviders(kind);
+  // "Loading models…" is only true while the catalog is still on its way. Once
+  // it has loaded with no brains (or the API is down) the honest word is
+  // "Unavailable" — a chip that says loading forever is a lie.
+  const brainPlaceholder = providers.length
+    ? 'Select a model'
+    : (s.simpleCatalog || s.apiOnline === false) ? 'Unavailable' : 'Loading models…';
   const value = selected
     ? `${selected.provider.label} · ${selected.model.label}`
-    : kind === 'brain'
-      ? (providers.length ? 'Select a model' : 'Loading models…')
-      : 'Automatic';
+    : kind === 'brain' ? brainPlaceholder : 'Automatic';
   return (
     <Menu
       up={up}
       width="w-[340px]"
       panelClassName="max-h-[min(440px,60vh)]"
       trigger={(open, toggle) => (
-        <ChipButton icon={icon} label={label} value={value} active={open} onClick={toggle} disabled={kind === 'brain' && !providers.length} />
+        <ChipButton
+          icon={icon}
+          label={label}
+          value={value}
+          active={open}
+          onClick={toggle}
+          disabled={kind === 'brain' && !providers.length}
+          title={kind === 'brain' && !providers.length && brainPlaceholder === 'Unavailable'
+            ? 'No LLM brain is advertised by the studio API — connect a provider under Providers, or check that the API is running.'
+            : undefined}
+        />
       )}
     >
       {(close) => <RoutePickerList kind={kind} close={close} value={route} onChange={onRouteChange} />}
@@ -245,7 +263,7 @@ function OptionsMenu() {
             <option value="decrement">Decrement</option>
           </NativeSelect>
         </Field>
-        <Field label="Seed">
+        <Field label="Seed" hint="-1 picks a random seed">
           <TextInput
             type="number"
             className="font-mono"
@@ -322,9 +340,13 @@ function IngredientsMenu() {
 /* Thread                                                            */
 /* ------------------------------------------------------------------ */
 
-function PlanCard({ plan }) {
+function PlanCard({ plan, createdRunId }) {
   const [busy, setBusy] = useState(false);
   const draft = plan.draft || {};
+  const confirm = async () => {
+    setBusy(true);
+    try { await createSimpleRun(plan); } finally { setBusy(false); }
+  };
   const scenes = Array.isArray(draft.scenes) ? draft.scenes : [];
   return (
     <div className="mt-2 flex flex-col gap-3 rounded-lg border border-line1 bg-bg2 p-3">
@@ -354,15 +376,24 @@ function PlanCard({ plan }) {
         </div>
       ) : null}
       {plan.mode === 'confirmation' ? (
-        <Button
-          variant="primary"
-          size="sm"
-          loading={busy}
-          onClick={() => { setBusy(true); void createSimpleRun(plan); }}
-          className="self-start"
-        >
-          Confirm & create production
-        </Button>
+        createdRunId ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Pill tone="ok" dot>{zh() ? '制作已创建' : 'Production created'}</Pill>
+            <Button size="sm" variant="ghost" icon="arrowRight" onClick={() => openRun(createdRunId)}>
+              {zh() ? '打开运行' : 'Open run'}
+            </Button>
+          </div>
+        ) : (
+          <Button
+            variant="primary"
+            size="sm"
+            loading={busy}
+            onClick={() => { void confirm(); }}
+            className="self-start"
+          >
+            {zh() ? '确认并创建制作' : 'Confirm & create production'}
+          </Button>
+        )
       ) : null}
     </div>
   );
@@ -393,7 +424,7 @@ function ThreadItem({ item }) {
               {item.questions.map((question, i) => <li key={i}>{question}</li>)}
             </ol>
           ) : null}
-          {item.plan ? <PlanCard plan={item.plan} /> : null}
+          {item.plan ? <PlanCard plan={item.plan} createdRunId={item.createdRunId} /> : null}
         </div>
       </div>
     );
@@ -452,7 +483,18 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div ref={threadRef} className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 p-4 md:p-5">
-          {s.thread.length === 0 ? (
+          {s.thread.length === 0 && s.apiOnline === false && !s.simpleCatalog ? (
+            // Boot never reached the API: say so instead of inviting a prompt
+            // the brain chip cannot serve.
+            <EmptyState
+              icon="plug"
+              title={zh() ? '工作室 API 不可达' : 'Studio API unreachable'}
+              hint={zh()
+                ? '规划器需要本地控制 API。它运行后会自动重试；也可以用顶栏的刷新按钮。'
+                : 'The Planner needs the local control API. It retries on its own once the API is running — or use the refresh button in the top bar.'}
+              className="flex-1"
+            />
+          ) : s.thread.length === 0 ? (
             <EmptyState icon="sparkles" title={mode.heading} hint={mode.copy} className="flex-1" />
           ) : (
             s.thread.map((item) => <ThreadItem key={item.id} item={item} />)
@@ -466,6 +508,15 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
           onSubmit={(e) => { e.preventDefault(); void submitSimplePrompt(); }}
         >
           {s.loadedCanvasSetup ? <LoadedCanvasSetup loaded={s.loadedCanvasSetup} /> : null}
+
+          {s.composerRestoredFrom ? (
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink3">
+              <Pill tone="neutral" dot>{zh() ? '已从上次运行恢复' : 'Restored from your last run'}</Pill>
+              <button type="button" onClick={clearRestoredComposer} className="font-medium text-ink2 underline-offset-2 hover:text-ink1 hover:underline">
+                {zh() ? '清除' : 'Clear'}
+              </button>
+            </div>
+          ) : null}
 
           {attachments.length ? (
             <div className="flex flex-wrap gap-2">
@@ -483,6 +534,10 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
               placeholder={mode.placeholder}
               value={s.composer.prompt}
               onChange={(e) => setComposer({ prompt: e.target.value })}
+              onKeyDown={(e) => {
+                // ⌘/Ctrl+Enter submits, like the studios; plain Enter keeps newlines.
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); void submitSimplePrompt(); }
+              }}
               className="max-h-[150px] min-h-[40px] w-full resize-none overflow-y-auto border-none bg-transparent px-1 pt-1 text-[15px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 md:max-h-[250px]"
             />
 
@@ -512,7 +567,15 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
 
               <div className="min-w-2 flex-1" />
 
-              <Button type="submit" variant="primary" size="lg" loading={s.simpleBusy} className="min-w-[130px]">
+              <Button
+                type="submit"
+                variant="primary"
+                size="lg"
+                loading={s.simpleBusy}
+                disabled={!s.composer.prompt.trim()}
+                title="⌘/Ctrl+Enter"
+                className="min-w-[130px]"
+              >
                 {s.simpleBusy ? (s.simpleBusyLabel || 'Planning') : mode.submit}
               </Button>
             </div>
@@ -536,26 +599,28 @@ function SceneEditor() {
         <Card key={index} className="flex flex-col gap-2 p-3">
           <div className="flex items-center gap-2">
             <span className="font-mono text-xs text-ink3">{String(index + 1).padStart(2, '0')}</span>
-            <input
+            <TextInput
               value={scene.title}
               placeholder="Scene title"
               aria-label={`Scene ${index + 1} title`}
               onChange={(e) => updateScene(index, 'title', e.target.value)}
-              className="h-8 min-w-0 flex-1 rounded-md border border-line1 bg-bg1 px-2.5 text-[13px] font-medium text-ink1 outline-none focus:border-honey/60"
+              className="min-w-0 flex-1 font-medium"
             />
-            <label className="flex items-center gap-1 text-xs text-ink3">
-              <input
-                type="number"
-                min="0.5"
-                max="300"
-                step="0.5"
-                value={scene.duration_seconds}
-                aria-label={`Scene ${index + 1} duration`}
-                onChange={(e) => updateScene(index, 'duration_seconds', e.target.value)}
-                className="h-8 w-16 rounded-md border border-line1 bg-bg1 px-2 font-mono text-[13px] text-ink1 outline-none focus:border-honey/60"
-              />
+            <span className="flex items-center gap-1 text-xs text-ink3">
+              <span className="w-20 shrink-0">
+                <TextInput
+                  type="number"
+                  min="0.5"
+                  max="300"
+                  step="0.5"
+                  value={scene.duration_seconds}
+                  aria-label={`Scene ${index + 1} duration`}
+                  onChange={(e) => updateScene(index, 'duration_seconds', e.target.value)}
+                  className="font-mono"
+                />
+              </span>
               sec
-            </label>
+            </span>
             <IconButton
               icon="trash"
               label={`Remove scene ${index + 1}`}
@@ -564,12 +629,11 @@ function SceneEditor() {
               onClick={() => removeScene(index)}
             />
           </div>
-          <input
+          <TextInput
             value={scene.beat}
             placeholder="What happens in this scene?"
             aria-label={`Scene ${index + 1} beat`}
             onChange={(e) => updateScene(index, 'beat', e.target.value)}
-            className="h-8 w-full rounded-md border border-line1 bg-bg1 px-2.5 text-[13px] text-ink1 outline-none focus:border-honey/60"
           />
           <div className="grid gap-2 md:grid-cols-2">
             <Field label="On-screen copy"><TextInput value={scene.overlay} onChange={(e) => updateScene(index, 'overlay', e.target.value)} /></Field>
@@ -612,16 +676,15 @@ function AdvancedForm({ titleRef }) {
           <section className="flex flex-col gap-3">
             <SectionLabel>Start with the idea</SectionLabel>
             <Field label="What are we making?">
-              {/* Native input (not the kit TextInput) so the data layer's
-                  workflowTitle focus hook — used by duplicateRun — gets a real ref. */}
-              <input
+              {/* React 19 passes ref as a plain prop, so the kit TextInput takes
+                  it directly — the workflowTitle focus hook (duplicateRun) works. */}
+              <TextInput
                 ref={titleRef}
                 maxLength={180}
                 required
                 placeholder="A launch ad for our new product"
                 value={w.title}
                 onChange={(e) => setWorkflow({ title: e.target.value })}
-                className="h-ctl-md w-full rounded-md border border-line1 bg-bg2 px-3 text-[13px] text-ink1 outline-none transition-colors duration-150 placeholder:text-ink3 hover:border-line2 focus:border-honey/60"
               />
             </Field>
             <Field label="Creative direction (optional)">
@@ -864,8 +927,8 @@ function AdvancedForm({ titleRef }) {
             {recent ? (
               <button type="button" onClick={() => openRun(recent.run_id)} className="w-full text-left">
                 <SectionLabel>Latest run</SectionLabel>
-                <b className="mt-1 block truncate text-[13px] font-semibold text-ink1">{runTitle(recent)}</b>
-                <small className="text-[11px] text-ink3">{titleCase(recent.lane)} · {titleCase(recent.status)}</small>
+                <b className="mt-1 block truncate text-[13px] font-semibold text-ink1">{runDisplayTitle(recent)}</b>
+                <small className="text-[11px] text-ink3">{humanize(recent.status)}</small>
               </button>
             ) : (
               <>
@@ -921,8 +984,8 @@ export function PlannerView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker="Agent-directed production"
-        title="Planner"
+        kicker={zh() ? '智能体主导的制作' : 'Agent-directed production'}
+        title={zh() ? '规划器' : 'Planner'}
         right={<Segmented options={MODE_OPTIONS} value={s.studioMode} onChange={setStudioMode} />}
       />
       {advanced

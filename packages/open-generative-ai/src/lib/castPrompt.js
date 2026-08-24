@@ -18,8 +18,11 @@
 // are allocated in cast order and each member's own references keep the order
 // the persona saved them in. Effect-free on purpose — no vault, no network, no
 // React — because the numbering rules are the part that has to be provable.
-import { WORDS_PER_SECOND, referenceLabels } from './h3References.js';
+import {
+  DIALOGUE_STUB, WORDS_PER_SECOND, parseFieldPrompt, referenceLabels,
+} from './h3References.js';
 import { normalizePersonaGender, personaGenderWords } from './personaId.js';
+import { bindStandIns } from './subjectTemplate.js';
 
 const DEFAULT_LIMITS = { images: 9, videos: 3, audios: 3 };
 
@@ -38,16 +41,21 @@ export function castPersona(name, persona, { style = PERSONA_DEFAULT_STYLE } = {
   return {
     kind: 'persona',
     style: String(style || ''),
-    name: String(name || 'Persona'),
+    // '' for a member that was never named — the rows attached by hand. The
+    // definition then binds the subject to its references alone, which is the
+    // honest description; a made-up placeholder name would reach the model.
+    name: String(name || ''),
     // Saved with the persona. It decides the noun the definition uses ("the
     // woman shown in <Picture 1>") and, when the subject speaks without a
     // cloned voice, which voice to ask for — H3's default for an unvoiced
     // subject is a generic adult male (measured 2026-08-13). '' = unknown:
     // the definition says "the character" and asks for no particular voice.
     gender: normalizePersonaGender(persona?.gender),
-    // Free text describing the member, so the definition line is not a
-    // placeholder someone has to remember to fill in.
-    appearance: '',
+    // Free text describing the member — the persona's saved LOOK (hair, face,
+    // build, wardrobe). With it the definition is complete; without it the
+    // definition carries a blank the Prompt Check flags, because a blank that
+    // reaches the model is read as an instruction.
+    appearance: String(persona?.look || '').trim(),
     images: (persona?.images || []).filter(Boolean).map(String),
     videos: (persona?.videos || []).filter((item) => item?.url).map((item) => ({
       url: String(item.url), name: String(item.name || ''), useAudio: Boolean(item.useAudio), compact: Boolean(item.compact),
@@ -217,6 +225,9 @@ export function characterSubjectLines({
   return lines;
 }
 
+export const APPEARANCE_BLANK =
+  '[hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the pictures]';
+
 /** How the model should be told to identify this member. */
 function subjectDefinition(role, shared = false) {
   const { member, subject } = role;
@@ -231,9 +242,10 @@ function subjectDefinition(role, shared = false) {
     }).join('\n');
   }
   const parts = [];
-  // The noun comes from the persona's saved gender; "the character" only when
-  // it was never set, so an old persona reads exactly as it always did.
-  const noun = member.gender ? personaGenderWords(member.gender).noun : 'character';
+  // The noun comes from the persona's saved gender; "the person" when it was
+  // never set — a persona is a photographed human by construction, and the
+  // reference scaffold always said so (the two writers are one path now).
+  const noun = member.gender ? personaGenderWords(member.gender).noun : 'person';
   if (role.pictures.length === 1) parts.push(`the ${noun} shown in ${role.pictures[0]}`);
   else if (role.pictures.length > 1) parts.push(`the ${noun} shown in ${role.pictures.join(', ')}`);
   // No picture: the first clip is the character reference — MiniMax's own
@@ -243,9 +255,12 @@ function subjectDefinition(role, shared = false) {
     // A sound-only row has no <Video N>: the first MOTION clip is the one the
     // subject can be bound to.
     parts.push(`the ${noun} shown in ${role.videos.find((label) => label?.video).video}`);
-  } else parts.push(member.gender ? `a ${noun}, ${member.name}` : `${member.name}`);
+  } else if (member.gender) parts.push(`a ${noun}${member.name ? `, ${member.name}` : ''}`);
+  else parts.push(member.name || 'a person');
   const voice = roleVoiceLabel(role);
-  const lines = [`${subject} is ${parts[0]}: ${member.appearance || '[appearance — one or two lines]'}.`];
+  // The blank is the same words the reference scaffold leaves, so the Prompt
+  // Check's SCAFFOLD_BLANKS catches it wherever it came from.
+  const lines = [`${subject} is ${parts[0]}: ${member.appearance || APPEARANCE_BLANK}.`];
   // Stated per subject, so a scene style cannot quietly restyle a real person.
   if (member.style) lines.push(`${subject} is rendered as ${member.style}.`);
   // H3 binds a voice to a subject through this pairing, written out. Without
@@ -477,7 +492,7 @@ const SOUNDSCAPE_VOCAL = /\b(exhale[sd]?|inhale[sd]?|breath(?:s|ing|e|es)?|pant(
  */
 export function compileCastPrompt({
   members = [], template = {}, limits = DEFAULT_LIMITS, speakingOrder = null, durationSeconds = 0,
-  previousCast = [],
+  previousCast = [], standIns = [], scaffold = false,
 } = {}) {
   const beats = Array.isArray(template.beats) ? template.beats : [];
   // Beats know who speaks and when, so they ARE the speaking order — an
@@ -490,33 +505,70 @@ export function compileCastPrompt({
   // The creative half is CARRIED, not preserved: everything in it that names a
   // member rather than a subject position is re-derived from the cast attached
   // now. Beats are compiled from scratch, so they skip the pass.
+  //
+  // Stand-ins go first: a starter rendered about "a Korean woman" recorded
+  // which words are the person (subjectTemplate.js), and whoever holds that
+  // subject slot now takes her place — her look goes with her, because the
+  // member's own definition carries its look. Only the slots this cast fills
+  // are bound; a stand-in for a subject nobody holds stays as written.
+  const CREATIVE = ['summary', 'detailed_description', 'overall_soundscape', 'non_diegetic_music'];
+  const carried = Object.fromEntries(CREATIVE.map((name) => [name, String(template[name] || '').trim()]));
+  const SEAM = '\u0000';
+  const binding = bindStandIns(
+    CREATIVE.map((name) => carried[name]).join(SEAM),
+    Array.isArray(standIns) ? standIns : [],
+    (index) => roles[index - 1]?.subject || null,
+  );
+  binding.text.split(SEAM).forEach((text, index) => { carried[CREATIVE[index]] = text; });
   const recast = (text) => recastCreative(text, roles, previousCast);
 
   const sections = [];
   sections.push(['subject_definitions',
     roles.map((role, _index, all) => subjectDefinition(role, all.length > 1)).join('\n')]);
 
-  const summary = recast(String(template.summary || '').trim());
-  if (summary) {
-    // The summary audio tag is a contract about the WHOLE clip, so it is written
-    // once here rather than per reference: with a voice reference attached, the
-    // source's own words must not reappear.
-    sections.push(['summary', anyVoice && !/\[audio (reference|reuse)\]/.test(summary)
-      ? `[audio reference] ${summary}`
-      : summary]);
+  // Description before summary: the stand-in is bound where it is first
+  // written, and a summary that repeats the phrase binds on its own pass.
+  let description = beats.length
+    ? renderBeats(beats, roles, { style: template.style })
+    : recast(carried.detailed_description);
+  if (!beats.length && description && !/\[Shot\s+\d+\]/.test(description)) {
+    // Loose prose is the shot. A prompt that already carries its own timeline
+    // keeps it; adding [Shot 1] in front of one that opens with it gave the
+    // prompt two and made the first cut unreadable.
+    description = `[Shot 1] ${description}`;
   }
+  if (scaffold && !description) description = `[Shot 1] ${DESCRIPTION_PLACEHOLDER}`;
+  // A cloned voice with nothing to say is the other half of the problem — but
+  // only the explicit scaffold writes the stub: an automatic weave would plant a
+  // placeholder line in a description that deliberately has no dialogue.
+  if (scaffold && anyVoice && description && !description.includes('<d>')) {
+    const speaker = roles.find((role) => roleVoiceLabel(role) && role.speaker) || roles.find((role) => roleVoiceLabel(role));
+    description = `${description}\n${speaker ? `${speaker.subject} ` : ''}${DIALOGUE_STUB}`;
+  }
+
+  let summary = recast(carried.summary);
+  if (!summary) summary = summaryFor(roles);
+  // The summary audio tag is a contract about the WHOLE clip, so it is written
+  // once here rather than per reference: with a voice reference attached, the
+  // source's own words must not reappear.
+  sections.push(['summary', anyVoice && !/\[audio (reference|reuse)\]/.test(summary)
+    ? `[audio reference] ${summary}`
+    : summary]);
 
   const retention = roles.flatMap(retentionLines);
   if (retention.length) sections.push(['retention_analysis', retention.join('\n')]);
 
-  const description = beats.length
-    ? renderBeats(beats, roles, { style: template.style })
-    : recast(String(template.detailed_description || '').trim());
   if (description) sections.push(['detailed_description', description]);
-  const soundscape = recast(String(template.overall_soundscape || '').trim());
-  if (soundscape) sections.push(['overall_soundscape', soundscape]);
-  const music = recast(String(template.non_diegetic_music || '').trim());
-  if (music) sections.push(['non_diegetic_music', music]);
+  // The author's own soundscape is the more specific instruction, so it
+  // carries. The default is for a prompt that had none — and its voice sentence
+  // is the one that prevented four seconds of invented speech, so it is kept
+  // for exactly that case.
+  const soundscape = recast(carried.overall_soundscape) || (anyVoice
+    ? `A quiet interior. Only ${roles.find((role) => roleVoiceLabel(role))?.subject || '<Subject 1>'}'s voice, close and dry, over faint room tone. No other speakers, no music, and no speech before or after the written lines.`
+    : 'A quiet interior with faint room tone. No speech and no music.');
+  sections.push(['overall_soundscape', soundscape]);
+  const music = recast(carried.non_diegetic_music) || 'none';
+  sections.push(['non_diegetic_music', music]);
 
   // MiniMax's own guide asks for roughly 350-500 English words of description.
   // A thin one is not merely terse: every beat left unstated is invented, which
@@ -619,11 +671,43 @@ export function compileCastPrompt({
     warnings.push('Nothing describes the shot. A prompt that only says who is in it leaves the whole clip to be invented.');
   }
 
+  // A stand-in the text no longer contains is the one case where binding is
+  // refused rather than guessed: the user edited those words, and a half-bound
+  // subject — label in one sentence, the old description in the next — is the
+  // exact failure this module exists to prevent.
+  for (const index of binding.unmatched) {
+    warnings.push(
+      `<Subject ${index}>'s stand-in phrase is no longer in the text, so it was not bound. `
+      + 'Write <Subject ' + index + '> into the description yourself, or ask the helper to.',
+    );
+  }
+
   return {
     prompt: sections.map(([name, body]) => `${name}:\n${body}`).join('\n\n'),
     allocation,
     warnings,
+    standIns: { bound: binding.bound, remaining: binding.remaining, unmatched: binding.unmatched },
   };
+}
+
+const DESCRIPTION_PLACEHOLDER = 'Medium shot of <Subject 1> against [setting], in [lighting]. '
+  + '<Subject 1> looks into the lens to speak, then holds a beat of stillness.';
+
+/** A summary for a prompt that had none: one line naming every subject and what drives it. */
+function summaryFor(roles) {
+  if (!roles.length) return '';
+  const clauses = roles.map((role) => {
+    const voice = roleVoiceLabel(role);
+    const motion = (role.videos || []).map((label) => label?.video).filter(Boolean);
+    const identityVideo = role.pictures?.length ? null : (motion[0] || null);
+    const manner = identityVideo ? motion.slice(1) : motion;
+    const bits = [role.subject];
+    if (voice) bits.push(`speaking in the voice of ${voice}`);
+    if (identityVideo) bits.push(`carrying the look and manner of ${identityVideo}`);
+    if (manner.length) bits.push(`moving in the manner of ${manner.join(' and ')}`);
+    return bits.join(', ');
+  });
+  return `One continuous take of ${clauses.join('; and ')}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -821,9 +905,21 @@ function recastDialogue(body, role) {
  */
 export function applyCastToPrompt(prompt, { template = {}, ...options } = {}) {
   const existing = parseSixSections(prompt);
+  // A three-field prompt — every text-mode starter, the helper's output — is
+  // CONVERTED field by field: description to description, soundscape to
+  // soundscape, music to music. Treating it as loose text swallowed the whole
+  // thing, headers and all, into detailed_description (2026-08-23).
+  const fields = existing ? null : parseFieldPrompt(prompt);
   const merged = existing
     ? { ...existing, ...template }
-    : { detailed_description: String(prompt || '').trim(), ...template };
+    : fields
+      ? {
+        detailed_description: [fields.lead, fields.integrated_multimodal_description].filter(Boolean).join('\n\n'),
+        overall_soundscape: fields.overall_soundscape || '',
+        non_diegetic_music: fields.non_diegetic_music || '',
+        ...template,
+      }
+      : { detailed_description: String(prompt || '').trim(), ...template };
   // The prompt's own definitions say who the carried-over creative half was
   // written about — which is what lets the recast pass find the outgoing cast's
   // names, voices and speaker ids in it instead of leaving them behind.

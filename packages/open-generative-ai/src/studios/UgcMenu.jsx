@@ -64,7 +64,9 @@ export function UgcMenu({
       width="w-[23rem]"
       trigger={(open, toggle) => (
         <ChipButton
-          icon="camera"
+          // persona, not camera: the Video composer's Camera chip wears the
+          // camera glyph, and two of them sat side by side on H3.
+          icon="persona"
           label={armed ? `UGC · ${zh() ? '第' : 'cast '}${cast.index + 1}` : 'UGC'}
           active={open || armed}
           onClick={toggle}

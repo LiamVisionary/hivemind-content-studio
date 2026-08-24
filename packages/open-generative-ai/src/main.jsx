@@ -9,5 +9,7 @@ import '@fontsource-variable/inter';
 import './style.css';
 import { createRoot } from 'react-dom/client';
 import { App } from './app/App.jsx';
+import { applyDocumentLang } from './lib/i18n.js';
 
+applyDocumentLang();
 createRoot(document.querySelector('#app')).render(<App />);

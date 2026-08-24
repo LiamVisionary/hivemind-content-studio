@@ -128,14 +128,26 @@ export function personaIdentity(value) {
     id: String(value.id || ''),
     name: String(value.name),
     gender: normalizePersonaGender(value.gender),
+    // The persona's saved LOOK — hair, face, build, wardrobe in a line or two.
+    // It is what the cast writes into <Subject N>'s definition instead of a
+    // blank, so it rides with the identity wherever the gender does.
+    look: normalizePersonaLook(value.look),
   };
 }
 
+/** The look as stored: one or two lines, whitespace collapsed, bounded. */
+export const PERSONA_LOOK_MAX = 600;
+export function normalizePersonaLook(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, PERSONA_LOOK_MAX);
+}
+
 /** Normalise the studio's three reference lists (and the gender) into a persona payload. */
-export function personaFromReferences({ images = [], videos = [], audios = [], gender = '' } = {}) {
+export function personaFromReferences({ images = [], videos = [], audios = [], gender = '', look = '' } = {}) {
   return {
     v: 1,
     gender: normalizePersonaGender(gender),
+    // Written only when set, so an older save reads byte-for-byte unchanged.
+    ...(normalizePersonaLook(look) ? { look: normalizePersonaLook(look) } : {}),
     images: (Array.isArray(images) ? images : [])
       .filter((url) => typeof url === 'string' && url)
       .map(String),
@@ -203,8 +215,10 @@ function fingerprint(data) {
   const persona = personaFromReferences(data || {});
   return JSON.stringify({
     // The gender is part of the character: changing it changes what every
-    // template writes about them, so it counts as an edit worth saving.
+    // template writes about them, so it counts as an edit worth saving. So is
+    // the look — it is the subject definition the cast writes.
     gender: persona.gender,
+    look: persona.look || '',
     images: persona.images,
     videos: persona.videos.map((item) => [item.url, item.useAudio, item.compact, item.motion === false]),
     audios: persona.audios.map((item) => item.url),

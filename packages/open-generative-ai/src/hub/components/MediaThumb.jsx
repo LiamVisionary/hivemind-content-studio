@@ -6,6 +6,7 @@
 // whole point of peeking first. resolveMediaSrc is fail-open for legacy media.
 import { useEffect, useRef, useState } from 'react';
 import { mediaSealFailure, peekResolvedMediaSrc, resolveMediaSrc } from '../../lib/e2eMedia.js';
+import { requestVaultUnlock } from '../../lib/vaultSession.js';
 import { Icon } from '../../ui/icons.jsx';
 import { cx } from '../../ui/kit.jsx';
 
@@ -17,20 +18,38 @@ import { cx } from '../../ui/kit.jsx';
 export function VaultLockedTile({ reason = 'locked', className = '' }) {
   const locked = reason !== 'undecryptable';
   const title = locked ? 'Vault locked' : "Can't decrypt";
-  const detail = locked ? 'Unlock the studio to view' : 'Sealed for a different key';
-  return (
-    <div
-      title={`${title} — ${detail}`}
-      className={cx(
-        'flex h-full w-full flex-col items-center justify-center gap-1.5 bg-bg3 px-3 text-center text-ink3',
-        className,
-      )}
-    >
+  const detail = locked ? 'Click to unlock your vault' : 'Sealed for a different key';
+  const body = (
+    <>
       <span className="grid h-9 w-9 place-items-center rounded-full bg-bg1/70 text-honey">
         <Icon name={locked ? 'lock' : 'warning'} size={16} />
       </span>
       <b className="text-[11px] font-semibold">{title}</b>
       <small className="text-[10px] leading-tight">{detail}</small>
+    </>
+  );
+  const classes = cx(
+    'flex h-full w-full flex-col items-center justify-center gap-1.5 bg-bg3 px-3 text-center text-ink3',
+    className,
+  );
+  // A locked tile is the moment the user wants to unlock; the button opens the
+  // in-app unlock flow (VaultUnlockModal) instead of pointing at a control that
+  // may not be on screen.
+  if (locked) {
+    return (
+      <button
+        type="button"
+        onClick={(event) => { event.stopPropagation(); requestVaultUnlock(); }}
+        title={`${title} — ${detail}`}
+        className={cx(classes, 'cursor-pointer transition-colors hover:bg-bg2')}
+      >
+        {body}
+      </button>
+    );
+  }
+  return (
+    <div title={`${title} — ${detail}`} className={classes}>
+      {body}
     </div>
   );
 }
@@ -44,6 +63,8 @@ export function MediaThumb({ url, alt = 'Private output', className = '', imgCla
     return url && mediaSealFailure(url) ? 'vault-locked' : 'locked';
   });
   const [src, setSrc] = useState(() => (url ? peekResolvedMediaSrc(url) : null));
+  // Bumped by the failed tile's click so the resolve effect runs again.
+  const [retry, setRetry] = useState(0);
   const revealTimer = useRef(null);
 
   useEffect(() => {
@@ -72,7 +93,7 @@ export function MediaThumb({ url, alt = 'Private output', className = '', imgCla
       alive = false;
       if (revealTimer.current) clearTimeout(revealTimer.current);
     };
-  }, [url]);
+  }, [url, retry]);
 
   const revealed = state === 'unlocked' || state === 'unlocking';
 
@@ -96,9 +117,20 @@ export function MediaThumb({ url, alt = 'Private output', className = '', imgCla
           <VaultLockedTile reason={mediaSealFailure(url)} />
         </div>
       ) : state === 'failed' ? (
-        <div className="absolute inset-0 grid place-items-center text-ink3">
-          <Icon name="warning" size={20} />
-        </div>
+        // Same shape as the vault tile: a glyph alone read as "broken app", not
+        // "this file did not load". Click retries the fetch.
+        <button
+          type="button"
+          onClick={(event) => { event.stopPropagation(); setSrc(null); setState('locked'); setRetry((n) => n + 1); }}
+          title="Could not load this output — click to retry"
+          className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-bg3 px-3 text-center text-ink3 transition-colors hover:bg-bg2"
+        >
+          <span className="grid h-9 w-9 place-items-center rounded-full bg-bg1/70 text-warn">
+            <Icon name="warning" size={16} />
+          </span>
+          <b className="text-[11px] font-semibold">Could not load</b>
+          <small className="text-[10px] leading-tight">Click to retry</small>
+        </button>
       ) : state !== 'unlocked' ? (
         <div className="absolute inset-0 grid place-items-center text-ink3">
           <span

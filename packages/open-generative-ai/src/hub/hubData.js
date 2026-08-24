@@ -92,7 +92,22 @@ export const hubState = {
   loadedCanvasSetup: null,
   telemetry: null,
   historyFilter: '',
+  // Client-side text filter over prompts (text) and outputs (model/basename).
+  historyQuery: '',
+  // False until the first prompts/outputs load settles, so History can show a
+  // skeleton instead of flashing "No outputs yet" before the response lands.
+  historyLoaded: false,
   activeView: 'create',
+  // Whether the hub root is on screen at all (a studio page hides it). Polls
+  // that exist only for a visible view — History, Providers — gate on this.
+  hubVisible: false,
+  // null until the first refresh settles; then the last refresh's verdict.
+  apiOnline: null,
+  // Run id the composer was silently pre-filled from at boot (restoreLatestRunInComposer).
+  composerRestoredFrom: '',
+  // provider → authorize URL when window.open was blocked, so the card can
+  // render the link instead of losing it.
+  oauthLinks: {},
   // Simple composer (was DOM state in the persistent hub root)
   composer: { prompt: '', promptHelper: true, walkthrough: false, seed: '-1', seedMode: 'randomize' },
   // Route values — JSON strings exactly as the old hidden inputs stored them
@@ -158,6 +173,14 @@ const focusHooks = new Map(); // 'prompt' | 'workflowTitle' -> fn
 let threadScroller = null;
 
 export function setHubRootEl(el) { hubRootEl = el; }
+// HubLayer reports whether the hub is the page on screen (false while a studio
+// shows). Polls that only serve a visible view read this.
+export function setHubVisible(visible) {
+  const next = Boolean(visible);
+  if (hubState.hubVisible === next) return;
+  hubState.hubVisible = next;
+  notifyHub();
+}
 export function registerHubFocus(key, fn) {
   focusHooks.set(key, fn);
   return () => { if (focusHooks.get(key) === fn) focusHooks.delete(key); };
@@ -198,7 +221,40 @@ let ownerPassphrase = readOwnerPassphrase();
 /* Small shared helpers                                               */
 /* ------------------------------------------------------------------ */
 
-export const titleCase = (value) => String(value || '').replaceAll('-', ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+// Title Case for names (lanes, roles, privacy modes): every word capitalised,
+// both separators the API uses turned into spaces.
+export const titleCase = (value) => String(value || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+
+// Sentence case for machine status words ("awaiting_generation" →
+// "Awaiting generation"): one capital, the rest left alone.
+export const humanize = (value) => {
+  const text = String(value || '').replace(/[-_]+/g, ' ').trim();
+  return text ? text[0].toUpperCase() + text.slice(1) : '';
+};
+
+// File extension for a saved artifact, from its MIME type — the run store
+// names artifacts by role, not by file, so a download has to derive one.
+const MIME_EXTENSIONS = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+  'image/avif': 'avif', 'image/svg+xml': 'svg', 'video/mp4': 'mp4', 'video/webm': 'webm',
+  'video/quicktime': 'mov', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3', 'audio/wav': 'wav', 'audio/x-wav': 'wav',
+  'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'application/json': 'json', 'text/plain': 'txt', 'application/pdf': 'pdf',
+};
+export function extensionForMime(mime) {
+  const type = String(mime || '').split(';')[0].trim().toLowerCase();
+  if (!type) return '';
+  if (MIME_EXTENSIONS[type]) return MIME_EXTENSIONS[type];
+  const subtype = type.split('/')[1] || '';
+  const cleaned = subtype.replace(/^x-/, '').replace(/\+.*$/, '');
+  return /^[a-z0-9]{1,8}$/.test(cleaned) ? cleaned : '';
+}
+
+// The rail/catalog name of a production lane ("First-frame animation ad"),
+// falling back to a Title Cased id when the catalog has not loaded.
+export function laneLabel(laneId) {
+  const found = (hubState.catalog?.lanes || []).find((item) => item.id === laneId);
+  return found?.label || titleCase(laneId);
+}
 
 export const providerLabel = (value) => ({
   'openai-gpt-image': 'OpenAI · GPT Image',
@@ -529,6 +585,8 @@ export function threadRunFor(item) {
   return hubState.runs.find((run) => run.run_id === item.runId) || item.snapshot || null;
 }
 
+// Resolves true when the run exists, false when it did not get created — the
+// PlanCard's confirm button awaits this to leave its busy state either way.
 export async function createSimpleRun(plan) {
   setSimpleBusy(true, 'Creating');
   const loading = pushThread({ kind: 'loading' });
@@ -539,14 +597,19 @@ export async function createSimpleRun(plan) {
     hubState.simpleAttachments.filter((item) => item.file).forEach((item) => form.append('images', item.file, item.file.name));
     const run = await api('/api/simple/runs', { method: 'POST', body: form });
     replaceThreadItem(loading.id, { kind: 'runCards', runId: run.run_id, snapshot: run });
+    // The plan card that asked for this run keeps the outcome, so the thread
+    // shows "Production created" in place of a button that can never fire twice.
+    hubState.thread.forEach((entry) => { if (entry.plan === plan) entry.createdRunId = run.run_id; });
     await Promise.all([loadRuns(), loadGenerationTelemetry({ quiet: true })]);
     hubState.selectedRunId = run.run_id;
     notifyHub();
     toast('Production created. Agents can continue from the durable run.');
     void loadPrompts({ quiet: true });
+    return true;
   } catch (error) {
     replaceThreadItem(loading.id, { kind: 'runError', message: error.message });
     toast.error(error.message);
+    return false;
   } finally {
     setSimpleBusy(false);
     scrollThreadToLatest();
@@ -594,6 +657,7 @@ export async function submitSimplePrompt() {
     });
     hubState.simpleHistory.push({ role: 'assistant', content: plan.message || JSON.stringify(plan.questions || []) });
     hubState.composer.prompt = '';
+    hubState.composerRestoredFrom = '';
     notifyHub();
     if (plan.mode === 'brief') await createSimpleRun(plan);
   } catch (error) {
@@ -665,7 +729,7 @@ export function buildRunGenerationCards(run) {
     const status = generationStageStatus(run, 'keyframes', artifacts, expected, attempt);
     stages.push({
       id: `${run.run_id}:image`, kind: 'image', intent: 'generate_keyframes', title: 'Image generation', status,
-      prompt: run.brief?.concept || run.brief?.goal || runTitle(run), provider, model: generationModel(run, provider, 'keyframe'),
+      prompt: run.brief?.concept || run.brief?.goal || '', provider, model: generationModel(run, provider, 'keyframe'),
       detail: generationStageDetail(run, 'keyframes', 'image', artifacts, expected, status), artifacts, sourceArtifacts: referenceArtifacts,
       createdAt: attempt?.createdAt, completedAt: attempt?.completedAt, error: attempt?.error_type || '',
     });
@@ -679,7 +743,7 @@ export function buildRunGenerationCards(run) {
     const status = generationStageStatus(run, 'motion', artifacts, expected, attempt);
     stages.push({
       id: `${run.run_id}:video`, kind: 'video', intent: 'animate_scenes', title: 'Video generation', status,
-      prompt: run.brief?.concept || run.brief?.goal || runTitle(run), provider, model: generationModel(run, provider, 'motion'),
+      prompt: run.brief?.concept || run.brief?.goal || '', provider, model: generationModel(run, provider, 'motion'),
       detail: generationStageDetail(run, 'motion', 'video', artifacts, expected, status), artifacts,
       sourceArtifacts: records.filter((artifact) => artifact.role === 'keyframe'), createdAt: attempt?.createdAt,
       completedAt: attempt?.completedAt, error: attempt?.error_type || '',
@@ -732,6 +796,7 @@ export function activateHubView(view) {
   if (selected === 'canvas') loadToolSurface(selected);
   if (selected === 'history') void loadPrompts({ quiet: true });
   if (selected === 'telemetry') void loadGenerationTelemetry({ quiet: true });
+  if (selected === 'providers') void loadOAuth().catch(() => {});
 }
 
 /* ------------------------------------------------------------------ */
@@ -861,9 +926,11 @@ function mergeCanvasHistoryPage(existing, page) {
   )));
 }
 
-export async function loadPrompts({ quiet = false } = {}) {
+export async function loadPrompts({ quiet = false, force = false } = {}) {
   // A quiet poll refreshes the first page in place. An explicit load (first open,
-  // filter change) restarts pagination from scratch.
+  // filter change) restarts pagination from scratch. `force` rides as
+  // `refresh=1`, which makes the server re-index the output folder now instead
+  // of serving its ~10 s cache — only the topbar Refresh sends it; polls never do.
   const refresh = quiet && hubState.canvasHistory.length > 0;
   let changed = true;
   try {
@@ -879,6 +946,7 @@ export async function loadPrompts({ quiet = false } = {}) {
       page_size: String(hubState.canvasPageSize),
       ...(hubState.canvasFormat ? { format: hubState.canvasFormat } : {}),
       ...(hubState.canvasModel ? { model: hubState.canvasModel } : {}),
+      ...(force ? { refresh: '1' } : {}),
     });
     const [promptPayload, canvasPayload] = await Promise.all([
       api('/api/simple/prompts'),
@@ -914,9 +982,20 @@ export async function loadPrompts({ quiet = false } = {}) {
   } catch (error) {
     if (!quiet) toast.error(error.message);
   } finally {
-    if (!refresh) hubState.canvasLoading = false;
+    // An explicit load owns canvasLoading, so its flip back must publish even
+    // when the data came back identical (filter change, manual refresh).
+    if (!refresh) { hubState.canvasLoading = false; changed = true; }
+    // The first settle — success or not — is what lets the view stop showing
+    // the skeleton; a failed first load falls through to the empty state with
+    // the offline pill rather than a spinner that never ends.
+    if (!hubState.historyLoaded) { hubState.historyLoaded = true; changed = true; }
   }
   if (changed) notifyHub();
+}
+
+export function setHistoryQuery(query) {
+  hubState.historyQuery = String(query || '');
+  notifyHub();
 }
 
 export async function loadMoreCanvasHistory() {
@@ -1029,7 +1108,7 @@ async function canvasWorkflowPayload(entry) {
   return hubState.canvasWorkflowPayloads[entry.history_id];
 }
 
-async function requestCanvasBridge(entry, action = 'inspect') {
+async function requestCanvasBridge(entry, action = 'inspect', { allowBridge = true } = {}) {
   const payload = await canvasWorkflowPayload(entry);
   // Studio outputs carry a vault-sealed setup (prompt/seed/model + the resolved
   // API graph), not a ComfyUI-mobile envelope. Decrypt it in the hub.
@@ -1047,6 +1126,10 @@ async function requestCanvasBridge(entry, action = 'inspect') {
   } else {
     bridgeMessage = { workflow: payload.workflow };
   }
+  // A genuine Canvas output needs the iframe. Background provenance reads
+  // (a card scrolling into view) must never be the thing that boots it — only
+  // an explicit action may; they come back empty and the card shows "—".
+  if (!allowBridge) return null;
   await waitForCanvasBridge();
   const requestId = globalThis.crypto?.randomUUID?.() || `history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const frame = surfaceFrames.get('canvas');
@@ -1069,21 +1152,31 @@ async function requestCanvasBridge(entry, action = 'inspect') {
   });
 }
 
-export async function inspectCanvasHistoryEntry(historyId) {
+// `allowBridge: false` is the background (scroll-into-view) read: it recovers
+// the sealed studio setup when there is one and otherwise resolves null without
+// touching the Canvas iframe — and without recording a failure, so a later
+// explicit action still gets its full attempt.
+export async function inspectCanvasHistoryEntry(historyId, { allowBridge = true } = {}) {
   const entry = hubState.canvasHistory.find((item) => item.history_id === historyId);
   if (!entry || hubState.canvasSetups[historyId]?.unavailable) return null;
   if (hubState.canvasSetups[historyId]?.primaryPrompt !== undefined) return hubState.canvasSetups[historyId];
   if (canvasSetupPromises.has(historyId)) return canvasSetupPromises.get(historyId);
-  const pending = scheduleCanvasSetup(() => requestCanvasBridge(entry, 'inspect'))
+  const pending = scheduleCanvasSetup(() => requestCanvasBridge(entry, 'inspect', { allowBridge }))
     .then(async (setup) => {
+      if (!setup) return null;
       hubState.canvasSetups[historyId] = setup;
-      entry.models = setup.models || [];
-      entry.seeds = setup.seeds || [];
-      hubState.canvasModels = [...new Set([...hubState.canvasModels, ...entry.models])].sort((left, right) => left.localeCompare(right));
+      // Replace the row rather than mutate it: the memoised History card only
+      // re-renders when its entry prop changes identity.
+      const models = setup.models || [];
+      const seeds = setup.seeds || [];
+      hubState.canvasHistory = hubState.canvasHistory.map((item) => (
+        item.history_id === historyId ? { ...item, models, seeds } : item
+      ));
+      hubState.canvasModels = [...new Set([...hubState.canvasModels, ...models])].sort((left, right) => left.localeCompare(right));
       notifyHub();
       await api(`/api/canvas/history/${encodeURIComponent(historyId)}/provenance`, {
         method: 'POST',
-        body: JSON.stringify({ models: entry.models, seeds: entry.seeds }),
+        body: JSON.stringify({ models, seeds }),
       }).catch(() => {});
       return setup;
     })
@@ -1098,14 +1191,12 @@ export async function inspectCanvasHistoryEntry(historyId) {
   return pending;
 }
 
-// Model line under a canvas history card (was imperative textContent updates).
+// Model line under a History card: the model(s) when known, otherwise a quiet
+// dash — the bridge's own vocabulary ("Exact setup unavailable", "Reading exact
+// setup…") is not something a user can act on from a card.
 export function canvasEntryModelLabel(entry) {
-  const setup = hubState.canvasSetups[entry.history_id];
   if (entry.models?.length) return entry.models.join(', ');
-  if (setup?.unavailable) return 'Exact setup unavailable';
-  if (setup?.error) return 'Setup not loaded · use an action to retry';
-  if (setup?.primaryPrompt !== undefined) return 'Exact workflow available';
-  return 'Reading exact setup…';
+  return '—';
 }
 
 function selectMatchingCanvasModel(entry, setup) {
@@ -1295,8 +1386,17 @@ export async function loadCanvasOutputInCanvas(historyId) {
 }
 
 export async function copyText(value) {
-  await navigator.clipboard.writeText(value);
-  toast('Copied prompt.');
+  // navigator.clipboard is undefined on a plain-http LAN origin; without the
+  // guard that was an unhandled rejection and no feedback at all.
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard access needs a secure (https or localhost) origin.');
+    await navigator.clipboard.writeText(value);
+    toast('Copied prompt.');
+    return true;
+  } catch (error) {
+    toast.error(`Could not copy — ${error?.message || 'clipboard unavailable'}`);
+    return false;
+  }
 }
 
 export async function copyCanvasPrompt(historyId) {
@@ -1370,12 +1470,18 @@ export async function setPromptFavorite(promptId, favorite) {
   } catch (error) { toast.error(error.message); }
 }
 
+// Returns false on failure so the confirm modal stays open (same contract as
+// deleteCanvasOutput).
 export async function deletePrompt(promptId) {
   try {
     await api(`/api/simple/prompts/${encodeURIComponent(promptId)}`, { method: 'DELETE' });
     hubState.prompts = hubState.prompts.filter((entry) => entry.prompt_id !== promptId);
     notifyHub();
-  } catch (error) { toast.error(error.message); }
+    return true;
+  } catch (error) {
+    toast.error(error.message);
+    return false;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1421,6 +1527,8 @@ export function loadRunIntoSimpleComposer(runId, { notify = true, focus = true, 
   const composer = runComposer || entry?.composer || {};
   const prompt = run.user_prompt || entry?.user_prompt || entry?.prompt || run.brief?.concept || run.brief?.title || '';
   hubState.composer.prompt = prompt;
+  // An explicit load replaces whatever the boot-time restore put here.
+  hubState.composerRestoredFrom = '';
 
   const routes = {
     brain: composer.brain,
@@ -1449,10 +1557,30 @@ export function loadRunIntoSimpleComposer(runId, { notify = true, focus = true, 
 function restoreLatestRunInComposer() {
   const latest = [...hubState.runs].sort((left, right) => new Date(right.created_at) - new Date(left.created_at))[0];
   if (!latest) return;
-  loadRunIntoSimpleComposer(latest.run_id, { notify: false, focus: false, navigateToCreate: false });
+  // Never overwrite something the user has already started typing.
+  if (hubState.composer.prompt.trim()) return;
+  if (!loadRunIntoSimpleComposer(latest.run_id, { notify: false, focus: false, navigateToCreate: false })) return;
+  // Say that it happened: the composer shows a "Restored from your last run"
+  // chip with a Clear, instead of a silently pre-filled prompt under an empty
+  // state that still asks "What do you want to make?". Only when something
+  // visible came back — a redacted run restores routes alone, and a chip over
+  // an empty composer would be its own puzzle.
+  if (hubState.composer.prompt.trim() || hubState.simpleAttachments.length) hubState.composerRestoredFrom = latest.run_id;
+  notifyHub();
   if (!hubState.thread.length && buildRunGenerationCards(latest).length) {
     pushThread({ kind: 'runCards', runId: latest.run_id, snapshot: latest });
   }
+}
+
+// The chip's Clear: empties what the restore put in the composer (prompt,
+// references, loaded setup). Routes stay — they are harmless defaults.
+export function clearRestoredComposer() {
+  hubState.composer.prompt = '';
+  hubState.simpleAttachments.filter((item) => item.file).forEach((item) => URL.revokeObjectURL(item.url));
+  hubState.simpleAttachments = [];
+  hubState.loadedCanvasSetup = null;
+  hubState.composerRestoredFrom = '';
+  notifyHub();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1662,15 +1790,18 @@ export async function loadRuns() {
   // actually changed so refreshAll can stay silent on an idle tick.
   const changed = JSON.stringify(hubState.runs) !== JSON.stringify(payload.runs);
   hubState.runs = payload.runs;
-  // Legacy AppShell topbar id — write only if present (retired in the new shell).
-  const count = document.getElementById('hub-run-count');
-  if (count) count.textContent = hubState.runs.length;
   if (changed) notifyHub();
   return changed;
 }
 
 export function runTitle(run) {
   return run.brief?.title || run.brief?.subject || run.run_id;
+}
+
+// What a run is called in a list: its brief's title when it has one, else the
+// lane's name — never the opaque run id, which rides along as a mono subline.
+export function runDisplayTitle(run) {
+  return run.brief?.title || run.brief?.subject || laneLabel(run.lane);
 }
 
 export function filteredRuns() {
@@ -1712,17 +1843,51 @@ export async function runAction(action, runId, stepId) {
 /* ------------------------------------------------------------------ */
 
 export async function loadOAuth() {
-  hubState.oauth = await api('/api/oauth');
-  notifyHub();
+  const next = await api('/api/oauth');
+  // On the Providers poll an unchanged answer must not re-render the hub.
+  let changed = JSON.stringify(hubState.oauth) !== JSON.stringify(next);
+  hubState.oauth = next;
+  // A blocked-popup fallback link has done its job once that account connects.
+  const links = hubState.oauthLinks || {};
+  const stillNeeded = Object.fromEntries(Object.entries(links).filter(([id, url]) => {
+    const status = next?.providers?.[id];
+    return url && !(status?.connected || status?.usable);
+  }));
+  if (Object.keys(stillNeeded).length !== Object.keys(links).filter((id) => links[id]).length) {
+    hubState.oauthLinks = stillNeeded;
+    changed = true;
+  }
+  if (changed) notifyHub();
+  return changed;
+}
+
+// The Providers card's "Check status": an explicit re-read that says when it
+// could not. Resolves true when the status was read.
+export async function refreshOAuth() {
+  try {
+    await loadOAuth();
+    return true;
+  } catch (error) {
+    toast.error(`Could not read provider status — ${error.message}`);
+    return false;
+  }
 }
 
 export async function startOAuth(provider) {
   try {
     const result = await api(`/api/oauth/${provider}/start`, { method: 'POST' });
-    window.open(result.authorize_url, '_blank', 'noopener,noreferrer');
-    toast(`Finish ${providerLabel(provider)} sign in in the new tab, then refresh provider status.`);
+    // window.open after an await is exactly what popup blockers eat; when it is
+    // refused, keep the URL so the card can offer it as a link.
+    const popup = window.open(result.authorize_url, '_blank', 'noopener,noreferrer');
+    const opened = Boolean(popup);
+    hubState.oauthLinks = { ...hubState.oauthLinks, [provider]: opened ? '' : result.authorize_url };
+    notifyHub();
+    if (opened) toast(`Finish ${providerLabel(provider)} sign in in the new tab — this card updates when it is connected.`);
+    else toast.error('The sign-in tab was blocked. Use the link on the card to open it.');
+    return { url: result.authorize_url, opened };
   } catch (error) {
     toast.error(error.message);
+    return null;
   }
 }
 
@@ -1731,24 +1896,30 @@ export async function startOAuth(provider) {
 /* ------------------------------------------------------------------ */
 
 function setApiOnline(online) {
-  // React topbar subscribes to the status store; the old #hub-api-status DOM
-  // contract is retired but the copy is preserved.
+  // React topbar subscribes to the status store (the old #hub-api-status DOM
+  // contract is gone); the hub store keeps the verdict so views can show an
+  // offline/stale state of their own.
   setApiStatusStore(online ? 'online' : 'offline', online ? 'Local API ready' : 'API unavailable');
-  // Legacy id support if an old shell is hosting this bundle.
-  const el = document.getElementById('hub-api-status');
-  if (el) {
-    el.className = `hub-api-status ${online ? 'is-online' : 'is-offline'}`;
-    el.innerHTML = `<i></i><span>${online ? 'Local API ready' : 'API unavailable'}</span>`;
-    el.title = online ? 'Hivemind Content Studio API is reachable' : 'The studio API is not reachable from this origin';
+  const next = Boolean(online);
+  if (hubState.apiOnline !== next) {
+    hubState.apiOnline = next;
+    notifyHub();
   }
 }
 
+// Views whose data only matters while they are on screen — History and
+// Providers poll only then, and only while the hub itself is the visible page.
+function viewIsShowing(view) {
+  return hubState.hubVisible && hubState.activeView === view;
+}
+
 export async function refreshAll({ quiet = false } = {}) {
-  document.getElementById('hub-refresh-button')?.setAttribute('aria-busy', 'true');
   try {
     if (!hubState.catalog || !quiet) hubState.catalog = await api('/api/catalog');
     if (!quiet) hubState.surfaces = await api('/api/surfaces');
-    if (!hubState.oauth || !quiet) await loadOAuth();
+    // OAuth status is re-read on every tick while Providers is showing, so a
+    // sign-in finished in another tab lands on the card without a manual refresh.
+    if (!hubState.oauth || !quiet || viewIsShowing('providers')) await loadOAuth();
     const [runsChanged, telemetryChanged] = await Promise.all([loadRuns(), loadGenerationTelemetry({ quiet: true })]);
     setApiOnline(true);
     // An idle quiet tick must publish nothing at all — loadRuns/loadGenerationTelemetry
@@ -1756,12 +1927,27 @@ export async function refreshAll({ quiet = false } = {}) {
     // whole hub (every History card, every thumbnail) every 10 seconds regardless.
     if (!quiet || runsChanged || telemetryChanged) notifyHub();
     // Keep the History tab live while it's open — a generation finishing in
-    // another view appears without toggling away.
-    if (hubState.activeView === 'history') await loadPrompts({ quiet: true });
+    // another view appears without toggling away. Only while it is actually on
+    // screen: re-fetching AND re-decrypting every prompt each tick while the
+    // user works in the Video studio was pure waste.
+    if (viewIsShowing('history')) await loadPrompts({ quiet: true, force: !quiet });
+    return true;
   } catch (error) {
     setApiOnline(false);
     if (!quiet) toast.error(error.message);
-  } finally { document.getElementById('hub-refresh-button')?.removeAttribute('aria-busy'); }
+    return false;
+  }
+}
+
+// Poll cadence: 10 s while the API answers; doubles after each failure up to
+// 60 s and snaps back to 10 s on the first success, so a down API is not hit
+// six times a minute forever.
+export const POLL_BASE_MS = 10000;
+export const POLL_MAX_MS = 60000;
+export function nextPollDelay(current, ok) {
+  if (ok) return POLL_BASE_MS;
+  const base = Number.isFinite(current) && current >= POLL_BASE_MS ? current : POLL_BASE_MS;
+  return Math.min(POLL_MAX_MS, base * 2);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1801,15 +1987,27 @@ function bindEvents() {
     else pending.reject(new Error(event.data.error || 'Unable to read the exact workflow'));
   });
 
-  // AppShell topbar controls talk to the hub through window events.
-  window.addEventListener('hivemind-hub-refresh', () => { void refreshAll(); void loadPrompts({ quiet: true }); });
+  // AppShell topbar controls talk to the hub through window events. refreshAll
+  // itself reloads History when that view is showing — a second loadPrompts
+  // here used to run two prompt fetches + decrypts per click.
+  window.addEventListener('hivemind-hub-refresh', () => { void pollTick({ quiet: false }); });
   window.addEventListener('hivemind-owner-lock-broadcast', () => {
     surfaceFrames.forEach((frame) => { void postOwnerAccess(frame, 'hivemind-owner-lock'); });
     ownerPassphrase = '';
     try { sessionStorage.removeItem(OWNER_PASSPHRASE_STORAGE_KEY); } catch { /* non-critical */ }
   });
 
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && hubRootEl?.isConnected) refreshAll({ quiet: true }); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && hubRootEl?.isConnected) void pollTick({ quiet: true }); });
+}
+
+// One refresh at a time. A slow or hung control API used to stack a new
+// 4-request batch every 10 s; now a tick that finds one in flight just waits
+// for it (and an explicit refresh joins the pending one instead of doubling it).
+let refreshInFlight = null;
+export function pollTick({ quiet }) {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = refreshAll({ quiet }).finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
 }
 
 function anyRunningGenerationCard() {
@@ -1848,7 +2046,19 @@ async function boot() {
     console.warn('[hub] studio API unavailable:', error?.message || error);
     setApiOnline(false);
   }
-  setInterval(() => { if (!document.hidden && hubRootEl?.isConnected) refreshAll({ quiet: true }); }, 10000);
+  // Self-scheduling poll (not setInterval): the next tick is armed only after
+  // the previous settles, at a delay that backs off while the API is down.
+  let pollDelay = POLL_BASE_MS;
+  const schedulePoll = () => {
+    setTimeout(async () => {
+      if (!document.hidden && hubRootEl?.isConnected) {
+        const ok = await pollTick({ quiet: true });
+        pollDelay = nextPollDelay(pollDelay, ok !== false);
+      }
+      schedulePoll();
+    }, pollDelay);
+  };
+  schedulePoll();
   setInterval(() => {
     if (!document.hidden && hubRootEl?.isConnected && anyRunningGenerationCard()) notifyHub();
   }, 1000);

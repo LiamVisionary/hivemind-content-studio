@@ -269,6 +269,20 @@ export function checkH3Prompt({
   // told what to do with is a slot spent on nothing.
   if (images.length && !tags.Picture.size && !tags.Subject.size) findings.push(warn('pictures-unnamed', { count: images.length }));
 
+  // A subject DEFINED and never put in the shot. subject_definitions says who
+  // <Subject 2> is; if the summary and the description never mention it, the
+  // model renders whoever it likes in that slot — the defined member stands in
+  // the background unused, or does not appear at all. The cast weave writes the
+  // definition; this says when the scene has not caught up.
+  if (sections.includes('subject_definitions')) {
+    const defined = new Set([...sectionBodyIn(text, 'subject_definitions').matchAll(/^<Subject (\d+)> is\b/gm)].map((hit) => Number(hit[1])));
+    const scene = `${sectionBodyIn(text, 'summary')}\n${sectionBodyIn(text, 'detailed_description')}`;
+    const staged = new Set([...scene.matchAll(/<Subject (\d+)>/g)].map((hit) => Number(hit[1])));
+    for (const number of [...defined].sort((a, b) => a - b)) {
+      if (!staged.has(number)) findings.push(warn('subject-not-in-scene', { subject: number }));
+    }
+  }
+
   const takeover = motionReferenceWarning({ prompt: text, videos, images });
   if (takeover?.kind === 'unnamed') findings.push(warn('motion-unnamed', { labels: takeover.labels }));
   if (takeover?.kind === 'no-exclusion') findings.push(warn('motion-no-exclusion'));

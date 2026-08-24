@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { Modal } from '../../ui/Modal.jsx';
-import { ActionButton, cx } from '../../ui/kit.jsx';
+import { ActionButton, Button, Field, Slider, TextArea, TextInput, cx } from '../../ui/kit.jsx';
 
 const BRUSH_MIN = 12;
 const BRUSH_MAX = 160;
@@ -196,28 +196,29 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit, onSmartSelect
           <div className="flex flex-col gap-1.5 rounded-lg border border-line1 bg-bg1 p-2.5">
             <div className="flex items-center gap-2">
               <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Smart select</span>
-              <button
-                type="button"
+              <Button
+                size="sm"
+                variant="neutral"
+                icon={pointMode ? 'check' : undefined}
+                aria-pressed={pointMode}
                 onClick={() => setPointMode((on) => !on)}
                 disabled={busy || selecting}
                 title="Tap the thing on the image instead of naming it (alt-tap to exclude)"
-                className={cx(
-                  'rounded border px-2 py-0.5 text-[11px] transition-colors',
-                  pointMode ? 'border-honey/60 bg-honey-tint text-honey' : 'border-line1 bg-bg0 text-ink2 hover:border-line2',
-                )}
+                className={cx(pointMode && 'border-honey/60 bg-honey-tint text-honey hover:border-honey')}
               >
                 {pointMode ? 'Tap to select: on' : 'Tap to select'}
-              </button>
+              </Button>
             </div>
             <div className="flex items-center gap-2">
-              <input
+              <TextInput
                 type="text"
+                aria-label="Name the object to select"
                 value={selectText}
                 onChange={(e) => setSelectText(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter' && selectText.trim()) void runSmartSelect(null); }}
                 placeholder="e.g. the jacket"
                 disabled={busy || selecting}
-                className="flex-1 rounded-md border border-line1 bg-bg0 px-2.5 py-1.5 text-[13px] text-ink1 outline-none placeholder:text-ink3 focus:border-honey/50"
+                className="flex-1"
               />
               <ActionButton
                 variant="neutral"
@@ -258,29 +259,25 @@ export function MaskEditorDialog({ entry, busy, onClose, onSubmit, onSmartSelect
           </div>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Brush {brush}px</span>
-            <input type="range" min={BRUSH_MIN} max={BRUSH_MAX} step={4} value={brush} onChange={(e) => setBrush(Number(e.target.value))} />
-          </label>
-          <label className="flex flex-col gap-1" title="How far the change may bleed past your strokes to blend shadows and texture">
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Blend collar {expand}px</span>
-            <input type="range" min={6} max={32} step={1} value={expand} onChange={(e) => setExpand(Number(e.target.value))} />
-          </label>
-          <label className="flex flex-col gap-1" title="How strongly the painted area changes — 100% fully repaints it">
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Strength {influence}%</span>
-            <input type="range" min={25} max={100} step={1} value={influence} onChange={(e) => setInfluence(Number(e.target.value))} />
-          </label>
+          <Field label="Brush">
+            <Slider min={BRUSH_MIN} max={BRUSH_MAX} step={4} value={brush} format={(v) => `${v}px`} onChange={setBrush} disabled={busy} />
+          </Field>
+          <Field label="Blend collar" hint="How far the change may bleed past your strokes to blend shadows and texture">
+            <Slider min={6} max={32} step={1} value={expand} format={(v) => `${v}px`} onChange={setExpand} disabled={busy} />
+          </Field>
+          <Field label="Strength" hint="How strongly the painted area changes — 100% fully repaints it">
+            <Slider min={25} max={100} step={1} value={influence} format={(v) => `${v}%`} onChange={setInfluence} disabled={busy} />
+          </Field>
         </div>
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">What should appear there?</span>
-          <textarea
+        <Field label="What should appear there?">
+          <TextArea
             rows={2}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
+            disabled={busy}
             placeholder="e.g. a red leather jacket — the scene-preservation clause is added automatically"
-            className="w-full resize-none rounded-md border border-line1 bg-bg0 px-2.5 py-2 text-[13px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 focus:border-honey/50"
           />
-        </label>
+        </Field>
       </div>
     </Modal>
   );

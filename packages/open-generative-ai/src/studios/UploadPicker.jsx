@@ -50,9 +50,48 @@ import {
   saveUpload,
 } from '../lib/uploadHistory.js';
 import { useDismissable } from '../ui/Menu.jsx';
-import { Modal } from '../ui/Modal.jsx';
+import { ConfirmModal, Modal } from '../ui/Modal.jsx';
 import { Icon } from '../ui/icons.jsx';
 import { Button, SectionLabel, Spinner, cx } from '../ui/kit.jsx';
+
+// What a dropped/picked file has to be to get in. MIME first; some browsers
+// hand over an empty type for HEIC/AVIF (and for anything dragged out of a
+// few apps), so the extension is the fallback — the server accepts the same
+// set (control_api.py upload_media_studio_reference).
+const KIND_EXTENSIONS = {
+  image: /\.(avif|heic|heif|png|jpe?g|webp|gif|bmp|tiff?)$/i,
+  video: /\.(mp4|mov|m4v|webm|mkv)$/i,
+  audio: /\.(mp3|wav|m4a|aac|ogg|flac|opus|webm)$/i,
+};
+// Server ceilings (control_api.py: _MAX_PRIVATE_IMAGE_BYTES / _MAX_PRIVATE_VIDEO_BYTES).
+// Audio shares the image bucket there. Kept here so the refusal is a plain
+// sentence up front instead of an HTTP 413 after the upload.
+export const UPLOAD_LIMIT_MB = { image: 32, video: 100, audio: 32 };
+
+// 'image' | 'video' | 'audio' | '' from an accept string like 'image/*'.
+export function acceptKind(accept) {
+  const prefix = String(accept || '').split('/')[0].trim();
+  return ['image', 'video', 'audio'].includes(prefix) ? prefix : '';
+}
+
+// Whether one file passes the picker's accept filter: by MIME when the browser
+// supplies one, by extension otherwise. An unscoped accept takes anything.
+export function fileMatchesAccept(file, accept) {
+  if (!accept || accept === '*' || accept === '*/*') return true;
+  const kind = acceptKind(accept);
+  if (!kind) return true;
+  const type = String(file?.type || '').toLowerCase();
+  if (type) return type.startsWith(`${kind}/`);
+  return KIND_EXTENSIONS[kind].test(String(file?.name || ''));
+}
+
+export function fileTooLarge(file, accept) {
+  const kind = acceptKind(accept) || 'image';
+  const limitMb = UPLOAD_LIMIT_MB[kind] || UPLOAD_LIMIT_MB.image;
+  return Number(file?.size) > limitMb * 1024 * 1024 ? limitMb : 0;
+}
+
+const KIND_NOUN = { image: 'images', video: 'video clips', audio: 'audio clips' };
 
 export function Thumb({ src, alt = '', className = '' }) {
   const resolved = useMediaSrc(src);
@@ -136,6 +175,11 @@ export function UploadPicker({
   const [uploading, setUploading] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  // dragenter/dragleave fire for every child (chips, the trigger), so a plain
+  // boolean flickered as the pointer crossed them. Count enters instead.
+  const dragDepthRef = useRef(0);
+  // Recent reference awaiting the delete confirm (null = closed).
+  const [deleteEntry, setDeleteEntry] = useState(null);
   const [history, setHistory] = useState(() => getUploadHistory());
   // Past uploads saved server-side (sealed) so they reappear even when the
   // browser's composer state is empty. Merged (deduped) into the displayed grid.
@@ -149,7 +193,7 @@ export function UploadPicker({
   // re-opened it, so the panel could never be closed from its own button.
   // Suspended while a preview is up so closing the preview (scrim click or
   // Escape) doesn't also tear down the panel underneath it.
-  const rootRef = useDismissable(panelOpen && !previewUrl, () => setPanelOpen(false));
+  const rootRef = useDismissable(panelOpen && !previewUrl && !deleteEntry, () => setPanelOpen(false));
 
   useEffect(() => {
     let alive = true;
@@ -230,9 +274,38 @@ export function UploadPicker({
     }
   };
 
+  // The one gate every file goes through — picked or dropped. Refusals are
+  // said out loud: a silent filter made a dropped HEIC look like nothing
+  // happened.
+  const admitFiles = (candidates) => {
+    const kind = acceptKind(accept) || 'image';
+    const noun = KIND_NOUN[kind] || 'images';
+    const admitted = [];
+    let wrongKind = 0;
+    let tooLarge = 0;
+    let limitMb = 0;
+    for (const file of candidates) {
+      if (!fileMatchesAccept(file, accept)) { wrongKind += 1; continue; }
+      const over = fileTooLarge(file, accept);
+      if (over) { tooLarge += 1; limitMb = over; continue; }
+      admitted.push(file);
+    }
+    if (wrongKind) {
+      toast.error(`Only ${noun} can be attached here — ${wrongKind === 1 ? 'one file was' : `${wrongKind} files were`} skipped.`);
+    }
+    if (tooLarge) {
+      toast.error(`${tooLarge === 1 ? 'One file is' : `${tooLarge} files are`} larger than the ${limitMb} MB limit for ${noun} and ${tooLarge === 1 ? 'was' : 'were'} skipped.`);
+    }
+    return admitted;
+  };
+
   const handleFiles = (fileList) => {
-    const files = Array.from(fileList || []).filter(Boolean);
-    if (!files.length || disabled) return;
+    if (disabled) return;
+    const files = admitFiles(Array.from(fileList || []).filter(Boolean));
+    if (!files.length) {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
     if (needsKey() && !localStorage.getItem('muapi_key')) {
       // Abort and gate behind AuthModal — the files are retained and processed
       // once the key is saved (retry continuation).
@@ -244,17 +317,21 @@ export function UploadPicker({
     void processFiles(files);
   };
 
-  const acceptsFile = (file) => {
-    if (!accept || accept === '*' || accept === '*/*') return true;
-    const prefix = accept.split('/')[0];
-    return accept.endsWith('/*') ? file.type.startsWith(`${prefix}/`) : true;
+  const onDragEnter = (event) => {
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    if (!disabled) setDragOver(true);
   };
-
+  const onDragLeave = () => {
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (!dragDepthRef.current) setDragOver(false);
+  };
   const onDrop = (event) => {
     event.preventDefault();
+    dragDepthRef.current = 0;
     setDragOver(false);
     if (disabled) return;
-    handleFiles(Array.from(event.dataTransfer?.files || []).filter(acceptsFile));
+    handleFiles(Array.from(event.dataTransfer?.files || []));
   };
 
   const removeValue = (url) => onChange?.(values.filter((u) => u !== url));
@@ -322,11 +399,9 @@ export function UploadPicker({
       ref={rootRef}
       data-upload-picker=""
       className={cx('relative inline-flex max-w-full flex-wrap items-center gap-1.5', disabled && 'opacity-60')}
-      onDragOver={(e) => {
-        e.preventDefault();
-        if (!disabled) setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
+      onDragEnter={onDragEnter}
+      onDragOver={(e) => { e.preventDefault(); }}
+      onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
       <input
@@ -456,7 +531,9 @@ export function UploadPicker({
                         title="Remove from history"
                         onClick={(e) => {
                           e.stopPropagation();
-                          deleteHistoryEntry(entry);
+                          // One click on a 20px button used to DELETE the sealed
+                          // reference from the server — it asks first now.
+                          setDeleteEntry(entry);
                         }}
                         className="grid h-5 w-5 place-items-center rounded-sm bg-danger/80 text-white transition-colors hover:bg-danger"
                       >
@@ -480,6 +557,20 @@ export function UploadPicker({
             </div>
           ) : null}
         </div>
+      ) : null}
+
+      {deleteEntry ? (
+        <ConfirmModal
+          open
+          title="Delete this reference?"
+          body="It is removed from this browser and from the studio's saved references."
+          confirmLabel="Delete"
+          onClose={() => setDeleteEntry(null)}
+          onConfirm={() => {
+            deleteHistoryEntry(deleteEntry);
+            setDeleteEntry(null);
+          }}
+        />
       ) : null}
 
       {previewUrl ? (

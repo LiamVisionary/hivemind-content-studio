@@ -179,7 +179,7 @@ const VOICE_RETENTION = (label) => (
 );
 
 // Speech reaches the model only inside <d>…</d>, attributed to a speaker id.
-const DIALOGUE_STUB = '(S1) <d>[English] Write the line you want spoken here — this is what the cloned voice says.</d>';
+export const DIALOGUE_STUB = '(S1) <d>[English] Write the line you want spoken here — this is what the cloned voice says.</d>';
 
 // The summary declares which of the two audio contracts is in force:
 // [audio reference] means the source's own words must NOT appear;
@@ -295,17 +295,20 @@ function retentionLines(labels, existing) {
  * is the man shown in <Video 1>: [hair, face …]" — the form MiniMax's own guide
  * uses for a subject that comes from a video.
  */
-export function referenceSubjectLine({ pictures = [], videos = [], gender = '' } = {}) {
+export function referenceSubjectLine({ pictures = [], videos = [], gender = '', look = '' } = {}) {
   const which = normalizePersonaGender(gender);
   const noun = which && which !== 'nonbinary' ? personaGenderWords(which).noun : 'person';
+  // A persona's saved look fills the line; without one the blank stays, and
+  // the Prompt Check's SCAFFOLD_BLANKS catches it before it reaches the model.
+  const described = String(look || '').trim();
   if (pictures.length) {
     const range = pictures.length > 1 ? `${pictures[0]} through ${pictures[pictures.length - 1]}` : pictures[0];
-    return `<Subject 1> is the ${noun} shown in ${range}: [hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the pictures].`;
+    return `<Subject 1> is the ${noun} shown in ${range}: ${described || '[hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the pictures]'}.`;
   }
   if (videos.length) {
-    return `<Subject 1> is the ${noun} shown in ${videos[0]}: [hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the clip].`;
+    return `<Subject 1> is the ${noun} shown in ${videos[0]}: ${described || '[hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the clip]'}.`;
   }
-  return `<Subject 1> is ${which && which !== 'nonbinary' ? `a ${noun}: ` : ''}[hair, face, build, wardrobe — write it out].`;
+  return `<Subject 1> is ${which && which !== 'nonbinary' ? `a ${noun}: ` : ''}${described || '[hair, face, build, wardrobe — write it out]'}.`;
 }
 
 /** The first voice the model will hear for <Subject 1>: a clip's soundtrack, else a voice clip. */

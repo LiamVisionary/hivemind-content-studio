@@ -20,6 +20,7 @@ import {
 } from '../../lib/models.js';
 import {
   getHivemindVideoModelById,
+  getSavedHivemindVideoSelection,
   isHivemindStudioEnabled,
   isHivemindVideoModelId,
 } from '../../lib/hivemindStudio.js';
@@ -35,6 +36,7 @@ import { resolveMediaSrc } from '../../lib/e2eMedia.js';
 import { personaIdentity } from '../../lib/personaId.js';
 import { routingLeaderFor } from '../../lib/rentedMachines.js';
 import { isSoundOnlyReference, referenceVideoCanvas } from '../../lib/h3References.js';
+import { H3_RESTYLE_PRESETS, restylePhrase } from '../../lib/h3RestylePresets.js';
 import { getLang, t } from '../../lib/i18n.js';
 
 export const zh = () => getLang() === 'zh-CN';
@@ -624,13 +626,17 @@ export function derivePromptUi(s, c) {
   if (model?.requiresRequestId) {
     return { placeholder: zh() ? '可选：描述视频如何继续…' : 'Optional: describe how to continue the video...', disabled: false };
   }
+  if (model?.supportsIngredientImages) {
+    return { placeholder: zh() ? '使用所选角色参考来描述镜头' : 'Describe the shot using the selected character references', disabled: false };
+  }
+  // Local workflows (H3, LTX) take the start frame as an OPTIONAL input — H3 is
+  // text-to-video by default — so the box asks for the shot, not for a frame
+  // the user does not need. (The old "Upload a start frame image, then…" read
+  // as a requirement, on a model that generates from text.)
+  if (isHivemindVideoModelId(s.modelId)) {
+    return { placeholder: zh() ? '描述这个镜头' : 'Describe the shot', disabled: false };
+  }
   if (s.imageMode) {
-    if (model?.supportsIngredientImages) {
-      return { placeholder: zh() ? '使用所选角色参考来描述镜头' : 'Describe the shot using the selected character references', disabled: false };
-    }
-    if (isHivemindVideoModelId(s.modelId) && !s.imageUrl) {
-      return { placeholder: zh() ? '上传起始帧图片，然后描述动作' : 'Upload a start frame image, then describe the motion', disabled: false };
-    }
     return { placeholder: zh() ? '描述动作或效果（可选）' : 'Describe the motion or effect (optional)', disabled: false };
   }
   return { placeholder: t('video.placeholder'), disabled: false };
@@ -655,6 +661,41 @@ export function startFrameSelectedTransition(prev, url, c) {
   return { setup: s, matchAspect: true, modelChanged };
 }
 
+// The text-to-video model a cleared composer lands on, from the SAME source the
+// tab is set to. `allT2V` is ordered cloud-first, so its head is the cloud
+// default even while Local is selected — "+ New" after an H3 run left the Model
+// chip naming Seedance Lite with a cloud icon, the picker (filtered to local
+// models) not listing it, and Generate opening the API-key modal. Local lands on
+// the session's last hand-picked local workflow, else the LTX default, else the
+// first local workflow; cloud lands on the first cloud model.
+export function defaultTextToVideoModelFor(s, c) {
+  if (s?.localMode) {
+    const local = c.hivemindI2V || [];
+    let saved = null;
+    try { saved = getSavedHivemindVideoSelection(); } catch { /* no session store */ }
+    const preferred = (saved?.modelId && local.find((m) => m.id === saved.modelId))
+      || local.find((m) => m.workflowId === 'ltx23-eros-fast')
+      || local[0]
+      || c.allT2V.find((m) => isLocalVideoModel(m.id));
+    if (preferred) return preferred;
+  }
+  // Cloud: the text-to-video sibling of the model's own family first (the
+  // reverse of the hop a start-frame pick makes), then the first cloud model.
+  const current = resolveVideoModel(s?.modelId, c);
+  const sibling = current?.family
+    ? c.allT2V.find((m) => m.family === current.family && !isLocalVideoModel(m.id))
+    : null;
+  return sibling || c.allT2V.find((m) => !isLocalVideoModel(m.id)) || c.allT2V[0];
+}
+
+// Whether a freshly cleared composer can stay on its model: Hivemind local
+// workflows take the start frame as an OPTIONAL input (H3 is text-to-video by
+// default), and a plain text-to-video model (imageMode off) has nothing to
+// lose — so clearing inputs never needs to leave either. Only a model that
+// cannot run without its input (a cloud image-to-video sibling, a video tool)
+// has to move.
+const keepsModelWhenCleared = (s) => !s?.v2vMode && (isHivemindVideoModelId(s?.modelId) || !s?.imageMode);
+
 // Start-frame cleared (old picker onClear, 484-499).
 export function startFrameClearedTransition(prev, c) {
   let s = { ...prev, imageUrl: null };
@@ -665,7 +706,7 @@ export function startFrameClearedTransition(prev, c) {
   // model unmounted the keyframe picker mid-edit and discarded middle/end.
   if (isHivemindVideoModelId(s.modelId)) return s;
   // Clearing the start frame invalidates any selected end frame.
-  s = withSelectedModel({ ...s, imageMode: false, endImageUrl: null }, c.allT2V[0]);
+  s = withSelectedModel({ ...s, imageMode: false, endImageUrl: null }, defaultTextToVideoModelFor(s, c));
   return applyModelDefaults(s, c);
 }
 
@@ -676,9 +717,14 @@ export function clearVideoUploadTransition(prev, c) {
   // Motion-control v2v: keep the model and image; user can re-upload a video
   if (isMotionControlV2V(s, c)) return s;
   if (wasHivemindVideo) {
-    return applyModelDefaults(withSelectedModel({ ...s, imageMode: false }, c.allT2V[0]), c);
+    // The LTX extension graph is a local workflow that generates from text
+    // just as well, so clearing the clip only clears the clip: the model, the
+    // source and the format settings all stay where they were.
+    return { ...s, imageMode: true };
   }
-  return applyModelDefaults(withSelectedModel({ ...s, v2vMode: false }, c.allT2V[0]), c);
+  const target = keepsModelWhenCleared(s) ? null : defaultTextToVideoModelFor(s, c);
+  if (!target) return { ...s, v2vMode: false };
+  return applyModelDefaults(withSelectedModel({ ...s, v2vMode: false }, target), c);
 }
 
 // After a reference video finished uploading (old videoFileInput.onchange, 663-706).
@@ -730,9 +776,14 @@ export function selectHivemindWorkflowTransition(prev, target, c) {
   return applyModelDefaults(s, c);
 }
 
-// "+ New" full reset (old newPromptBtn, 2940-2962).
+// "+ New" (old newPromptBtn, 2940-2962): a fresh prompt with every input
+// cleared. The MODEL stays when it can start a text prompt where it is — every
+// Hivemind local workflow can — so "+ New" after an H3 run is still H3 with
+// the same format settings; only a model that cannot run without its input (a
+// cloud image-to-video sibling, a video tool) falls back to the default
+// text-to-video model of the same source.
 export function newPromptTransition(prev, c) {
-  const s = withSelectedModel({
+  const cleared = {
     ...prev,
     prompt: '',
     imageUrl: null,
@@ -746,11 +797,17 @@ export function newPromptTransition(prev, c) {
     matchStartFrameAr: true,
     // Post-generation grain cleanup: '' (off), 'light', 'strong'.
     denoise: '',
-    imageMode: false,
     videoUrl: null,
     videoName: null,
     v2vMode: false,
-  }, c.allT2V[0]);
+  };
+  if (keepsModelWhenCleared(prev)) {
+    // Local workflows are selected with imageMode true (the start frame is an
+    // optional input, not a mode) — keep that shape so a later start-frame pick
+    // stays on this model instead of hopping to the first in the list.
+    return { ...cleared, imageMode: isHivemindVideoModelId(prev.modelId) };
+  }
+  const s = withSelectedModel({ ...cleared, imageMode: false }, defaultTextToVideoModelFor(prev, c));
   return applyModelDefaults(s, c);
 }
 
@@ -800,6 +857,25 @@ export function applyRestoredPreferences(prev, preferences, c) {
   // it on the selected model's capability, so a value left on from MiniMax H3
   // is inert on a workflow that cannot compile the two-pass graph.
   s.fastHighRes = preferences.fastHighRes === true;
+  // The rest of what the Advanced / Task panels hold. Every one of these was
+  // normalized by normalizeVideoPreferences and WRITTEN by the studio, but
+  // never read back — so Spectrum off, the Detailer, negative guidance, Task =
+  // Head swap and the swap engine all reset on every reload. Each is re-gated
+  // at send time on the selected model (Spectrum/Detailer/NAG are capability-
+  // checked, the task strip is LTX-only), so a value saved on one model is
+  // inert on another rather than harmful.
+  if (typeof preferences.spectrum === 'boolean') s.spectrum = preferences.spectrum;
+  if (typeof preferences.nagScale === 'number') s.nagScale = preferences.nagScale;
+  if (typeof preferences.detailerStrength === 'number' && preferences.detailerStrength > 0) s.detailerStrength = preferences.detailerStrength;
+  if (typeof preferences.videoTask === 'string' && preferences.videoTask !== 'generate') s.videoTask = preferences.videoTask;
+  if (preferences.headSwapBackend === 'facefusion') s.headSwapBackend = 'facefusion';
+  if (preferences.headSwapFaceEnhancer === true) s.headSwapFaceEnhancer = true;
+  if (typeof preferences.headSwapLoraStrength === 'number' && preferences.headSwapLoraStrength !== 1) s.headSwapLoraStrength = preferences.headSwapLoraStrength;
+  // The camera / restyle chips: ids only. The phrase they stand for comes back
+  // with the prompt from the encrypted composer, and the studio reconciles the
+  // two once that hydrates (a chip must never claim a phrase the prompt lacks).
+  if (Array.isArray(preferences.cameraMotionIds) && preferences.cameraMotionIds.length) s.cameraMotionIds = [...preferences.cameraMotionIds];
+  if (typeof preferences.restylePresetId === 'string' && preferences.restylePresetId) s.restylePresetId = preferences.restylePresetId;
   // An in-progress scene chain survives reload: the pointer is opaque and the
   // clip stays sealed. videoRequestPlan re-gates it, so a stale value on a
   // non-chaining model is inert.
@@ -909,6 +985,16 @@ export const redactPrivateHistoryEntry = (entry) => (
     : entry
 );
 
+
+// The restyle preset whose phrase is written in the prompt, or null — the
+// reverse of applyRestylePrompt, so the Style chip can be reconciled with a
+// prompt restored from the encrypted composer (see cameraMotionIdsInPrompt).
+export function restylePresetIdInPrompt(prompt) {
+  const source = String(prompt || '');
+  if (!source) return null;
+  const hit = H3_RESTYLE_PRESETS.find((preset) => source.includes(restylePhrase(preset.id)));
+  return hit ? hit.id : null;
+}
 
 // Capability readers. The `accepts` → capability derivation itself lives in ONE
 // place — mapHivemindWorkflowModels in lib/hivemindStudio.js — so these are

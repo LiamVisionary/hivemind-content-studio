@@ -184,6 +184,9 @@ export const IMAGE_TAB_FIELDS = [
   'selectedModel', 'selectedModelName', 'useLocalModel', 'rentedOnly', 'rentedMachineId',
   'selectedLocalModel', 'localRuntimeMode',
   'imageMode', 'uploadedImageUrls', 'maxImages',
+  // What each reference supplies, the UGC deal counters and the open Custom
+  // aspect tile travel with the references they describe.
+  'referenceRoles', 'ugcVariantIndex', 'ugcRoomIndex', 'customArOpen',
   'selectedAr', 'selectedResolution', 'guidanceScale', 'steps',
   'seed', 'seedText', 'selectedStyle', 'batchCount',
   'customWidth', 'customHeight', 'sampler', 'scheduler', 'baseSize', 'referenceStrength',
@@ -201,4 +204,8 @@ export const VIDEO_TAB_FIELDS = [
   'setup', 'catalogs', 'hivemindWorkflowSignature',
   'videoLoraSelectionsByModel', 'loraOpen',
   'sharedIngredientSelections', 'sharedIngredientSheets', 'selectedIngredientSheet',
+  // Who is in the shot, which words of the prompt are still stand-ins, and the
+  // Shots timeline — all plain arrays/objects on the tab, all part of "the same
+  // setup" a copy is expected to open with.
+  'cast', 'standIns', 'shotTimeline',
 ];

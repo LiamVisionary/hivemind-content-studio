@@ -26,9 +26,11 @@ import { zh } from './videoLogic.js';
  * @param {Array}  props.audios          voice clips, as attached
  * @param {object} props.durations       url -> measured seconds, where known
  * @param {Function} [props.onRefit]      re-time the shots to fit the clip
+ * @param {Function} [props.onWeave]      weave the attached references / cast into the prompt
+ * @param {Function} [props.onRefine]     open the helper — for findings only prose can fix
  */
 export function PromptCheckMenu({
-  prompt = '', durationSeconds = 0, images = [], videos = [], audios = [], durations = {}, onRefit,
+  prompt = '', durationSeconds = 0, images = [], videos = [], audios = [], durations = {}, onRefit, onWeave, onRefine,
 }) {
   const result = checkH3Prompt({ prompt, durationSeconds, images, videos, audios, durations });
   const nothingYet = result.findings.length === 1 && result.findings[0].code === 'empty';
@@ -44,6 +46,19 @@ export function PromptCheckMenu({
   const canRefit = typeof onRefit === 'function'
     && durationSeconds > 0
     && findings.some((finding) => finding.code === 'cut-past-end');
+  // The other mechanical fix: references attached under a prompt that never
+  // addresses them. The weave (lib/promptWeave.js) writes the subject for
+  // whoever is in the rows and binds the scene to it — the same pass every
+  // door runs, offered here for text that was typed straight in.
+  // subject-not-in-scene is deliberately NOT here: the weave can define a
+  // subject but cannot write it into prose — that is the helper's job.
+  const WEAVABLE = new Set(['no-sections', 'pictures-unnamed', 'motion-unnamed', 'partial-sections']);
+  const canWeave = typeof onWeave === 'function'
+    && findings.some((finding) => WEAVABLE.has(finding.code));
+  // A subject defined but never staged needs PROSE — a beat for them to be in.
+  // That is the helper's job, told the cast by slot.
+  const unstaged = findings.filter((finding) => finding.code === 'subject-not-in-scene').map((finding) => finding.subject);
+  const canRefine = typeof onRefine === 'function' && unstaged.length > 0;
 
   const tone = result.errors ? 'error' : (result.warnings && !nothingYet ? 'warn' : 'clean');
   const badge = result.errors || (nothingYet ? 0 : result.warnings);
@@ -100,6 +115,36 @@ export function PromptCheckMenu({
                 </li>
               ))}
             </ul>
+          ) : null}
+
+          {canWeave ? (
+            <button
+              type="button"
+              className="flex items-center justify-center gap-1.5 rounded-md border border-honey bg-honey-tint px-2 py-1.5 text-[10px] font-medium text-ink1 hover:bg-bg2"
+              onClick={() => { onWeave(); close(); }}
+              title={zh()
+                ? '按已附加的参考和演员表重写主体定义与 retention_analysis，并把主体写进场景'
+                : 'Write the subject definitions and retention lines for whoever is attached, and bind the scene to them'}
+            >
+              <Icon name="wand" size={11} className="text-honey" />
+              {zh() ? '把参考织入提示词' : 'Weave references into the prompt'}
+            </button>
+          ) : null}
+
+          {canRefine ? (
+            <button
+              type="button"
+              className="flex items-center justify-center gap-1.5 rounded-md border border-honey bg-honey-tint px-2 py-1.5 text-[10px] font-medium text-ink1 hover:bg-bg2"
+              onClick={() => { onRefine(); close(); }}
+              title={zh()
+                ? '打开助手：它知道演员表，会把每位主体写进场景'
+                : 'Open the helper — it is told the cast by slot and writes every subject into the scene'}
+            >
+              <Icon name="sparkles" size={11} className="text-honey" />
+              {zh()
+                ? `让助手把 ${unstaged.map((n) => `<Subject ${n}>`).join('、')} 写进场景`
+                : `Write ${unstaged.map((n) => `<Subject ${n}>`).join(', ')} into the scene with the helper`}
+            </button>
           ) : null}
 
           {canRefit ? (

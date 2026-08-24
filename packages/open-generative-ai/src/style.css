@@ -15,23 +15,33 @@
 }
 
 /* Scene timeline — the joined episode tile.
-   The shots are parts; the joined cut is the deliverable, so its border moves
-   while every shot tile stays a flat outline. The gradient sits in the tile's
-   own padding box (the inner panel covers the middle), which keeps it a border
-   rather than a glow that would tint the video. */
+   The shots are parts; the joined cut is the deliverable, so it wears the one
+   accent as a static border (and the overlay shadow, because it sits above its
+   parts). The border only MOVES while the cut is being built — a progress
+   indicator, the one kind of motion allowed to loop — and it stays inside the
+   honey family: no cyan/violet, no ambient spin. The gradient sits in the
+   tile's own padding box (the inner panel covers the middle), which keeps it a
+   border rather than a glow that would tint the video. */
 .chain-combined-tile {
+  background:
+    linear-gradient(var(--bg-2), var(--bg-2)) padding-box,
+    linear-gradient(var(--honey), var(--honey)) border-box;
+  border: 2px solid transparent;
+  box-shadow: var(--shadow-card);
+}
+
+.chain-combined-tile--building {
   background:
     linear-gradient(var(--bg-2), var(--bg-2)) padding-box,
     conic-gradient(
       from var(--chain-cut-angle, 0deg),
-      var(--honey), #7dd3fc, #c084fc, #f472b6, var(--honey)
+      var(--honey), var(--honey-bright, var(--honey)), var(--honey-deep, var(--honey)), var(--honey)
     ) border-box;
-  border: 2px solid transparent;
-  animation: chain-cut-spin 6s linear infinite;
+  animation: chain-cut-spin 2.4s linear infinite;
 }
 
 .chain-combined-tile--active {
-  box-shadow: 0 0 0 1px var(--honey);
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--honey);
 }
 
 @property --chain-cut-angle {
@@ -44,9 +54,7 @@
   to { --chain-cut-angle: 360deg; }
 }
 
-/* Browsers without @property cannot interpolate the angle, so the border would
-   sit still — rotate the whole tile's gradient by opacity instead of faking it.
-   Reduced-motion users get the same colours, held still. */
+/* Reduced motion: the build indicator holds still (same colours). */
 @media (prefers-reduced-motion: reduce) {
-  .chain-combined-tile { animation: none; }
+  .chain-combined-tile--building { animation: none; }
 }

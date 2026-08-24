@@ -20,7 +20,7 @@ import {
   referenceRolesAreSet,
 } from '../../lib/imageReferenceRoles.js';
 import { ChipButton, Menu } from '../../ui/Menu.jsx';
-import { NativeSelect, SectionLabel, TextInput, cx } from '../../ui/kit.jsx';
+import { Button, NativeSelect, SectionLabel, TextInput } from '../../ui/kit.jsx';
 
 const ROLE_HINT = new Map(IMAGE_REFERENCE_ROLES.map(([id, , hint]) => [id, hint]));
 
@@ -99,16 +99,17 @@ export function ReferenceRolesMenu({ count = 0, roles = [], labelStyle = 'ordina
           ) : null}
 
           <div className="flex items-center gap-1.5">
-            <button
-              type="button"
+            <Button
+              size="sm"
+              variant="primary"
               onClick={() => { onApply?.(current); setDraft(null); close(); }}
-              className="rounded-sm border border-honey bg-honey-tint px-2 py-1 text-[11px] font-semibold text-honey transition-colors hover:border-honey"
             >
               Apply to prompt
-            </button>
+            </Button>
             {isSet ? (
-              <button
-                type="button"
+              <Button
+                size="sm"
+                variant="neutral"
                 onClick={() => {
                   const cleared = current.map(() => ({ role: DEFAULT_IMAGE_REFERENCE_ROLE, note: '' }));
                   onApply?.(cleared);
@@ -116,13 +117,9 @@ export function ReferenceRolesMenu({ count = 0, roles = [], labelStyle = 'ordina
                   close();
                 }}
                 title="Take the ownership block back out of the prompt"
-                className={cx(
-                  'rounded-sm border border-line1 bg-bg1 px-2 py-1 text-[11px] font-semibold text-ink1',
-                  'transition-colors hover:border-line2',
-                )}
               >
                 Clear
-              </button>
+              </Button>
             ) : null}
           </div>
         </div>

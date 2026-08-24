@@ -33,10 +33,11 @@ import {
   isPersistentUploadReference,
   saveUpload,
 } from '../../lib/uploadHistory.js';
-import { useDismissable } from '../../ui/Menu.jsx';
+import { ChipButton, useDismissable } from '../../ui/Menu.jsx';
 import { Icon } from '../../ui/icons.jsx';
-import { Button, SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
+import { Button, SectionLabel, cx } from '../../ui/kit.jsx';
 import { ReferencePreview, Thumb } from '../UploadPicker.jsx';
+import { zh } from './videoLogic.js';
 
 export function FrameSlotsPicker({
   slots = [],
@@ -114,7 +115,7 @@ export function FrameSlotsPicker({
       assign(activeKey, uploadedUrl);
     } catch (err) {
       console.error('[FrameSlotsPicker] Upload failed:', err);
-      toast.error(`Image upload failed: ${err.message}`);
+      toast.error(`${zh() ? '图片上传失败' : 'Image upload failed'}: ${err.message}`);
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -157,35 +158,28 @@ export function FrameSlotsPicker({
         onChange={(e) => handleFile(e.target.files?.[0])}
       />
 
-      <button
-        type="button"
+      {/* The same chip primitive as every other composer control (the count
+          rides in `value`, the way Shots and Check show theirs), so the row
+          reads as one family rather than four trigger styles. */}
+      <ChipButton
+        icon="film"
+        label={label}
+        value={setCount > 0 ? String(setCount) : ''}
+        active={panelOpen || setCount > 0}
+        chevron={false}
         disabled={disabled}
         title={triggerTitle}
         aria-label={triggerTitle}
+        aria-expanded={panelOpen}
         onClick={() => setPanelOpen((v) => !v)}
-        className={cx(
-          'inline-flex h-9 shrink-0 select-none items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors duration-150',
-          setCount > 0
-            ? 'border-honey/40 bg-bg2 text-ink2 hover:border-honey/60 hover:text-ink1'
-            : 'border-line1 bg-bg2 text-ink2 hover:border-line2 hover:text-ink1',
-          inactiveNote && 'opacity-70 grayscale',
-          disabled && 'cursor-not-allowed',
-        )}
-      >
-        {uploading ? <Spinner size={14} className="text-honey" /> : <Icon name="film" size={14} />}
-        <span>{label}</span>
-        {setCount > 0 ? (
-          <span className="grid h-4 min-w-4 place-items-center rounded-full bg-honey px-1 text-[10px] font-bold text-on-honey">
-            {setCount}
-          </span>
-        ) : null}
-      </button>
+        className={cx(inactiveNote && 'opacity-70 grayscale', uploading && 'animate-pulse')}
+      />
 
       {panelOpen ? (
-        <div className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[304px] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop">
+        <div className="hive-scale-in absolute bottom-[calc(100%+8px)] left-0 z-50 w-[304px] max-w-[calc(100vw-1.5rem)] rounded-lg border border-line1 bg-bg1 p-3 shadow-pop">
           <div className="mb-2.5 border-b border-line1 pb-2.5">
-            <SectionLabel>Keyframes</SectionLabel>
-            <span className="mt-0.5 block text-[11px] text-ink3">{`${slotSummary[0].toUpperCase()}${slotSummary.slice(1)} frames — all optional`}</span>
+            <SectionLabel>{zh() ? '关键帧' : 'Keyframes'}</SectionLabel>
+            <span className="mt-0.5 block text-[11px] text-ink3">{zh() ? `${slotSummary} — 均为可选` : `${slotSummary[0].toUpperCase()}${slotSummary.slice(1)} frames — all optional`}</span>
             {inactiveNote ? (
               <span className="mt-1 block text-[11px] font-medium text-honey">{inactiveNote}</span>
             ) : null}
@@ -236,7 +230,9 @@ export function FrameSlotsPicker({
                     <span className="min-w-0">
                       <span className="block text-xs font-medium text-ink1">{slot.label}</span>
                       <span className="block text-[11px] text-ink3">
-                        {slot.url ? 'Selected — tap image to view' : isActive ? 'Pick below or upload' : 'Empty'}
+                        {slot.url
+                          ? (zh() ? '已选择 — 点击图片查看' : 'Selected — tap image to view')
+                          : isActive ? (zh() ? '在下方选择或上传' : 'Pick below or upload') : (zh() ? '空' : 'Empty')}
                       </span>
                     </span>
                   </button>
@@ -268,15 +264,15 @@ export function FrameSlotsPicker({
 
           {/* Recent uploads (shared) */}
           <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-line1 pt-2.5">
-            <SectionLabel>Recent uploads</SectionLabel>
+            <SectionLabel>{zh() ? '最近上传' : 'Recent uploads'}</SectionLabel>
             <Button size="sm" icon="upload" onClick={() => fileInputRef.current?.click()}>
-              Upload new
+              {zh() ? '上传新图片' : 'Upload new'}
             </Button>
           </div>
           {mergedHistory.length === 0 ? (
             <div className="flex flex-col items-center gap-2 py-5 text-ink3">
               <Icon name="upload" size={20} />
-              <span className="text-xs">No uploads yet</span>
+              <span className="text-xs">{zh() ? '还没有上传' : 'No uploads yet'}</span>
             </div>
           ) : (
             <>
@@ -310,8 +306,9 @@ export function FrameSlotsPicker({
                 })}
               </div>
               <div className="mt-2 text-[11px] text-ink3">
-                Selecting <span className="font-medium text-ink2">{activeLabel}</span> — tap a recent upload to assign it
-                {activeSlot?.url ? ', or tap the highlighted one to clear it' : ''}.
+                {zh() ? '正在设置 ' : 'Selecting '}<span className="font-medium text-ink2">{activeLabel}</span>
+                {zh() ? ' — 点击最近上传即可指定' : ' — tap a recent upload to assign it'}
+                {activeSlot?.url ? (zh() ? '，或点击高亮的那张以清除' : ', or tap the highlighted one to clear it') : ''}.
               </div>
             </>
           )}

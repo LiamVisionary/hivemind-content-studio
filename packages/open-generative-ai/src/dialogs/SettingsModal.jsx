@@ -30,14 +30,24 @@ export function SettingsModal({ onClose }) {
     ...(hasLocalAI ? [{ value: 'local', label: t('settings.localModels') }] : []),
   ];
 
-  const save = () => {
+  const hadKey = Boolean(localStorage.getItem('muapi_key'));
+  const save = (event) => {
+    event?.preventDefault?.();
     const key = apiKey.trim();
     if (!key) {
+      if (hadKey) {
+        // An emptied field is the only way to forget a stored key.
+        localStorage.removeItem('muapi_key');
+        toast.success(zh ? '已移除 API 密钥' : 'API key removed');
+        onClose?.();
+        return;
+      }
       // Same gating as the old alert(t('settings.invalidKey')): abort, stay open.
       toast.error(t('settings.invalidKey'));
       return;
     }
     localStorage.setItem('muapi_key', key);
+    toast.success(zh ? '已保存 API 密钥' : 'API key saved');
     onClose?.();
   };
 
@@ -53,7 +63,7 @@ export function SettingsModal({ onClose }) {
             <Button variant="ghost" onClick={onClose}>
               {t('common.cancel')}
             </Button>
-            <Button variant="primary" onClick={save}>
+            <Button variant="primary" type="submit" form="settings-api-form">
               {t('common.save')}
             </Button>
           </>
@@ -62,15 +72,16 @@ export function SettingsModal({ onClose }) {
     >
       {tabs.length > 1 ? <Tabs tabs={tabs} value={tab} onChange={setTab} className="-mt-1 mb-4" /> : null}
 
-      {/* API key + preferences */}
-      <div className={tab === 'api' ? 'flex flex-col gap-4' : 'hidden'}>
-        <Field label={t('settings.muapiKeyLabel')} hint={t('settings.keyNote')}>
+      {/* API key + preferences — a form so Enter saves like any one-field dialog. */}
+      <form id="settings-api-form" onSubmit={save} className={tab === 'api' ? 'flex flex-col gap-4' : 'hidden'}>
+        <Field label={t('settings.muapiKeyLabel')} hint={hadKey ? `${t('settings.keyNote')} ${zh ? '清空后保存即可移除。' : 'Clear the field and save to remove it.'}` : t('settings.keyNote')}>
           <TextInput
             type="password"
             placeholder={t('settings.keyPlaceholder')}
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             autoComplete="off"
+            autoFocus
           />
         </Field>
 
@@ -94,7 +105,7 @@ export function SettingsModal({ onClose }) {
             }}
           />
         </div>
-      </div>
+      </form>
 
       {/* Local models — mounted once per modal open, hidden (not unmounted) on tab
           switch so in-flight download progress keeps rendering. */}

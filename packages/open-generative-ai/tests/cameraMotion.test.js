@@ -53,3 +53,28 @@ test('the phrase applies onto an empty prompt and respects ending punctuation', 
     const punctuated = applyCameraMotionPrompt('Night market, rain-soaked streets!', '', ['tilt-up']);
     assert.equal(punctuated.prompt, 'Night market, rain-soaked streets! Camera motion: tilt upward.');
 });
+
+// The Camera chip is reconciled with a RESTORED prompt: the phrase comes back
+// from the encrypted composer, the ids from plaintext settings, and the two
+// must agree or re-applying stacks a second sentence.
+test('the ids behind a written phrase can be read back out of the prompt, exactly', async () => {
+    const { cameraMotionIdsInPrompt, cameraMotionPhrase, applyCameraMotionPrompt, CAMERA_MOTIONS } = await import('../src/lib/cameraMotion.js');
+    assert.deepEqual(cameraMotionIdsInPrompt(''), []);
+    assert.deepEqual(cameraMotionIdsInPrompt('A person crosses the street.'), []);
+    for (const ids of [['pan-left'], ['zoom-in'], ['dolly-in', 'roll-cw'], ['truck-left', 'zoom-in', 'tilt-up'], ['handheld-zoom-in', 'fpv-orbit-ccw', 'zoom-out']]) {
+        const { prompt } = applyCameraMotionPrompt('Night market, rain-soaked streets!', '', ids);
+        assert.deepEqual(cameraMotionIdsInPrompt(prompt), ids, `round-trips ${ids.join(',')}`);
+    }
+    // Every single move round-trips on its own.
+    for (const motion of CAMERA_MOTIONS) {
+        assert.deepEqual(cameraMotionIdsInPrompt(`Text. ${cameraMotionPhrase([motion.id])}`), [motion.id], motion.id);
+    }
+    // A hand-edited sentence is NOT a selection: the chip must not claim it.
+    assert.deepEqual(cameraMotionIdsInPrompt('Camera motion: pan smoothly to the left, then something else.'), []);
+    // And the reconciled ids strip cleanly, so re-applying never stacks.
+    const { prompt } = applyCameraMotionPrompt('A shot.', '', ['dolly-in', 'roll-cw']);
+    const restored = cameraMotionIdsInPrompt(prompt);
+    const reapplied = applyCameraMotionPrompt(prompt, cameraMotionPhrase(restored), ['pan-left']);
+    assert.equal((reapplied.prompt.match(/Camera motion:/g) || []).length, 1);
+    assert.doesNotMatch(reapplied.prompt, /dolly/);
+});

@@ -157,6 +157,10 @@ export function describeCheckFinding(finding) {
         ? `${where || '提示词'} 里还留着占位文字「${finding.blank}」，模型会照着它生成。`
         : `${where || 'The prompt'} still carries the placeholder “${finding.blank}” — the model will act on it.`;
     }
+    case 'subject-not-in-scene':
+      return zh()
+        ? `<Subject ${finding.subject}> 已定义，但摘要和镜头描述里都没有出现——模型会自行决定这个位置上是谁。用「织入」或让助手把他们写进场景。`
+        : `<Subject ${finding.subject}> is defined but never appears in the summary or description — the model decides who fills that slot. Weave, or ask the helper to write them into the scene.`;
     case 'pictures-unnamed':
       return zh()
         ? `挂了 ${finding.count} 张图片，但提示词里没有 <Picture N> 或 <Subject N>——模型不知道该拿它们做什么。`

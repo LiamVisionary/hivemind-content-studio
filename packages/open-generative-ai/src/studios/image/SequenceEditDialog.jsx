@@ -5,7 +5,7 @@
 import { useState } from 'react';
 import { MAX_SEQUENCE_STEPS, normalizeSequentialPrompts } from '../../lib/editSequence.js';
 import { Modal } from '../../ui/Modal.jsx';
-import { ActionButton } from '../../ui/kit.jsx';
+import { ActionButton, Field, TextArea } from '../../ui/kit.jsx';
 
 export function SequenceEditDialog({ entry, modelName, busy, progress, onClose, onRun }) {
   const [text, setText] = useState('');
@@ -36,19 +36,16 @@ export function SequenceEditDialog({ entry, modelName, busy, progress, onClose, 
           One edit per line, run top to bottom on {modelName}. Each step edits the previous
           step&apos;s result, so changes accumulate; every intermediate lands in the gallery.
         </p>
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">
-            Steps ({prompts.length}/{MAX_SEQUENCE_STEPS})
-          </span>
-          <textarea
+        <Field label={`Steps (${prompts.length}/${MAX_SEQUENCE_STEPS})`}>
+          <TextArea
             rows={6}
             value={text}
             onChange={(e) => setText(e.target.value)}
             disabled={busy}
             placeholder={'add a red scarf\nmake it snow lightly\nshift to warm evening light'}
-            className="w-full resize-none rounded-md border border-line1 bg-bg0 px-2.5 py-2 font-mono text-[13px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 focus:border-honey/50 disabled:opacity-60"
+            className="font-mono"
           />
-        </label>
+        </Field>
       </div>
     </Modal>
   );

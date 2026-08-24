@@ -45,6 +45,10 @@ const MAX_LIBRARY_BYTES = 4 * 1024 * 1024;
 
 const cache = new Map();     // library -> entries[]
 const loaded = new Set();    // libraries whose blob has been read this session
+// Libraries whose blob came back but could not be decrypted with this key (sealed
+// under an earlier vault). Listed as empty, but a write would replace the real
+// library — so writes are refused until the caller says it meant to.
+const unreadable = new Set();
 const listeners = new Set();
 
 export class LibraryLockedError extends Error {
@@ -52,6 +56,14 @@ export class LibraryLockedError extends Error {
     super('Unlock the studio to use your saved library — it is encrypted with your key.');
     this.name = 'LibraryLockedError';
     this.locked = true;
+  }
+}
+
+export class LibraryUnreadableError extends Error {
+  constructor() {
+    super('Your saved library could not be decrypted with this key — it may have been sealed under an earlier vault. Saving now would replace it.');
+    this.name = 'LibraryUnreadableError';
+    this.unreadable = true;
   }
 }
 
@@ -73,6 +85,11 @@ export function isLibraryLoaded(library) {
   return loaded.has(library);
 }
 
+/** True when the stored blob exists but this key cannot open it. */
+export function isLibraryUnreadable(library) {
+  return unreadable.has(library);
+}
+
 function blobKey(library) {
   const key = BLOB_KEYS[library];
   if (!key) throw new Error(`Unknown library "${library}"`);
@@ -92,22 +109,27 @@ function sortEntries(entries) {
  * Read a library from the owner vault. Resolves to [] for an empty/absent
  * library. Throws LibraryLockedError when there is no unlocked owner vault, so
  * callers can prompt for an unlock instead of showing a silently empty list.
+ * A failed READ (lapsed session, server error) throws too and caches NOTHING —
+ * a library that could not be read must never be shown as empty, because the
+ * next save would then replace it.
  */
 export async function loadLibrary(library) {
   await requireVault();
   const ciphertext = await getVaultBlob(NAMESPACE, blobKey(library));
   let entries = [];
+  let opened = true;
   if (ciphertext) {
     try {
       const payload = await decryptJson(ciphertext);
       if (Array.isArray(payload?.entries)) entries = payload.entries;
     } catch {
-      // A blob sealed to a superseded key can't be read. Surface it as empty
-      // rather than throwing — the user can still save new entries, and this
-      // never overwrites until they do.
+      // A blob sealed to a superseded key can't be read. List it as empty, but
+      // remember that it is not: writes refuse until the caller confirms.
       entries = [];
+      opened = false;
     }
   }
+  if (opened) unreadable.delete(library); else unreadable.add(library);
   cache.set(library, sortEntries(entries));
   loaded.add(library);
   notify();
@@ -120,7 +142,10 @@ export async function ensureLibraryLoaded(library) {
   return loadLibrary(library);
 }
 
-async function writeLibrary(library, entries) {
+// The cache only moves once the server has kept the blob: putVaultBlob throws on
+// a non-OK response, so a failed write leaves the cache (and the UI) as it was.
+async function writeLibrary(library, entries, { overwriteUnreadable = false } = {}) {
+  if (unreadable.has(library) && !overwriteUnreadable) throw new LibraryUnreadableError();
   const next = sortEntries(entries);
   if (next.length > MAX_ENTRIES) {
     throw new Error(`That would pass ${MAX_ENTRIES} saved entries — delete a few first.`);
@@ -130,6 +155,7 @@ async function writeLibrary(library, entries) {
     throw new Error('Your saved library is full — delete a few entries first.');
   }
   await putVaultBlob(NAMESPACE, blobKey(library), blob);
+  unreadable.delete(library);
   cache.set(library, next);
   loaded.add(library);
   notify();
@@ -153,8 +179,12 @@ export function findLibraryEntryByName(library, name) {
  * Upsert by NAME — saving "Anime set" twice updates that group rather than
  * leaving two identically-named entries the user cannot tell apart. Callers that
  * want to warn first can check findLibraryEntryByName.
+ *
+ * Rejects with LibraryUnreadableError when the stored library could not be
+ * decrypted with this key; pass `{ overwriteUnreadable: true }` once the user
+ * has confirmed that replacing it is what they want.
  */
-export async function saveLibraryEntry(library, { name, data }) {
+export async function saveLibraryEntry(library, { name, data }, { overwriteUnreadable = false } = {}) {
   const clean = String(name || '').trim();
   if (!clean) throw new Error('Give it a name first.');
   await requireVault();
@@ -167,7 +197,7 @@ export async function saveLibraryEntry(library, { name, data }) {
     data,
   };
   const rest = peekLibrary(library).filter((item) => item.id !== entry.id);
-  await writeLibrary(library, [...rest, entry]);
+  await writeLibrary(library, [...rest, entry], { overwriteUnreadable });
   return entry;
 }
 
@@ -193,4 +223,5 @@ export async function renameLibraryEntry(library, id, name) {
 export function __resetLibraryCache() {
   cache.clear();
   loaded.clear();
+  unreadable.clear();
 }

@@ -30,7 +30,13 @@ function ModelCard({ model }) {
           </div>
           <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-ink3">{model.description}</p>
         </div>
-        <Pill tone={unavailable ? 'warn' : 'ok'} dot>{unavailable ? 'Offline' : modelTypeLabel(model)}</Pill>
+        {/* Two facts, two pills: what kind of model, and whether it can run
+            right now — a ready model used to show a green "Image" and an
+            offline one lost its type. */}
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Pill tone="neutral">{modelTypeLabel(model)}</Pill>
+          <Pill tone={unavailable ? 'warn' : 'ok'} dot>{unavailable ? 'Offline' : 'Ready'}</Pill>
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
@@ -42,10 +48,11 @@ function ModelCard({ model }) {
         <span className="min-w-0 truncate font-mono text-[10px] text-ink3" title={model.id}>{model.id}</span>
         <Button
           size="sm"
-          variant="primary"
+          variant="neutral"
           icon={isVideo ? 'video' : 'image'}
           disabled={unavailable}
           onClick={() => openModelInStudio(model)}
+          title={isVideo ? 'Open in the Video studio' : 'Open in the Image studio'}
         >
           Open
         </Button>
@@ -76,9 +83,10 @@ export function RunnableModels({ models, loading }) {
       <div className="flex flex-wrap items-center gap-2 border-b border-line1 px-4 py-2.5 md:px-5">
         <Segmented
           options={[
-            { value: 'all', label: `All ${counts.all}` },
-            { value: 'image', label: `Image ${counts.image}` },
-            { value: 'video', label: `Video ${counts.video}` },
+            // A count of 0 is not a count worth advertising on a filter chip.
+            { value: 'all', label: counts.all ? `All ${counts.all}` : 'All' },
+            { value: 'image', label: counts.image ? `Image ${counts.image}` : 'Image' },
+            { value: 'video', label: counts.video ? `Video ${counts.video}` : 'Video' },
           ]}
           value={type}
           onChange={setType}
@@ -102,11 +110,15 @@ export function RunnableModels({ models, loading }) {
           </div>
         ) : (
           <EmptyState
-            icon="cpu"
-            title={loading ? 'Reading the local model catalog…' : 'No matching models'}
+            icon={type === 'video' && !counts.video ? 'video' : 'cpu'}
+            title={loading
+              ? 'Reading the local model catalog…'
+              : type === 'video' && !counts.video ? 'No video models advertised here' : 'No matching models'}
             hint={loading
               ? undefined
-              : 'Workflow JSON dropped into ComfyUI/workflows/auto/ shows up here as a local model.'}
+              : type === 'video' && !counts.video
+                ? 'Video models come from the Media Studio catalog and run in the Video studio — open it to see what is installed.'
+                : 'Workflow JSON dropped into ComfyUI/workflows/auto/ shows up here as a local model.'}
           />
         )}
       </div>

@@ -17,7 +17,7 @@
 //     images={[url]}                                  // <Picture N>
 //     audios={[{ url, name }]}                        // <Audio N>
 //     videos={[{ url, name, useAudio, compact }]}     // <Video N>
-//     prompt={string} onPromptChange={(next) => void}  // for the tag button
+//     prompt={string} onWeave={() => void}  // for the Weave button
 //     limits={{ images: 9, audios: 3, videos: 3 }}
 //     onChange={{ images, audios, videos }}           // one setter per kind
 //     persona={{ id, name } | null}                   // the loaded Hive Persona ID
@@ -45,7 +45,6 @@ import {
   referenceUrl,
   referenceVideoCompactLocked,
   unscriptedTimeWarning,
-  withReferenceTags,
 } from '../../lib/h3References.js';
 import {
   attachDroppedReferences,
@@ -62,9 +61,9 @@ import { captureImagePoster, captureVideoPoster } from '../../lib/mediaPoster.js
 import { warmReferencePosters } from '../../lib/referencePosterWarmup.js';
 import { muapi } from '../../lib/muapi.js';
 import { getUploadHistory } from '../../lib/uploadHistory.js';
-import { useDismissable } from '../../ui/Menu.jsx';
+import { ChipButton, useDismissable } from '../../ui/Menu.jsx';
 import { Icon } from '../../ui/icons.jsx';
-import { SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
+import { IconButton, SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
 import { PersonaBar } from './PersonaBar.jsx';
 import { ReferenceThumb } from './ReferenceThumb.jsx';
 import { KIND_META, describeReferenceRejection } from './referenceKinds.js';
@@ -148,15 +147,13 @@ function ReferenceRow({
   const primaryTag = typeof label === 'string' ? label : (label?.video || label?.audio || meta.tag(index));
   const secondaryTag = typeof label === 'object' && label?.video && label?.audio ? label.audio : '';
   const removeButton = (
-    <button
-      type="button"
+    <IconButton
+      icon="x"
+      size="xs"
+      label={zh() ? '移除参考' : 'Remove reference'}
       onClick={onRemove}
-      aria-label={zh() ? '移除参考' : 'Remove reference'}
-      title={zh() ? '移除参考' : 'Remove reference'}
-      className="grid h-6 w-6 shrink-0 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
-    >
-      <Icon name="x" size={12} />
-    </button>
+      className="shrink-0 text-ink3"
+    />
   );
   return (
     <div className="flex flex-col gap-1 rounded-md border border-line1 bg-bg2 p-1 pr-1.5">
@@ -191,7 +188,7 @@ function ReferenceRow({
         {kind !== 'videos' ? removeButton : null}
       </div>
       {kind === 'videos' ? (
-        <div className="flex items-center gap-1 pl-11">
+        <div className="hive-edge-fade flex items-center gap-1 overflow-x-auto pl-11">
           {/* What of the clip is used. MOTION is its movement (<Video N>);
               SOUND is its soundtrack (<Audio N>). Both on = the clip with its
               own sound; sound alone = a voice reference whose pixels are never
@@ -249,13 +246,13 @@ function ReferenceRow({
             <button
               type="button"
               onClick={onPrep}
-              aria-label={zh() ? '裁剪压缩该片段' : 'Trim and compress this clip'}
               title={zh()
                 ? '在本机裁剪、压缩这段参考——更短更小的参考会释放完整的生成时长'
                 : 'Trim, crop and compress this reference on this device — a shorter, smaller reference frees the full generation range'}
-              className="grid h-6 w-6 shrink-0 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
+              className="flex h-6 shrink-0 items-center gap-1 rounded px-1.5 text-[10px] font-medium text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
             >
-              <Icon name="sliders" size={12} />
+              <Icon name="scissors" size={11} />
+              {zh() ? '裁剪' : 'Trim'}
             </button>
           ) : null}
           {removeButton}
@@ -267,7 +264,7 @@ function ReferenceRow({
 
 export function ReferenceSection({
   kind, items, limit, labels, onAdd, onRemove, onToggleAudio, onToggleMotion, onToggleCompact, compactLocked = false,
-  busy, recent, onPickRecent, dropTarget, onWriteTags, posters = {}, onPosterCaptured, onPrep,
+  busy, recent, onPickRecent, dropTarget, posters = {}, onPosterCaptured, onPrep,
 }) {
   const meta = KIND_META[kind];
   const full = items.length >= limit;
@@ -281,25 +278,14 @@ export function ReferenceSection({
         dropTarget ? 'border-honey bg-honey-tint' : 'border-transparent',
       )}
     >
+      {/* No Weave button here: the weave lives in Prompt Check and on the
+          cast strip, and a third copy read as three different features. The
+          kind's long explanation is the Add button's title, not a paragraph
+          under every heading. */}
       <div className="flex items-baseline justify-between gap-2">
         <SectionLabel>{meta.label()}</SectionLabel>
-        <span className="flex items-baseline gap-2">
-          {onWriteTags && items.length ? (
-            <button
-              type="button"
-              onClick={onWriteTags}
-              title={zh()
-                ? '把每个参考的 retention_analysis 标签、音频标记和一行示例台词写进提示词'
-                : 'Write a retention_analysis line for every attached reference, the summary audio tag, and a dialogue line to fill in'}
-              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-ink3 transition-colors hover:bg-honey-tint hover:text-honey"
-            >
-              {zh() ? '写入标签与台词' : 'Add tags + dialogue'}
-            </button>
-          ) : null}
-          <span className="text-[10px] text-ink3">{items.length}/{limit}</span>
-        </span>
+        <span className="text-[10px] text-ink3">{items.length}/{limit}</span>
       </div>
-      <p className="text-[10px] leading-snug text-ink3">{meta.hint()}</p>
       {items.map((item, index) => (
         <ReferenceRow
           key={rowKeys[index]}
@@ -321,8 +307,9 @@ export function ReferenceSection({
         type="button"
         disabled={full || busy}
         onClick={onAdd}
+        title={meta.hint()}
         className={cx(
-          'flex h-10 items-center justify-center gap-1.5 rounded-md border border-dashed text-[11px] font-medium transition-colors',
+          'flex h-9 items-center justify-center gap-1.5 rounded-md border border-dashed text-[11px] font-medium transition-colors',
           full || busy
             ? 'cursor-not-allowed border-line1 text-ink3 opacity-50'
             : 'border-line2 text-ink2 hover:border-honey/60 hover:bg-honey-tint hover:text-honey',
@@ -380,7 +367,10 @@ export function ReferencesMenu({
   audios = [],
   videos = [],
   prompt = '',
-  onPromptChange,
+  // The explicit weave: the studio's own pass that recasts the prompt onto
+  // whoever is in these rows, plus the scaffold (a placeholder shot and a
+  // dialogue line to fill in). The panel never edits the prompt itself.
+  onWeave = null,
   // What the run is set to produce, so the panel can say when the clip is
   // longer than the prompt accounts for.
   durationSeconds = 0,
@@ -388,11 +378,16 @@ export function ReferencesMenu({
   onChange = {},
   persona = null,
   onPersonaChange,
+  personaSeed = null,
   uploadFn,
   requireApiKey,
   disabled = false,
+  // A counter the studio bumps to open the panel from elsewhere (the cast
+  // strip's "Pictures or clips of a person").
+  openRequest = 0,
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
+  useEffect(() => { if (openRequest) setPanelOpen(true); }, [openRequest]);
   // Which video reference row Clip Prep is open on, or -1 for closed.
   const [prepIndex, setPrepIndex] = useState(-1);
   // Measured lengths of the attached clips, keyed by url. Metadata-only reads,
@@ -425,6 +420,18 @@ export function ReferencesMenu({
   // flickers as the pointer crosses rows. Count enters instead.
   const dragDepthRef = useRef(0);
   const rootRef = useDismissable(panelOpen, () => setPanelOpen(false));
+  // Same rule as ui/Menu.jsx: anchored left of the chip, flipped to the right
+  // edge when it would run off-screen, so the panel stays inside the viewport.
+  const panelRef = useRef(null);
+  const [side, setSide] = useState('start');
+  useEffect(() => {
+    if (!panelOpen) { setSide('start'); return; }
+    const panel = panelRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const margin = 8;
+    setSide(rect.right > window.innerWidth - margin && rect.width < window.innerWidth - 2 * margin ? 'end' : 'start');
+  }, [panelOpen]);
 
   const studioMode = isHivemindStudioEnabled();
   const doUpload = uploadFn || (studioMode ? uploadFileToHivemindStudio : (file) => muapi.uploadFile(file));
@@ -513,10 +520,9 @@ export function ReferencesMenu({
   }, []);
 
   const values = { images, videos, audios };
-  // The scaffold covers every attached reference at once, so it needs exactly
-  // one button. It sits on the first section that has something to tag — which
-  // means someone with only a voice clip still finds it.
-  const tagSectionKind = videos.length ? 'videos' : (audios.length ? 'audios' : null);
+  // `onWeave` is accepted for compatibility and not rendered: the weave has one
+  // home (Prompt Check, and the cast strip's own readout).
+  void onWeave;
   const labels = referenceLabels({ images, videos, audios });
   const motionWarning = motionReferenceWarning({ prompt, videos, images });
   const timeWarning = unscriptedTimeWarning({ prompt, durationSeconds, videos, audios });
@@ -648,30 +654,25 @@ export function ReferencesMenu({
         className="hidden"
         onChange={(e) => { void handleFile(e.target.files?.[0]); e.target.value = ''; }}
       />
-      <button
-        type="button"
+      {/* The same chip primitive as the rest of the row. A loaded persona names
+          the value: what is attached is a character, not "four references". */}
+      <ChipButton
+        icon={persona?.name ? 'persona' : 'layers'}
+        label={zh() ? '参考' : 'References'}
+        value={persona?.name ? `${persona.name} · ${total}` : (total > 0 ? String(total) : '')}
+        active={panelOpen || total > 0}
+        chevron={false}
         disabled={disabled}
+        aria-expanded={panelOpen}
         onClick={() => setPanelOpen((open) => !open)}
-        title={zh() ? '参考：图片、声音、动作' : 'References: pictures, voice, motion'}
-        className={cx(
-          'flex h-9 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors',
-          total > 0
-            ? 'border-honey/40 bg-honey-tint text-honey'
-            : 'border-line1 bg-bg1 text-ink2 hover:border-line2 hover:text-ink1',
-          disabled ? 'cursor-not-allowed opacity-50' : '',
-        )}
-      >
-        {/* A loaded persona names the button: what is attached is a character,
-            not "four references". */}
-        <Icon name={persona?.name ? 'persona' : 'layers'} size={13} />
-        {persona?.name ? (
-          <span className="max-w-[9rem] truncate">{persona.name}</span>
-        ) : (zh() ? '参考' : 'References')}
-        {total > 0 ? <span className="tabular-nums">{total}</span> : null}
-      </button>
+        title={zh()
+          ? '参考：角色图片、声音片段、动作片段——附加任意一种即切换到参考模式（取代首尾帧）'
+          : 'References — pictures of a person, voice clips, motion clips. Attaching any switches the run to Reference mode, which replaces the start/end frames'}
+      />
 
       {panelOpen ? (
         <div
+          ref={panelRef}
           // The window-level "drag an output back in to restore its settings"
           // zone skips anything inside [data-upload-picker], so marking the
           // panel keeps a reference drop from being read as a settings restore.
@@ -693,7 +694,8 @@ export function ReferencesMenu({
           }}
           onDrop={(event) => { dragDepthRef.current = 0; void handleDrop(event); }}
           className={cx(
-            'absolute bottom-full left-0 z-40 mb-2 flex max-h-[70vh] w-[320px] flex-col gap-3 overflow-y-auto rounded-lg border bg-bg1 p-2.5 shadow-xl',
+            'absolute bottom-full z-40 mb-2 flex max-h-[70vh] w-[320px] max-w-[calc(100vw-1.5rem)] flex-col gap-3 overflow-y-auto rounded-lg border bg-bg1 p-2.5 shadow-pop',
+            side === 'end' ? 'right-0' : 'left-0',
             dragDepthRef.current ? 'border-honey/60' : 'border-line1',
           )}
         >
@@ -704,6 +706,7 @@ export function ReferencesMenu({
             audios={audios}
             persona={persona}
             onPersonaChange={onPersonaChange}
+            seed={personaSeed}
             limits={limits}
             posters={posters}
             known={known}
@@ -730,9 +733,6 @@ export function ReferencesMenu({
               dropTarget={dragKinds.includes(kind)}
               posters={posters}
               onPosterCaptured={onPosterCaptured}
-              onWriteTags={kind === tagSectionKind && onPromptChange
-                ? () => onPromptChange(withReferenceTags(prompt, { images, videos, audios, gender: persona?.gender || '' }))
-                : null}
               onPickRecent={(url) => attach(kind, url)}
               onAdd={() => openPicker(kind)}
               onRemove={(index) => emit(kind, values[kind].filter((_, i) => i !== index))}
@@ -764,11 +764,8 @@ export function ReferencesMenu({
               reference, because dropping one renumbers every label after it and
               would silently invalidate tags already written into the prompt.
               The fix is almost always a trim, which costs no slot at all. */}
-          {budget.counts.total ? (
-            <div className={cx(
-              'rounded-md border px-2 py-1.5 text-[10px] leading-snug',
-              budget.ok ? 'border-line1 bg-bg2 text-ink3' : 'border-danger bg-bg2 text-ink2',
-            )}>
+          {budget.counts.total && !budget.ok ? (
+            <div className="rounded-md border border-danger bg-bg2 px-2 py-1.5 text-[10px] leading-snug text-ink2">
               <span className="font-mono">
                 {budget.counts.total}/{budget.counts.limit} {zh() ? '个参考' : 'refs'}
                 {' · '}
@@ -796,8 +793,8 @@ export function ReferencesMenu({
                     ? `有片段只有 ${problem.seconds} 秒，最短 ${problem.limit} 秒。`
                     : `A clip runs ${problem.seconds}s; the minimum is ${problem.limit}s.`)}
                   {problem.code === 'clip-too-long' && (zh()
-                    ? `有片段长 ${problem.seconds} 秒，单段上限 ${problem.limit} 秒——用 ✂ 裁剪。`
-                    : `A clip runs ${problem.seconds}s; ${problem.limit}s is the per-clip maximum — trim it with ✂.`)}
+                    ? `有片段长 ${problem.seconds} 秒，单段上限 ${problem.limit} 秒——用该行的「裁剪」。`
+                    : `A clip runs ${problem.seconds}s; ${problem.limit}s is the per-clip maximum — use Trim on its row.`)}
                   {problem.code === 'over-video-seconds' && (zh()
                     ? `视频参考合计 ${problem.seconds} 秒，上限 ${problem.limit} 秒（这是所有片段的总和，不是每段的额度）。`
                     : `Video references total ${problem.seconds}s against a ${problem.limit}s budget — that ${problem.limit}s is the total across every clip, not a per-clip allowance.`)}
@@ -839,11 +836,6 @@ export function ReferencesMenu({
                   : "Say what must NOT carry from the motion clip — its performer's appearance, clothing, setting and framing — or it can replace your subject entirely.")}
             </p>
           ) : null}
-          <p className="border-t border-line1 pt-2 text-[10px] leading-snug text-ink3">
-            {zh()
-              ? '参考模式会取代首尾帧。提示词请用上面显示的标签指代每个参考。'
-              : 'Attaching any reference switches the run to Reference mode, replacing the start/end frames. Name each one in your prompt by the label shown above.'}
-          </p>
         </div>
       ) : null}
 

@@ -2,7 +2,7 @@
 // stages. Keeps the honey-for-active / semantic-for-terminal language of the
 // design system in one place so every hub view reads the same.
 import { Pill } from '../../ui/kit.jsx';
-import { titleCase } from '../hubData.js';
+import { humanize } from '../hubData.js';
 
 const TONE = {
   completed: 'ok',
@@ -31,10 +31,12 @@ export function statusTone(status) {
   return TONE[String(status || '').toLowerCase()] || 'neutral';
 }
 
+// Label falls back to the status in sentence case: "awaiting_generation" reads
+// "Awaiting generation", not "Awaiting_generation".
 export function StatusPill({ status, label, dot = true, className = '' }) {
   return (
     <Pill tone={statusTone(status)} dot={dot} className={className}>
-      {label ?? titleCase(status)}
+      {label ?? humanize(status)}
     </Pill>
   );
 }

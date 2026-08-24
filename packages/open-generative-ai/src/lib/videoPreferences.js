@@ -12,6 +12,9 @@
 //
 // videoLogic.js re-exports all of this, so studio code keeps one import site.
 
+import { normalizeCameraMotions } from './cameraMotion.js';
+import { restylePresetById } from './h3RestylePresets.js';
+
 const VIDEO_ADVANCED_EXCLUDED_INPUTS = new Set([
     'prompt',
     'aspect_ratio',
@@ -180,6 +183,12 @@ export function normalizeVideoPreferences(value) {
             && Number.isFinite(value.motionContextIndex) && value.motionContextIndex >= 1)
             ? Math.floor(value.motionContextIndex)
             : null,
+        // Camera-motion and restyle SELECTIONS (ids, never the phrase they
+        // generate): the phrase rides in the encrypted composer with the
+        // prompt, and the ids are what lets re-applying strip it instead of
+        // stacking a second sentence after a reload.
+        cameraMotionIds: normalizeCameraMotions(value.cameraMotionIds),
+        restylePresetId: restylePresetById(stringValue(value.restylePresetId)) ? stringValue(value.restylePresetId) : null,
         advancedValues,
         loraSelections,
         ingredientSelections,

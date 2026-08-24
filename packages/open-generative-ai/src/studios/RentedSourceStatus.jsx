@@ -5,6 +5,7 @@
 // request), so there is no "connecting…" phase to narrate.
 import { useEffect, useState } from 'react';
 import { Button, Spinner } from '../ui/kit.jsx';
+import { Icon } from '../ui/icons.jsx';
 import { getLang } from '../lib/i18n.js';
 import { api } from '../hub/hubData.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, withPin } from '../lib/rentedMachines.js';
@@ -23,14 +24,6 @@ function seconds(machine) {
   return value >= 90 ? `~${(value / 60).toFixed(1)}min` : `~${Math.round(value)}s`;
 }
 
-function LockGlyph() {
-  return (
-    <svg aria-hidden="true" width="9" height="9" viewBox="0 0 16 16" fill="currentColor" className="mr-1 inline-block align-[-1px]">
-      <path d="M4 7V5a4 4 0 1 1 8 0v2h1a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h1Zm2 0h4V5a2 2 0 1 0-4 0v2Z" />
-    </svg>
-  );
-}
-
 // With more than one ready machine, "which box does this run on?" is a real
 // question with a real answer — and it is answered PER TAB. A click here pins
 // this tab to a machine: every generation the tab sends carries that pin
@@ -44,6 +37,8 @@ function LockGlyph() {
 // being ATTACHED shows a spinner — pinning an attached box is instant, local
 // state — and no row is ever disabled: changing your mind is a normal thing to
 // do, and greying the list out was most of what made this feel broken.
+// Clicking the pinned row again UNPINS it (the tab follows the Machines default
+// once more) — there used to be no way back.
 function MachinePicker({ machines, all, pinned, pendingId, onSelect }) {
   return (
     <div className="flex flex-col gap-1">
@@ -66,6 +61,11 @@ function MachinePicker({ machines, all, pinned, pendingId, onSelect }) {
             type="button"
             aria-pressed={locked}
             data-rental-id={machine.rental_id}
+            title={locked && !dead
+              ? (zh() ? '再次点击可取消锁定，跟随“机器”页的默认选择' : 'Click again to unpin — this tab follows the Machines default')
+              : (dead
+                ? (zh() ? '重新连接这台机器' : 'Reconnect this machine')
+                : (zh() ? '把此标签页锁定到这台机器' : 'Lock this tab to this machine'))}
             onClick={() => onSelect(machine)}
             className={`flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors ${
               leading ? 'border-honey/50 bg-honey-tint' : 'border-line1 bg-bg1 hover:border-line2'
@@ -84,8 +84,8 @@ function MachinePicker({ machines, all, pinned, pendingId, onSelect }) {
             {pending
               ? <Spinner size={10} className="ml-auto shrink-0 text-honey" />
               : (
-                <span className={`ml-auto text-[10px] uppercase tracking-[0.06em] ${locked && !dead ? 'text-honey' : 'text-ink3'}`}>
-                  {locked && !dead ? <LockGlyph /> : null}
+                <span className={`ml-auto inline-flex items-center gap-1 text-[10px] uppercase tracking-[0.06em] ${locked && !dead ? 'text-honey' : 'text-ink3'}`}>
+                  {locked && !dead ? <Icon name="lock" size={10} /> : null}
                   {label}
                 </span>
               )}
@@ -148,8 +148,13 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
   }, [stale, onPin]);
 
   const select = async (machine) => {
-    if (!onPin || machine.rental_id === pinned) return;
+    if (!onPin) return;
     setError('');
+    // The pinned row again: unpin, and follow the Machines default.
+    if (machine.rental_id === pinned) {
+      onPin('');
+      return;
+    }
     if (machine.attached && machine.tunnel_alive) {
       onPin(machine.rental_id);
       return;
@@ -184,8 +189,8 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
         <small className="text-[11px] text-ink3">
           {lockedHere
             ? (zh()
-              ? `此标签页已锁定到该机器：它发出的生成在那里运行并加密返回（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
-              : `This tab is locked to that machine — its generations run there and return sealed. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`)
+              ? `此标签页已锁定到该机器：它发出的生成在那里运行并加密返回。再次点击该机器可取消锁定（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
+              : `This tab is locked to that machine — its generations run there and return sealed. Click it again to follow the default. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`)
             : (zh()
               ? `当前跟随“机器”页的默认选择；点击一台机器即可将此标签页锁定到它（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
               : `Following the Machines default — click a machine to lock this tab to it. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`)}
@@ -241,7 +246,7 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
             {zh() ? '重新连接' : 'Reconnect'}
           </Button>
           <Button variant="ghost" size="sm" onClick={openMachines}>
-            {zh() ? '查看机器' : 'View Machines'}
+            {zh() ? '查看机器' : 'View machines'}
           </Button>
         </Line>
         {error ? <small className="text-[11px] text-warn">{error}</small> : null}
@@ -262,7 +267,7 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
           {zh() ? '机器正在准备中：' : 'Machine coming online: '}{machine.phase}{models}
         </small>
         <Button variant="ghost" size="sm" onClick={openMachines}>
-          {zh() ? '查看机器' : 'View Machines'}
+          {zh() ? '查看机器' : 'View machines'}
         </Button>
       </Line>
     );

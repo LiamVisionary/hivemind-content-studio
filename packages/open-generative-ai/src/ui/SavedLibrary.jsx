@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons.jsx';
 import { Modal } from './Modal.jsx';
 import { Button, Field, SectionLabel, Spinner, TextInput, cx } from './kit.jsx';
+import { requestVaultUnlock } from '../lib/vaultSession.js';
 
 const same = (left, right) => String(left || '').trim().toLowerCase() === String(right || '').trim().toLowerCase();
 
@@ -115,10 +116,17 @@ export function SaveNameModal({
 }
 
 /**
- * The loading / locked / empty states of a library menu. Returns null once there
- * is something to list, so callers render `<LibraryStateNote …/>` then the rows.
+ * The loading / locked / failed / unreadable / empty states of a library menu.
+ * Returns null once there is something to list, so callers render
+ * `<LibraryStateNote …/>` then the rows.
+ *
+ * `error` is a read that FAILED (lapsed session, server error). It is shown with
+ * a Retry and never as "nothing saved yet": an empty hint here would invite a
+ * save that replaces the real, unread library. `unreadable` is a blob this key
+ * cannot open — the list is empty but the library is not, and a save will ask
+ * before replacing it.
  */
-export function LibraryStateNote({ loading, locked, empty, emptyHint }) {
+export function LibraryStateNote({ loading, locked, error = '', onRetry, unreadable = false, empty, emptyHint }) {
   if (loading) {
     return (
       <div className="flex items-center gap-2 px-2.5 py-3 text-xs text-ink3">
@@ -126,11 +134,39 @@ export function LibraryStateNote({ loading, locked, empty, emptyHint }) {
       </div>
     );
   }
+  if (error) {
+    return (
+      <div className="mx-1 my-1 flex items-start gap-2 rounded-md border border-danger bg-danger-tint px-2.5 py-2 text-xs leading-relaxed text-ink1">
+        <Icon name="warning" size={13} className="mt-px shrink-0 text-danger" />
+        <span className="min-w-0 flex-1">
+          <span className="block">Couldn't open your library.</span>
+          <span className="block break-words font-mono text-[11px] text-ink2">{error}</span>
+        </span>
+        {onRetry ? <Button size="sm" variant="neutral" onClick={onRetry}>Retry</Button> : null}
+      </div>
+    );
+  }
   if (locked) {
     return (
       <div className="flex items-start gap-2 px-2.5 py-3 text-xs leading-relaxed text-ink3">
         <Icon name="lock" size={13} className="mt-px shrink-0" />
-        <span>Unlock the studio (top right) to reach your saved items — they are encrypted with your key.</span>
+        <span>
+          Your saved items are encrypted with your key and this tab's vault is locked.{' '}
+          <button type="button" onClick={requestVaultUnlock} className="font-semibold text-honey underline-offset-2 hover:underline">
+            Unlock vault
+          </button>
+        </span>
+      </div>
+    );
+  }
+  if (unreadable) {
+    return (
+      <div className="flex items-start gap-2 px-2.5 py-3 text-xs leading-relaxed text-ink3">
+        <Icon name="warning" size={13} className="mt-px shrink-0 text-warn" />
+        <span>
+          Your saved library is there but could not be decrypted with this key — it may have been sealed under an earlier vault.
+          Saving will ask before replacing it.
+        </span>
       </div>
     );
   }

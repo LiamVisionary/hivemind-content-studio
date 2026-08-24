@@ -13,10 +13,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Modal } from '../ui/Modal.jsx';
 import { Icon } from '../ui/icons.jsx';
-import { Button, Card, Pill, SectionLabel, Spinner, TextArea, Toggle, cx } from '../ui/kit.jsx';
+import { Button, Card, IconButton, Pill, SectionLabel, Spinner, TextArea, Toggle, cx } from '../ui/kit.jsx';
 import {
     blockedReason,
     canSelect,
+    describeWritingFor,
     externalHold,
     formatBytes,
     lastUsedModelId,
@@ -25,6 +26,7 @@ import {
     rememberModelId,
     sortModels,
 } from '../lib/promptHelperRuntime.js';
+import { flattenApiDetail } from '../lib/muapiErrors.js';
 import { referenceToLocalImageInput } from '../lib/hivemindStudio.js';
 import { videoContactSheet } from '../lib/contactSheet.js';
 import { characterNoteLines, charactersMentionedIn } from '../lib/h3Characters.js';
@@ -37,7 +39,11 @@ async function api(path, body) {
         credentials: 'same-origin',
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload?.detail || payload?.error || `Request failed (${response.status})`);
+    if (!response.ok) {
+        // A 422 arrives as a FastAPI array of { msg } — flattened, or the toast
+        // would read "[object Object]".
+        throw new Error(flattenApiDetail(payload?.detail ?? payload?.error) || `Request failed (${response.status})`);
+    }
     return payload;
 }
 
@@ -65,6 +71,12 @@ export function PromptHelperDialog({
     // instead of guessing from the idea. Only the gender goes — the persona's
     // name is sealed to the owner's vault and stays out of every request.
     personaGender = '',
+    // Who is in the shot, by slot — [{ subject, kind, gender, name, voice,
+    // look }] from lib/promptWeave.js castSubjects(). With it the helper
+    // writes every <Subject N> into the scene instead of inventing a stranger.
+    // A persona's name never travels (it is vault-sealed); a known character's
+    // does, because the model has to be told which cartoon to write.
+    cast = [],
     // What the run will condition on, when reference mode is armed:
     // { images: N, videos: [{ useAudio }], audios: N }. The helper has to write
     // the labels the graph will actually carry, and it cannot count them itself.
@@ -144,8 +156,19 @@ export function PromptHelperDialog({
         try {
             if (!isLoaded) {
                 setBusy(`Loading ${selectedModel.name}…`);
-                const loaded = await api('/api/prompt-helper/load', { modelId: selectedModel.id, unloadOthers });
+                let loaded = await api('/api/prompt-helper/load', { modelId: selectedModel.id, unloadOthers });
                 if (ticket !== requestRef.current) return;
+                // A load another tab (or an earlier click) already started answers
+                // `status: 'loading'` — wait for llama-server to come up rather than
+                // firing a request it will refuse.
+                const deadline = Date.now() + 4 * 60 * 1000;
+                while (loaded?.status === 'loading' && Date.now() < deadline) {
+                    await new Promise((resolve) => setTimeout(resolve, 2500));
+                    if (ticket !== requestRef.current) return;
+                    const snap = await api('/api/prompt-helper/runtime');
+                    const row = (snap?.models || []).find((m) => m.id === selectedModel.id);
+                    loaded = { ...snap, status: row?.fit === 'loading' ? 'loading' : 'loaded' };
+                }
                 setSnapshot(loaded);
             }
             // The start frame is sealed at rest, so it is decrypted here and
@@ -196,6 +219,16 @@ export function PromptHelperDialog({
                 previousPrompt: (continuingFromUrl && continuingFromPrompt) || null,
                 ugc: Boolean(ugc),
                 personaGender: personaGender || undefined,
+                cast: Array.isArray(cast) && cast.length
+                  ? cast.map((member) => ({
+                    subject: member.subject,
+                    kind: member.kind,
+                    gender: member.gender || '',
+                    name: member.kind === 'character' ? (member.name || '') : '',
+                    voice: Boolean(member.voice),
+                    look: member.look || '',
+                  }))
+                  : undefined,
                 // Reference mode: how many of each are attached, and which
                 // clips bring their own soundtrack (each of those takes an
                 // <Audio N> label of its own, before its <Video N>).
@@ -278,6 +311,8 @@ export function PromptHelperDialog({
     // prompt text anywhere (it stays in the composer's encrypted store).
     const draft = result || (idea || '').trim();
     const fromComposer = !result && Boolean(draft);
+    const accept = () => { if (draft.trim() && !busy) { onUse?.(draft.trim()); onClose?.(); } };
+    const writingFor = describeWritingFor({ cast, references });
 
     // The actions belong to Modal's footer, not the body: the body scrolls, and a
     // long suggested prompt would otherwise push them off the bottom of the dialog.
@@ -297,7 +332,8 @@ export function PromptHelperDialog({
             <Button
                 variant="primary"
                 disabled={!draft.trim() || Boolean(busy)}
-                onClick={() => { onUse?.(draft.trim()); onClose?.(); }}
+                onClick={accept}
+                title="Put this prompt in the composer (⌘/Ctrl+Enter)"
             >
                 Use this prompt
             </Button>
@@ -308,12 +344,36 @@ export function PromptHelperDialog({
         <Modal open={open} onClose={onClose} title="Prompt helper" size="lg" footer={footer}>
             <div className="flex flex-col gap-4">
                 {unavailable ? (
-                    <Card className="p-3 text-xs text-ink2">
-                        No <code>llama-server</code> found on this machine. Install llama.cpp to use the prompt helper.
+                    <Card className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-3 text-xs text-ink2">
+                        <span>No <code>llama-server</code> found on this machine. Install llama.cpp to use the prompt helper.</span>
+                        <a
+                            href="https://github.com/ggml-org/llama.cpp/releases"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 font-medium text-honey hover:underline"
+                        >
+                            Get llama.cpp <Icon name="external" size={11} />
+                        </a>
                     </Card>
                 ) : null}
 
-                {/* Memory header — the numbers the load decision is made from. */}
+                {/* What the helper has been told about this shot, so the user
+                    can see it knows rather than having to trust it. */}
+                {writingFor ? (
+                    <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-ink2">
+                        <Icon name="persona" size={12} className="mt-px shrink-0 text-ink3" />
+                        <span><span className="text-ink3">Writing for:</span> {writingFor}</span>
+                    </p>
+                ) : null}
+
+                {/* Memory header — the numbers the load decision is made from.
+                    Nothing to say until the runtime has answered: "0 GB free"
+                    over an empty model list read as a broken machine. */}
+                {snapshot === null ? (
+                    <Card className="flex items-center gap-2 p-3 text-xs text-ink3">
+                        <Spinner size={13} /> Checking this machine's RAM and models…
+                    </Card>
+                ) : (
                 <Card className="flex flex-wrap items-center gap-x-4 gap-y-2 p-3 text-xs">
                     <span className="text-ink2">
                         <span className="font-semibold text-ink1">{formatBytes(snapshot?.availableBytes)}</span> free
@@ -323,9 +383,12 @@ export function PromptHelperDialog({
                         <span className="text-ink3">+{formatBytes(snapshot.reclaimableBytes)} reclaimable by unloading</span>
                     ) : null}
                     {held ? (
-                        <Pill tone="warn" dot>
-                            {held.count} model{held.count > 1 ? 's' : ''} held by LM Studio — unload there to free that RAM
-                        </Pill>
+                        // A sentence, not a pill: a fixed-height pill overflowed
+                        // the card on narrow widths. Wraps instead.
+                        <span className="flex min-w-0 items-start gap-1.5 text-[11px] font-semibold leading-snug text-warn">
+                            <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
+                            <span>{held.count} model{held.count > 1 ? 's' : ''} held by LM Studio — unload there to free that RAM</span>
+                        </span>
                     ) : null}
                     {freed ? <Pill tone="ok">freed {formatBytes(freed)}</Pill> : null}
                     <Button
@@ -339,6 +402,7 @@ export function PromptHelperDialog({
                         Free ComfyUI memory
                     </Button>
                 </Card>
+                )}
 
                 <div>
                     <div className="mb-2 flex items-center justify-between gap-3">
@@ -354,25 +418,37 @@ export function PromptHelperDialog({
                             />
                         </span>
                     </div>
-                    <div className="flex max-h-64 flex-col gap-1.5 overflow-y-auto">
-                        {models.length === 0 ? (
+                    <div className="flex max-h-64 flex-col gap-1.5 overflow-y-auto" role="radiogroup" aria-label="Local model">
+                        {snapshot === null ? (
+                            <p className="flex items-center gap-2 px-1 py-3 text-xs text-ink3"><Spinner size={12} /> Looking for GGUF models…</p>
+                        ) : models.length === 0 ? (
                             <p className="px-1 py-3 text-xs text-ink3">No GGUF models found on this machine.</p>
                         ) : null}
                         {models.map((model) => {
                             const selectable = canSelect(model, { unloadOthers });
                             const reason = blockedReason(model, { unloadOthers });
                             const active = model.id === selected;
+                            const pickable = selectable && !busy;
+                            const pick = () => { if (pickable) choose(model.id); };
+                            // A div with role=radio rather than a <button>: the
+                            // Unload control sits INSIDE the row, and a button in
+                            // a button is invalid HTML that a screen reader reads
+                            // as one control.
                             return (
-                                <button
+                                <div
                                     key={model.id}
-                                    type="button"
-                                    disabled={!selectable || Boolean(busy)}
-                                    onClick={() => choose(model.id)}
+                                    role="radio"
+                                    aria-checked={active}
+                                    aria-disabled={!pickable || undefined}
+                                    tabIndex={pickable ? 0 : -1}
+                                    onClick={pick}
+                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } }}
                                     title={reason || model.id}
                                     className={cx(
                                         'flex items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors',
+                                        pickable ? 'cursor-pointer' : 'cursor-not-allowed',
                                         active ? 'border-honey bg-bg2' : 'border-line1 hover:bg-bg2',
-                                        !selectable && 'cursor-not-allowed opacity-40 hover:bg-transparent',
+                                        !selectable && 'opacity-40 hover:bg-transparent',
                                     )}
                                 >
                                     <div className="min-w-0 flex-1">
@@ -391,21 +467,19 @@ export function PromptHelperDialog({
                                     {model.fit === 'loaded' ? (
                                         <>
                                             <Pill tone="ok" dot>In RAM</Pill>
-                                            <span
-                                                role="button"
-                                                tabIndex={0}
-                                                aria-label={`Unload ${model.name}`}
+                                            <IconButton
+                                                icon="x"
+                                                size="xs"
+                                                label={`Unload ${model.name}`}
+                                                disabled={Boolean(busy)}
                                                 onClick={(e) => { e.stopPropagation(); unload(model.id); }}
-                                                onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); unload(model.id); } }}
-                                                className="grid h-6 w-6 shrink-0 place-items-center rounded text-ink3 hover:bg-bg3 hover:text-ink1"
-                                            >
-                                                <Icon name="x" size={13} />
-                                            </span>
+                                                onKeyDown={(e) => e.stopPropagation()}
+                                            />
                                         </>
                                     ) : (
                                         <span className="shrink-0 text-[11px] text-ink3">{modelStatus(model)}</span>
                                     )}
-                                </button>
+                                </div>
                             );
                         })}
                     </div>
@@ -503,11 +577,23 @@ export function PromptHelperDialog({
                                 </div>
                             </div>
                         ) : null}
-                        <TextArea rows={7} value={draft} onChange={(e) => setResult(e.target.value)} />
+                        <TextArea
+                            rows={7}
+                            value={draft}
+                            onChange={(e) => setResult(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); accept(); }
+                            }}
+                        />
                     </div>
                 ) : null}
 
-                {error ? <p className="text-xs text-danger">{error}</p> : null}
+                {error ? (
+                    <div className="flex items-start gap-2 rounded-md border border-danger bg-danger-tint px-3 py-2" role="alert">
+                        <Icon name="warning" size={13} className="mt-px shrink-0 text-danger" />
+                        <span className="min-w-0 break-words font-mono text-xs text-ink1">{error}</span>
+                    </div>
+                ) : null}
             </div>
         </Modal>
     );

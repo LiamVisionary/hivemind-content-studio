@@ -16,7 +16,7 @@ import {
 // the one every sibling here uses (see IngredientsPanel.jsx).
 import { zh } from './videoLogic.js';
 import { ChipButton, Menu } from '../../ui/Menu.jsx';
-import { cx } from '../../ui/kit.jsx';
+import { Button, cx } from '../../ui/kit.jsx';
 
 const COLLECTIONS = ['Core moves', 'Handheld & FPV'];
 
@@ -38,18 +38,17 @@ export function CameraMotionMenu({ selectedIds, onApply }) {
   return (
     <Menu
       up
-      width="w-[24rem]"
+      width="w-[24rem] max-w-[calc(100vw-1.5rem)]"
       trigger={(open, toggleMenu) => (
         <ChipButton
-          icon="video"
-          label={applied.length
-            ? `${zh() ? '运镜' : 'Motion'} ·${applied.length}`
-            : (zh() ? '运镜' : 'Motion')}
+          icon="camera"
+          label={zh() ? '运镜' : 'Camera'}
+          value={applied.length ? String(applied.length) : ''}
           active={open || applied.length > 0}
           onClick={() => { setDraft(null); toggleMenu(); }}
           title={zh()
             ? '选择最多三个镜头运动，按顺序合成提示词短语'
-            : `Pick up to ${MAX_CAMERA_MOTIONS} camera moves — order becomes begin/continue/finish`}
+            : `Camera moves — pick up to ${MAX_CAMERA_MOTIONS}; their order becomes begin / continue / finish`}
         />
       )}
     >
@@ -102,28 +101,23 @@ export function CameraMotionMenu({ selectedIds, onApply }) {
           ) : null}
 
           <div className="mt-1 flex items-center gap-1.5">
-            <button
-              type="button"
+            <Button
+              size="sm"
+              variant="primary"
               disabled={!current.length && !applied.length}
               onClick={() => { onApply(current); setDraft(null); close(); }}
-              className={cx(
-                'rounded-sm border px-2 py-1 text-[11px] font-semibold transition-colors',
-                current.length || applied.length
-                  ? 'border-honey/50 bg-honey-tint text-honey hover:border-honey'
-                  : 'cursor-not-allowed border-line1 bg-bg1 text-ink3 opacity-60',
-              )}
             >
               {zh() ? '应用到提示词' : 'Apply to prompt'}
-            </button>
+            </Button>
             {applied.length ? (
-              <button
-                type="button"
+              <Button
+                size="sm"
+                variant="neutral"
                 onClick={() => { onApply([]); setDraft(null); close(); }}
-                title={zh() ? '从提示词中移除运镜短语' : 'Remove the motion phrase from the prompt'}
-                className="rounded-sm border border-line1 bg-bg1 px-2 py-1 text-[11px] font-semibold text-ink1 transition-colors hover:border-line2"
+                title={zh() ? '从提示词中移除运镜短语' : 'Remove the camera phrase from the prompt'}
               >
                 {zh() ? '清除' : 'Clear'}
-              </button>
+              </Button>
             ) : null}
             <span className="ml-auto pr-1 text-[10px] text-ink3">
               {current.length}/{MAX_CAMERA_MOTIONS}

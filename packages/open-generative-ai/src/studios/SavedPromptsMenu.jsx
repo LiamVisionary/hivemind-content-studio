@@ -11,18 +11,29 @@
 // now — each is a finished prompt in that model's own format, so the ones for
 // other models are hidden rather than listed. They are not vault data, so they
 // show even while the vault is locked.
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useSavedLibrary } from '../hooks/hooks.js';
 import { LIBRARIES, deleteLibraryEntry, saveLibraryEntry } from '../lib/savedLibraryStore.js';
 import { defaultPromptsFor, describeDefaultPrompt, describeDefaultPromptPart } from '../lib/defaultPrompts.js';
-import { Icon } from '../ui/icons.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
-import { ChipButton, Menu, MenuHeading } from '../ui/Menu.jsx';
+import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { LibraryDeleteButton, LibraryStateNote, SaveNameModal } from '../ui/SavedLibrary.jsx';
-import { cx } from '../ui/kit.jsx';
+import { Button, TextInput } from '../ui/kit.jsx';
 
 const SECTION_LABEL = { image: 'Image', video: 'Video' };
+// Past this many saved prompts a name list stops being scannable, so a filter
+// box appears above it. Below it the box would only be one more thing to read.
+const SEARCH_FROM = 7;
+
+// Name first, then the one-line summary, then the prompt text itself — so
+// "night" finds a prompt about a night street even when its name is "Shot 3".
+export function filterSavedPrompts(entries, query) {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return entries;
+  return entries.filter((entry) => [entry.name, entry.data?.summary, entry.data?.prompt]
+    .some((field) => String(field || '').toLowerCase().includes(needle)));
+}
 
 // One line describing what "+ settings" would restore, built at save time from
 // whichever context shape the studio produced.
@@ -53,16 +64,31 @@ export function describeSavedContext(section, context) {
 
 // `modelSource` is the current studio setup — used only to float the starters
 // written for the selected model to the top, so it stays optional.
-export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture, modelSource = null, onLoadPrompt, onLoadContext }) {
-  const { entries, loading, locked, retry } = useSavedLibrary(LIBRARIES.prompts);
+export function SavedPromptsMenu({
+  section, prompt, negativePrompt = '', capture, modelSource = null, onLoadPrompt, onLoadContext,
+  // Who the starters should be rendered for (the gender of whoever holds
+  // <Subject 1>), and the stand-ins of the prompt in the composer — saved with
+  // it so a library prompt binds its person when it is loaded onto a cast.
+  renderGender = undefined, standIns = [],
+}) {
+  const { entries, loading, locked, error, unreadable, retry } = useSavedLibrary(LIBRARIES.prompts);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
+  // A save that met a library this key cannot open: held here until the user
+  // says replacing that library is what they want.
+  const [confirmReplace, setConfirmReplace] = useState(null);
+  const [query, setQuery] = useState('');
+  // The menu's close(), captured from the render prop so a delete can shut the
+  // menu AFTER the confirm — not before it, which left a cancel with the menu gone.
+  const closeMenuRef = useRef(null);
 
   const hasPrompt = Boolean(String(prompt || '').trim());
-  const starters = defaultPromptsFor(section, modelSource);
+  const starters = defaultPromptsFor(section, modelSource, { gender: renderGender });
+  const searchable = entries.length >= SEARCH_FROM;
+  const shown = searchable ? filterSavedPrompts(entries, query) : entries;
 
-  const save = async (name) => {
+  const save = async (name, { overwriteUnreadable = false } = {}) => {
     setSaving(true);
     try {
       const context = capture?.() || null;
@@ -72,13 +98,19 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
           section,
           prompt: String(prompt || ''),
           negativePrompt: String(negativePrompt || ''),
+          // Which words of the prompt are its stand-in person, when it still
+          // has one — so loading it onto a cast binds them (subjectTemplate.js).
+          ...(Array.isArray(standIns) && standIns.length ? { standIns } : {}),
           context,
           summary: describeSavedContext(section, context),
         },
-      });
+      }, { overwriteUnreadable });
       setSaveOpen(false);
       toast.success(`Saved “${name}”.`);
     } catch (error) {
+      // The stored library could not be decrypted with this key. Never replace
+      // it on the strength of a Save click alone — ask, then retry with consent.
+      if (error?.unreadable) { setConfirmReplace(name); return; }
       toast.error(error.message);
     } finally {
       setSaving(false);
@@ -86,7 +118,11 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
   };
 
   const loadPromptOnly = (entry) => {
-    onLoadPrompt({ prompt: entry.data?.prompt || '', negativePrompt: entry.data?.negativePrompt || '' });
+    onLoadPrompt({
+      prompt: entry.data?.prompt || '',
+      negativePrompt: entry.data?.negativePrompt || '',
+      standIns: Array.isArray(entry.data?.standIns) ? entry.data.standIns : [],
+    });
     toast.success(`Loaded the prompt from “${entry.name}”.`);
   };
 
@@ -98,7 +134,7 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
   // because that step happens BEFORE the pasted prompt makes sense, and the
   // hover title it came from is gone the moment the menu closes.
   const loadStarter = (entry, part, index = 0) => {
-    onLoadPrompt({ prompt: part.prompt, negativePrompt });
+    onLoadPrompt({ prompt: part.prompt, negativePrompt, standIns: part.standIns || [] });
     const name = entry.parts.length > 1
       ? `${entry.name} — part ${index + 1}`
       : entry.name;
@@ -123,6 +159,7 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
     try {
       await deleteLibraryEntry(LIBRARIES.prompts, entry.id);
       toast(`Deleted “${entry.name}”.`);
+      closeMenuRef.current?.();
     } catch (error) {
       toast.error(error.message);
     }
@@ -145,34 +182,51 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
           />
         )}
       >
-        {(close) => (
+        {(close) => {
+          closeMenuRef.current = close;
+          return (
           <>
-            <button
-              type="button"
+            <MenuItem
+              icon="plus"
               disabled={!hasPrompt}
               onClick={() => { setSaveOpen(true); close(); }}
               title={hasPrompt ? 'Save this prompt with every current setting' : 'Write a prompt first'}
-              className={cx(
-                'flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[13px] font-medium transition-colors',
-                hasPrompt ? 'text-ink1 hover:bg-honey-tint hover:text-honey' : 'cursor-not-allowed text-ink3 opacity-60',
-              )}
+              className="font-medium text-ink1"
             >
-              <Icon name="plus" size={14} className="shrink-0" />
               Save current prompt…
-            </button>
+            </MenuItem>
 
             <div className="my-1 h-px bg-line1" />
 
             <LibraryStateNote
               loading={loading}
               locked={locked}
+              error={error}
+              onRetry={retry}
+              unreadable={unreadable}
               empty={!entries.length}
               emptyHint="Nothing saved yet. Write a prompt, dial in the settings, then use Save current prompt."
             />
 
-            {entries.length ? (
+            {searchable ? (
+              <div className="px-1 pb-1.5">
+                <TextInput
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={`Search ${entries.length} saved prompts`}
+                  aria-label="Search saved prompts"
+                  className="text-xs"
+                />
+              </div>
+            ) : null}
+
+            {entries.length && !shown.length ? (
+              <p className="px-2.5 py-3 text-xs text-ink3">No saved prompt matches “{query.trim()}”.</p>
+            ) : null}
+
+            {shown.length ? (
               <div className="max-h-80 overflow-y-auto">
-                {entries.map((entry) => {
+                {shown.map((entry) => {
                   const foreign = entry.data?.section && entry.data.section !== section;
                   const restorable = Boolean(entry.data?.context) && !foreign;
                   return (
@@ -185,19 +239,27 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
                             {entry.data?.summary || 'Prompt only'}
                           </div>
                         </div>
-                        <LibraryDeleteButton label={`Delete ${entry.name}`} onClick={() => { setConfirmDelete(entry); close(); }} />
+                        {/* The menu stays open under the confirm: cancelling
+                            used to drop you back with the menu shut. */}
+                        <LibraryDeleteButton label={`Delete ${entry.name}`} onClick={() => setConfirmDelete(entry)} />
                       </div>
                       <div className="mt-1.5 flex items-center gap-1.5">
-                        <button
-                          type="button"
+                        <Button
+                          size="sm"
+                          variant="neutral"
                           onClick={() => { loadPromptOnly(entry); close(); }}
                           title="Replace the prompt text only — your current settings stay as they are"
-                          className="rounded-sm border border-line1 bg-bg1 px-2 py-1 text-[11px] font-semibold text-ink1 transition-colors hover:border-honey/50 hover:text-honey"
                         >
                           Load prompt
-                        </button>
-                        <button
-                          type="button"
+                        </Button>
+                        {/* Honey-outlined rather than a filled primary: a list of
+                            entries would otherwise hold a primary per row. The
+                            `!` is needed — the neutral variant's own border/text
+                            colour utilities sort after these in the sheet. */}
+                        <Button
+                          size="sm"
+                          variant="neutral"
+                          className={restorable ? '!border-honey/50 !bg-honey-tint !text-honey hover:!border-honey' : ''}
                           disabled={!restorable}
                           onClick={() => { loadEverything(entry); close(); }}
                           title={
@@ -207,15 +269,9 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
                                 ? 'Replace the prompt AND restore every setting saved with it'
                                 : 'No settings were captured with this prompt'
                           }
-                          className={cx(
-                            'rounded-sm border px-2 py-1 text-[11px] font-semibold transition-colors',
-                            restorable
-                              ? 'border-honey/50 bg-honey-tint text-honey hover:border-honey'
-                              : 'cursor-not-allowed border-line1 bg-bg1 text-ink3 opacity-60',
-                          )}
                         >
                           Load prompt + settings
-                        </button>
+                        </Button>
                       </div>
                     </div>
                   );
@@ -243,10 +299,7 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
                             onClick: () => { loadStarter(entry, entry.parts[0]); close(); },
                             title: entry.note || 'Replace the prompt text with this starter',
                           })}
-                          className={cx(
-                            'flex w-full flex-col items-start rounded-md px-1.5 py-1 text-left transition-colors',
-                            split ? '' : 'hover:bg-bg2',
-                          )}
+                          className={`flex w-full flex-col items-start rounded-md px-1.5 py-1 text-left transition-colors ${split ? '' : 'hover:bg-bg2'}`}
                         >
                           <span className="truncate text-[13px] font-medium text-ink1">{entry.name}</span>
                           <span className="truncate text-[10px] text-ink3">{describeDefaultPrompt(entry)}</span>
@@ -254,21 +307,21 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
                               these into an empty composer and pressing Generate
                               produces a clip with no clip in it. */}
                           {entry.requires ? (
-                            <span className="truncate text-[10px] text-honey/80">Needs {entry.requires}</span>
+                            <span className="truncate text-[10px] text-honey">Needs {entry.requires}</span>
                           ) : null}
                         </Row>
                         {split ? (
                           <div className="mt-1 flex flex-wrap items-center gap-1 px-1.5 pb-1">
                             {entry.parts.map((part, index) => (
-                              <button
+                              <Button
                                 key={part.label}
-                                type="button"
+                                size="sm"
+                                variant="neutral"
                                 onClick={() => { loadStarter(entry, part, index); close(); }}
                                 title={[entry.note, part.note].filter(Boolean).join('\n\n')}
-                                className="rounded-sm border border-line1 bg-bg1 px-2 py-1 text-[11px] font-semibold text-ink1 transition-colors hover:border-honey/50 hover:text-honey"
                               >
                                 {describeDefaultPromptPart(part, index)}
-                              </button>
+                              </Button>
                             ))}
                           </div>
                         ) : null}
@@ -279,7 +332,8 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
               </>
             ) : null}
           </>
-        )}
+          );
+        }}
       </Menu>
 
       <SaveNameModal
@@ -301,6 +355,16 @@ export function SavedPromptsMenu({ section, prompt, negativePrompt = '', capture
         title={`Delete “${confirmDelete?.name}”?`}
         body="This permanently removes the saved prompt and the settings stored with it."
         confirmLabel="Delete prompt"
+      />
+
+      <ConfirmModal
+        open={Boolean(confirmReplace)}
+        onClose={() => setConfirmReplace(null)}
+        onConfirm={() => { const name = confirmReplace; setConfirmReplace(null); void save(name, { overwriteUnreadable: true }); }}
+        title="Replace your unreadable prompt library?"
+        body="The saved prompts on the server could not be decrypted with this key — they may have been sealed under an earlier vault. Saving now replaces that library with this one prompt. The old entries cannot be recovered afterwards."
+        confirmLabel="Replace and save"
+        cancelLabel="Keep the old library"
       />
     </>
   );

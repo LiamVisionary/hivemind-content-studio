@@ -17,8 +17,10 @@ import { toast } from 'react-hot-toast';
 import { useSavedLibrary } from '../../hooks/hooks.js';
 import {
   PERSONA_GENDER_OPTIONS,
+  PERSONA_LOOK_MAX,
   applyPersonaToReferences,
   normalizePersonaGender,
+  normalizePersonaLook,
   personaCounts,
   personaFromReferences,
   personaIdentity,
@@ -42,7 +44,7 @@ const BAR_BUTTON = 'rounded-md border px-2 py-1 text-[11px] font-semibold transi
 // character that its pictures cannot tell a prompt — "the woman"/"her" or "the
 // man"/"his" — so it is set here beside the name, and every template, cast
 // definition, UGC deal and helper request reads it from the saved persona.
-function GenderChips({ value, onChange, disabled = false, compact = false }) {
+export function GenderChips({ value, onChange, disabled = false, compact = false }) {
   return (
     <div role="group" aria-label={zh() ? '性别' : 'Gender'} className="flex flex-wrap items-center gap-1">
       {PERSONA_GENDER_OPTIONS.map((option) => (
@@ -103,6 +105,10 @@ function PersonaFace({ data, posters, onPosterCaptured }) {
 export function PersonaBar({
   images = [], videos = [], audios = [], persona = null, onPersonaChange,
   onLoad, limits, posters = {}, known = null, onPosterCaptured, uploadFn,
+  // What the cast strip knows about the person in these rows when no persona
+  // names them yet — gender and look set on the chip — so "Save as persona"
+  // starts from what was already written rather than from blanks.
+  seed = null,
 }) {
   const { entries, loading, locked, retry } = useSavedLibrary(LIBRARIES.personas);
   const [listOpen, setListOpen] = useState(false);
@@ -117,10 +123,14 @@ export function PersonaBar({
   // The gender chosen in the save dialog. Seeded from the loaded persona when
   // the dialog opens, so "Save as new" starts from the character on screen.
   const [saveGender, setSaveGender] = useState('');
+  // The look typed in the save dialog — hair, face, build, wardrobe. Seeded
+  // from the loaded persona (or the cast strip's draft) when the dialog opens.
+  const [saveLook, setSaveLook] = useState('');
   const importInputRef = useRef(null);
 
-  const gender = normalizePersonaGender(persona?.gender);
-  const current = personaFromReferences({ images, videos, audios, gender });
+  const gender = normalizePersonaGender(persona?.gender ?? seed?.gender);
+  const look = normalizePersonaLook(persona?.look ?? seed?.look);
+  const current = personaFromReferences({ images, videos, audios, gender, look });
   const empty = personaIsEmpty(current);
   const activeEntry = persona?.id ? entries.find((entry) => entry.id === persona.id) : null;
   // Only meaningful once the library has actually been read: before that, an
@@ -135,11 +145,13 @@ export function PersonaBar({
   const save = async (name) => {
     setSaving(true);
     try {
-      const data = { ...current, gender: normalizePersonaGender(saveGender) };
+      const data = personaFromReferences({
+        ...current, gender: normalizePersonaGender(saveGender), look: saveLook,
+      });
       const entry = await saveLibraryEntry(LIBRARIES.personas, { name, data });
       // A same-name save is an upsert, so an existing id means it replaced one.
       const replaced = entries.some((item) => item.id === entry.id);
-      onPersonaChange?.(personaIdentity({ id: entry.id, name: entry.name, gender: data.gender }));
+      onPersonaChange?.(personaIdentity({ id: entry.id, name: entry.name, gender: data.gender, look: data.look }));
       setSaveOpen(false);
       toast.success(replaced
         ? (zh() ? `已更新“${name}”。` : `Updated “${name}”.`)
@@ -254,6 +266,7 @@ export function PersonaBar({
   const openSave = (asNew) => {
     setSaveAsNew(asNew);
     setSaveGender(gender);
+    setSaveLook(look);
     setSaveOpen(true);
   };
 
@@ -452,6 +465,25 @@ export function PersonaBar({
             {zh()
               ? '模板、演员表和 UGC 预设会据此写“她/他/他们”。'
               : 'Starters, the Cast control, UGC deals and the prompt helper write “her”, “his” or “their” from this.'}
+          </p>
+        </div>
+        <div className="mt-3">
+          <SectionLabel>{zh() ? '外貌' : 'Look'}</SectionLabel>
+          <textarea
+            rows={2}
+            maxLength={PERSONA_LOOK_MAX}
+            value={saveLook}
+            disabled={saving}
+            onChange={(event) => setSaveLook(event.target.value)}
+            placeholder={zh()
+              ? '发型、面部、体型、穿着——写出来。'
+              : 'Hair, face, build, wardrobe — write it out.'}
+            className="mt-1.5 w-full resize-none rounded-md border border-line1 bg-bg2 px-2.5 py-2 text-[12px] leading-snug text-ink1 outline-none placeholder:text-ink3 focus:border-honey"
+          />
+          <p className="mt-1.5 text-[11px] leading-relaxed text-ink3">
+            {zh()
+              ? '演员表会把它写进 <Subject N> 的定义，代替占位空白。在镜头里的成员卡片上可以让助手看图生成。'
+              : "Written into <Subject N>'s definition by the cast instead of a blank. The member chip above the prompt can draft it from the pictures."}
           </p>
         </div>
       </SaveNameModal>

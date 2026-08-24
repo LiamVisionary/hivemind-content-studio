@@ -153,16 +153,20 @@ export const CIVITAI_TYPES = ['LORA', 'Checkpoint', 'TextualInversion', 'Control
 export const CIVITAI_SORTS = ['Most Downloaded', 'Highest Rated', 'Most Liked', 'Newest'];
 export const CIVITAI_PERIODS = ['AllTime', 'Year', 'Month', 'Week', 'Day'];
 
+// Safe by default: Civitai's own default is "everything", and explicit previews
+// in a work tool is not something to opt out of — it is something to opt into.
 export const DEFAULT_CIVITAI_FILTERS = {
   types: 'LORA',
   baseModels: '',
   sort: 'Most Downloaded',
   period: 'Month',
-  nsfw: '',
+  nsfw: 'false',
   limit: '40',
 };
 
-export function civitaiSearchParams(query, filters) {
+// `cursor` continues a search from the page the last result ended on (the
+// gateway forwards it to Civitai's /models); absent means the first page.
+export function civitaiSearchParams(query, filters, cursor = '') {
   const params = { primaryFileOnly: true };
   const trimmed = String(query || '').trim();
   if (trimmed) params.query = trimmed;
@@ -171,7 +175,23 @@ export function civitaiSearchParams(query, filters) {
   }
   // Empty means "whatever Civitai defaults to" — only an explicit choice is sent.
   if (filters?.nsfw === 'true' || filters?.nsfw === 'false') params.nsfw = filters.nsfw;
+  const next = String(cursor || '').trim();
+  if (next) params.cursor = next;
   return params;
+}
+
+// Results from a later page appended to the ones already shown, without
+// repeating a model/version Civitai hands back twice across page boundaries.
+export function mergeCivitaiResults(existing, incoming) {
+  const key = (item) => `${item?.id}-${item?.versionId}`;
+  const seen = new Set((existing || []).map(key));
+  const added = (incoming || []).filter((item) => {
+    const k = key(item);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return [...(existing || []), ...added];
 }
 
 export function isCivitaiResultInstalled(item, installed) {

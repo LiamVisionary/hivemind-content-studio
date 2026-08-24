@@ -156,7 +156,7 @@ export function LoraSection({
                     ? 'grid-cols-[36px_minmax(0,1fr)_64px_28px_28px]'
                     : 'grid-cols-[36px_minmax(0,1fr)_64px_28px]',
                   enabled
-                    ? 'border-honey/30 bg-honey-tint hover:border-honey/50'
+                    ? 'border-honey/40 bg-honey-tint hover:border-honey/60'
                     : 'border-line1 bg-bg2 opacity-55 hover:opacity-80',
                 )}
               >
@@ -204,7 +204,7 @@ export function LoraSection({
                   type="button"
                   title={`Unload ${label}`}
                   aria-label={`Unload ${label}`}
-                  className="grid h-7 w-7 place-items-center rounded-sm bg-danger-tint text-danger transition-colors hover:border hover:border-danger/40"
+                  className="grid h-7 w-7 place-items-center rounded-sm border border-transparent bg-danger-tint text-danger transition-colors hover:border-danger/40"
                   onClick={(e) => { e.stopPropagation(); onToggleLora(lora); }}
                 >
                   <Icon name="x" size={13} />

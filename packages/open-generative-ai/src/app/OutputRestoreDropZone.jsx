@@ -14,12 +14,30 @@ import { useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { loadStudioSetup } from './promptTarget.js';
 import { basenameOf, resolveGenerationSetup, warmGenerationSetupLookup } from '../lib/generationSetupStore.js';
-import { HIVEMIND_OUTPUT_DRAG_TYPE, dragCarriesDroppable } from '../lib/referenceDrop.js';
+import { HIVEMIND_OUTPUT_DRAG_TYPE } from '../lib/referenceDrop.js';
+import { getLang } from '../lib/i18n.js';
 import { Spinner, cx } from '../ui/kit.jsx';
 
 const CUSTOM_TYPE = HIVEMIND_OUTPUT_DRAG_TYPE;
+const zh = () => getLang() === 'zh-CN';
 
-const dragHasPayload = dragCarriesDroppable;
+// Only an in-app output drag or an image/video FILE can restore anything, so
+// only those light the overlay: a .pdf used to get "Drop to restore its
+// settings" and then "No saved settings found". During dragenter/dragover the
+// browser is in protected mode — `items[i].type` is readable, file contents and
+// getData() are not — so the MIME is the most that can be checked here. An item
+// with an empty type (a HEIC on some platforms) is let through rather than
+// refused on a guess.
+function dragHasPayload(dataTransfer) {
+  if (!dataTransfer) return false;
+  const types = Array.from(dataTransfer.types || []);
+  if (types.includes(CUSTOM_TYPE)) return true;
+  if (!types.includes('Files')) return false;
+  const items = Array.from(dataTransfer.items || []);
+  if (!items.length) return true; // some browsers expose no items mid-drag
+  return items.some((item) => item.kind === 'file'
+    && (!item.type || /^(image|video)\//i.test(item.type)));
+}
 
 // The regions that own their own drops. Nothing here fires inside them.
 function isInputDropTarget(target) {
@@ -45,19 +63,12 @@ function extractIdentity(dataTransfer) {
       }
     }
   } catch { /* not our payload */ }
-  // 2) A file dragged from disk — identify by filename.
+  // 2) A file dragged from disk — identify by filename. (A bare URL drag is not
+  //    handled: dragover never allows it, so a drop for one never fires.)
   const file = dataTransfer.files && dataTransfer.files[0];
   if (file) {
     return { url: null, basename: file.name, section: sectionFromMediaType(file.type, file.name), file };
   }
-  // 3) A bare URL dragged from elsewhere.
-  try {
-    const uri = dataTransfer.getData('text/uri-list') || dataTransfer.getData('text/plain');
-    const first = String(uri || '').split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
-    if (first && /^(https?:|\/)/.test(first)) {
-      return { url: first, basename: basenameOf(first), section: null };
-    }
-  } catch { /* none */ }
   return null;
 }
 
@@ -72,21 +83,23 @@ function restoreFullContext(section, context) {
     (Array.isArray(context.referenceImages) && context.referenceImages.length) ||
     (Array.isArray(context.ingredientImages) && context.ingredientImages.length) ||
     (Array.isArray(context.loras) && context.loras.length);
-  const where = section === 'video' ? 'Video' : 'Image';
+  const where = section === 'video' ? (zh() ? '视频' : 'Video') : (zh() ? '图像' : 'Image');
   // Oversized inline references are not sealed (they would bloat the vault and cost
   // the settings of older generations), so say so rather than letting the user
   // generate with a silently smaller reference set than the run they restored.
   if (omitted) {
     toast.success(
-      `Settings restored into the ${where} studio — re-attach ${omitted} reference image${omitted === 1 ? '' : 's'}.`,
+      zh()
+        ? `设置已恢复到${where}工作室 — 请重新附加 ${omitted} 张参考图。`
+        : `Settings restored into the ${where} studio — re-attach ${omitted} reference image${omitted === 1 ? '' : 's'}.`,
       { duration: 6000 },
     );
     return;
   }
   toast.success(
     needsAttention
-      ? `Settings restored into the ${where} studio — re-check reference images / LoRAs.`
-      : `Settings restored into the ${where} studio.`,
+      ? (zh() ? `设置已恢复到${where}工作室 — 请检查参考图 / LoRA。` : `Settings restored into the ${where} studio — re-check reference images / LoRAs.`)
+      : (zh() ? `设置已恢复到${where}工作室。` : `Settings restored into the ${where} studio.`),
   );
 }
 
@@ -105,7 +118,7 @@ async function tryEmbeddedMetadata(file) {
       seed: recovered.seed,
     });
     window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'image' } }));
-    toast.success('Recovered the prompt from the image’s embedded workflow.');
+    toast.success(zh() ? '已从图片内嵌的工作流中恢复提示词。' : 'Recovered the prompt from the image’s embedded workflow.');
     return true;
   } catch {
     return false;
@@ -149,10 +162,10 @@ async function handleDrop(dataTransfer) {
   if (!result?.needsUnlock && await tryCanvasHistory(identity)) return;
 
   if (result?.needsUnlock) {
-    toast('Unlock the studio (top-right) to restore saved settings, then drop again.');
+    toast(zh() ? '先在顶栏解锁保险库，再拖放一次即可恢复保存的设置。' : 'Unlock your vault (topbar) to restore saved settings, then drop again.');
     return;
   }
-  toast('No saved settings found for this file.');
+  toast(zh() ? '没有找到这个文件的已保存设置。' : 'No saved settings found for this file.');
 }
 
 export function OutputRestoreDropZone() {
@@ -227,14 +240,14 @@ export function OutputRestoreDropZone() {
           <>
             <div className="flex items-center justify-center gap-2 text-sm font-medium text-ink1">
               <Spinner size={14} className="text-honey" />
-              Restoring settings…
+              {zh() ? '正在恢复设置…' : 'Restoring settings…'}
             </div>
-            <div className="mt-1 text-xs text-ink3">Decrypting this output’s saved setup with your key</div>
+            <div className="mt-1 text-xs text-ink3">{zh() ? '正在用你的密钥解密这个输出保存的设置' : 'Decrypting this output’s saved setup with your key'}</div>
           </>
         ) : (
           <>
-            <div className="text-sm font-medium text-ink1">Drop to restore its settings</div>
-            <div className="mt-1 text-xs text-ink3">Loads the prompt, model and every setting into the matching studio</div>
+            <div className="text-sm font-medium text-ink1">{zh() ? '拖放此工作室生成的图片或视频以恢复其设置' : 'Drop an image or video from this studio to restore its settings'}</div>
+            <div className="mt-1 text-xs text-ink3">{zh() ? '会把提示词、模型和全部设置载入对应的工作室' : 'Loads the prompt, model and every setting into the matching studio'}</div>
           </>
         )}
       </div>

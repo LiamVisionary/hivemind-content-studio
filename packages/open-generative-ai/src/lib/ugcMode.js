@@ -363,7 +363,9 @@ export function ugcReferenceBrief(variant, { durationSeconds, script, persona, c
   const noun = gender && gender !== 'nonbinary' ? personaGenderWords(gender).noun : '';
 
   const subject = [
-    referenceSubjectLine({ pictures: labels.images, videos: labels.videos.map((label) => label.video).filter(Boolean), gender }),
+    referenceSubjectLine({
+      pictures: labels.images, videos: labels.videos.map((label) => label.video).filter(Boolean), gender, look: persona?.look || '',
+    }),
     '<Subject 1> is rendered as photoreal live-action, real human skin texture and hair, shot on a phone front camera — not illustrated, not stylised, no beauty filter.',
   ];
   if (voice) {

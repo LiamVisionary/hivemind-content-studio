@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
     blockedReason,
     canSelect,
+    describeWritingFor,
     externalHold,
     formatBytes,
     lastUsedModelId,
@@ -111,4 +112,22 @@ test('the remembered id survives a browser with no localStorage', () => {
     // remembered" instead of throwing on the way into the picker.
     assert.equal(lastUsedModelId(), '');
     assert.doesNotThrow(() => rememberModelId('scout.gguf'));
+});
+
+// The "Writing for:" line — what the helper has been told, so the user can see
+// it knows the cast and the attached media rather than having to trust it.
+test('describeWritingFor names each subject and counts the references', () => {
+    assert.equal(describeWritingFor({
+        cast: [
+            { subject: 1, kind: 'persona', gender: 'female', name: '', voice: false, look: 'red coat' },
+            { subject: 2, kind: 'character', gender: 'male', name: 'Willow', voice: true, look: '' },
+        ],
+        references: { images: 3, videos: [{ useAudio: false }], audios: 0 },
+    }), 'Subject 1 (woman, look set) · Subject 2 Willow (known character, voice) · 3 pictures, 1 clip');
+    // A persona's name never appears — only the gender word and whether a look is set.
+    assert.doesNotMatch(describeWritingFor({ cast: [{ subject: 1, kind: 'persona', gender: 'male', name: 'Liam' }] }), /Liam/);
+    assert.equal(describeWritingFor({ cast: [{ subject: 1, kind: 'persona', gender: 'male', name: 'Liam' }] }), 'Subject 1 (man)');
+    assert.equal(describeWritingFor({ references: { images: 1, videos: [], audios: 2 } }), '1 picture, 2 voice clips');
+    assert.equal(describeWritingFor({}), '');
+    assert.equal(describeWritingFor({ cast: [], references: { images: 0, videos: [], audios: 0 } }), '');
 });

@@ -5,15 +5,25 @@
 // as a file the "Join" button downloaded — you could not see it, scrub it, or
 // tell which shots were in it. This is that surface: click any shot to put it
 // in the big preview, drop a shot you don't want, export one shot or the whole
-// cut. The joined tile carries a moving gradient border because it is the
-// deliverable and the shots are its parts.
+// cut. The joined tile carries a honey border because it is the deliverable
+// and the shots are its parts; the border only moves while the cut is being
+// built.
 import { Icon } from '../../ui/icons.jsx';
-import { Spinner, cx } from '../../ui/kit.jsx';
-import { useMediaSrc } from '../../hooks/hooks.js';
+import { IconButton, Spinner, cx } from '../../ui/kit.jsx';
+import { useMediaPoster } from '../../hooks/hooks.js';
 
+// One decoded frame as an <img>, not a <video> per tile — the same poster
+// pipeline the reference rows use. The clip is decrypted once (cached) and
+// reused when it is picked onto the canvas.
 function ShotThumb({ url }) {
-  const src = useMediaSrc(url);
-  return <video src={src} muted preload="metadata" className="aspect-video w-full bg-bg0 object-cover" />;
+  const { poster, resolved, pending } = useMediaPoster(url, { kind: 'video' });
+  if (poster) return <img src={poster} alt="" className="aspect-video w-full bg-bg0 object-cover" />;
+  if (!resolved || pending) return <div className="aspect-video w-full animate-pulse bg-bg2" />;
+  return (
+    <div className="grid aspect-video w-full place-items-center bg-bg0 text-ink3">
+      <Icon name="film" size={16} />
+    </div>
+  );
 }
 
 export function ChainTimeline({
@@ -53,7 +63,11 @@ export function ChainTimeline({
                 ? (zh ? '私密提示词（已隐去）' : 'Private prompt (hidden)')
                 : (shot.prompt || (zh ? `第 ${shot.shot} 段` : `Shot ${shot.shot}`))}
               onClick={() => onSelect(shot.url, shot.model)}
-              onKeyDown={(event) => { if (event.key === 'Enter') onSelect(shot.url, shot.model); }}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                onSelect(shot.url, shot.model);
+              }}
               className={cx(
                 'group relative w-[132px] shrink-0 cursor-pointer overflow-hidden rounded-lg border bg-bg2 transition-colors duration-150',
                 active ? 'border-honey' : 'border-line1 hover:border-line2',
@@ -69,27 +83,24 @@ export function ChainTimeline({
                   {zh ? '已移除' : 'Dropped'}
                 </div>
               ) : null}
-              <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-                <button
-                  type="button"
-                  title={zh ? '导出这一段' : 'Export this shot'}
-                  aria-label={zh ? '导出这一段' : 'Export this shot'}
-                  className="grid h-6 w-6 place-items-center rounded border border-line1 bg-bg0/85 text-ink1 transition-colors hover:border-line2"
+              {/* Visible on keyboard focus too, not only under a pointer. */}
+              <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
+                <IconButton
+                  icon="download"
+                  size="xs"
+                  label={zh ? '导出这一段' : 'Export this shot'}
+                  className="border border-line1 bg-bg0/85 hover:border-line2"
                   onClick={(event) => { event.stopPropagation(); onExport(shot); }}
-                >
-                  <Icon name="download" size={11} />
-                </button>
-                <button
-                  type="button"
-                  title={shot.excluded
+                />
+                <IconButton
+                  icon={shot.excluded ? 'plus' : 'x'}
+                  size="xs"
+                  label={shot.excluded
                     ? (zh ? '放回合成片' : 'Put back in the cut')
                     : (zh ? '从合成片中移除（不删除该视频）' : 'Drop from the cut (the clip is kept)')}
-                  aria-label={shot.excluded ? 'Restore shot' : 'Drop shot'}
-                  className="grid h-6 w-6 place-items-center rounded border border-line1 bg-bg0/85 text-ink1 transition-colors hover:border-line2"
+                  className="border border-line1 bg-bg0/85 hover:border-line2"
                   onClick={(event) => { event.stopPropagation(); onToggleExcluded(shot.url); }}
-                >
-                  <Icon name={shot.excluded ? 'plus' : 'x'} size={11} />
-                </button>
+                />
               </div>
             </div>
           );
@@ -124,11 +135,13 @@ export function ChainTimeline({
             : (zh ? '把所有镜头合成为一个视频' : 'Join every shot into one video')}
           onClick={() => (combined ? onSelect(combined.url, zh ? '合成片' : 'Joined episode') : onBuild())}
           onKeyDown={(event) => {
-            if (event.key !== 'Enter') return;
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
             if (combined) onSelect(combined.url, zh ? '合成片' : 'Joined episode'); else onBuild();
           }}
           className={cx(
             'chain-combined-tile group relative w-[132px] shrink-0 cursor-pointer overflow-hidden rounded-lg bg-bg2 p-[2px]',
+            building && 'chain-combined-tile--building',
             !canBuild && 'pointer-events-none opacity-40',
             activeUrl && combined && activeUrl === combined.url && 'chain-combined-tile--active',
           )}
@@ -152,15 +165,13 @@ export function ChainTimeline({
             </div>
           </div>
           {combined ? (
-            <button
-              type="button"
-              title={zh ? '导出完整合成片' : 'Export the full cut'}
-              aria-label={zh ? '导出完整合成片' : 'Export the full cut'}
-              className="absolute right-1.5 top-1.5 grid h-6 w-6 place-items-center rounded border border-line1 bg-bg0/85 text-ink1 opacity-0 transition-opacity duration-150 hover:border-line2 group-hover:opacity-100 focus:opacity-100"
+            <IconButton
+              icon="download"
+              size="xs"
+              label={zh ? '导出完整合成片' : 'Export the full cut'}
+              className="absolute right-1.5 top-1.5 border border-line1 bg-bg0/85 opacity-0 transition-opacity duration-150 hover:border-line2 focus:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100"
               onClick={(event) => { event.stopPropagation(); onExportCombined(); }}
-            >
-              <Icon name="download" size={11} />
-            </button>
+            />
           ) : null}
         </div>
       </div>

@@ -29,27 +29,27 @@ import {
   CAMERA_TIMINGS,
   CAMERA_VIEWPOINTS,
   blankCamera,
-  cameraInstruction,
   cameraIsSet,
 } from '../../lib/h3Camera.js';
 import {
-  H3_MODE_LABELS,
   SHOT_TRANSITIONS,
   composeH3Prompt,
   h3Mode,
   newBeat,
   newDialogue,
   newShot,
+  parseShotBlocks,
   speakerIds,
   timecode,
   timelineEndSec,
+  timelineShotsFromPrompt,
 } from '../../lib/h3Shots.js';
 import { checkH3Prompt, sectionBodyIn } from '../../lib/h3PromptCheck.js';
 import { checkSummaryText, describeCheckFinding } from './promptCheckText.js';
 import { Modal } from '../../ui/Modal.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import {
-  Button, Field, NativeSelect, SectionLabel, TextArea, TextInput, cx,
+  Button, CollapsibleSection, Field, NativeSelect, SectionLabel, TextArea, TextInput, cx,
 } from '../../ui/kit.jsx';
 import { ChipButton } from '../../ui/Menu.jsx';
 import { zh } from './videoLogic.js';
@@ -70,6 +70,16 @@ export function blankTimeline() {
 const num = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+};
+
+// H3's own names for its shapes (Ref2VA, FL2VA, I2VA, L2VA, T2VA) are jargon in
+// a footer; say what is attached instead.
+const MODE_TEXT = {
+  reference: () => (zh() ? '参考' : 'Reference'),
+  flf: () => (zh() ? '首尾帧' : 'First + last frame'),
+  first: () => (zh() ? '首帧' : 'First frame'),
+  last: () => (zh() ? '尾帧' : 'Last frame'),
+  text: () => (zh() ? '文本' : 'Text'),
 };
 
 const options = (list) => list.map(([value, label]) => (
@@ -379,21 +389,24 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
             <TextArea rows={2} value={shot.action} onChange={(e) => set({ action: e.target.value })} />
           </Field>
 
-          <div>
-            <div className="mb-1 flex items-center gap-2">
-              <SectionLabel>{zh() ? '摄影机' : 'Camera'}</SectionLabel>
-              {cameraSet ? (
-                <button
-                  type="button"
-                  onClick={() => set({ camera: blankCamera() })}
-                  className="ml-auto text-[10px] text-ink3 transition-colors hover:text-ink1"
-                >
-                  {zh() ? '清除' : 'Clear'}
-                </button>
-              ) : null}
-            </div>
+          {/* Thirteen selects, folded: open when something is set, else one
+              line — every open shot used to unroll all of them. */}
+          <CollapsibleSection
+            title={zh() ? '摄影机' : 'Camera'}
+            hint={cameraSet ? (zh() ? '已设置' : 'set') : ''}
+            defaultOpen={cameraSet}
+          >
+            {cameraSet ? (
+              <button
+                type="button"
+                onClick={() => set({ camera: blankCamera() })}
+                className="-mt-1 self-end text-[10px] text-ink3 transition-colors hover:text-ink1"
+              >
+                {zh() ? '清除摄影机设置' : 'Clear camera'}
+              </button>
+            ) : null}
             <CameraFields camera={shot.camera} onChange={(camera) => set({ camera })} />
-          </div>
+          </CollapsibleSection>
 
           <div>
             <div className="mb-1 flex items-center gap-2">
@@ -504,19 +517,33 @@ export function ShotBuilderDialog({
   const audios = references.audios || [];
   const mode = h3Mode({ firstFrame, lastFrame, images, videos, audios });
 
-  // Opening the builder onto a prompt that already has sound: the fields start
-  // from what is there, so applying never quietly discards a soundscape
-  // somebody wrote by hand.
+  // Opening the builder onto a prompt that already has shots and sound: the
+  // timeline starts from what is there. It used to open on one blank shot over
+  // a starter's three written ones and offer to replace them with it — the
+  // chip read 0 while the prompt held three. Only a BLANK timeline is seeded;
+  // a timeline someone already built is theirs, and the footer warns instead.
   const [seeded, setSeeded] = useState(false);
+  const [seededShots, setSeededShots] = useState(0);
+  const promptShotCount = useMemo(() => (open ? parseShotBlocks(prompt).length : 0), [open, prompt]);
   useEffect(() => {
-    if (!open) { setSeeded(false); return; }
+    if (!open) { setSeeded(false); setSeededShots(0); return; }
     if (seeded) return;
     setSeeded(true);
     const soundscape = sectionBodyIn(prompt, 'overall_soundscape');
     const music = sectionBodyIn(prompt, 'non_diegetic_music');
-    if (!timeline.soundscape && soundscape) onTimelineChange({ ...timeline, soundscape, music: timeline.music || music || '' });
-    else if (!timeline.music && music) onTimelineChange({ ...timeline, music });
+    const next = { ...timeline };
+    let changed = false;
+    if (!timeline.soundscape && soundscape) { next.soundscape = soundscape; next.music = timeline.music || music || ''; changed = true; }
+    else if (!timeline.music && music) { next.music = music; changed = true; }
+    if (timeline.shots.every(shotIsBlank)) {
+      const shots = timelineShotsFromPrompt(prompt);
+      if (shots.length) { next.shots = shots; setSeededShots(shots.length); changed = true; }
+    }
+    if (changed) onTimelineChange(next);
   }, [open, seeded, prompt, timeline, onTimelineChange]);
+  // The prompt's own shots will be REPLACED by what is written here — said in
+  // the footer when they are not the ones this timeline came from.
+  const replaces = promptShotCount > 0 && !seededShots;
 
   const set = (patch) => onTimelineChange({ ...timeline, ...patch });
   const setShot = (id, next) => set({ shots: timeline.shots.map((shot) => (shot.id === id ? next : shot)) });
@@ -550,11 +577,22 @@ export function ShotBuilderDialog({
       open={open}
       onClose={onClose}
       size="xl"
-      title={zh() ? '分镜' : 'Shot Builder'}
+      title={zh() ? '分镜' : 'Shot builder'}
       footer={(
         <>
-          <span className="mr-auto text-[11px] text-ink3">
-            {zh() ? `${H3_MODE_LABELS[mode]} · ${timeline.shots.length} 镜 · ${composed.length.toLocaleString()} 字符` : `${H3_MODE_LABELS[mode]} · ${timeline.shots.length} shot${timeline.shots.length === 1 ? '' : 's'} · ${composed.length.toLocaleString()} chars`}
+          <span className="mr-auto flex min-w-0 flex-col text-[11px] text-ink3">
+            <span>
+              {zh() ? `${MODE_TEXT[mode]()} · ${timeline.shots.length} 镜 · ${composed.length.toLocaleString()} 字符` : `${MODE_TEXT[mode]()} · ${timeline.shots.length} shot${timeline.shots.length === 1 ? '' : 's'} · ${composed.length.toLocaleString()} chars`}
+            </span>
+            {seededShots ? (
+              <span className="text-honey">
+                {zh() ? `已从提示词中已有的 ${seededShots} 镜读入` : `Seeded from the ${seededShots} shot${seededShots === 1 ? '' : 's'} already in the prompt`}
+              </span>
+            ) : replaces ? (
+              <span className="text-honey">
+                {zh() ? `提示词里已有 ${promptShotCount} 镜——写入会替换它们` : `This prompt already has ${promptShotCount} shot${promptShotCount === 1 ? '' : 's'} — writing replaces them`}
+              </span>
+            ) : null}
           </span>
           <Button variant="ghost" onClick={onClose}>{zh() ? '取消' : 'Cancel'}</Button>
           <Button
@@ -678,21 +716,31 @@ export function ShotBuilderDialog({
   );
 }
 
-/** The chip that opens the builder, showing what the timeline already holds. */
-export function ShotBuilderChip({ timeline, onOpen }) {
+/**
+ * The chip that opens the builder, showing what the timeline already holds —
+ * or, while the builder holds nothing, how many shots the PROMPT already has
+ * (a loaded starter's three read as 0 before).
+ */
+export function ShotBuilderChip({ timeline, prompt = '', onOpen }) {
   const shots = timeline?.shots || [];
   const written = shots.filter((shot) => !shotIsBlank(shot)).length;
+  const inPrompt = written ? 0 : parseShotBlocks(prompt).length;
+  const count = written || inPrompt;
   return (
     <ChipButton
       icon="clapper"
       label={zh() ? '分镜' : 'Shots'}
-      value={written ? String(written) : ''}
-      active={written > 0}
+      value={count ? String(count) : ''}
+      active={count > 0}
       chevron={false}
       onClick={onOpen}
-      title={zh()
-        ? '在一次生成里排好多个镜头：切点、运镜、定时动作和台词，按 H3 的写法生成'
-        : "Lay out several shots inside one generation — cuts, camera, timed beats and dialogue, written in H3's own grammar"}
+      title={inPrompt
+        ? (zh()
+          ? `提示词里已有 ${inPrompt} 镜——打开分镜会从它们开始`
+          : `The prompt already has ${inPrompt} shot${inPrompt === 1 ? '' : 's'} — the builder opens on them`)
+        : (zh()
+          ? '在一次生成里排好多个镜头：切点、运镜、定时动作和台词，按 H3 的写法生成'
+          : "Lay out several shots inside one generation — cuts, camera, timed beats and dialogue, written in H3's own grammar")}
     />
   );
 }

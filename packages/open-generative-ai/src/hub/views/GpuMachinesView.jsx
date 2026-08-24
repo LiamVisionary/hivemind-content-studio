@@ -3,11 +3,24 @@
 // the hosted customer billing gateway). Tier presets, prices, and expected
 // speeds come from the server; this view only renders and confirms.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Card, EmptyState, IconButton, Pill, SectionLabel, Segmented, Spinner } from '../../ui/kit.jsx';
-import { api } from '../hubData.js';
+import { getLang } from '../../lib/i18n.js';
+import { Icon } from '../../ui/icons.jsx';
+import { ConfirmModal } from '../../ui/Modal.jsx';
+import {
+  Button, Card, CollapsibleSection, EmptyState, Field, IconButton, NativeSelect, Pill, SectionLabel, Segmented,
+  Spinner, TextInput,
+} from '../../ui/kit.jsx';
+import { api, humanize } from '../hubData.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, requestRentedMode } from '../../lib/rentedMachines.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
+
+const zh = () => getLang() === 'zh-CN';
+
+// Money and a NaN must never meet: an unmanaged/external row may carry no
+// usd_per_hour at all, and "$NaN/hr" (or a thrown toFixed) was the result.
+const usd = (value, digits = 3) => (Number.isFinite(Number(value)) && value !== null && value !== '' ? `$${Number(value).toFixed(digits)}` : '—');
+const hours = (value) => (Number.isFinite(Number(value)) && value !== null ? `${Number(value).toFixed(1)}h` : '—');
 
 // 6s while the view is open: provisioning machines report via their beacon,
 // and the whole poll (list + beacon probes) is cheap.
@@ -118,9 +131,13 @@ function PerformanceSlider({ classes, index, onChange, disabled }) {
             type="button"
             disabled={disabled}
             onClick={() => onChange(i)}
-            className={`absolute flex flex-col whitespace-nowrap text-[10px] leading-tight ${
+            className={`absolute flex-col whitespace-nowrap text-[10px] leading-tight ${
               i === 0 ? 'items-start' : i === max ? 'items-end' : 'items-center'
-            } ${i === index ? 'text-ink1 font-medium' : 'text-ink3 hover:text-ink2'}`}
+            } ${i === index ? 'text-ink1 font-medium' : 'text-ink3 hover:text-ink2'} ${
+              // Five stops do not fit a half-width column: below md only the
+              // ends (and the selected rung) carry a label.
+              i === 0 || i === max || i === index ? 'flex' : 'hidden md:flex'
+            }`}
             style={{
               left: `${max ? (i / max) * 100 : 100}%`,
               transform: i === 0 ? 'none' : i === max ? 'translateX(-100%)' : 'translateX(-50%)',
@@ -149,6 +166,9 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
   const [tier, setTier] = useState(plans[0]?.tier);
   const [gpuClass, setGpuClass] = useState('');
   const [count, setCount] = useState(1);
+  // The rent request waiting for its confirmation — real money, so one click
+  // opens the confirm and a second one spends.
+  const [pendingRent, setPendingRent] = useState(null);
 
   const plan = plans.find((p) => p.tier === tier) || plans[0];
   // Price by default, so the cheapest machine is always the first thing the
@@ -234,14 +254,14 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
         <div className="flex flex-col gap-1.5 rounded-md border border-line1 bg-bg1 p-3">
           <div className="flex flex-wrap items-center gap-2">
             <b className="text-[15px] text-ink1">{rung?.label}</b>
-            <span className="text-[12px] text-ink3">{rung?.vram_gb}GB</span>
-            {rung?.cheapest && <Pill tone="ok">cheapest</Pill>}
-            {rung?.fastest && <Pill tone="ok">fastest</Pill>}
-            {rung?.gpu_class === bestValue && <Pill tone="ok">best value</Pill>}
-            {rung?.estimate_basis === 'measured' && <Pill tone="honey">measured here</Pill>}
+            {rung?.vram_gb ? <span className="text-[12px] text-ink3">{rung.vram_gb}GB</span> : null}
+            {rung?.cheapest && <Pill tone="ok">Cheapest</Pill>}
+            {rung?.fastest && <Pill tone="ok">Fastest</Pill>}
+            {rung?.gpu_class === bestValue && <Pill tone="ok">Best value</Pill>}
+            {rung?.estimate_basis === 'measured' && <Pill tone="honey">Measured here</Pill>}
             {rung?.warm && (
               <Pill tone="ok" title={`A warm volume in ${rung.warm_data_center || 'its region'} already holds the models: the box mounts it and skips the download, ready in ~${rung.warm_setup_minutes ?? 3} min.`}>
-                warm · ~{rung.warm_setup_minutes ?? 3} min
+                Warm · ~{rung.warm_setup_minutes ?? 3} min
               </Pill>
             )}
           </div>
@@ -328,7 +348,7 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
           loading={busy}
           disabled={busy || !rung?.usd_per_hour || affordable < 1}
           title="Rents the ask quoted above. If it is gone by the time the click lands, the next host is taken only within a few cents of the quote — otherwise nothing is rented and the price refreshes."
-          onClick={() => onRent({
+          onClick={() => setPendingRent({
             tier: plan.tier,
             gpu_class: rung.gpu_class,
             count: machines,
@@ -336,6 +356,7 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
             // the server tries that ask first and bounds any fallback to it.
             offer: rung.offers?.[0] || null,
             usd_per_hour: rung.usd_per_hour,
+            label: rung.label,
           })}
         >
           {busy ? 'Provisioning…' : machines > 1 ? `Rent ${machines} machines` : 'Rent machine'}
@@ -347,6 +368,30 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
           {purse?.credit_url || 'vast.ai'} or pick a cheaper rung.
         </small>
       ) : null}
+      <ConfirmModal
+        open={Boolean(pendingRent)}
+        tone="primary"
+        onClose={() => setPendingRent(null)}
+        onConfirm={() => { const request = pendingRent; setPendingRent(null); onRent(request); }}
+        title={pendingRent?.count > 1 ? `Rent ${pendingRent.count} machines?` : 'Rent this machine?'}
+        confirmLabel={pendingRent?.count > 1 ? `Rent ${pendingRent.count} machines` : 'Rent machine'}
+        body={pendingRent ? (
+          <div className="flex flex-col gap-2 text-[13px] leading-relaxed text-ink2">
+            <p>
+              <b className="text-ink1">{pendingRent.label}</b>
+              {' · '}
+              <span className="font-mono text-ink1">{usd(pendingRent.usd_per_hour)}/hr × {pendingRent.count}</span>
+              {' = '}
+              <span className="font-mono text-ink1">{usd(pendingRent.usd_per_hour * pendingRent.count)}/hr</span>
+              {' on '}{purse?.label || 'marketplace'} credit.
+            </p>
+            <p className="text-ink3">
+              Billed per second while running, from the moment the host is taken — provisioning time included.
+              Pause keeps the disk at a lower rate; Destroy stops all billing.
+            </p>
+          </div>
+        ) : null}
+      />
     </Card>
   );
 }
@@ -384,7 +429,7 @@ function ProvisionStepper({ machine }) {
   const p = machine.provision;
   const failed = machine.phase === 'error';
   return (
-    <div className={`flex flex-col gap-1.5 rounded-md border p-3 ${failed ? 'border-danger/40 bg-danger/5' : 'border-line1 bg-bg1'}`}>
+    <div className={`flex flex-col gap-1.5 rounded-md border p-3 ${failed ? 'border-danger/40 bg-danger-tint' : 'border-line1 bg-bg1'}`}>
       {failed && (
         <div className="mb-1 flex flex-col gap-0.5">
           <b className="text-[12px] text-danger">Provisioning failed — this machine cannot be used</b>
@@ -402,13 +447,13 @@ function ProvisionStepper({ machine }) {
         return (
           <div key={step.key} className="flex items-center gap-2 text-[12px]">
             {isDone ? (
-              <span className="grid h-4 w-4 place-items-center text-ok">✓</span>
+              <span className="grid h-4 w-4 place-items-center text-ok"><Icon name="check" size={12} /></span>
             ) : isActive && failed ? (
-              <span className="grid h-4 w-4 place-items-center text-danger">✕</span>
+              <span className="grid h-4 w-4 place-items-center text-danger"><Icon name="x" size={12} /></span>
             ) : isActive ? (
               <Spinner size={13} className="text-honey" />
             ) : (
-              <span className="grid h-4 w-4 place-items-center text-ink3">·</span>
+              <span className="grid h-4 w-4 place-items-center text-ink3"><span className="h-1 w-1 rounded-full bg-current" /></span>
             )}
             <span className={isActive && failed ? 'font-medium text-danger'
               : isActive ? 'text-ink1 font-medium' : isDone ? 'text-ink2' : 'text-ink3'}>
@@ -468,20 +513,18 @@ function StudioButtons({ machine, onUse, onDetach, busy, applying, leading, shar
         </Button>
       ))}
       {machine.attached && !machine.tunnel_alive && (
-        <span className="rounded bg-warn/15 px-2 py-0.5 text-[11px] text-warn">
-          tunnel down — click Use to re-attach
-        </span>
+        <Pill tone="warn" className="h-5 px-2 text-[10px]">Tunnel down — Use re-attaches</Pill>
       )}
       {machine.attached ? (
         <Button variant="neutral" size="sm" disabled={busy} onClick={() => onDetach(machine)}>
           Detach
         </Button>
       ) : (
-        <small className="text-[11px] text-ink3">first use routes this tier&apos;s models through the machine</small>
+        <small className="text-[11px] text-ink3">First use routes this tier&apos;s models through the machine.</small>
       )}
       {shared && !leading && machine.attached ? (
         <small className="text-[11px] text-ink3">
-          another machine is serving these models — Use switches them over
+          Another machine is serving these models — Use switches them over.
         </small>
       ) : null}
     </div>
@@ -502,7 +545,7 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
   const failed = machine.phase === 'error';
   const pillStatus = ready ? 'succeeded' : resumeBlocked ? 'failed' : paused ? 'waiting' : failed ? 'failed'
     : machine.phase === 'provisioning' || machine.phase === 'booting' ? 'running' : machine.status;
-  const pillLabel = ready ? 'ready' : failed ? 'failed' : resumeBlocked ? 'resume blocked' : resuming ? 'resuming' : machine.phase;
+  const pillLabel = humanize(ready ? 'ready' : failed ? 'failed' : resumeBlocked ? 'resume blocked' : resuming ? 'resuming' : machine.phase);
   return (
     <Card className="flex flex-col gap-2 p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -513,11 +556,11 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
         )}
         {leading && ready && (
           <Pill tone="ok" dot>
-            running generations
+            Running generations
           </Pill>
         )}
         <span className="font-mono text-[12px] text-ink2">
-          ${(paused ? (machine.paused_usd_per_hour ?? 0) : machine.usd_per_hour).toFixed(3)}/hr
+          {usd(paused ? (machine.paused_usd_per_hour ?? 0) : machine.usd_per_hour)}/hr
           {paused ? <span className="text-ink3"> (disk only)</span> : null}
         </span>
         {machine.seconds_per_generation && !paused ? (
@@ -527,13 +570,13 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
           </span>
         ) : null}
         {machine.uptime_hours != null && (
-          <span className="text-[12px] text-ink3">up {machine.uptime_hours.toFixed(1)}h · ≈$
-            {(machine.uptime_hours * machine.usd_per_hour).toFixed(2)} so far</span>
+          <span className="text-[12px] text-ink3">
+            Up {hours(machine.uptime_hours)}
+            {Number.isFinite(Number(machine.usd_per_hour)) ? ` · ≈${usd(machine.uptime_hours * machine.usd_per_hour, 2)} so far` : ''}
+          </span>
         )}
         {!machine.managed && (
-          <span className="rounded bg-warn/15 px-2 py-0.5 text-[11px] text-warn">
-            external (billing gateway) — managed elsewhere
-          </span>
+          <Pill tone="warn" className="h-5 px-2 text-[10px]" title="Rented through the billing gateway; managed elsewhere">External</Pill>
         )}
         <span className="ml-auto" />
         {machine.managed && (ready || paused) && (
@@ -555,9 +598,9 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
               size="sm"
               disabled={attachBusy}
               onClick={() => onPause(machine)}
-              title="Quick resume: stops the GPU (and its hourly price) but keeps the disk with every model on it, so resuming takes about a minute instead of a fresh 15–30 minute provision. While paused you pay only for the disk — and the GPU is not reserved for you."
+              title="Stops the GPU (and its hourly price) but keeps the disk with every model on it, so resuming takes about a minute instead of a fresh 15–30 minute provision. While paused you pay only for the disk — and the GPU is not reserved for you."
             >
-              Pause · Quick resume
+              Pause (keeps disk)
             </Button>
           )
         )}
@@ -572,21 +615,20 @@ function MachineRow({ machine, onDestroy, destroying, onUse, onDetach, onPause, 
         {machine.label || `id ${machine.rental_id}`}
       </small>
       {machine.managed && paused && !resumeBlocked && (
-        <small className="text-[12px] text-ink3">
-          Quick resume — the models stay on the disk{machine.disk_gb ? ` (${machine.disk_gb}GB)` : ''}, so resuming
-          takes about a minute instead of a fresh provision (measured 40 s on a PRO 6000, 2026-08-22).
-          While paused you pay for the disk only (${(machine.paused_usd_per_hour ?? 0).toFixed(3)}/hr — marketplaces
-          often bill stopped storage at a higher rate than running). <b className="text-ink2">No guarantee:</b> the
-          GPU is released to the host while paused, and if someone else rents it your resume waits on
-          &ldquo;scheduling&rdquo; until it is free again. Destroy to stop paying for the disk.
+        <small
+          className="text-[12px] text-ink3"
+          title={`The models stay on the disk${machine.disk_gb ? ` (${machine.disk_gb}GB)` : ''}, so resuming takes about a minute instead of a fresh provision (measured 40 s on a PRO 6000). Marketplaces often bill stopped storage at a higher rate than running. The GPU is released to the host while paused; if someone else rents it, your resume waits on "scheduling" until it is free again. Destroy to stop paying for the disk.`}
+        >
+          Paused — disk kept at {usd(machine.paused_usd_per_hour ?? 0)}/hr, resume takes about a minute.
+          The GPU is not reserved while paused.
         </small>
       )}
       {machine.managed && resumeBlocked && (
         <small className="text-[12px] text-warn">
           Resume was asked for {machine.resume_requested_at ? `${Math.max(1, Math.round((Date.now() / 1000 - machine.resume_requested_at) / 60))} min ago` : 'a while ago'} and
-          the host has not given the GPU back — it is most likely rented by someone else right now. Your disk and models
-          are intact and still billing at ${(machine.paused_usd_per_hour ?? 0).toFixed(3)}/hr. Keep retrying, or destroy
-          this machine and rent a fresh one (a cold provision).
+          the host has not given the GPU back — most likely someone else is renting it. Your disk and models
+          are intact and still billing at {usd(machine.paused_usd_per_hour ?? 0)}/hr. Keep retrying, or destroy
+          this machine and rent a fresh one.
         </small>
       )}
       {machine.managed && !ready && !paused && <ProvisionStepper machine={machine} />}
@@ -635,28 +677,44 @@ const warmAge = (hours) => {
   return `${(h / 24).toFixed(h < 240 ? 1 : 0)}d`;
 };
 
-function WarmVolumesCard({ plans }) {
+function WarmVolumesCard({ plans, active }) {
   const [volumes, setVolumes] = useState(null);
+  // `error` is what an action said (dismissable, never wiped by the poll);
+  // `loadError` is the poll's own and only shows while there is no data.
   const [error, setError] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [busy, setBusy] = useState(false);
   const [tier, setTier] = useState(plans?.[0]?.tier || 'minimax');
   const [dataCenter, setDataCenter] = useState('EU-RO-1');
+  // Confirmations: money (stock) and destruction (delete) each wait for a
+  // second click in the app's own modal.
+  const [confirmStock, setConfirmStock] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const hasVolumesRef = useRef(false);
   const load = useCallback(async () => {
     try {
       const body = await api('/api/gpu-rentals/warm-volumes');
+      hasVolumesRef.current = true;
       setVolumes(body.volumes || []);
-      setError('');
+      setLoadError('');
     } catch (e) {
-      setError(e.message);
+      // With data on screen a failed poll is just stale; only an empty card
+      // needs to say why it is empty.
+      if (!hasVolumesRef.current) setLoadError(e.message);
     }
   }, []);
+  // Only while this page is showing and the tab is visible: hub views never
+  // unmount, so an ungated interval here ran for the life of the tab.
   useEffect(() => {
+    if (!active) return undefined;
     load();
-    const timer = setInterval(load, 30_000);
+    const timer = setInterval(() => { if (!document.hidden) load(); }, 30_000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [load, active]);
   const stock = async () => {
+    setError('');
     setBusy(true);
+    setConfirmStock(false);
     try {
       await api('/api/gpu-rentals/warm-volumes', {
         method: 'POST',
@@ -671,43 +729,46 @@ function WarmVolumesCard({ plans }) {
     }
   };
   const remove = async (volume) => {
-    const saving = warmUsd(volume.usd_per_month);
-    if (!window.confirm(
-      `Delete the warm volume for ${volume.tier_label || volume.tier} in ${volume.data_center_id}?`
-      + `${saving ? ` This stops ${saving}/month.` : ''}`
-      + ' The models on it are gone and the next rental there downloads them again (~25 min).',
-    )) return;
+    setError('');
     setBusy(true);
     try {
       await api(`/api/gpu-rentals/warm-volumes/${encodeURIComponent(volume.tier)}`, { method: 'DELETE' });
       await load();
+      setPendingDelete(null);
     } catch (e) {
       setError(e.message);
     } finally {
       setBusy(false);
     }
   };
+  const tierLabel = (plans || []).find((p) => p.tier === tier)?.tier_label || tier;
+  const deleteSaving = pendingDelete ? warmUsd(pendingDelete.usd_per_month) : null;
   return (
     <section className="flex flex-col gap-3">
       <SectionLabel>Warm regions</SectionLabel>
       <Card className="flex flex-col gap-3 p-4">
         <small className="text-[12px] text-ink2">
           A warm region keeps a tier&rsquo;s models on a persistent volume (RunPod Secure Cloud) so a new machine
-          there mounts them and is ready in a few minutes instead of downloading ~60&ndash;100&nbsp;GB first.
-          Storage is <b>$0.07/GB per month</b> (first 1&nbsp;TB) and bills from the moment the volume is created
-          until you delete it &mdash; whether or not a machine is attached. Stocking it also rents one machine for
-          the length of the download.
+          there is ready in minutes instead of downloading 60&ndash;100&nbsp;GB first.
+          {' '}<span className="text-ink3" title="Storage is $0.07/GB per month (first 1 TB) and bills from the moment the volume is created until you delete it, whether or not a machine is attached. Stocking it also rents one machine for the length of the download.">Storage bills monthly until deleted.</span>
         </small>
-        {error && <small className="text-[12px] text-danger">{error}</small>}
+        {error && (
+          <div className="flex items-start gap-2 rounded-md bg-danger-tint px-3 py-2">
+            <small className="min-w-0 flex-1 font-mono text-[11px] text-danger">{error}</small>
+            <IconButton icon="x" size="xs" label="Dismiss" onClick={() => setError('')} />
+          </div>
+        )}
         {volumes === null ? (
-          <Spinner size={13} className="text-honey" />
+          loadError
+            ? <small className="font-mono text-[11px] text-danger">{loadError}</small>
+            : <Spinner size={13} className="text-honey" />
         ) : volumes.length === 0 ? (
           <small className="text-[12px] text-ink3">No warm regions yet.</small>
         ) : (
           <div className="flex flex-col gap-2">
             {volumes.map((v) => (
               <div key={v.key} className="flex flex-wrap items-center gap-2 text-[12px]">
-                <StatusPill status={v.state === 'stocked' ? 'succeeded' : v.state === 'error' ? 'failed' : 'running'} label={v.state} />
+                <StatusPill status={v.state === 'stocked' ? 'succeeded' : v.state === 'error' ? 'failed' : 'running'} label={humanize(v.state)} />
                 <b className="text-ink1">{v.tier_label || v.tier}</b>
                 <span className="font-mono text-ink2">{v.provider} · {v.data_center_id} · {v.size_gb}GB</span>
                 {v.usd_per_month != null && (
@@ -724,16 +785,16 @@ function WarmVolumesCard({ plans }) {
                   </span>
                 )}
                 {v.state === 'stocking' && v.stocking_rental_id && (
-                  <span className="text-ink3">stocking on {v.stocking_rental_id} — watch it under Active machines</span>
+                  <span className="text-ink3">Stocking on {v.stocking_rental_id} — watch it under Active machines</span>
                 )}
                 {v.state === 'error' && <span className="text-warn">{v.detail}</span>}
                 <span className="ml-auto" />
                 {v.state === 'error' && (
-                  <Button size="sm" variant="neutral" disabled={busy} onClick={() => { setTier(v.tier); setDataCenter(v.data_center_id); stock(); }}>
+                  <Button size="sm" variant="neutral" disabled={busy} onClick={() => { setTier(v.tier); setDataCenter(v.data_center_id); setConfirmStock(true); }}>
                     Retry stocking
                   </Button>
                 )}
-                <Button size="sm" variant="danger" disabled={busy} onClick={() => remove(v)}>Delete</Button>
+                <Button size="sm" variant="danger" disabled={busy} onClick={() => setPendingDelete(v)}>Delete</Button>
               </div>
             ))}
           </div>
@@ -744,24 +805,61 @@ function WarmVolumesCard({ plans }) {
             {' · '}{warmUsd(volumes.reduce((sum, v) => sum + (Number(v.usd_accrued) || 0), 0))} so far.
           </small>
         )}
-        <div className="flex flex-wrap items-center gap-2">
-          <select className="rounded border border-line bg-bg1 px-2 py-1 text-[12px] text-ink1" value={tier} onChange={(e) => setTier(e.target.value)}>
-            {(plans || []).map((p) => <option key={p.tier} value={p.tier}>{p.tier_label || p.tier}</option>)}
-          </select>
-          <input
-            className="w-32 rounded border border-line bg-bg1 px-2 py-1 font-mono text-[12px] text-ink1"
-            value={dataCenter}
-            onChange={(e) => setDataCenter(e.target.value)}
-            placeholder="EU-RO-1"
-            title="RunPod data center id with storage support (e.g. EU-RO-1, EUR-IS-1, CA-MTL-3, US-IL-1)"
-          />
-          <Button size="sm" variant="primary" loading={busy} disabled={busy || !dataCenter.trim()} onClick={stock}>
+        <div className="flex flex-wrap items-end gap-2">
+          <Field label="Tier" className="w-44">
+            <NativeSelect value={tier} onChange={(e) => setTier(e.target.value)}>
+              {(plans || []).map((p) => <option key={p.tier} value={p.tier}>{p.tier_label || p.tier}</option>)}
+            </NativeSelect>
+          </Field>
+          <Field label="Data center" className="w-40">
+            <TextInput
+              className="font-mono"
+              value={dataCenter}
+              onChange={(e) => setDataCenter(e.target.value)}
+              placeholder="EU-RO-1"
+              title="RunPod data center id with storage support (e.g. EU-RO-1, EUR-IS-1, CA-MTL-3, US-IL-1)"
+            />
+          </Field>
+          <Button size="sm" variant="neutral" loading={busy} disabled={busy || !dataCenter.trim()} onClick={() => setConfirmStock(true)}>
             Stock a warm region
           </Button>
         </div>
       </Card>
+      <ConfirmModal
+        open={confirmStock}
+        tone="primary"
+        onClose={() => (busy ? null : setConfirmStock(false))}
+        onConfirm={stock}
+        busy={busy}
+        title={`Stock a warm region in ${dataCenter.trim() || '…'}?`}
+        confirmLabel="Stock region"
+        body={(
+          <div className="flex flex-col gap-2 text-[13px] leading-relaxed text-ink2">
+            <p>Creates a persistent volume in <b className="text-ink1">{dataCenter.trim()}</b> and fills it with the <b className="text-ink1">{tierLabel}</b> models.</p>
+            <p className="text-ink3">
+              Storage is <span className="font-mono text-ink2">$0.07/GB per month</span> and bills from creation until you delete the volume —
+              whether or not a machine is attached. Stocking also rents one machine for the length of the download.
+            </p>
+          </div>
+        )}
+      />
+      <ConfirmModal
+        open={Boolean(pendingDelete)}
+        onClose={() => (busy ? null : setPendingDelete(null))}
+        onConfirm={() => remove(pendingDelete)}
+        busy={busy}
+        title={pendingDelete ? `Delete the warm volume in ${pendingDelete.data_center_id}?` : 'Delete this warm volume?'}
+        confirmLabel="Delete volume"
+        body={pendingDelete
+          ? `The ${pendingDelete.tier_label || pendingDelete.tier} models on it are gone and the next rental there downloads them again (~25 min).${deleteSaving ? ` This stops ${deleteSaving}/month.` : ''}`
+          : ''}
+      />
     </section>
   );
+}
+
+function rentalRequestId() {
+  try { return crypto.randomUUID(); } catch { return `rent-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`; }
 }
 
 export function GpuMachinesView({ active }) {
@@ -777,13 +875,22 @@ export function GpuMachinesView({ active }) {
   // that was already in flight when the dismissal went out would bring the
   // row back for one cycle on its way in — so the view also keeps its own set.
   const dismissedRef = useRef(new Set());
+  // Two different things used to share one `error`: what an ACTION said (a rent
+  // refused, a destroy that failed) and what the POLL said (the list could not
+  // be read at all). The poll cleared both on its next success, so an action's
+  // explanation lived ≤6 s. Now the poll owns only loadError/stale; `error` and
+  // `notice` are the user's, cleared by a dismiss or by the next action.
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [loadError, setLoadError] = useState('');
   // A failed poll that still has good data on screen — reported as a chip, not
   // as an error that wipes the view.
   const [stale, setStale] = useState('');
   const [renting, setRenting] = useState(false);
   const [prefer, setPrefer] = useState('balanced');
   const [destroyingId, setDestroyingId] = useState(null);
+  const [pendingDestroy, setPendingDestroy] = useState(null);
+  const beginAction = () => { setError(''); setNotice(''); };
   const pollRef = useRef(null);
   const hasDataRef = useRef(false);
   // Read inside the memoised refresh without making it a dependency.
@@ -819,7 +926,7 @@ export function GpuMachinesView({ active }) {
             : err;
         }
       }
-      setError('');
+      setLoadError('');
       setStale('');
     } catch (err) {
       const message = err.message || 'Failed to reach the rentals API';
@@ -829,7 +936,7 @@ export function GpuMachinesView({ active }) {
       // last good data and say quietly that it went stale; only a view with
       // NOTHING on it gets the hard error.
       if (hasDataRef.current) setStale(message);
-      else setError(message);
+      else setLoadError(message);
     }
   }, []);
 
@@ -840,7 +947,8 @@ export function GpuMachinesView({ active }) {
       return undefined;
     }
     refresh(true);
-    pollRef.current = setInterval(() => refresh(false), POLL_MS);
+    // Tab hidden = no poll; the beacon probes are cheap but not free.
+    pollRef.current = setInterval(() => { if (!document.hidden) refresh(false); }, POLL_MS);
     return () => clearInterval(pollRef.current);
   }, [active, refresh]);
 
@@ -851,6 +959,7 @@ export function GpuMachinesView({ active }) {
   }, [prefer]);
 
   const rent = async ({ tier, gpu_class: gpuClass, count, offer, usd_per_hour: quoted }) => {
+    beginAction();
     setRenting(true);
     try {
       const body = await api('/api/gpu-rentals', {
@@ -860,6 +969,9 @@ export function GpuMachinesView({ active }) {
           gpu_class: gpuClass,
           count,
           prefer,
+          // One id per click: a retry after a proxy timeout replays the same
+          // rental on the server instead of renting a second billing machine.
+          request_id: rentalRequestId(),
           // Pin the quoted ask and bound the fallbacks to its price: a rent
           // that silently landed on the next-cheapest host (+7.4% on
           // 2026-08-22) is how the card and the bill came to disagree.
@@ -867,8 +979,7 @@ export function GpuMachinesView({ active }) {
           ...(quoted ? { max_usd_per_hour: quoted } : {}),
         }),
       });
-      // Re-price first — the server drops its market snapshot on every rent,
-      // and refresh() clears the banner, so the notices below must come after.
+      // Re-price first — the server drops its market snapshot on every rent.
       await refresh(true);
       const notices = [];
       // A batch can come up short when asks evaporate mid-flight; those
@@ -881,7 +992,9 @@ export function GpuMachinesView({ active }) {
       if (quoted && landed && Math.abs(landed - quoted) >= 0.0005) {
         notices.push(`rented at $${landed.toFixed(3)}/hr, not the $${quoted.toFixed(3)}/hr quoted — that ask was taken, and the next host was within a few cents`);
       }
-      setError(notices.length ? `Heads up — ${notices.join('; ')}.` : '');
+      // Not an error — the rent went through — so it is a warn notice, not the
+      // danger card, and it stays until dismissed.
+      setNotice(notices.length ? `Heads up — ${notices.join('; ')}.` : '');
     } catch (err) {
       // A refusal means the quote was stale: re-price the card so the number
       // on the button and the message agree, then show why nothing rented.
@@ -911,6 +1024,7 @@ export function GpuMachinesView({ active }) {
   }, []);
 
   const applyAttachment = async (machine, method) => {
+    beginAction();
     setAttachBusyId(machine.rental_id);
     try {
       const body = await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}/attach`, { method });
@@ -933,6 +1047,7 @@ export function GpuMachinesView({ active }) {
     // "Use" now SELECTS: with more than one machine serving the same models,
     // attaching alone would leave the generation on whichever one already led.
     if (!machine.attached || !machine.tunnel_alive || !isRoutingLeader(machine, rentals || [])) {
+      beginAction();
       setAttachBusyId(machine.rental_id);
       try {
         const body = await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}/select`, { method: 'POST' });
@@ -959,6 +1074,7 @@ export function GpuMachinesView({ active }) {
   };
 
   const pauseMachine = async (machine) => {
+    beginAction();
     setAttachBusyId(machine.rental_id);
     try {
       await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}/pause`, { method: 'POST' });
@@ -972,6 +1088,7 @@ export function GpuMachinesView({ active }) {
   };
 
   const resumeMachine = async (machine) => {
+    beginAction();
     setAttachBusyId(machine.rental_id);
     try {
       await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}/resume`, { method: 'POST' });
@@ -983,9 +1100,10 @@ export function GpuMachinesView({ active }) {
     }
   };
 
+  // Called AFTER the ConfirmModal's Destroy; the row's button only opens it.
   const destroy = async (machine) => {
-    // eslint-disable-next-line no-alert
-    if (!window.confirm(`Destroy ${machine.label}? This is irreversible; the box and its disk are deleted.`)) return;
+    beginAction();
+    setPendingDestroy(null);
     setDestroyingId(machine.rental_id);
     try {
       const body = await api(`/api/gpu-rentals/${encodeURIComponent(machine.rental_id)}`, { method: 'DELETE' });
@@ -1011,6 +1129,7 @@ export function GpuMachinesView({ active }) {
   // One notice, or every notice. Optimistic: the row goes the moment it is
   // clicked, and only comes back if the server refused to remember it.
   const dismissFailures = async (rentalId = null) => {
+    beginAction();
     const ids = rentalId === null
       ? failures.map((failure) => String(failure.rental_id))
       : [String(rentalId)];
@@ -1030,20 +1149,36 @@ export function GpuMachinesView({ active }) {
     }
   };
 
-  const loading = rentals === null && !error;
+  const loading = rentals === null && !loadError;
+  const machineName = (machine) => machine?.label || machine?.gpu || (machine?.rental_id ? `machine ${machine.rental_id}` : 'this machine');
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker="Owner compute"
-        title="GPU Machines"
-        subtitle="Provisioned studio ComfyUI boxes on your Vast.ai account · billed by Vast per second while running"
+        kicker={zh() ? '自有算力' : 'Owner compute'}
+        title={zh() ? '机器' : 'Machines'}
+        subtitle={zh() ? '租用的 GPU · 运行时按秒计费' : 'Rented GPUs · billed per second while running'}
       />
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
-        {error && (
-          <Card className="mb-4 border-danger/40 p-3 text-[12px] text-danger">{error}</Card>
+        {loadError && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-danger/40 bg-danger-tint p-3">
+            <small className="min-w-0 flex-1 font-mono text-[12px] text-danger">{loadError}</small>
+          </div>
         )}
-        {stale && !error && (
+        {error && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-danger/40 bg-danger-tint p-3" role="alert">
+            <small className="min-w-0 flex-1 font-mono text-[12px] text-danger">{error}</small>
+            <IconButton icon="x" size="sm" label="Dismiss" className="-mr-1 -mt-1" onClick={() => setError('')} />
+          </div>
+        )}
+        {notice && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-warn/40 bg-warn/10 p-3" role="status">
+            <Pill tone="warn" className="shrink-0">Heads up</Pill>
+            <small className="min-w-0 flex-1 text-[12px] text-ink1">{notice.replace(/^Heads up — /, '')}</small>
+            <IconButton icon="x" size="sm" label="Dismiss" className="-mr-1 -mt-1" onClick={() => setNotice('')} />
+          </div>
+        )}
+        {stale && !loadError && (
           <Card className="mb-4 flex items-center gap-2 border-warn/40 p-2 text-[11px] text-warn">
             <Spinner size={12} className="text-warn" />
             Showing the last reading — the studio API did not answer the latest poll
@@ -1101,7 +1236,7 @@ export function GpuMachinesView({ active }) {
               <div className="flex items-center gap-2">
                 <SectionLabel>Active machines</SectionLabel>
                 <Spinner size={13} className="text-honey" />
-                <small className="text-[12px] text-ink3">Reading your Vast.ai account…</small>
+                <small className="text-[12px] text-ink3">Reading your marketplace accounts…</small>
               </div>
               <Card className="h-24 animate-pulse bg-bg1" />
             </section>
@@ -1133,7 +1268,7 @@ export function GpuMachinesView({ active }) {
                     <MachineRow
                       key={machine.rental_id}
                       machine={machine}
-                      onDestroy={destroy}
+                      onDestroy={setPendingDestroy}
                       destroying={destroyingId === machine.rental_id}
                       onUse={useMachine}
                       onDetach={(m) => applyAttachment(m, 'DELETE')}
@@ -1149,11 +1284,11 @@ export function GpuMachinesView({ active }) {
                   ))}
                 </div>
               ) : (
-                <EmptyState icon="cpu" title="No machines running" hint="Rent one below — boxes come up provisioned with the studio models. Pause (Quick resume) keeps the disk for about a minute's restart; Destroy stops all billing." />
+                <EmptyState icon="cpu" title="No machines running" hint="Rent one below — boxes come up provisioned with the studio models. Pause keeps the disk for a one-minute restart; Destroy stops all billing." />
               )}
             </section>
 
-            <WarmVolumesCard plans={plans} />
+            <WarmVolumesCard plans={plans} active={active} />
 
             <section className="flex flex-col gap-3">
               <SectionLabel>Rent a machine</SectionLabel>
@@ -1166,23 +1301,46 @@ export function GpuMachinesView({ active }) {
                   busy={renting}
                   onRent={rent}
                 />
-              ) : error ? (
+              ) : loadError ? (
                 <small className="text-[12px] text-ink3">
-                  Offers unavailable — {error}
+                  Offers unavailable — {loadError}
                 </small>
               ) : (
                 <Spinner size={18} className="text-ink2" />
               )}
-              <small className="text-[11px] text-ink3">
-                Fast start picks a host whose link can pull the models in ~3 minutes; Lowest price drops that
-                bar, which is cheaper per hour but bills more provisioning time. Times are for a warm box —
-                the first generation after boot pays a one-off weight load (~40s image · ~2min video).
-                Reach ComfyUI through the SSH tunnel command on the machine card.
-              </small>
+              <CollapsibleSection title="How the offers are chosen" storageKey="machines-offer-notes">
+                <small className="text-[11px] leading-relaxed text-ink3">
+                  Fast start picks a host whose link can pull the models in ~3 minutes; Lowest price drops that
+                  bar, which is cheaper per hour but bills more provisioning time. Times are for a warm box —
+                  the first generation after boot pays a one-off weight load (~40s image · ~2min video).
+                  Reach ComfyUI through the SSH tunnel command on the machine card.
+                </small>
+              </CollapsibleSection>
             </section>
           </div>
         )}
       </div>
+      <ConfirmModal
+        open={Boolean(pendingDestroy)}
+        onClose={() => setPendingDestroy(null)}
+        onConfirm={() => destroy(pendingDestroy)}
+        title={`Destroy ${machineName(pendingDestroy)}?`}
+        confirmLabel="Destroy"
+        cancelLabel="Keep it"
+        body={pendingDestroy ? (
+          <div className="flex flex-col gap-2 text-[13px] leading-relaxed text-ink2">
+            <p>
+              The box and its disk are deleted — every model on it is gone, and a new rental downloads them again.
+              This cannot be undone.
+            </p>
+            <p className="text-ink3">
+              Billing stops the moment it is destroyed
+              {Number.isFinite(Number(pendingDestroy.usd_per_hour)) ? ` (currently ${usd(pendingDestroy.usd_per_hour)}/hr)` : ''}.
+              {pendingDestroy.attached ? ' It is attached — the studios routing through it fall back to local.' : ''}
+            </p>
+          </div>
+        ) : null}
+      />
     </div>
   );
 }

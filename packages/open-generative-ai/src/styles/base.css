@@ -2,6 +2,8 @@
    Hive system v3 — global base layer (React redesign)
    ============================================================ */
 
+:root { color-scheme: dark; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -21,10 +23,11 @@ html, body {
 
 /* ---- Focus ---- */
 :focus { outline: none; }
+/* An outline (not box-shadow) so utilities like .shadow-card cannot hide the
+   ring, and no forced radius so the ring follows the element's own shape. */
 :focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--r-sm);
+  outline: 2px solid rgba(246, 178, 27, 0.7);
+  outline-offset: 2px;
 }
 
 /* ---- Scrollbars ---- */
@@ -41,6 +44,16 @@ html, body {
 
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Horizontal strips that scroll (mobile nav, chip rows): hide the bar but fade the
+   clipped edge so it is obvious there is more. */
+.hive-edge-fade::-webkit-scrollbar { display: none; }
+.hive-edge-fade {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 20px), transparent);
+}
 
 /* ---- Native control restyling ---- */
 input, textarea, select, button { font: inherit; color: inherit; }
@@ -97,6 +110,12 @@ input[type='range'].hive-range::-moz-range-thumb {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+  /* Progress indicators must keep moving or "loading" reads as "hung" — only
+     their speed is calmed. */
+  .hive-motion-keep, .hive-motion-keep::before, .hive-motion-keep::after {
+    animation-duration: 1.6s !important;
+    animation-iteration-count: infinite !important;
   }
 }
 

@@ -235,11 +235,12 @@ class LocalInferenceClient {
         return window.localAI.unloadIdeogram4();
     }
 
-    cancelGeneration() {
+    cancelGeneration(jobId) {
         if (!isLocalAIAvailable()) return;
-        // Ask both — only the running one reacts.
-        window.localAI.cancelGeneration();
-        window.localAI.wan2gp.cancelGeneration();
+        // Ask both — only the running one reacts. The hosted bridge cancels by
+        // job id (it stops that job's poll); the desktop bridge ignores the arg.
+        try { window.localAI.cancelGeneration(jobId); } catch { /* bridge without cancel */ }
+        try { window.localAI.wan2gp?.cancelGeneration?.(); } catch { /* no wan2gp */ }
     }
 
     /**

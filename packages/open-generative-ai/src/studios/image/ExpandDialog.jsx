@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { computeExpandTarget } from '../../lib/expandGeometry.js';
 import { Modal } from '../../ui/Modal.jsx';
-import { ActionButton, cx } from '../../ui/kit.jsx';
+import { ActionButton, Field, TextArea, cx } from '../../ui/kit.jsx';
 
 const ASPECTS = ['21:9', '16:9', '3:2', '4:3', '1:1', '4:5', '3:4', '9:16'];
 
@@ -122,16 +122,15 @@ export function ExpandDialog({ entry, busy, onClose, onExpand }) {
             </div>
           </div>
         ) : null}
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Scene description (guides the new border)</span>
-          <textarea
+        <Field label="Scene description" hint="Guides the new border so the extension continues the scene naturally">
+          <TextArea
             rows={2}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
+            disabled={busy}
             placeholder="Describe the scene so the extension continues it naturally"
-            className="w-full resize-none rounded-md border border-line1 bg-bg0 px-2.5 py-2 text-[13px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 focus:border-honey/50"
           />
-        </label>
+        </Field>
       </div>
     </Modal>
   );

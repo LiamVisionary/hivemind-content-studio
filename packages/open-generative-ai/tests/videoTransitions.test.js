@@ -91,12 +91,16 @@ test('changing the model always rewrites the family it is gated on', async () =>
         // the id and name. Every family-scoped control then answered for a model
         // that was no longer selected.
         for (const [name, next] of Object.entries({
-            newPrompt: logic.newPromptTransition(onH3, catalogs),
             extend: logic.extendTransition(onH3, catalogs),
         })) {
             assert.ok(!next.modelId.startsWith('hivemind-media:minimax'), `${name} left the H3 family`);
             assert.notEqual(next.modelFamily, 'minimax', `${name} must not carry the old family forward`);
         }
+        // "+ New" no longer leaves at all: H3 generates from text, so a fresh
+        // prompt stays on it — and the family stays truthful WITH it.
+        const fresh = logic.newPromptTransition(onH3, catalogs);
+        assert.equal(fresh.modelId, H3.id, '+ New keeps the H3 model');
+        assert.equal(fresh.modelFamily, 'minimax');
 
         // And selecting a local workflow sets it.
         const back = logic.selectHivemindWorkflowTransition(onH3, catalogs.hivemindI2V[0], catalogs);
@@ -147,6 +151,136 @@ test('the registry model reaches the studio whole', async () => {
         assert.equal(entry.someLaterCapability, true, 'a field added later carries through unchanged');
         assert.equal(entry.provider, 'hivemind-media-studio');
         assert.ok(entry.inputs?.prompt, 'and the catalog input shim is synthesized');
+    } finally {
+        restore();
+    }
+});
+
+// "+ New" and clearing a source clip used to land on allT2V[0] — the first CLOUD
+// model — while the Source stayed Local: the Model chip named Seedance Lite with
+// a cloud icon, the picker (filtered to local models) did not list it, and
+// Generate opened the API-key modal. Every reset now respects the source.
+test('"+ New" and clearing a clip never hop a Local session onto a cloud model', async () => {
+    const restore = stubBrowserGlobals();
+    try {
+        const logic = await loadLogic('no-cloud-hop');
+        const LTX = {
+            id: 'hivemind-media:ltx23-eros-fast', name: 'LTX 2.3 Eros', workflowId: 'ltx23-eros-fast',
+            workflowFamily: 'ltx', accepts: ['video_base64'], supportsVideoInput: true,
+            aspectRatios: ['16:9'], durations: [4, 8], defaultDuration: 4,
+        };
+        const catalogs = logic.buildCatalogs([logic.adaptHivemindToVideoEntry(H3), logic.adaptHivemindToVideoEntry(LTX)]);
+        const initial = logic.buildInitialSetup(catalogs);
+        const isLocal = (id) => logic.isLocalVideoModel(id);
+
+        // H3, Local: "+ New" keeps the model, clears every input, keeps the format.
+        const onH3 = logic.applyModelDefaults({
+            ...initial, modelId: H3.id, modelName: H3.name, modelFamily: 'minimax', imageMode: true, localMode: true,
+            prompt: 'a shot', imageUrl: '/api/x.png', referenceImageUrls: ['/api/r.png'], duration: 3,
+        }, catalogs);
+        const fresh = logic.newPromptTransition({ ...onH3, duration: 3 }, catalogs);
+        assert.equal(fresh.modelId, H3.id);
+        assert.equal(fresh.prompt, '');
+        assert.equal(fresh.imageUrl, null);
+        assert.deepEqual(fresh.referenceImageUrls, []);
+        assert.equal(fresh.duration, 3, 'the format settings survive a fresh prompt on the same model');
+        assert.equal(fresh.imageMode, true, 'local workflows keep the optional-start-frame shape');
+
+        // An LTX clip being extended, Local: clearing the clip keeps LTX.
+        const extending = logic.videoUploadedTransition(
+            { ...initial, localMode: true, modelId: H3.id, modelName: H3.name, modelFamily: 'minimax' },
+            { url: '/api/clip.mp4', name: 'clip.mp4', useHivemind: true, preferredHive: catalogs.hivemindI2V[1] },
+            catalogs,
+        );
+        assert.equal(extending.modelId, LTX.id, 'precondition: the upload moved to the LTX extension graph');
+        const cleared = logic.clearVideoUploadTransition(extending, catalogs);
+        assert.equal(cleared.videoUrl, null);
+        assert.equal(cleared.modelId, LTX.id, 'clearing the clip keeps the local model');
+        assert.equal(cleared.localMode, true);
+
+        // A video TOOL, Local (an edge the picker hides, but the state can hold
+        // it): "+ New" has to leave it, and lands on a LOCAL workflow.
+        const onTool = logic.selectV2VModelTransition({ ...initial, localMode: true }, logic.v2vModels[0], catalogs);
+        const offTool = logic.newPromptTransition(onTool, catalogs);
+        assert.ok(isLocal(offTool.modelId), `a Local session lands on a local model, got ${offTool.modelId}`);
+        assert.equal(offTool.v2vMode, false);
+
+        // Cloud stays cloud: a cloud image-to-video model falls back to a cloud
+        // text-to-video model of its own family.
+        const cloudI2V = catalogs.allI2V.find((m) => !isLocal(m.id) && m.family
+            && catalogs.allT2V.some((t) => t.family === m.family && !isLocal(t.id)));
+        const onCloudI2V = logic.applyModelDefaults(
+            logic.withSelectedModel({ ...initial, localMode: false, imageMode: true, imageUrl: '/api/x.png' }, cloudI2V), catalogs,
+        );
+        const offCloud = logic.newPromptTransition(onCloudI2V, catalogs);
+        assert.ok(!isLocal(offCloud.modelId), 'a cloud session stays on a cloud model');
+        assert.equal(offCloud.imageMode, false);
+        const landed = logic.resolveVideoModel(offCloud.modelId, catalogs);
+        assert.equal(landed.family, cloudI2V.family, 'and on the text-to-video sibling of the same family');
+
+        // A plain cloud text-to-video model simply keeps itself.
+        const cloudT2V = catalogs.allT2V.find((m) => !isLocal(m.id));
+        const onCloudT2V = logic.selectRegularModelTransition({ ...initial, localMode: false, prompt: 'x' }, cloudT2V, catalogs);
+        assert.equal(logic.newPromptTransition(onCloudT2V, catalogs).modelId, cloudT2V.id);
+    } finally {
+        restore();
+    }
+});
+
+// Settings the Advanced / Task panels hold used to reset on every reload:
+// normalizeVideoPreferences carried fields for them, currentVideoPreferences
+// never wrote most of them, and applyRestoredPreferences never read any. The
+// writer (VideoStudio.currentVideoPreferences) is pinned by text below; the
+// reader is evaluated.
+test('every Advanced / Task setting survives normalize → restore, and the chips reconcile with the prompt', async () => {
+    const restore = stubBrowserGlobals();
+    try {
+        const logic = await loadLogic('prefs-restore');
+        const fs = await import('node:fs');
+        const path = await import('node:path');
+        const studio = fs.readFileSync(path.join(__dirname, '../src/studios/VideoStudio.jsx'), 'utf8');
+        const writer = studio.match(/const currentVideoPreferences = [\s\S]*?\n  \}\);/)[0];
+        for (const key of ['spectrum', 'nagScale', 'detailerStrength', 'videoTask', 'headSwapBackend', 'headSwapFaceEnhancer', 'headSwapLoraStrength', 'cameraMotionIds', 'restylePresetId']) {
+            assert.match(writer, new RegExp(`${key}: s\\.setup\\.${key}`), `the studio persists ${key}`);
+        }
+
+        const catalogs = logic.buildCatalogs([logic.adaptHivemindToVideoEntry(H3)]);
+        const initial = logic.buildInitialSetup(catalogs);
+        const saved = logic.normalizeVideoPreferences({
+            modelId: H3.id, duration: 5, spectrum: false, nagScale: 15, detailerStrength: 0.6,
+            videoTask: 'head-swap', headSwapBackend: 'facefusion', headSwapFaceEnhancer: true, headSwapLoraStrength: 1.2,
+            cameraMotionIds: ['dolly-in', 'roll-cw', 'nope'], restylePresetId: 'anime-2d',
+        });
+        assert.deepEqual(saved.cameraMotionIds, ['dolly-in', 'roll-cw'], 'ids are normalized, unknown ones dropped');
+        assert.equal(saved.restylePresetId, 'anime-2d');
+        assert.equal(logic.normalizeVideoPreferences({ modelId: 'm', restylePresetId: 'not-a-preset' }).restylePresetId, null);
+
+        const restored = logic.applyRestoredPreferences(initial, saved, catalogs);
+        assert.equal(restored.spectrum, false);
+        assert.equal(restored.nagScale, 15);
+        assert.equal(restored.detailerStrength, 0.6);
+        assert.equal(restored.videoTask, 'head-swap');
+        assert.equal(restored.headSwapBackend, 'facefusion');
+        assert.equal(restored.headSwapFaceEnhancer, true);
+        assert.equal(restored.headSwapLoraStrength, 1.2);
+        assert.deepEqual(restored.cameraMotionIds, ['dolly-in', 'roll-cw']);
+        assert.equal(restored.restylePresetId, 'anime-2d');
+        // Defaults stay defaults (undefined = "the workflow's own"), so a save
+        // from before these fields existed changes nothing.
+        const plain = logic.applyRestoredPreferences(initial, logic.normalizeVideoPreferences({ modelId: H3.id }), catalogs);
+        assert.equal(plain.spectrum, undefined);
+        assert.equal(plain.nagScale, undefined);
+        assert.equal(plain.videoTask, undefined);
+
+        // The Style chip reads its id back out of the prompt — the phrase comes
+        // back with the prompt (encrypted), the id with the settings (plain),
+        // and the studio reconciles them at hydration.
+        const { applyRestylePrompt } = await import('../src/lib/h3RestylePresets.js');
+        const { prompt } = applyRestylePrompt('A quiet street.', null, 'anime-2d');
+        assert.equal(logic.restylePresetIdInPrompt(prompt), 'anime-2d');
+        assert.equal(logic.restylePresetIdInPrompt('A quiet street.'), null);
+        assert.match(studio, /const cameraIds = cameraMotionIdsInPrompt\(restoredPrompt\);/);
+        assert.match(studio, /const restyleId = restylePresetIdInPrompt\(restoredPrompt\);/);
     } finally {
         restore();
     }

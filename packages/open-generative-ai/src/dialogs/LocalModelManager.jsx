@@ -5,11 +5,13 @@
 // that always unsubscribe on success AND error.
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { t, tf } from '../lib/i18n.js';
+import { getLang, t, tf } from '../lib/i18n.js';
 import { isLocalAIAvailable, localAI } from '../lib/localInferenceClient.js';
 import { Icon } from '../ui/icons.jsx';
-import { Button, Pill, SectionLabel, Spinner, TextInput, cx } from '../ui/kit.jsx';
+import { Button, EmptyState, Field, Pill, ProgressBar, SectionLabel, Spinner, TextInput, cx } from '../ui/kit.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
+
+const zh = () => getLang() === 'zh-CN';
 
 function fmtGB(gb) {
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(gb * 1024).toFixed(0)} MB`;
@@ -26,12 +28,7 @@ function Tag({ children }) {
 function MiniProgress({ progress, label }) {
   return (
     <div className="mt-1.5 w-full">
-      <div className="h-1 overflow-hidden rounded-full bg-bg3">
-        <div
-          className="h-full rounded-full bg-honey transition-[width] duration-200"
-          style={{ width: `${Math.round((progress || 0) * 100)}%` }}
-        />
-      </div>
+      <ProgressBar value={Math.max(0, Math.min(1, Number(progress) || 0))} label={label} />
       <span className="mt-1 block text-[11px] text-ink3">{label}</span>
     </div>
   );
@@ -158,6 +155,9 @@ function Wan2gpConfigBar({ onChange }) {
           ? { text: `Reachable · Gradio ${r.version}`, kind: 'ok' }
           : { text: `Unreachable: ${r.error}`, kind: 'err' },
       );
+    } catch (err) {
+      // A throwing probe used to leave "Probing…" on screen for good.
+      setStatus({ text: err?.message || 'Could not probe that server', kind: 'err' });
     } finally {
       setTesting(false);
     }
@@ -177,6 +177,8 @@ function Wan2gpConfigBar({ onChange }) {
             : { text: 'Cleared', kind: 'warn' },
       );
       onChange?.();
+    } catch (err) {
+      setStatus({ text: err?.message || 'Could not save that URL', kind: 'err' });
     } finally {
       setSaving(false);
     }
@@ -202,18 +204,21 @@ function Wan2gpConfigBar({ onChange }) {
           unlock video models from this UI.
         </div>
       </div>
-      <div className="flex items-center gap-2">
-        <TextInput
-          type="text"
-          placeholder="http://127.0.0.1:7860"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          className="flex-1 font-mono text-xs"
-        />
-        <Button size="sm" onClick={test} loading={testing}>
+      <div className="flex items-end gap-2">
+        <Field label="Server URL" className="flex-1">
+          <TextInput
+            type="text"
+            placeholder="http://127.0.0.1:7860"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            className="font-mono text-xs"
+          />
+        </Field>
+        <Button onClick={test} loading={testing}>
           Test
         </Button>
-        <Button size="sm" variant="primary" onClick={save} loading={saving}>
+        {/* Neutral: the panel's one primary is Install engine. */}
+        <Button variant="neutral" onClick={save} loading={saving}>
           Save
         </Button>
       </div>
@@ -394,7 +399,7 @@ function ModelCard({ model, onStateChange }) {
           {isDownloaded ? (
             <Button variant="danger" size="sm" icon="trash" onClick={() => setConfirmOpen(true)} aria-label={`Delete ${model.name}`} />
           ) : (
-            <Button variant="primary" size="sm" icon="download" onClick={download} loading={busy}>
+            <Button variant="neutral" size="sm" icon="download" onClick={download} loading={busy}>
               {error ? t('common.retry') : busy ? t('localModels.starting') : t('localModels.download')}
             </Button>
           )}
@@ -413,9 +418,10 @@ function ModelCard({ model, onStateChange }) {
         open={confirmOpen}
         onClose={() => setConfirmOpen(false)}
         onConfirm={doDelete}
-        title={t('localModels.title')}
+        title={zh() ? '删除模型？' : 'Delete model?'}
         body={tf('localModels.deleteConfirm', model.name)}
-        confirmLabel="Delete"
+        confirmLabel={zh() ? '删除' : 'Delete'}
+        cancelLabel={zh() ? '取消' : 'Cancel'}
         busy={deleting}
       />
     </div>
@@ -492,10 +498,21 @@ export function LocalModelManager() {
               {t('localModels.loading')}
             </div>
           ) : listError ? (
-            <div className="py-4 text-center font-mono text-xs text-danger">
-              {t('localModels.errorLoading')}
-              {listError}
-            </div>
+            <EmptyState
+              icon="warning"
+              title={zh() ? '无法列出本地模型' : "Couldn't list local models"}
+              hint={<span className="font-mono text-xs text-danger">{listError}</span>}
+              action={<Button size="sm" icon="refresh" onClick={refreshModels}>{t('common.retry')}</Button>}
+              className="py-8"
+            />
+          ) : models.length === 0 ? (
+            <EmptyState
+              icon="cpu"
+              title={zh() ? '还没有可用的本地模型' : 'No local models available yet'}
+              hint={zh() ? '安装推理引擎后，这里会列出可下载的模型。' : 'Install the inference engine and the downloadable models will be listed here.'}
+              action={<Button size="sm" icon="refresh" onClick={refreshModels}>{t('common.retry')}</Button>}
+              className="py-8"
+            />
           ) : (
             models.map((model) => <ModelCard key={model.id} model={model} onStateChange={refreshModels} />)
           )}

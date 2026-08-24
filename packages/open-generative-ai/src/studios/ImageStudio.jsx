@@ -27,7 +27,7 @@ import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, se
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../lib/promptUtils.js';
-import { t, aspectRatioName } from '../lib/i18n.js';
+import { t, aspectRatioName, getLang } from '../lib/i18n.js';
 import {
   savePendingJob, removePendingJob, getPendingJobs, pendingJobsForTab,
 } from '../lib/pendingJobs.js';
@@ -39,7 +39,7 @@ import { getComposerSection, hydrateComposerState, updateComposerSection } from 
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
-import { applyReferenceRoles, referenceLabelStyleFor } from '../lib/imageReferenceRoles.js';
+import { OWNERSHIP_HEADING, applyReferenceRoles, normalizeReferenceRoles, referenceLabelStyleFor } from '../lib/imageReferenceRoles.js';
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { huntLoraIds, isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraHunt, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { localModelSupportsImageInput, localModelSupportsNegativePrompt, negativePromptNeedsGuidance } from '../lib/localImageModelFilter.js';
@@ -84,6 +84,7 @@ import { computeSmoothProgress, formatElapsed, estimateGenerationSeconds, record
 import {
   AUTO_SAMPLER_LOW_STEP_THRESHOLD, IMAGE_PREFERENCES_KEY, STYLE_PRESETS,
   applyStylePreset, imageTimingProfile, normalizeImagePreferences,
+  parseSeedInput, referenceRolesNeedRewrite, restoredReferenceLimit, startFreshPatch,
 } from './image/imagePrefs.js';
 import { LoraSection } from './image/LoraSection.jsx';
 import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
@@ -99,6 +100,8 @@ import { angleDialectForModel, angleLabel, editAnglePrompt } from '../lib/editAn
 
 // Re-export the pure normalizer — tests and other callers import it from here.
 export { normalizeImagePreferences };
+
+const zh = () => getLang() === 'zh-CN';
 
 // Cloud catalog capability flags: an API model "supports" references when it
 // has an image-to-image configuration; models only in the editing catalog
@@ -180,7 +183,12 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
 
   // Local inference state — only image-capable models surface here.
   const localImageModels = LOCAL_MODEL_CATALOG.filter((m) => m.type !== 'video');
-  const useLocalModel = Boolean(persistedImagePreferences?.useLocalModel && isLocalAIAvailable());
+  // No saved preference yet: a hosted studio with local models boots on the
+  // Local source (same default as the Video studio) instead of opening the cloud
+  // key modal on the first Generate. A saved choice always wins.
+  const useLocalModel = persistedImagePreferences
+    ? Boolean(persistedImagePreferences.useLocalModel && isLocalAIAvailable())
+    : Boolean(isHivemindStudioEnabled() && isLocalAIAvailable());
   const selectedLocalModel = persistedImagePreferences?.localModelId || localImageModels[0]?.id || null;
   const bootLocalModel = localImageModels.find((m) => m.id === selectedLocalModel) || getLocalModelById(selectedLocalModel);
   const localRuntimeMode = persistedImagePreferences?.localRuntimeMode || bootLocalModel?.defaultRuntimeMode || 'one-off';
@@ -206,6 +214,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // it travels with a saved prompt — a second copy in preferences could only
     // ever disagree with it.
     referenceRoles: [],
+    // UGC deal counters (which cast / room was dealt last) — session-only.
+    ugcVariantIndex: null,
+    ugcRoomIndex: null,
     localImageModels,
     useLocalModel,
     // Rented source mode: local mechanically (lane rules route by model
@@ -286,6 +297,12 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
       ? (bootLocalModel?.maxReferenceImages || 1)
       : (apiModelSupportsImage(selectedModel) ? getMaxImagesForI2IModel(selectedModel) : 1),
     generating: false,
+    // The run in flight: { jobId, cancelled, unsub }. Cancel flips `cancelled`
+    // and whatever the bridge still resolves afterwards is ignored — no history
+    // entry, no viewer, no chime for a run the user gave up on.
+    activeGeneration: null,
+    // Last failure, kept on the canvas (copyable) until dismissed or the next run.
+    generateError: '',
     localProgress: { active: false, pct: 0, label: '' },
     // Smooth, time-based ETA bar. Image generation exposes no real per-step
     // progress on any path, so the bar is driven by elapsed / expected (from the
@@ -337,9 +354,7 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     enhanceBase: '',
     enhanceTags: new Set(),
     enhanceCopied: false,
-    warmLabel: 'Warm model',
     warmBusy: false,
-    unloadLabel: 'Unload',
     unloadBusy: false,
     persistTimer: null,
   };
@@ -865,7 +880,19 @@ export function ImageStudio({
     if (tabActiveRef.current) updateComposerSection('image', patch);
   };
 
+  // The reference-ownership block in the prompt names pictures BY POSITION, so
+  // it is only true for the count it was written for. Re-written (or stripped)
+  // whenever the count changes; a prompt that never carried one is left alone.
+  const syncRolesToReferenceCount = () => {
+    if (!referenceRolesNeedRewrite(s.prompt, s.referenceRoles, OWNERSHIP_HEADING)) return;
+    applyRoles(normalizeReferenceRoles(s.referenceRoles, s.uploadedImageUrls.length));
+  };
+
   // onChange add/update path — mirrors the old picker onSelect side effects.
+  // Attaching never touches the aspect ratio: the user's pick stands, and an
+  // edit workflow that takes its aspect from the reference hides the picker
+  // (referenceDrivenEdit) rather than overwriting the choice. It also never
+  // reloads the LoRA catalog — the model did not change, so the list is the same.
   const handleReferencesSelected = (urls) => {
     s.uploadedImageUrls = urls.slice();
     s.imageMode = true;
@@ -876,13 +903,10 @@ export function ImageStudio({
     }
     if (s.useLocalModel) {
       const localModel = ensureCompatibleLocalModel();
-      if (localModel) {
-        s.selectedAr = localModel.aspectRatios?.[0] || s.selectedAr;
-        s.maxImages = localModel.maxReferenceImages || 1;
-      }
+      if (localModel) s.maxImages = localModel.maxReferenceImages || 1;
       updatePromptHelperVisibility();
-      void loadLorasForCurrentModel();
     }
+    syncRolesToReferenceCount();
     persistImagePreferences();
     updateComposerDraft({ references: s.uploadedImageUrls.slice() });
     bump();
@@ -896,11 +920,11 @@ export function ImageStudio({
       refreshModelConfigControls();
     }
     if (s.useLocalModel) {
-      const localModel = ensureCompatibleLocalModel();
-      if (localModel) s.selectedAr = localModel.aspectRatios?.[0] || s.selectedAr;
+      ensureCompatibleLocalModel();
       updatePromptHelperVisibility();
-      void loadLorasForCurrentModel();
     }
+    // No pictures, no roles: the block comes out of the prompt.
+    syncRolesToReferenceCount();
     persistImagePreferences();
     updateComposerDraft({ references: [] });
     bump();
@@ -1032,6 +1056,21 @@ export function ImageStudio({
     customWidth: s.customWidth,
     customHeight: s.customHeight,
     referenceStrength: s.referenceStrength,
+    // Local sampling choices and the short-side resolution — without them a
+    // restored run came back on Auto sampler at the workflow default.
+    sampler: s.sampler,
+    scheduler: s.scheduler,
+    baseSize: s.baseSize,
+    // Couple mode, whole: a couple generation must not restore as a plain one.
+    // The character text is session-only everywhere else, but this context is
+    // sealed to the owner vault — the one place it is allowed to be written.
+    coupleMode: s.coupleMode,
+    coupleDirection: s.coupleDirection,
+    coupleSplit: s.coupleSplit,
+    couplePair: s.couplePair,
+    coupleShared: s.coupleShared,
+    coupleA: s.coupleA,
+    coupleB: s.coupleB,
     characterSheetMode: s.characterSheetMode,
     characterSheetPreset: s.characterSheetPreset,
     // The boxes, not just the sentences they produced — restoring a generation
@@ -1073,14 +1112,35 @@ export function ImageStudio({
     s.customWidth = context.customWidth ?? s.customWidth;
     s.customHeight = context.customHeight ?? s.customHeight;
     s.referenceStrength = context.referenceStrength ?? s.referenceStrength;
+    // `??` on purpose: a context captured before these fields existed leaves the
+    // current values alone; a new one restores them exactly (false included).
+    s.sampler = context.sampler ?? s.sampler;
+    s.scheduler = context.scheduler ?? s.scheduler;
+    s.baseSize = context.baseSize ?? s.baseSize;
+    s.coupleMode = context.coupleMode ?? s.coupleMode;
+    s.coupleDirection = context.coupleDirection === 'vertical' ? 'vertical'
+      : context.coupleDirection === 'horizontal' ? 'horizontal' : s.coupleDirection;
+    s.coupleSplit = context.coupleSplit ?? s.coupleSplit;
+    s.couplePair = ['girls', 'mixed', 'boys'].includes(context.couplePair) ? context.couplePair : s.couplePair;
+    s.coupleShared = context.coupleShared ?? s.coupleShared;
+    s.coupleA = context.coupleA ?? s.coupleA;
+    s.coupleB = context.coupleB ?? s.coupleB;
     s.characterSheetMode = Boolean(context.characterSheetMode);
     s.characterSheetPreset = ['turnaround', 'standard', 'full'].includes(context.characterSheetPreset)
       ? context.characterSheetPreset : s.characterSheetPreset;
 
     // Reference images — restored silently (no upload side effects re-run).
-    const maxRefs = s.imageMode ? getMaxImagesForI2IModel(s.selectedModel) : 1;
-    s.maxImages = maxRefs;
+    // The slot count comes from the model that RAN it: a local Klein run keeps
+    // its four references even though the cloud model selection allows one.
     const refs = Array.isArray(context.referenceImages) ? context.referenceImages.filter(Boolean) : [];
+    const maxRefs = restoredReferenceLimit({
+      imageMode: s.imageMode,
+      useLocalModel: s.useLocalModel,
+      localModel: s.useLocalModel ? localModelById(s.selectedLocalModel) : null,
+      cloudLimit: s.useLocalModel ? 1 : getMaxImagesForI2IModel(s.selectedModel),
+      referenceCount: refs.length,
+    });
+    s.maxImages = maxRefs;
     s.uploadedImageUrls = refs.slice(0, Math.max(maxRefs, 1));
     // Image mode is only real when references actually restored — a bare flag
     // with an empty picker is the ghost state this guards against.
@@ -1242,6 +1302,9 @@ export function ImageStudio({
         sourceUrl: entry.url,
       });
       s.expandEntry = null;
+      // Bring the result forward: it lands in the gallery behind the open viewer
+      // otherwise, and the toast is the only sign anything happened.
+      viewImage(result.url);
       toast.success('Expanded image added to the gallery.', { id: loadingId });
     } catch (error) {
       toast.error(error?.message || 'Expand failed', { id: loadingId });
@@ -1305,6 +1368,7 @@ export function ImageStudio({
         sourceUrl: entry.url,
       });
       s.inpaintEntry = null;
+      viewImage(result.url);
       toast.success('Edited image added to the gallery.', { id: loadingId });
     } catch (error) {
       toast.error(error?.message || 'Edit failed', { id: loadingId });
@@ -1338,6 +1402,7 @@ export function ImageStudio({
     s.angleStop = false;
     bump();
     let completed = 0;
+    let lastUrl = null;
     try {
       const dataUrl = await entryToDataUrl(entry.url);
       const dialect = angleDialectForModel(model);
@@ -1365,8 +1430,10 @@ export function ImageStudio({
           sourceUrl: entry.url,
         });
         completed += 1;
+        lastUrl = result.url;
       }
       s.angleEntry = null;
+      if (lastUrl) viewImage(lastUrl);
       toast.success(s.angleStop && completed < angles.length
         ? `Stopped after ${completed} of ${angles.length} viewpoints.`
         : `${completed} viewpoint${completed === 1 ? '' : 's'} added to the gallery.`);
@@ -1421,6 +1488,7 @@ export function ImageStudio({
         dataUrl = await entryToDataUrl(result.url);
       }
       s.sequenceEntry = null;
+      if (completed > 0 && sourceUrl !== entry.url) viewImage(sourceUrl);
       toast.success(s.sequenceStop && completed < prompts.length
         ? `Stopped after step ${completed} of ${prompts.length}.`
         : `Sequence finished — ${completed} steps in the gallery.`);
@@ -1444,28 +1512,27 @@ export function ImageStudio({
   const downloadImage = downloadMedia;
 
   const newPrompt = () => {
-    // Start fresh — clears prompt, refs and the viewed setup, keeps saved tuning.
-    s.viewerUrl = null;
+    // Start fresh — a blank canvas: prompt, references (and their roles), region
+    // boxes, couple text, the enhancer and the viewed setup all go. The source,
+    // the model, the aspect and the saved tuning stay: starting over is not a
+    // reason to switch workflows, and on the Local source the cloud model is
+    // not even on screen.
     s.contextStore.clearViewed();
-    s.lastSubmittedContext = null;
-    s.prompt = '';
-    s.uploadedImageUrls = [];
-    s.maxImages = 1;
-    s.imageMode = false;
-    s.selectedModel = t2iModels[0].id;
-    s.selectedModelName = t2iModels[0].name;
-    s.selectedAr = getAspectRatiosForModel(s.selectedModel)[0];
-    const resetResolutions = getResolutionsForModel(s.selectedModel);
-    s.selectedResolution = resetResolutions[0] || '';
-    if (!s.useLocalModel) applyStoredModelSettings(`api:${s.selectedModel}`);
-    if (s.useLocalModel) {
+    closePromptHelper();
+    Object.assign(s, startFreshPatch());
+    if (!s.useLocalModel) {
+      // The selected cloud model stays; with no references its text-to-image
+      // configuration is the active one again (aspect list, slot count).
+      refreshModelConfigControls();
+    } else {
       const localModel = ensureCompatibleLocalModel();
-      if (localModel) {
-        s.selectedAr = localModel.aspectRatios?.[0] || s.selectedAr;
-        // "Start fresh" clears the canvas, not the model's saved tuning.
-        applyStoredModelSettings(`local:${localModel.id}`, localModel);
-      }
+      s.maxImages = localModel?.maxReferenceImages || 1;
     }
+    // Through the draft writers, so the encrypted composer forgets them too —
+    // a bare `s.prompt = ''` left the old prompt and references in the draft,
+    // and the next reload brought them straight back.
+    setPromptValue('');
+    updateComposerDraft({ references: [] });
     schedulePersist();
     bump();
     promptRef.current?.focus();
@@ -1542,11 +1609,36 @@ export function ImageStudio({
 
   /* ---------------- generation ---------------- */
 
-  const cancelLocalGeneration = () => {
-    localAI.cancelGeneration();
+  // Cancel the run in flight. The flag is what makes it honest: the bridge's
+  // promise may still settle later (the hosted bridge stops polling at once; an
+  // Electron/wan2gp runtime gets a best-effort interrupt and may finish anyway)
+  // and the run's continuation checks the flag before it touches history, the
+  // viewer or the chime. The timer and the progress listener are torn down here
+  // rather than "when the promise comes back" — which used to be minutes later.
+  const cancelGeneration = () => {
+    const run = s.activeGeneration;
+    if (run) {
+      run.cancelled = true;
+      try { run.abort?.abort(); } catch { /* already settled */ }
+      try {
+        // Hosted bridge: stop polling THIS job (a sibling tab's run keeps going).
+        // Other runtimes: the global best-effort interrupt they expose.
+        if (run.jobId && window.localAI?.isHosted && typeof window.localAI.cancelGeneration === 'function') {
+          void window.localAI.cancelGeneration(run.jobId);
+        } else if (s.useLocalModel) {
+          localAI.cancelGeneration();
+        }
+      } catch { /* not all runtimes support it */ }
+      if (typeof run.unsub === 'function') { try { run.unsub(); } catch { /* already gone */ } run.unsub = null; }
+      if (run.jobId) removePendingJob(run.jobId);
+    }
+    s.activeGeneration = null;
     s.localProgress = { active: false, pct: 0, label: '' };
+    finishImageProgress(false);
     s.generating = false;
+    s.generateError = '';
     bump();
+    toast(zh() ? '已取消生成。' : 'Generation cancelled.');
   };
 
   const generateNow = async () => {
@@ -1633,11 +1725,15 @@ export function ImageStudio({
       }
 
       s.generating = true;
+      s.generateError = '';
       s.localProgress = { active: true, pct: 0, label: t('common.generating') };
+      const run = { jobId: null, cancelled: false, unsub: null };
+      s.activeGeneration = run;
       startImageProgress();
       bump();
 
-      const unsub = localAI.onProgress(({ progress, status, message }) => {
+      run.unsub = localAI.onProgress(({ progress, status, message }) => {
+        if (run.cancelled) return;
         const pct = Math.round((progress ?? 0) * 100);
         const label = message || (status === 'starting' ? 'Starting...' : `${pct}%`);
         s.localProgress = { active: true, pct, label };
@@ -1645,6 +1741,21 @@ export function ImageStudio({
         s.progressReal = Math.min(1, Math.max(0, progress ?? 0));
         bump();
       });
+      const unsub = () => { if (typeof run.unsub === 'function') run.unsub(); run.unsub = null; };
+      const historyMeta = { model: `local:${s.selectedLocalModel}`, aspect_ratio: s.selectedAr };
+      // The hosted bridge hands the gateway job id back as soon as it is
+      // queued: a reload mid-render then finds the run again (pending job, same
+      // registry as the cloud path) and Cancel can stop this one poll by id.
+      // Only the hosted bridge takes a callback — an Electron runtime sends the
+      // params over IPC, where a function cannot travel.
+      const onJobId = window.localAI?.isHosted ? (jobId) => {
+        if (run.cancelled || !jobId) return;
+        run.jobId = jobId;
+        savePendingJob({
+          requestId: jobId, studioType: 'image', kind: 'hosted-local', historyMeta, tabId: tabIdRef.current,
+          submittedAt: Date.now(),
+        });
+      } : null;
 
       // Batch Count was the second dead control: rendered, persisted, never
       // sent. The gateway runs one image per request, so a batch is N
@@ -1674,11 +1785,13 @@ export function ImageStudio({
         }
         let lastUrl = null;
         for (let shot = 0; shot < batchTotal; shot += 1) {
+          if (run.cancelled) break;
           if (batchTotal > 1) {
             s.localProgress = { active: true, pct: 0, label: `Shot ${shot + 1} of ${batchTotal}` };
             bump();
           }
           const res = await localAI.generate({
+            ...(onJobId ? { onJobId } : {}),
             model: s.selectedLocalModel,
             studio_lane: studioLane,
             ...runOn(),
@@ -1713,6 +1826,10 @@ export function ImageStudio({
             ...referenceInput,
             ...(extraReferences.length ? { images_base64: extraReferences } : {}),
           });
+          // Cancelled while this shot was rendering: the result is not ours any
+          // more — no history entry, no viewer, no chime.
+          if (run.cancelled) break;
+          if (run.jobId) { removePendingJob(run.jobId); run.jobId = null; }
           if (!res?.url) throw new Error('No output returned from local generation');
           if (res.mediaType === 'video') {
             throw new Error('This model produces video — use the Video studio instead.');
@@ -1728,19 +1845,30 @@ export function ImageStudio({
           }, s.lastSubmittedContext);
           lastUrl = res.url;
         }
+        if (run.cancelled) return;
         unsub();
         s.localProgress = { active: false, pct: 0, label: '' };
         finishImageProgress(true);
-        viewImage(lastUrl);
+        if (lastUrl) viewImage(lastUrl);
       } catch (e) {
+        // A cancelled run already reset everything in cancelGeneration; a
+        // rejection that arrives afterwards (the bridge stopping its poll, or a
+        // runtime's interrupt) is the expected ending, not an error.
+        if (run.cancelled || e?.cancelled) return;
         unsub();
         s.localProgress = { active: false, pct: 0, label: '' };
         finishImageProgress(false);
-        console.error('[Local] generation error:', e);
-        console.error('[Local] full error:', e.message);
-        toast.error(e.message);
+        // Message only — the error object carries the request (prompt included),
+        // which has no business in the console.
+        console.warn('[ImageStudio] local generation failed:', e?.message || e);
+        s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
+        toast.error(s.generateError);
       } finally {
-        s.generating = false;
+        if (run.jobId) removePendingJob(run.jobId);
+        if (s.activeGeneration === run) {
+          s.activeGeneration = null;
+          s.generating = false;
+        }
         bump();
       }
       return;
@@ -1768,6 +1896,11 @@ export function ImageStudio({
     }
 
     s.generating = true;
+    s.generateError = '';
+    // The muapi client polls with this signal, so Cancel stops the provider poll
+    // at once (and frees the serial queue) instead of just ignoring a late result.
+    const run = { jobId: null, cancelled: false, unsub: null, abort: new AbortController() };
+    s.activeGeneration = run;
     startImageProgress();
     bump();
 
@@ -1777,17 +1910,23 @@ export function ImageStudio({
     try {
       let res;
       const qualityLabel = s.selectedResolution;
+      // An explicit seed rides along on both cloud paths (the lib drops -1).
+      const seed = (typeof s.seed === 'number' && s.seed >= 0) ? s.seed : -1;
       if (sendingRefs) {
         // Approved above: decrypt anything held locally and upload it so the provider
         // has a URL it can fetch. Already-public references pass straight through.
         const cloudRefs = await resolveCloudReferences(s.uploadedImageUrls, { cache: s.cloudRefUploads });
+        if (run.cancelled) return;
         const genParams = {
           model: s.selectedModel,
           images_list: cloudRefs,
           image_url: cloudRefs[0], // backward compat for single-image models
           aspect_ratio: s.selectedAr,
+          seed,
+          signal: run.abort.signal,
           onRequestId: (rid) => {
             capturedRequestId = rid;
+            run.jobId = rid;
             // Stamped with the tab that started it, so it is that tab — and no
             // other — that reclaims the run after a reload.
             savePendingJob({
@@ -1805,8 +1944,11 @@ export function ImageStudio({
           model: s.selectedModel,
           prompt,
           aspect_ratio: s.selectedAr,
+          seed,
+          signal: run.abort.signal,
           onRequestId: (rid) => {
             capturedRequestId = rid;
+            run.jobId = rid;
             savePendingJob({
               requestId: rid, studioType: 'image', historyMeta, tabId: tabIdRef.current,
               maxAttempts: 60, interval: 2000, submittedAt: Date.now(),
@@ -1818,6 +1960,9 @@ export function ImageStudio({
         res = await muapi.generateImage(genParams);
       }
 
+      // Cancelled while the provider was working: the pending job is already
+      // gone and this result belongs to nobody.
+      if (run.cancelled) return;
       if (res && res.url) {
         if (capturedRequestId) removePendingJob(capturedRequestId);
         addToHistory({
@@ -1834,12 +1979,17 @@ export function ImageStudio({
         throw new Error('No image URL returned by API');
       }
     } catch (e) {
+      if (run.cancelled || e?.cancelled) return;
       if (capturedRequestId) removePendingJob(capturedRequestId);
       finishImageProgress(false);
-      console.error(e);
-      toast.error(e.message);
+      console.warn('[ImageStudio] cloud generation failed:', e?.message || e);
+      s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
+      toast.error(s.generateError);
     } finally {
-      s.generating = false;
+      if (s.activeGeneration === run) {
+        s.activeGeneration = null;
+        s.generating = false;
+      }
       bump();
     }
   };
@@ -1847,35 +1997,33 @@ export function ImageStudio({
 
   /* ---------------- warm / unload (Ideogram sidecar) ---------------- */
 
+  // Outcome lands as a toast; the buttons only show busy. (They used to mutate
+  // their own label for 2.5 s — "Warm failed" as a button caption.)
   const warmModel = async () => {
-    s.warmLabel = 'Warming…';
     s.warmBusy = true;
     bump();
     try {
       await localAI.warmIdeogram4();
-      s.warmLabel = 'Warm';
+      toast.success(zh() ? '模型已预热。' : 'Model is warm.');
     } catch (e) {
-      s.warmLabel = 'Warm failed';
-      console.error('[Local] Ideogram warm failed:', e);
+      toast.error(e?.message || (zh() ? '预热失败' : 'Warm failed'));
     } finally {
+      s.warmBusy = false;
       bump();
-      setTimeout(() => { s.warmLabel = 'Warm model'; s.warmBusy = false; bump(); }, 2500);
     }
   };
 
   const unloadModel = async () => {
-    s.unloadLabel = 'Unloading…';
     s.unloadBusy = true;
     bump();
     try {
       await localAI.unloadIdeogram4();
-      s.unloadLabel = 'Unloaded';
+      toast.success(zh() ? '模型已卸载。' : 'Model unloaded.');
     } catch (e) {
-      s.unloadLabel = 'Unload failed';
-      console.error('[Local] Ideogram unload failed:', e);
+      toast.error(e?.message || (zh() ? '卸载失败' : 'Unload failed'));
     } finally {
+      s.unloadBusy = false;
       bump();
-      setTimeout(() => { s.unloadLabel = 'Unload'; s.unloadBusy = false; bump(); }, 2500);
     }
   };
 
@@ -1893,11 +2041,18 @@ export function ImageStudio({
     // mid-render, or a job saved before jobs carried a tab id) into history.
     (async () => {
       const apiKey = localStorage.getItem('muapi_key');
-      if (!apiKey) return; // can't poll without key; jobs remain for next time
-      const claimed = pendingJobsForTab(getPendingJobs('image'), tabIdRef.current, {
+      // A local (hosted-bridge) job is polled through the bridge by id — no cloud
+      // key involved. Only the hosted bridge can resume one; a job left behind by
+      // another runtime would poll forever, so it is dropped instead of kept.
+      const isLocalJob = (job) => job?.kind === 'hosted-local';
+      const canResumeLocal = Boolean(window.localAI?.isHosted) && typeof window.localAI?.resumeGeneration === 'function';
+      const owned = pendingJobsForTab(getPendingJobs('image'), tabIdRef.current, {
         primary: isPrimaryTab,
         openTabIds: openTabIdsRef.current,
       });
+      owned.filter((job) => isLocalJob(job) && !canResumeLocal).forEach((job) => removePendingJob(job.requestId));
+      // Cloud jobs wait for a key (they remain for next time); local ones never needed one.
+      const claimed = owned.filter((job) => (isLocalJob(job) ? canResumeLocal : Boolean(apiKey)));
       if (!claimed.length) return;
       const ownTab = Number.isSafeInteger(Number(tabIdRef.current)) ? Number(tabIdRef.current) : null;
       // The canvas shows one run, so restore this tab's newest job there and poll
@@ -1908,6 +2063,10 @@ export function ImageStudio({
       const silent = claimed.filter((job) => job !== live);
 
       const pollJob = async (job) => {
+        if (isLocalJob(job)) {
+          const result = await window.localAI.resumeGeneration(job.requestId);
+          return result?.url;
+        }
         const interval = Number(job.interval) || 2000;
         const spent = Math.floor((Date.now() - (Number(job.submittedAt) || Date.now())) / interval);
         const attemptsLeft = Math.max(1, (Number(job.maxAttempts) || 60) - spent);
@@ -1917,6 +2076,11 @@ export function ImageStudio({
 
       if (live && !s.generating) {
         s.generating = true;
+        s.generateError = '';
+        // Cancel has to be able to stop a resumed poll too — by job id, the same
+        // way it stops a fresh one.
+        const run = { jobId: live.requestId, cancelled: false, unsub: null };
+        s.activeGeneration = run;
         startImageProgress();
         // A resumed job was configured before this mount, so its wall time is not a
         // measurement of what the panels currently say — don't file it as one.
@@ -1928,6 +2092,7 @@ export function ImageStudio({
         void (async () => {
           try {
             const url = await pollJob(live);
+            if (run.cancelled) return;
             if (url) {
               addToHistory({ id: live.requestId, url, ...live.historyMeta, timestamp: new Date().toISOString() });
               finishImageProgress(true);
@@ -1936,11 +2101,16 @@ export function ImageStudio({
               finishImageProgress(false);
             }
           } catch (e) {
+            if (run.cancelled || e?.cancelled) return;
             console.warn('[ImageStudio] Image resume failed:', live.requestId, e.message);
+            s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
             finishImageProgress(false);
           } finally {
             removePendingJob(live.requestId);
-            s.generating = false;
+            if (s.activeGeneration === run) {
+              s.activeGeneration = null;
+              s.generating = false;
+            }
             bump();
           }
         })();
@@ -2171,14 +2341,17 @@ export function ImageStudio({
     return () => { alive = false; probe.onload = null; };
   }, [referenceSrc]);
 
-  // Prompt textarea auto-grow (same 150/250px caps as the old oninput).
+  // Prompt textarea auto-grow (same 150/250px caps as the old oninput). Keyed
+  // on the text: measuring scrollHeight forces a reflow, and without a
+  // dependency list it ran on every render — every 300 ms progress tick, every
+  // slider drag.
   useEffect(() => {
     const el = promptRef.current;
     if (!el) return;
     el.style.height = 'auto';
     const maxHeight = window.innerWidth < 768 ? 150 : 250;
     el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
-  });
+  }, [s.prompt, coupleActive()]);
 
   /* ---------------- render ---------------- */
 
@@ -2197,6 +2370,9 @@ export function ImageStudio({
   const samplerChoices = s.useLocalModel ? (activeLocalModel?.samplers || []) : [];
   const schedulerChoices = s.useLocalModel ? (activeLocalModel?.schedulers || []) : [];
   const showSampler = samplerChoices.length > 0;
+  // The Resolution / Sampler hints quote Krea 2's measured internals; they are
+  // only true for Krea 2.
+  const krea2Selected = s.useLocalModel && /krea2/i.test(String(activeLocalModel?.backend || activeLocalModel?.id || ''));
   // Sampling cost tracks pixel count, so the resolved size is worth showing:
   // 16:9 at 1024 is ~1.75x the work of 1:1 at 1024.
   const resolvedDims = s.useLocalModel
@@ -2238,26 +2414,29 @@ export function ImageStudio({
     activeLoraCount ? `${activeLoraCount} LoRA${activeLoraCount === 1 ? '' : 's'}` : '',
     s.negativePrompt.trim() && currentModelSupportsNegativePrompt() ? 'negative' : '',
   ].filter(Boolean).join(' · ');
-  const viewerEntry = s.viewerUrl ? s.history.find((e) => e.url === s.viewerUrl) : null;
+  const viewerIndex = s.viewerUrl ? s.history.findIndex((e) => e.url === s.viewerUrl) : -1;
+  const viewerEntry = viewerIndex >= 0 ? s.history[viewerIndex] : null;
   const enhanced = [s.enhanceBase.trim(), Array.from(s.enhanceTags).join(', ')].filter(Boolean).join(', ');
 
-  const generateLabel = s.generating
-    ? (s.useLocalModel && s.localProgress.active && s.localProgress.label
-      ? s.localProgress.label
-      : t('common.generating'))
-    : t('common.generate');
+  // The button says one thing while working; the bridge's status text ("Queued
+  // on hosted…") belongs to the progress card, not to a 130px button that
+  // swelled to 300px and reflowed the chip row.
+  const generateLabel = s.generating ? t('common.generating') : t('common.generate');
 
   const promptPlaceholder = refCount > 1
-    ? `${refCount} ${t('image.multiImageNote') || 'images selected — describe the transformation (optional)'}`
+    ? `${refCount} ${t('image.multiImageNote')}`
     : refCount > 0
       ? t('image.placeholderTransform')
       : t('image.placeholder');
+
+  // The helper chips are disabled on an empty box — the tooltip says why.
+  const helperDisabledTitle = zh() ? '先在下方输入一个想法，再让助手润色' : 'Type an idea below first — the helper refines what is in the box';
 
   const panel = (
     <>
       {isLocalAIAvailable() ? (
         <div className="flex flex-col gap-2">
-          <SectionLabel>Source</SectionLabel>
+          <SectionLabel>{zh() ? '来源' : 'Source'}</SectionLabel>
           <Segmented
             value={s.rentedOnly ? 'rented' : s.useLocalModel ? 'local' : 'api'}
             onChange={(v) => setSource(v !== 'api', v === 'rented')}
@@ -2280,7 +2459,7 @@ export function ImageStudio({
       {rentedBlocked ? null : (
         <>
       <div className="flex flex-col gap-2">
-        <SectionLabel>Model</SectionLabel>
+        <SectionLabel>{zh() ? '模型' : 'Model'}</SectionLabel>
         <ModelMenu
           engine={s}
           modelLabel={modelLabel}
@@ -2291,15 +2470,15 @@ export function ImageStudio({
       </div>
 
       <div className="flex flex-col gap-3">
-        <SectionLabel>Format</SectionLabel>
+        <SectionLabel>{zh() ? '格式' : 'Format'}</SectionLabel>
         {referenceDrivesAspect ? (
-          <Field label="Aspect ratio">
+          <Field label={zh() ? '宽高比' : 'Aspect ratio'}>
             <div className="rounded-md border border-line1 bg-bg2 px-3 py-2 text-xs leading-relaxed text-ink3">
-              Matches your reference image — the edit keeps its proportions.
+              {zh() ? '与参考图一致——编辑会保留其比例。' : 'Matches your reference image — the edit keeps its proportions.'}
             </div>
           </Field>
         ) : (
-          <Field label="Aspect ratio">
+          <Field label={zh() ? '宽高比' : 'Aspect ratio'}>
             <AspectRatioPicker
               options={aspectRatios}
               value={customDimsActive ? 'custom' : s.selectedAr}
@@ -2342,7 +2521,7 @@ export function ImageStudio({
           </div>
         ) : null}
         {resolutions.length > 0 ? (
-          <Field label="Resolution">
+          <Field label={zh() ? '分辨率' : 'Resolution'}>
             <NativeSelect
               title={t('image.qualityTooltip')}
               value={s.selectedResolution}
@@ -2354,7 +2533,7 @@ export function ImageStudio({
         ) : null}
         {editBudget ? (
           <Field
-            label="Resolution"
+            label={zh() ? '分辨率' : 'Resolution'}
             hint={editOutput
               ? `${editOutput.width} × ${editOutput.height} for this reference — ${editBudget.megapixels.toFixed(1)} MP of canvas; sampling time scales with pixel count`
               : `${editBudget.megapixels.toFixed(1)} MP of canvas, shaped like your reference — sampling time scales with pixel count`}
@@ -2376,10 +2555,12 @@ export function ImageStudio({
         ) : null}
         {s.useLocalModel && resolvedDims && !referenceDrivesAspect ? (
           <Field
-            label="Resolution"
+            label={zh() ? '分辨率' : 'Resolution'}
+            // The measured Krea 2 timings only describe Krea 2; every other
+            // workflow gets the rule without the numbers.
             hint={resolvedDims.custom
               ? `${resolvedDims.width} × ${resolvedDims.height} — set by the Custom aspect ratio above`
-              : `${resolvedDims.width} × ${resolvedDims.height} — sampling time scales with pixel count (Krea 2 @ 8 steps: 1024≈42s, 896≈32s, 768≈26s, 640≈18s)`}
+              : `${resolvedDims.width} × ${resolvedDims.height} — sampling time scales with pixel count${krea2Selected ? ' (Krea 2 @ 8 steps: 1024≈42s, 896≈32s, 768≈26s, 640≈18s)' : ''}`}
           >
             <NativeSelect
               value={String(s.baseSize || 0)}
@@ -2397,54 +2578,66 @@ export function ImageStudio({
       </div>
 
       <CollapsibleSection title={t('image.advancedOptions')} hint={advancedHint} storageKey="image.advanced">
-        <Field label={t('image.steps')}>
-          <Slider min={1} max={50} step={1} value={s.steps}
-            onChange={(v) => { s.steps = v; bump(); }} />
-        </Field>
+        {/* Steps, guidance, batch and the negative prompt reach the LOCAL payload
+            only — the cloud request is { model, prompt, aspect_ratio, quality,
+            seed }, so on the API source those controls would be dead and are not
+            shown. Seed and Style preset ride on both. */}
+        {s.useLocalModel ? (
+          <Field label={t('image.steps')}>
+            <Slider min={1} max={50} step={1} value={s.steps}
+              onChange={(v) => { s.steps = v; bump(); }} />
+          </Field>
+        ) : null}
         {showSampler ? (
           <>
             <Field
-              label="Sampler"
+              label={zh() ? '采样器' : 'Sampler'}
               hint={s.sampler
                 ? undefined
-                : (s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD
-                  ? 'Auto: deis_3m — usable at 2–5 steps, but ~2.7 model evals per step (not a speed win)'
-                  : 'Auto: euler_ancestral — tuned for 8–10 steps, 1 eval per step')}
+                : krea2Selected
+                  ? (s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD
+                    ? 'Auto: deis_3m — usable at 2–5 steps, but ~2.7 model evals per step (not a speed win)'
+                    : 'Auto: euler_ancestral — tuned for 8–10 steps, 1 eval per step')
+                  : (zh() ? '自动：工作流按步数自行选择' : 'Auto: the workflow picks a pair to match the step count')}
             >
               <NativeSelect
                 value={s.sampler}
                 onChange={(e) => { s.sampler = e.target.value; persistImagePreferences(); bump(); }}
               >
-                <option value="">Auto (match steps)</option>
+                <option value="">{zh() ? '自动（按步数）' : 'Auto (match steps)'}</option>
                 {samplerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
               </NativeSelect>
             </Field>
             <Field
-              label="Scheduler"
-              hint={s.scheduler ? undefined : `Auto: ${s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD ? 'bong_tangent' : 'beta'}`}
+              label={zh() ? '调度器' : 'Scheduler'}
+              hint={s.scheduler || !krea2Selected ? undefined : `Auto: ${s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD ? 'bong_tangent' : 'beta'}`}
             >
               <NativeSelect
                 value={s.scheduler}
                 onChange={(e) => { s.scheduler = e.target.value; persistImagePreferences(); bump(); }}
               >
-                <option value="">Auto (match steps)</option>
+                <option value="">{zh() ? '自动（按步数）' : 'Auto (match steps)'}</option>
                 {schedulerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
               </NativeSelect>
             </Field>
           </>
         ) : null}
-        <Field label={t('image.guidanceScale')}>
-          <Slider min={1} max={20} step={0.5} value={s.guidanceScale}
-            onChange={(v) => { s.guidanceScale = v; bump(); }} />
-        </Field>
+        {s.useLocalModel ? (
+          <Field label={t('image.guidanceScale')}>
+            <Slider min={1} max={20} step={0.5} value={s.guidanceScale}
+              onChange={(v) => { s.guidanceScale = v; bump(); }} />
+          </Field>
+        ) : null}
         <Field label={t('image.seed')}>
           <div className="flex items-center gap-1.5">
             <TextInput
               type="number"
+              min={0}
+              step={1}
               className="font-mono"
               placeholder={t('image.seedPlaceholder')}
               value={s.seedText}
-              onChange={(e) => { s.seedText = e.target.value; s.seed = parseInt(e.target.value) || -1; bump(); }}
+              onChange={(e) => { s.seedText = e.target.value; s.seed = parseSeedInput(e.target.value); bump(); }}
             />
             <IconButton icon="refresh" label={t('common.randomize')} onClick={() => {
               s.seed = Math.floor(Math.random() * 999999999);
@@ -2453,16 +2646,18 @@ export function ImageStudio({
             }} />
           </div>
         </Field>
-        <Field label={t('image.batchCount')}>
-          <Slider min={1} max={4} step={1} value={s.batchCount}
-            onChange={(v) => { s.batchCount = v; bump(); }} />
-        </Field>
+        {s.useLocalModel ? (
+          <Field label={t('image.batchCount')}>
+            <Slider min={1} max={4} step={1} value={s.batchCount}
+              onChange={(v) => { s.batchCount = v; bump(); }} />
+          </Field>
+        ) : null}
         <Field label={t('image.stylePreset')}>
           <NativeSelect value={s.selectedStyle} onChange={(e) => { s.selectedStyle = e.target.value; bump(); }}>
             {STYLE_PRESETS.map((preset) => <option key={preset} value={preset}>{preset}</option>)}
           </NativeSelect>
         </Field>
-        {currentModelSupportsNegativePrompt() ? (
+        {s.useLocalModel && currentModelSupportsNegativePrompt() ? (
           <Field
             label={t('image.negPromptLabel')}
             // At guidance 1 ComfyUI never evaluates the negative branch, so say so
@@ -2477,7 +2672,7 @@ export function ImageStudio({
               onChange={(e) => { s.negativePrompt = e.target.value; bump(); }}
             />
           </Field>
-        ) : s.negativePrompt ? (
+        ) : s.useLocalModel && s.negativePrompt ? (
           // The field is gone, but text saved under another model is not: explain
           // why it stopped applying rather than dropping it silently.
           <p className="text-[11px] leading-relaxed text-ink3">
@@ -2486,53 +2681,56 @@ export function ImageStudio({
             {t('image.negPromptUnsupported')(localModelById(s.selectedLocalModel)?.name || 'This workflow')}
           </p>
         ) : null}
-        <Field label={t('image.refStrength')} hint={t('image.refStrengthNote')}>
-          <Slider min={0} max={100} step={5} value={s.referenceStrength} format={(v) => `${v}%`}
-            onChange={(v) => { s.referenceStrength = v; bump(); }} />
-        </Field>
+        {/* No "Reference strength" slider: neither the local gateway nor the
+            cloud i2i request reads one today (s.referenceStrength is kept in
+            state only so saved preferences keep their shape). */}
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs font-medium text-ink2">{t('common.pingWhenComplete')}</span>
           <Toggle label={t('common.pingWhenComplete')} checked={s.pingWhenComplete} onChange={setPing} />
         </div>
       {showRuntimeMode ? (
         <div className="flex flex-col gap-2">
-          <SectionLabel>Local runtime mode</SectionLabel>
+          <SectionLabel>{zh() ? '本地运行模式' : 'Local runtime mode'}</SectionLabel>
           <Segmented
             value={s.localRuntimeMode}
             onChange={(v) => { s.localRuntimeMode = v; bump(); }}
             options={[
-              { value: 'one-off', label: 'One-off generation' },
-              { value: 'persistent', label: 'Keep model loaded' },
+              { value: 'one-off', label: zh() ? '单次生成' : 'One-off generation' },
+              { value: 'persistent', label: zh() ? '常驻模型' : 'Keep model loaded' },
             ]}
           />
           <div className="flex items-center gap-2">
-            <Button size="sm" onClick={warmModel} disabled={s.warmBusy}>{s.warmLabel}</Button>
-            <Button size="sm" variant="danger" onClick={unloadModel} disabled={s.unloadBusy}>{s.unloadLabel}</Button>
+            <Button size="sm" loading={s.warmBusy} onClick={warmModel}>{zh() ? '预热模型' : 'Warm model'}</Button>
+            {/* Unloading is housekeeping, not destruction — neutral, not danger. */}
+            <Button size="sm" variant="neutral" loading={s.unloadBusy} onClick={unloadModel}>{zh() ? '卸载' : 'Unload'}</Button>
           </div>
           <p className="text-xs leading-relaxed text-ink3">
-            One-off frees RAM after each image. Keep loaded uses the loopback-only Apple Silicon MLX sidecar for faster follow-up images.
+            {zh()
+              ? '单次生成在每张图后释放内存；常驻模型把模型留在内存中，后续出图更快。'
+              : 'One-off frees memory after each image. Keep loaded holds the model in memory so follow-up images start faster.'}
           </p>
         </div>
       ) : null}
 
       <div className="flex flex-col gap-2.5">
         <div className="flex items-center justify-between gap-2">
-          <SectionLabel>Region boxes</SectionLabel>
+          <SectionLabel>{zh() ? '区域框' : 'Region boxes'}</SectionLabel>
           <Toggle
-            label="Region boxes"
+            label={zh() ? '区域框' : 'Region boxes'}
             checked={s.regionMode}
             onChange={(v) => { s.regionMode = v; persistImagePreferences(); bump(); }}
           />
         </div>
         <p className="text-xs leading-relaxed text-ink3">
-          Say what goes where: each box becomes a placement sentence appended to your prompt. Works with
-          every model — no extra nodes. Box text stays in this session only.
+          {zh()
+            ? '说明各元素的位置：每个框都会变成一句位置描述附加到提示词后，适用于所有模型，无需额外节点。框内文字仅保留在本次会话。'
+            : 'Say what goes where: each box becomes a placement sentence appended to your prompt. Works with every model — no extra nodes. Box text stays in this session only.'}
         </p>
         {s.regionMode ? (
           <>
             {coupleActive() ? (
               <p className="text-xs leading-relaxed text-warn">
-                Couple mode owns the prompt while it is on, so regions stand down.
+                {zh() ? '双人模式开启时由它接管提示词，区域框暂不生效。' : 'Couple mode owns the prompt while it is on, so regions stand down.'}
               </p>
             ) : null}
             <RegionBoxEditor
@@ -2548,15 +2746,17 @@ export function ImageStudio({
       {coupleCapableModel() ? (
         <div className="flex flex-col gap-2.5">
           <div className="flex items-center justify-between gap-2">
-            <SectionLabel>Couple mode</SectionLabel>
+            <SectionLabel>{zh() ? '双人模式' : 'Couple mode'}</SectionLabel>
             <Toggle
-              label="Couple mode"
+              label={zh() ? '双人模式' : 'Couple mode'}
               checked={s.coupleMode}
               onChange={(v) => { s.coupleMode = v; persistImagePreferences(); bump(); }}
             />
           </div>
           <p className="text-xs leading-relaxed text-ink3">
-            Two-character mode: one prompt per character with a canvas split. Character text stays in this session only.
+            {zh()
+              ? '双角色模式：每个角色一段提示词，画布按比例分割。角色文字仅保留在本次会话。'
+              : 'Two-character mode: one prompt per character with a canvas split. Character text stays in this session only.'}
           </p>
           {coupleOn ? (
             <div className="flex flex-col gap-3">
@@ -2620,15 +2820,17 @@ export function ImageStudio({
       {characterSheetCapable() ? (
         <div className="flex flex-col gap-2.5">
           <div className="flex items-center justify-between gap-2">
-            <SectionLabel>Character sheet</SectionLabel>
+            <SectionLabel>{zh() ? '角色设定图' : 'Character sheet'}</SectionLabel>
             <Toggle
-              label="Character sheet"
+              label={zh() ? '角色设定图' : 'Character sheet'}
               checked={s.characterSheetMode}
               onChange={(v) => { s.characterSheetMode = v; persistImagePreferences(); bump(); }}
             />
           </div>
           <p className="text-xs leading-relaxed text-ink3">
-            Multi-view sheet from your reference: each view is its own edit with a shared seed, composited into one labeled sheet. The prompt box is optional extra styling.
+            {zh()
+              ? '基于参考图的多视角设定图：每个视角单独编辑、共用种子，合成为一张带标注的设定图。提示词框可选，用于补充风格。'
+              : 'Multi-view sheet from your reference: each view is its own edit with a shared seed, composited into one labeled sheet. The prompt box is optional extra styling.'}
           </p>
           {sheetOn ? (
             <Field label="Views">
@@ -2854,18 +3056,21 @@ export function ImageStudio({
                 <span className="mr-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">{category}</span>
                 {tags.map((tag) => {
                   const on = s.enhanceTags.has(tag);
+                  // Multi-select toggle pills: ChipButton's active tokens, the
+                  // Pill's size, aria-pressed so a reader hears the state.
                   return (
                     <button
                       key={tag}
                       type="button"
                       data-tag={tag}
+                      aria-pressed={on}
                       onClick={() => {
                         if (on) s.enhanceTags.delete(tag); else s.enhanceTags.add(tag);
                         bump();
                       }}
                       className={cx(
-                        'rounded-full border px-2 py-0.5 text-[11px] transition-colors duration-150',
-                        on ? 'border-honey/50 bg-honey-tint text-honey' : 'border-line1 bg-bg2 text-ink2 hover:border-line2',
+                        'inline-flex h-6 items-center rounded-full border px-2.5 text-[11px] font-medium transition-colors duration-150',
+                        on ? 'border-honey/50 bg-honey-tint text-honey' : 'border-line1 bg-bg2 text-ink2 hover:border-line2 hover:text-ink1',
                       )}
                     >
                       {tag}
@@ -2916,11 +3121,22 @@ export function ImageStudio({
             placeholder={promptPlaceholder}
             value={s.prompt}
             onChange={(e) => setPromptValue(e.target.value)}
+            // Cmd/Ctrl+Enter generates, same guards as the button.
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                if (!s.generating && !rentedBlocked) generate();
+              }
+            }}
             className="max-h-[150px] min-h-[40px] w-full resize-none overflow-y-auto border-none bg-transparent px-1 pt-1 text-[15px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 md:max-h-[250px]"
           />
         )}
 
-        <div className="flex flex-wrap items-center gap-1.5">
+        {/* Chips wrap on a narrow composer; Generate (and Cancel) stay pinned at
+            the right/bottom in their own group instead of wrapping into the
+            chip flow. */}
+        <div className="flex items-end gap-2">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           <UploadPicker
             values={s.uploadedImageUrls}
             onChange={handlePickerChange}
@@ -2946,13 +3162,15 @@ export function ImageStudio({
               {refsIgnored
                 ? `${refCount} ${refCount === 1 ? 'reference image' : 'reference images'} — ignored by this model`
                 : `Using ${refCount} ${refCount === 1 ? 'reference image' : 'reference images'}`}
-              <button
-                type="button"
-                className="font-bold underline decoration-honey/40 underline-offset-2 transition-colors hover:text-ink1"
+              <Button
+                size="sm"
+                variant="ghost"
+                className="-my-1 -mr-1.5 h-6 px-1.5 text-xs text-honey hover:text-ink1"
+                title={zh() ? '移除全部参考图' : 'Remove every attached reference'}
                 onClick={clearReferences}
               >
                 {t('common.clearReferences')}
-              </button>
+              </Button>
             </span>
           ) : null}
 
@@ -3023,33 +3241,37 @@ export function ImageStudio({
             onClick={newPrompt}
           />
 
-          {/* The app's own helper, available for every model rather than only the
-              workflows that ship a ComfyUI prompt_assistant node. The workflow
-              helper below still renders when a workflow declares one. */}
+          {/* The app's own helper ("Refine", as in the Video studio), available
+              for every model rather than only the workflows that ship a ComfyUI
+              prompt_assistant node. The workflow helper below still renders,
+              under its own profile name, when a workflow declares one. */}
           <ChipButton
             icon="sparkles"
-            value="Prompt helper"
+            label={zh() ? '润色' : 'Refine'}
             chevron={false}
             disabled={!s.prompt.trim()}
             onClick={() => { s.localPromptHelperOpen = true; bump(); }}
-            title="Refine this idea with a local LLM on this machine"
-            className="border-honey/40 text-honey"
+            title={!s.prompt.trim()
+              ? helperDisabledTitle
+              : (zh() ? '用本机的本地模型润色这个想法' : 'Refine this idea with a local LLM on this machine')}
           />
 
           {helper ? (
             <ChipButton
               icon="wand"
-              value={helper.label || 'Prompt helper'}
+              value={helper.label || (zh() ? '工作流助手' : 'Workflow helper')}
               chevron={false}
-              disabled={s.promptHelper.busy}
+              disabled={s.promptHelper.busy || !s.prompt.trim()}
               onClick={runPromptHelper}
-              title="Refine with this workflow prompt helper"
+              title={!s.prompt.trim()
+                ? helperDisabledTitle
+                : (zh() ? '用此工作流自带的提示词助手润色' : 'Refine with this workflow’s own prompt helper')}
             />
           ) : null}
+        </div>
 
-          {/* The model reads out in the left panel — no duplicate badge here. */}
-          <div className="min-w-2 flex-1" />
-
+        {/* The model reads out in the left panel — no duplicate badge here. */}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
           <Button
             variant="primary"
             size="lg"
@@ -3063,6 +3285,18 @@ export function ImageStudio({
           >
             {generateLabel}
           </Button>
+          {s.generating ? (
+            <Button
+              variant="danger"
+              size="lg"
+              onClick={cancelGeneration}
+              title={zh() ? '取消当前生成并重置状态' : 'Cancel the current generation and reset'}
+              className="min-w-[100px]"
+            >
+              {t('common.cancel')}
+            </Button>
+          ) : null}
+        </div>
         </div>
       </div>
     </div>
@@ -3070,8 +3304,25 @@ export function ImageStudio({
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
-      <StudioLayout panel={panel} panelTitle="Image settings" composer={composer} composerDrop={composerDrop}>
+      <StudioLayout panel={panel} panelTitle={zh() ? '图像设置' : 'Image settings'} composer={composer} composerDrop={composerDrop}>
         <div className="flex flex-col gap-4 p-4 md:p-5">
+          {/* The last failure stays on the canvas, copyable, until dismissed or
+              the next run — a 4 s toast is no place for an OOM traceback. */}
+          {s.generateError ? (
+            <div className="flex items-start justify-between gap-3 rounded-md border border-danger/40 bg-danger-tint px-3.5 py-3" role="alert">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-danger">{zh() ? '生成失败' : 'Generation failed'}</div>
+                <div className="mt-1 break-words font-mono text-xs text-danger/90">{s.generateError}</div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <Button size="sm" variant="neutral" icon="refresh" disabled={s.generating || rentedBlocked} onClick={generate}>
+                  {zh() ? '重试' : 'Try again'}
+                </Button>
+                <IconButton icon="x" label={zh() ? '关闭' : 'Dismiss'} size="sm" onClick={() => { s.generateError = ''; bump(); }} />
+              </div>
+            </div>
+          ) : null}
+
           {s.generating ? (() => {
             const pct = Math.max(0, Math.min(1, Number(s.progressDisplay) || 0));
             const eta = Number(s.progressEstimateSec) > 0 ? formatElapsed(s.progressEstimateSec * 1000) : null;
@@ -3083,8 +3334,9 @@ export function ImageStudio({
                   </span>
                   <span className="font-mono text-xs font-semibold text-honey">{Math.round(pct * 100)}%</span>
                 </div>
-                <ProgressBar value={pct} />
+                <ProgressBar value={pct} label={zh() ? '生成进度' : 'Generation progress'} />
                 <div className="flex items-center justify-between gap-3 font-mono text-[11px] text-ink3">
+                  {/* The bridge's status text lives here, not on the Generate button. */}
                   <span className="min-w-0 truncate">
                     {s.localProgress.label || (s.useLocalModel ? `local:${s.selectedLocalModel}` : (s.selectedModelName || s.selectedModel))}
                   </span>
@@ -3092,11 +3344,6 @@ export function ImageStudio({
                     {formatElapsed(Date.now() - s.generationStartedAt)}{eta ? ` / ~${eta}` : ''}
                   </span>
                 </div>
-                {s.useLocalModel ? (
-                  <div className="flex justify-end">
-                    <Button size="sm" variant="ghost" onClick={cancelLocalGeneration}>{t('common.cancel')}</Button>
-                  </div>
-                ) : null}
               </Card>
             );
           })() : null}
@@ -3104,8 +3351,20 @@ export function ImageStudio({
           {s.history.length === 0 && !s.generating ? (
             <EmptyState
               icon="image"
-              title="Create your first image"
-              hint="Enter a prompt below and press Generate. Tip: be descriptive — include style, lighting, mood, and subject for best results."
+              title={zh() ? '还没有图像' : 'Nothing here yet'}
+              hint={zh()
+                ? '在下方输入提示词并点击生成。之前的作品都在作品库里。'
+                : 'Describe the image below and press Generate. Everything you have made before is in the Library.'}
+              action={(
+                <Button
+                  size="sm"
+                  variant="neutral"
+                  icon="history"
+                  onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'history' } }))}
+                >
+                  {zh() ? '打开作品库' : 'Open Library'}
+                </Button>
+              )}
               className="flex-1"
             />
           ) : (
@@ -3147,6 +3406,11 @@ export function ImageStudio({
         <ViewerModal
           url={s.viewerUrl}
           entry={viewerEntry}
+          // Walk the gallery from the viewer. The grid reads newest-first, so
+          // "previous" is the newer neighbour (left) and "next" the older (right).
+          position={viewerIndex >= 0 ? { index: viewerIndex, total: s.history.length } : null}
+          onPrev={viewerIndex > 0 ? () => viewImage(s.history[viewerIndex - 1].url) : undefined}
+          onNext={viewerIndex >= 0 && viewerIndex < s.history.length - 1 ? () => viewImage(s.history[viewerIndex + 1].url) : undefined}
           onClose={() => { s.viewerUrl = null; bump(); promptRef.current?.focus(); }}
           onBackToSetup={() => {
             const viewed = s.contextStore.getViewed();

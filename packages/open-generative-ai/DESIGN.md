@@ -58,10 +58,28 @@ From `src/ui/kit.jsx`:
 - `Toggle`, `Slider` (honey track fill, mono value readout), `Pill` (`tone="ok|danger|warn|info|honey|neutral"`),
   `SectionLabel` (11px uppercase kicker `text-ink3`), `Card`, `EmptyState`, `Spinner`, `ProgressBar`, `Kbd`.
 - `Modal` from `src/ui/Modal.jsx` — portal, scrim `bg-scrim`, `esc`/outside-click close, sizes.
+  It moves focus in (first `[autofocus]`/`[data-autofocus]`, else the panel), traps Tab, restores
+  focus on close, locks page scroll, and Escape closes only the TOPMOST dialog. `ConfirmModal`
+  takes `tone="danger"` (focus lands on Cancel — a stray Enter must never delete) or
+  `tone="primary"` (money / irreversible-but-not-destructive: Rent, Stock), `cancelLabel`, and a
+  node `body`. Use it for every confirm; `window.confirm` is banned.
 - `Menu`/`MenuItem`/`ChipButton` from `src/ui/Menu.jsx` — composer option chips that open
-  popover menus (replaces the old `<details>` popovers; closes on outside click).
+  popover menus (replaces the old `<details>` popovers; closes on outside click). `ChipButton`
+  forwards `title`/`aria-*`; `Menu` flips to the other edge and caps its width at the viewport.
+- `IconButton` sizes `xs` (24px — dense rows, card corners) / `sm` / `md` / `lg`; never hand-roll
+  a `grid h-6 w-6 place-items-center` button.
+- `ProgressBar` takes `tone="honey|danger|ok"` + `label`; `Slider` inside a `Field` gets its id.
+- `ErrorBoundary` from `src/app/ErrorBoundary.jsx` wraps every studio mount and every hub view;
+  a render error shows a contained "X hit an error — Try again / Reload page" panel, never a
+  black page. Wrap any new top-level surface the same way.
 - Icons from `src/ui/icons.jsx` — one stroke family, `<Icon name size />`. Add missing icons there
-  (24×24 viewBox, stroke-width 2, no fills) rather than pasting SVGs in components.
+  (24×24 viewBox, stroke-width 2, no fills) rather than pasting SVGs in components. No emoji or
+  text glyphs (✓ ✕ ↻ ↓ +) as icons — the set has check/x/refresh/download/plus/more/star/…
+- Colour tokens are alpha-capable: `border-honey/50`, `bg-bg0/80`, `bg-warn/10` work because
+  `tailwind.config.js` maps them through `rgb(var(--x-rgb) / <alpha-value>)`; adding a colour means
+  adding its `--x-rgb` triplet in `variables.css`. The tints scale (`bg-honey-tint/50` = half the wash).
+- CSS helpers in `base.css`: `hive-edge-fade` (horizontal scrollers that hide their bar but fade
+  the clipped edge), `hive-motion-keep` (progress indicators keep moving under reduced motion).
 
 Prompt bar (composer) pattern: a `bg-bg1 border border-line1 rounded-lg` bar with an auto-growing
 textarea, left = attach/reference chips, right = model chip + Generate (primary). Options that
@@ -73,14 +91,19 @@ were pill-soup become `ChipButton`+`Menu` groups with clear labels and current-v
   percentage uses `ProgressBar` + mono percent.
 - Empty: `EmptyState` with an icon, one sentence, and (when sensible) one action. No walls of tips.
 - Errors: inline `Pill tone="danger"` or a bordered `bg-danger-tint` callout with the raw message in
-  `font-mono text-xs`. Never `alert()` — replace `alert(...)` calls with `toast.error(...)`
-  (react-hot-toast is styled in `main.jsx`) unless a spec says the flow depends on blocking.
-- Destructive confirms: `Modal` with `Button variant="danger"` — one consistent pattern everywhere.
+  `font-mono text-xs` AND a way out (Try again / Dismiss). Never `alert()` — use `toast.error(...)`
+  (the `Toaster` in `App.jsx` sets one baseline: notices 4.5 s, success 3.5 s, errors 6 s — only
+  override for genuinely long copy). Show a failure once (callout OR toast, not both).
+- Destructive confirms: `ConfirmModal` — one consistent pattern everywhere (tone above).
+- Keyboard: ⌘/Ctrl+Enter generates in every composer; ⌘/Ctrl+, opens Settings; Escape closes the
+  topmost layer; Space and Enter both activate `role="button"` tiles; hover-only actions also show
+  on `focus-within`.
 
 ## 5. Hard rules (from the port maps — breaking these breaks the product)
 
-1. `src/lib/**` is IMMUTABLE. Import it; never edit it. All crypto (e2eVault/e2eMedia/vaultSession/
-   composerState), muapi, localInferenceClient, hivemindStudio, pendingJobs, i18n stay byte-identical.
+1. `src/lib/**` is shared logic — edit it deliberately and with a node test; the crypto modules
+   (e2eVault/e2eMedia/vaultSession/composerState) and every wire shape stay byte-for-byte
+   compatible. (The original port rule was "immutable"; that ended once the port finished.)
 2. Every fetch route, storage key, window event, postMessage type, and payload shape in your area's
    spec (`specs/*.json`) survives verbatim. Media `<img>/<video>` srcs go through
    `useMediaSrc` (wraps `resolveMediaSrc`) so E2E-encrypted media keeps decrypting client-side.

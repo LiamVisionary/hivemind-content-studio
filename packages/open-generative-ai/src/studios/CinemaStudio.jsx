@@ -8,8 +8,12 @@
 // - Preferences persist to localStorage 'cinema_generation_preferences' via the
 //   shared normalizer in lib/studioPreferences.js — one definition, which the
 //   generationSettingsPersistence test exercises directly.
-// - History persists to 'cinema_history' (slice 0..50), same entry shape.
-// - Every media src goes through useMediaSrc (E2E decrypt, fail-open).
+// - History ('cinema_history', slice 0..50, same entry shape) goes through the
+//   studio history helpers in lib/hivemindStudio.js: in studio mode they are
+//   no-ops, so a prompt never lands on disk in the clear — the same rule the
+//   Image and Video studios follow. Standalone keeps plain localStorage.
+// - Every media src goes through useMediaSrc (E2E decrypt, fail-open); downloads
+//   go through the one shared downloader (lib/downloadMedia.js).
 // - alert() → toast.error(); the two competing camera UIs (full-screen wheel overlay
 //   + collapsible builder) collapse to ONE controlled rig in the left panel, which
 //   fixes the old overlay/builder desync and body-mounted overlay leak for free.
@@ -19,28 +23,37 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
 import { muapi } from '../lib/muapi.js';
-import { buildNanoBananaPrompt, CAMERA_MAP, LENS_MAP, FOCAL_PERSPECTIVE, APERTURE_EFFECT } from '../lib/promptUtils.js';
-import { resolveMediaSrc } from '../lib/e2eMedia.js';
+import { buildNanoBananaPrompt, CAMERA_MAP, LENS_MAP } from '../lib/promptUtils.js';
+import { downloadMedia } from '../lib/downloadMedia.js';
+import { imageDownloadName } from '../lib/downloadNames.js';
+import { formatElapsed } from '../lib/genProgress.js';
+import { loadStudioGenerationHistory, saveStudioGenerationHistory } from '../lib/hivemindStudio.js';
+import { toastMuapiError } from './lipsync/muapiErrorToast.jsx';
 import {
   CINEMA_ASPECT_RATIOS,
   CINEMA_PREFERENCES_KEY,
   CINEMA_RESOLUTIONS,
   normalizeCinemaPreferences,
 } from '../lib/studioPreferences.js';
-import { t } from '../lib/i18n.js';
+import { getLang, t } from '../lib/i18n.js';
 
 import { useMediaSrc } from '../hooks/hooks.js';
 import { registerPromptInserter } from '../app/promptTarget.js';
 import { Icon } from '../ui/icons.jsx';
 import {
-  Button, Card, EmptyState, Pill, ProgressBar, SectionLabel, Segmented, Spinner, StudioLayout, cx,
+  AspectRatioPicker, Button, Card, EmptyState, IconButton, Pill, ProgressBar, SectionLabel, Segmented, Spinner, StudioLayout, cx,
 } from '../ui/kit.jsx';
-import { Modal } from '../ui/Modal.jsx';
+import { ConfirmModal, Modal } from '../ui/Modal.jsx';
 
 import { CameraControls } from './CameraControls.jsx';
+import { MetaRow } from './lipsync/MetaRow.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 
 const CINEMA_HISTORY_KEY = 'cinema_history';
+const CINEMA_HISTORY_LIMIT = 50;
+const CINEMA_MODEL = 'nano-banana-pro';
+
+const zh = () => getLang() === 'zh-CN';
 
 function createEngine() {
   let persisted = null;
@@ -55,25 +68,19 @@ function createEngine() {
     focal: 35,
     aperture: 'f/1.4',
   };
-  let history = [];
-  try {
-    const saved = JSON.parse(localStorage.getItem(CINEMA_HISTORY_KEY) || '[]');
-    if (Array.isArray(saved)) history = saved;
-  } catch { /* ignore */ }
-  return { settings, history, prompt: '', generating: false, viewerUrl: null, authOpen: false };
+  return {
+    settings,
+    history: loadStudioGenerationHistory(CINEMA_HISTORY_KEY),
+    prompt: '',
+    generating: false,
+    startedAt: 0,
+    viewerUrl: null,
+    authOpen: false,
+    confirmDelete: null,
+  };
 }
 
-function MetaRow({ label, value }) {
-  if (value == null || value === '') return null;
-  return (
-    <div className="flex items-baseline gap-3">
-      <span className="w-20 shrink-0 text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{label}</span>
-      <span className="min-w-0 break-words font-mono text-xs leading-relaxed text-ink1">{String(value)}</span>
-    </div>
-  );
-}
-
-function CinemaGalleryCard({ entry, active, onOpen, onDownload }) {
+function CinemaGalleryCard({ entry, active, onOpen, onDownload, onDelete }) {
   const src = useMediaSrc(entry.url);
   const setup = entry.settings || {};
   return (
@@ -91,23 +98,28 @@ function CinemaGalleryCard({ entry, active, onOpen, onDownload }) {
           scrolls stays deferred forever. */}
       <img
         src={src}
-        alt={setup.prompt?.substring(0, 30) || 'Cinema shot'}
+        alt={setup.prompt?.substring(0, 30) || (zh() ? '电影镜头' : 'Cinema shot')}
         className="aspect-square w-full object-cover"
       />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-bg0/90 to-transparent p-2 pt-6 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
         <div className="truncate text-[11px] text-ink1">{setup.prompt || '—'}</div>
         <div className="truncate font-mono text-[10px] text-ink3">{setup.camera || ''}</div>
       </div>
-      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-        <button
-          type="button"
-          title={t('cinema.download')}
-          aria-label="Download shot"
-          className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-ink1 transition-colors hover:border-line2 hover:bg-bg1"
+      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+        <IconButton
+          icon="download"
+          size="sm"
+          label={t('cinema.download')}
+          className="border border-line1 bg-bg0/80 text-ink1 hover:border-line2 hover:bg-bg1"
           onClick={(e) => { e.stopPropagation(); onDownload(); }}
-        >
-          <Icon name="download" size={13} />
-        </button>
+        />
+        <IconButton
+          icon="trash"
+          size="sm"
+          label={zh() ? '从历史记录中移除' : 'Remove from history'}
+          className="border border-line1 bg-bg0/80 text-ink1 hover:border-danger hover:bg-danger-tint hover:text-danger"
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+        />
       </div>
     </div>
   );
@@ -120,14 +132,24 @@ function CinemaViewer({ url, entry, generating, onClose, onLoadSetup, onRegenera
     <Modal
       open
       onClose={onClose}
-      title="Cinema shot"
+      title={zh() ? '电影镜头' : 'Cinema shot'}
       size="xl"
       footer={
         <>
           <Button variant="ghost" onClick={onNew}>{t('cinema.newShot')}</Button>
-          <Button variant="neutral" onClick={onLoadSetup}>{t('cinema.load')}</Button>
-          <Button variant="neutral" loading={generating} onClick={onRegenerate}>{t('cinema.regenerate')}</Button>
-          <Button variant="primary" onClick={onDownload}>{t('cinema.download')}</Button>
+          <Button variant="neutral" onClick={onLoadSetup} title={zh() ? '把这张镜头的机位与提示词载入编辑器' : 'Put this shot’s rig and prompt back in the composer'}>
+            {t('cinema.load')}
+          </Button>
+          <Button
+            variant="neutral"
+            icon="refresh"
+            loading={generating}
+            onClick={onRegenerate}
+            title={zh() ? '用这张镜头的设置再生成一次' : 'Runs again with this shot’s rig and prompt'}
+          >
+            {t('cinema.regenerate')}
+          </Button>
+          <Button variant="primary" icon="download" onClick={onDownload}>{t('cinema.download')}</Button>
         </>
       }
     >
@@ -136,13 +158,14 @@ function CinemaViewer({ url, entry, generating, onClose, onLoadSetup, onRegenera
           <img src={src} alt={setup.prompt || 'Cinema shot'} className="max-h-[52vh] w-auto max-w-full object-contain" />
         </div>
         <div className="flex flex-col gap-1.5">
-          <MetaRow label="Prompt" value={setup.prompt} />
-          <MetaRow label="Camera" value={setup.camera} />
-          <MetaRow label="Lens" value={setup.lens} />
-          <MetaRow label="Focal" value={setup.focal != null ? `${setup.focal}mm` : ''} />
-          <MetaRow label="Aperture" value={setup.aperture} />
-          <MetaRow label="Aspect" value={setup.aspect_ratio} />
-          <MetaRow label="Resolution" value={setup.resolution} />
+          <MetaRow label={zh() ? '提示词' : 'Prompt'} value={setup.prompt} mono={false} />
+          <MetaRow label={t('cinema.camera')} value={setup.camera} />
+          <MetaRow label={t('cinema.lens')} value={setup.lens} />
+          <MetaRow label={t('cinema.focal')} value={setup.focal != null ? `${setup.focal}mm` : ''} />
+          <MetaRow label={t('cinema.aperture')} value={setup.aperture} />
+          <MetaRow label={zh() ? '比例' : 'Aspect'} value={setup.aspect_ratio} />
+          <MetaRow label={zh() ? '分辨率' : 'Resolution'} value={setup.resolution} />
+          <MetaRow label={zh() ? '生成时间' : 'Created'} value={entry?.timestamp ? new Date(entry.timestamp).toLocaleString() : ''} mono={false} />
         </div>
       </div>
     </Modal>
@@ -176,9 +199,19 @@ export function CinemaStudio({ active = true } = {}) {
     bump();
   };
 
+  const saveHistory = () => saveStudioGenerationHistory(CINEMA_HISTORY_KEY, s.history, CINEMA_HISTORY_LIMIT);
+
   const addToHistory = (entry) => {
     s.history.unshift(entry);
-    try { localStorage.setItem(CINEMA_HISTORY_KEY, JSON.stringify(s.history.slice(0, 50))); } catch { /* quota */ }
+    s.history = s.history.slice(0, CINEMA_HISTORY_LIMIT);
+    saveHistory();
+    bump();
+  };
+
+  const removeFromHistory = (entry) => {
+    s.history = s.history.filter((item) => item !== entry);
+    if (s.viewerUrl === entry.url) s.viewerUrl = null;
+    saveHistory();
     bump();
   };
 
@@ -201,26 +234,16 @@ export function CinemaStudio({ active = true } = {}) {
     promptRef.current?.focus();
   };
 
-  const downloadShot = async (url, filename) => {
-    try {
-      const response = await fetch(await resolveMediaSrc(url));
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      window.open(url, '_blank');
-    }
-  };
+  const downloadShot = (entry) => downloadMedia(entry.url, imageDownloadName(CINEMA_MODEL, entry.timestamp));
 
   const generate = async () => {
     const basePrompt = s.prompt.trim();
-    if (!basePrompt) return;
+    if (!basePrompt) {
+      toast.error(zh() ? '请先描述场景。' : 'Describe the scene first — the prompt is empty.');
+      promptRef.current?.focus();
+      return;
+    }
+    if (s.generating) return;
 
     const apiKey = localStorage.getItem('muapi_key');
     if (!apiKey) {
@@ -231,6 +254,7 @@ export function CinemaStudio({ active = true } = {}) {
     }
 
     s.generating = true;
+    s.startedAt = Date.now();
     bump();
 
     const finalPrompt = buildNanoBananaPrompt(
@@ -243,10 +267,10 @@ export function CinemaStudio({ active = true } = {}) {
 
     try {
       const res = await muapi.generateImage({
-        model: 'nano-banana-pro',
+        model: CINEMA_MODEL,
         prompt: finalPrompt,
         aspect_ratio: s.settings.aspect_ratio,
-        resolution: (s.settings.resolution || '1k').toLowerCase(),
+        resolution: (s.settings.resolution || '2K').toLowerCase(),
         negative_prompt: 'blurry, low quality, distortion, bad composition',
       });
 
@@ -266,9 +290,10 @@ export function CinemaStudio({ active = true } = {}) {
       }
     } catch (e) {
       console.error(e);
-      toast.error(t('cinema.generationFailed') + e.message);
+      toastMuapiError(e, { prefix: t('cinema.generationFailed').replace(/:\s*$/, '') });
     } finally {
       s.generating = false;
+      s.startedAt = 0;
       bump();
     }
   };
@@ -322,8 +347,18 @@ export function CinemaStudio({ active = true } = {}) {
     el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`;
   });
 
+  // Elapsed readout on the progress card: MUAPI gives no progress, so time is
+  // the only honest thing to show while a shot is out.
+  useEffect(() => {
+    if (!s.generating) return undefined;
+    const id = window.setInterval(bump, 1000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.generating]);
+
   const recipePreview = buildNanoBananaPrompt('', s.settings.camera, s.settings.lens, s.settings.focal, s.settings.aperture);
   const viewerEntry = s.viewerUrl ? s.history.find((e) => e.url === s.viewerUrl) : null;
+  const hasPrompt = Boolean(s.prompt.trim());
 
   const panel = (
     <>
@@ -340,23 +375,30 @@ export function CinemaStudio({ active = true } = {}) {
       </div>
 
       <div className="flex flex-col gap-3">
-        <SectionLabel>Format</SectionLabel>
+        <SectionLabel>{zh() ? '画幅' : 'Format'}</SectionLabel>
         <div className="flex flex-col gap-1.5">
-          <span className="text-xs font-medium text-ink2">Aspect ratio</span>
-          <Segmented size="sm" value={s.settings.aspect_ratio} onChange={(v) => setSetting({ aspect_ratio: v })} options={CINEMA_ASPECT_RATIOS} />
+          <span className="text-xs font-medium text-ink2">{zh() ? '宽高比' : 'Aspect ratio'}</span>
+          <AspectRatioPicker
+            options={CINEMA_ASPECT_RATIOS}
+            value={s.settings.aspect_ratio}
+            onChange={(v) => setSetting({ aspect_ratio: v })}
+          />
         </div>
         <div className="flex flex-col gap-1.5">
-          <span className="text-xs font-medium text-ink2">Resolution</span>
+          <span className="text-xs font-medium text-ink2">{zh() ? '分辨率' : 'Resolution'}</span>
           <Segmented size="sm" value={s.settings.resolution} onChange={(v) => setSetting({ resolution: v })} options={CINEMA_RESOLUTIONS} />
         </div>
       </div>
 
       <div className="flex flex-col gap-2">
-        <SectionLabel>Engine</SectionLabel>
+        <SectionLabel>{zh() ? '引擎' : 'Engine'}</SectionLabel>
         <Pill tone="neutral" className="self-start font-mono">
           <Icon name="cloud" size={12} />
-          nano-banana-pro
+          {CINEMA_MODEL}
         </Pill>
+        <p className="text-[11px] leading-relaxed text-ink3">
+          {zh() ? '在 MUAPI（云端）运行 — 提示词会发送到那里。' : 'Runs on MUAPI (cloud) — prompts are sent there.'}
+        </p>
       </div>
     </>
   );
@@ -370,6 +412,9 @@ export function CinemaStudio({ active = true } = {}) {
           placeholder={t('cinema.placeholder')}
           value={s.prompt}
           onChange={(e) => setPrompt(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void generate(); }
+          }}
           className="max-h-[150px] min-h-[40px] w-full resize-none overflow-y-auto border-none bg-transparent px-1 pt-1 text-[15px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 md:max-h-[250px]"
         />
         <div className="flex flex-wrap items-center gap-1.5">
@@ -382,8 +427,11 @@ export function CinemaStudio({ active = true } = {}) {
             variant="primary"
             size="lg"
             loading={s.generating}
+            disabled={!hasPrompt}
             onClick={generate}
-            title={t('cinema.generateBtn')}
+            title={hasPrompt
+              ? (zh() ? '生成（⌘/Ctrl+Enter）' : 'Generate (⌘/Ctrl+Enter)')
+              : (zh() ? '请先描述场景' : 'Describe the scene first')}
             className="min-w-[130px]"
           >
             {s.generating ? t('cinema.shooting') : t('cinema.generateBtn')}
@@ -401,15 +449,16 @@ export function CinemaStudio({ active = true } = {}) {
             <Card className="flex items-center gap-3 p-4">
               <Spinner size={16} className="text-honey" />
               <span className="text-[13px] text-ink2">{t('cinema.shooting')}</span>
-              <div className="flex-1"><ProgressBar value={null} /></div>
+              <div className="flex-1"><ProgressBar value={null} label={t('cinema.shooting')} /></div>
+              <span className="shrink-0 font-mono text-[11px] text-ink3">{formatElapsed(Date.now() - s.startedAt)}</span>
             </Card>
           ) : null}
 
           {s.history.length === 0 && !s.generating ? (
             <EmptyState
               icon="camera"
-              title="Shoot your first frame"
-              hint="Set the camera rig on the left, describe your scene below, and press Generate."
+              title={zh() ? '拍摄你的第一帧' : 'Shoot your first frame'}
+              hint={zh() ? '在左侧设置机位，在下方描述场景，然后按生成。' : 'Set the camera rig on the left, describe your scene below, and press Generate.'}
               className="flex-1"
             />
           ) : (
@@ -425,7 +474,8 @@ export function CinemaStudio({ active = true } = {}) {
                     entry={entry}
                     active={s.viewerUrl ? s.viewerUrl === entry.url : idx === 0}
                     onOpen={() => { s.viewerUrl = entry.url; bump(); }}
-                    onDownload={() => downloadShot(entry.url, `cinema-shot-${Date.now()}.jpg`)}
+                    onDownload={() => downloadShot(entry)}
+                    onDelete={() => { s.confirmDelete = entry; bump(); }}
                   />
                 ))}
               </div>
@@ -442,10 +492,20 @@ export function CinemaStudio({ active = true } = {}) {
           onClose={() => { s.viewerUrl = null; bump(); promptRef.current?.focus(); }}
           onLoadSetup={() => loadSetup(viewerEntry)}
           onRegenerate={() => regenerateFrom(viewerEntry)}
-          onDownload={() => downloadShot(s.viewerUrl, `cinema-shot-${Date.now()}.jpg`)}
+          onDownload={() => (viewerEntry ? downloadShot(viewerEntry) : downloadMedia(s.viewerUrl, imageDownloadName(CINEMA_MODEL, Date.now())))}
           onNew={newShot}
         />
       ) : null}
+
+      <ConfirmModal
+        open={Boolean(s.confirmDelete)}
+        onClose={() => { s.confirmDelete = null; bump(); }}
+        onConfirm={() => { const entry = s.confirmDelete; s.confirmDelete = null; if (entry) removeFromHistory(entry); }}
+        title={zh() ? '从历史记录中移除这张镜头？' : 'Remove this shot from history?'}
+        body={zh() ? '只会从此工作室的列表中移除，不会删除任何文件。' : 'It leaves this studio’s list only — no file is deleted.'}
+        confirmLabel={zh() ? '移除' : 'Remove'}
+        cancelLabel={zh() ? '取消' : 'Cancel'}
+      />
 
       {s.authOpen ? (
         <AuthModal

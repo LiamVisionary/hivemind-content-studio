@@ -4,8 +4,7 @@
 // flows through useMediaSrc so E2E-encrypted artifacts keep decrypting client
 // side, and the 1s running-ticker re-renders via React state instead of the old
 // innerHTML churn — so a playing <video> preview is never restarted.
-import { useState } from 'react';
-import { createPortal } from 'react-dom';
+import { memo, useState } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Button, ProgressBar, cx } from '../../ui/kit.jsx';
@@ -13,18 +12,24 @@ import {
   generationArtifactUrl, generationProgressPct, generationStatusLabel,
   generationTiming, providerLabel,
 } from '../hubData.js';
+import { Lightbox } from './Lightbox.jsx';
 import { StatusPill } from './StatusPill.jsx';
 
+// useMediaSrc hands back '' while a sealed artifact decrypts; an <img src="">
+// is a React warning and a broken-image glyph, so show a skeleton until then.
 function ArtifactImage({ run, artifact, index, onOpen }) {
   const src = useMediaSrc(generationArtifactUrl(run, artifact));
   return (
     <button
       type="button"
       onClick={() => onOpen(src)}
+      disabled={!src}
       aria-label={`Open generated image ${index + 1}`}
       className="group relative aspect-square overflow-hidden rounded-md border border-line1 bg-bg3 transition-colors hover:border-line2"
     >
-      <img src={src} alt={`Generated ${index + 1}`} loading="lazy" className="h-full w-full object-cover" />
+      {src
+        ? <img src={src} alt={`Generated ${index + 1}`} loading="lazy" className="h-full w-full object-cover" />
+        : <span className="block h-full w-full animate-pulse bg-bg2" />}
     </button>
   );
 }
@@ -47,43 +52,18 @@ function SourceThumb({ run, artifact, onOpen }) {
     <button
       type="button"
       onClick={() => onOpen(src)}
+      disabled={!src}
       aria-label="Open source image preview"
       className="h-12 w-12 shrink-0 overflow-hidden rounded-md border border-line1 bg-bg3"
     >
-      <img src={src} alt="Source" className="h-full w-full object-cover" />
+      {src
+        ? <img src={src} alt="Source" className="h-full w-full object-cover" />
+        : <span className="block h-full w-full animate-pulse bg-bg2" />}
     </button>
   );
 }
 
-function Lightbox({ src, onClose }) {
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Generated image preview"
-      onClick={onClose}
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-scrim p-6"
-    >
-      <button
-        type="button"
-        onClick={onClose}
-        aria-label="Close preview"
-        className="absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-md bg-bg2 text-ink2 transition-colors hover:text-ink1"
-      >
-        <Icon name="x" size={18} />
-      </button>
-      <img
-        src={src}
-        alt="Generated preview"
-        onClick={(e) => e.stopPropagation()}
-        className="max-h-full max-w-full rounded-lg object-contain shadow-overlay"
-      />
-    </div>,
-    document.body,
-  );
-}
-
-export function GenerationCard({ run, card, onOpenRun }) {
+export const GenerationCard = memo(function GenerationCard({ run, card, onOpenRun }) {
   const [preview, setPreview] = useState(null);
   const progress = generationProgressPct(card);
   const headerIcon = card.status === 'running' ? 'sparkles' : card.kind === 'video' ? 'video' : 'image';
@@ -136,7 +116,11 @@ export function GenerationCard({ run, card, onOpenRun }) {
       <div className="flex items-start gap-3 rounded-md bg-bg1 p-2.5">
         <div className="min-w-0 flex-1">
           <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink3">Prompt</div>
-          <p className="mt-0.5 line-clamp-3 text-[13px] leading-relaxed text-ink2">{card.prompt}</p>
+          {/* A machine-redacted run carries no prompt text; say so rather than
+              printing the run id in its place. */}
+          <p className={cx('mt-0.5 line-clamp-3 text-[13px] leading-relaxed', card.prompt ? 'text-ink2' : 'text-ink3')}>
+            {card.prompt || 'Prompt not available for this run'}
+          </p>
         </div>
         {card.sourceArtifacts?.[0] ? (
           <SourceThumb run={run} artifact={card.sourceArtifacts[0]} onOpen={setPreview} />
@@ -149,7 +133,7 @@ export function GenerationCard({ run, card, onOpenRun }) {
         </Button>
       </div>
 
-      {preview ? <Lightbox src={preview} onClose={() => setPreview(null)} /> : null}
+      {preview ? <Lightbox src={preview} kind="image" title="Generated image" alt="Generated image" onClose={() => setPreview(null)} /> : null}
     </article>
   );
-}
+});

@@ -29,28 +29,79 @@
     }
   }
 
+  // Cancelled generate polls, by gateway job id, so a cancel stops ONE poll
+  // (the studio's run) without touching a sibling tab's. There is no
+  // server-side cancel route on this host, so cancelling here stops the client
+  // poll and rejects with { cancelled: true }; the gateway finishes the job on
+  // its own and the output still lands in its history.
+  const cancelledGenerateJobs = new Set();
+  const cancelledError = () => Object.assign(new Error('Generation cancelled'), { cancelled: true });
+
+  async function pollGenerateJob(jobId) {
+    try {
+      let last = null;
+      for (;;) {
+        await new Promise(resolve => setTimeout(resolve, last ? 1200 : 600));
+        if (cancelledGenerateJobs.has(jobId)) throw cancelledError();
+        last = await jsonFetch(`/local-ai/job/${encodeURIComponent(jobId)}`);
+        if (cancelledGenerateJobs.has(jobId)) throw cancelledError();
+        const status = last.status || 'running';
+        const progress = status === 'success' ? 1 : status === 'running' ? 0.35 : 0.1;
+        emitProgress({ status, progress, message: status === 'success' ? 'Done' : 'Generating on hosted Open Generative AI' });
+        if (status === 'success') {
+          if (!last.url) throw new Error('Generation finished without an image');
+          return { url: last.url, seed: last.seed };
+        }
+        if (status === 'error') throw new Error(last.error || 'Generation failed');
+      }
+    } finally {
+      cancelledGenerateJobs.delete(jobId);
+    }
+  }
+
   async function generate(params) {
+    // The job-id callback is the caller's, not part of the request body —
+    // JSON.stringify would drop it anyway, but keep the payload explicit.
+    const { onJobId, ...body } = params || {};
     emitProgress({ status: 'queued', progress: 0, message: 'Queued on hosted Open Generative AI' });
     const submitted = await jsonFetch('/local-ai/generate', {
       method: 'POST',
-      body: JSON.stringify(params || {}),
+      body: JSON.stringify(body),
     });
     const jobId = submitted.id;
     if (!jobId) throw new Error('No job id returned by hosted generator');
+    // Handed back as soon as the job is queued, so the studio can save it as a
+    // pending job (a reload mid-render finds it again) and cancel it by id.
+    if (typeof onJobId === 'function') { try { onJobId(jobId); } catch (_) {} }
+    return pollGenerateJob(jobId);
+  }
 
-    let last = null;
-    for (;;) {
-      await new Promise(resolve => setTimeout(resolve, last ? 1200 : 600));
-      last = await jsonFetch(`/local-ai/job/${encodeURIComponent(jobId)}`);
-      const status = last.status || 'running';
-      const progress = status === 'success' ? 1 : status === 'running' ? 0.35 : 0.1;
-      emitProgress({ status, progress, message: status === 'success' ? 'Done' : 'Generating on hosted Open Generative AI' });
-      if (status === 'success') {
-        if (!last.url) throw new Error('Generation finished without an image');
-        return { url: last.url, seed: last.seed };
-      }
-      if (status === 'error') throw new Error(last.error || 'Generation failed');
-    }
+  // Resume polling a generate job this page submitted before a reload. Same
+  // result shape as generate().
+  async function resumeGeneration(jobId) {
+    if (!jobId) throw new Error('No job id to resume');
+    return pollGenerateJob(String(jobId));
+  }
+
+  // Stop polling one job, by id. Without an id this stays the no-op it always
+  // was: the Video studio fires the lib's global cancelGeneration() as a
+  // best-effort interrupt, and that must not tear down an Image run polling in
+  // the same page. Resolves { ok, cancelled: [ids] }; never throws.
+  async function cancelGeneration(jobId) {
+    const id = jobId ? String(jobId) : '';
+    if (!id) return { ok: true, cancelled: [] };
+    // Marked even if the poll has not started yet (the id arrives via onJobId
+    // a tick before polling begins), so an early cancel still lands.
+    cancelledGenerateJobs.add(id);
+    // Tell the gateway too, so the lane frees instead of finishing a job nobody
+    // wants. Best effort: the poll is already stopped whatever this answers.
+    let stopped = null;
+    try {
+      const response = await fetch(`/local-ai/job/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+      const body = await response.json().catch(() => ({}));
+      stopped = response.ok ? Boolean(body.stopped) : null;
+    } catch (_) { /* bridge older than the cancel route */ }
+    return { ok: true, cancelled: [id], stopped };
   }
 
   async function upscale(params) {
@@ -281,7 +332,8 @@
     saveEpisode,
     smartMask,
     ltxDirector,
-    cancelGeneration: async () => ({ ok: true }),
+    cancelGeneration,
+    resumeGeneration,
     wan2gp: {
       getConfig: async () => ({ url: '' }),
       setUrl: async () => ({ ok: false, error: 'Wan2GP config is not enabled in hosted mode.' }),

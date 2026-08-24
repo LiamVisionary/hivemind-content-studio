@@ -36,6 +36,9 @@ function scrubLegacyPersistentCreativeState() {
     if (!isHivemindStudioEnabled()) return;
     try { localStorage.removeItem('muapi_history'); } catch {}
     try { localStorage.removeItem('video_history'); } catch {}
+    // Cinema / Lip sync wrote prompts + result URLs here in the clear until 2026-08-24.
+    try { localStorage.removeItem('cinema_history'); } catch {}
+    try { localStorage.removeItem('lipsync_history'); } catch {}
     try { localStorage.removeItem(PENDING_JOBS_KEY); } catch {}
 }
 
@@ -60,6 +63,14 @@ export function saveStudioGenerationHistory(storageKey, entries, limit) {
     try {
         localStorage.setItem(storageKey, JSON.stringify(entries.slice(0, limit)));
     } catch {}
+}
+
+// Lock must clear the bridge's private state even in a tab where the explore
+// dock is not mounted: the Shell broadcasts 'hivemind-owner-lock-broadcast' and
+// hubData relays 'hivemind-owner-lock' to the surfaces; the bridge itself
+// listens here so the clear does not depend on which React views are alive.
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('hivemind-owner-lock-broadcast', () => clearHivemindStudioPrivateState());
 }
 
 export function clearHivemindStudioPrivateState() {
@@ -700,6 +711,11 @@ export async function generateHivemindVideo(params) {
     // polling after a tab switch / reload — a long local render must not be lost
     // just because the studio component remounts.
     if (typeof params.onJobId === 'function') params.onJobId(jobId);
+    // The server may have trimmed something on the way in (an over-long
+    // ingredient note, say); it says so instead of cutting silently.
+    if (Array.isArray(start.data.warnings) && start.data.warnings.length && typeof params.onWarning === 'function') {
+        for (const warning of start.data.warnings) params.onWarning(String(warning));
+    }
     // Seed the expected-duration estimate (from historical timings) so the bar can
     // show elapsed / ~expected immediately, before the first status poll lands.
     const estimateSeconds = Number(start.data.estimate_seconds) || null;
@@ -744,8 +760,14 @@ export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds 
     while (Date.now() < deadline) {
         if (signal?.aborted) throw cancelled();
         // 2s poll: the bar is smoothed client-side between polls, so this only needs
-        // to keep real progress / estimate / completion reasonably fresh.
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        // to keep real progress / estimate / completion reasonably fresh. The wait
+        // itself is abortable so Cancel frees the serial queue at once instead of
+        // sitting out the rest of the tick.
+        await new Promise((resolve) => {
+            const timer = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve(); }, 2000);
+            function onAbort() { clearTimeout(timer); resolve(); }
+            signal?.addEventListener?.('abort', onAbort, { once: true });
+        });
         if (signal?.aborted) throw cancelled();
         let payload;
         try {
@@ -787,162 +809,4 @@ export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds 
         if (payload.ok && (payload.url || payload.media_url || payload.output_url)) return done(payload);
     }
     throw new Error('Media Studio generation timed out. If it finishes later, the video will appear in the History tab.');
-}
-
-function escapeHtml(value) {
-    return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;',
-    }[char]));
-}
-
-function insertIntoPrompt(text) {
-    const active = document.activeElement;
-    const target = active?.tagName === 'TEXTAREA' && !active.disabled
-        ? active
-        : document.querySelector('#content-area textarea:not([disabled])') || document.querySelector('textarea:not([disabled])');
-    if (!target) return false;
-    const current = target.value.trim();
-    target.value = current ? `${target.value.replace(/\s+$/, '')}\n${text}` : text;
-    target.dispatchEvent(new Event('input', { bubbles: true }));
-    target.focus();
-    target.setSelectionRange(target.value.length, target.value.length);
-    return true;
-}
-
-function renderItems(items, kind) {
-    if (!items.length) return '<p class="text-[11px] text-white/40 px-2 py-3">Nothing saved yet.</p>';
-    return items.slice(0, 8).map((item) => {
-        const label = kind === 'template' ? item.title : item.prompt;
-        const text = kind === 'template' ? item.description : item.prompt;
-        const id = kind === 'template' ? item.id : item.prompt_id;
-        return `
-            <button type="button" data-hive-${kind}="${escapeHtml(id)}" class="w-full text-left rounded-xl border border-white/5 bg-white/[0.03] hover:bg-white/[0.07] px-3 py-2 transition-colors">
-                <span class="block text-xs font-bold text-white truncate">${escapeHtml(label)}</span>
-                <span class="block text-[10px] text-white/45 truncate">${escapeHtml(text)}</span>
-            </button>
-        `;
-    }).join('');
-}
-
-function renderDock(panel, context) {
-    const templates = context.catalog?.templates || [];
-    const options = getHivemindStudioOptions();
-    panel.innerHTML = `
-        <div class="flex items-center justify-between gap-3 border-b border-white/10 pb-3">
-            <div>
-                <div class="text-[10px] font-black uppercase tracking-[0.22em] text-primary">Hivemind</div>
-                <div class="text-sm font-black text-white">Studio tools</div>
-            </div>
-            <button type="button" data-hive-close class="h-8 w-8 rounded-lg bg-white/5 text-white/70 hover:bg-white/10">x</button>
-        </div>
-        <div class="grid gap-3 pt-3">
-            <label class="grid gap-1.5">
-                <span class="text-[10px] font-bold uppercase tracking-widest text-white/45">Local video workflow</span>
-                <select data-hive-video-workflow class="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs font-bold text-white outline-none">
-                    <option value="">Choose on generate</option>
-                    ${context.videoModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.name)}</option>`).join('')}
-                </select>
-            </label>
-            <div class="grid grid-cols-3 gap-2">
-                <label class="flex items-center justify-between gap-2 rounded-xl border border-white/5 bg-white/[0.03] px-2 py-2 text-[10px] font-bold text-white/70"><span>Helper</span><input data-hive-option="promptHelper" type="checkbox" ${options.promptHelper ? 'checked' : ''}></label>
-                <label class="flex items-center justify-between gap-2 rounded-xl border border-white/5 bg-white/[0.03] px-2 py-2 text-[10px] font-bold text-white/70"><span>Pass</span><input data-hive-option="passthrough" type="checkbox" ${options.passthrough ? 'checked' : ''}></label>
-                <label class="flex items-center justify-between gap-2 rounded-xl border border-white/5 bg-white/[0.03] px-2 py-2 text-[10px] font-bold text-white/70"><span>Ask</span><input data-hive-option="walkthrough" type="checkbox" ${options.walkthrough ? 'checked' : ''}></label>
-            </div>
-            <details class="rounded-xl border border-white/5 bg-white/[0.03] p-2">
-                <summary class="cursor-pointer text-xs font-black text-white">Templates</summary>
-                <div class="mt-2 grid gap-2">${renderItems(templates, 'template')}</div>
-            </details>
-            <details class="rounded-xl border border-white/5 bg-white/[0.03] p-2">
-                <summary class="cursor-pointer text-xs font-black text-white">Ingredients</summary>
-                <div class="mt-2 grid gap-2">${renderItems(context.prompts, 'ingredient')}</div>
-            </details>
-        </div>
-    `;
-    const saved = getSavedHivemindVideoSelection();
-    const select = panel.querySelector('[data-hive-video-workflow]');
-    if (select && saved?.modelId) select.value = saved.modelId;
-}
-
-export function installHivemindExploreDock() {
-    if (!isHivemindStudioEnabled() || document.getElementById('hivemind-explore-dock')) return;
-    scrubLegacyPersistentCreativeState();
-    const root = document.createElement('div');
-    root.id = 'hivemind-explore-dock';
-    root.className = 'fixed right-3 top-[112px] lg:top-[64px] z-[90] flex flex-col items-end gap-2';
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = 'h-10 rounded-xl border border-white/10 bg-elevated-bg/90 px-3 text-xs font-bold text-white shadow-2xl backdrop-blur-xl transition-colors hover:border-primary/50';
-    toggle.textContent = 'Hivemind';
-    const panel = document.createElement('div');
-    panel.className = 'hidden w-[min(21rem,calc(100vw-1.5rem))] rounded-2xl border border-white/10 bg-black/90 p-3 shadow-2xl backdrop-blur-xl';
-    root.appendChild(toggle);
-    root.appendChild(panel);
-    document.body.appendChild(root);
-
-    const open = async () => {
-        const context = await loadHivemindStudioContext();
-        renderDock(panel, context);
-        panel.classList.remove('hidden');
-    };
-    const close = () => panel.classList.add('hidden');
-    toggle.onclick = () => panel.classList.contains('hidden') ? void open() : close();
-
-    panel.addEventListener('click', (event) => {
-        const closeButton = event.target.closest('[data-hive-close]');
-        if (closeButton) { close(); return; }
-        const template = event.target.closest('[data-hive-template]');
-        if (template) {
-            const item = contextCache?.catalog?.templates?.find((candidate) => candidate.id === template.dataset.hiveTemplate);
-            if (item) insertIntoPrompt(item.prompt);
-            return;
-        }
-        const ingredient = event.target.closest('[data-hive-ingredient]');
-        if (ingredient) {
-            const item = contextCache?.prompts?.find((candidate) => candidate.prompt_id === ingredient.dataset.hiveIngredient);
-            if (item) insertIntoPrompt(item.prompt);
-        }
-    });
-
-    panel.addEventListener('change', (event) => {
-        const option = event.target.closest('[data-hive-option]');
-        if (option) {
-            const current = getHivemindStudioOptions();
-            current[option.dataset.hiveOption] = Boolean(option.checked);
-            if (option.dataset.hiveOption === 'passthrough' && option.checked) current.promptHelper = false;
-            if (option.dataset.hiveOption === 'promptHelper' && option.checked) current.passthrough = false;
-            saveHivemindStudioOptions(current);
-            renderDock(panel, contextCache || defaultContext());
-            return;
-        }
-        const select = event.target.closest('[data-hive-video-workflow]');
-        if (!select) return;
-        const model = contextCache?.videoModels?.find((candidate) => candidate.id === select.value);
-        if (!model) return;
-        saveHivemindVideoSelection({ provider: 'media-studio-mcp', model: model.workflowId, modelId: model.id });
-        window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'video' } }));
-        window.setTimeout(() => {
-            window.dispatchEvent(new CustomEvent('hivemind-workflow-selected', { detail: { modelId: model.id } }));
-        }, 0);
-    });
-
-    window.addEventListener('message', (event) => {
-        if (event.origin !== window.location.origin) return;
-        if (event.data?.type === 'hivemind-owner-lock') {
-            clearHivemindStudioPrivateState();
-            return;
-        }
-        if (event.data?.type === 'hivemind-explore-insert-prompt') insertIntoPrompt(event.data.text || '');
-        if (event.data?.type === 'hivemind-explore-refresh') {
-            void loadHivemindStudioContext({ refresh: true }).then((context) => {
-                if (!panel.classList.contains('hidden')) renderDock(panel, context);
-            });
-        }
-    });
-
-    window.parent?.postMessage?.({ type: 'hivemind-explore-ready' }, window.location.origin);
-    void loadHivemindStudioContext();
 }

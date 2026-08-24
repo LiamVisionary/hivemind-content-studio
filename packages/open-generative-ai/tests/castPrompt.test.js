@@ -82,7 +82,7 @@ test('compiling writes who the subjects are and what each reference may carry', 
     });
 
     // Each subject is defined once, in cast order, by what actually identifies it.
-    assert.match(prompt, /subject_definitions:\n<Subject 1> is the character shown in <Picture 1>, <Picture 2>/);
+    assert.match(prompt, /subject_definitions:\n<Subject 1> is the person shown in <Picture 1>, <Picture 2>/);
     assert.match(prompt, /<Subject 2> is SpongeBob SquarePants from the animated series \(1999\)\./);
 
     // Cheryl's soundtrack makes her a speaker, so her timbre reference is named.
@@ -212,7 +212,7 @@ test('applying a cast rewrites only the two sections the cast owns', async () =>
     const sections = parseSixSections(prompt);
 
     // Rewritten from the cast that is actually attached.
-    assert.match(sections.subject_definitions, /<Subject 1> is the character shown in <Picture 1>, <Picture 2>/);
+    assert.match(sections.subject_definitions, /<Subject 1> is the person shown in <Picture 1>, <Picture 2>/);
     assert.match(sections.subject_definitions, /<Subject 2> is SpongeBob SquarePants \(1999\)\./);
     assert.doesNotMatch(prompt, /somebody else entirely/);
     assert.match(sections.retention_analysis, /<Picture 1>: fully_preserved/);
@@ -232,8 +232,15 @@ test('a plain paragraph is framed rather than sent as-is', async () => {
         members: [castPersona('Cheryl', CHERYL)],
     });
     const sections = parseSixSections(prompt);
-    assert.equal(sections.detailed_description, 'She throws a punch on a wet street at night.');
+    // Loose prose IS the shot, so it is filed as one — a description with no
+    // [Shot N] header is the one shape H3 cannot read a timeline from.
+    assert.equal(sections.detailed_description, '[Shot 1] She throws a punch on a wet street at night.');
     assert.ok(sections.subject_definitions, 'the frame it never had is written around it');
+    // …and the two sections a six-section prompt cannot go without are written
+    // with the defaults the reference scaffold uses, so the model is never left
+    // to invent a soundscape or a score.
+    assert.match(sections.overall_soundscape, /no music/i);
+    assert.equal(sections.non_diegetic_music, 'none');
     // And it is told the paragraph is far thinner than H3 asks for.
     assert.ok(warnings.some((text) => /H3's guide asks for roughly 350-500/.test(text)));
 });
@@ -619,7 +626,7 @@ test('a persona with only a clip is introduced by that clip, which carries the p
     const { compileCastPrompt, castPersona } = await load();
     const clipOnly = castPersona('Liam', { images: [], videos: [{ url: '/liam.mov', useAudio: false }], audios: [], gender: 'male' });
     const { prompt } = compileCastPrompt({ members: [clipOnly], speakingOrder: [0], template: { summary: 'x' } });
-    assert.match(prompt, /<Subject 1> is the man shown in <Video 1>: \[appearance/);
+    assert.match(prompt, /<Subject 1> is the man shown in <Video 1>: \[hair, face/);
     assert.match(prompt, /<Subject 1>: fully_preserved — the same face, hair, build and wardrobe/);
     assert.match(prompt, /<Video 1>: fully_preserved — <Subject 1> IS the person in this clip/);
     assert.doesNotMatch(prompt, /<Video 1>: attribute_transfer/);
@@ -645,7 +652,7 @@ test('a persona is introduced by its gender, and asked for a matching voice when
     // generic adult male for whoever is on screen.
     const marco = castPersona('Marco', { images: ['/m.jpg'], gender: 'male' });
     const him = compileCastPrompt({ members: [marco], speakingOrder: [0], template: { summary: 'x' } }).prompt;
-    assert.match(him, /<Subject 1> is the man shown in <Picture 1>: \[appearance/);
+    assert.match(him, /<Subject 1> is the man shown in <Picture 1>: \[hair, face/);
     assert.match(him, /<Subject 1> speaks as S1, in a man's voice\./);
 
     // Non-binary: the noun is "person" and no voice kind is implied. Marco,
@@ -657,15 +664,15 @@ test('a persona is introduced by its gender, and asked for a matching voice when
     assert.doesNotMatch(them, /<Subject 1> speaks as/);
     assert.doesNotMatch(them, /voice\./);
 
-    // Unset reads exactly as it always has.
+    // Unset reads as a person — a persona is a photographed human.
     const unset = compileCastPrompt({ members: [castPersona('Cheryl', CHERYL)], template: { summary: 'x' } }).prompt;
-    assert.match(unset, /<Subject 1> is the character shown in <Picture 1>, <Picture 2>/);
+    assert.match(unset, /<Subject 1> is the person shown in <Picture 1>, <Picture 2>/);
     assert.equal(castPersona('Cheryl', CHERYL).gender, '');
     assert.equal(castPersona('Cheryl', { ...CHERYL, gender: 'Woman' }).gender, 'female');
 });
 
 // ---------------------------------------------------------------------------
-// The wiring around the pure rules. CastMenu.jsx and VideoStudio.jsx are JSX,
+// The wiring around the pure rules. CastStrip.jsx and VideoStudio.jsx are JSX,
 // which node:test cannot import, so these assert the shape of the source the
 // same way the other studio tests do (see personaBar.test.js).
 const fs = require('node:fs');
@@ -678,7 +685,7 @@ test('the panel hands the catalog description of a voice to the compiler', () =>
     // description of the timbre for exactly that, and the control that
     // GENERATES the starter prompt was dropping it while the starter kept it.
     assert.match(
-        read('src/studios/video/CastMenu.jsx'),
+        read('src/lib/promptWeave.js'),
         /voiceQuality: member\.useVoice \? String\(member\.entry\?\.voiceQuality \|\| ''\) : ''/,
     );
 });
@@ -689,13 +696,22 @@ test('the cast lives in the studio, so a loaded prompt can be recast on the way 
     // members while it is open, and a prompt can arrive while it is shut.
     assert.match(studio, /^\s*cast: \[\],$/m);
     assert.match(studio, /members=\{s\.cast\}/);
-    assert.match(studio, /onMembersChange=\{\(next\) => \{ s\.cast = next; bump\(\); \}\}/);
-    // Every prompt from the library goes through the recast, and it changes the
-    // PROMPT only — loading a prompt is not a request to reshuffle attachments.
-    assert.match(studio, /onLoadPrompt=\{\(\{ prompt \}\) => \{\s*loadPromptText\(prompt,/);
-    const loader = /const loadPromptText = \(text, limits\) => \{[\s\S]*?\n  \};/.exec(studio);
+    // Every change in the menu applies at once — no Apply step to forget.
+    assert.match(studio, /onMembersChange=\{applyCast\}/);
+    // Every prompt from the library goes through the weave, with the starter's
+    // stand-ins, and it changes the PROMPT only — loading a prompt is not a
+    // request to reshuffle attachments (the rows the cast occupies are the
+    // rows it already had).
+    assert.match(studio, /onLoadPrompt=\{\(\{ prompt, standIns \}\) => \{\s*loadPromptText\(prompt, \{ standIns: standIns \|\| \[\] \}\);/);
+    const loader = /const loadPromptText = \(text, \{ standIns = \[\] \} = \{\}\) => \{[\s\S]*?\n  \};/.exec(studio);
     assert.ok(loader, 'the loader exists');
+    assert.match(loader[0], /acceptPrompt\(text, \{ standIns \}\)/);
     assert.doesNotMatch(loader[0], /referenceImageUrls|referenceVideos|referenceAudios/);
+    // And every other door is the same call: the helper, the Shot Builder,
+    // the insert bridge, the canvas restore, the References panel's Weave, and
+    // the last one — Generate, for text typed straight into the box.
+    assert.ok((studio.match(/acceptPrompt\(/g) || []).length >= 7, 'every door goes through acceptPrompt');
+    assert.doesNotMatch(studio, /withReferenceTags|applyCharacterToPrompt|castApplication\(/);
 });
 
 // A persona clip switched to SOUND ONLY is a voice reference and nothing else:
@@ -716,4 +732,104 @@ test('a persona clip switched to sound only is a voice reference, not the charac
     assert.match(named, /<Audio 1> is the voice-timbre reference for <Subject 1>/);
     assert.doesNotMatch(named, /<Video 1>/);
     assert.doesNotMatch(named, /IS the person in this clip/);
+});
+
+// ---------------------------------------------------------------------------
+// The weave: a cast applied over the OTHER native format, over stand-ins, and
+// over a persona that carries its own look (2026-08-23).
+
+const LONE = { gender: 'female', images: ['/lone.jpg'], videos: [], audios: [] };
+
+const THREE_FIELD = `integrated_multimodal_description: Handheld DV camcorder look. [Shot 1] A Korean woman in her early twenties (S1) sits on a low concrete wall; she has black wavy hair, black canvas sneakers. She smiles to herself. [Shot 2] At 00:05.000, she walks into an alley.
+
+overall_soundscape: Birdsong, a distant motorcycle, light wind in the leaves.
+
+non_diegetic_music: none`;
+
+test('a three-field prompt is converted field by field, never swallowed whole', async () => {
+    const { applyCastToPrompt, castPersona, parseSixSections } = await load();
+    const { prompt } = applyCastToPrompt(THREE_FIELD, { members: [castPersona('Cheryl', LONE)] });
+    const sections = parseSixSections(prompt);
+    assert.doesNotMatch(sections.detailed_description, /integrated_multimodal_description|overall_soundscape|non_diegetic_music/);
+    assert.match(sections.detailed_description, /^Handheld DV camcorder look\. \[Shot 1\] A Korean woman/);
+    assert.equal(sections.overall_soundscape, 'Birdsong, a distant motorcycle, light wind in the leaves.');
+    assert.equal(sections.non_diegetic_music, 'none');
+    assert.ok(sections.subject_definitions.includes('<Subject 1> is the woman shown in <Picture 1>'));
+});
+
+test('a stand-in is bound to the member holding its slot, and its look goes with it', async () => {
+    const { applyCastToPrompt, castPersona, parseSixSections } = await load();
+    const standIns = [{
+        index: 1,
+        phrases: ['A Korean woman in her early twenties'],
+        looks: ['; she has black wavy hair, black canvas sneakers'],
+    }];
+    const { prompt, standIns: report } = applyCastToPrompt(THREE_FIELD, {
+        members: [castPersona('Cheryl', LONE)], standIns,
+    });
+    const sections = parseSixSections(prompt);
+    assert.match(sections.detailed_description, /\[Shot 1\] <Subject 1> \(S1\) sits on a low concrete wall\. She smiles/);
+    assert.doesNotMatch(sections.detailed_description, /black wavy hair/, 'the stand-in look is gone — the definition carries the real one');
+    assert.deepEqual(report.bound, [1]);
+    assert.deepEqual(report.remaining, []);
+});
+
+test('a stand-in for a slot nobody holds stays as written, and is handed back to bind later', async () => {
+    const { applyCastToPrompt, castPersona } = await load();
+    const standIns = [
+        { index: 1, phrases: ['A Korean woman in her early twenties'], looks: [] },
+        { index: 2, phrases: ['a stray tabby cat'], looks: [] },
+    ];
+    const text = `${THREE_FIELD} A stray tabby cat trots up.`.replace('A stray tabby cat', 'a stray tabby cat');
+    const { prompt, standIns: report } = applyCastToPrompt(text, { members: [castPersona('Cheryl', LONE)], standIns });
+    assert.match(prompt, /<Subject 1> \(S1\) sits/);
+    assert.match(prompt, /a stray tabby cat trots up/);
+    assert.deepEqual(report.bound, [1]);
+    assert.deepEqual(report.remaining.map((item) => item.index), [2]);
+});
+
+test('a stand-in whose words were edited is refused and reported, not half-bound', async () => {
+    const { applyCastToPrompt, castPersona } = await load();
+    const standIns = [{ index: 1, phrases: ['A Korean woman in her early twenties'], looks: ['; she has black wavy hair'] }];
+    const edited = THREE_FIELD.replace('A Korean woman', 'A Korean girl');
+    const { prompt, warnings, standIns: report } = applyCastToPrompt(edited, { members: [castPersona('Cheryl', LONE)], standIns });
+    assert.match(prompt, /A Korean girl in her early twenties \(S1\)/, 'text untouched');
+    assert.deepEqual(report.unmatched, [1]);
+    assert.ok(warnings.some((text) => /stand-in phrase is no longer in the text/.test(text)));
+});
+
+test("a persona's saved look fills the definition, so no blank reaches the model", async () => {
+    const { applyCastToPrompt, castPersona, parseSixSections, APPEARANCE_BLANK } = await load();
+    const withLook = { ...LONE, look: 'shoulder-length auburn hair, freckles, a grey hoodie' };
+    const { prompt } = applyCastToPrompt('She waves.', { members: [castPersona('Cheryl', withLook)] });
+    const sections = parseSixSections(prompt);
+    assert.match(sections.subject_definitions, /<Subject 1> is the woman shown in <Picture 1>: shoulder-length auburn hair, freckles, a grey hoodie\./);
+    assert.ok(!prompt.includes(APPEARANCE_BLANK));
+    // And without one, the blank is the wording the Prompt Check knows.
+    const bare = applyCastToPrompt('She waves.', { members: [castPersona('Cheryl', LONE)] }).prompt;
+    assert.ok(bare.includes(APPEARANCE_BLANK));
+    assert.match(APPEARANCE_BLANK, /write it out/);
+});
+
+test('a prompt with no summary gets one that names every subject and what drives it', async () => {
+    const { applyCastToPrompt, castPersona, castCharacter, parseSixSections } = await load();
+    const voiced = { ...LONE, audios: [{ url: '/cheryl.m4a', name: 'cheryl.m4a' }] };
+    const { prompt } = applyCastToPrompt('They square off.', {
+        members: [castPersona('Cheryl', voiced), castCharacter('SpongeBob SquarePants', 'SpongeBob SquarePants from the animated series SpongeBob SquarePants (1999)')],
+    });
+    const sections = parseSixSections(prompt);
+    assert.match(sections.summary, /^\[audio reference\] One continuous take of <Subject 1>, speaking in the voice of <Audio 1>; and <Subject 2>\.$/);
+});
+
+test('the dialogue stub is written only by the explicit scaffold, never by an automatic weave', async () => {
+    const { applyCastToPrompt, castPersona, parseSixSections } = await load();
+    const voiced = { ...LONE, audios: [{ url: '/cheryl.m4a', name: 'cheryl.m4a' }] };
+    const quiet = applyCastToPrompt('She waits by the window.', { members: [castPersona('Cheryl', voiced)] }).prompt;
+    assert.ok(!quiet.includes('<d>'), 'an automatic weave leaves a silent description silent');
+    const scaffolded = applyCastToPrompt('She waits by the window.', { members: [castPersona('Cheryl', voiced)], scaffold: true }).prompt;
+    const sections = parseSixSections(scaffolded);
+    assert.match(sections.detailed_description, /^\[Shot 1\] She waits by the window\.\n<Subject 1> \(S1\) <d>\[English\] Write the line you want spoken here/);
+    // An empty composer under the scaffold gets the placeholder shot.
+    const empty = applyCastToPrompt('', { members: [castPersona('Cheryl', voiced)], scaffold: true }).prompt;
+    assert.match(parseSixSections(empty).detailed_description, /^\[Shot 1\] Medium shot of <Subject 1> against \[setting\]/);
 });

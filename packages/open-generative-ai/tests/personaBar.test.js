@@ -54,7 +54,7 @@ test('the studio carries which persona the references are, and drops it with the
     const studio = read('src/studios/VideoStudio.jsx');
     assert.match(studio, /persona: s\.setup\.persona \? \{ \.\.\.s\.setup\.persona \} : null,/, 'capture carries it');
     assert.match(studio, /persona: personaIdentity\(next\)/, 'the bar\'s change handler shapes it the same way');
-    assert.match(studio, /persona: personaIdentity\(persona\)/, 'and so does applying a cast');
+    assert.match(studio, /persona: personaIdentity\(woven\.persona\)/, 'and so does the weave, whenever it writes the rows');
     assert.match(studio, /persona=\{s\.setup\.persona \|\| null\}/);
     assert.match(studio, /onPersonaChange=\{onPersonaChange\}/);
 });
@@ -87,8 +87,12 @@ test('a persona has a gender, set beside its name and read by every generator', 
     assert.match(bar, /function GenderChips\(/);
     assert.match(bar, /<GenderChips value=\{saveGender\} onChange=\{setSaveGender\}/, 'the save dialog asks for it');
     assert.match(bar, /<GenderChips compact value=\{gender\} onChange=\{setLoadedGender\}/, 'the bar lets a loaded persona change it');
-    assert.match(bar, /const data = \{ \.\.\.current, gender: normalizePersonaGender\(saveGender\) \};/, 'save writes it into the payload');
-    assert.match(bar, /personaFromReferences\(\{ images, videos, audios, gender \}\)/, 'the loaded gender is part of what is compared and saved over');
+    assert.match(bar, /const data = personaFromReferences\(\{\s*\.\.\.current, gender: normalizePersonaGender\(saveGender\), look: saveLook,\s*\}\);/, 'save writes it — and the look — into the payload');
+    assert.match(bar, /personaFromReferences\(\{ images, videos, audios, gender, look \}\)/, 'the loaded gender and look are part of what is compared and saved over');
+    // The look has a field of its own in the save dialog, and is seeded from
+    // the loaded persona or the cast strip's draft.
+    assert.match(bar, /value=\{saveLook\}/);
+    assert.match(bar, /const look = normalizePersonaLook\(persona\?\.look \?\? seed\?\.look\);/);
     // The shared save dialog grew a slot for it rather than the bar growing a
     // second dialog.
     assert.match(read('src/ui/SavedLibrary.jsx'), /children = null,/);
@@ -105,9 +109,20 @@ test('a persona has a gender, set beside its name and read by every generator', 
     assert.match(studio, /subject=\{ugcSubjectLabel\(ugcPersona\(\)\)\}/);
     assert.match(studio, /videoRequestPlan\(s\.setup\)\.sendReferenceImages\) return null;/, 'only pictures that will be SENT count');
     assert.match(studio, /personaGender=\{s\.setup\.persona\?\.gender \|\| ''\}/);
-    assert.match(studio, /gender: s\.setup\.persona\?\.gender \|\| '',/, 'the helper result is re-scaffolded with it');
-    assert.match(read('src/studios/video/ReferencesMenu.jsx'), /withReferenceTags\(prompt, \{ images, videos, audios, gender: persona\?\.gender \|\| '' \}\)/);
-    assert.match(read('src/lib/defaultPrompts.js'), /const gender = source\?\.persona\?\.gender \|\| '';/);
+    // The helper's draft and the References panel's Weave both go through the
+    // studio's one weave (acceptPrompt), whose cast carries the gender — and
+    // the helper is told the whole cast by slot, never a persona's name.
+    assert.match(studio, /cast=\{castSubjects\(s\.cast\)\}/);
+    assert.match(studio, /onUse=\{\(prompt\) => \{[\s\S]*?acceptPrompt\(prompt\);/);
+    // The References panel no longer renders a Weave of its own — the weave has
+    // one home (Prompt Check + the cast strip), and the panel's onWeave prop is
+    // accepted but inert.
+    const menu = read('src/studios/video/ReferencesMenu.jsx');
+    assert.doesNotMatch(menu, /onWriteTags/);
+    assert.match(menu, /void onWeave;/);
+    assert.match(studio, /<PromptCheckMenu[\s\S]*?onWeave=\{\(\) => \{[\s\S]*?acceptPrompt\(s\.setup\.prompt, \{ scaffold: true \}\);/);
+    assert.match(read('src/lib/promptWeave.js'), /gender: normalizePersonaGender\(persona\?\.gender \|\| gender\)/, 'the references member carries it');
+    assert.match(read('src/lib/defaultPrompts.js'), /const gender = override !== undefined \? override : \(source\?\.persona\?\.gender \|\| ''\);/);
     // Only the gender reaches the helper request — never the persona's name,
     // which is sealed to the owner's vault.
     const dialog = read('src/dialogs/PromptHelperDialog.jsx');

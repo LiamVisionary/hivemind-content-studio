@@ -17,6 +17,7 @@
 // - install-time legacy plaintext scrub (via loadStudioGenerationHistory, which
 //   scrubs 'muapi_history'/'video_history'/'muapi_pending_jobs' in studio mode)
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { toast } from 'react-hot-toast';
 import { getExploreDock, setExploreDock, subscribeExploreDock } from '../app/exploreDockStore.js';
 import { insertIntoActivePrompt } from '../app/promptTarget.js';
 import { clearResolvedMediaCache } from '../lib/e2eMedia.js';
@@ -29,27 +30,35 @@ import {
   loadStudioGenerationHistory,
 } from '../lib/hivemindStudio.js';
 import { resetVaultSession } from '../lib/vaultSession.js';
+import { getLang } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { NativeSelect, SectionLabel, Toggle, cx } from '../ui/kit.jsx';
 
 const OPTIONS_KEY = 'hivemind.explore.options';
 const VIDEO_SELECTION_KEY = 'hivemind.explore.videoSelection';
+// How many templates/ingredients the dock lists before pointing at History.
+const LIST_LIMIT = 8;
+// The pages whose studio registers a prompt inserter while it is on screen
+// (registerPromptInserter in each studio's `active` effect).
+const PROMPT_PAGES = new Set(['image', 'video', 'cinema', 'lipsync']);
+
+const zh = () => getLang() === 'zh-CN';
 
 const OPTION_ROWS = [
   {
     key: 'promptHelper',
-    label: 'Prompt helper',
-    description: 'Let the studio refine your prompt before generating.',
+    label: () => (zh() ? '提示词助手' : 'Prompt helper'),
+    description: () => (zh() ? '生成前让工作室先润色你的提示词。' : 'Let the studio refine your prompt before generating.'),
   },
   {
     key: 'passthrough',
-    label: 'Passthrough',
-    description: 'Send prompts exactly as written — turns the helper off.',
+    label: () => (zh() ? '原样发送提示词' : 'Send prompt as written'),
+    description: () => (zh() ? '不做任何改写 — 会关闭提示词助手。' : 'No rewriting at all — turns the helper off.'),
   },
   {
     key: 'walkthrough',
-    label: 'Ask first',
-    description: 'Walk through the options before each generation.',
+    label: () => (zh() ? '先确认' : 'Ask first'),
+    description: () => (zh() ? '每次生成前逐项确认选项。' : 'Walk through the options before each generation.'),
   },
 ];
 
@@ -61,25 +70,42 @@ function PromptItemButton({ label, text, onInsert }) {
       className="w-full rounded-md border border-line1 bg-bg2 px-2.5 py-2 text-left transition-colors duration-150 hover:border-line2 hover:bg-bg3"
     >
       <span className="block truncate text-xs font-medium text-ink1">{label}</span>
-      <span className="block truncate text-[11px] text-ink3">{text}</span>
+      {text ? <span className="block truncate text-[11px] text-ink3">{text}</span> : null}
     </button>
   );
 }
 
 function PromptItemList({ items, kind, onInsert }) {
   if (!items.length) {
-    return <p className="px-1 py-2 text-[11px] text-ink3">Nothing saved yet.</p>;
+    return <p className="px-1 py-2 text-[11px] text-ink3">{zh() ? '还没有保存的内容。' : 'Nothing saved yet.'}</p>;
   }
+  const shown = items.slice(0, LIST_LIMIT);
   return (
     <div className="flex flex-col gap-1.5">
-      {items.slice(0, 8).map((item) => {
+      {shown.map((item) => {
         const id = kind === 'template' ? item.id : item.prompt_id;
-        const label = kind === 'template' ? item.title : item.prompt;
-        const text = kind === 'template' ? item.description : item.prompt;
+        // An ingredient IS its prompt — it was listed twice (title line and
+        // muted line both the prompt). Now: its title over the prompt when it
+        // has one, else the prompt alone with its lane as the muted line.
+        const titled = kind !== 'template' && item.title;
+        const label = kind === 'template' ? item.title : (titled ? item.title : item.prompt);
+        const text = kind === 'template' ? item.description : (titled ? item.prompt : (item.lane || ''));
         return (
           <PromptItemButton key={id} label={label} text={text} onInsert={() => onInsert(item.prompt)} />
         );
       })}
+      {items.length > shown.length ? (
+        <div className="flex items-center justify-between px-1 pt-0.5 text-[11px] text-ink3">
+          <span>{zh() ? `显示 ${shown.length} / ${items.length}` : `${shown.length} of ${items.length}`}</span>
+          <button
+            type="button"
+            onClick={() => { window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'history' } })); setExploreDock(false); }}
+            className="font-medium text-honey hover:underline"
+          >
+            {zh() ? '打开历史记录' : 'Open History'}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -90,6 +116,7 @@ function DisclosureSection({ title, open, onToggle, children }) {
       <button
         type="button"
         onClick={onToggle}
+        aria-expanded={open}
         className="flex w-full items-center justify-between px-2.5 py-2 text-left text-xs font-semibold text-ink1"
       >
         {title}
@@ -110,20 +137,28 @@ function ExploreDockInner() {
     () => getSavedHivemindVideoSelection()?.modelId || '',
   );
   const [section, setSection] = useState(null); // 'templates' | 'ingredients' | null
-  const rootRef = useRef(null);
 
   useEffect(() => subscribeExploreDock(setOpenState), []);
 
-  // Outside-click + Escape close, but ignore the topbar trigger (it toggles).
+  const rootRef = useRef(null);
+
+  // Outside-click + Escape close, with the same two guards ui/Menu.jsx's
+  // useDismissable applies (a click inside a Modal is the modal's own; Escape
+  // belongs to the topmost dialog) — the dock used to close under a dialog. Not
+  // the hook itself: its close() carries no event, and the topbar trigger has
+  // to be exempt or its click would close-then-reopen the dock.
   useEffect(() => {
     if (!open) return undefined;
+    const inModal = (node) => Boolean(node?.closest?.('[role="dialog"]'));
+    const modalOpen = () => Boolean(document.querySelector('[role="dialog"]'));
     const onDown = (e) => {
+      if (inModal(e.target)) return;
       if (rootRef.current && rootRef.current.contains(e.target)) return;
       if (e.target.closest?.('[data-explore-trigger]')) return;
       setExploreDock(false);
     };
     const onKey = (e) => {
-      if (e.key === 'Escape') setExploreDock(false);
+      if (e.key === 'Escape' && !modalOpen()) setExploreDock(false);
     };
     document.addEventListener('pointerdown', onDown, true);
     window.addEventListener('keydown', onKey);
@@ -218,8 +253,17 @@ function ExploreDockInner() {
     }, 0);
   };
 
+  // Only a studio page has a prompt to insert into. On a hub page the legacy
+  // fallback probed the DOM for ANY textarea, which could append a template into
+  // whatever the hub happened to show.
   const insert = (text) => {
-    if (text) insertIntoActivePrompt(text);
+    if (!text) return;
+    const page = new URLSearchParams(window.location.search).get('page') || '';
+    if (!PROMPT_PAGES.has(page)) {
+      toast(zh() ? '打开图像或视频工作室后再插入提示词。' : 'Open the Image or Video studio to insert prompts.');
+      return;
+    }
+    insertIntoActivePrompt(text);
   };
 
   const templates = context.catalog?.templates || [];
@@ -237,12 +281,12 @@ function ExploreDockInner() {
           <div className="flex items-center justify-between gap-3 border-b border-line1 pb-2.5">
             <div>
               <SectionLabel className="text-honey">Hivemind</SectionLabel>
-              <div className="text-[13px] font-semibold text-ink1">Studio tools</div>
+              <div className="text-[13px] font-semibold text-ink1">{zh() ? '工作室工具' : 'Studio tools'}</div>
             </div>
             <button
               type="button"
               onClick={() => setExploreDock(false)}
-              aria-label="Close"
+              aria-label={zh() ? '关闭' : 'Close'}
               className="grid h-7 w-7 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg2 hover:text-ink1"
             >
               <Icon name="x" size={14} />
@@ -250,9 +294,9 @@ function ExploreDockInner() {
           </div>
 
           <label className="flex flex-col gap-1.5">
-            <SectionLabel>Local video workflow</SectionLabel>
+            <SectionLabel>{zh() ? '本地视频工作流' : 'Local video workflow'}</SectionLabel>
             <NativeSelect value={selectedModelId} onChange={(e) => selectWorkflow(e.target.value)}>
-              <option value="">Choose on generate</option>
+              <option value="">{zh() ? '生成时再选择' : 'Choose on generate'}</option>
               {context.videoModels.map((model) => (
                 <option key={model.id} value={model.id}>
                   {model.name}
@@ -262,27 +306,27 @@ function ExploreDockInner() {
           </label>
 
           <div className="flex flex-col gap-1.5">
-            <SectionLabel>Generation options</SectionLabel>
+            <SectionLabel>{zh() ? '生成选项' : 'Generation options'}</SectionLabel>
             {OPTION_ROWS.map((row) => (
               <div
                 key={row.key}
                 className="flex items-center justify-between gap-3 rounded-md border border-line1 bg-bg2/50 px-2.5 py-2"
               >
                 <div className="min-w-0">
-                  <div className="text-xs font-medium text-ink1">{row.label}</div>
-                  <div className="text-[11px] leading-snug text-ink3">{row.description}</div>
+                  <div className="text-xs font-medium text-ink1">{row.label()}</div>
+                  <div className="text-[11px] leading-snug text-ink3">{row.description()}</div>
                 </div>
                 <Toggle
                   checked={Boolean(options[row.key])}
                   onChange={(checked) => setOption(row.key, checked)}
-                  label={row.label}
+                  label={row.label()}
                 />
               </div>
             ))}
           </div>
 
           <DisclosureSection
-            title="Templates"
+            title={zh() ? '模板' : 'Templates'}
             open={section === 'templates'}
             onToggle={() => setSection(section === 'templates' ? null : 'templates')}
           >
@@ -290,7 +334,7 @@ function ExploreDockInner() {
           </DisclosureSection>
 
           <DisclosureSection
-            title="Ingredients"
+            title={zh() ? '配料' : 'Ingredients'}
             open={section === 'ingredients'}
             onToggle={() => setSection(section === 'ingredients' ? null : 'ingredients')}
           >

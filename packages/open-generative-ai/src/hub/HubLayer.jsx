@@ -12,8 +12,9 @@
 //   canvas → loadToolSurface, history → loadPrompts, telemetry → load…).
 // - setHubRootEl wires this node so the poll loops can gate on root.isConnected.
 import { useEffect, useRef } from 'react';
+import { ErrorBoundary } from '../app/ErrorBoundary.jsx';
 import { cx } from '../ui/kit.jsx';
-import { activateHubView, setHubRootEl, startHub } from './hubData.js';
+import { activateHubView, setHubRootEl, setHubVisible, startHub } from './hubData.js';
 import { PlannerView } from './views/PlannerView.jsx';
 import { CanvasView } from './views/CanvasView.jsx';
 import { ModelsView } from './views/ModelsView.jsx';
@@ -39,20 +40,31 @@ export function HubLayer({ visible, view }) {
     if (view) activateHubView(view);
   }, [view]);
 
+  // The data layer's view-scoped polls (History prompts, Providers OAuth) need
+  // to know when a studio page has taken over the screen — activeView alone
+  // stayed 'history' and kept the archive re-fetching behind the Video studio.
+  useEffect(() => {
+    setHubVisible(visible);
+    return () => setHubVisible(false);
+  }, [visible]);
+
   // Display is driven straight off the router props so switching never flashes a
   // stale view; the data layer's activeView is kept in sync by the effect above.
   const current = visible ? view : null;
 
   return (
     <div ref={rootRef} className={cx('flex min-h-0 flex-1 flex-col', !visible && 'hidden')}>
-      <PlannerView active={current === 'create'} />
-      <CanvasView active={current === 'canvas'} />
-      <ModelsView active={current === 'models'} />
-      <RunsView active={current === 'runs'} />
-      <HistoryView active={current === 'history'} />
-      <TelemetryView active={current === 'telemetry'} />
-      <ProvidersView active={current === 'providers'} />
-      <GpuMachinesView active={current === 'machines'} />
+      {/* One boundary per view: a surprising payload in one page must not blank
+          the others (they all stay mounted, so a crash here used to take the
+          Canvas iframe and every decrypted thumbnail with it). */}
+      <ErrorBoundary label="Planner" hidden={current !== 'create'}><PlannerView active={current === 'create'} /></ErrorBoundary>
+      <ErrorBoundary label="Canvas" hidden={current !== 'canvas'}><CanvasView active={current === 'canvas'} /></ErrorBoundary>
+      <ErrorBoundary label="Models" hidden={current !== 'models'}><ModelsView active={current === 'models'} /></ErrorBoundary>
+      <ErrorBoundary label="Runs" hidden={current !== 'runs'}><RunsView active={current === 'runs'} /></ErrorBoundary>
+      <ErrorBoundary label="History" hidden={current !== 'history'}><HistoryView active={current === 'history'} /></ErrorBoundary>
+      <ErrorBoundary label="Telemetry" hidden={current !== 'telemetry'}><TelemetryView active={current === 'telemetry'} /></ErrorBoundary>
+      <ErrorBoundary label="Providers" hidden={current !== 'providers'}><ProvidersView active={current === 'providers'} /></ErrorBoundary>
+      <ErrorBoundary label="Machines" hidden={current !== 'machines'}><GpuMachinesView active={current === 'machines'} /></ErrorBoundary>
     </div>
   );
 }

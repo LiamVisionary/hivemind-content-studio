@@ -34,6 +34,28 @@
   --ink-2: #a3a3ac;
   --ink-3: #6b6b74;
 
+  /* Channel triplets — the Tailwind colour map reads these so opacity
+     modifiers (border-honey/50, bg-bg0/80, bg-warn/10 …) actually emit CSS.
+     Keep each in sync with the hex token above it. */
+  --honey-rgb: 246 178 27;
+  --honey-bright-rgb: 255 201 74;
+  --honey-deep-rgb: 200 138 10;
+  --on-honey-rgb: 26 18 5;
+  --ok-rgb: 52 199 123;
+  --danger-rgb: 242 109 95;
+  --warn-rgb: 232 137 58;
+  --info-rgb: 108 168 255;
+  --bg-0-rgb: 12 12 14;
+  --bg-1-rgb: 17 17 20;
+  --bg-2-rgb: 23 23 27;
+  --bg-3-rgb: 30 30 36;
+  --ink-1-rgb: 242 242 243;
+  --ink-2-rgb: 163 163 172;
+  --ink-3-rgb: 107 107 116;
+  --honey-tint-a: 0.12;
+  --ok-tint-a: 0.12;
+  --danger-tint-a: 0.12;
+
   /* Lines */
   --line-1: rgba(255, 255, 255, 0.08);
   --line-2: rgba(255, 255, 255, 0.16);
@@ -70,39 +92,4 @@
   --sidebar-w: 216px;
   --sidebar-w-rail: 64px;
   --topbar-h: 52px;
-
-  /* ---- Legacy aliases (old components during port; removed after) ---- */
-  --color-primary: var(--honey);
-  --color-primary-hover: var(--honey-bright);
-  --color-accent: var(--honey-bright);
-  --color-accent-hover: var(--honey-bright);
-  --color-danger: var(--danger);
-  --color-success: var(--ok);
-  --bg-app: var(--bg-0);
-  --bg-panel: var(--bg-1);
-  --bg-card: var(--bg-2);
-  --bg-elevated: var(--bg-3);
-  --text-primary: var(--ink-1);
-  --text-secondary: var(--ink-2);
-  --text-muted: var(--ink-3);
-  --border-color: #23232a;
-  --border-light: var(--line-1);
-  --border-radius-sm: var(--r-sm);
-  --border-radius-md: var(--r-md);
-  --border-radius-lg: var(--r-lg);
-  --border-radius-xl: var(--r-xl);
-  --border-radius-full: var(--r-full);
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
-  --shadow-md: 0 6px 16px -6px rgb(0 0 0 / 0.5);
-  --shadow-lg: var(--shadow-overlay);
-  --shadow-glow: none;
-  --shadow-glow-accent: none;
-  --backdrop-blur: blur(16px);
-  --ease-out-expo: var(--ease-swift);
-  --transition-fast: var(--t-fast);
-  --transition-normal: var(--t-med);
-  --font-family: var(--font-ui);
-  --font-display: var(--font-ui);
-  --rail-width: var(--sidebar-w);
-  --topbar-height: var(--topbar-h);
 }

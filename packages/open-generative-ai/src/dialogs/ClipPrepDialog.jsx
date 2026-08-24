@@ -20,7 +20,7 @@ import {
   storyboardTimestamps,
 } from '../lib/clipPrepPlan.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
-import { Button, Field, ProgressBar, SectionLabel, Segmented, Spinner, cx } from '../ui/kit.jsx';
+import { Button, Field, ProgressBar, SectionLabel, Segmented, Spinner, Toggle, cx } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
 
 const STORYBOARD_TILES = 6;
@@ -52,6 +52,8 @@ export function ClipPrepDialog({
   const [blob, setBlob] = useState(null);
   const [source, setSource] = useState(null);
   const [loadError, setLoadError] = useState('');
+  // Bumped by Retry so the decrypt+probe effect runs again for the same source.
+  const [attempt, setAttempt] = useState(0);
   const [previewUrl, setPreviewUrl] = useState('');
 
   const [trim, setTrim] = useState({ start: 0, end: null });
@@ -97,7 +99,7 @@ export function ClipPrepDialog({
       }
     })();
     return () => { cancelled = true; };
-  }, [open, sourceUrl, track]);
+  }, [open, sourceUrl, track, attempt]);
 
   const crop = useMemo(() => {
     const ratio = CROP_ASPECTS.find((entry) => entry.id === aspect)?.ratio ?? null;
@@ -221,11 +223,17 @@ export function ClipPrepDialog({
       )}
     >
       {loadError ? (
-        <div className="p-5 text-sm text-danger">{loadError}</div>
+        <div className="flex items-start gap-3 rounded-md border border-danger bg-danger-tint px-3.5 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-ink1">Couldn't read that clip</div>
+            <div className="mt-0.5 break-words font-mono text-xs text-danger">{loadError}</div>
+          </div>
+          <Button size="sm" variant="neutral" icon="refresh" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>
+        </div>
       ) : !source ? (
-        <div className="flex items-center gap-3 p-6 text-sm text-ink3"><Spinner /> Decrypting and reading the clip on this device…</div>
+        <div className="flex items-center gap-3 py-2 text-sm text-ink3"><Spinner /> Decrypting and reading the clip on this device…</div>
       ) : (
-        <div className="flex flex-col gap-4 p-5">
+        <div className="flex flex-col gap-4">
           <div className="overflow-hidden rounded-lg border border-line1 bg-bg0">
             {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
             {/* nodownload: Chrome names a blob: download from the URL's UUID and
@@ -244,9 +252,13 @@ export function ClipPrepDialog({
           {/* Trim. Two ranges rather than a custom dual-handle: they are
               keyboard-operable for free, which a div with pointer handlers is not. */}
           <div className="flex flex-col gap-2">
-            <SectionLabel>
-              Trim — {seconds(bounds.start)} to {seconds(bounds.end)} ({seconds(bounds.seconds)})
-            </SectionLabel>
+            <div className="flex items-baseline justify-between gap-3">
+              <SectionLabel>Trim</SectionLabel>
+              {/* Timecodes outside the uppercase kicker: "0:00.0 TO 0:05.0" is not a readout. */}
+              <span className="font-mono text-xs text-ink2">
+                {seconds(bounds.start)} – {seconds(bounds.end)} <span className="text-ink3">({seconds(bounds.seconds)})</span>
+              </span>
+            </div>
             <label className="flex items-center gap-2 text-xs text-ink3">
               <span className="w-8 shrink-0">In</span>
               <input
@@ -289,27 +301,34 @@ export function ClipPrepDialog({
           {budget && clipSeconds > 0 ? (
             <div className={cx(
               'rounded-lg border px-3 py-2 text-xs',
-              budget.limitedByReference ? 'border-warn bg-bg0 text-ink2' : 'border-line1 bg-bg0 text-ink3',
+              budget.limitedByReference ? 'border-line1 bg-bg0 text-ink3' : 'border-warn bg-bg0 text-ink2',
             )}>
               {budget.limitedByReference ? (
-                <>This reference is <strong>{seconds(budget.referenceSeconds)}</strong>, shorter than the {seconds(clipSeconds)} shot — the shot will be capped to the reference.</>
+                <>This <strong>{seconds(budget.referenceSeconds)}</strong> reference keeps its own length — it costs {seconds(budget.referenceSeconds)} of motion budget and leaves the full {seconds(clipSeconds)} range open.</>
+              ) : budget.referenceSeconds - clipSeconds < 0.05 ? (
+                <>As long as the {seconds(clipSeconds)} shot: it spends the whole motion budget. Trim it below {seconds(clipSeconds)} to spend less.</>
               ) : (
-                <>The {seconds(clipSeconds)} shot is the limit here, not this {seconds(budget.referenceSeconds)} reference. Trimming further will not free any more range.</>
+                <>Longer than the {seconds(clipSeconds)} shot: it is trimmed to {seconds(clipSeconds)} on the way in. Trim it below {seconds(clipSeconds)} to spend less budget.</>
               )}
             </div>
           ) : null}
 
           <div className="flex flex-wrap items-center gap-2">
-            <Button icon="image" onClick={() => runGrabFrame(videoRef.current?.currentTime || bounds.start)} disabled={Boolean(busy)}>
+            <Button
+              icon="image"
+              onClick={() => runGrabFrame(videoRef.current?.currentTime || bounds.start)}
+              disabled={Boolean(busy)}
+              title="Saves the frame under the playhead as a start frame and closes this dialog — reopen Prepare to trim the clip as well"
+            >
               Use current frame
             </Button>
             <Button icon="grid" onClick={runStoryboard} disabled={Boolean(busy)} loading={busy === 'board'}>
               Storyboard
             </Button>
-            <label className="ml-auto flex items-center gap-2 text-xs text-ink3">
-              <input type="checkbox" checked={dropAudio} onChange={(e) => setDropAudio(e.target.checked)} disabled={!source.hasAudio} />
+            <span className="ml-auto flex items-center gap-2 text-xs text-ink3">
               Drop audio{source.hasAudio ? '' : ' (none)'}
-            </label>
+              <Toggle checked={dropAudio} onChange={setDropAudio} label="Drop audio" disabled={!source.hasAudio} />
+            </span>
           </div>
 
           {board.length ? (
@@ -320,7 +339,7 @@ export function ClipPrepDialog({
                   type="button"
                   className="group overflow-hidden rounded-md border border-line1 hover:border-honey"
                   onClick={() => runGrabFrame(tile.at)}
-                  title={`Use the frame at ${seconds(tile.at)}`}
+                  title={`Use the frame at ${seconds(tile.at)} as a start frame (closes this dialog)`}
                 >
                   <img src={tile.url} alt={`Frame at ${seconds(tile.at)}`} className="aspect-video w-full object-cover" />
                   <span className="block py-0.5 text-center text-[10px] text-ink3">{seconds(tile.at)}</span>

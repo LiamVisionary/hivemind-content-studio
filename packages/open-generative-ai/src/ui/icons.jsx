@@ -308,6 +308,54 @@ const PATHS = {
       <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
     </>
   ),
+  // Overflow / actions menu trigger (vertical kebab).
+  more: (
+    <>
+      <circle cx="12" cy="5" r="1" fill="currentColor" />
+      <circle cx="12" cy="12" r="1" fill="currentColor" />
+      <circle cx="12" cy="19" r="1" fill="currentColor" />
+    </>
+  ),
+  star: <path d="m12 2.8 2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.6l-5.8 3.1 1.1-6.5-4.7-4.6 6.5-.9L12 2.8z" />,
+  heart: <path d="M19.5 12.6 12 20l-7.5-7.4a4.6 4.6 0 0 1 6.5-6.5l1 1 1-1a4.6 4.6 0 0 1 6.5 6.5z" />,
+  sound: (
+    <>
+      <path d="M11 5 6 9H2v6h4l5 4V5z" />
+      <path d="M15.5 8.5a5 5 0 0 1 0 7" />
+      <path d="M18.5 5.5a9 9 0 0 1 0 13" />
+    </>
+  ),
+  mute: (
+    <>
+      <path d="M11 5 6 9H2v6h4l5 4V5z" />
+      <path d="m22 9-6 6" />
+      <path d="m16 9 6 6" />
+    </>
+  ),
+  scissors: (
+    <>
+      <circle cx="6" cy="6" r="3" />
+      <circle cx="6" cy="18" r="3" />
+      <path d="M20 4 8.1 15.9" />
+      <path d="M14.5 14.5 20 20" />
+      <path d="M8.1 8.1 12 12" />
+    </>
+  ),
+  chevronUp: <path d="m18 15-6-6-6 6" />,
+  expand: (
+    <>
+      <path d="M15 3h6v6" />
+      <path d="M9 21H3v-6" />
+      <path d="m21 3-7 7" />
+      <path d="m3 21 7-7" />
+    </>
+  ),
+  arrowLeft: (
+    <>
+      <path d="M19 12H5" />
+      <path d="m12 19-7-7 7-7" />
+    </>
+  ),
 };
 
 export function Icon({ name, size = 18, className = '', strokeWidth = 2, ...rest }) {

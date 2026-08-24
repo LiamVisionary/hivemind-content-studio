@@ -43,12 +43,16 @@ export function ChipButton({
   // dashed honey outline rather than a new colour, so "on" and "on but stale"
   // stay one family and only the edge changes.
   warn = false,
+  // title / aria-* / data-* ride through: every tooltip written for a chip used
+  // to be dropped here silently.
+  ...rest
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      {...rest}
       className={cx(
         'inline-flex h-ctl-md max-w-[240px] shrink-0 items-center gap-2 rounded-md border px-3 text-[13px] transition-colors duration-150',
         active
@@ -76,16 +80,36 @@ export function ChipButton({
 export function Menu({ trigger, children, align = 'start', up = false, width = 'w-64', panelClassName = '' }) {
   const [open, setOpen] = useState(false);
   const ref = useDismissable(open, () => setOpen(false));
+  const panelRef = useRef(null);
+  const [side, setSide] = useState(align);
+  // A popover anchored at the left of a chip near the right edge (or wider than a
+  // phone) used to run off-screen; flip to the other edge when it would.
+  useEffect(() => {
+    if (!open) { setSide(align); return; }
+    const panel = panelRef.current;
+    const anchor = ref.current;
+    if (!panel || !anchor) return;
+    // Measure with the UNSCALED width (offsetWidth) against the anchor's box: the
+    // panel is mid scale-in when this runs, so its own bounding rect under-reports.
+    const anchorRect = anchor.getBoundingClientRect();
+    const width = panel.offsetWidth;
+    const margin = 8;
+    const fits = width < window.innerWidth - 2 * margin;
+    if (align !== 'end' && fits && anchorRect.left + width > window.innerWidth - margin) setSide('end');
+    else if (align === 'end' && fits && anchorRect.right - width < margin) setSide('start');
+    else setSide(align);
+  }, [open, align, ref]);
   return (
     <div ref={ref} className="relative inline-block">
       {trigger(open, () => setOpen((v) => !v))}
       {open ? (
         <div
+          ref={panelRef}
           className={cx(
-            'hive-scale-in absolute z-50 max-h-[min(420px,60vh)] overflow-y-auto rounded-lg border border-line1 bg-bg1 p-1.5 shadow-pop',
+            'hive-scale-in absolute z-50 max-h-[min(420px,60vh)] max-w-[calc(100vw-1rem)] overflow-y-auto rounded-lg border border-line1 bg-bg1 p-1.5 shadow-pop',
             width,
             up ? 'bottom-[calc(100%+6px)]' : 'top-[calc(100%+6px)]',
-            align === 'end' ? 'right-0' : 'left-0',
+            side === 'end' ? 'right-0' : 'left-0',
             panelClassName,
           )}
           role="menu"

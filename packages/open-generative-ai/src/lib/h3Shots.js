@@ -376,6 +376,62 @@ function autoSummary(shots = [], durationSeconds = 0) {
   return sentence(opening ? `${opening.replace(/\.$/, '')}, in ${shape}${length}` : `A scene in ${shape}${length}`);
 }
 
+/**
+ * The [Shot N] blocks of a prompt as WRITTEN — the reverse direction of
+ * shotText, kept deliberately shallow. Each block keeps its cut stamp ("At
+ * mm:ss.mmm, the shot cuts to …"), its transition verb and what the cut lands
+ * on; everything else in the block stays as prose in `text` (beats, dialogue
+ * and camera sentences are not taken apart — re-serializing them as prose
+ * reproduces them). Returns [] when the prompt has no shot markers.
+ *
+ * The builder uses this to seed its timeline from a prompt that already has
+ * shots (a starter, a saved prompt), instead of opening on one blank shot and
+ * offering to replace three written ones with it.
+ */
+export function parseShotBlocks(prompt) {
+  const source = String(prompt || '');
+  const hits = [...source.matchAll(/\[Shot\s+(\d+)\]/gi)];
+  if (!hits.length) return [];
+  const SECTION = /\n\s*(?:overall_soundscape|non_diegetic_music|retention_analysis|subject_definitions|summary|detailed_description)\s*:/i;
+  const VERBS = /^(the shot (?:cuts|cross-dissolves|fades|wipes) to)\s+/i;
+  return hits.map((hit, i) => {
+    const start = hit.index + hit[0].length;
+    const end = i + 1 < hits.length ? hits[i + 1].index : source.length;
+    let body = source.slice(start, end).split(SECTION)[0].trim();
+    let cutSec = 0;
+    let transition = 'the shot cuts to';
+    let cutTo = '';
+    const stamp = body.match(/^At\s+(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?,\s*/i);
+    if (stamp) {
+      cutSec = Number(stamp[1]) * 60 + Number(stamp[2]) + (stamp[3] ? Number(stamp[3].padEnd(3, '0')) / 1000 : 0);
+      body = body.slice(stamp[0].length);
+      const verb = body.match(VERBS);
+      if (verb) {
+        transition = verb[1].toLowerCase();
+        body = body.slice(verb[0].length);
+        const landing = body.match(/^([^.]*)\.?\s*/);
+        if (landing) {
+          cutTo = landing[1].trim();
+          body = body.slice(landing[0].length);
+        }
+      }
+    }
+    return { index: Number(hit[1]), cutSec, transition, cutTo, text: body.trim() };
+  });
+}
+
+/** Builder shots seeded from the prompt's own [Shot N] blocks (see above). */
+export function timelineShotsFromPrompt(prompt) {
+  return parseShotBlocks(prompt).map((block, at) => {
+    const shot = newShot();
+    shot.cutSec = at === 0 ? 0 : block.cutSec;
+    shot.transition = block.transition;
+    shot.cutTo = block.cutTo;
+    shot.action = block.text;
+    return shot;
+  });
+}
+
 /** Total time the timeline claims, for checks and for the builder's readout. */
 export function timelineEndSec(shots = [], durationSeconds = 0) {
   const cuts = shots.slice(1).map((shot) => Number(shot?.cutSec) || 0);

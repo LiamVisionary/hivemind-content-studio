@@ -10,18 +10,25 @@
 // hubState.workflow.operatorToken that authHeaders() reads live at action time.
 // Artifact media flows through useMediaSrc for E2E decrypt.
 import { useState } from 'react';
-import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 import { useMediaSrc } from '../../hooks/hooks.js';
+import { getLang } from '../../lib/i18n.js';
+import { downloadMedia } from '../../lib/downloadMedia.js';
+import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { Icon } from '../../ui/icons.jsx';
+import { ConfirmModal } from '../../ui/Modal.jsx';
 import { Button, EmptyState, Field, Pill, Segmented, TextInput } from '../../ui/kit.jsx';
 import {
-  duplicateRun, filteredRuns, generationArtifactUrl, loadRunIntoSimpleComposer,
-  runAction, runTitle, setSelectedRunId, setStatusFilter, setWorkflow, titleCase, useHub,
+  duplicateRun, extensionForMime, filteredRuns, generationArtifactUrl, humanize, laneLabel,
+  loadRunIntoSimpleComposer, runAction, runDisplayTitle, setSelectedRunId, setStatusFilter,
+  setWorkflow, useHub,
 } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
+import { Lightbox } from '../components/Lightbox.jsx';
 import { RunCard } from '../components/RunCard.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
+
+const zh = () => getLang() === 'zh-CN';
 
 const FILTERS = [
   { value: '', label: 'All' },
@@ -36,46 +43,8 @@ const fmtTime = (value) => {
 };
 
 /* ------------------------------------------------------------------ */
-/* Artifact preview + lightbox                                        */
+/* Artifact preview                                                   */
 /* ------------------------------------------------------------------ */
-
-function Lightbox({ src, isVideo, onClose }) {
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Artifact preview"
-      onClick={onClose}
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-scrim p-6"
-    >
-      <button
-        type="button"
-        onClick={onClose}
-        aria-label="Close preview"
-        className="absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-md bg-bg2 text-ink2 transition-colors hover:text-ink1"
-      >
-        <Icon name="x" size={18} />
-      </button>
-      {isVideo ? (
-        <video
-          src={src}
-          controls controlsList="nodownload"
-          autoPlay
-          onClick={(e) => e.stopPropagation()}
-          className="max-h-full max-w-full rounded-lg object-contain shadow-overlay"
-        />
-      ) : (
-        <img
-          src={src}
-          alt="Artifact preview"
-          onClick={(e) => e.stopPropagation()}
-          className="max-h-full max-w-full rounded-lg object-contain shadow-overlay"
-        />
-      )}
-    </div>,
-    document.body,
-  );
-}
 
 function ArtifactCard({ run, artifact, onOpen }) {
   const rawUrl = generationArtifactUrl(run, artifact);
@@ -85,7 +54,12 @@ function ArtifactCard({ run, artifact, onOpen }) {
   const isVideo = mime.startsWith('video/');
   const isAudio = mime.startsWith('audio/');
   const kb = Math.max(1, Math.round((artifact.size_bytes || 0) / 1024));
-  const filename = `${run.run_id}-${artifact.role || 'artifact'}`;
+  // Named like History's downloads: <provider>-<run>-<role>.<ext>. The raw
+  // anchor this replaces saved a sealed artifact's envelope JSON (ciphertext)
+  // under a name with no extension at all.
+  const filename = mediaDownloadName(
+    artifact.provider, `${run.run_id}-${artifact.role || 'artifact'}`, extensionForMime(mime), { fallback: 'artifact' },
+  );
 
   const copyUrl = async () => {
     try {
@@ -101,8 +75,8 @@ function ArtifactCard({ run, artifact, onOpen }) {
       {isImage || isVideo ? (
         <button
           type="button"
-          onClick={() => onOpen({ src, isVideo })}
-          aria-label={`Open ${titleCase(artifact.role)} preview`}
+          onClick={() => onOpen({ src, isVideo, title: humanize(artifact.role) })}
+          aria-label={`Open ${humanize(artifact.role)} preview`}
           className="grid aspect-video place-items-center overflow-hidden bg-bg3"
         >
           {isVideo
@@ -114,29 +88,27 @@ function ArtifactCard({ run, artifact, onOpen }) {
           <audio src={src} controls preload="metadata" className="w-full" />
         </span>
       ) : (
-        <span className="grid aspect-video place-items-center bg-bg3 text-xs text-ink3">{titleCase(artifact.role)}</span>
+        <span className="grid aspect-video place-items-center bg-bg3 text-xs text-ink3">{humanize(artifact.role)}</span>
       )}
 
       <figcaption className="flex items-center gap-1.5 px-2.5 py-2">
         <span className="min-w-0 flex-1">
-          <b className="block truncate text-[12px] font-semibold text-ink1">{titleCase(artifact.role)}</b>
+          <b className="block truncate text-[12px] font-semibold text-ink1">{humanize(artifact.role)}</b>
           <small className="text-[11px] text-ink3">{artifact.provider || 'studio'} · <span className="font-mono">{kb} KB</span></small>
         </span>
-        <a
-          href={rawUrl}
-          download={filename}
-          target="_blank"
-          rel="noreferrer"
-          aria-label={`Download ${titleCase(artifact.role)}`}
+        <button
+          type="button"
+          onClick={() => void downloadMedia(rawUrl, filename)}
+          aria-label={`Download ${humanize(artifact.role)}`}
           title="Download"
           className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
         >
           <Icon name="download" size={15} />
-        </a>
+        </button>
         <button
           type="button"
           onClick={copyUrl}
-          aria-label={`Copy ${titleCase(artifact.role)} URL`}
+          aria-label={`Copy ${humanize(artifact.role)} URL`}
           title="Copy URL"
           className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
         >
@@ -165,14 +137,26 @@ function Section({ title, right, children }) {
 
 function RunDetail({ run, operatorToken }) {
   const [preview, setPreview] = useState(null);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   if (!run) {
     return (
-      <EmptyState icon="stack" title="Select a run" hint="Inspect its scenes, steps, artifacts, and next action." className="flex-1" />
+      <EmptyState
+        icon="stack"
+        title={zh() ? '选择一个运行' : 'Select a run'}
+        hint={zh() ? '查看其场景、步骤、产物和下一步操作。' : 'Inspect its scenes, steps, artifacts, and next action.'}
+        className="flex-1"
+      />
     );
   }
   const action = run.next_actions?.[0];
-  const canCancel = !['completed', 'cancelled'].includes(run.status);
+  // A failed run has nothing left to cancel.
+  const canCancel = !['completed', 'cancelled', 'failed'].includes(run.status);
   const canAuth = Boolean(run.current_step) || canCancel;
+  const cancelRun = async () => {
+    setCancelling(true);
+    try { await runAction('cancel', run.run_id); } finally { setCancelling(false); setConfirmCancel(false); }
+  };
   const scenes = run.brief?.scenes || [];
   const created = fmtTime(run.created_at);
   const updated = fmtTime(run.updated_at);
@@ -181,9 +165,12 @@ function RunDetail({ run, operatorToken }) {
     <div className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-4 md:p-5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink3">{titleCase(run.lane)}</p>
-          <h3 className="truncate text-[15px] font-semibold text-ink1">{runTitle(run)}</h3>
-          <p className="mt-0.5 truncate font-mono text-[11px] text-ink3">{run.run_id}</p>
+          {/* The lane is the kicker unless it is already the title (a brief with no title of its own). */}
+          <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink3">
+            {runDisplayTitle(run) === laneLabel(run.lane) ? (zh() ? '制作' : 'Production') : laneLabel(run.lane)}
+          </p>
+          <h3 className="truncate text-[15px] font-semibold text-ink1">{runDisplayTitle(run)}</h3>
+          <p className="mt-0.5 truncate font-mono text-[11px] text-ink3" title={run.run_id}>{run.run_id}</p>
           {created || updated ? (
             <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-ink3">
               {created ? <span>created <span className="font-mono text-ink2">{created}</span></span> : null}
@@ -197,7 +184,7 @@ function RunDetail({ run, operatorToken }) {
       {action ? (
         <Section title="Next action">
           <div className="rounded-lg border border-line1 bg-bg2 p-3">
-            <b className="text-[13px] text-ink1">{titleCase(action.intent)}</b>
+            <b className="text-[13px] text-ink1">{humanize(action.intent)}</b>
             <p className="mt-0.5 text-[13px] leading-relaxed text-ink3">{action.reason}</p>
           </div>
         </Section>
@@ -253,7 +240,7 @@ function RunDetail({ run, operatorToken }) {
               <Button size="sm" onClick={() => runAction('retry', run.run_id, run.current_step)}>Retry step</Button>
             </>
           ) : null}
-          {canCancel ? <Button size="sm" variant="danger" onClick={() => runAction('cancel', run.run_id)}>Cancel</Button> : null}
+          {canCancel ? <Button size="sm" variant="danger" onClick={() => setConfirmCancel(true)}>Cancel run</Button> : null}
         </div>
         {canAuth ? (
           <Field
@@ -272,7 +259,25 @@ function RunDetail({ run, operatorToken }) {
         ) : null}
       </Section>
 
-      {preview ? <Lightbox src={preview.src} isVideo={preview.isVideo} onClose={() => setPreview(null)} /> : null}
+      {preview ? (
+        <Lightbox
+          src={preview.src}
+          kind={preview.isVideo ? 'video' : 'image'}
+          title={preview.title}
+          alt={preview.title}
+          onClose={() => setPreview(null)}
+        />
+      ) : null}
+      <ConfirmModal
+        open={confirmCancel}
+        onClose={() => (cancelling ? null : setConfirmCancel(false))}
+        onConfirm={cancelRun}
+        busy={cancelling}
+        title="Cancel this production?"
+        confirmLabel="Cancel production"
+        cancelLabel="Keep running"
+        body={`Running steps stop and "${runDisplayTitle(run)}" is marked cancelled. Artifacts already made stay in the run.`}
+      />
     </div>
   );
 }
@@ -288,7 +293,7 @@ export function RunsView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker="Durable production" title="Runs">
+      <HubToolbar kicker={zh() ? '持久化制作' : 'Durable production'} title={zh() ? '运行' : 'Runs'}>
         <Segmented options={FILTERS} value={s.statusFilter} onChange={setStatusFilter} />
       </HubToolbar>
 
@@ -302,7 +307,11 @@ export function RunsView({ active }) {
               <RunCard key={run.run_id} run={run} selected={run.run_id === s.selectedRunId} onOpen={setSelectedRunId} />
             ))
           ) : (
-            <EmptyState icon="stack" title="No matching runs" hint="Create a production or change the filter." />
+            <EmptyState
+              icon="stack"
+              title={zh() ? '没有匹配的运行' : 'No matching runs'}
+              hint={zh() ? '创建一个制作，或更改筛选条件。' : 'Create a production or change the filter.'}
+            />
           )}
         </div>
         <RunDetail run={selected} operatorToken={s.workflow.operatorToken} />

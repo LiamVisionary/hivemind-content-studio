@@ -288,3 +288,31 @@ test('every blank the scaffolds write is one the check knows about', async () =>
         }
     }
 });
+
+test('a subject that is defined but never staged is a finding of its own', async () => {
+    const { checkH3Prompt } = await import('../src/lib/h3PromptCheck.js');
+    const prompt = `subject_definitions:
+<Subject 1> is the woman shown in <Picture 1>: red hair.
+<Subject 2> is SpongeBob SquarePants from the animated series SpongeBob SquarePants (1999).
+
+summary:
+One take of <Subject 1>.
+
+retention_analysis:
+<Picture 1>: fully_preserved — same person.
+
+detailed_description:
+[Shot 1] <Subject 1> (S1) sits at a table and looks out of the window.
+
+overall_soundscape:
+Room tone.
+
+non_diegetic_music:
+none`;
+    const { findings } = checkH3Prompt({ prompt, images: ['/a.png'] });
+    const missing = findings.filter((finding) => finding.code === 'subject-not-in-scene');
+    assert.deepEqual(missing.map((finding) => finding.subject), [2]);
+    // Staging the second subject clears it.
+    const staged = checkH3Prompt({ prompt: prompt.replace('looks out of the window.', 'looks out of the window as <Subject 2> bounces in.'), images: ['/a.png'] });
+    assert.equal(staged.findings.some((finding) => finding.code === 'subject-not-in-scene'), false);
+});

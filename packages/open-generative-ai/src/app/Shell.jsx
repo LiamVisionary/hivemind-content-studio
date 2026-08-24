@@ -2,7 +2,10 @@
 import { useEffect, useState } from 'react';
 import { useLang, useOwnerSession } from '../hooks/hooks.js';
 import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
-import { t } from '../lib/i18n.js';
+import { getLang, t } from '../lib/i18n.js';
+
+const zhUi = () => getLang() === 'zh-CN';
+import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { IconButton, cx } from '../ui/kit.jsx';
 import { getExploreDock, subscribeExploreDock, toggleExploreDock } from './exploreDockStore.js';
@@ -20,8 +23,8 @@ function ExploreDockButton() {
       type="button"
       data-explore-trigger
       onClick={toggleExploreDock}
-      title="Hivemind studio tools"
-      aria-label="Hivemind studio tools"
+      title={zhUi() ? 'Hivemind 工具箱' : 'Hivemind studio tools'}
+      aria-label={zhUi() ? 'Hivemind 工具箱' : 'Hivemind studio tools'}
       aria-pressed={open}
       className={cx(
         'inline-flex h-ctl-md items-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold transition-colors duration-150',
@@ -48,7 +51,7 @@ function ApiStatusPill() {
   return (
     <span
       className={cx('inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-semibold', tone)}
-      title={`Studio API: ${status.label}`}
+      title={`${zhUi() ? '工作室 API' : 'Studio API'}: ${status.label}`}
     >
       <span className="h-1.5 w-1.5 rounded-full bg-current" />
       <span className="hidden sm:inline">{status.label}</span>
@@ -56,27 +59,90 @@ function ApiStatusPill() {
   );
 }
 
+// Signed in (cookie) but this tab never received the per-tab passphrase — a
+// second browser tab, typically. Every sealed tile then says "unlock", so the
+// control to do it has to exist somewhere: here, next to Lock.
+function VaultUnlockButton({ signedIn }) {
+  const [locked, setLocked] = useState(false);
+  useEffect(() => {
+    if (!signedIn || !isHivemindStudioEnabled()) return undefined;
+    let alive = true;
+    ensureVaultReady().then((ready) => { if (alive) setLocked(!ready); });
+    return () => { alive = false; };
+  }, [signedIn]);
+  if (!locked) return null;
+  return (
+    <button
+      type="button"
+      onClick={requestVaultUnlock}
+      title={zhUi() ? '此标签页的保险库已锁定——解锁以查看加密媒体与已保存项目' : 'Your vault is locked in this tab — unlock it to open sealed media and saved items'}
+      className="inline-flex h-ctl-md items-center gap-1.5 rounded-md border border-honey/50 bg-honey-tint px-3 text-xs font-semibold text-honey transition-colors hover:border-honey"
+    >
+      <Icon name="unlock" size={14} />
+      <span className="hidden sm:inline">{zhUi() ? '解锁保险库' : 'Unlock vault'}</span>
+    </button>
+  );
+}
+
 function LockButton() {
   const unlocked = useOwnerSession();
-  if (!unlocked) return null;
   const lock = async () => {
     window.dispatchEvent(new Event('hivemind-owner-lock-broadcast'));
+    // The passphrase handoff lives in this tab's sessionStorage for 24 h; Lock
+    // must not leave it behind (the hub only cleared it once a hub page had
+    // been visited).
+    clearOwnerHandoff();
+    resetVaultSession();
     try {
       await fetch('/api/owner/lock', { method: 'POST' });
     } catch { /* non-critical */ }
     location.reload();
   };
   return (
+    <>
+      <VaultUnlockButton signedIn={unlocked} />
+      {unlocked ? (
+        <button
+          type="button"
+          onClick={lock}
+          title={zhUi() ? '退出并锁定工作室' : 'Sign out and lock this studio'}
+          className="inline-flex h-ctl-md items-center gap-1.5 rounded-md border border-line1 bg-bg2 px-3 text-xs font-semibold text-ink2 transition-colors hover:border-line2 hover:text-ink1"
+        >
+          <Icon name="lock" size={14} />
+          <span className="hidden sm:inline">{zhUi() ? '锁定' : 'Lock'}</span>
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+// Topbar refresh: re-reads the catalog, runs and history. The icon spins briefly
+// so the click is visibly acknowledged even on pages that refresh silently.
+function RefreshButton({ zh }) {
+  const [busy, setBusy] = useState(false);
+  const refresh = () => {
+    window.dispatchEvent(new Event('hivemind-hub-refresh'));
+    setBusy(true);
+    window.setTimeout(() => setBusy(false), 900);
+  };
+  return (
     <button
       type="button"
-      onClick={lock}
-      title="Lock the studio (owner session)"
-      className="inline-flex h-ctl-md items-center gap-1.5 rounded-md border border-line1 bg-bg2 px-3 text-xs font-semibold text-ink2 transition-colors hover:border-line2 hover:text-ink1"
+      onClick={refresh}
+      title={zh ? '刷新目录、运行与历史' : 'Refresh catalog, runs and history'}
+      aria-label={zh ? '刷新' : 'Refresh'}
+      className="grid h-ctl-md w-[36px] shrink-0 place-items-center rounded-md text-ink2 transition-colors hover:bg-bg2 hover:text-ink1"
     >
-      <Icon name="lock" size={14} />
-      <span className="hidden sm:inline">Lock</span>
+      <Icon name="refresh" size={17} className={busy ? 'hive-motion-keep animate-[hive-spin_0.7s_linear_infinite]' : ''} />
     </button>
   );
+}
+
+// The mobile strip holds 13 chips in ~375px; landing on a System page used to
+// leave the highlighted chip off-screen with no hint that the strip scrolls.
+function scrollActiveChipIntoView(node) {
+  if (!node || typeof node.scrollIntoView !== 'function') return;
+  try { node.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch { /* older engines */ }
 }
 
 function NavEntry({ item, active, onNavigate }) {
@@ -84,6 +150,7 @@ function NavEntry({ item, active, onNavigate }) {
     <button
       type="button"
       onClick={() => onNavigate(item.page)}
+      aria-current={active ? 'page' : undefined}
       className={cx(
         'group relative flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] font-medium transition-colors duration-150',
         active ? 'bg-honey-tint text-ink1' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
@@ -130,7 +197,7 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
             <span className="block truncate text-[11px] leading-tight text-ink3">Content Studio</span>
           </span>
         </button>
-        <nav className="no-scrollbar flex flex-1 flex-col gap-4 overflow-y-auto px-3 py-2">
+        <nav className="flex flex-1 flex-col gap-4 overflow-y-auto px-3 py-2">
           {NAV_SECTIONS.map((section, i) => (
             <div key={i} className="flex flex-col gap-0.5">
               <div className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-ink3">
@@ -143,11 +210,11 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
           ))}
         </nav>
         <div className="flex items-center gap-1 border-t border-line1 p-3">
-          <IconButton icon="settings" label={t('nav.settings')} onClick={onOpenSettings} />
+          <IconButton icon="settings" label={`${t('nav.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
           <button
             type="button"
             onClick={toggle}
-            title={lang === 'zh-CN' ? t('web.switchToEn') : t('web.switchToZh')}
+            title={`${lang === 'zh-CN' ? t('web.switchToEn') : t('web.switchToZh')} (${zh ? '页面会刷新' : 'reloads the page'})`}
             className="grid h-ctl-md w-[36px] place-items-center rounded-md text-[11px] font-bold text-ink2 transition-colors hover:bg-bg2 hover:text-ink1"
           >
             {lang === 'zh-CN' ? 'EN' : '中文'}
@@ -168,19 +235,15 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
           <div className="flex shrink-0 items-center gap-2">
             <ExploreDockButton />
             <ApiStatusPill />
-            <IconButton
-              icon="refresh"
-              label="Refresh studio data"
-              onClick={() => window.dispatchEvent(new Event('hivemind-hub-refresh'))}
-            />
+            <RefreshButton zh={zh} />
             <LockButton />
             <span className="lg:hidden">
-              <IconButton icon="settings" label={t('nav.settings')} onClick={onOpenSettings} />
+              <IconButton icon="settings" label={`${t('nav.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
             </span>
             <button
               type="button"
               onClick={toggle}
-              title={lang === 'zh-CN' ? t('web.switchToEn') : t('web.switchToZh')}
+              title={`${lang === 'zh-CN' ? t('web.switchToEn') : t('web.switchToZh')} (${zh ? '页面会刷新' : 'reloads the page'})`}
               className="grid h-ctl-md w-[36px] place-items-center rounded-md text-[11px] font-bold text-ink2 transition-colors hover:bg-bg2 hover:text-ink1 lg:hidden"
             >
               {lang === 'zh-CN' ? 'EN' : '中文'}
@@ -190,7 +253,7 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
 
         {/* ---- Mobile tab strip (< lg) ---- */}
         <nav
-          className="no-scrollbar flex h-11 w-full shrink-0 items-center gap-1 overflow-x-auto border-b border-line1 bg-bg1 px-3 lg:hidden"
+          className="hive-edge-fade flex h-11 w-full shrink-0 items-center gap-1 overflow-x-auto border-b border-line1 bg-bg1 px-3 lg:hidden"
           aria-label="Studio navigation"
         >
           {NAV_ITEMS.map((item) => {
@@ -200,6 +263,8 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
                 key={item.page}
                 type="button"
                 onClick={() => onNavigate(item.page)}
+                aria-current={on ? 'page' : undefined}
+                ref={on ? scrollActiveChipIntoView : undefined}
                 className={cx(
                   'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors duration-150',
                   on ? 'bg-honey-tint text-honey' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
