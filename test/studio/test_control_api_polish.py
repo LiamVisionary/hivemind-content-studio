@@ -22,7 +22,6 @@ from fastapi.testclient import TestClient
 from hivemind_content_studio import gpu_rentals
 from hivemind_content_studio.accounts import ACCOUNT_COOKIE, AccountAccess, SESSION_SECONDS
 from hivemind_content_studio.approval_ledger import ApprovalLedger
-from hivemind_content_studio.canvas_history import CanvasHistoryStore
 from hivemind_content_studio.control_api import build_control_app
 from hivemind_content_studio.media_studio import sanitize_error_detail
 from hivemind_content_studio.orchestrator import ContentOrchestrator

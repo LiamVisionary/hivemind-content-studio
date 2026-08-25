@@ -4,7 +4,6 @@ import contextlib
 import hashlib
 import json
 import socket
-import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -1077,7 +1076,9 @@ def test_oversized_onstart_is_refused_before_vast_sees_it(monkeypatch) -> None:
 def test_privacy_node_survives_the_round_trip(monkeypatch) -> None:
     # The node ships gzipped to fit the budget; a mangled payload would mean a
     # box with no prompt redaction and no scrub route.
-    import base64 as _b64, gzip as _gz, re as _re
+    import base64 as _b64
+    import gzip as _gz
+    import re as _re
 
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
     script = gpu_rentals._onstart_script("image")
@@ -1100,7 +1101,9 @@ def test_every_tier_provisions_the_privacy_layer(tier: str, monkeypatch) -> None
     assert "export COMFY_PRIVATE_HISTORY_PROMPTS=1" in script
     # The node body must arrive intact and self-contained (it ships gzipped to
     # fit Vast's arg budget) — never as a path or URL the box cannot resolve.
-    import base64 as _b64, gzip as _gz, re as _re
+    import base64 as _b64
+    import gzip as _gz
+    import re as _re
     packed = _re.search(r"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d", script).group(1)
     node = _gz.decompress(_b64.b64decode(packed)).decode("utf-8")
     assert "/hivemind/scrub-files" in node

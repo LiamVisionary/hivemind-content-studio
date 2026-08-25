@@ -195,10 +195,12 @@ def _app_vault_record(token: str, key_material: str) -> dict:
 
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+    def b64(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
     key = hashlib.sha256(key_material.encode("utf-8")).digest()
     nonce = b"\x01" * 12
     sealed = AESGCM(key).encrypt(nonce, token.encode("utf-8"), None)
-    b64 = lambda raw: base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return {
         "walletAgentId": "shared:hivemindos-models", "slug": "default",
         "iv": b64(nonce), "tag": b64(sealed[-16:]), "encryptedToken": b64(sealed[:-16]),

@@ -15,7 +15,6 @@ from __future__ import annotations
 import socket
 import urllib.parse
 
-import pytest
 
 from hivemind_content_studio import hivemindos_oauth as oauth
 

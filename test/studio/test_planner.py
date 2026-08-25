@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from hivemind_content_studio.manifest import approve_manifest, load_manifest
