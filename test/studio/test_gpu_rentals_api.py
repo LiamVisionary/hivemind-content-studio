@@ -3,7 +3,9 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import socket
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1059,6 +1061,11 @@ def test_onstart_fits_vast_arg_limit(tier: str, monkeypatch) -> None:
 def test_oversized_onstart_is_refused_before_vast_sees_it(monkeypatch) -> None:
     # The weight list no longer lives in the onstart, so presigned URLs cannot
     # overflow it; the authorized key is the remaining per-rental string.
+    # The manifest now goes to R2 first, and the suite has no Cloudflare token —
+    # without this the script builder fails there and never reaches the size
+    # guard this test is about.
+    monkeypatch.setattr(gpu_rentals, "_rental_manifest", lambda tier: ("weights.safetensors\tmodels/x", 1))
+    monkeypatch.setattr(gpu_rentals, "_publish_rental_manifest", lambda text: "https://r2.example/manifest.tsv")
     monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 " + "A" * 8000)
     with pytest.raises(gpu_rentals.GpuRentalError) as excinfo:
         gpu_rentals._onstart_script("video")
@@ -1280,6 +1287,7 @@ def test_phase_ready_from_beacon(tmp_path: Path, monkeypatch) -> None:
     def handler(method, path, payload):
         return {"instances": [{"id": 3, "label": STUDIO_LABEL, "actual_status": "running",
                                "public_ipaddr": "1.2.3.4",
+                               "ssh_host": "ssh7.vast.ai", "ssh_port": 19896,
                                "ports": {"18189/tcp": [{"HostPort": "28189"}]}}]}
 
     _fake_vast(monkeypatch, handler)
@@ -1299,13 +1307,22 @@ def test_onstart_has_beacon_and_atomic_downloads(tmp_path: Path, monkeypatch) ->
     assert "--listen 127.0.0.1" in script
 
 
-def test_create_publishes_beacon_port_only(tmp_path: Path, monkeypatch) -> None:
+def test_create_publishes_sshd_and_the_beacon_and_nothing_else(tmp_path: Path, monkeypatch) -> None:
+    """22 so the box has a door of its own; the beacon so provisioning can be
+    watched. ComfyUI is deliberately absent — it stays on loopback behind the
+    tunnel.
+
+    Port 22 is here because a rental whose only way in is the marketplace's
+    proxy has no way in at all when that proxy misbehaves: on 2026-08-24 Vast
+    published its Jupyter HTTPS port as the box's ssh_port and the machine had
+    to be destroyed. sshd is pubkey-only, so publishing it concedes nothing.
+    """
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
 
     def handler(method, path, payload):
         if path == "/v0/bundles/":
             return {"offers": [{"id": 77}]}
-        assert payload["env"] == {"-p 18189:18189": "1"}
+        assert payload["env"] == {"-p 22:22": "1", "-p 18189:18189": "1"}
         return {"new_contract": 1, "success": True}
 
     _fake_vast(monkeypatch, handler)
@@ -1628,6 +1645,11 @@ def test_attach_fails_loudly_when_the_tunnel_is_refused(tmp_path: Path, monkeypa
     monkeypatch.setattr(gpu_rentals, "RENTAL_SSH_KEY", tmp_path / "key")
     (tmp_path / "key").write_text("x")
     monkeypatch.setattr(gpu_rentals, "_tunnel_pid", lambda rid: None)
+    # The undo above dropped the suite-wide SSH-probe block with everything
+    # else, and this box's address is invented. Put it back, or the door check
+    # dials 9.9.9.9 for real and the attach fails on the wrong thing.
+    monkeypatch.setattr(gpu_rentals, "_ssh_banner_fault",
+                        lambda host, port, timeout=3.0, cache=False: None)
 
     class DeadSsh:
         pid = 4242
@@ -2577,6 +2599,10 @@ def _running_box(**over) -> dict:
         "public_ipaddr": "38.87.238.254",
         "machine_id": 141928,
         "start_date": time.time() - 600,
+        # Vast reports a proxy endpoint for every running instance; a fixture
+        # without one is a box with no door, which is now its own failure.
+        "ssh_host": "ssh7.vast.ai",
+        "ssh_port": 19896,
         "ports": {f"{gpu_rentals.BEACON_PORT}/tcp": [{"HostPort": "43798"}]},
         **over,
     }
@@ -2709,15 +2735,61 @@ def test_restarting_the_stack_does_not_read_as_silence(monkeypatch) -> None:
     assert "never reported in" in dto["provision"]["detail"]
 
 
-def test_a_box_with_no_published_beacon_port_is_not_judged_on_silence(monkeypatch) -> None:
-    """With nowhere to ask, "no answer" says nothing about the box."""
+def test_a_box_with_nowhere_to_ask_is_not_judged_on_silence(monkeypatch) -> None:
+    """With nowhere to ask, "no answer" says nothing about the box.
+
+    Nowhere means BOTH channels: no published beacon port and no SSH door. A
+    box with a door is a box that can be asked, even when its port map is
+    empty — see the test below.
+    """
     gpu_rentals._BEACON_CACHE.clear()
     monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: None)
     monkeypatch.setattr(gpu_rentals, "_PROCESS_STARTED",
                         time.time() - gpu_rentals.BEACON_SILENCE_SECONDS - 60)
-    no_ports = _running_box(ports={}, start_date=time.time() - gpu_rentals.BEACON_SILENCE_SECONDS * 3)
-    dto = gpu_rentals._instance_dto(_vast_instance(no_ports), probe=True)
+    mute = _running_box(ports={}, ssh_host=None, ssh_port=None,
+                        start_date=time.time() - gpu_rentals.BEACON_SILENCE_SECONDS * 3)
+    dto = gpu_rentals._instance_dto(_vast_instance(mute), probe=True)
     assert dto["phase"] == "provisioning", "a missing port map is not a dead host"
+
+
+def test_the_beacon_is_read_over_ssh_when_the_published_port_is_not_routable(monkeypatch) -> None:
+    """A host that does not route the mapped ports leaves a working box mute.
+
+    Live on 2026-08-24: vast:48544133 had finished provisioning — beacon file
+    written, ComfyUI listening, sshd up — and both its published ports read as
+    closed from outside. Nothing could hear it, so it was 60 seconds from being
+    destroyed as a dead host. It had an open SSH door the whole time.
+    """
+    gpu_rentals._BEACON_CACHE.clear()
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: None)
+    monkeypatch.setattr(gpu_rentals, "_PROCESS_STARTED",
+                        time.time() - gpu_rentals.BEACON_SILENCE_SECONDS - 60)
+    asked_at = []
+    monkeypatch.setattr(gpu_rentals, "_beacon_over_ssh",
+                        lambda endpoint, timeout=5.0: asked_at.append(endpoint) or
+                        {"step": "ready", "done": 8, "total": 8, "detail": "ComfyUI is up"})
+    mute_port = _running_box(ports={}, start_date=time.time() - gpu_rentals.BEACON_SILENCE_SECONDS * 3)
+
+    dto = gpu_rentals._instance_dto(_vast_instance(mute_port), probe=True)
+
+    assert dto["phase"] == "ready"
+    assert dto["provision"]["detail"] == "ComfyUI is up"
+    assert asked_at == [("ssh7.vast.ai", "19896")], "it should ask through the door it has"
+
+
+def test_a_box_that_answers_neither_channel_is_still_called_dead(monkeypatch) -> None:
+    """The fallback must not become a way for a genuinely dead box to hide: a
+    door that answers while the beacon stays unreadable is still silence."""
+    gpu_rentals._BEACON_CACHE.clear()
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon", lambda *_a, **_k: None)
+    monkeypatch.setattr(gpu_rentals, "_PROCESS_STARTED",
+                        time.time() - gpu_rentals.BEACON_SILENCE_SECONDS - 60)
+    monkeypatch.setattr(gpu_rentals, "_beacon_over_ssh", lambda endpoint, timeout=5.0: None)
+    dead = _running_box(start_date=time.time() - gpu_rentals.BEACON_SILENCE_SECONDS * 3)
+
+    dto = gpu_rentals._instance_dto(_vast_instance(dead), probe=True)
+
+    assert dto["phase"] == "error"
 
 
 # --- Quick resume: a resume the host is not honouring ------------------------
@@ -2975,3 +3047,174 @@ def test_the_warm_volume_listing_carries_the_rate_and_the_running_total(tmp_path
     assert listed["usd_per_month"] == 8.4
     assert listed["age_hours"] == pytest.approx(1.0, abs=0.05)
     assert listed["usd_accrued"] == pytest.approx(8.4 / 730.5, abs=0.001)
+
+
+# --- the door: is anything of ours able to reach the box at all -------------
+# Every test below exists because of one live rental, vast:48539896 on
+# 2026-08-24: it provisioned perfectly, its beacon said "ComfyUI is up", the
+# studio showed it ready for 25 minutes, and the ssh_port Vast published for it
+# was that instance's Jupyter HTTPS proxy. ComfyUI binds to loopback and Vast's
+# command API refuses running instances, so there was no second way in and a
+# healthy $0.51/hr machine had to be destroyed.
+
+
+def _attachment(lane: str, port: int = 18300) -> dict:
+    """A registry record shaped the way attach_rental writes one; the overlay
+    writer reads every field, so a partial dict fails on the wrong thing."""
+    return {"lane": lane, "local_port": port, "needles": ["minimax"], "tier": "minimax",
+            "studio_pages": ["video"], "attached_at": time.time(), "priority": 1,
+            "comfy_launch_args": ["main.py"], "vram_headroom_gb": 12.0}
+
+
+@contextlib.contextmanager
+def _greeting_server(payload: bytes | None):
+    """A loopback port that answers one connection with `payload`, or hangs up.
+
+    A real socket rather than a fake: the thing under test is what arrives on
+    the wire, and a stub that returns bytes would be asserting on itself.
+    """
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def serve() -> None:
+        with contextlib.suppress(OSError):
+            conn, _ = server.accept()
+            with conn:
+                if payload:
+                    conn.sendall(payload)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield "127.0.0.1", str(server.getsockname()[1])
+    finally:
+        server.close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.ssh_probe_transport
+def test_the_door_probe_tells_ssh_from_whatever_else_is_on_that_port() -> None:
+    """An accepted connection is not an SSH server, and this is the third time
+    that has cost a machine (see _tunnel_carrying_traffic for the other two)."""
+    with _greeting_server(b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.13\r\n") as (host, port):
+        assert gpu_rentals._ssh_banner_fault(host, port, timeout=2.0) is None
+
+    # Byte for byte what ssh7.vast.ai:19896 sent back: a TLS fatal alert,
+    # description 0x32 = decode_error, at the sight of an SSH banner.
+    with _greeting_server(b"\x15\x03\x03\x00\x02\x02\x32") as (host, port):
+        fault = gpu_rentals._ssh_banner_fault(host, port, timeout=2.0)
+    assert fault and "serving TLS, not SSH" in fault
+
+    with _greeting_server(b"HTTP/1.1 302 Found\r\nLocation: /tree?\r\n\r\n") as (host, port):
+        fault = gpu_rentals._ssh_banner_fault(host, port, timeout=2.0)
+    assert fault and "serving HTTP, not SSH" in fault
+
+    with _greeting_server(None) as (host, port):
+        fault = gpu_rentals._ssh_banner_fault(host, port, timeout=2.0)
+    assert fault and "without an SSH banner" in fault
+
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    shut_port = str(closed.getsockname()[1])
+    closed.close()
+    fault = gpu_rentals._ssh_banner_fault("127.0.0.1", shut_port, timeout=2.0)
+    assert fault and "nothing is listening" in fault
+
+
+@pytest.mark.ssh_probe_transport
+def test_a_port_that_merely_accepts_is_not_a_door() -> None:
+    """The regression proper. _container_ssh_open used to be a bare TCP connect,
+    so the Jupyter port passed for an open door and _boot_stall never fired."""
+    with _greeting_server(None) as endpoint:
+        assert gpu_rentals._container_ssh_open(endpoint, timeout=2.0) is False
+
+
+def test_a_ready_box_with_no_working_door_is_a_failed_provision(monkeypatch) -> None:
+    """"ComfyUI is up" is half the readiness question; reachable is the other."""
+    gpu_rentals._BEACON_CACHE.clear()
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda *_a, **_k: {"step": "ready", "done": 5, "total": 5, "detail": "ComfyUI is up"})
+    monkeypatch.setattr(gpu_rentals, "_ssh_banner_fault",
+                        lambda host, port, timeout=3.0, cache=False: f"{host}:{port} is serving TLS, not SSH")
+
+    dto = gpu_rentals._instance_dto(_vast_instance(_running_box()), probe=True)
+
+    assert dto["phase"] == "error"
+    detail = dto["provision"]["detail"]
+    # The reason has to outlive the box: it is all the failure log will hold.
+    assert "serving TLS, not SSH" in detail and "ssh7.vast.ai:19896" in detail
+    # And it must not read as a beacon problem — the beacon was perfect.
+    assert "no working SSH door" in detail
+
+
+def test_an_attached_box_is_never_judged_on_a_door_probe(tmp_path, monkeypatch) -> None:
+    """The one way this escalation could be catastrophic: reaping a machine that
+    is working. An attached box answers through its tunnel and its ComfyUI; a
+    single unhappy probe must not cost the user a running generation."""
+    gpu_rentals._BEACON_CACHE.clear()
+    monkeypatch.setattr(gpu_rentals, "MEDIA_STATE_ROOT", tmp_path / "media-state")
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda *_a, **_k: {"step": "ready", "done": 5, "total": 5, "detail": "ComfyUI is up"})
+    monkeypatch.setattr(gpu_rentals, "_ssh_banner_fault",
+                        lambda host, port, timeout=3.0, cache=False: "every door is shut")
+    instance = _vast_instance(_running_box())
+    gpu_rentals._write_attachments({str(instance.ref): _attachment("rental48183103")})
+
+    assert gpu_rentals._instance_dto(instance, probe=True)["phase"] == "ready"
+
+
+def test_attach_falls_back_to_the_proxy_when_the_direct_port_is_not_ssh(tmp_path, monkeypatch) -> None:
+    """Two doors is the whole point of publishing 22: the proxy carries the
+    tunnel when the direct mapping cannot, and the other way round."""
+    instance = dict(_ready_instance(), ssh_host="ssh7.vast.ai", ssh_port=19896)
+    _fake_vast(monkeypatch, lambda m, p, b: {"instances": [instance]})
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda url: {"step": "ready", "done": 6, "total": 6, "detail": ""})
+    spawned, _ = _attach_env(monkeypatch, tmp_path)
+    # The direct mapping is dead; Vast's proxy is fine. (On the live box it was
+    # the other way round, which is exactly why neither one may be assumed.)
+    monkeypatch.setattr(gpu_rentals, "_ssh_banner_fault",
+                        lambda host, port, timeout=3.0, cache=False: None if host == "ssh7.vast.ai"
+                        else f"{host}:{port} answered with something that is not SSH")
+    client = _client(tmp_path, monkeypatch)
+
+    assert client.post("/api/gpu-rentals/7/attach").status_code == 200
+    assert (spawned["ip"], spawned["port"]) == ("ssh7.vast.ai", "19896")
+
+
+def test_attach_prefers_the_direct_port_when_both_answer(tmp_path, monkeypatch) -> None:
+    """Direct first: the box's own sshd on the box's own address, with nothing
+    of the marketplace's in the path."""
+    instance = dict(_ready_instance(), ssh_host="ssh7.vast.ai", ssh_port=19896)
+    _fake_vast(monkeypatch, lambda m, p, b: {"instances": [instance]})
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda url: {"step": "ready", "done": 6, "total": 6, "detail": ""})
+    spawned, _ = _attach_env(monkeypatch, tmp_path)
+    client = _client(tmp_path, monkeypatch)
+
+    assert client.post("/api/gpu-rentals/7/attach").status_code == 200
+    assert (spawned["ip"], spawned["port"]) == ("9.9.9.9", "41000")
+
+
+def test_attaching_a_box_whose_doors_all_died_says_which_and_why(tmp_path, monkeypatch) -> None:
+    """An attached box skips the readiness gate (see the test above), so this is
+    where a door that dies under a live attachment surfaces. "Connection closed
+    by remote host" is what this replaces."""
+    instance = dict(_ready_instance(), ssh_host="ssh7.vast.ai", ssh_port=19896)
+    _fake_vast(monkeypatch, lambda m, p, b: {"instances": [instance]})
+    monkeypatch.setattr(gpu_rentals, "_fetch_beacon",
+                        lambda url: {"step": "ready", "done": 6, "total": 6, "detail": ""})
+    _attach_env(monkeypatch, tmp_path)
+    gpu_rentals._write_attachments({"vast:7": _attachment("rental7")})
+    monkeypatch.setattr(gpu_rentals, "_ssh_banner_fault",
+                        lambda host, port, timeout=3.0, cache=False: f"{host}:{port} is serving TLS, not SSH")
+    monkeypatch.setattr(gpu_rentals, "_tunnel_pid", lambda rid: None)
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post("/api/gpu-rentals/7/attach")
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "9.9.9.9:41000 is serving TLS, not SSH" in detail
+    assert "ssh7.vast.ai:19896 is serving TLS, not SSH" in detail

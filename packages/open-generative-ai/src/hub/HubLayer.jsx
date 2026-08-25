@@ -23,6 +23,7 @@ import { HistoryView } from './views/HistoryView.jsx';
 import { TelemetryView } from './views/TelemetryView.jsx';
 import { GpuMachinesView } from './views/GpuMachinesView.jsx';
 import { ProvidersView } from './views/ProvidersView.jsx';
+import { PassBookView } from './views/PassBookView.jsx';
 
 export function HubLayer({ visible, view }) {
   const rootRef = useRef(null);
@@ -64,6 +65,7 @@ export function HubLayer({ visible, view }) {
       <ErrorBoundary label="History" hidden={current !== 'history'}><HistoryView active={current === 'history'} /></ErrorBoundary>
       <ErrorBoundary label="Telemetry" hidden={current !== 'telemetry'}><TelemetryView active={current === 'telemetry'} /></ErrorBoundary>
       <ErrorBoundary label="Providers" hidden={current !== 'providers'}><ProvidersView active={current === 'providers'} /></ErrorBoundary>
+      <ErrorBoundary label="PassBook" hidden={current !== 'passbook'}><PassBookView active={current === 'passbook'} /></ErrorBoundary>
       <ErrorBoundary label="Machines" hidden={current !== 'machines'}><GpuMachinesView active={current === 'machines'} /></ErrorBoundary>
     </div>
   );

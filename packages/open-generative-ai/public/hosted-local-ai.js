@@ -46,8 +46,18 @@
         last = await jsonFetch(`/local-ai/job/${encodeURIComponent(jobId)}`);
         if (cancelledGenerateJobs.has(jobId)) throw cancelledError();
         const status = last.status || 'running';
-        const progress = status === 'success' ? 1 : status === 'running' ? 0.35 : 0.1;
-        emitProgress({ status, progress, message: status === 'success' ? 'Done' : 'Generating on hosted Open Generative AI' });
+        // The gateway reports real step progress as 0-100. Reading it beats the
+        // flat 0.35 this used to emit, which parked the bar at 35% for the whole
+        // render and made the ETA beside it meaningless.
+        const reported = Number(last.progress);
+        const measured = Number.isFinite(reported) && reported >= 0
+          ? Math.max(0, Math.min(1, reported > 1 ? reported / 100 : reported))
+          : null;
+        const progress = status === 'success' ? 1 : measured ?? (status === 'running' ? 0.35 : 0.1);
+        // This job runs on THIS machine — /local-ai is the local runtime. Saying
+        // "hosted" beside a local render contradicted the privacy the rest of
+        // the studio is careful about.
+        emitProgress({ status, progress, message: status === 'success' ? 'Done' : 'Generating on this machine' });
         if (status === 'success') {
           if (!last.url) throw new Error('Generation finished without an image');
           return { url: last.url, seed: last.seed };
@@ -63,7 +73,7 @@
     // The job-id callback is the caller's, not part of the request body —
     // JSON.stringify would drop it anyway, but keep the payload explicit.
     const { onJobId, ...body } = params || {};
-    emitProgress({ status: 'queued', progress: 0, message: 'Queued on hosted Open Generative AI' });
+    emitProgress({ status: 'queued', progress: 0, message: 'Queued on this machine' });
     const submitted = await jsonFetch('/local-ai/generate', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -105,7 +115,7 @@
   }
 
   async function upscale(params) {
-    emitProgress({ status: 'queued', progress: 0, message: 'Upscaling on hosted Open Generative AI' });
+    emitProgress({ status: 'queued', progress: 0, message: 'Upscaling on this machine' });
     const submitted = await jsonFetch('/local-ai/upscale', {
       method: 'POST',
       body: JSON.stringify(params || {}),

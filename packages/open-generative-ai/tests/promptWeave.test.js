@@ -303,3 +303,71 @@ test('PHASE 3 — on a prose family, a known character takes the stand-in\'s pla
     }
     assert.ok(checked >= 4, `expected several prose parts with stand-ins (checked ${checked})`);
 });
+
+/* ---------------- a SECOND person — anyone can be a subject (2026-08-24) ---------------- */
+
+test('ANOTHER PERSON — a new member survives with no media, and the next attach is claimed for them', async () => {
+    const { reconcileCast, newPersonMember, nextPersonKey } = await load();
+    // Liam is in the shot from his pictures; a second person is added on purpose.
+    let cast = reconcileCast([], { images: PICTURES.slice(0, 2), videos: [], audios: [] }, { persona: { id: 'me', name: 'Liam', gender: 'male' } });
+    const second = newPersonMember(cast);
+    assert.equal(second.key, 'person:1');
+    cast = [...cast, second];
+    // Reconcile with nothing new attached: the empty person STAYS (explicit).
+    cast = reconcileCast(cast, { images: PICTURES.slice(0, 2), videos: [], audios: [] }, { persona: { id: 'me', name: 'Liam', gender: 'male' } });
+    assert.deepEqual(cast.map((member) => member.key), ['persona:me', 'person:1']);
+    // Her pictures arrive, claimed for HER — they do not join Liam.
+    cast = reconcileCast(cast, { images: [...PICTURES.slice(0, 2), '/her-1.jpg'], videos: [], audios: [] }, { claimNew: 'person:1' });
+    assert.deepEqual(cast[0].data.images, PICTURES.slice(0, 2), 'Liam keeps his own');
+    assert.deepEqual(cast[1].data.images, ['/her-1.jpg']);
+    // Without a claim, new media still joins the references member, never a
+    // random person: two holders exist, so it opens a third, anonymous one.
+    const free = reconcileCast(cast, { images: [...PICTURES.slice(0, 2), '/her-1.jpg', '/stray.jpg'], videos: [], audios: [] });
+    assert.equal(free.length, 3);
+    assert.deepEqual(free[2].data.images, ['/stray.jpg']);
+    assert.equal(nextPersonKey(cast), 'person:2');
+});
+
+test('ANOTHER PERSON — claiming for a key that does not exist yet creates the member in place', async () => {
+    const { reconcileCast } = await load();
+    let cast = reconcileCast([], { images: [PICTURES[0]], videos: [], audios: [] });
+    cast = reconcileCast(cast, { images: [PICTURES[0], '/her-1.jpg'], videos: [], audios: [] }, { claimNew: 'person:1' });
+    assert.deepEqual(cast.map((member) => member.key), ['references', 'person:1']);
+    assert.equal(cast[1].explicit, true);
+    assert.deepEqual(cast[1].data.images, ['/her-1.jpg']);
+});
+
+test('ANOTHER PERSON — two people from pictures weave as <Subject 1> and <Subject 2>', async () => {
+    const { reconcileCast, weavePrompt } = await load();
+    const { parseSixSections } = await loadCast();
+    let cast = reconcileCast([], { images: PICTURES.slice(0, 2), videos: [], audios: [] }, { persona: { id: 'me', name: 'Liam', gender: 'male', look: 'beard, black tee' } });
+    cast = reconcileCast(cast, { images: [...PICTURES.slice(0, 2), '/ana-1.jpg'], videos: [], audios: [] }, { claimNew: 'person:1' });
+    cast = cast.map((member) => (member.key === 'person:1'
+        ? { ...member, name: 'Ana', data: { ...member.data, gender: 'female', look: 'red coat, tall' } }
+        : member));
+    const woven = weavePrompt('They argue over a chessboard.', { cast, limits: LIMITS, durationSeconds: 5, target: 'reference' });
+    const sections = parseSixSections(woven.prompt);
+    assert.match(sections.subject_definitions, /<Subject 1> is the man shown in <Picture 1>, <Picture 2>: beard, black tee\./);
+    assert.match(sections.subject_definitions, /<Subject 2> is the woman shown in <Picture 3>: red coat, tall\./);
+    assert.deepEqual(woven.rows.images, [...PICTURES.slice(0, 2), '/ana-1.jpg']);
+});
+
+test('ANOTHER PERSON — a text-defined person is a real subject in reference mode, holding no slot', async () => {
+    const { reconcileCast, newPersonMember, weavePrompt } = await load();
+    const { parseSixSections } = await loadCast();
+    let cast = reconcileCast([], { images: [PICTURES[0]], videos: [], audios: [] }, { persona: { id: 'me', name: 'Liam', gender: 'male' } });
+    const ana = { ...newPersonMember(cast), name: 'Ana', data: { v: 1, gender: 'female', look: 'red coat, tall', images: [], videos: [], audios: [] } };
+    cast = [...cast, ana];
+    const woven = weavePrompt('He shows her the map.', { cast, limits: LIMITS, durationSeconds: 5, target: 'reference' });
+    const sections = parseSixSections(woven.prompt);
+    assert.match(sections.subject_definitions, /<Subject 2> is a woman, Ana: red coat, tall\./);
+    assert.deepEqual(woven.rows.images, [PICTURES[0]], 'no slot spent on her');
+});
+
+test('ANOTHER PERSON — in text mode a stand-in binds to the text-defined person', async () => {
+    const { weavePrompt, newPersonMember, prosePersonPhrase } = await load();
+    const ana = { ...newPersonMember([]), name: 'Ana', data: { v: 1, gender: 'female', look: 'red coat', images: [], videos: [], audios: [] } };
+    assert.equal(prosePersonPhrase(ana), 'Ana, a woman — red coat —');
+    const woven = weavePrompt(THREE_FIELD, { cast: [ana], durationSeconds: 10, target: 'h3-text', standIns: STAND_INS });
+    assert.match(woven.prompt, /\[Shot 1\] Ana, a woman — red coat — \(S1\) sits on a low concrete wall/);
+});

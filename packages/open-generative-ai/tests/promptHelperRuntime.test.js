@@ -131,3 +131,15 @@ test('describeWritingFor names each subject and counts the references', () => {
     assert.equal(describeWritingFor({}), '');
     assert.equal(describeWritingFor({ cast: [], references: { images: 0, videos: [], audios: 0 } }), '');
 });
+
+test('the MTPLX slot reads as a server, not a RAM estimate', () => {
+    const mtplx = (fit) => ({ id: 'qwen38-speed', provider: 'mtplx', fit, estimatedLoadBytes: 20 * 1024 ** 3 });
+    assert.equal(modelStatus(mtplx('loaded')), 'Serving on MTPLX');
+    assert.equal(modelStatus(mtplx('loading')), 'Starting MTPLX…');
+    assert.match(modelStatus(mtplx('fits')), /via MTPLX/);
+    // Serving and fits rows are selectable like any other; loading is not yet.
+    assert.equal(canSelect(mtplx('loaded')), true);
+    assert.equal(canSelect(mtplx('fits')), true);
+    assert.equal(canSelect(mtplx('loading')), false);
+    assert.match(blockedReason(mtplx('loading')), /Still loading/);
+});

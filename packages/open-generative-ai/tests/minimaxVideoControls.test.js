@@ -263,12 +263,13 @@ test('a motion reference caps the duration range at the measured ceiling', async
     // The slider's ceiling is the FILTERED list, so an impossible length is not
     // merely discouraged — it cannot be expressed.
     assert.match(videoStudio, /const durationOptions = availableDurationsFor\(/);
-    // Attaching a reference re-clamps: the setup funnel, plus the three writes
-    // that bypass it — a hand-attached clip, a cast that brings its own, and the
-    // effect that measures a clip's duration. That last one matters in the other
-    // direction: learning a reference is SHORT has to give the range back.
+    // Attaching a reference re-clamps: the setup funnel, plus the four writes
+    // that bypass it — a hand-attached clip, a cast that brings its own, the
+    // effect that measures a clip's duration, and a member chip's "+ clip"
+    // batch. The measuring one matters in the other direction: learning a
+    // reference is SHORT has to give the range back.
     assert.match(videoStudio, /s\.setup = withDurationThatFits\(nextSetup\)/);
-    assert.equal((videoStudio.match(/withDurationThatFits\(\{/g) || []).length, 3, 'every non-commit setup write re-clamps');
+    assert.equal((videoStudio.match(/withDurationThatFits\(\{/g) || []).length, 4, 'every non-commit setup write re-clamps');
 });
 
 // The published per-canvas ceiling assumes the worst of everything (a reference

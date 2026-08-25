@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+# stdout is this command's contract — every subcommand prints one JSON document
+# there and agents parse it. The embedded faceless engine logs to stdout by
+# default, which interleaved ANSI-coloured loguru lines with that JSON and made
+# a successful render unparseable. Claim the channel before anything imports the
+# engine; `setdefault` so an operator debugging by hand can still override.
+os.environ.setdefault("MPT_LOG_SINK", "stderr")
 
 from .agent_runtime import attach_script, run_registered_agent_script
 from .approval_config import load_approval_ledger, operator_token

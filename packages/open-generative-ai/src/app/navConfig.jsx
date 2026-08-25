@@ -9,6 +9,8 @@ export const NAV_SECTIONS = [
     items: [
       { page: 'image', icon: 'image', label: () => t('nav.image') },
       { page: 'video', icon: 'video', label: () => t('nav.video') },
+      { page: 'sprite', icon: 'grid', label: () => (zh() ? '精灵图' : 'Sprite') },
+      { page: 'story', icon: 'persona', label: () => (zh() ? '故事' : 'Story') },
       { page: 'lipsync', icon: 'mic', label: () => t('nav.lipsync') },
       { page: 'cinema', icon: 'clapper', label: () => t('nav.cinema') },
       { page: 'canvas', icon: 'nodes', label: () => (zh() ? '画布' : 'Canvas') },
@@ -28,6 +30,7 @@ export const NAV_SECTIONS = [
       { page: 'models', icon: 'database', label: () => (zh() ? '模型' : 'Models') },
       { page: 'telemetry', icon: 'pulse', label: () => (zh() ? '遥测' : 'Telemetry') },
       { page: 'providers', icon: 'plug', label: () => (zh() ? '服务商' : 'Providers') },
+      { page: 'passbook', icon: 'key', label: () => 'PassBook' },
       { page: 'machines', icon: 'cpu', label: () => (zh() ? 'GPU 机器' : 'Machines') },
       { page: 'mcp-cli', icon: 'terminal', label: () => t('nav.mcpcli') },
     ],
@@ -38,7 +41,7 @@ export const NAV_ITEMS = NAV_SECTIONS.flatMap((s) => s.items);
 export const APP_NAME = 'Hivemind Content Studio';
 
 // Studio pages rebuild on every navigation; hub pages persist once mounted.
-export const STUDIO_PAGES = ['image', 'video', 'cinema', 'lipsync', 'mcp-cli'];
+export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'cinema', 'lipsync', 'mcp-cli'];
 export const HUB_PAGES = {
   planner: 'create',
   canvas: 'canvas',
@@ -48,6 +51,7 @@ export const HUB_PAGES = {
   telemetry: 'telemetry',
   providers: 'providers',
   machines: 'machines',
+  passbook: 'passbook',
 };
 
 export function isKnownPage(page) {

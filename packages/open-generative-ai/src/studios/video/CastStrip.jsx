@@ -7,16 +7,19 @@
 // the + menu — because all of them are cast members (lib/promptWeave.js) and
 // the weave recasts the prompt the moment the cast changes.
 //
-// Clicking a chip opens the member: gender and look for a person (the look is
-// what the cast writes into <Subject N>'s definition instead of a blank, and a
-// vision-capable helper can draft it from the pictures), how a character is
-// drawn and whether it speaks in its own voice; move and remove for both.
+// Clicking a chip opens the member: name, gender and look for a person (the
+// look is what the cast writes into <Subject N>'s definition instead of a
+// blank, and a vision-capable helper can draft it from the pictures), its own
+// "+ Pictures / + Motion clip / + Voice clip" buttons (media added there is
+// claimed for THAT member — how a second person gets their own pictures), how
+// a character is drawn and whether it speaks in its own voice. Chips DRAG to
+// reorder — order is the <Subject N> numbering — and the arrows do the same.
 //
 // The right-hand side says which grammar the prompt is being woven into and
 // whether it is — so the status of the "magic" is never hidden.
 //
 // This file is the panel; every rule lives in lib/promptWeave.js.
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { PERSONA_DEFAULT_STYLE } from '../../lib/castPrompt.js';
 import {
@@ -24,6 +27,8 @@ import {
   REFERENCES_KEY,
   characterCastMember,
   describeMember,
+  memberHasMedia,
+  newPersonMember,
   personaMember,
 } from '../../lib/promptWeave.js';
 import {
@@ -36,7 +41,7 @@ import {
 import { PERSONA_LOOK_MAX, normalizePersonaLook, personaSummary } from '../../lib/personaId.js';
 import { LIBRARIES } from '../../lib/savedLibraryStore.js';
 import { useSavedLibrary } from '../../hooks/hooks.js';
-import { Menu, MenuHeading } from '../../ui/Menu.jsx';
+import { Menu, MenuHeading, useDismissable } from '../../ui/Menu.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { LibraryStateNote } from '../../ui/SavedLibrary.jsx';
 import { cx } from '../../ui/kit.jsx';
@@ -55,8 +60,13 @@ const isPersonaLike = (member) => member?.kind === 'persona';
 function memberName(member) {
   if (member.name) return member.name;
   if (member.key === REFERENCES_KEY) return zh() ? '你的参考' : 'Your references';
+  if (String(member.key || '').startsWith('person:')) return zh() ? '新成员' : 'New person';
   return zh() ? '角色 ID' : 'Persona';
 }
+
+/** Whether the member's NAME is this strip's to edit — a saved persona is renamed by saving. */
+const nameEditable = (member) => isPersonaLike(member)
+  && (member.key === REFERENCES_KEY || String(member.key || '').startsWith('person:'));
 
 /* ---------------- adding members ---------------- */
 
@@ -195,7 +205,7 @@ function NumberBadge({ index, kind }) {
   );
 }
 
-function MemberEditor({ member, index, total, onChange, onRemove, onMove, onDraftLook, close }) {
+function MemberEditor({ member, index, total, onChange, onRemove, onMove, onDraftLook, onAddMedia, referenceLane, close }) {
   const [drafting, setDrafting] = useState(false);
   const subject = `<Subject ${index + 1}>`;
   const draftLook = async () => {
@@ -259,6 +269,47 @@ function MemberEditor({ member, index, total, onChange, onRemove, onMove, onDraf
               ? `${describeMember(member, { zh: true })} · 按真人实拍渲染`
               : `${describeMember(member)} · rendered photoreal`}
           </p>
+          {nameEditable(member) ? (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">{zh() ? '名字' : 'Name'}</span>
+              <input
+                type="text"
+                value={member.name || ''}
+                maxLength={80}
+                onChange={(event) => onChange(member.key, { name: event.target.value })}
+                placeholder={zh() ? '可选——没有图片时会写进提示词' : 'Optional — written into the prompt when there are no pictures'}
+                className="h-7 w-full rounded-md border border-line1 bg-bg1 px-2 text-[11px] text-ink1 outline-none placeholder:text-ink3 focus:border-honey"
+              />
+            </div>
+          ) : null}
+          {referenceLane && onAddMedia ? (
+            <div className="flex flex-wrap items-center gap-1">
+              {[
+                ['images', zh() ? '+ 图片' : '+ Pictures'],
+                ['videos', zh() ? '+ 动作片段' : '+ Motion clip'],
+                ['audios', zh() ? '+ 声音片段' : '+ Voice clip'],
+              ].map(([kind, label]) => (
+                <button
+                  key={kind}
+                  type="button"
+                  onClick={() => { onAddMedia(member.key, kind); close(); }}
+                  title={zh()
+                    ? '为这位成员附加参考——归属这位成员，而不是并入第一位'
+                    : 'Attach references FOR this member — they are claimed here, not merged into the first person'}
+                  className="rounded-md border border-dashed border-line2 px-2 py-1 text-[10px] font-medium text-ink2 transition-colors hover:border-honey hover:bg-honey-tint hover:text-honey"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {!memberHasMedia(member) ? (
+            <p className="text-[10px] leading-snug text-ink3">
+              {zh()
+                ? '没有参考时，这位成员由名字、性别和外貌的文字定义。'
+                : 'With no references, this member is defined by the name, gender and look written here.'}
+            </p>
+          ) : null}
           <div className="flex flex-col gap-1">
             <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">{zh() ? '性别' : 'Gender'}</span>
             <GenderChips
@@ -329,44 +380,60 @@ function MemberEditor({ member, index, total, onChange, onRemove, onMove, onDraf
   );
 }
 
-function MemberChip({ member, index, total, onChange, onRemove, onMove, onDraftLook }) {
+function MemberChip({
+  member, index, total, onChange, onRemove, onMove, onDraftLook, onAddMedia, referenceLane,
+  open, onOpenChange, drag,
+}) {
+  // Controlled, not a Menu: the strip auto-opens a just-added person so the
+  // name/look/+ Pictures are one tap away, and a drag must never read as a
+  // click that pops the editor.
+  const ref = useDismissable(open, () => onOpenChange(false));
   return (
-    <Menu
-      up
-      width="w-[19rem]"
-      trigger={(open, toggle) => (
-        <button
-          type="button"
-          onClick={toggle}
-          title={isPersonaLike(member)
-            ? (zh() ? '性别、外貌、顺序' : 'Gender, look, order')
-            : (zh() ? '画风、声音、顺序' : 'Style, voice, order')}
-          className={cx(
-            'inline-flex h-7 max-w-[260px] items-center gap-1.5 rounded-md border px-1.5 text-[12px] transition-colors',
-            open ? 'border-honey bg-honey-tint' : 'border-line1 bg-bg2 hover:border-line2 hover:bg-bg3',
-          )}
-        >
-          <NumberBadge index={index} kind={member.kind} />
-          <span className="truncate font-medium text-ink1">{memberName(member)}</span>
-          <span className="hidden truncate text-[10px] text-ink3 sm:inline">
-            {isPersonaLike(member) ? describeMember(member, { zh: zh() }) : (zh() ? '已知角色' : 'known character')}
-          </span>
-        </button>
-      )}
+    <div
+      ref={ref}
+      className="relative inline-block"
+      draggable
+      onDragStart={(event) => drag.start(event, index)}
+      onDragOver={(event) => drag.over(event, index)}
+      onDrop={(event) => drag.drop(event, index)}
+      onDragEnd={drag.end}
     >
-      {(close) => (
-        <MemberEditor
-          member={member}
-          index={index}
-          total={total}
-          onChange={onChange}
-          onRemove={onRemove}
-          onMove={onMove}
-          onDraftLook={onDraftLook}
-          close={close}
-        />
-      )}
-    </Menu>
+      <button
+        type="button"
+        onClick={() => { if (!drag.happened()) onOpenChange(!open); }}
+        title={isPersonaLike(member)
+          ? (zh() ? '名字、性别、外貌、参考、顺序（可拖动排序）' : 'Name, gender, look, references, order — drag to reorder')
+          : (zh() ? '画风、声音、顺序（可拖动排序）' : 'Style, voice, order — drag to reorder')}
+        className={cx(
+          'inline-flex h-7 max-w-[260px] cursor-grab items-center gap-1.5 rounded-md border px-1.5 text-[12px] transition-colors active:cursor-grabbing',
+          open ? 'border-honey bg-honey-tint' : 'border-line1 bg-bg2 hover:border-line2 hover:bg-bg3',
+          drag.overIndex === index && drag.fromIndex !== index && 'border-honey ring-1 ring-honey',
+          drag.fromIndex === index && 'opacity-50',
+        )}
+      >
+        <NumberBadge index={index} kind={member.kind} />
+        <span className="truncate font-medium text-ink1">{memberName(member)}</span>
+        <span className="hidden truncate text-[10px] text-ink3 sm:inline">
+          {isPersonaLike(member) ? describeMember(member, { zh: zh() }) : (zh() ? '已知角色' : 'known character')}
+        </span>
+      </button>
+      {open ? (
+        <div className="hive-scale-in absolute bottom-[calc(100%+6px)] left-0 z-50 max-h-[min(420px,60vh)] w-[19rem] overflow-y-auto rounded-lg border border-line1 bg-bg1 p-1.5 shadow-pop" role="dialog">
+          <MemberEditor
+            member={member}
+            index={index}
+            total={total}
+            onChange={onChange}
+            onRemove={onRemove}
+            onMove={onMove}
+            onDraftLook={onDraftLook}
+            onAddMedia={onAddMedia}
+            referenceLane={referenceLane}
+            close={() => onOpenChange(false)}
+          />
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -385,16 +452,23 @@ function MemberChip({ member, index, total, onChange, onRemove, onMove, onDraftL
  * @param {Function} props.onAttach         open the References panel (pictures / clips by hand)
  * @param {Function} props.onWeave          the explicit weave
  * @param {Function} [props.onDraftLook]    (member) => Promise<string> — vision helper, or null when none
+ * @param {Function} [props.onAddMedia]     (memberKey, 'images'|'videos'|'audios') => void — attach FOR one member
  */
 export function CastStrip({
   members = [], onMembersChange, target = 'prose', referenceLane = false, h3 = false,
-  woven = false, promptEmpty = true, warnings = [], onAttach, onWeave, onDraftLook = null,
+  woven = false, promptEmpty = true, warnings = [], onAttach, onWeave, onDraftLook = null, onAddMedia = null,
 }) {
   const setMembers = (next, options) => onMembersChange?.(typeof next === 'function' ? next(members) : next, options);
+  // Which member's editor is open — controlled here so a just-added person
+  // opens ready to name, describe and fill with pictures.
+  const [openKey, setOpenKey] = useState('');
   const add = (member) => setMembers((list) => (
     list.some((item) => item.key === member.key) ? list : [...list, member]
   ));
-  const remove = (key) => setMembers((list) => list.filter((item) => item.key !== key));
+  const remove = (key) => {
+    if (openKey === key) setOpenKey('');
+    setMembers((list) => list.filter((item) => item.key !== key));
+  };
   // An attribute edit re-weaves silently (no toast per keystroke).
   const change = (key, patch) => setMembers((list) => list.map((item) => (
     item.key === key ? { ...item, ...patch } : item
@@ -406,6 +480,62 @@ export function CastStrip({
     [next[index], next[to]] = [next[to], next[index]];
     return next;
   });
+
+  // Drag to reorder — order IS the <Subject N> numbering, so dragging chip 1
+  // past chip 2 renumbers both. State lives in refs plus one render nudge: the
+  // browser owns the drag, React only paints the highlight.
+  const [dragPaint, setDragPaint] = useState({ from: -1, over: -1 });
+  const dragFromRef = useRef(-1);
+  const dragHappenedRef = useRef(0);
+  const drag = {
+    fromIndex: dragPaint.from,
+    overIndex: dragPaint.over,
+    start: (event, index) => {
+      dragFromRef.current = index;
+      dragHappenedRef.current = Date.now();
+      event.dataTransfer.effectAllowed = 'move';
+      try { event.dataTransfer.setData('text/plain', String(index)); } catch { /* older engines */ }
+      setDragPaint({ from: index, over: -1 });
+    },
+    over: (event, index) => {
+      if (dragFromRef.current === -1) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      if (dragPaint.over !== index) setDragPaint((paint) => ({ ...paint, over: index }));
+    },
+    drop: (event, index) => {
+      event.preventDefault();
+      const from = dragFromRef.current;
+      dragHappenedRef.current = Date.now();
+      if (from !== -1 && from !== index) {
+        setMembers((list) => {
+          const next = [...list];
+          const [taken] = next.splice(from, 1);
+          next.splice(index, 0, taken);
+          return next;
+        });
+      }
+      dragFromRef.current = -1;
+      setDragPaint({ from: -1, over: -1 });
+    },
+    end: () => {
+      dragFromRef.current = -1;
+      dragHappenedRef.current = Date.now();
+      setDragPaint({ from: -1, over: -1 });
+    },
+    // A finished (or abandoned) drag must not read as the click that follows
+    // it — the editor popping open after every reorder was noise.
+    happened: () => Date.now() - dragHappenedRef.current < 250,
+  };
+
+  // Anyone can be a second subject: a person added here starts empty and is
+  // filled by its own "+ Pictures", or stays defined by name, gender and look.
+  const addPerson = (close) => {
+    const person = newPersonMember(members);
+    add(person);
+    setOpenKey(person.key);
+    close();
+  };
 
   const lane = target === 'reference'
     ? (zh() ? '参考模式' : 'Reference lane')
@@ -429,6 +559,11 @@ export function CastStrip({
           onRemove={remove}
           onMove={move}
           onDraftLook={isPersonaLike(member) ? onDraftLook : null}
+          onAddMedia={onAddMedia}
+          referenceLane={referenceLane}
+          open={openKey === member.key}
+          onOpenChange={(next) => setOpenKey(next ? member.key : '')}
+          drag={drag}
         />
       ))}
 
@@ -459,7 +594,7 @@ export function CastStrip({
                 ? '顺序即编号：第一位是 <Subject 1>。提示词里用 <Subject N> 指代，换人也能用。'
                 : 'Order is the numbering — the first member is <Subject 1>. Prompts written against <Subject N> work with any cast.'}
             </p>
-            {referenceLane ? (
+            {referenceLane && !members.length ? (
               <button
                 type="button"
                 onClick={() => { onAttach?.(); close(); }}
@@ -469,13 +604,26 @@ export function CastStrip({
                 {zh() ? '图片或片段（参考面板）' : 'Pictures or clips of a person'}
               </button>
             ) : null}
-            {referenceLane ? <AddPersona members={members} onAdd={(member) => { add(member); close(); }} /> : (
-              <p className="text-[10px] leading-snug text-ink3">
-                {zh()
-                  ? '当前工作流没有参考槽位，图片与角色 ID 无法加入；已知角色仍可加入。'
-                  : 'This workflow has no reference slots, so pictures and personas cannot join; known characters still can.'}
-              </p>
-            )}
+            {/* Anyone can be a second subject — a NEW person, never merged into
+                the first. On a lane with reference slots they get their own
+                pictures from the chip's + buttons; anywhere they can be defined
+                by name, gender and look alone. */}
+            <button
+              type="button"
+              onClick={() => addPerson(close)}
+              title={referenceLane
+                ? (zh()
+                  ? '新增一位成员：用成员卡片上的 + 按钮为 TA 附加图片/片段，或仅用文字定义'
+                  : "Add a new member — give them their own pictures with the chip's + buttons, or define them in text")
+                : (zh()
+                  ? '此模型没有参考槽位——新成员由名字、性别和外貌的文字定义'
+                  : 'This model has no reference slots — the new member is defined by name, gender and look in text')}
+              className="flex items-center gap-1.5 rounded-md border border-dashed border-line2 px-2 py-1.5 text-[11px] font-medium text-ink2 transition-colors hover:border-honey hover:bg-honey-tint hover:text-honey"
+            >
+              <Icon name="plus" size={12} />
+              {members.length ? (zh() ? '另一位成员' : 'Another person') : (zh() ? '仅用文字定义的成员' : 'A person described in text')}
+            </button>
+            {referenceLane ? <AddPersona members={members} onAdd={(member) => { add(member); close(); }} /> : null}
             <AddCharacter members={members} onAdd={(member) => { add(member); close(); }} />
             {members.length ? null : (
               <p className="text-[10px] leading-snug text-ink3">

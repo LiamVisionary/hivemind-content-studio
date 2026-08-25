@@ -81,12 +81,21 @@ def readiness(provider: Provider, cfg: StudioConfig | None = None) -> dict:
     elif provider.id == "clueso-mcp":
         available = False
         detail = "Agent-scoped provider: verify authenticated Clueso MCP tools in the active agent runtime before selecting it"
-    elif provider.id == "media-studio-mcp":
+    elif provider.id in {"media-studio-mcp", "comfyui"}:
+        # One credential, one endpoint, two names. `comfyui` is what the media
+        # catalog calls the local generation route and `media-studio-mcp` is
+        # what the provider matrix calls it; image_router already maps both to
+        # the same runner. Leaving comfyui without a branch here fell through to
+        # the manual-mode default and reported it unavailable on every machine
+        # forever — which took the capability router's only local image
+        # provider away and dead-ended the animation lanes.
         from .media_studio import media_studio_status
 
         status = media_studio_status()
         available = bool(status["configured"] and status["auth_present"] and status["reachable"])
         detail = status["detail"]
+        if provider.id == "comfyui" and available:
+            detail = "This machine's ComfyUI workflows are reachable through the local Media Studio route."
     elif provider.id == "universal-tts":
         available = _http_reachable(f"{cfg.universal_tts_url}/health")
         detail = f"TTS health {'answered' if available else 'unavailable'} at {cfg.universal_tts_url}"

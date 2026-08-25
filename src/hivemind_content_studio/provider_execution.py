@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .generation import (
+    AUTH_MODE_API_KEY,
+    AUTH_MODE_OAUTH,
     PAID_GENERATION_CONFIRMATION,
     generate_higgsfield_cloud_asset,
     generate_higgsfield_consumer_asset,
@@ -159,7 +161,7 @@ class ProviderExecutors:
             model = _selected_model(options, kind, "grok-imagine-image-quality" if kind == "keyframe" else "grok-imagine-video")
             return self.xai_imagine(
                 kind=kind,
-                auth_mode="oauth" if provider.endswith("oauth") else "api-key",
+                auth_mode=AUTH_MODE_OAUTH if provider.endswith("oauth") else AUTH_MODE_API_KEY,
                 prompt=prompt,
                 model=model,
                 aspect_ratio=aspect_ratio,

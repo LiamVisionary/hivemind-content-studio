@@ -18,6 +18,7 @@ import statistics
 import tempfile
 import threading
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -50,13 +51,18 @@ from .canvas_history import (
 from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brain, plan_with_local_brain
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
 from .lanes import LANE_MATRIX
-from . import comfy_lanes, local_llm, media_posters, prompt_profiles
+from . import (
+    comfy_lanes, hivemindos_models, image_router, local_llm, media_posters, muapi_proxy,
+    prompt_profiles, story_producer, text_models,
+)
 from .manifest import load_manifest, write_manifest
 from .machine_privacy import machine_operation_receipt, machine_run_receipt
+from .capability_matrix import capability_matrix
 from .media_catalog import media_catalog
 from .media_studio import (
     normalized_requester_pub,
     sanitize_error_detail,
+    smart_mask as run_smart_mask,
     cancel_video as run_media_studio_video_cancel,
     check_video as run_media_studio_video_check,
     finish_video as run_media_studio_video_finish,
@@ -105,7 +111,25 @@ from .private_access import (
 )
 from .run_privacy import migrate_private_runs
 from .gpu_rentals import register_gpu_rental_routes
-from .shared_env import apply_shared_hive_env
+from .shared_env import (
+    ContainerisedHomeError,
+    access_ledger,
+    apply_shared_hive_env,
+    enable_access_stamps,
+    hive_env_status,
+    join_hive_env,
+    access_state,
+    broker_status,
+    close_unlock,
+    machine_links,
+    open_unlock,
+    resolve_request,
+    set_access_mode,
+    revoke_machine_link,
+    seal_store,
+    sealing_status,
+    set_hive_env_values,
+)
 from .studio_drafts import StudioRunDraft
 from .studio_state import StudioStateStore
 from .vault_store import VaultStore
@@ -160,6 +184,24 @@ class OwnerUnlockBody(BaseModel):
     password: str
 
 
+class PassBookBody(BaseModel):
+    """Credentials the owner is adding to the machine's shared store.
+
+    Deliberately not a general key-value write: only names the studio actually
+    uses are accepted, so a bug or a hostile page cannot turn this into a way to
+    plant arbitrary environment variables into every Hive app on the machine.
+    """
+
+    values: dict[str, str] = Field(default_factory=dict)
+    overwrite: bool = False
+
+
+class PassBookRevokeBody(BaseModel):
+    """Which machine to stop lending to, named by its DID."""
+
+    did: str = Field(min_length=1, max_length=200)
+
+
 class AccountUnlockBody(BaseModel):
     account_id: int
     password: str
@@ -206,6 +248,41 @@ class PasskeyAssertionBody(BaseModel):
     signature: str = Field(max_length=4096)
 
 
+class PassBookUnlockBody(BaseModel):
+    """Hold access open for a stated period."""
+
+    duration: str = Field(default="1h", max_length=16)
+    keys: list[str] = Field(default_factory=list, max_length=64)
+    app: str = Field(default="", max_length=128)
+    reason: str = Field(default="", max_length=200)
+
+
+class PassBookResolveBody(BaseModel):
+    """Answer a request that is waiting on a person.
+
+    The passkey fields are optional here and required by policy in the route: a
+    machine that has enrolled a passkey should not be able to approve a
+    credential release with a bare click, because then the passkey is decoration.
+    """
+
+    id: str = Field(min_length=1, max_length=64)
+    approve: bool = True
+    remember: str = Field(default="", max_length=16)
+    credential_id: str = Field(default="", max_length=1024)
+    client_data_json: str = Field(default="", max_length=8192)
+    authenticator_data: str = Field(default="", max_length=8192)
+    signature: str = Field(default="", max_length=4096)
+
+
+class PassBookModeBody(BaseModel):
+    """How one key, or one app, is answered."""
+
+    app: str = Field(default="", max_length=128)
+    key: str = Field(default="", max_length=128)
+    mode: str = Field(max_length=16)
+    window: dict[str, Any] | None = None
+
+
 class ConfirmDeleteBody(BaseModel):
     confirm: bool = False
 
@@ -239,6 +316,67 @@ class PromptHelperUnloadBody(BaseModel):
 
 class LaneFreeBody(BaseModel):
     lane: str
+
+
+class StudioImageBody(BaseModel):
+    """One still, from the provider the studio's picker actually selected.
+
+    ``provider`` is the media catalog's provider id and is REQUIRED: a model id
+    alone is ambiguous (gpt-image-2 exists under an OpenAI API key, an OpenAI
+    OAuth grant and MUAPI, on three different accounts), and guessing which one
+    is a charge on someone else's bill.
+    """
+
+    provider: str
+    model: str = ""
+    prompt: str
+    aspect_ratio: str = "1:1"
+    quality: str = ""
+    seed: int | None = None
+
+
+class HivemindosLinkCallbackBody(BaseModel):
+    """What the HivemindOS app posts back: the link it is answering, and the key."""
+
+    nonce: str = Field(default="", max_length=256)
+    token: str = Field(default="", max_length=512)
+
+
+class HivemindosConnectBody(BaseModel):
+    """The owner's HivemindOS account key, or an empty string to disconnect."""
+
+    token: str = Field(default="", max_length=512)
+
+
+class HivemindosMergeBody(BaseModel):
+    """Two or more account keys whose balances should become one."""
+
+    tokens: list[str] = Field(default_factory=list, max_length=8)
+
+
+class HivemindosTopUpBody(BaseModel):
+    """How much to put on the studio's own HivemindOS credit balance.
+
+    Bounded here rather than only at the gateway: an owner cannot mistype a
+    zero into a checkout this studio opened.
+    """
+
+    amountUsd: float = Field(default=5.0, ge=5.0, le=100.0)
+
+
+class StoryProducerBody(BaseModel):
+    """One question the Story studio asks its producer.
+
+    ``task`` is one of story_producer.TASKS. ``brief`` is what the director
+    just typed; ``context`` is everything already locked (the contract, the
+    characters, the location, the board), sent so the answer preserves it
+    instead of quietly inventing a second version of the same character.
+    """
+
+    modelId: str
+    task: str
+    brief: str = ""
+    context: dict | None = None
 
 
 class PromptHelperGenerateBody(BaseModel):
@@ -296,6 +434,11 @@ class PromptHelperGenerateBody(BaseModel):
     # change, and what the owner wants different about it.
     currentPrompt: str | None = None
     revision: str | None = None
+    # Refine currentPrompt into the model's perfect shape: {"detail":
+    # "keep"|"enrich", "shots": "keep"|"more"|"single", "guidance": "..."}.
+    # Validated in prompt_profiles.normalize_refine (advisory knobs, never a
+    # 422); requires currentPrompt like revision does.
+    refine: dict | None = None
 
 
 class PromptHelperDescribeLookBody(BaseModel):
@@ -455,6 +598,26 @@ class MediaStudioVideoBody(BaseModel):
 class MediaStudioIngredientPreviewBody(BaseModel):
     ingredient_images: list[MediaStudioIngredientImageBody] = []
     aspect_ratio: str = "16:9"
+
+
+class SpritePointBody(BaseModel):
+    x: float = 0.0
+    y: float = 0.0
+    include: bool = True
+
+
+class SpriteMatteBody(BaseModel):
+    """One extracted frame plus what to keep in it.
+
+    The frame arrives inline and decrypted — the browser pulled it out of a
+    clip it was already playing — so nothing here reads the vault, and nothing
+    is written down: the mask goes back in the same response.
+    """
+
+    image_base64: str = ""
+    subject: str = ""
+    points: list[SpritePointBody] = []
+    confidence: float | None = None
 
 
 # First-run fallback before any real duration is recorded, expressed per WORK
@@ -1023,6 +1186,14 @@ def build_control_app(
     canvas_workflow_fetcher: CanvasWorkflowFetcher | None = None,
     canvas_delete_fetcher: CanvasDeleteFetcher | None = None,
 ) -> FastAPI:
+    # Join the machine's shared credential store before anything asks for a key.
+    # On a machine that already has HivemindOS this adopts the existing store; on
+    # a bare machine it creates the canonical one at the same path, so a later
+    # HivemindOS install finds this and does not start a second.
+    join_hive_env()
+    # Every credential read from here on leaves a hash-chained receipt naming
+    # the key. Optional and silent when the companion module is absent.
+    enable_access_stamps()
     apply_shared_hive_env()
     runs = orchestrator or ContentOrchestrator(generation_metric_sink=record_hivemind_generation_metric)
     cipher = private_cipher or PrivateFieldCipher.from_keychain(
@@ -1210,6 +1381,15 @@ def build_control_app(
         "/api/accounts/unlock",
         "/api/accounts/webauthn/authenticate/options",
         "/api/accounts/webauthn/authenticate",
+        # The HivemindOS app answering a link the owner started here. It has no
+        # studio session and cannot be given one, so this route is reachable
+        # without signing in — guarded instead by three things it cannot fake:
+        # the caller must be on this machine, it must carry a 32-byte single-use
+        # nonce this studio minted in the last five minutes for a link the owner
+        # asked for, and the key it hands over is verified against HivemindOS
+        # before anything is stored. Nothing here reads studio state; the only
+        # thing it can do is complete a hand-over that was already requested.
+        "/api/hivemindos/models/link-callback",
     })
 
     def _machine_token_presented(request: Request) -> bool:
@@ -1721,6 +1901,17 @@ def build_control_app(
             "privacy_modes": ["local-only", "local-first", "cloud-allowed"],
         }
 
+    @app.get("/api/capabilities/matrix", dependencies=[Depends(require_owner)])
+    def capabilities_matrix() -> dict:
+        """Which models are FIT for a studio feature, not merely capable of it.
+
+        The registry's `accepts` list already says what a graph CAN take, and
+        the studio reads it in one place. This adds the other half — whether
+        the model is any good at the thing — with the provenance of each
+        verdict attached, so the UI can tell a measured run from an inference.
+        """
+        return {"ok": True, **capability_matrix()}
+
     @app.get("/api/surfaces")
     def surfaces() -> dict:
         open_gen_index = open_gen_dist / "index.html"
@@ -1917,6 +2108,112 @@ def build_control_app(
     def prompt_helper_runtime() -> dict:
         return {"ok": True, **local_llm.runtime().snapshot()}
 
+    @app.post("/api/hivemindos/models/connect", dependencies=[Depends(require_owner)])
+    def hivemindos_models_connect(body: HivemindosConnectBody) -> dict:
+        """Point this studio at the owner's HivemindOS account.
+
+        The key is verified against the gateway before it is stored, and stored
+        encrypted on this machine — it is a bearer credential for their credit
+        balance and never goes near the browser again after this call.
+        """
+        try:
+            if not body.token.strip():
+                hivemindos_models.forget_credit_token()
+                return {"ok": True, "connected": False}
+            return {"ok": True, **hivemindos_models.connect_account(body.token)}
+        except hivemindos_models.HivemindosModelsError as exc:
+            raise HTTPException(status_code=400, detail={
+                "message": str(exc), "remedy": exc.remedy, "provider": "hivemindos",
+            }) from exc
+
+    def _loopback_host(host: str) -> bool:
+        """Is this Host header this machine? A deep link can only reach the app
+        on the same computer, so a studio opened over the tailnet or a Hivemind
+        Link proxy has to be told that plainly rather than handed a link that
+        would resolve on the wrong machine."""
+        name = host.rsplit(":", 1)[0].strip("[]").lower()
+        return name in {"127.0.0.1", "::1", "localhost"}
+
+    @app.post("/api/hivemindos/models/link-request", dependencies=[Depends(require_owner)])
+    def hivemindos_models_link_request(request: Request) -> dict:
+        """Start an app-mediated link and return the deep link that carries it.
+
+        The callback is built from the address this request arrived on, so the
+        app answers the studio the owner is actually looking at rather than a
+        port guessed here.
+        """
+        host = (request.headers.get("host") or "").strip()
+        if not _loopback_host(host):
+            raise HTTPException(status_code=400, detail={
+                "message": "Linking through the app only works when the studio is open on this machine.",
+                "remedy": "connect-account", "provider": "hivemindos",
+            })
+        return {"ok": True, **hivemindos_models.start_link(f"http://{host}/api/hivemindos/models/link-callback")}
+
+    @app.post("/api/hivemindos/models/link-callback")
+    def hivemindos_models_link_callback(request: Request, body: HivemindosLinkCallbackBody) -> dict:
+        """Where the HivemindOS app hands the key back.
+
+        NOT owner-gated, because the caller is the desktop app rather than the
+        owner's browser — the nonce is what proves this belongs to a link the
+        owner started here, and it is single-use and short-lived. Loopback only,
+        because a deep link is a local mechanism and nothing off this machine has
+        any business completing one.
+        """
+        client = request.client.host if request.client else ""
+        if client not in {"127.0.0.1", "::1", "localhost"}:
+            raise HTTPException(status_code=403, detail="Local callers only")
+        try:
+            return {"ok": True, **hivemindos_models.complete_link(body.nonce, body.token)}
+        except hivemindos_models.HivemindosModelsError as exc:
+            raise HTTPException(status_code=400, detail={
+                "message": str(exc), "remedy": exc.remedy, "provider": "hivemindos",
+            }) from exc
+
+    @app.get("/api/hivemindos/models/link-state", dependencies=[Depends(require_owner)])
+    def hivemindos_models_link_state(nonce: str) -> dict:
+        """What the browser polls while the owner is over in the app."""
+        return {"ok": True, "state": hivemindos_models.link_state(nonce)}
+
+    @app.post("/api/hivemindos/models/merge-credits", dependencies=[Depends(require_owner)])
+    def hivemindos_models_merge(body: HivemindosMergeBody) -> dict:
+        """Fold a second HivemindOS balance into the connected one."""
+        try:
+            return {"ok": True, **hivemindos_models.merge_accounts(body.tokens)}
+        except hivemindos_models.HivemindosModelsError as exc:
+            raise HTTPException(status_code=400, detail={
+                "message": str(exc), "remedy": exc.remedy, "provider": "hivemindos",
+            }) from exc
+
+    @app.post("/api/hivemindos/models/top-up", dependencies=[Depends(require_owner)])
+    def hivemindos_models_top_up(body: HivemindosTopUpBody) -> dict:
+        """Start a card checkout for HivemindOS credits, for a studio with no app.
+
+        Nothing is charged here: the gateway returns its own checkout page and
+        the owner enters the card there. The credit token that comes back is
+        stored on this machine, encrypted, so the next paid ask can spend it.
+        With the HivemindOS app running this refuses instead — credits added
+        there stay one shared balance, and buying a second one would split it.
+        """
+        try:
+            return {"ok": True, **hivemindos_models.start_top_up(amount_usd=body.amountUsd)}
+        except hivemindos_models.HivemindosModelsError as exc:
+            raise HTTPException(status_code=400, detail={
+                "message": str(exc), "remedy": exc.remedy, "provider": "hivemindos",
+            }) from exc
+
+    @app.get("/api/text-models", dependencies=[Depends(require_owner)])
+    def text_model_catalog() -> dict:
+        """Every model the producer can think with, from both sources at once.
+
+        One answer rather than two calls the browser has to reconcile: the local
+        runtime's snapshot, HivemindOS's catalog and credit state, and which id a
+        fresh install should start on. A source that cannot answer comes back as
+        a source that cannot answer, with the action that repairs it — the picker
+        renders that state instead of silently offering fewer models.
+        """
+        return {"ok": True, **text_models.catalog()}
+
     @app.post("/api/prompt-helper/load", dependencies=[Depends(require_owner)])
     def prompt_helper_load(body: PromptHelperLoadBody) -> dict:
         try:
@@ -1951,6 +2248,46 @@ def build_control_app(
     def prompt_helper_unload(body: PromptHelperUnloadBody) -> dict:
         return local_llm.runtime().unload(body.modelId)
 
+    @app.post("/api/story/producer", dependencies=[Depends(require_owner)])
+    def story_producer_ask(body: StoryProducerBody) -> dict:
+        """Ask the Story studio's producer one structured question.
+
+        Same local llama-server the prompt helper loads, and the same rule: the
+        story never leaves this machine. The answer is JSON the studio renders
+        as editable fields — the director edits every one of them before
+        anything is generated from it, which is why a slightly wrong answer here
+        is cheap and a silently empty one is not.
+        """
+        if body.task not in story_producer.TASKS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown producer task. Known tasks: {', '.join(story_producer.task_ids())}",
+            )
+        try:
+            answer = story_producer.produce(
+                model_id=body.modelId, task_id=body.task,
+                brief=body.brief, context=body.context,
+                # Which engine runs this id is a lookup, not an assumption. A
+                # HivemindOS id used to be sent to the local runtime, which
+                # answered "Unknown local model" for a model that exists.
+                runtime=text_models.runtime_for(body.modelId),
+            )
+        except hivemindos_models.HivemindosModelsError as exc:
+            # The cloud producer's failures are the ones with a repair attached
+            # (top up, open HivemindOS, link it). The message is HivemindOS's own
+            # sentence; `remedy` is which button the studio should offer with it.
+            raise HTTPException(status_code=400, detail={
+                "message": str(exc), "remedy": exc.remedy, "provider": "hivemindos",
+            }) from exc
+        except story_producer.StoryProducerError as exc:
+            # 400 rather than 500: every one of these is something the owner can
+            # act on — load a model, pick a bigger one, or ask for fewer at once.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # `notes` is for an answer that IS usable but is not what was asked for
+        # (six concepts of eight, because the model ran out of room). The studio
+        # shows them; returning the short answer silently would misrepresent it.
+        return {"ok": True, "task": body.task, "result": answer.payload, "notes": list(answer.notes)}
+
     @app.post("/api/prompt-helper/generate", dependencies=[Depends(require_owner)])
     def prompt_helper_generate(body: PromptHelperGenerateBody) -> dict:
         idea = body.idea.strip()
@@ -1974,6 +2311,16 @@ def build_control_app(
         # Client-computed from the composer's character catalog; bounded here
         # because the system prompt is a token budget, not a dumping ground.
         notes = [note.strip()[:200] for note in (body.characterNotes or []) if note.strip()][:12]
+        revision = (body.revision or "").strip()
+        current = (body.currentPrompt or "").strip()
+        refine = prompt_profiles.normalize_refine(body.refine) if body.refine is not None else None
+        if refine is not None and current:
+            # The prompt being refined is the authority on its own grammar. The
+            # dialog's targetModel is a guess about the next run, and when that
+            # guess missed reference mode the helper taught the three-field
+            # format to a six-section prompt — and the model dutifully deleted
+            # subject_definitions and every <Picture N> (seen live 2026-08-24).
+            profile = prompt_profiles.profile_matching_prompt(current, profile)
         messages = [
             {"role": "system", "content": prompt_profiles.system_prompt(
                 profile, duration_seconds=body.durationSeconds, character_notes=notes,
@@ -1986,8 +2333,6 @@ def build_control_app(
         # the format rules, the clip length and the start frame all still
         # apply — a note like "make it night" must not quietly cost the
         # <d> tags or push a beat past the end of the clip.
-        revision = (body.revision or "").strip()
-        current = (body.currentPrompt or "").strip()
         if revision and current:
             messages += [
                 {"role": "assistant", "content": current},
@@ -1998,6 +2343,19 @@ def build_control_app(
         elif revision:
             raise HTTPException(
                 status_code=400, detail="Write a prompt before asking for changes to it")
+        elif refine is not None:
+            # Refinement is the same conversation shape as a revision — the
+            # draft as an assistant turn, the ask as the next user turn — so
+            # the profile's format rules, the clip length and the cast all
+            # still govern the rewrite.
+            if not current:
+                raise HTTPException(status_code=400, detail="Write a prompt before refining it")
+            messages += [
+                {"role": "assistant", "content": current},
+                {"role": "user", "content": prompt_profiles.refine_instruction(
+                    refine, media_type=body.mediaType,
+                    structure=prompt_profiles.structure_clause(current))},
+            ]
 
         def _write(history: list[dict]) -> str:
             try:
@@ -2007,6 +2365,55 @@ def build_control_app(
 
         prompt = prompt_profiles.normalize(profile, _write(messages))
         edited = None
+        if refine is not None and current:
+            # A refinement must never cost the prompt its skeleton: section
+            # headers, <Subject/Picture/Video/Audio N> labels and <d> dialogue
+            # tags mirror the mode and the attached references. One pointed
+            # retry names exactly what went missing; if the model flattens it
+            # AGAIN, the owner keeps their prompt — a "refined" draft that
+            # deleted the reference structure is worse than no refinement.
+            lost = prompt_profiles.structure_losses(current, prompt)
+            if lost:
+                shown = ", ".join(lost[:6]) + ("…" if len(lost) > 6 else "")
+                restore = messages + [
+                    {"role": "assistant", "content": prompt},
+                    {"role": "user", "content":
+                        f"Your rewrite dropped structure it must keep: {shown}. Output the refined "
+                        "prompt again with every section header, every <Subject/Picture/Video/Audio N> "
+                        "label and every <d>[Language] dialogue tag from the original intact."},
+                ]
+                second = prompt_profiles.normalize(profile, _write(restore))
+                if not prompt_profiles.structure_losses(current, second):
+                    prompt = second
+                else:
+                    prompt = current
+                    warnings.append(
+                        f"The model kept dropping the prompt's structure ({shown}), so nothing "
+                        "was changed. Try again, or steer it with the notes field."
+                    )
+            # An unchanged result from a plain refine is a legitimate "already
+            # in shape". A DIRECTED refine (a knob turned, or owner notes) that
+            # comes back byte-identical is the model ignoring the ask — push
+            # once, then say which of the two happened.
+            edited = prompt_profiles.changed_lines(current, prompt)
+            if edited == 0 and prompt_profiles.refine_is_directed(refine):
+                harder = messages + [
+                    {"role": "assistant", "content": prompt},
+                    {"role": "user", "content":
+                        "That is the same prompt — the refinement was not applied. Apply it now "
+                        "and output the full refined prompt."},
+                ]
+                second = prompt_profiles.normalize(profile, _write(harder))
+                edited = prompt_profiles.changed_lines(current, second)
+                if edited:
+                    prompt = second
+                else:
+                    warnings.append(
+                        "The model handed the prompt back unchanged. Try spelling out what to "
+                        "change in the notes field, or edit the text directly."
+                    )
+            elif edited == 0:
+                warnings.append("Already in shape — the model found nothing worth changing.")
         if revision and current:
             # A revision that comes back byte-identical is the model ignoring
             # the note, and it is indistinguishable on screen from a correct
@@ -2684,6 +3091,98 @@ def build_control_app(
         status = 400 if isinstance(exc, (FileNotFoundError, ValueError)) else 503
         return HTTPException(status_code=status, detail=detail or "Media generation failed")
 
+    @app.get("/api/muapi/status", dependencies=[Depends(require_owner)])
+    def muapi_status() -> dict:
+        """Does this machine hold the MUAPI key?
+
+        Presence only — never the value. The browser asks this to decide whether
+        to route through here or fall back to a key of its own, which is what
+        lets a machine that already has the key stop asking for one.
+        """
+        return {"ok": True, "server_key": muapi_proxy.has_server_key()}
+
+    @app.api_route(
+        "/api/muapi/{path:path}",
+        methods=["GET", "POST", "PUT", "DELETE"],
+        dependencies=[Depends(require_owner)],
+    )
+    async def muapi_forward(path: str, request: Request) -> Response:
+        """Forward the studio's MUAPI calls with this machine's key attached.
+
+        A proxy rather than a re-implementation: the browser client owns the
+        poll cadence, the request-id contract a reload resumes from, and MUAPI's
+        detail-envelope failures. Rewriting that server-side would be a second
+        copy to keep in step.
+        """
+        body = await request.body()
+        try:
+            status, payload, headers = await asyncio.to_thread(
+                muapi_proxy.forward,
+                method=request.method,
+                path=path,
+                query=str(request.url.query or ""),
+                body=body or None,
+                headers=dict(request.headers),
+            )
+        except muapi_proxy.MuapiProxyError as exc:
+            # 400, not 502: every one of these is something the owner can act on
+            # — add the key, or ask for a path that exists.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        media_type = headers.pop("Content-Type", None) or headers.pop("content-type", None) or "application/json"
+        return Response(content=payload, status_code=status, media_type=media_type, headers=headers)
+
+    @app.post("/api/media-studio/image", dependencies=[Depends(require_owner)])
+    async def generate_studio_image(body: StudioImageBody, request: Request) -> dict:
+        """Render one still through whichever provider the studio picked.
+
+        The dispatch itself lives in image_router, so this route holds no
+        opinion about which credential belongs to which provider — the failure
+        being designed out is a studio that treats "not local" as "MUAPI" and
+        bills the wrong account for a model of the same name.
+        """
+        name = f"studio-{uuid.uuid4().hex[:12]}.png"
+        output = outputs_root() / name
+        started = time.perf_counter()
+        try:
+            result = await asyncio.to_thread(
+                image_router.render_image,
+                provider=body.provider.strip(),
+                model=body.model.strip(),
+                prompt=body.prompt.strip(),
+                aspect_ratio=body.aspect_ratio.strip() or "1:1",
+                output=output,
+                quality=body.quality.strip(),
+                seed=body.seed,
+            )
+        except image_router.ImageRouterError as exc:
+            # The remedy travels WITH the failure so the studio can offer the
+            # button instead of printing the provider's sentence.
+            raise HTTPException(status_code=400, detail={
+                "message": str(exc),
+                "remedy": getattr(exc, "remedy", ""),
+                "provider": getattr(exc, "provider", ""),
+            }) from exc
+        # The MCP names its own file; everything else wrote to `output`.
+        landed = Path(str(result.get("output") or output)).resolve()
+        root = outputs_root().resolve()
+        if not landed.is_relative_to(root) or not landed.is_file():
+            raise HTTPException(status_code=502, detail="The provider returned no image")
+        # Same sealing as every other generated output: client-only E2E when the
+        # signed-in account has a vault, the legacy cipher when it does not.
+        spki = _vault_public_key()
+        if spki:
+            seal_private_media_e2e(landed, spki, media_type=mimetypes.guess_type(landed.name)[0] or "image/png")
+        else:
+            _encrypt_private_media(landed, cipher)
+        return {
+            "ok": True,
+            "provider": result.get("provider") or body.provider,
+            "model": result.get("model") or body.model,
+            "output": landed.name,
+            "url": f"/api/media-studio/generated/{urllib.parse.quote(landed.name)}",
+            "seconds": round(time.perf_counter() - started, 3),
+        }
+
     @app.post("/api/media-studio/video", dependencies=[Depends(require_owner_or_control)])
     async def generate_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
         # Decoding up to 3x100 MB of inline clips (plus HEIC transcodes and
@@ -3046,6 +3545,40 @@ def build_control_app(
                 source.unlink(missing_ok=True)
             if output is not None:
                 output.unlink(missing_ok=True)
+
+    @app.post("/api/sprite/matte", dependencies=[Depends(require_owner)])
+    async def sprite_matte(body: SpriteMatteBody, request: Request) -> dict:
+        """Cut one animation frame out of its background with SAM3.
+
+        Named rather than salient-object matting on purpose: a sprite clip
+        routinely has something else moving in it (the butterfly the dragon is
+        watching), and a matting net keeps whatever is most conspicuous. Text
+        grounding keeps the thing you asked for and drops the rest.
+
+        One frame per call. A warm run is ~20s and the first loads a 3.45 GB
+        checkpoint, so the caller shows per-frame progress instead of hiding a
+        multi-minute wait behind a single request.
+        """
+        points = [
+            {"x": point.x, "y": point.y, "include": point.include}
+            for point in body.points
+        ]
+        try:
+            result = await asyncio.to_thread(
+                run_smart_mask,
+                body.image_base64,
+                subject=body.subject,
+                points=points,
+                confidence=body.confidence,
+                requester_pub=_requester_pub(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail=sanitize_error_detail(str(exc))) from None
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=sanitize_error_detail(str(exc))) from None
+        return {"ok": True, **result}
 
     def _reference_kind_for_suffix(suffix: str) -> str:
         """image / video / audio from the stored extension. The listing route
@@ -3529,6 +4062,209 @@ def build_control_app(
     def providers() -> dict:
         return {"ok": True, "providers": provider_report()}
 
+    # The credential keys this studio can actually use. A first-run screen offers
+    # these and nothing else: an allow-list keeps a write route from becoming a
+    # way to set arbitrary environment variables for every Hive app on the box.
+    SETTABLE_CREDENTIALS: dict[str, str] = {
+        "OPENAI_API_KEY": "OpenAI — GPT Image and the planner brain",
+        "XAI_API_KEY": "xAI — Grok Imagine image and video",
+        "ELEVENLABS_API_KEY": "ElevenLabs — cloud voice",
+        "PEXELS_API_KEY": "Pexels — stock footage for the faceless lane",
+        "PIXABAY_API_KEY": "Pixabay — stock footage for the faceless lane",
+        "MUAPI_API_KEY": "MUAPI — hosted image, video and lip sync",
+        "HIGGSFIELD_API_KEY_ID": "Higgsfield — key id",
+        "HIGGSFIELD_API_KEY_SECRET": "Higgsfield — key secret",
+        "UPLOAD_POST_API_KEY": "Upload-Post — publishing",
+        "UPLOAD_POST_USERNAME": "Upload-Post — account name",
+        "CIVITAI_API_KEY": "Civitai — model downloads",
+    }
+
+    @app.get("/api/passbook", dependencies=[Depends(require_owner)])
+    def passbook_state() -> dict:
+        """What the shared store holds, by NAME, and what this studio can set.
+
+        Never returns a value. `configured` is what a first-run screen ticks off;
+        `detail` explains a store this build cannot reach at all.
+        """
+        state = hive_env_status()
+        held = set(state["keys"])
+        return {
+            "ok": True,
+            **{key: state[key] for key in ("path", "exists", "workspace", "workspaces", "apps", "home_is_container", "detail")},
+            "settable": [
+                {"key": key, "label": label, "configured": key in held}
+                for key, label in SETTABLE_CREDENTIALS.items()
+            ],
+            "keys": sorted(held),
+            "sealing": sealing_status(),
+        }
+
+    @app.get("/api/passbook/access", dependencies=[Depends(require_owner)])
+    def passbook_access(limit: int = 100) -> dict:
+        """Who read which credential, and whether the record has been altered.
+
+        Key names only. `intact` is the load-bearing field: false means a row
+        was edited, removed or reordered since it was written.
+        """
+        return {"ok": True, **access_ledger(limit=max(1, min(1000, limit)))}
+
+    @app.get("/api/passbook/policy", dependencies=[Depends(require_owner)])
+    def passbook_access_state() -> dict:
+        """The rules, the open unlocks, and anything waiting on the owner."""
+        return {"ok": True, **access_state()}
+
+    @app.post("/api/passbook/policy/mode", dependencies=[Depends(require_owner)])
+    def passbook_set_mode(body: PassBookModeBody) -> dict:
+        result = set_access_mode(app=body.app, key=body.key, mode=body.mode, window=body.window)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail={
+                "message": result.get("detail") or "That mode could not be set.",
+                "remedy": "Pick always, ask, window or never; a window needs a start and an end.",
+            })
+        return result
+
+    @app.post("/api/passbook/policy/unlock", dependencies=[Depends(require_owner)])
+    def passbook_unlock(body: PassBookUnlockBody) -> dict:
+        """Open access for a stated period, then let it shut by itself."""
+        result = open_unlock(duration=body.duration, keys=body.keys,
+                             app=body.app, reason=body.reason)
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail={
+                "message": result.get("detail") or "That unlock could not be opened.",
+                "remedy": "Use a duration like 30m, 1h or 4h, up to 7 days.",
+            })
+        return result
+
+    @app.post("/api/passbook/policy/lock", dependencies=[Depends(require_owner)])
+    def passbook_lock(body: PassBookRevokeBody | None = None) -> dict:
+        return {"ok": True, **close_unlock("")}
+
+    @app.post("/api/passbook/policy/resolve", dependencies=[Depends(require_owner)])
+    def passbook_resolve(body: PassBookResolveBody, request: Request) -> dict:
+        """Approve or decline a waiting request, with a passkey when one exists.
+
+        Being signed in already got the owner this far. A release of credentials
+        to a process is a second decision, so where a passkey is enrolled it has
+        to be exercised — otherwise the passkey protects the session and not the
+        thing the session is for.
+        """
+        account = getattr(request.state, "account", None)
+        enrolled = account_store.list_passkeys(account.id) if account else []
+        approver = "owner"
+
+        if enrolled and body.approve:
+            if not body.credential_id:
+                raise HTTPException(status_code=401, detail={
+                    "message": "This approval needs your passkey.",
+                    "remedy": "Confirm with the passkey enrolled on this machine.",
+                })
+            try:
+                verify_assertion(
+                    store=account_store, party=_relying_party(request),
+                    credential_id=body.credential_id, client_data_json=body.client_data_json,
+                    authenticator_data=body.authenticator_data, signature=body.signature,
+                )
+            except WebAuthnError as exc:
+                raise HTTPException(status_code=401, detail={
+                    "message": "That passkey did not verify.",
+                    "remedy": "Try again with the passkey enrolled on this machine.",
+                }) from exc
+            approver = f"passkey:{body.credential_id[:12]}"
+
+        result = resolve_request(body.id, approve=body.approve,
+                                 remember=body.remember, approved_by=approver)
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail={
+                "message": result.get("detail") or "That request is no longer waiting.",
+                "remedy": "Refresh; it may have been answered or timed out.",
+            })
+        return {"ok": True, **result, "approved_by": approver}
+
+    @app.get("/api/passbook/broker", dependencies=[Depends(require_owner)])
+    def passbook_broker_state() -> dict:
+        """Whether credential reads go through the broker, and its limits.
+
+        Read-only. Starting and stopping a background service from a web request
+        is a different kind of decision from pasting a key, and it belongs on the
+        command line where the person doing it sees what it does.
+        """
+        return {"ok": True, **broker_status()}
+
+    @app.get("/api/passbook/links", dependencies=[Depends(require_owner)])
+    def passbook_links() -> dict:
+        """Machines this one lends keys to, or borrows them from. Key names only.
+
+        Read plus revoke, deliberately. Approving and accepting need a
+        fingerprint compared against a second machine's screen, which no panel
+        on one machine can do — a button that appeared to do it would be worse
+        than no button.
+        """
+        return {"ok": True, **machine_links()}
+
+    @app.post("/api/passbook/links/revoke", dependencies=[Depends(require_owner)])
+    def passbook_revoke_link(body: PassBookRevokeBody) -> dict:
+        """Stop lending to a machine, and say what must still be rotated.
+
+        Revoking cannot unsend a value that has already been delivered. The
+        `rotate` list is the real remediation, so it is returned rather than
+        buried.
+        """
+        result = revoke_machine_link(body.did)
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail={
+                "message": result.get("detail") or "No active grant to that machine.",
+                "remedy": "Refresh the list; it may already have been revoked.",
+            })
+        return {"ok": True, **result}
+
+    @app.post("/api/passbook/seal", dependencies=[Depends(require_owner)])
+    def passbook_seal_store() -> dict:
+        """Encrypt every plaintext value in the shared store, in place.
+
+        Protects the store at rest — a stolen laptop, a backup, a synced home
+        directory. It does not protect against code running as this user; that
+        needs a broker, not a cipher.
+        """
+        result = seal_store()
+        if not result.get("ok"):
+            raise HTTPException(status_code=409, detail={
+                "message": result.get("detail") or "The store could not be sealed.",
+                "remedy": "Install the `cryptography` package, or set HIVE_ENV_KEY on this machine.",
+            })
+        return {"ok": True, **result}
+
+    @app.post("/api/passbook", dependencies=[Depends(require_owner)])
+    def passbook_set(body: PassBookBody) -> dict:
+        """Add credentials to the machine's shared store.
+
+        Additive by default: an existing key is kept unless the owner explicitly
+        replaces it, so adding a key here can never quietly break another app
+        that is already using the store.
+        """
+        unknown = sorted(set(body.values) - set(SETTABLE_CREDENTIALS))
+        if unknown:
+            raise HTTPException(status_code=400, detail={
+                "message": f"This studio does not use {', '.join(unknown)}.",
+                "remedy": "Add it with the HivemindOS app, or edit the shared env directly.",
+            })
+        blank = sorted(key for key, value in body.values.items() if not str(value).strip())
+        if blank:
+            raise HTTPException(status_code=400, detail={
+                "message": f"No value given for {', '.join(blank)}.",
+                "remedy": "Paste the key, or leave the field out to keep what is already stored.",
+            })
+        try:
+            written = set_hive_env_values(body.values, overwrite=body.overwrite)
+        except ContainerisedHomeError as exc:
+            raise HTTPException(status_code=409, detail={
+                "message": str(exc),
+                "remedy": "Ship this build unsandboxed, or launch it with HIVE_HOME set.",
+            }) from None
+        # The new keys have to reach THIS process too, or the provider the owner
+        # just configured stays unavailable until a restart.
+        apply_shared_hive_env()
+        return {"ok": True, **{key: written[key] for key in ("added", "updated", "kept")}, "path": written["path"]}
+
     @app.get("/api/oauth")
     def oauth_status() -> dict:
         return {
@@ -3541,10 +4277,26 @@ def build_control_app(
 
     @app.post("/api/oauth/{provider}/start")
     def oauth_start(provider: str) -> dict:
+        """Begin a sign-in, and say up front whether it can come back.
+
+        The authorize URL's redirect_uri is registered with the provider and
+        must not be rewritten, so an unreachable callback is REPORTED rather
+        than repaired — but it is reported before anyone is sent to a page that
+        will strand them after they approve it.
+        """
         try:
-            return {"ok": True, **start_oauth_login(provider)}
+            result = start_oauth_login(provider)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
+        callback = result.get("callback") or {}
+        if callback.get("checked") and not callback.get("reachable"):
+            raise HTTPException(status_code=409, detail={
+                "message": callback.get("detail") or "The sign-in has nowhere to come back to.",
+                "remedy": "fix-callback",
+                "instruction": callback.get("remedy") or "",
+                "target": callback.get("target") or "",
+            })
+        return {"ok": True, **result}
 
     @app.post("/api/runs/{run_id}/resume", dependencies=[Depends(require_owner_or_control)])
     def resume(run_id: str, request: Request) -> dict:

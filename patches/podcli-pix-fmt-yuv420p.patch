@@ -1,0 +1,65 @@
+diff --git a/backend/services/encoder.py b/backend/services/encoder.py
+index 915b2de..4f07695 100644
+--- a/backend/services/encoder.py
++++ b/backend/services/encoder.py
+@@ -134,6 +134,9 @@ def _get_encoder_flags(encoder: str) -> list[str]:
+             "-crf", "18",              # Near-lossless quality
+             "-preset", "slow",         # Better compression at same quality
+             "-profile:v", "high",
++            # `high` cannot encode 4:4:4, and without this ffmpeg keeps the
++            # source's chroma — so a non-4:2:0 input fails to open the encoder.
++            "-pix_fmt", "yuv420p",
+         ],
+     }
+     return flags.get(encoder, flags["libx264"])
+@@ -147,7 +150,7 @@ def get_video_encode_flags() -> list[str]:
+     except Exception:
+         # Absolute fallback — never let encoder detection break the pipeline
+         print("Warning: encoder detection failed, using libx264", file=sys.stderr)
+-        return ["-c:v", "libx264", "-crf", "18", "-preset", "slow", "-profile:v", "high"]
++        return ["-c:v", "libx264", "-crf", "18", "-preset", "slow", "-profile:v", "high", "-pix_fmt", "yuv420p"]
+ 
+ 
+ def _encoder_cache_path() -> str:
+@@ -190,7 +193,7 @@ def get_encoder_info() -> dict:
+         info = detect_encoders()
+     except Exception:
+         info = {"available": ["libx264"], "best": "libx264",
+-                "best_flags": ["-c:v", "libx264", "-crf", "18", "-preset", "slow", "-profile:v", "high"],
++                "best_flags": ["-c:v", "libx264", "-crf", "18", "-preset", "slow", "-profile:v", "high", "-pix_fmt", "yuv420p"],
+                 "system": platform.system()}
+ 
+     try:
+diff --git a/backend/services/media_probe.py b/backend/services/media_probe.py
+index b84de00..e2bc077 100644
+--- a/backend/services/media_probe.py
++++ b/backend/services/media_probe.py
+@@ -40,6 +40,9 @@ CPU_FLAGS = [
+     "-crf", _qp["crf"],
+     "-preset", _qp["preset"],
+     "-profile:v", "high",
++    # Pinned alongside the profile: `high` has no 4:4:4 mode, so an unpinned
++    # chroma from a non-4:2:0 source stops the encoder from opening at all.
++    "-pix_fmt", "yuv420p",
+ ]
+ 
+ 
+diff --git a/backend/services/video_cut.py b/backend/services/video_cut.py
+index 55aea80..4422be6 100644
+--- a/backend/services/video_cut.py
++++ b/backend/services/video_cut.py
+@@ -33,7 +33,13 @@ def cut_segment(
+         "-ss", str(start_second),
+         "-i", input_path,
+         "-t", str(duration),
+-        "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-profile:v", "high",
++        # -pix_fmt is not optional next to -profile:v high. Without it ffmpeg
++        # keeps the source's chroma, and `high` cannot encode 4:4:4 — so any
++        # source that is not already 4:2:0 (screen recordings, ProRes exports,
++        # video built from stills) failed with "high profile doesn't support
++        # 4:4:4" and the run exported zero clips.
++        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
++        "-profile:v", "high", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "192k",
+         "-avoid_negative_ts", "make_zero",
+         output_path,

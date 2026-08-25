@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Modal } from '../ui/Modal.jsx';
 import { Icon } from '../ui/icons.jsx';
-import { Button, Card, IconButton, Pill, SectionLabel, Spinner, TextArea, Toggle, cx } from '../ui/kit.jsx';
+import { Button, Card, CollapsibleSection, IconButton, Pill, SectionLabel, Segmented, Spinner, TextArea, Toggle, cx } from '../ui/kit.jsx';
 import {
     blockedReason,
     canSelect,
@@ -92,14 +92,19 @@ export function PromptHelperDialog({
     const [profileLabel, setProfileLabel] = useState('');
     const [warnings, setWarnings] = useState([]);
     const [sawImage, setSawImage] = useState(false);
-    // How much the last revision moved, so a correct three-word edit inside a
+    // How much the last refinement moved, so a correct three-word edit inside a
     // twenty-line prompt is visibly a change rather than apparently nothing.
     const [changedLines, setChangedLines] = useState(null);
     const [freed, setFreed] = useState(0);
-    // Model-mediated editing: say what is wrong instead of rewriting the
-    // prompt by hand. The textarea stays editable for direct fixes.
-    const [editing, setEditing] = useState(false);
-    const [revision, setRevision] = useState('');
+    // Refinement controls — how much the Refine pass may do, plus the owner's
+    // free-text steer. Tucked into a disclosure so the default path stays two
+    // buttons; the notes field replaces the old "describe a change" box.
+    const [refineDetail, setRefineDetail] = useState('keep');
+    const [refineShots, setRefineShots] = useState('keep');
+    const [guidance, setGuidance] = useState('');
+    // The model picker collapses to one line once a usable model is settled;
+    // it starts open only when there is nothing to write with yet.
+    const [pickerOpen, setPickerOpen] = useState(false);
     // A slow load must not overwrite state from a newer one the user kicked off.
     const requestRef = useRef(0);
 
@@ -127,6 +132,13 @@ export function PromptHelperDialog({
         refresh();
     }, [open, refresh]);
 
+    // A fresh open with no usable model must not hide the picker behind a
+    // one-line summary that reads "pick a model" with nothing to click.
+    useEffect(() => {
+        if (!open || snapshot === null) return;
+        if (!selected) setPickerOpen(true);
+    }, [open, snapshot, selected]);
+
     // Picking a model is a durable choice, not a per-open one: the next open
     // starts here, on this machine, whatever ends up loaded in the meantime.
     const choose = useCallback((modelId) => {
@@ -139,20 +151,26 @@ export function PromptHelperDialog({
     const isLoaded = selectedModel?.fit === 'loaded';
     const held = externalHold(snapshot);
 
-    const run = async ({ revise = '' } = {}) => {
+    const run = async ({ refine = null } = {}) => {
         // Silence here reads as a dead button. Both of these are reachable —
         // no model is selected when nothing is loaded on a fresh open.
         if (!selectedModel) {
-            setError('Pick a local model above first.');
+            setError('Pick a local model first.');
+            setPickerOpen(true);
             return;
         }
-        if (!(idea || '').trim()) {
+        const refineBase = refine ? (result || idea || '').trim() : '';
+        if (refine && !refineBase) {
+            setError('Write a prompt before refining it.');
+            return;
+        }
+        if (!refine && !(idea || '').trim()) {
             setError('Write something in the composer before using the helper.');
             return;
         }
         const ticket = ++requestRef.current;
         setError('');
-        if (!revise) setResult('');
+        if (!refine) setResult('');
         try {
             if (!isLoaded) {
                 setBusy(`Loading ${selectedModel.name}…`);
@@ -191,16 +209,16 @@ export function PromptHelperDialog({
                 } catch { /* fall back to writing from the idea alone */ }
                 if (ticket !== requestRef.current) return;
             }
-            setBusy(revise
-                ? 'Applying your changes…'
+            setBusy(refine
+                ? 'Refining your prompt…'
                 : image ? `Writing prompt from your ${sourceLabel}…` : 'Writing prompt…');
             // H3 identifies characters through their source (name, casting,
             // work, year). When the idea names ones the studio's catalog
             // knows, ship the verified facts so the local model cannot
             // misremember a casting. Matched against the draft too: a
-            // revision like "add Willow" should land enriched as well.
+            // refine note like "add Willow" should land enriched as well.
             const characterNotes = /minimax|(^|[-_.])h3([-_.]|$)/i.test(targetModel || '')
-                ? characterNoteLines(charactersMentionedIn(`${idea}\n${revise ? `${result || ''}\n${revise}` : ''}`))
+                ? characterNoteLines(charactersMentionedIn(`${idea}\n${refine ? `${refineBase}\n${refine.guidance || ''}` : ''}`))
                 : [];
             const data = await api('/api/prompt-helper/generate', {
                 modelId: selectedModel.id,
@@ -250,8 +268,8 @@ export function PromptHelperDialog({
                   : undefined,
                 durationSeconds: durationSeconds || null,
                 imageBase64: image || null,
-                currentPrompt: revise ? (result || idea || '') : null,
-                revision: revise || null,
+                currentPrompt: refine ? refineBase : null,
+                refine: refine || undefined,
             });
             if (ticket !== requestRef.current) return;
             // Covers the model the picker chose for them: once it has actually
@@ -261,8 +279,7 @@ export function PromptHelperDialog({
             setProfileLabel(data.profileLabel || '');
             setWarnings(data.warnings || []);
             setSawImage(Boolean(data.sawImage));
-            setChangedLines(revise ? (data.changedLines ?? null) : null);
-            if (revise) { setRevision(''); setEditing(false); }
+            setChangedLines(refine ? (data.changedLines ?? null) : null);
         } catch (exc) {
             if (ticket !== requestRef.current) return;
             setError(exc.message);
@@ -312,6 +329,13 @@ export function PromptHelperDialog({
     const draft = result || (idea || '').trim();
     const fromComposer = !result && Boolean(draft);
     const accept = () => { if (draft.trim() && !busy) { onUse?.(draft.trim()); onClose?.(); } };
+    const refineNow = () => run({
+        refine: {
+            detail: refineDetail,
+            shots: mediaType === 'video' ? refineShots : 'keep',
+            guidance: guidance.trim(),
+        },
+    });
     const writingFor = describeWritingFor({ cast, references });
 
     // The actions belong to Modal's footer, not the body: the body scrolls, and a
@@ -326,8 +350,16 @@ export function PromptHelperDialog({
             <Button variant="ghost" onClick={onClose} disabled={Boolean(busy)}>Cancel</Button>
             {/* Called with no argument on purpose: run() takes an options
                 object, and a click handler would otherwise hand it an event. */}
-            <Button onClick={() => run()} disabled={!selectedModel || !idea.trim() || Boolean(busy)}>
-                {result ? 'Regenerate' : 'Write prompt'}
+            <Button onClick={() => run()} disabled={!idea.trim() || Boolean(busy)}>
+                {result ? 'Rewrite from idea' : 'Write prompt'}
+            </Button>
+            <Button
+                icon="sparkles"
+                onClick={refineNow}
+                disabled={!draft.trim() || Boolean(busy)}
+                title="Rewrite this prompt into the model's perfect shape and fill in the craft details. The controls below steer how far it goes."
+            >
+                Refine
             </Button>
             <Button
                 variant="primary"
@@ -366,6 +398,34 @@ export function PromptHelperDialog({
                     </p>
                 ) : null}
 
+                {/* Model — one line once settled; the full picker (memory
+                    numbers, every model, unload controls) is behind it. The
+                    machinery matters on the day a load will not fit, and it
+                    buried the two buttons that matter every day. */}
+                <div>
+                    <button
+                        type="button"
+                        onClick={() => setPickerOpen((v) => !v)}
+                        aria-expanded={pickerOpen}
+                        className="-mx-1 flex w-full min-w-0 items-center gap-1.5 rounded-sm px-1 py-0.5 text-left text-ink3 transition-colors hover:text-ink1"
+                    >
+                        <Icon name="chevronRight" size={13} className={cx('shrink-0 transition-transform', pickerOpen && 'rotate-90')} />
+                        <SectionLabel>Model</SectionLabel>
+                        {!pickerOpen ? (
+                            snapshot === null ? (
+                                <span className="flex items-center gap-1.5 text-[11px] normal-case text-ink3"><Spinner size={11} /> checking…</span>
+                            ) : selectedModel ? (
+                                <span className="min-w-0 truncate text-[11px] font-medium normal-case tracking-normal text-ink2">
+                                    {selectedModel.name}
+                                    <span className="text-ink3"> · {modelStatus(selectedModel)}</span>
+                                </span>
+                            ) : (
+                                <span className="text-[11px] font-medium normal-case tracking-normal text-honey">pick a model</span>
+                            )
+                        ) : null}
+                    </button>
+                </div>
+                {pickerOpen ? (<>
                 {/* Memory header — the numbers the load decision is made from.
                     Nothing to say until the runtime has answered: "0 GB free"
                     over an empty model list read as a broken machine. */}
@@ -466,11 +526,11 @@ export function PromptHelperDialog({
                                     ) : null}
                                     {model.fit === 'loaded' ? (
                                         <>
-                                            <Pill tone="ok" dot>In RAM</Pill>
+                                            <Pill tone="ok" dot>{model.provider === 'mtplx' ? 'Serving' : 'In RAM'}</Pill>
                                             <IconButton
                                                 icon="x"
                                                 size="xs"
-                                                label={`Unload ${model.name}`}
+                                                label={model.provider === 'mtplx' ? 'Stop the MTPLX server' : `Unload ${model.name}`}
                                                 disabled={Boolean(busy)}
                                                 onClick={(e) => { e.stopPropagation(); unload(model.id); }}
                                                 onKeyDown={(e) => e.stopPropagation()}
@@ -501,6 +561,7 @@ export function PromptHelperDialog({
                         </details>
                     ) : null}
                 </div>
+                </>) : null}
 
                 {draft ? (
                     <div>
@@ -517,20 +578,12 @@ export function PromptHelperDialog({
                                     <span className="text-[11px] text-ink3">{durationSeconds}s clip</span>
                                 ) : null}
                                 {profileLabel ? <span className="text-[11px] text-ink3">Guidance: {profileLabel}</span> : null}
-                                <Button
-                                    size="sm"
-                                    variant={editing ? 'neutral' : 'ghost'}
-                                    disabled={Boolean(busy)}
-                                    onClick={() => setEditing((on) => !on)}
-                                >
-                                    Edit
-                                </Button>
                             </span>
                         </div>
                         {fromComposer ? (
                             <p className="mb-2 text-[11px] text-ink3">
-                                This is what your composer holds now — edit it here, describe a change,
-                                or write a new prompt from it.
+                                This is what your composer holds now — edit it directly, hit Refine to
+                                knock it into shape, or rewrite it from your idea.
                             </p>
                         ) : null}
                         {/* A beat past the end of the clip never renders, so the
@@ -538,45 +591,6 @@ export function PromptHelperDialog({
                         {warnings.map((warning) => (
                             <p key={warning} className="mb-2 text-[11px] text-warn">{warning}</p>
                         ))}
-                        {/* Say what is wrong rather than rewriting it by hand.
-                            The whole conversation is replayed, so the format,
-                            the clip length and the start frame still hold. */}
-                        {editing ? (
-                            <div className="mb-2 flex flex-col gap-1.5 rounded-md border border-line1 bg-bg1 p-2">
-                                <TextArea
-                                    rows={2}
-                                    autoFocus
-                                    value={revision}
-                                    placeholder="What should change? e.g. make it night, cut the dialogue, hold the camera still"
-                                    onChange={(e) => setRevision(e.target.value)}
-                                    onKeyDown={(e) => {
-                                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && revision.trim()) {
-                                            run({ revise: revision.trim() });
-                                        }
-                                    }}
-                                />
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <Button
-                                        size="sm"
-                                        disabled={!revision.trim() || !selectedModel || Boolean(busy)}
-                                        onClick={() => run({ revise: revision.trim() })}
-                                    >
-                                        Apply change
-                                    </Button>
-                                    <Button
-                                        size="sm"
-                                        variant="ghost"
-                                        disabled={Boolean(busy)}
-                                        onClick={() => { setEditing(false); setRevision(''); }}
-                                    >
-                                        Cancel
-                                    </Button>
-                                    <small className="text-[11px] text-ink3">
-                                        Rewrites the whole prompt, keeping everything you did not mention.
-                                    </small>
-                                </div>
-                            </div>
-                        ) : null}
                         <TextArea
                             rows={7}
                             value={draft}
@@ -585,6 +599,60 @@ export function PromptHelperDialog({
                                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); accept(); }
                             }}
                         />
+
+                        {/* How far Refine may go. Closed, Refine still does its
+                            base job — perfect structure, nothing lost, the
+                            unwritten craft decisions filled in. */}
+                        <CollapsibleSection title="Refinement controls" className="mt-3" storageKey="promptHelper.refine">
+                            <div className="flex flex-col gap-3">
+                                <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                                    <span className="flex items-center gap-2 text-[11px] text-ink2">
+                                        Detail
+                                        <Segmented
+                                            size="sm"
+                                            value={refineDetail}
+                                            onChange={setRefineDetail}
+                                            options={[
+                                                { value: 'keep', label: 'Keep' },
+                                                { value: 'enrich', label: 'Add more' },
+                                            ]}
+                                        />
+                                    </span>
+                                    {mediaType === 'video' ? (
+                                        <span className="flex items-center gap-2 text-[11px] text-ink2">
+                                            Shots
+                                            <Segmented
+                                                size="sm"
+                                                value={refineShots}
+                                                onChange={setRefineShots}
+                                                options={[
+                                                    { value: 'keep', label: 'Keep' },
+                                                    { value: 'more', label: 'Add shots' },
+                                                    { value: 'single', label: 'Single still' },
+                                                ]}
+                                            />
+                                        </span>
+                                    ) : null}
+                                </div>
+                                <div>
+                                    <TextArea
+                                        rows={2}
+                                        value={guidance}
+                                        placeholder="Steer it: focus more on…, add…, remove…, make … more subtle"
+                                        onChange={(e) => setGuidance(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && draft.trim()) {
+                                                e.preventDefault();
+                                                refineNow();
+                                            }
+                                        }}
+                                    />
+                                    <p className="mt-1 text-[11px] text-ink3">
+                                        Your notes win over the toggles. Refine keeps every fact and line of dialogue either way.
+                                    </p>
+                                </div>
+                            </div>
+                        </CollapsibleSection>
                     </div>
                 ) : null}
 

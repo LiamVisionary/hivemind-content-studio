@@ -22,7 +22,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
-import { muapi } from '../lib/muapi.js';
+import { muapiRow, runImage } from '../lib/modelRunner.js';
 import { buildNanoBananaPrompt, CAMERA_MAP, LENS_MAP } from '../lib/promptUtils.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { imageDownloadName } from '../lib/downloadNames.js';
@@ -266,12 +266,19 @@ export function CinemaStudio({ active = true } = {}) {
     );
 
     try {
-      const res = await muapi.generateImage({
-        model: CINEMA_MODEL,
-        prompt: finalPrompt,
-        aspect_ratio: s.settings.aspect_ratio,
-        resolution: (s.settings.resolution || '2K').toLowerCase(),
-        negative_prompt: 'blurry, low quality, distortion, bad composition',
+      // Through the one dispatcher, like every other studio: the PROVIDER
+      // decides the transport, never the call site. `extra.muapi` is also this
+      // call's declaration that a MUAPI payload is what it built — a row that
+      // resolved anywhere else is refused rather than sent this shape.
+      const res = await runImage({
+        row: muapiRow(CINEMA_MODEL),
+        shared: { prompt: finalPrompt, aspect_ratio: s.settings.aspect_ratio },
+        extra: {
+          muapi: {
+            resolution: (s.settings.resolution || '2K').toLowerCase(),
+            negative_prompt: 'blurry, low quality, distortion, bad composition',
+          },
+        },
       });
 
       if (res && res.url) {

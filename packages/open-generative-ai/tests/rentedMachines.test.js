@@ -233,8 +233,11 @@ test('the studios send the tab pin as run_on only in Rented mode, persist it, an
 
   // Image: one helper, gated on the Rented source, spread into every generate/upscale call.
   assert.match(image, /const runOn = \(\) => \(s\.rentedOnly && s\.rentedMachineId \? \{ run_on: s\.rentedMachineId \} : \{\}\);/);
-  const generateCalls = image.match(/studio_lane: studioLane,\n\s+\.\.\.runOn\(\),/g) || [];
-  assert.equal(generateCalls.length, 5, 'every localAI.generate call carries the pin');
+  // \s* rather than \n\s+: the invariant is that the lane and the pin travel
+  // TOGETHER on every local generate, not that they sit on two lines. Two of
+  // them moved onto one line when the calls were routed through modelRunner.
+  const generateCalls = image.match(/studio_lane: studioLane,\s*\.\.\.runOn\(\),/g) || [];
+  assert.equal(generateCalls.length, 5, 'every local generate call carries the pin');
   assert.match(image, /localAI\.upscale\(\{[^}]*\.\.\.runOn\(\) \}\)/);
   // Video: the hivemind request carries it, gated the same way.
   assert.match(video, /\.\.\.\(setup\.rentedOnly && setup\.rentedMachineId \? \{ run_on: setup\.rentedMachineId \} : \{\}\),/);

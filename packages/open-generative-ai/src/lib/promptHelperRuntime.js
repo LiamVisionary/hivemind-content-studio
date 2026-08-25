@@ -48,6 +48,13 @@ export function blockedReason(model, { unloadOthers = true } = {}) {
 /** Short status line for a model row. */
 export function modelStatus(model) {
     if (!model) return '';
+    // The MTPLX slot (HivemindOS's tuned Qwen3-Next server) runs itself; its
+    // rows say where they run rather than a RAM estimate our ladder made up.
+    if (model.provider === 'mtplx') {
+        if (model.fit === 'loaded') return 'Serving on MTPLX';
+        if (model.fit === 'loading') return 'Starting MTPLX…';
+        return `${formatBytes(model.estimatedLoadBytes)} · via MTPLX`;
+    }
     if (model.fit === 'loaded') return 'Loaded';
     if (model.fit === 'loading') return 'Loading…';
     const size = formatBytes(model.estimatedLoadBytes);

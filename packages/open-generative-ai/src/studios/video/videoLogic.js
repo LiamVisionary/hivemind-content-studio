@@ -6,6 +6,7 @@
 // src/lib (videoPreferences, videoTasks, modelTiers, genProgress) and are
 // re-exported here, so the node:test suite can exercise them and studio code
 // still has one import site.
+import { servedByAnyMachine } from '../../lib/rentedMachines.js';
 import {
   t2vModels,
   i2vModels,
@@ -769,6 +770,20 @@ export function selectRegularModelTransition(prev, m, c) {
 }
 
 // selectHivemindWorkflowModel (old 1208-1232) — caller checks target exists.
+// Landing in Rented mode still pointed at a model the machine cannot run leaves
+// a selection the generate guard will simply refuse. One rule, so every way into
+// Rented mode obeys it: the source picker, and the "Use in Video Studio" handoff
+// from the Machines view — which bypassed this and was how that handoff arrived
+// in Rented mode still on a cloud model (2026-08-24).
+export function withServedModel(setup, machines, c) {
+  if (!machines?.length) return setup;
+  if (servedByAnyMachine(machines, { id: setup.modelId, name: setup.modelName })) return setup;
+  const served = [...(c.hivemindI2V || []), ...(c.allT2V || [])]
+    .find((m) => servedByAnyMachine(machines, m));
+  return served ? selectHivemindWorkflowTransition(setup, served, c) : setup;
+}
+
+
 export function selectHivemindWorkflowTransition(prev, target, c) {
   let s = prev;
   if (s.v2vMode) s = { ...s, v2vMode: false, videoUrl: null, videoName: null };

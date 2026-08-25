@@ -93,18 +93,28 @@ def _mapped_port(instance: dict, container_port: int) -> str | None:
     return entries[0].get("HostPort")
 
 
-def _ssh_endpoint(instance: dict) -> tuple[str, str] | None:
-    """SSH endpoint for the instance: direct 22/tcp mapping when the host
-    publishes one, else Vast's SSH proxy (ssh_host/ssh_port) — API-created
-    instances usually only get the proxy, and -L tunneling works over both."""
+def _ssh_endpoints(instance: dict) -> list[tuple[str, str]]:
+    """Every way into the container, best first.
+
+    Direct 22/tcp first: it is the box's own sshd on the box's own address,
+    with nothing of Vast's in the path. The proxy (ssh_host/ssh_port) follows
+    as a fallback, because it is all an instance gets when the create did not
+    ask for a 22 mapping — and because it is the half that fails. On
+    2026-08-24 Vast reported ssh_port 19896 for a healthy running box and that
+    port answered a TLS handshake for CN=jupyter.vast.ai: ssh got a fatal
+    decode_error alert and reported "Connection closed by remote host", the
+    rental had no other door, and it had to be destroyed. Both forms carry -L
+    tunneling identically, so preferring the direct one costs nothing.
+    """
+    endpoints: list[tuple[str, str]] = []
     direct_port = _mapped_port(instance, 22)
     ip = instance.get("public_ipaddr")
     if direct_port and ip:
-        return ip, str(direct_port)
+        endpoints.append((str(ip), str(direct_port)))
     host, port = instance.get("ssh_host"), instance.get("ssh_port")
     if host and port:
-        return str(host), str(port)
-    return None
+        endpoints.append((str(host), str(port)))
+    return endpoints
 
 
 class VastProvider:
@@ -201,8 +211,14 @@ class VastProvider:
             "label": spec.label,
             "onstart": spec.onstart,
             "runtype": "ssh",
-            # Publish only the beacon; ComfyUI stays on loopback.
-            "env": {f"-p {port}:{port}": "1" for port in spec.expose_ports},
+            # Publish sshd and the beacon; ComfyUI stays on loopback behind the
+            # tunnel. Port 22 is here so the box has a door that is ours rather
+            # than Vast's: without a direct mapping _ssh_endpoints can only
+            # offer the proxy, and a proxy port that turns out not to speak SSH
+            # leaves the rental unreachable and unfixable (2026-08-24). sshd is
+            # pubkey-only, so publishing it concedes nothing ComfyUI does not
+            # already keep on loopback — RunPod has always mapped 22 this way.
+            "env": {f"-p {port}:{port}": "1" for port in (22, *spec.expose_ports)},
         })
         return str(body.get("new_contract"))
 
@@ -264,7 +280,7 @@ class VastProvider:
             disk_gb=raw.get("disk_space"),
             started_at=raw.get("start_date"),
             public_ip=raw.get("public_ipaddr"),
-            ssh=_ssh_endpoint(raw),
+            ssh_endpoints=_ssh_endpoints(raw),
             ports=ports,
             raw=raw,
         )

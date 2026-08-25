@@ -35,6 +35,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+from . import mtplx_server
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -520,6 +522,12 @@ class LocalLlmRuntime:
         self._binary = binary or os.environ.get("HIVEMIND_LLAMA_SERVER") or self._find_binary()
         self._context_tokens = context_tokens
         self._lmstudio_url = lmstudio_url.rstrip("/")
+        # MTPLX (the shared single-model Qwen3-Next server, see mtplx_server.py):
+        # probed at most every 10 s so snapshot stays cheap; candidates carry
+        # their own TTL because a fresh ref costs an `mtplx inspect`.
+        self._mtplx_probe: tuple[float, dict[str, Any] | None] = (0.0, None)
+        self._mtplx_candidates: tuple[float, list[str]] = (0.0, [])
+        self._mtplx_loading: str = ""  # model id a quickstart is bringing up
         self._loaded: dict[str, LoadedModel] = {}
         # projector path -> the llama-server build that could actually parse it.
         self._projector_binary: dict[str, str] = {}
@@ -609,6 +617,84 @@ class LocalLlmRuntime:
         self._scan_cache = (key, now, result)
         return result
 
+    def _mtplx_serving(self) -> dict[str, Any] | None:
+        """The serving MTPLX model ({id, contextLength}) — cached ~10 s."""
+        at, value = self._mtplx_probe
+        if time.time() - at < 10.0:
+            return value
+        state = mtplx_server.read_mtplx_state()
+        port = int((state or {}).get("port") or mtplx_server.MTPLX_DEFAULT_PORT)
+        value = mtplx_server.probe_served_model(port) if mtplx_server.mtplx_available() or state else None
+        if value is not None:
+            value = {**value, "port": port}
+        self._mtplx_probe = (time.time(), value)
+        return value
+
+    def _mtplx_candidate_refs(self) -> list[str]:
+        """Loadable MTPLX checkpoints — cached 60 s (inspect verdicts persist
+        for a day in the shared state file, so this is usually a dir listing)."""
+        at, refs = self._mtplx_candidates
+        if time.time() - at < 60.0:
+            return refs
+        try:
+            refs = mtplx_server.list_mtplx_candidates()
+        except Exception:
+            refs = []
+        self._mtplx_candidates = (time.time(), refs)
+        return refs
+
+    def _mtplx_models(self) -> list[dict[str, Any]]:
+        """Picker rows for the MTPLX slot: the serving model first, then every
+        other loadable checkpoint. MTPLX owns its own memory (quickstart
+        resolves the user's tuned profile), so rows are offered as "fits" —
+        the fit ladder here budgets llama-server RAM, not MTPLX's."""
+        if not mtplx_server.mtplx_available() and not self._mtplx_serving():
+            return []
+        serving = self._mtplx_serving()
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def row(model_id: str, ref: str, fit: str, context: int) -> dict[str, Any]:
+            name = (ref.split("/")[-1] if ref else model_id).replace("-", " ")
+            return {
+                "id": model_id,
+                "name": name,
+                "sizeBytes": mtplx_server.snapshot_size_bytes(ref) if ref else 0,
+                "architecture": "Qwen3-Next",
+                "quantization": "MTPLX",
+                "maxContext": context,
+                "estimatedLoadBytes": mtplx_server.snapshot_size_bytes(ref) if ref else 0,
+                "fit": fit,
+                "vision": False,
+                "provider": "mtplx",
+            }
+
+        state = mtplx_server.read_mtplx_state() or {}
+        if serving:
+            ref = str(state.get("modelRef") or "") if state.get("modelId") == serving["id"] else ""
+            rows.append(row(serving["id"], ref, "loaded", int(serving.get("contextLength") or 0)))
+            seen.add(serving["id"])
+        if self._mtplx_loading and self._mtplx_loading not in seen:
+            ref = mtplx_server.mtplx_ref_for_model(self._mtplx_loading)
+            rows.append(row(self._mtplx_loading, ref, "loading", 0))
+            seen.add(self._mtplx_loading)
+        for ref in self._mtplx_candidate_refs():
+            model_id = mtplx_server.mtplx_model_id_for_ref(ref)
+            if model_id in seen:
+                continue
+            rows.append(row(model_id, ref, "fits", 0))
+            seen.add(model_id)
+        return rows
+
+    def _mtplx_model_ids(self) -> set[str]:
+        serving = self._mtplx_serving()
+        ids = {serving["id"]} if serving else set()
+        if self._mtplx_loading:
+            ids.add(self._mtplx_loading)
+        for ref in self._mtplx_candidate_refs():
+            ids.add(mtplx_server.mtplx_model_id_for_ref(ref))
+        return ids
+
     def snapshot(self) -> dict[str, Any]:
         """Everything the picker needs to decide what is safe to load."""
         with self._lock:
@@ -665,8 +751,9 @@ class LocalLlmRuntime:
                                else _projector_for(Path(model.path)) is not None),
                 }
             )
+        models.extend(self._mtplx_models())
         return {
-            "available": self.available,
+            "available": self.available or bool(models),
             "binary": self._binary,
             "contextTokens": self._context_tokens,
             "totalBytes": total,
@@ -694,7 +781,11 @@ class LocalLlmRuntime:
         request that only needs to pick a loaded model should not pay for."""
         with self._lock:
             self._reap()
-            return [model_id for model_id, entry in self._loaded.items() if not entry.loading]
+            ids = [model_id for model_id, entry in self._loaded.items() if not entry.loading]
+        serving = self._mtplx_serving()
+        if serving and serving["id"] not in ids:
+            ids.append(serving["id"])
+        return ids
 
     def model_sees_images(self, model_id: str) -> bool:
         """Whether an image sent to this model is actually read.
@@ -706,6 +797,8 @@ class LocalLlmRuntime:
             entry = self._loaded.get(model_id)
         if entry is not None:
             return entry.vision
+        if model_id in self._mtplx_model_ids():
+            return False
         try:
             return _projector_for(Path(self._model_by_id(model_id).path)) is not None
         except LocalLlmError:
@@ -718,6 +811,8 @@ class LocalLlmRuntime:
         raise LocalLlmError(f"Unknown local model: {model_id}")
 
     def load(self, model_id: str, *, unload_others: bool = True) -> dict[str, Any]:
+        if model_id in self._mtplx_model_ids() or mtplx_server.mtplx_owns_model(model_id):
+            return self._load_mtplx(model_id)
         if not self.available:
             raise LocalLlmError("llama-server was not found on this machine. Install llama.cpp to use the prompt helper.")
         model = self._model_by_id(model_id)
@@ -865,7 +960,39 @@ class LocalLlmRuntime:
                     process.wait(timeout=5)
         return True
 
+    def _load_mtplx(self, model_id: str) -> dict[str, Any]:
+        """Start (or adopt) the MTPLX server for this checkpoint. Blocking,
+        like the llama path — the dialog budgets minutes for a load. The
+        "unload others" sweep never touches MTPLX: it may be serving another
+        app's chat, and stopping it is an explicit act (the row's Unload)."""
+        serving = self._mtplx_serving()
+        if serving and serving["id"] == model_id:
+            return {**self.snapshot(), "status": "loaded"}
+        ref = mtplx_server.mtplx_ref_for_model(model_id)
+        if not ref:
+            raise LocalLlmError(f"Unknown MTPLX model: {model_id}")
+        self._mtplx_loading = model_id
+        self._mtplx_probe = (0.0, None)
+        try:
+            result = mtplx_server.mtplx_load_model(ref)
+            if not result.get("ok"):
+                raise LocalLlmError(str(result.get("error") or "MTPLX load failed."))
+        finally:
+            self._mtplx_loading = ""
+            self._mtplx_probe = (0.0, None)
+        return {**self.snapshot(), "status": "loaded"}
+
     def unload(self, model_id: str) -> dict[str, Any]:
+        serving = self._mtplx_serving()
+        if serving and serving["id"] == model_id:
+            result = mtplx_server.mtplx_unload_model()
+            self._mtplx_probe = (0.0, None)
+            if not result.get("ok"):
+                raise LocalLlmError(str(result.get("error") or "MTPLX stop failed."))
+            return {**self.snapshot(), "freedBytes": 0}
+        return self._unload_llama(model_id)
+
+    def _unload_llama(self, model_id: str) -> dict[str, Any]:
         with self._lock:
             self._reap()
             self._unload_locked(model_id)
@@ -900,6 +1027,12 @@ class LocalLlmRuntime:
             self._reap()
             entry = self._loaded.get(model_id)
         if entry is None:
+            serving = self._mtplx_serving()
+            if serving and serving["id"] == model_id:
+                return self._chat_mtplx(
+                    port=int(serving["port"]), model_id=model_id, messages=messages,
+                    max_tokens=max_tokens, timeout=timeout,
+                )
             raise LocalLlmError(f"{model_id} is not loaded. Load it first.")
         if entry.loading:
             # Asking now gets "Connection refused" in urlopen's words; say
@@ -952,6 +1085,52 @@ class LocalLlmRuntime:
             raise LocalLlmError(
                 "The model spent its whole answer budget reasoning without writing a prompt. "
                 "Try a smaller idea, or pick a non-reasoning model."
+            )
+        raise LocalLlmEmptyAnswer("Local model returned an empty prompt.")
+
+    def _chat_mtplx(
+        self, *, port: int, model_id: str, messages: list[dict[str, str]],
+        max_tokens: int, timeout: float,
+    ) -> str:
+        """One completion against the MTPLX server.
+
+        Deliberately NO sampling fields: HivemindOS measured that the server's
+        launch defaults mirror the model's own generation_config (Qwen3.8:
+        temperature 1.0), which is the vendor's setting for general/creative
+        turns — exactly what prompt writing is. The coding/agent profile
+        (0.6/0.95/20) only applies to tool-calling turns, which this is not.
+        Qwen3.8 reasons before answering; the budget stays generous and the
+        <think> block is stripped like every other reasoning model here."""
+        body = json.dumps({
+            "model": model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise LocalLlmError(f"MTPLX returned HTTP {exc.code}.") from exc
+        except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
+            raise LocalLlmError(f"MTPLX did not answer: {exc}") from exc
+        choices = payload.get("choices") or []
+        if not choices:
+            raise LocalLlmError("MTPLX returned no completion.")
+        choice = choices[0]
+        content = _strip_reasoning(str(choice.get("message", {}).get("content") or ""))
+        if content:
+            return content
+        if choice.get("finish_reason") == "length":
+            raise LocalLlmError(
+                "The model spent its whole answer budget reasoning without writing a prompt. "
+                "Try a smaller idea."
             )
         raise LocalLlmEmptyAnswer("Local model returned an empty prompt.")
 

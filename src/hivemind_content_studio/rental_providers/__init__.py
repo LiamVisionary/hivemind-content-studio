@@ -210,11 +210,23 @@ class Instance:
     disk_gb: float | None = None
     started_at: float | None = None
     public_ip: str | None = None
-    # (host, port) for SSH, already resolved past any proxy the provider uses.
-    ssh: tuple[str, str] | None = None
+    # Every way into the container, best first: a direct port mapping ahead of
+    # any proxy the provider fronts it with. A list rather than one endpoint
+    # because a marketplace can hand out an address that is not SSH at all —
+    # on 2026-08-24 Vast reported ssh_port 19896 for a live box and that port
+    # was its Jupyter HTTPS proxy (TLS handshake, CN=jupyter.vast.ai), which
+    # left the rental unreachable with nothing else to try. Attach walks these
+    # in order, so a second candidate is the difference between a slow attach
+    # and a box that has to be destroyed.
+    ssh_endpoints: list[tuple[str, str]] = field(default_factory=list)
     # container port -> published host port, for the beacon.
     ports: dict[int, str] = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
+
+    @property
+    def ssh(self) -> tuple[str, str] | None:
+        """The endpoint to try first; None while the box has no door at all."""
+        return self.ssh_endpoints[0] if self.ssh_endpoints else None
 
     @property
     def ref(self) -> RentalRef:

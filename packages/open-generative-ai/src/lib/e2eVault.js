@@ -335,29 +335,80 @@ export async function rememberOnThisDevice(identity, passphrase, accountId) {
     return true;
 }
 
-/** Unlock from this browser's remembered copy. False when there is none. */
-export async function unlockWithDevice(identity, accountId) {
-    if (!subtle) throw new Error('WebCrypto unavailable');
+/**
+ * The master key inside this browser's device wrap, extractable.
+ *
+ * Null means there is nothing to work with — no wrap stored, or no device key
+ * in this browser right now (a private window, IndexedDB unavailable). A THROW
+ * means the wrap is there and cannot be opened, which is a different thing:
+ * callers act on the two differently, so do not collapse them.
+ */
+async function masterKeyFromDeviceWrap(accountId) {
     let stored;
     try {
         stored = await deviceRecord('readonly', deviceWrapKey(accountId));
     } catch {
+        return null;
+    }
+    if (!stored) return null;
+    const identityKeys = await deviceIdentity();
+    if (!identityKeys?.keyPair) return null;
+    const raw = await subtle.decrypt({ name: 'RSA-OAEP' }, identityKeys.keyPair.privateKey, fromB64url(stored));
+    return subtle.importKey(
+        'raw', raw, { name: 'AES-GCM', length: 256 }, true,
+        ['encrypt', 'decrypt', 'unwrapKey'],
+    );
+}
+
+/**
+ * Unlock from this browser's remembered copy. False when there is none.
+ *
+ * A wrap that is PRESENT but unusable is deleted rather than kept: it was
+ * sealed to a device key this browser no longer has, or it holds the master key
+ * of a superseded identity. Nothing else ever clears it, so keeping it means
+ * failing the same way on every reload — with a valid session, a healthy vault,
+ * and no way to tell why. Dropping it costs one password unlock, which then
+ * writes a fresh wrap.
+ */
+export async function unlockWithDevice(identity, accountId) {
+    if (!subtle) throw new Error('WebCrypto unavailable');
+    let mk;
+    try {
+        mk = await masterKeyFromDeviceWrap(accountId);
+    } catch {
+        await forgetThisDevice(accountId).catch(() => false);
         return false;
     }
-    if (!stored) return false;
+    if (!mk) return false;
     try {
-        const identityKeys = await deviceIdentity();
-        if (!identityKeys?.keyPair) return false;
-        const raw = await subtle.decrypt({ name: 'RSA-OAEP' }, identityKeys.keyPair.privateKey, fromB64url(stored));
-        const mk = await subtle.importKey(
-            'raw', raw, { name: 'AES-GCM', length: 256 }, true,
-            ['encrypt', 'decrypt', 'unwrapKey'],
-        );
         await completeUnlock(identity, mk);
         return true;
     } catch {
+        // Opened, but it does not fit this identity — equally dead.
+        await forgetThisDevice(accountId).catch(() => false);
         return false;
     }
+}
+
+/**
+ * Wrap the master key for a passkey's PRF secret using the device wrap as the
+ * source, for a session unlocked WITHOUT the passphrase.
+ *
+ * wrapMasterKeyForPrf re-derives the key from the passphrase, which a device
+ * unlock has not got. Without this path a passkey sign-in can never enrol PRF:
+ * it rides the weaker device wrap forever and the stronger unlock it is
+ * entitled to is never written.
+ */
+export async function wrapMasterKeyForPrfWithDevice(accountId, prfSecret) {
+    if (!subtle) throw new Error('WebCrypto unavailable');
+    let mk;
+    try {
+        mk = await masterKeyFromDeviceWrap(accountId);
+    } catch {
+        return null;
+    }
+    if (!mk) return null;
+    return wrapMasterKey(await keyFromPrfSecret(prfSecret), mk);
 }
 
 /** Drop this browser's remembered copy (sign out of the device, not the account). */

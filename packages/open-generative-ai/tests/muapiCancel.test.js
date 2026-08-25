@@ -19,7 +19,11 @@ const load = () => import('../src/lib/muapi.js');
 test('an aborted signal stops the poll at once and rejects with the cancelled marker', async () => {
     let polls = 0;
     const restore = stubBrowser({
-        fetchImpl: async () => {
+        // Only PREDICTION fetches count. Resolving which route this page is on
+        // (/api/muapi/status — this machine's key, or the browser's) is a
+        // separate, once-per-page call and not a poll.
+        fetchImpl: async (url) => {
+            if (String(url).includes('/api/muapi/status')) return { ok: true, json: async () => ({ server_key: false }) };
             polls += 1;
             return { ok: true, json: async () => ({ status: 'processing' }) };
         },

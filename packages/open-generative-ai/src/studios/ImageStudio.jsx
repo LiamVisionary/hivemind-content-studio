@@ -15,6 +15,9 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
+import { localRow, muapiRow, runImage } from '../lib/modelRunner.js';
+// Still imported for the NON-generation calls — polling a resumed job and
+// uploading a reference. Generation goes through runImage().
 import { muapi } from '../lib/muapi.js';
 import {
   t2iModels, getAspectRatiosForModel, getResolutionsForModel, getQualityFieldForModel,
@@ -676,6 +679,22 @@ export function ImageStudio({
       localStorage.setItem(IMAGE_PREFERENCES_KEY, JSON.stringify(settings));
     } catch { /* quota */ }
   };
+  // Set when a handoff was claimed before any machine list had arrived, so the
+  // model could not be re-picked yet; the next sync with machines finishes it.
+  const reconcileRentedModelRef = useRef(false);
+
+  // "Use in Image Studio" is a one-shot handoff from the Machines view. Only the
+  // front tab may claim it, or whichever background tab looked first would
+  // swallow it. Claimed the moment it can be rather than inside the poll
+  // callback, and through setSource — the same function the source picker calls,
+  // which is what re-picks a model the machine can actually serve. Setting the
+  // two flags raw skipped all of that (2026-08-24).
+  const claimRentedHandoff = () => {
+    if (!tabActiveRef.current || !consumeRentedModeRequest('image')) return;
+    reconcileRentedModelRef.current = !s.rentedMachines?.length;
+    setSource(true, true);
+  };
+
   // Rented source mode: track attached machines while mounted (the studio
   // component stays mounted across navigations, so a one-shot fetch would
   // freeze the boot-time answer — usually "none", vault still locked). A
@@ -684,6 +703,14 @@ export function ImageStudio({
   useEffect(() => {
     let alive = true;
     let timer = null;
+    const schedule = (pending) => {
+      // Watch a provisioning machine closely so "Ready" lands on its own.
+      const wanted = pending ? 8000 : 30000;
+      if (timer?.every !== wanted) {
+        if (timer) clearInterval(timer.id);
+        timer = { every: wanted, id: setInterval(() => sync(false), wanted) };
+      }
+    };
     // Rented stays selected even with no machine (the panel then offers to
     // rent one) — bouncing the user back to Local would hide the feature.
     const sync = (force) => rentedMachinesState({ force }).then((state) => {
@@ -695,22 +722,30 @@ export function ImageStudio({
       s.rentedProvisioning = state.provisioning;
       s.rentedIdle = state.idle;
       s.rentedBroken = state.broken;
-      // "Use in Studio" is a one-shot handoff — only the front tab may claim it,
-      // or whichever background tab's poll happened to fire first would swallow it.
-      if (tabActiveRef.current && consumeRentedModeRequest('image')) {
-        s.rentedOnly = true;
-        s.useLocalModel = true;
-      }
-      // Watch a provisioning machine closely so "Ready" lands on its own.
-      const wanted = state.pending.length ? 8000 : 30000;
-      if (timer?.every !== wanted) {
-        if (timer) clearInterval(timer.id);
-        timer = { every: wanted, id: setInterval(() => sync(false), wanted) };
+      schedule(state.pending.length);
+      // A handoff claimed before any machine list arrived could not re-pick a
+      // model then. Finish it now there is one to pick from.
+      if (reconcileRentedModelRef.current && s.rentedMachines.length) {
+        reconcileRentedModelRef.current = false;
+        const lm = ensureCompatibleLocalModel();
+        if (lm) applyStoredModelSettings(`local:${lm.id}`, lm);
+        void loadLorasForCurrentModel();
       }
       bump();
+    }).catch(() => {
+      if (!alive) return;
+      // A read that fails must not stop the polling. The interval used to be
+      // created inside the resolve path, so a single rejected fetch — vault
+      // locked, stack mid-restart — left this studio never asking again.
+      schedule(false);
+      bump();
     });
+    claimRentedHandoff();
     sync(false);
-    const onChanged = () => sync(true);
+    // Claim BEFORE syncing: the Machines view announces this immediately after
+    // setting the handoff, and waiting for the fetch is what made the switch
+    // arrive late.
+    const onChanged = () => { claimRentedHandoff(); sync(true); };
     window.addEventListener(RENTED_CHANGED_EVENT, onChanged);
     return () => {
       alive = false;
@@ -719,6 +754,13 @@ export function ImageStudio({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A tab that becomes the front one inherits a handoff nobody could claim
+  // while it was in the background.
+  useEffect(() => {
+    if (tabActive) claimRentedHandoff();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabActive]);
 
   const persistRef = useRef(persistImagePreferences);
   persistRef.current = persistImagePreferences;
@@ -1276,19 +1318,23 @@ export function ImageStudio({
         reader.onerror = () => reject(new Error('Could not read the image'));
         reader.readAsDataURL(blob);
       });
-      const result = await localAI.generate({
-        model: model.id,
-        studio_lane: studioLane,
-        ...runOn(),
-        prompt: prompt || entry.prompt || '',
-        image_base64: dataUrl,
-        outpaint: {
-          width,
-          height,
-          ...(offsetX != null ? { offset_x: offsetX } : {}),
-          ...(offsetY != null ? { offset_y: offsetY } : {}),
-        },
-        seed: -1,
+      const result = await runImage({
+        row: localRow(model.id, model.provider),
+        shared: { prompt: prompt || entry.prompt || '', seed: -1 },
+        // Outpaint is a local-only capability. Keying it by transport is also
+        // the declaration that this call builds a LOCAL request — a row that
+        // resolved elsewhere is refused rather than quietly losing the frame.
+        extra: { local: {
+          studio_lane: studioLane,
+          ...runOn(),
+          image_base64: dataUrl,
+          outpaint: {
+            width,
+            height,
+            ...(offsetX != null ? { offset_x: offsetX } : {}),
+            ...(offsetY != null ? { offset_y: offsetY } : {}),
+          },
+        } },
       });
       if (!result?.url) throw new Error('Expand finished without an image');
       addToHistory({
@@ -1347,14 +1393,15 @@ export function ImageStudio({
         reader.onerror = () => reject(new Error('Could not read the image'));
         reader.readAsDataURL(blob);
       });
-      const result = await localAI.generate({
-        model: model.id,
-        studio_lane: studioLane,
-        ...runOn(),
-        prompt: prompt || '',
-        image_base64: dataUrl,
-        inpaint: { mask_base64: maskDataUrl, mask_expand: maskExpand, mask_influence: maskInfluence },
-        seed: -1,
+      const result = await runImage({
+        row: localRow(model.id, model.provider),
+        shared: { prompt: prompt || '', seed: -1 },
+        extra: { local: {
+          studio_lane: studioLane,
+          ...runOn(),
+          image_base64: dataUrl,
+          inpaint: { mask_base64: maskDataUrl, mask_expand: maskExpand, mask_influence: maskInfluence },
+        } },
       });
       if (!result?.url) throw new Error('Edit finished without an image');
       addToHistory({
@@ -1411,13 +1458,10 @@ export function ImageStudio({
         const angle = angles[i];
         s.angleProgress = `Shot ${i + 1} of ${angles.length} — ${angleLabel(angle)}`;
         bump();
-        const result = await localAI.generate({
-          model: model.id,
-          studio_lane: studioLane,
-          ...runOn(),
-          prompt: editAnglePrompt(dialect, angle, extraPrompt),
-          image_base64: dataUrl,
-          seed: -1,
+        const result = await runImage({
+          row: localRow(model.id, model.provider),
+          shared: { prompt: editAnglePrompt(dialect, angle, extraPrompt), seed: -1 },
+          extra: { local: { studio_lane: studioLane, ...runOn(), image_base64: dataUrl } },
         });
         if (!result?.url) throw new Error(`No output for ${angleLabel(angle)}`);
         addToHistory({
@@ -1463,13 +1507,10 @@ export function ImageStudio({
         if (s.sequenceStop) break;
         s.sequenceProgress = `Step ${i + 1} of ${prompts.length}`;
         bump();
-        const result = await localAI.generate({
-          model: model.id,
-          studio_lane: studioLane,
-          ...runOn(),
-          prompt: prompts[i],
-          image_base64: dataUrl,
-          seed: baseSeed + i,
+        const result = await runImage({
+          row: localRow(model.id, model.provider),
+          shared: { prompt: prompts[i], seed: baseSeed + i },
+          extra: { local: { studio_lane: studioLane, ...runOn(), image_base64: dataUrl } },
         });
         if (!result?.url) throw new Error(`Step ${i + 1} finished without an image`);
         addToHistory({
@@ -1790,21 +1831,25 @@ export function ImageStudio({
             s.localProgress = { active: true, pct: 0, label: `Shot ${shot + 1} of ${batchTotal}` };
             bump();
           }
-          const res = await localAI.generate({
+          const res = await runImage({
+            row: localRow(s.selectedLocalModel),
+            shared: {
+              prompt,
+              aspect_ratio: s.selectedAr,
+              // Explicit seeds advance per shot so a batch is N different
+              // images, never N copies; -1 stays -1 (the server randomizes each
+              // run).
+              seed: (typeof s.seed === 'number' && s.seed >= 0) ? s.seed + shot : s.seed,
+            },
+            extra: { local: {
             ...(onJobId ? { onJobId } : {}),
-            model: s.selectedLocalModel,
             studio_lane: studioLane,
             ...runOn(),
-            prompt,
             // Not sent to workflows that ignore it — the UI says as much, and a field
             // the user can no longer see must not keep riding along in the payload.
             negative_prompt: (currentModelSupportsNegativePrompt() && s.negativePrompt) || undefined,
-            aspect_ratio: s.selectedAr,
             steps: s.steps,
             guidance_scale: s.guidanceScale,
-            // Explicit seeds advance per shot so a batch is N different images,
-            // never N copies; -1 stays -1 (the server randomizes each run).
-            seed: (typeof s.seed === 'number' && s.seed >= 0) ? s.seed + shot : s.seed,
             runtime_mode: s.localRuntimeMode,
             width: editBudget ? editBudget.width : (s.customWidth || undefined),
             height: editBudget ? editBudget.height : (s.customHeight || undefined),
@@ -1825,6 +1870,7 @@ export function ImageStudio({
             ...(coupleOptions || {}),
             ...referenceInput,
             ...(extraReferences.length ? { images_base64: extraReferences } : {}),
+            } },
           });
           // Cancelled while this shot was rendering: the result is not ours any
           // more — no history entry, no viewer, no chime.
@@ -1938,7 +1984,14 @@ export function ImageStudio({
         if (prompt) genParams.prompt = prompt;
         const qualityField = getCurrentQualityField(s.selectedModel);
         if (qualityField && qualityLabel) genParams[qualityField] = qualityLabel;
-        res = await muapi.generateI2I(genParams);
+        res = await runImage({
+          row: muapiRow(s.selectedModel),
+          shared: { prompt: prompt || '', aspect_ratio: s.selectedAr, seed },
+          // generateI2I, not generateImage: the reference rows are the point of
+          // this branch, and the two endpoints take different bodies.
+          extra: { muapi: { method: 'generateI2I', ...genParams } },
+          signal: run.abort.signal,
+        });
       } else {
         const genParams = {
           model: s.selectedModel,
@@ -1957,7 +2010,12 @@ export function ImageStudio({
         };
         const qualityField = getCurrentQualityField(s.selectedModel);
         if (qualityField && qualityLabel) genParams[qualityField] = qualityLabel;
-        res = await muapi.generateImage(genParams);
+        res = await runImage({
+          row: muapiRow(s.selectedModel),
+          shared: { prompt: prompt || '', aspect_ratio: s.selectedAr, seed },
+          extra: { muapi: genParams },
+          signal: run.abort.signal,
+        });
       }
 
       // Cancelled while the provider was working: the pending job is already

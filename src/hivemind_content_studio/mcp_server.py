@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+# stdio MCP speaks JSON-RPC over stdout. An engine log line on that channel is a
+# protocol violation, not noise — see the same claim in cli.py.
+os.environ.setdefault("MPT_LOG_SINK", "stderr")
 
 from .agent_runtime import attach_script, run_registered_agent_script
 from .approval_ledger import ApprovalLedger
@@ -249,8 +254,21 @@ def build_mcp_server():
     @mcp.tool()
     def preflight_content_semantics(run_id: str) -> dict:
         """Run deterministic claim and mobile-legibility preflight before semantic evaluation."""
-        semantic_preflight(_manifest_for_run(run_id))
-        return {"ok": True, "run_id": run_id, "privacy": "machine-redacted", "evaluation_completed": True}
+        # The findings ARE the answer. This used to run the check and return a
+        # hard-coded success, so a brief carrying an unsubstantiated guarantee
+        # and two unreadable overlays came back {"ok": true} and the agent's
+        # only pre-evaluation safety gate saw nothing.
+        report = semantic_preflight(_manifest_for_run(run_id))
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "privacy": "machine-redacted",
+            "preflight_passed": bool(report.get("passed")),
+            "score": report.get("score"),
+            "checks": report.get("checks") or {},
+            "scene_failures": report.get("scene_failures") or [],
+            "regeneration_instructions": report.get("regeneration_instructions") or [],
+        }
 
     @mcp.tool()
     def record_semantic_evaluation(run_id: str, evaluator: str, passed: bool, score: float, checks: dict, scene_failures: list[dict], regeneration_instructions: list[dict]) -> dict:

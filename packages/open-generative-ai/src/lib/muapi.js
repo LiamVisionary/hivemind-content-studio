@@ -13,12 +13,52 @@ export class MuapiClient {
     constructor() {
         // Ideally user provides this in settings
         this.baseUrl = (typeof import.meta !== 'undefined' && import.meta.env?.DEV) ? '' : 'https://api.muapi.ai';
+        this._routePromise = null;
     }
 
     getKey() {
         const key = window.__MUAPI_KEY__ || localStorage.getItem('muapi_key');
         if (!key) throw new Error('API Key missing. Please set it in Settings.');
         return key;
+    }
+
+    /**
+     * Where to send, and what to send with it.
+     *
+     * Two routes, resolved once per page and cached:
+     *
+     *   proxied  this machine holds MUAPI_API_KEY (from the shared Hive
+     *            environment, which is where HivemindOS keeps its keys), so the
+     *            call goes to our own origin and the key never enters the
+     *            browser. A machine that has already been given the key stops
+     *            asking for one.
+     *   direct   standalone, or no server key — the original path, with a key
+     *            this browser holds.
+     *
+     * Only the destination and the header change. The endpoint resolution, the
+     * poll cadence, the request-id contract a reload resumes from and MUAPI's
+     * detail-envelope failures are all untouched, because those are exactly the
+     * things a second implementation would get subtly wrong.
+     */
+    async route() {
+        if (!this._routePromise) {
+            this._routePromise = (async () => {
+                try {
+                    const response = await fetch('/api/muapi/status', { credentials: 'same-origin' });
+                    if (response.ok) {
+                        const body = await response.json();
+                        if (body?.server_key) return { base: '/api/muapi', headers: {}, proxied: true };
+                    }
+                } catch { /* standalone, or the studio server is not there */ }
+                return { base: this.baseUrl, headers: { 'x-api-key': this.getKey() }, proxied: false };
+            })();
+        }
+        return this._routePromise;
+    }
+
+    /** Forget the resolved route — after a key is saved, or the server gains one. */
+    resetRoute() {
+        this._routePromise = null;
     }
 
     /**
@@ -34,12 +74,12 @@ export class MuapiClient {
      * @param {string} [params.image_url] - If present, treats as Image-to-Image
      */
     async generateImage(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
 
         // Resolve endpoint from model definition
         const modelInfo = getModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         // Build payload matching the API's expected format
         const finalPayload = {
@@ -81,7 +121,7 @@ export class MuapiClient {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-api-key': key
+                    ...authHeaders
                 },
                 body: JSON.stringify(finalPayload)
             });
@@ -105,7 +145,7 @@ export class MuapiClient {
             if (params.onRequestId) params.onRequestId(requestId);
 
             // Step 2: Poll for results
-            const result = await this.pollForResult(requestId, key, 60, 2000, { signal: params.signal });
+            const result = await this.pollForResult(requestId, '', 60, 2000, { signal: params.signal });
 
             // Normalize: extract image URL from outputs array
             const imageUrl = result.outputs?.[0] || result.url || result.output?.url;
@@ -129,7 +169,15 @@ export class MuapiClient {
      *   Media Studio poll uses, so one catch branch serves both paths.
      */
     async pollForResult(requestId, key, maxAttempts = 60, interval = 2000, { signal = null } = {}) {
-        const pollUrl = `${this.baseUrl}/api/v1/predictions/${requestId}/result`;
+        const cancelledEarly = () => Object.assign(new Error('Generation cancelled'), { cancelled: true });
+        // Already cancelled: do not even resolve the route. A poll that was
+        // abandoned before it began should touch the network zero times.
+        if (signal?.aborted) throw cancelledEarly();
+        // `key` is ignored on the proxied route and kept in the signature for
+        // the resume path, which reads a key out of storage before it knows
+        // which route this page is on.
+        const { base, headers: authHeaders } = await this.route();
+        const pollUrl = `${base}/api/v1/predictions/${requestId}/result`;
         const cancelled = () => Object.assign(new Error('Generation cancelled'), { cancelled: true });
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -148,7 +196,7 @@ export class MuapiClient {
                     method: 'GET',
                     headers: {
                         'Content-Type': 'application/json',
-                        'x-api-key': key
+                        ...authHeaders
                     },
                     ...(signal ? { signal } : {}),
                 });
@@ -186,11 +234,11 @@ export class MuapiClient {
     }
 
     async generateVideo(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
 
         const modelInfo = getVideoModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const finalPayload = {};
 
@@ -210,7 +258,7 @@ export class MuapiClient {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-api-key': key
+                    ...authHeaders
                 },
                 body: JSON.stringify(finalPayload)
             });
@@ -228,7 +276,7 @@ export class MuapiClient {
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000, { signal: params.signal });
+            const result = await this.pollForResult(requestId, '', 900, 2000, { signal: params.signal });
 
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
             return { ...result, url: videoUrl };
@@ -250,10 +298,10 @@ export class MuapiClient {
      * @param {string} [params.resolution]
      */
     async generateI2I(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
         const modelInfo = getI2IModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const finalPayload = {};
 
@@ -282,7 +330,7 @@ export class MuapiClient {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: { 'Content-Type': 'application/json', ...authHeaders },
                 body: JSON.stringify(finalPayload)
             });
 
@@ -298,7 +346,7 @@ export class MuapiClient {
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 60, 2000, { signal: params.signal });
+            const result = await this.pollForResult(requestId, '', 60, 2000, { signal: params.signal });
             const imageUrl = result.outputs?.[0] || result.url || result.output?.url;
             return { ...result, url: imageUrl };
         } catch (error) {
@@ -319,10 +367,10 @@ export class MuapiClient {
      * @param {string} [params.quality]
      */
     async generateI2V(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
         const modelInfo = getI2VModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const finalPayload = {};
 
@@ -370,7 +418,7 @@ export class MuapiClient {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: { 'Content-Type': 'application/json', ...authHeaders },
                 body: JSON.stringify(finalPayload)
             });
 
@@ -386,7 +434,7 @@ export class MuapiClient {
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000, { signal: params.signal });
+            const result = await this.pollForResult(requestId, '', 900, 2000, { signal: params.signal });
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
             return { ...result, url: videoUrl };
         } catch (error) {
@@ -401,8 +449,8 @@ export class MuapiClient {
      * @returns {Promise<string>} The hosted URL of the uploaded file
      */
     async uploadFile(file) {
-        const key = this.getKey();
-        const url = `${this.baseUrl}/api/v1/upload_file`;
+        const { base, headers: authHeaders } = await this.route();
+        const url = `${base}/api/v1/upload_file`;
 
         const formData = new FormData();
         formData.append('file', file);
@@ -410,7 +458,7 @@ export class MuapiClient {
 
         const response = await fetch(url, {
             method: 'POST',
-            headers: { 'x-api-key': key },
+            headers: { ...authHeaders },
             body: formData
         });
 
@@ -437,10 +485,10 @@ export class MuapiClient {
      * @param {string} [params.prompt] - Motion description (motion-control models)
      */
     async processV2V(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
         const modelInfo = getV2VModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const videoField = modelInfo?.videoField || 'video_url';
         const finalPayload = { [videoField]: params.video_url };
@@ -456,7 +504,7 @@ export class MuapiClient {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: { 'Content-Type': 'application/json', ...authHeaders },
                 body: JSON.stringify(finalPayload)
             });
 
@@ -472,7 +520,7 @@ export class MuapiClient {
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000, { signal: params.signal });
+            const result = await this.pollForResult(requestId, '', 900, 2000, { signal: params.signal });
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
             return { ...result, url: videoUrl };
         } catch (error) {
@@ -495,10 +543,10 @@ export class MuapiClient {
      * @param {Function} [params.onRequestId] - Called when request_id is received
      */
     async processLipSync(params) {
-        const key = this.getKey();
+        const { base, headers: authHeaders } = await this.route();
         const modelInfo = getLipSyncModelById(params.model);
         const endpoint = modelInfo?.endpoint || params.model;
-        const url = `${this.baseUrl}/api/v1/${endpoint}`;
+        const url = `${base}/api/v1/${endpoint}`;
 
         const finalPayload = {};
 
@@ -513,7 +561,7 @@ export class MuapiClient {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+                headers: { 'Content-Type': 'application/json', ...authHeaders },
                 body: JSON.stringify(finalPayload)
             });
 
@@ -530,7 +578,7 @@ export class MuapiClient {
 
             if (params.onRequestId) params.onRequestId(requestId);
 
-            const result = await this.pollForResult(requestId, key, 900, 2000, { signal: params.signal });
+            const result = await this.pollForResult(requestId, '', 900, 2000, { signal: params.signal });
             const videoUrl = result.outputs?.[0] || result.url || result.output?.url;
             return { ...result, url: videoUrl };
         } catch (error) {

@@ -19,6 +19,7 @@ import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
 import { muapi } from '../lib/muapi.js';
+import { localRow, muapiRow, runVideo, studioRow } from '../lib/modelRunner.js';
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { fitShotTimeline } from '../lib/shotTimeline.js';
 import { isWan2gpModelId } from '../lib/localModels.js';
@@ -64,7 +65,6 @@ import {
   primeCompletionPing, playCompletionPing,
 } from '../lib/completionPing.js';
 import {
-  generateHivemindVideo,
   cancelHivemindVideoJob,
   deleteHivemindStudioUpload,
   getSavedHivemindVideoSelection,
@@ -135,7 +135,7 @@ import {
   applyRestoredPreferences, applyGenerationContext, restylePresetIdInPrompt,
   startFrameSelectedTransition, startFrameClearedTransition, clearVideoUploadTransition,
   videoUploadedTransition, selectV2VModelTransition, selectRegularModelTransition,
-  selectHivemindWorkflowTransition, newPromptTransition, extendTransition,
+  selectHivemindWorkflowTransition, newPromptTransition, extendTransition, withServedModel,
   getAdvancedVideoInputs, getAdvancedVideoPayload,
   normalizeVideoPreferences, normalizeVideoIngredientSelections, normalizeSelectedVideoIngredientSheet,
   normalizeVideoGenerationProgress, normalizeSamplerSteps, classifyVideoGenerationStage, formatVideoGenerationElapsed,
@@ -335,6 +335,8 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // the cast it was saved with.
     cast: [],
     castWarnings: [],
+    // Transient: which member the media being attached right now belongs to.
+    claimNewFor: '',
     // The stand-ins of the prompt in the composer — which words of a loaded
     // starter are the person it was written about (subjectTemplate.js), kept
     // until a cast member takes their place. Persisted with the prompt in the
@@ -386,11 +388,64 @@ export function VideoStudio({
   const tabActiveRef = useRef(tabActive);
   tabActiveRef.current = tabActive;
 
+  // Set when a handoff was claimed before any machine list had arrived, so the
+  // model could not be re-pointed yet; the next sync with machines finishes it.
+  const reconcileRentedModelRef = useRef(false);
+
+  // "Use in Video Studio" is a one-shot handoff from the Machines view. Only the
+  // front tab may claim it, or whichever background tab looked first would
+  // swallow it.
+  //
+  // Claimed the moment it can be — on mount, on the Machines view's announcement,
+  // and when this tab comes to the front. It used to be consumed inside the
+  // rented-state poll's callback, which made the switch wait on a network
+  // round-trip, and made a missed pass wait a whole poll interval for the next
+  // one. That is the ~30 seconds of apparently doing nothing before the studio
+  // switched itself to Rented.
+  //
+  // setLocalMode, not a raw commit of the flags: it is the same function the
+  // source picker calls, and the part a raw commit skipped is the part that
+  // lands on a model the machine can actually run. Skipping it is why the
+  // handoff arrived in Rented mode still pointed at a cloud model.
+  const claimRentedHandoff = () => {
+    if (!tabActiveRef.current || !consumeRentedModeRequest('video')) return;
+    // setLocalMode re-points the model itself when it can. It cannot yet if the
+    // machine list or the local catalogue has not arrived — both are fetched,
+    // both land after mount, and in no fixed order — so mark the handoff
+    // unfinished and let finishRentedHandoff close it out on their arrival.
+    reconcileRentedModelRef.current = true;
+    setLocalMode(true, true);
+    finishRentedHandoff();
+  };
+
+  // The other half of the handoff: land on a model the machine can actually run.
+  // Called on every arrival that could make the answer knowable, and gives up
+  // its claim only once it has really decided — an early attempt against an
+  // empty catalogue used to clear the flag and leave the studio on the cloud
+  // model it opened with.
+  const finishRentedHandoff = () => {
+    if (!reconcileRentedModelRef.current) return;
+    if (!s.rentedMachines?.length || !s.catalogs.hivemindI2V?.length) return;
+    reconcileRentedModelRef.current = false;
+    const next = withServedModel(s.setup, s.rentedMachines, s.catalogs);
+    // Persisted, unlike the old raw commit: this is the completion of a switch
+    // the user made, and a reload should not undo half of it.
+    if (next !== s.setup) commit(next);
+  };
+
   // Rented source mode: keep attached-machine state fresh while mounted and
   // honor the one-shot "open in Rented" handoff from the Machines view.
   useEffect(() => {
     let alive = true;
     let timer = null;
+    const schedule = (pending) => {
+      // Watch a provisioning machine closely so "Ready" lands on its own.
+      const wanted = pending ? 8000 : 30000;
+      if (timer?.every !== wanted) {
+        if (timer) clearInterval(timer.id);
+        timer = { every: wanted, id: setInterval(() => sync(false), wanted) };
+      }
+    };
     // Rented stays selected even with no machine (the panel offers to rent
     // one) — bouncing back to Local would hide the feature.
     const sync = (force) => rentedMachinesState({ force }).then((state) => {
@@ -406,21 +461,25 @@ export function VideoStudio({
       // picker prices against this tab's pin, else the routing leader), so a
       // machine change re-clamps the duration exactly like a setup change.
       s.setup = withDurationThatFits(s.setup);
-      const wanted = state.pending.length ? 8000 : 30000;
-      if (timer?.every !== wanted) {
-        if (timer) clearInterval(timer.id);
-        timer = { every: wanted, id: setInterval(() => sync(false), wanted) };
-      }
-      // "Use in Studio" is a one-shot handoff — only the front tab may claim it,
-      // or whichever background tab's poll fired first would swallow it.
-      if (tabActiveRef.current && consumeRentedModeRequest('video')) {
-        commit({ ...s.setup, localMode: true, rentedOnly: true }, { persist: false });
-      } else {
-        bump();
-      }
+      schedule(state.pending.length);
+      // A handoff claimed before the machine list existed could not pick a
+      // model then. Finish it now there is one to pick from.
+      finishRentedHandoff();
+      bump();
+    }).catch(() => {
+      if (!alive) return;
+      // A read that fails must not stop the polling. The interval used to be
+      // created inside the resolve path, so a single rejected fetch — vault
+      // locked, stack mid-restart — left this studio never asking again.
+      schedule(false);
+      bump();
     });
+    claimRentedHandoff();
     sync(false);
-    const onChanged = () => sync(true);
+    // Claim BEFORE syncing: the Machines view announces this immediately after
+    // setting the handoff, and waiting for the fetch is what made the switch
+    // arrive late.
+    const onChanged = () => { claimRentedHandoff(); sync(true); };
     window.addEventListener(RENTED_CHANGED_EVENT, onChanged);
     return () => {
       alive = false;
@@ -429,6 +488,13 @@ export function VideoStudio({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A tab that becomes the front one inherits a handoff nobody could claim
+  // while it was in the background.
+  useEffect(() => {
+    if (tabActive) claimRentedHandoff();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabActive]);
 
   const rootRef = useRef(null);
   const promptRef = useRef(null);
@@ -545,6 +611,14 @@ export function VideoStudio({
   const referenceLaneEntry = () => (isHivemindVideoModelId(s.setup.modelId)
     ? referenceWorkflowForHivemindModel(s.setup.modelId)
     : null);
+  // Whether this FAMILY has a reference lane. The catalog entry is the
+  // authority when it is live, but the catalog loads late and degrades — and
+  // H3 always has its reference sibling — so the family answers when the
+  // registry cannot. Gating on the entry alone told a user with seven pictures
+  // attached that "pictures cannot join" (2026-08-24), and quietly wove in the
+  // wrong grammar until the catalog arrived; videoRequestPlan routes reference
+  // mode by FAMILY, so this must agree with it.
+  const referenceLaneAvailable = () => Boolean(referenceLaneEntry()) || isH3();
   const weaveLimits = () => {
     const entry = referenceLaneEntry();
     return {
@@ -559,10 +633,15 @@ export function VideoStudio({
     audios: Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : [],
   });
   const weaveTargetNow = () => weaveTarget({
-    h3: isH3(), referenceLane: Boolean(referenceLaneEntry()), rows: currentRows(),
+    h3: isH3(), referenceLane: referenceLaneAvailable(), rows: currentRows(),
   });
   const syncCast = () => {
-    s.cast = reconcileCast(s.cast, currentRows(), { persona: s.setup.persona });
+    s.cast = reconcileCast(s.cast, currentRows(), {
+      persona: s.setup.persona,
+      // Who newly attached media is FOR — set only around a member chip's
+      // "+ Pictures / clip / voice" flow, consumed by this reconcile.
+      claimNew: s.claimNewFor || '',
+    });
     return s.cast;
   };
   // The cast and the stand-ins persist WITH the prompt, in the encrypted
@@ -670,6 +749,62 @@ export function VideoStudio({
     return String(payload.look || '');
   };
 
+  // "+ Pictures / + Motion clip / + Voice clip" on a member's chip: the files
+  // go up the same way a composer drop does, but land CLAIMED for that member
+  // — all three rows are written in ONE update so the claim covers the whole
+  // batch, then the weave runs once.
+  const attachFilesForMember = async (key, files) => {
+    if (!files.length) return;
+    if (frameRequiresApiKey() && !localStorage.getItem('muapi_key')) {
+      s.authRetry = () => { void attachFilesForMember(key, files); };
+      s.authOpen = true;
+      bump();
+      return;
+    }
+    s.composerAttaching = true;
+    bump();
+    try {
+      const current = currentRows();
+      const { added, rejected } = await attachDroppedReferences({
+        files,
+        taken: { images: current.images.length, videos: current.videos.length, audios: current.audios.length },
+        limits: weaveLimits(),
+        upload: referenceUploader(uploadFnForFrame),
+      });
+      for (const rejection of rejected) {
+        if (rejection.error) console.error('[VideoStudio] member attach failed:', rejection.error);
+        toast.error(describeReferenceRejection(rejection));
+      }
+      const total = added.images.length + added.videos.length + added.audios.length;
+      if (total) {
+        s.claimNewFor = key;
+        s.setup = withDurationThatFits({
+          ...s.setup,
+          referenceImageUrls: [...current.images, ...added.images.map((item) => item.url)],
+          referenceVideos: [...current.videos, ...added.videos.map((item) => ({ ...item, useAudio: false, compact: false }))],
+          referenceAudios: [...current.audios, ...added.audios],
+        });
+        afterRowsChanged();
+      }
+    } catch (err) {
+      console.error('[VideoStudio] member attach failed:', err);
+      toast.error(err?.message || (zh() ? '附加失败' : 'Could not attach that.'));
+    } finally {
+      s.claimNewFor = '';
+      s.composerAttaching = false;
+      bump();
+    }
+  };
+
+  const memberFileInputRef = useRef(null);
+  const addMediaForMember = (key, kind) => {
+    const input = memberFileInputRef.current;
+    if (!input) return;
+    input.accept = kind === 'images' ? 'image/*' : (kind === 'videos' ? 'video/*' : 'audio/*');
+    input.dataset.memberKey = key;
+    input.click();
+  };
+
   const afterRowsChanged = () => {
     const before = weaveSnapshot();
     syncCast();
@@ -725,20 +860,12 @@ export function VideoStudio({
   const setLocalMode = (local, rented = false) => {
     const nextRented = Boolean(local && rented);
     if (local === s.setup.localMode && nextRented === Boolean(s.setup.rentedOnly)) return;
-    let next = { ...s.setup, localMode: local, rentedOnly: nextRented };
+    const next = { ...s.setup, localMode: local, rentedOnly: nextRented };
     // Switching INTO rented while the selected model is one the machine does
     // not serve would leave a model the box cannot run (and the generate guard
-    // would just refuse). Land on something it actually serves.
-    if (nextRented && s.rentedMachines?.length
-        && !servedByAnyMachine(s.rentedMachines, { id: next.modelId, name: next.modelName })) {
-      const served = [...(s.catalogs.hivemindI2V || []), ...(s.catalogs.allT2V || [])]
-        .find((m) => servedByAnyMachine(s.rentedMachines, m));
-      if (served) {
-        commit(selectHivemindWorkflowTransition(next, served, s.catalogs));
-        return;
-      }
-    }
-    commit(next);
+    // would just refuse). withServedModel is the one rule for that, shared with
+    // the Machines-view handoff so both land the same way.
+    commit(nextRented ? withServedModel(next, s.rentedMachines, s.catalogs) : next);
   };
   const setAr = (v) => commit({ ...s.setup, ar: v });
   const setMatchStartFrameAr = (checked) => commit({ ...s.setup, matchStartFrameAr: checked });
@@ -2161,8 +2288,17 @@ export function VideoStudio({
             submittedAt: Date.now(),
           });
         };
-        localParams.signal = runSignal;
-        const res = settled(await generateHivemindVideo(localParams));
+        // Through the one dispatcher. The row is built from the RESOLVED
+        // workflow id, not from setup.modelId: the two differ
+        // (workflowIdFromHivemindModelId) and reference mode overrides it again
+        // above, so taking the model id here would silently run a different
+        // workflow than the one the composer configured.
+        const { workflow_id: laneWorkflowId, signal: _laneSignal, ...laneParams } = localParams;
+        const res = settled(await runVideo({
+          row: studioRow(laneWorkflowId),
+          shared: laneParams,
+          signal: runSignal,
+        }));
         if (res && res.url) {
           const genId = res.id || Date.now().toString();
           s.lastGenerationId = null;
@@ -2203,7 +2339,10 @@ export function VideoStudio({
           studio_lane: studioLane,
         };
         if (setup.imageMode && setup.imageUrl) localParams.image = setup.imageUrl;
-        const res = settled(await localAI.generate(localParams));
+        const res = settled(await runVideo({
+          row: localRow(setup.modelId, 'wan2gp'),
+          extra: { local: localParams },
+        }));
         if (res && res.url) {
           s.lastGenerationId = null;
           s.lastGenerationModel = null;
@@ -2274,7 +2413,11 @@ export function VideoStudio({
       if (resolutionsFor(setup, setup.modelId).length > 0) params.resolution = setup.resolution;
       if (setup.quality) params.quality = setup.quality;
       if (setup.mode) params.mode = setup.mode;
-      const res = settled(await muapi.generateVideo(params));
+      const res = settled(await runVideo({
+        row: muapiRow(setup.modelId),
+        extra: { muapi: params },
+        signal: runSignal,
+      }));
       if (res && res.url) {
         if (capturedRequestId) removePendingJob(capturedRequestId);
         const genId = res.id || capturedRequestId || Date.now().toString();
@@ -2460,6 +2603,8 @@ export function VideoStudio({
     // Owner unlock and backend startup can race the iframe's first request.
     if (!context.videoModels?.length) context = await loadHivemindStudioContext({ refresh: true });
     applyHivemindWorkflows(context);
+    // The catalogue is the other thing a pending handoff was waiting on.
+    finishRentedHandoff();
     // A catalog the server could not read live still carries a full model list,
     // so the empty-check above never fires for it — and it is the more damaging
     // miss of the two: the fallback list knows nothing of reference mode, so
@@ -3799,7 +3944,7 @@ export function VideoStudio({
             members={s.cast}
             onMembersChange={applyCast}
             target={weaveTargetNow()}
-            referenceLane={Boolean(referenceEntry)}
+            referenceLane={referenceLaneAvailable()}
             h3={isH3()}
             woven={isWovenForReference(s.setup.prompt)}
             promptEmpty={!s.setup.prompt.trim()}
@@ -3812,6 +3957,7 @@ export function VideoStudio({
               focusPrompt();
             }}
             onDraftLook={draftLookFor}
+            onAddMedia={referenceLaneAvailable() ? addMediaForMember : null}
           />
         ) : null}
         <textarea
@@ -3963,6 +4109,20 @@ export function VideoStudio({
               accept="video/*"
               className="hidden"
               onChange={(e) => { void handleVideoFile(e.target.files?.[0]); e.target.value = ''; }}
+            />
+            {/* The cast strip's per-member attach — files land claimed for the
+                member whose chip opened this picker. */}
+            <input
+              ref={memberFileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = Array.from(e.target.files || []);
+                const key = e.target.dataset.memberKey || '';
+                e.target.value = '';
+                if (key && files.length) void attachFilesForMember(key, files);
+              }}
             />
             {/* A labelled chip like its neighbours. On H3 this arms scene
                 chaining (continueSceneFrom), not the LTX extension graph, so the

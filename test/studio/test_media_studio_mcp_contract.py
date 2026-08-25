@@ -2871,7 +2871,56 @@ def test_the_no_headroom_ceiling_reaches_every_h3_video_lane():
     assert f'--vram-headroom {TIERS["minimax"]["comfy_vram_headroom_gb"]}"' in script
 
 
-def _call_mcp_tool(name: str, arguments: dict) -> str:
+class _StubGateway(BaseHTTPRequestHandler):
+    """The one gateway answer the motion-reference guard needs, pinned.
+
+    The guard prices a job against the card the lane actually has, so a test
+    that lets the MCP resolve the LIVE gateway is asserting against whatever
+    hardware it happens to run on. On a 32 GB machine it passed; on an Apple
+    Silicon host, whose unified memory is published as VRAM, the same job priced
+    against the 96 GB bucket and the assertion failed for the hardware rather
+    than for the behaviour. Pin the card and the test measures the guard again.
+    """
+
+    card_vram_gb = 32.0
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        if self.path.rstrip("/") != "/api/lanes/resolve":
+            self.send_error(404)
+            return
+        body = json.dumps({
+            "lane": "default",
+            "remote": False,
+            "probed": True,
+            "vram_headroom_gb": 0.0,
+            "vram_total_gb": self.card_vram_gb,
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args) -> None:
+        pass
+
+
+@contextlib.contextmanager
+def _pinned_gateway(card_vram_gb: float = 32.0):
+    handler = type("_PinnedGateway", (_StubGateway,), {"card_vram_gb": card_vram_gb})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def _call_mcp_tool(name: str, arguments: dict, *, backend_url: str = "") -> str:
     """Run the real MCP over HTTP with machine-private redaction ON."""
     mcp_port = _free_port()
     env = {
@@ -2879,6 +2928,7 @@ def _call_mcp_tool(name: str, arguments: dict) -> str:
         "MEDIA_STUDIO_TOKEN_FILE": "/dev/null",
         "MEDIA_STUDIO_TOKEN": "test-token",
         "MEDIA_STUDIO_MCP_MACHINE_PRIVATE": "1",
+        **({"MEDIA_STUDIO_MCP_BACKEND_URL": backend_url} if backend_url else {}),
     }
     process = subprocess.Popen(
         ["node", str(MCP_SOURCE), "--http", "--host", "127.0.0.1", "--port", str(mcp_port)],
@@ -2928,17 +2978,18 @@ def _call_mcp_tool(name: str, arguments: dict) -> str:
 # back is what proves the ordering.
 def test_an_impossible_motion_reference_clip_is_refused_before_anything_is_staged():
     missing = "/nonexistent/never-staged-because-the-preflight-refused-first.mp4"
-    body = _call_mcp_tool("media_generate_video", {
-        "workflow_id": "minimax-h3-reference",
-        "prompt": "x",
-        "width": 768,
-        "height": 1344,
-        "duration_seconds": 15,
-        # A reference as long as the clip on the native canvas: the node trims
-        # it to the clip, so the clip's own 15s is what has to fit — and at this
-        # canvas it does not (216,774 packed rows against 76,000).
-        "reference_videos": [{"video_path": missing, "use_audio": False, "duration_seconds": 15}],
-    })
+    with _pinned_gateway(card_vram_gb=32.0) as backend:
+        body = _call_mcp_tool("media_generate_video", {
+            "workflow_id": "minimax-h3-reference",
+            "prompt": "x",
+            "width": 768,
+            "height": 1344,
+            "duration_seconds": 15,
+            # A reference as long as the clip on the native canvas: the node trims
+            # it to the clip, so the clip's own 15s is what has to fit — and at this
+            # canvas it does not (216,774 packed rows against 76,000).
+            "reference_videos": [{"video_path": missing, "use_audio": False, "duration_seconds": 15}],
+        }, backend_url=backend)
 
     # The reason survives machine-private redaction, because it is the card's
     # capacity and the canvas the caller already chose — no prompt, no media.
@@ -2958,14 +3009,15 @@ def test_a_short_motion_reference_leaves_the_duration_range_open():
     attached, and refused this outright. (A 15s render at this canvas is 90,658
     rows before any reference and sits over the budget on its own, so the
     longest render that takes a motion clip here is 10s: 73,674 rows.)"""
-    body = _call_mcp_tool("media_generate_video", {
-        "workflow_id": "minimax-h3-reference",
-        "prompt": "x",
-        "width": 704,
-        "height": 1216,
-        "duration_seconds": 10,
-        "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False, "duration_seconds": 2}],
-    })
+    with _pinned_gateway(card_vram_gb=32.0) as backend:
+        body = _call_mcp_tool("media_generate_video", {
+            "workflow_id": "minimax-h3-reference",
+            "prompt": "x",
+            "width": 704,
+            "height": 1216,
+            "duration_seconds": 10,
+            "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False, "duration_seconds": 2}],
+        }, backend_url=backend)
     assert "does not fit this card" not in body, body[:400]
 
 
@@ -2974,14 +3026,15 @@ def test_an_unmeasured_reference_is_treated_as_long():
     guessing short would let an over-budget run through to a three-minute OOM.
     It assumes the longest the lane will stage (15s) at the node's largest
     reference canvas; the authoritative check re-runs on the real staged file."""
-    body = _call_mcp_tool("media_generate_video", {
-        "workflow_id": "minimax-h3-reference",
-        "prompt": "x",
-        "width": 768,
-        "height": 1344,
-        "duration_seconds": 15,
-        "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False}],
-    })
+    with _pinned_gateway(card_vram_gb=32.0) as backend:
+        body = _call_mcp_tool("media_generate_video", {
+            "workflow_id": "minimax-h3-reference",
+            "prompt": "x",
+            "width": 768,
+            "height": 1344,
+            "duration_seconds": 15,
+            "reference_videos": [{"video_path": "/nonexistent/clip.mp4", "use_audio": False}],
+        }, backend_url=backend)
     assert "does not fit this card" in body, body[:400]
 
 

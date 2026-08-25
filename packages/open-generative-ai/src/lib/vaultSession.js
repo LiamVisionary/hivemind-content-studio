@@ -16,6 +16,7 @@ import {
     unlockWithPassphrase,
     unlockWithPrf,
     wrapMasterKeyForPrf,
+    wrapMasterKeyForPrfWithDevice,
 } from './e2eVault.js';
 
 const PASSPHRASE_KEY = 'hivemind.ownerPassphrase.once';
@@ -38,15 +39,62 @@ function readOwnerPassphrase() {
     return parsed?.password ? String(parsed.password) : null;
 }
 
+/**
+ * The sign-in hint, with its two halves treated as the different things they
+ * are.
+ *
+ * The gate stamps ONE 24 h expiry across the whole blob, but `prf` is a secret
+ * that must lapse while `accountId` and `credentialId` are identifiers — and
+ * `accountId` is the only thing the device wrap needs. Expiring it bought
+ * nothing: the wrap it points at lives in IndexedDB with no expiry, and the
+ * owner cookie SLIDES (control_api re-issues it past half its life), so a tab
+ * in daily use keeps a valid session indefinitely. All the expiry did was
+ * guarantee that every browser lost its vault exactly 24 h after sign-in, with
+ * a working session, a healthy vault and a usable device wrap — and no way back
+ * but retyping the password, every day.
+ *
+ * So the secret lapses and the identifiers do not.
+ */
+function readVaultHint() {
+    let parsed = null;
+    try {
+        parsed = JSON.parse(sessionStorage.getItem(VAULT_HINT_KEY) || 'null');
+    } catch { return null; }
+    if (!parsed) return null;
+    if (!parsed.expiresAt || parsed.expiresAt > Date.now()) return parsed;
+    return { ...parsed, prf: null, expired: true };
+}
+
 function fromB64url(text) {
     const padded = String(text).replace(/-/g, '+').replace(/_/g, '/');
     const binary = atob(padded + '==='.slice((padded.length + 3) % 4));
     return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
+// A failure to REACH the studio is not an answer about the vault. Marking it
+// keeps ensureVaultReady from caching a restart, a sleeping laptop or one
+// dropped packet as "locked" for the rest of the page load.
+function transportError(message) {
+    const error = new Error(message);
+    error.transient = true;
+    return error;
+}
+
 async function fetchIdentity() {
-    const response = await fetch('/api/vault/identity', { credentials: 'same-origin', cache: 'no-store' });
-    if (!response.ok) throw new Error(`vault identity fetch failed (${response.status})`);
+    let response;
+    try {
+        response = await fetch('/api/vault/identity', { credentials: 'same-origin', cache: 'no-store' });
+    } catch {
+        throw transportError('vault identity unreachable');
+    }
+    if (!response.ok) {
+        const error = new Error(`vault identity fetch failed (${response.status})`);
+        // 5xx is the server having a bad moment and worth retrying. A 4xx is a
+        // real answer about this session, and retrying it on every sealed image
+        // on the page would be a stampede for the same "no".
+        error.transient = response.status >= 500;
+        throw error;
+    }
     return response.json();
 }
 
@@ -71,7 +119,15 @@ async function unlockExisting(identity, hint, passphrase) {
     if (hint?.prf && hint.credentialId) {
         if (await unlockWithPrf(identity, hint.credentialId, fromB64url(hint.prf))) return true;
     }
-    if (hint?.accountId && await unlockWithDevice(identity, hint.accountId)) return true;
+    if (hint?.accountId && await unlockWithDevice(identity, hint.accountId)) {
+        // A device unlock has no passphrase, but it does put the master key
+        // within reach — so finish the enrolment the passphrase path would have
+        // done. Without this a passkey sign-in rides the device wrap forever:
+        // every unlock takes the weaker path, PRF is never written, and the day
+        // the wrap breaks there is nothing left but the password.
+        await enrolPrfWrapFromDevice(identity, hint).catch(() => false);
+        return true;
+    }
     if (passphrase && await unlockWithPassphrase(identity, passphrase)) {
         // Having proved the passphrase, leave a device-wrapped copy behind so
         // the NEXT sign-in on this browser can be a passkey with no password —
@@ -89,16 +145,16 @@ async function unlockExisting(identity, hint, passphrase) {
     return false;
 }
 
-async function enrolPrfWrap(identity, hint, passphrase) {
-    if (!hint?.prf || !hint.credentialId) return false;
+function prfWrapMissing(identity, credentialId) {
     let existing = {};
     try {
         existing = JSON.parse(identity.wrapped_mk_prf || '{}');
     } catch { /* treat unreadable as absent and re-enrol */ }
-    if (existing[hint.credentialId]) return false;
-    const wrapped = await wrapMasterKeyForPrf(identity, passphrase, fromB64url(hint.prf));
-    if (!wrapped) return false;
-    const response = await fetch(`/api/vault/prf/${encodeURIComponent(hint.credentialId)}`, {
+    return !existing[credentialId];
+}
+
+async function putPrfWrap(credentialId, wrapped) {
+    const response = await fetch(`/api/vault/prf/${encodeURIComponent(credentialId)}`, {
         method: 'PUT',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
@@ -107,17 +163,38 @@ async function enrolPrfWrap(identity, hint, passphrase) {
     return response.ok;
 }
 
+async function enrolPrfWrap(identity, hint, passphrase) {
+    if (!hint?.prf || !hint.credentialId) return false;
+    if (!prfWrapMissing(identity, hint.credentialId)) return false;
+    const wrapped = await wrapMasterKeyForPrf(identity, passphrase, fromB64url(hint.prf));
+    if (!wrapped) return false;
+    return putPrfWrap(hint.credentialId, wrapped);
+}
+
+async function enrolPrfWrapFromDevice(identity, hint) {
+    if (!hint?.prf || !hint.credentialId || !hint.accountId) return false;
+    if (!prfWrapMissing(identity, hint.credentialId)) return false;
+    const wrapped = await wrapMasterKeyForPrfWithDevice(hint.accountId, fromB64url(hint.prf));
+    if (!wrapped) return false;
+    return putPrfWrap(hint.credentialId, wrapped);
+}
+
 async function bootstrap() {
     if (!isHivemindStudioEnabled()) return false;
     const passphrase = readOwnerPassphrase();
-    const hint = readHandoff(VAULT_HINT_KEY);
+    const hint = readVaultHint();
     // A passkey sign-in has no passphrase but does have a hint; either alone is
-    // enough to try, neither means this browser was never unlocked.
+    // enough to try, neither means this browser was never unlocked. An EXPIRED
+    // hint still counts: its secret is gone, but it names the account whose
+    // device wrap is sitting in IndexedDB, unexpired.
     if (!passphrase && !hint) return false;
     let payload;
     try {
         payload = await fetchIdentity();
-    } catch {
+    } catch (error) {
+        // Rethrown so ensureVaultReady can decline to cache it; a 4xx still
+        // reads as a settled "no".
+        if (error?.transient) throw error;
         return false;
     }
     if (payload.exists && payload.identity) {
@@ -147,7 +224,17 @@ async function bootstrap() {
 
 export function ensureVaultReady() {
     if (isVaultUnlocked()) return Promise.resolve(true);
-    if (!readyPromise) readyPromise = bootstrap().catch(() => false);
+    if (!readyPromise) {
+        readyPromise = bootstrap().catch((error) => {
+            // "This vault cannot be unlocked here" is a stable answer and is
+            // worth caching for the page load. "I could not reach the studio"
+            // is not: caching it pinned the vault locked until a manual reload,
+            // with a valid session, healthy keys and a working API one second
+            // later. Clear the slot so the next caller retries.
+            if (error?.transient) readyPromise = null;
+            return false;
+        });
+    }
     return readyPromise;
 }
 

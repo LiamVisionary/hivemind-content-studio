@@ -31,6 +31,8 @@ const TABBED_STUDIOS = new Set(['image', 'video']);
 const STUDIO_LOADERS = {
   image: () => import('../studios/ImageStudio.jsx').then((m) => m.ImageStudio),
   video: () => import('../studios/VideoStudio.jsx').then((m) => m.VideoStudio),
+  sprite: () => import('../studios/SpriteStudio.jsx').then((m) => m.SpriteStudio),
+  story: () => import('../studios/StoryStudio.jsx').then((m) => m.StoryStudio),
   cinema: () => import('../studios/CinemaStudio.jsx').then((m) => m.CinemaStudio),
   lipsync: () => import('../studios/LipSyncStudio.jsx').then((m) => m.LipSyncStudio),
   'mcp-cli': () => import('../studios/McpCliStudio.jsx').then((m) => m.McpCliStudio),

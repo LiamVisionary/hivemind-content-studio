@@ -27,6 +27,38 @@ OPENAI_IMAGE_URL = "https://api.openai.com/v1/images/generations"
 XAI_API_BASE_URL = "https://api.x.ai/v1"
 TERMINAL_XAI_VIDEO_FAILURES = {"failed", "expired", "cancelled", "canceled"}
 
+# The two ways a provider proves who it is. Named, because the strings used to
+# be spelled inline at both the call site and the check: image_router asked for
+# "api" while the check accepted only "api-key", so every xAI API-key render
+# failed on its own argument before reaching the network — and the provider
+# advertised itself as ready the whole time. Import these instead of retyping.
+AUTH_MODE_API_KEY = "api-key"
+AUTH_MODE_OAUTH = "oauth"
+AUTH_MODES = frozenset({AUTH_MODE_API_KEY, AUTH_MODE_OAUTH})
+
+# What this studio calls itself when fetching a provider's finished media.
+DOWNLOAD_USER_AGENT = "hivemind-content-studio/1.0"
+
+
+def provider_credential(name: str) -> str:
+    """One provider key, resolved the way every credential in this studio is.
+
+    The shared hive env at ~/.hivemindos/.env is the fleet-wide default and the
+    process environment overrides it, so a key set for the project wins and an
+    unset one is inherited. `apply_shared_hive_env` only fills what is missing,
+    which makes this safe to call on every read — and calling it here is what
+    lets a bare CLI or MCP process (which never went through `load_config`)
+    resolve the same credential the running API does.
+    """
+    from .shared_env import apply_shared_hive_env, request_credential
+
+    apply_shared_hive_env()
+    # Ask for this one key by name. The value is identical to reading the
+    # environment, but the request is scoped and recorded — which is what lets a
+    # broker later answer "no" without any call site here changing.
+    scoped = request_credential(name, reason="provider credential")
+    return scoped or os.environ.get(name, "").strip()
+
 
 def record_generated_asset(manifest_path: str | Path, result: dict[str, Any], *, role: str, scene: int | None = None) -> dict[str, Any]:
     manifest_file = Path(manifest_path).expanduser().resolve()
@@ -129,6 +161,38 @@ def _write_generated_image(payload: dict[str, Any], destination: Path, *, downlo
     return source_url or None
 
 
+# What the first bytes of a file say it really is. Callers name the destination
+# before the provider has answered, so a provider that returns JPEG (xAI does)
+# landed as "…png" and was then SERVED as image/png next to `nosniff` — which
+# makes a browser refuse to render a perfectly good image.
+_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"),
+)
+
+
+def correct_media_suffix(path: Path) -> Path:
+    """Rename `path` to match the bytes in it, and give back where it landed."""
+    try:
+        header = path.open("rb").read(12)
+    except OSError:
+        return path
+    suffix = next((value for magic, value in _IMAGE_MAGIC if header.startswith(magic)), "")
+    if header[4:12].startswith(b"ftyp"):
+        suffix = ".mp4"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        suffix = ".webp"
+    if not suffix or path.suffix.lower() in {suffix, ".jpeg" if suffix == ".jpg" else suffix}:
+        return path
+    corrected = path.with_suffix(suffix)
+    if corrected != path:
+        corrected.unlink(missing_ok=True)
+        path.rename(corrected)
+    return corrected
+
+
 def generate_openai_image_asset(
     *,
     prompt: str,
@@ -141,9 +205,12 @@ def generate_openai_image_asset(
     downloader: Callable[[str, Path], None] | None = None,
 ) -> dict[str, Any]:
     require_paid_generation(confirm)
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    api_key = provider_credential("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required for GPT Image; ChatGPT/Codex OAuth is not an Image API credential")
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set — add it to the shared hive env (~/.hivemindos/.env). "
+            "ChatGPT/Codex OAuth is a separate credential; pick the GPT Image OAuth provider to use it"
+        )
     bounded_prompt = _validate_openai_image_args(
         prompt,
         model,
@@ -169,6 +236,7 @@ def generate_openai_image_asset(
     payload = _read_provider_json(request, provider="OpenAI GPT Image", opener=opener)
     destination = Path(output).expanduser().resolve()
     source_url = _write_generated_image(payload, destination, downloader=downloader or _download)
+    destination = correct_media_suffix(destination)
     return {
         "provider": "openai-gpt-image",
         "model": model,
@@ -212,6 +280,7 @@ def generate_openai_oauth_image_asset(
     )
     destination = Path(output).expanduser().resolve()
     source_url = _write_generated_image(payload, destination, downloader=downloader or _download)
+    destination = correct_media_suffix(destination)
     return {
         "provider": "openai-gpt-image-oauth",
         "model": model,
@@ -255,8 +324,8 @@ def generate_xai_imagine_asset(
     require_paid_generation(confirm)
     if kind not in {"keyframe", "motion"}:
         raise ValueError("xAI Imagine kind must be keyframe or motion")
-    if auth_mode not in {"api-key", "oauth"}:
-        raise ValueError("xAI Imagine auth mode must be api-key or oauth")
+    if auth_mode not in AUTH_MODES:
+        raise ValueError(f"xAI Imagine auth mode must be one of {', '.join(sorted(AUTH_MODES))}")
     bounded_prompt = prompt.strip()
     if not bounded_prompt or len(bounded_prompt) > 20_000:
         raise ValueError("xAI Imagine prompt must contain 1 to 20,000 characters")
@@ -275,15 +344,18 @@ def generate_xai_imagine_asset(
             body["image"] = {"url": _inline_image(source)}
 
     def request_xai(value: dict[str, Any]) -> dict[str, Any]:
-        if auth_mode == "oauth":
+        if auth_mode == AUTH_MODE_OAUTH:
             if oauth_request is None:
                 from .hivemindos_oauth import xai_oauth_media_request
 
                 return xai_oauth_media_request(value)
             return oauth_request(value)
-        api_key = os.environ.get("XAI_API_KEY", "").strip()
+        api_key = provider_credential("XAI_API_KEY")
         if not api_key:
-            raise RuntimeError("XAI_API_KEY is required for xAI Imagine API-key generation")
+            raise RuntimeError(
+                "XAI_API_KEY is not set — add it to the shared hive env (~/.hivemindos/.env) "
+                "or connect xAI over OAuth and pick the xAI Imagine OAuth provider instead"
+            )
         path = (
             f"/videos/{urllib.parse.quote(str(value['requestId']))}"
             if value["action"] == "video-status"
@@ -307,6 +379,7 @@ def generate_xai_imagine_asset(
     provider_id = "xai-imagine-oauth" if auth_mode == "oauth" else "xai-imagine-api"
     if kind == "keyframe":
         source_url = _write_generated_image(payload, destination, downloader=downloader or _download)
+        destination = correct_media_suffix(destination)
         return {"provider": provider_id, "model": selected_model, "output": str(destination), "source_url": source_url, "usage": payload.get("usage") or {}}
 
     request_id = str(payload.get("request_id") or "").strip()
@@ -396,7 +469,12 @@ def _urls(value: Any) -> list[str]:
 def _download(url: str, destination: Path) -> None:
     _validate_download_url(url)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url, method="GET")
+    # Identify the client. urllib's default "Python-urllib/3.x" is filtered at
+    # the edge by at least one provider's media CDN (xAI's imgen.x.ai answers
+    # 403 to it and 200 to any ordinary agent string), which surfaced as
+    # "Generated media download failed" AFTER the image had been generated and
+    # paid for. Naming ourselves is both the fix and the courteous thing to do.
+    request = urllib.request.Request(url, method="GET", headers={"User-Agent": DOWNLOAD_USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=300) as response, destination.open("wb") as output:
             _validate_download_url(response.geturl())

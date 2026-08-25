@@ -204,7 +204,7 @@
       ],
       "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-regular-anchor/ltx23-regular-anchor.user-image-api.json",
       "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Regular FP8 Mobile.json",
-      "default": false,
+      "default": true,
       "native_mlx": {
         "enabled": true,
         "variant": "regular-q8-distilled",

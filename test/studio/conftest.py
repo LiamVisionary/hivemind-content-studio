@@ -1,13 +1,14 @@
 """Shared studio test setup: private-state cipher without touching the Keychain,
 and studio data/runs directories isolated from the real repository state."""
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from hivemind_content_studio import private_access
+from hivemind_content_studio import hivemindos_models, mtplx_server, private_access
 
 
 OPEN_GEN_DIST = Path(__file__).resolve().parents[2] / "packages" / "open-generative-ai" / "dist"
@@ -17,6 +18,75 @@ _STYLESHEET = re.compile(r'<link[^>]+rel="stylesheet"[^>]+href="\.?/?(assets/[^"
 # gate 401s it before the /assets mount is reached: with dist/ absent, Starlette
 # raises on the first request that gets through instead of returning 404.
 _UNBUILT_SCRIPT = "/assets/index-not-built.js"
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_env():
+    """Undo direct writes to os.environ that monkeypatch cannot see.
+
+    `apply_shared_hive_env()` sets variables straight into `os.environ` — that is
+    its entire job — and monkeypatch only restores what monkeypatch itself
+    changed. So any test that triggers it leaves those variables set for every
+    test that runs afterwards, and an assertion that a key is ABSENT then passes
+    or fails depending on the order pytest happened to pick.
+
+    That is not hypothetical: test_broker_integration.py passed on its own and
+    failed four ways in the full suite, and the first reading of it was a product
+    bug rather than a leaked variable. Restoring here makes the order stop
+    mattering. Declared first so it wraps the other autouse fixtures and returns
+    the environment to its true baseline last.
+    """
+    snapshot = dict(os.environ)
+    yield
+    for key in set(os.environ) - set(snapshot):
+        del os.environ[key]
+    for key, value in snapshot.items():
+        if os.environ.get(key) != value:
+            os.environ[key] = value
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_hive_env(monkeypatch) -> None:
+    """Keep the developer's real ~/.hivemindos/.env out of the suite.
+
+    `apply_shared_hive_env()` fills any variable the process does not already
+    have, and `load_config()` calls it — so a test that does
+    `monkeypatch.delenv("XAI_API_KEY")` and then asks a provider whether it is
+    ready gets the key put straight back from the real shared env, and the
+    assertion passes or fails depending on whose machine it runs on. That is
+    exactly what happened to
+    test_providers::test_openai_and_xai_media_readiness_uses_the_correct_auth_surface,
+    which failed only for owners who have XAI_API_KEY in the shared file.
+
+    HIVE_ENV_FILES is the loader's own override, so pointing it at a path that
+    does not exist neutralises the fallback for the whole suite without
+    reaching into the module.
+    """
+    monkeypatch.setenv("HIVE_ENV_FILES", str(Path(__file__).parent / "no-such-shared.env"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hivemindos_models(monkeypatch) -> None:
+    """No test may reach the HivemindOS app running on this machine.
+
+    Clearing HIVEMINDOS_DASHBOARD_DEVICE_TOKEN does NOT do it — the reader falls
+    back to ~/.hivemindos/.env, which exists on a developer's machine and holds a
+    live token. That is the same shape of trap that once let the suite rent real
+    GPUs: the isolation has to block the transport, not the variable. So the
+    reader itself is replaced and the base URL is pointed at a port nothing
+    serves; a test that wants a reachable HivemindOS patches both back
+    explicitly, and a call that spends real credits cannot happen by accident.
+    """
+    monkeypatch.setattr(hivemindos_models, "_dashboard_token", lambda: "")
+    monkeypatch.setenv("HIVEMINDOS_URL", "http://127.0.0.1:9")
+    # And the hosted gateway behind it. Blocking only the local app would have
+    # left every test free to reach the real service over the internet — which
+    # is where the paid models and the metered free tier are.
+    monkeypatch.setenv("HIVEMINDOS_GATEWAY_URL", "https://127.0.0.1:9")
+    # And the app's own credit vault in ~/.hivemindos, which the studio can read
+    # to link a balance without being asked. A developer's real vault would make
+    # "is an account connected?" answer differently on their machine than in CI.
+    monkeypatch.setenv("HIVEMINDOS_HOME", str(Path(__file__).parent / "no-such-hivemindos"))
 
 
 @dataclass(frozen=True)
@@ -100,6 +170,36 @@ def _no_marketplace_calls_from_tests(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _no_ssh_probes_from_tests(monkeypatch, request):
+    """No test may open a real SSH connection while probing a rental's door.
+
+    The studio reads an endpoint's SSH banner before it will call a machine
+    reachable — an accepted TCP connection proved nothing, which is how a box
+    fronted by Vast's Jupyter HTTPS port passed for ready on 2026-08-24. That
+    probe runs on the ordinary Machines poll, so without this guard every DTO
+    test dials the addresses its fixtures invent: 1.2.3.4 and friends, a
+    3-second timeout apiece at best and a stranger's machine at worst.
+
+    The default is a door that answers, because that is the uninteresting case
+    every other test is built on. A test that wants a shut door, or a port
+    serving something that is not SSH, patches _ssh_banner_fault itself.
+    """
+    if request.node.get_closest_marker("ssh_probe_transport"):
+        return
+
+    from hivemind_content_studio import gpu_rentals
+
+    gpu_rentals._ssh_probe_cache.clear()
+    monkeypatch.setattr(gpu_rentals, "_ssh_banner_fault",
+                        lambda host, port, timeout=3.0, cache=False: None)
+    # Reading a mute box's beacon shells out to ssh, which is the same network
+    # by another route. Default: the door is there and has nothing to say, so a
+    # test that wants a beacon fetches it over HTTP like every other one.
+    monkeypatch.setattr(gpu_rentals, "_beacon_over_ssh",
+                        lambda endpoint, timeout=5.0: None)
+
+
+@pytest.fixture(autouse=True)
 def rental_manifest(monkeypatch):
     """Generating a rental onstart publishes the weights manifest to R2. No
     test may do that over the network; every test gets a recorder instead.
@@ -127,3 +227,25 @@ def pytest_configure(config):
         "marketplace_transport: test drives a provider's HTTP transport directly "
         "(stubs the session; exempt from the no-network guard)",
     )
+    config.addinivalue_line(
+        "markers",
+        "ssh_probe_transport: test drives the SSH banner probe directly against a "
+        "loopback socket (exempt from the no-ssh-probe guard)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mtplx(monkeypatch):
+    """Keep the suite hermetic on a machine with a live MTPLX server.
+
+    The prompt helper adopts the shared ~/.hivemindos MTPLX slot (state file,
+    :8001 probe, HF-cache candidate scan). Real-machine state must not leak
+    into assertions — and a first candidate sweep runs `mtplx inspect`, which
+    is far too slow for a test. The MTPLX-specific tests re-patch these seams
+    on top with their own fakes.
+    """
+    monkeypatch.setattr(mtplx_server, "mtplx_available", lambda: False)
+    monkeypatch.setattr(mtplx_server, "read_mtplx_state", lambda: None)
+    monkeypatch.setattr(mtplx_server, "probe_served_model", lambda port, timeout=1.5: None)
+    monkeypatch.setattr(mtplx_server, "list_mtplx_candidates", lambda: [])
+    monkeypatch.setattr(mtplx_server, "mtplx_owns_model", lambda model: False)

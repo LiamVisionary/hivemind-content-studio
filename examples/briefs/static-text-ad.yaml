@@ -3,7 +3,7 @@ lane: static-text-ad
 title: One idea, impossible to miss
 audience: direct-to-consumer founders
 goal: test a low-production text-led creative against generated video
-aspect_ratio: 4:5
+aspect_ratio: "4:5"
 palette:
   background: "#F7F5F2"
   foreground: "#171717"

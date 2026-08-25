@@ -54,7 +54,7 @@ import {
   characterVoiceText,
 } from './h3Characters.js';
 import { parseFieldPrompt } from './h3References.js';
-import { normalizePersonaGender } from './personaId.js';
+import { normalizePersonaGender, personaGenderWords } from './personaId.js';
 import { fitShotTimeline } from './shotTimeline.js';
 import { bindStandIns, liveStandIns } from './subjectTemplate.js';
 
@@ -104,6 +104,32 @@ export const characterCastMember = (entry) => ({
   // brings no voice clip to clone.
   useVoice: true,
 });
+
+/** The next free `person:N` key — deterministic, so tests and replays agree. */
+export function nextPersonKey(members = []) {
+  const taken = (members || [])
+    .map((member) => /^person:(\d+)$/.exec(member?.key || ''))
+    .filter(Boolean)
+    .map((hit) => Number(hit[1]));
+  return `person:${(taken.length ? Math.max(...taken) : 0) + 1}`;
+}
+
+/**
+ * A brand-new person, added on purpose before any media exists — "anyone can
+ * be a second subject". `explicit` keeps it in the cast while its rows are
+ * still empty (a derived member with no media would leave the shot); it fills
+ * from the media attached FOR it (reconcileCast's `claimNew`), or stays
+ * text-defined by its name, gender and look.
+ */
+export function newPersonMember(members = []) {
+  return {
+    key: nextPersonKey(members),
+    kind: 'persona',
+    name: '',
+    explicit: true,
+    data: { v: 1, gender: '', look: '', images: [], videos: [], audios: [] },
+  };
+}
 
 /** The references attached by hand, as a member. `persona` names it when a Persona ID is loaded. */
 export const referencesMember = ({ images = [], videos = [], audios = [], persona = null, gender = '', look = '' } = {}) => ({
@@ -164,7 +190,7 @@ export function memberHasMedia(member) {
  * Characters pass through untouched. Returns a NEW list; the input is never
  * mutated.
  */
-export function reconcileCast(members = [], rows = {}, { persona = null } = {}) {
+export function reconcileCast(members = [], rows = {}, { persona = null, claimNew = '' } = {}) {
   const list = Array.isArray(members) ? members : [];
   const attached = {
     images: (rows.images || []).filter(Boolean),
@@ -198,11 +224,21 @@ export function reconcileCast(members = [], rows = {}, { persona = null } = {}) 
   const anyUnowned = ROW_KINDS.some((kind) => unowned[kind].length);
   if (anyUnowned) {
     const holders = next.filter(isPersonaLike);
-    let target = holders.length === 1
-      ? holders[0]
-      : holders.find((member) => member.key === REFERENCES_KEY) || null;
+    // `claimNew` says WHO the newly attached media is for — set when the user
+    // pressed "+ Pictures" on a member's chip, or just added another person.
+    // Without it: a single person takes everything (adding a picture to the
+    // one person in the shot is editing THAT person), else the anonymous
+    // references member.
+    let target = (claimNew && holders.find((member) => member.key === claimNew)) || null;
+    if (!target && !claimNew) {
+      target = holders.length === 1
+        ? holders[0]
+        : holders.find((member) => member.key === REFERENCES_KEY) || null;
+    }
     if (!target) {
-      target = referencesMember({ persona });
+      target = claimNew && claimNew !== REFERENCES_KEY
+        ? { ...newPersonMember(next), key: claimNew }
+        : referencesMember({ persona });
       const lastPersona = next.map(isPersonaLike).lastIndexOf(true);
       next.splice(lastPersona + 1, 0, target);
     }
@@ -227,7 +263,10 @@ export function reconcileCast(members = [], rows = {}, { persona = null } = {}) 
     }
   }
 
-  return next.filter((member) => !isPersonaLike(member) || memberHasMedia(member));
+  // A derived member with no media left leaves the shot; one the user added on
+  // purpose (`explicit`) stays — it may be text-defined, or still waiting for
+  // its pictures. Removing it is the ✕ on its chip.
+  return next.filter((member) => !isPersonaLike(member) || memberHasMedia(member) || member.explicit);
 }
 
 /** The rows the whole cast occupies, in cast order — what the References panel should hold. */
@@ -296,6 +335,11 @@ export function describeMember(member, { zh = false } = {}) {
   if (images) parts.push(zh ? `${images} 张图` : `${images} picture${images === 1 ? '' : 's'}`);
   if (motion) parts.push(zh ? `${motion} 段动作` : `${motion} motion clip${motion === 1 ? '' : 's'}`);
   if (voice) parts.push(zh ? '声音' : 'voice');
+  if (!parts.length) {
+    return String(data.look || '').trim()
+      ? (zh ? '仅文字定义' : 'described in text')
+      : (zh ? '还没有图片' : 'no pictures yet');
+  }
   return parts.join(' · ');
 }
 
@@ -396,13 +440,17 @@ export function weavePrompt(text, {
     persona = woven.persona;
     remaining = woven.standIns?.remaining || [];
   } else if (cast.length) {
-    // No subject grammar: a stand-in binds to a character's source form (a
-    // persona cannot be rendered without its pictures, so its stand-in stays
-    // as written), and a character nothing mentions is written in.
+    // No subject grammar: a stand-in binds to a character's source form, or to
+    // a TEXT-DEFINED person's own description (name, gender, look — a person
+    // with pictures cannot be rendered here, so their stand-in stays as
+    // written), and a character nothing mentions is written in.
     const characters = cast.filter((member) => !isPersonaLike(member));
     const bound = bindStandIns(source, live, (index) => {
       const member = cast[index - 1];
-      return member && !isPersonaLike(member) ? characterPromptText(member.entry) : null;
+      if (!member) return null;
+      if (!isPersonaLike(member)) return characterPromptText(member.entry);
+      if (memberHasMedia(member)) return null;
+      return prosePersonPhrase(member);
     });
     prompt = bound.text;
     remaining = bound.remaining;
@@ -423,6 +471,16 @@ export function weavePrompt(text, {
     persona,
     standIns: remaining,
   };
+}
+
+/** "Ana, a woman — tall, red coat —" for a text-defined person in plain prose, or '' when there is nothing to say. */
+export function prosePersonPhrase(member) {
+  const gender = normalizePersonaGender(member?.data?.gender);
+  const noun = gender && gender !== 'nonbinary' ? personaGenderWords(gender).noun : 'person';
+  const look = String(member?.data?.look || '').trim();
+  const name = String(member?.name || '').trim();
+  if (!look && !name) return '';
+  return `${name ? `${name}, ` : ''}a ${noun}${look ? ` — ${look} —` : ''}`;
 }
 
 /** True when a prompt is already woven for reference mode (carries subject definitions). */

@@ -28,11 +28,45 @@ DEFAULT_PROVIDERS = {
 }
 
 
+def normalize_aspect_ratio(value: Any) -> str:
+    """Give back "W:H", including when YAML already ate it.
+
+    An unquoted `9:16` is a YAML 1.1 sexagesimal integer, so `safe_load` hands
+    back 556 — nine sixties plus sixteen — and every ratio a person types by
+    hand arrives as arithmetic. It failed loudly on the faceless lane (pydantic
+    refused `video_aspect=556`) and silently everywhere else, where the declared
+    ratio was simply never honoured. Briefs are hand-written, so the loader
+    undoes it rather than asking everyone to remember the quotes.
+    """
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, int):
+        # Base-60 is reversible for every ratio anyone writes: both sides of a
+        # real aspect ratio are under 60, which is exactly the range YAML packed.
+        width, height = divmod(value, 60)
+        if 0 < width < 60 and 0 <= height < 60:
+            return f"{width}:{height}"
+        raise ValueError(
+            f"aspect_ratio {value} is not a ratio. Quote it in the brief — aspect_ratio: \"9:16\""
+        )
+    text = str(value).strip()
+    return text
+
+
 def load_brief(path: str | Path) -> dict[str, Any]:
     brief_path = Path(path).expanduser().resolve()
     brief = yaml.safe_load(read_private_text(brief_path)) or {}
     if not isinstance(brief, dict):
         raise ValueError(f"Brief must be a YAML object: {brief_path}")
+    if "aspect_ratio" in brief:
+        normalized = normalize_aspect_ratio(brief["aspect_ratio"])
+        if normalized:
+            brief["aspect_ratio"] = normalized
+    for raw in brief.get("scenes") or []:
+        if isinstance(raw, dict) and "aspect_ratio" in raw:
+            normalized = normalize_aspect_ratio(raw["aspect_ratio"])
+            if normalized:
+                raw["aspect_ratio"] = normalized
     return brief
 
 
@@ -235,6 +269,30 @@ def _plan_static_text_ad(run_dir: Path, brief: dict[str, Any], manifest: dict[st
     _write_publish_metadata(run_dir, brief, manifest)
 
 
+def _faceless_voice_name(voice: dict[str, Any]) -> str:
+    """The brief's voice, in the name the faceless engine dispatches on.
+
+    The engine picks its backend from the SHAPE of the voice name — a bare name
+    goes to azure/edge, `localtts:model:voice-Local` goes to the local server.
+    Passing only `voice.voice_id` through meant a brief asking for universal-tts
+    was answered by the azure router, which rejected the local voice by name
+    ("Invalid voice 'Luna'") and failed the whole render. Everything else in the
+    studio honours `voice.provider`; this lane now does too.
+    """
+    from .local_voice import LOCAL_VOICE_PROVIDERS
+
+    provider = str(voice.get("provider") or "").strip().lower()
+    voice_id = str(voice.get("voice_id") or voice.get("name") or "").strip()
+    if provider not in LOCAL_VOICE_PROVIDERS:
+        return voice_id
+    if voice_id.startswith("localtts:"):
+        return voice_id
+    from .local_voice import resolve_local_voice
+
+    model_id, resolved_voice = resolve_local_voice(voice)
+    return f"localtts:{model_id}:{resolved_voice}-Local"
+
+
 def _plan_faceless(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any]) -> None:
     voice = brief.get("voice") if isinstance(brief.get("voice"), dict) else {}
     subtitles = brief.get("subtitles") if isinstance(brief.get("subtitles"), dict) else {}
@@ -249,7 +307,7 @@ def _plan_faceless(run_dir: Path, brief: dict[str, Any], manifest: dict[str, Any
         # the params written here already say "local" and render_faceless fills
         # video_materials in before the engine runs.
         "video_source": "local" if is_studio_media_source(media_source) else media_source,
-        "voice_name": voice.get("voice_id") or "",
+        "voice_name": _faceless_voice_name(voice),
         "subtitle_enabled": subtitles.get("enabled", True),
         "video_count": int(brief.get("count") or 1),
         "video_clip_duration": int(brief.get("clip_duration_seconds") or 5),

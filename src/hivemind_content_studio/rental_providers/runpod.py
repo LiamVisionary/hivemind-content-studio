@@ -518,7 +518,7 @@ class RunPodProvider:
             disk_gb=raw.get("containerDiskInGb"),
             started_at=_started_at(raw, live, runtime),
             public_ip=public_ip,
-            ssh=(public_ip, ssh_port) if public_ip and ssh_port else None,
+            ssh_endpoints=[(public_ip, ssh_port)] if public_ip and ssh_port else [],
             ports=ports,
             raw={**raw, "runtime": runtime},
         )

@@ -93,8 +93,20 @@
     {
       "name": "open-generative-ai-catalog-fixture",
       "runtimeExecutable": "sh",
-      "runtimeArgs": ["-c", "OPENGEN_API_PROXY=http://127.0.0.1:9931 npm --prefix packages/open-generative-ai run vite:dev -- --port 5773 --strictPort"],
+      "runtimeArgs": [
+        "-c",
+        "OPENGEN_API_PROXY=http://127.0.0.1:9931 npm --prefix packages/open-generative-ai run vite:dev -- --port 5773 --strictPort"
+      ],
       "port": 5773
+    },
+    {
+      "name": "open-generative-ai-passbook-fixture",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "OPENGEN_API_PROXY=http://127.0.0.1:9911 npm --prefix packages/open-generative-ai run vite:dev -- --port 5873 --strictPort"
+      ],
+      "port": 5873
     }
   ]
 }

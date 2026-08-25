@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from typing import Any
 
 # Written here rather than copied from the model card: the structure below (start
 # frame, one camera/style line, one environment line, a Performance block,
@@ -1243,3 +1244,178 @@ def normalize_look(text: str) -> str:
             cut = cut[: cut.rfind(" ")]
         look = cut.rstrip(" ,;:—–-")
     return look
+
+
+# ---------------------------------------------------------------------------
+# Refinement — "get this prompt into perfect shape"
+# ---------------------------------------------------------------------------
+
+REFINE_DETAIL_CHOICES = ("keep", "enrich")
+REFINE_SHOTS_CHOICES = ("keep", "more", "single")
+REFINE_GUIDANCE_MAX = 2000
+
+
+def normalize_refine(value: Any) -> dict | None:
+    """Validate the dialog's refinement controls.
+
+    ``{"detail": "keep"|"enrich", "shots": "keep"|"more"|"single",
+    "guidance": str}`` — anything malformed collapses to the do-least default
+    rather than erroring: the controls are advisory knobs, not a wire contract
+    worth failing a request over. Returns None when the field is absent.
+    """
+    if not isinstance(value, dict):
+        return None
+    detail = str(value.get("detail") or "keep").strip().lower()
+    shots = str(value.get("shots") or "keep").strip().lower()
+    guidance = str(value.get("guidance") or "").strip()[:REFINE_GUIDANCE_MAX]
+    return {
+        "detail": detail if detail in REFINE_DETAIL_CHOICES else "keep",
+        "shots": shots if shots in REFINE_SHOTS_CHOICES else "keep",
+        "guidance": guidance,
+    }
+
+
+def refine_is_directed(refine: dict | None) -> bool:
+    """Did the owner ask for anything beyond structure-and-complete?
+
+    Decides whether an unchanged result is a legitimate "already in shape"
+    (plain refine) or the model ignoring an instruction (directed refine).
+    """
+    if not refine:
+        return False
+    return bool(refine.get("guidance")) or refine.get("detail") != "keep" or refine.get("shots") != "keep"
+
+
+def refine_instruction(refine: dict, *, media_type: str = "video", structure: str = "") -> str:
+    """The user-turn instruction for a refinement pass.
+
+    The system prompt already carries the target model's full trained format;
+    this turn says what to DO with the draft above it. The base ask is always
+    the same — perfect structure, nothing lost, unwritten craft decisions
+    filled in — and the knobs layer on top. The owner's free-text notes go
+    last and are declared to win, so "make the rain more subtle" beats the
+    enrich knob's appetite for more rain.
+    """
+    lines = [
+        "Refine the prompt above into its best shape for the target model.",
+        "Rewrite it in the exact trained format from your instructions — every required "
+        "section present, in order, nothing extra.",
+        "Keep every fact: who is in the shot, what happens, the meaning of every line of "
+        "dialogue, the setting, the tone. Do not invent new subjects or events.",
+        *([structure] if structure else []),
+        "Fill in what a director would have decided but the draft leaves unsaid: light, "
+        "lens and framing, color and texture, pacing, and the soundscape.",
+    ]
+    if refine.get("detail") == "enrich":
+        lines.append(
+            "Add generous sensory detail — surfaces, how the light behaves, atmosphere, "
+            "small physical business — well beyond the minimum."
+        )
+    else:
+        lines.append("Keep the level of detail as it is; only complete what is missing.")
+    if media_type == "video":
+        if refine.get("shots") == "more":
+            lines.append(
+                "Break the action into more shots: add [Shot N] beats that deepen the same "
+                "scene, each timed to fit inside the clip — never past its end."
+            )
+        elif refine.get("shots") == "single":
+            lines.append(
+                "Write it as ONE continuous shot: a single [Shot 1], camera locked as if on "
+                "a tripod, no cuts and no camera moves — all motion happens inside the frame."
+            )
+    guidance = str(refine.get("guidance") or "").strip()
+    if guidance:
+        lines.append(
+            "The owner's notes below override everything above where they conflict — follow "
+            "them exactly (more of what they want emphasised, less or none of what they want "
+            f"removed or made subtle):\n{guidance}"
+        )
+    lines.append("Output the full refined prompt and nothing else.")
+    return "\n".join(lines)
+
+
+SIX_SECTION_HEADERS = (
+    "subject_definitions", "summary", "retention_analysis",
+    "detailed_description", "overall_soundscape", "non_diegetic_music",
+)
+THREE_FIELD_HEADERS = ("integrated_multimodal_description", "overall_soundscape", "non_diegetic_music")
+
+
+def detect_prompt_format(text: str) -> str:
+    """Which H3 grammar a prompt is already written in.
+
+    ``"six-section"`` (reference mode), ``"three-field"`` or ``""``. The prompt
+    ITSELF is the authority when refining: the dialog's targetModel is a guess
+    about the next run, and guessing wrong here made Refine teach the
+    three-field format to a six-section prompt — the model then dutifully
+    deleted subject_definitions, retention_analysis and every label (seen live,
+    2026-08-24).
+    """
+    body = text or ""
+    if re.search(r"^[ \t]*(subject_definitions|retention_analysis)[ \t]*:", body, re.MULTILINE):
+        return "six-section"
+    if re.search(r"^[ \t]*integrated_multimodal_description[ \t]*:", body, re.MULTILINE):
+        return "three-field"
+    return ""
+
+
+def profile_matching_prompt(current: str, profile: str) -> str:
+    """The profile a REFINE must use so the prompt keeps its own grammar."""
+    detected = detect_prompt_format(current)
+    if detected == "six-section":
+        return "minimax-h3-reference"
+    if detected == "three-field" and profile == "minimax-h3-reference":
+        # References are armed but the draft was never woven into reference
+        # form; refine polishes what is there rather than silently switching
+        # grammars under the owner.
+        return "minimax-h3-t2v"
+    return profile
+
+
+_REFERENCE_LABEL_RE = re.compile(r"<(?:Subject|Picture|Video|Audio) \d+>")
+_SECTION_HEADER_RE = re.compile(
+    r"^[ \t]*(subject_definitions|summary|retention_analysis|detailed_description|"
+    r"overall_soundscape|non_diegetic_music|integrated_multimodal_description)[ \t]*:",
+    re.MULTILINE,
+)
+
+
+def structure_losses(before: str, after: str) -> list[str]:
+    """What load-bearing structure a rewrite dropped.
+
+    Section headers and ``<Subject/Picture/Video/Audio N>`` labels mirror the
+    prompt's mode and the ATTACHED references — a refinement has no business
+    removing any of them; a ``<d>`` dialogue tag that existed must survive or
+    the line stops being spoken. [Shot N] headers are deliberately NOT here:
+    the shots knob merges and splits those legitimately.
+    """
+    losses: list[str] = []
+    headers_after = set(_SECTION_HEADER_RE.findall(after or ""))
+    for header in dict.fromkeys(_SECTION_HEADER_RE.findall(before or "")):
+        if header not in headers_after:
+            losses.append(f"the {header}: section")
+    labels_after = {match.group(0) for match in _REFERENCE_LABEL_RE.finditer(after or "")}
+    for label in dict.fromkeys(m.group(0) for m in _REFERENCE_LABEL_RE.finditer(before or "")):
+        if label not in labels_after:
+            losses.append(label)
+    if "<d>[" in (before or "") and "<d>[" not in (after or ""):
+        losses.append("the <d>[Language] dialogue tags")
+    return losses
+
+
+def structure_clause(current: str) -> str:
+    """The refine instruction's skeleton-preservation clause, when the draft
+    is already in an H3 grammar."""
+    detected = detect_prompt_format(current)
+    if not detected:
+        return ""
+    headers = SIX_SECTION_HEADERS if detected == "six-section" else THREE_FIELD_HEADERS
+    return (
+        "The prompt's skeleton is load-bearing — keep it EXACTLY: every section "
+        f"header line ({', '.join(f'{name}:' for name in headers)}) stays, in this "
+        "order, each on its own line. Every <Subject N>, <Picture N>, <Video N> and "
+        "<Audio N> label, every (S1)-style speaker id and every <d>[Language] …</d> "
+        "dialogue tag survives the rewrite — never resolve a label into prose, and "
+        "never drop a section, even when its content barely changes."
+    )

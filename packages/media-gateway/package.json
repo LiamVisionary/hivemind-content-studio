@@ -6,7 +6,7 @@
     "dev": "next dev -H 127.0.0.1 -p 8788",
     "build": "next build",
     "start": "NODE_ENV=production HOST=127.0.0.1 PORT=8788 node server.js",
-    "test": "python3 -m unittest test_app.py && npm run build",
+    "test": "node scripts/run-python-tests.mjs && npm run build",
     "studio": "node bin/image-gen-studio.mjs open --start",
     "studio:open": "node bin/image-gen-studio.mjs open",
     "studio:status": "node bin/image-gen-studio.mjs status",

@@ -1,0 +1,58 @@
+# Packaging PassBook for the tools people already have.
+#
+#   uv tool install passbook
+#   pipx install passbook
+#
+# Both create their own isolated environment, so `cryptography` installs
+# cleanly and nothing touches a system Python. That is why it is a hard
+# dependency here while `passbook.py` on its own has none: the promise of "no
+# dependencies" is about the file you vendor into a project, not about the tool
+# you install on a machine. A security tool whose sealing and linking are
+# optional extras would ship with them switched off for most people.
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "passbook"
+version = "1.0.0"
+description = "One credential store per machine, shared by every app that opts in."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+keywords = ["credentials", "environment", "secrets", "dotenv"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = ["cryptography>=41"]
+
+[project.urls]
+Homepage = "https://github.com/hivemindos/passbook"
+
+# One implementation, many names: each console script lands with its own
+# basename, which is what the CLI dispatches on.
+[project.scripts]
+passbook = "passbook_cli:main"
+passbook-access = "passbook_cli:main"
+passbook-broker = "passbook_cli:main"
+passbook-add = "passbook_cli:main"
+passbook-check = "passbook_cli:main"
+passbook-delete = "passbook_cli:main"
+passbook-link = "passbook_cli:main"
+passbook-list = "passbook_cli:main"
+passbook-remove = "passbook_cli:main"
+passbook-run = "passbook_cli:main"
+passbook-seal = "passbook_cli:main"
+passbook-set = "passbook_cli:main"
+passbook-status = "passbook_cli:main"
+
+[tool.setuptools]
+py-modules = ["passbook", "passbook_broker", "passbook_cli", "passbook_link", "passbook_seal", "passbook_stamp"]
+
+[tool.setuptools.data-files]
+"share/passbook" = ["SPEC.md", "AGENT_PROMPT.md", "passbook.mjs"]

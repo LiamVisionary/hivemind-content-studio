@@ -88,6 +88,11 @@ def comfy_image_for(provider_key: str) -> str:
 # the Machines view can render truthful provisioning phases. ComfyUI itself
 # stays bound to 127.0.0.1 — only the beacon is exposed.
 BEACON_PORT = 18189
+# Where the box writes it. The reader used to be the HTTP server alone, so the
+# path could stay a literal in the onstart; now that a mute published port is
+# read back over SSH instead, writer and reader have to agree in one place.
+BEACON_DIR = "/root/beacon"
+BEACON_PROGRESS_PATH = f"{BEACON_DIR}/progress.json"
 PRESIGN_EXPIRE_SECONDS = 3 * 3600
 # Vast's documented ceiling for the onstart/args field. The weight list used
 # to live inline (measured 2026-08-08: the video tier's 11 presigned URLs alone
@@ -1259,12 +1264,12 @@ def _onstart_script(tier: str) -> str:
         # Before anything slow: a box we cannot reach is a box we cannot use,
         # and every second of provisioning is billed.
         *_authorize_rental_key_lines(),
-        "mkdir -p /root/beacon",
+        f"mkdir -p {BEACON_DIR}",
         # beacon <step> <done> <detail> — atomically publishes progress.json.
         "beacon() { printf '{\"step\":\"%s\",\"done\":%s,\"total\":"
         + str(total)
         + ",\"detail\":\"%s\",\"ts\":%s}' \"$1\" \"$2\" \"$3\" \"$(date +%s)\""
-        " > /root/beacon/progress.json.tmp && mv /root/beacon/progress.json.tmp /root/beacon/progress.json; }",
+        f" > {BEACON_PROGRESS_PATH}.tmp && mv {BEACON_PROGRESS_PATH}.tmp {BEACON_PROGRESS_PATH}; }}",
         # The download library: pget/plen/stream/plain/dlwait. Kept in its own
         # builder so the test suite can run the very same bash against a
         # misbehaving HTTP server (test/studio/test_rental_downloads.py).
@@ -1272,7 +1277,7 @@ def _onstart_script(tier: str) -> str:
         'beacon booting 0 "Host accepted, preparing environment"',
         # setsid for the same reason as ComfyUI below: the beacon is how the boot
         # reports itself, so it must outlive whatever signals onstart's group.
-        f"(cd /root/beacon && setsid nohup python3 -m http.server {BEACON_PORT} --bind 0.0.0.0 >/dev/null 2>&1 < /dev/null &)",
+        f"(cd {BEACON_DIR} && setsid nohup python3 -m http.server {BEACON_PORT} --bind 0.0.0.0 >/dev/null 2>&1 < /dev/null &)",
         'beacon installing 0 "Installing the ComfyUI stack"',
         "mkdir -p /workspace/ComfyUI",
         "rsync -a /opt/workspace-internal/ComfyUI/ /workspace/ComfyUI/",
@@ -1671,6 +1676,46 @@ def _fetch_beacon(url: str) -> dict | None:
         return None
 
 
+def _beacon_over_ssh(endpoint: tuple[str, str], timeout: float = 5.0) -> dict | None:
+    """Read the beacon through the box's SSH door when its HTTP port is not
+    routable from here.
+
+    The beacon binds 0.0.0.0 inside the container and the create publishes it,
+    but publishing is a request: some hosts simply do not route the mapped
+    ports, and from outside they read as closed. That is not a broken box —
+    2026-08-24, vast:48544133 was fully provisioned, its beacon file said
+    "ComfyUI is up", sshd and ComfyUI were both listening — but the studio
+    could not read a word of it, so _beacon_silence called it dead and the
+    reaper was 60 seconds from destroying a $0.59/hr machine that worked.
+
+    One channel with no fallback is the same mistake this file just fixed for
+    SSH, so the fix is the same: the box has a door, use it. Only ever reached
+    when the HTTP read already failed, so a healthy box never pays for it.
+    """
+    if not RENTAL_SSH_KEY.exists():
+        return None
+    host, port = endpoint
+    try:
+        done = subprocess.run(
+            ["ssh", "-n",
+             "-o", "BatchMode=yes",
+             "-o", "StrictHostKeyChecking=accept-new",
+             "-o", f"ConnectTimeout={int(timeout)}",
+             "-i", str(RENTAL_SSH_KEY), "-p", str(port), f"root@{host}",
+             f"cat {BEACON_PROGRESS_PATH}"],
+            capture_output=True, text=True, timeout=timeout + 5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        beacon = json.loads(done.stdout)
+    except ValueError:
+        return None
+    return beacon if isinstance(beacon, dict) else None
+
+
 def _remember_beacon(rental_id: str, beacon: dict) -> dict:
     _BEACON_CACHE[rental_id] = {"beacon": beacon, "at": time.time()}
     return beacon
@@ -1713,22 +1758,128 @@ BEACON_SILENCE_SECONDS = int(os.environ.get("HIVEMIND_RENTAL_BEACON_SILENCE_SECO
 BOOT_STALL_SECONDS = int(os.environ.get("HIVEMIND_RENTAL_BOOT_STALL_SECONDS", "480"))
 
 
+# Probing a dead endpoint costs its full timeout, and the Machines view, both
+# studios and the reaper all poll the same list — so an unreachable box was
+# paying that price several times over, per sweep. Short TTL: long enough to
+# collapse one round of pollers, short enough that a door coming back is
+# noticed within a poll.
+_SSH_PROBE_TTL_SECONDS = 20.0
+_ssh_probe_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
+_ssh_probe_lock = threading.Lock()
+
+
+def _ssh_banner_fault(host: str, port: str, timeout: float = 3.0,
+                      cache: bool = False) -> str | None:
+    """None when this endpoint really is SSH; else a plain account of what it is.
+
+    An accepted connection is not evidence, and this is the third time that
+    lesson has cost a machine (see _tunnel_carrying_traffic for the other two).
+    On 2026-08-24 Vast reported ssh_port 19896 for a healthy box; the port
+    accepted every connection, so _container_ssh_open called the door open and
+    _boot_stall never fired — but it was Vast's Jupyter HTTPS proxy, and what
+    it actually sent back was a TLS fatal alert (15 03 03 00 02 02 32,
+    decode_error) at the sight of an SSH banner. The studio showed the rental
+    ready for 25 minutes, the user clicked Run on, and the only thing anyone
+    learned was "Connection closed by remote host". ComfyUI binds to loopback
+    and Vast's command API refuses running instances, so there was no second
+    way in and the box had to be destroyed.
+
+    So: read what the far end says. sshd greets first and immediately, which
+    makes this one round-trip and no handshake.
+    """
+    key = (host, str(port))
+    if cache:
+        with _ssh_probe_lock:
+            entry = _ssh_probe_cache.get(key)
+        if entry and time.time() - entry[0] < _SSH_PROBE_TTL_SECONDS:
+            return entry[1]
+    fault = _read_ssh_banner(host, port, timeout)
+    if cache:
+        with _ssh_probe_lock:
+            _ssh_probe_cache[key] = (time.time(), fault)
+    return fault
+
+
+def _read_ssh_banner(host: str, port: str, timeout: float) -> str | None:
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            greeting = sock.recv(64)
+    except (OSError, ValueError):
+        return f"nothing is listening on {host}:{port}"
+    if greeting.startswith(b"SSH-"):
+        return None
+    if not greeting:
+        return f"{host}:{port} accepted the connection, then closed it without an SSH banner"
+    # 0x16 handshake / 0x15 alert, then a TLS major version of 3.
+    if greeting[:1] in (b"\x15", b"\x16") and greeting[1:2] == b"\x03":
+        return f"{host}:{port} is serving TLS, not SSH"
+    if greeting.startswith(b"HTTP/"):
+        return f"{host}:{port} is serving HTTP, not SSH"
+    return f"{host}:{port} answered with something that is not SSH"
+
+
 def _container_ssh_open(endpoint: tuple[str, str] | None, timeout: float = 3.0) -> bool:
-    """Is the container's own sshd accepting yet?
+    """Is the container's own sshd answering yet?
 
     This is the honest boot signal. Vast marks an instance running the moment
     the HOST accepts the contract, which is long before the image is unpacked
     and the container exists — so "the instance is up" says nothing about
-    whether anything of ours can start. The port answering does.
+    whether anything of ours can start. An SSH banner does.
     """
     if not endpoint:
         return False
     host, port = endpoint
-    try:
-        with socket.create_connection((host, int(port)), timeout=timeout):
-            return True
-    except (OSError, ValueError):
-        return False
+    return _ssh_banner_fault(host, port, timeout=timeout) is None
+
+
+def _reachable_ssh_endpoint(
+    instance: Instance, timeout: float = 3.0, cache: bool = False
+) -> tuple[tuple[str, str] | None, list[str]]:
+    """The first endpoint that speaks SSH, plus why the others did not.
+
+    The faults are carried back rather than logged because they are the whole
+    diagnosis: "Connection closed by remote host" tells nobody anything, and
+    "ssh7.vast.ai:19896 is serving TLS, not SSH" tells them everything.
+    """
+    faults: list[str] = []
+    for host, port in instance.ssh_endpoints:
+        fault = _ssh_banner_fault(host, port, timeout=timeout, cache=cache)
+        if fault is None:
+            return (host, port), faults
+        faults.append(fault)
+    return None, faults
+
+
+def _ssh_door_failure(instance: Instance) -> dict | None:
+    """A provisioning record for a box that provisioned fine and has no door.
+
+    The counterpart to _boot_stall and _beacon_silence for the box that got all
+    the way to "ComfyUI is up" while every way in was dead. Nothing else
+    catches it: the beacon is a published HTTP port and answers happily, so the
+    box reads ready, and the failure only surfaces when a person clicks Run on
+    and gets a 502 — by which time it has been billing for half an hour.
+
+    Treated as a provisioning failure rather than an error to show, because
+    that is what it is and the reaper already knows what to do with one: record
+    the reason and destroy the box before it bills for an hour. Renting the
+    replacement is still the operator's call, as it is for every other
+    provisioning failure — but they are choosing a new machine rather than
+    debugging a dead one.
+    """
+    endpoint, faults = _reachable_ssh_endpoint(instance, cache=True)
+    if endpoint is not None:
+        return None
+    return {
+        "step": "error",
+        "done": 0,
+        "total": None,
+        "detail": (
+            "this box finished provisioning but has no working SSH door ("
+            + "; ".join(faults or ["the marketplace never published one"])
+            + ") — nothing can reach its ComfyUI, so destroy this machine and rent another"
+        ),
+    }
 
 
 def _boot_stall(instance: Instance, endpoint: tuple[str, str] | None) -> dict | None:
@@ -1837,11 +1988,43 @@ def _instance_dto(instance: Instance, probe: bool = False) -> dict:
             provision = stall
     elif instance.state == "running" and managed:
         beacon_port = instance.ports.get(BEACON_PORT)
+        attached = _read_attachments().get(str(ref))
         # Only a box we could actually reach for is judged on its silence: with
         # no published port there is nowhere to ask, and "the provider has not
         # surfaced the port map yet" must not read the same as "the host died".
         asked = bool(probe and ip and beacon_port)
-        beacon = _fetch_beacon(f"http://{ip}:{beacon_port}/progress.json") if asked else None
+        # An attached box with a tunnel carrying traffic has already answered the
+        # only question this whole block asks, from the far end and over
+        # localhost. Ask it first: every remote channel below costs seconds when
+        # it is the dead one, and this poll is on the path of the Machines view
+        # and both studios. Measured 2026-08-24 on a box whose host published
+        # ports it does not route: 4.0s for the mute HTTP beacon, 3.6s to walk
+        # the SSH candidates, 3.4s to read the beacon over ssh — 10.6s per box,
+        # per poll, to re-derive "ready" for a machine already serving.
+        beacon = None
+        if probe and attached is not None and _tunnel_carrying_traffic(ref, timeout=1.5):
+            beacon = _last_beacon(str(ref))[0] or {
+                "step": "ready", "done": None, "total": None, "detail": "ComfyUI is up"}
+        elif asked:
+            beacon = _fetch_beacon(f"http://{ip}:{beacon_port}/progress.json")
+        # The published port is one way to ask, not the only one. A host that
+        # does not route it leaves a perfectly good box mute, and mute is what
+        # _beacon_silence destroys boxes for.
+        #
+        # `asked` grows only when a door actually answered. Having a candidate
+        # endpoint is not having somewhere to ask, and the difference is the
+        # whole reason silence is survivable: judge a box on a question it was
+        # never in a position to hear and the answer is always "dead".
+        # Reading it over ssh spawns a process and pays a connect, so do it only
+        # when the remembered reading has actually gone stale. In between, the
+        # cache below serves the last one with an honest stale_seconds — which
+        # is what that mechanism has always been for.
+        remembered, remembered_age = _last_beacon(str(ref))
+        if beacon is None and probe and (remembered is None or remembered_age >= _SSH_PROBE_TTL_SECONDS):
+            door, _ = _reachable_ssh_endpoint(instance, timeout=2.0, cache=True)
+            if door is not None:
+                beacon = _beacon_over_ssh(door)
+                asked = True
         # A miss is not a state. Falling back to step "booting" rewound the
         # studio's ladder to "Booting host" every time a poll timed out, so a
         # box that was 3/5 through its models looked like it had started over —
@@ -1870,6 +2053,22 @@ def _instance_dto(instance: Instance, probe: bool = False) -> dict:
             if silence:
                 phase = "error"
                 provision = silence
+            # "ComfyUI is up" is only half the readiness question; the other
+            # half is whether anything can reach it. A box whose beacon says
+            # ready while every SSH door is dead is a failed provision, and
+            # until this check existed the studio showed it green and let the
+            # user find out by clicking Run on 25 minutes later.
+            #
+            # Only a box that is NOT attached is judged this way. An attached
+            # one has a live tunnel and a ComfyUI answering for it, and
+            # destroying a working machine over one unhappy probe costs far
+            # more than the bill it saves — the same rule _beacon_silence
+            # follows when it declines to judge a box that reached "ready".
+            elif phase == "ready" and probe and attached is None:
+                door = _ssh_door_failure(instance)
+                if door:
+                    phase = "error"
+                    provision = door
         else:
             phase = "provisioning"
             provision = {"step": "booting", "done": 0, "total": None, "stale_seconds": 0,
@@ -2940,10 +3139,26 @@ def attach_rental(rental_id: str | int, *, select: bool = False) -> dict:
     if not dto["managed"]:
         raise GpuRentalError("only studio-managed machines can be attached", status_code=409)
     if dto["phase"] != "ready":
-        raise GpuRentalError(f"machine is not ready yet (phase: {dto['phase']})", status_code=409)
-    endpoint = match.ssh
-    if endpoint is None:
+        # Carry the provisioning record's own words. "phase: error" alone sent
+        # people looking for a broken key when what the box actually had was a
+        # marketplace port that does not speak SSH.
+        why = (dto.get("provision") or {}).get("detail")
+        raise GpuRentalError(
+            f"machine is not ready yet (phase: {dto['phase']})" + (f" — {why}" if why else ""),
+            status_code=409)
+    if not match.ssh_endpoints:
         raise GpuRentalError("instance has no SSH endpoint yet", status_code=409)
+    # Try every door before giving up, and say which ones were shut. A
+    # marketplace can publish an endpoint that is not SSH at all, and the bare
+    # ssh error for that ("Connection closed by remote host") sends everyone
+    # hunting for a key or a firewall problem that does not exist.
+    endpoint, faults = _reachable_ssh_endpoint(match)
+    if endpoint is None:
+        raise GpuRentalError(
+            "this machine has no working SSH door: " + "; ".join(
+                faults or ["the marketplace never published one"]),
+            status_code=502,
+        )
     ip, ssh_port = endpoint
 
     tier = _tier_from_label(dto["label"])

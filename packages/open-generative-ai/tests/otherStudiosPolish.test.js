@@ -88,7 +88,7 @@ test('the prompt helper waits for the runtime snapshot and keeps Unload out of t
     assert.match(dialog, /Checking this machine's RAM and models…/);
     assert.match(dialog, /role="radio"/);
     assert.doesNotMatch(dialog, /role="button"/, 'no control nested in a button');
-    assert.match(dialog, /label=\{`Unload \$\{model\.name\}`\}/);
+    assert.match(dialog, /label=\{model\.provider === 'mtplx' \? 'Stop the MTPLX server' : `Unload \$\{model\.name\}`\}/);
     assert.match(dialog, /describeWritingFor\(\{ cast, references \}\)/);
     assert.match(dialog, /https:\/\/github\.com\/ggml-org\/llama\.cpp\/releases/);
     assert.match(dialog, /flattenApiDetail\(payload\?\.detail \?\? payload\?\.error\)/);
@@ -133,4 +133,24 @@ test('the dead preference copies are gone and MetaRow lives in one place', () =>
     assert.match(read('src/studios/LipSyncStudio.jsx'), /import \{ MetaRow \} from '\.\/lipsync\/MetaRow\.jsx';/);
     assert.doesNotMatch(read('src/studios/CinemaStudio.jsx'), /function MetaRow/);
     assert.doesNotMatch(read('src/studios/LipSyncStudio.jsx'), /function MetaRow/);
+});
+
+test('the prompt helper offers Refine with tucked-away controls, not a revision box', () => {
+    const dialog = read('src/dialogs/PromptHelperDialog.jsx');
+    // The Refine action and its knobs.
+    assert.match(dialog, />\s*Refine\s*</);
+    assert.match(dialog, /Refinement controls/);
+    assert.match(dialog, /'single', label: 'Single still'/);
+    assert.match(dialog, /'more', label: 'Add shots'/);
+    assert.match(dialog, /focus more on…, add…, remove…, make … more subtle/);
+    // The wire shape the backend validates (prompt_profiles.normalize_refine).
+    assert.match(dialog, /refine: refine \|\| undefined/);
+    assert.match(dialog, /detail: refineDetail/);
+    // The old model-mediated revision box is gone; the notes field replaced it.
+    assert.doesNotMatch(dialog, /Apply change/);
+    assert.doesNotMatch(dialog, /revision: revise/);
+    // The model picker is a one-line disclosure, closed once a model is settled.
+    assert.match(dialog, /setPickerOpen/);
+    // Image mode never sends shot knobs.
+    assert.match(dialog, /mediaType === 'video' \? refineShots : 'keep'/);
 });

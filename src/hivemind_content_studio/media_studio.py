@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import secrets
 import time
 import urllib.error
 import urllib.request
@@ -131,15 +132,28 @@ def media_studio_status() -> dict[str, Any]:
         return {"configured": False, "auth_present": False, "reachable": False, "detail": "No Media Studio mcpVideo preference or environment override was found."}
     token = _token(descriptor)
     reachable = _reachable(descriptor.mcp_url, token)
+    auth_present = not descriptor.auth_env_key or bool(token)
+    # The detail is what the card shows, so it has to describe the state the
+    # caller is actually in. Reporting "reachable" beside available:false told
+    # people the opposite of their own status and named nothing to fix.
+    if not reachable:
+        detail = "Media Studio is configured but its MCP endpoint did not answer."
+    elif not auth_present:
+        detail = (
+            f"Media Studio answered but its token is missing — set {descriptor.auth_env_key} "
+            "in the shared hive env, or sign in to HivemindOS on this machine."
+        )
+    else:
+        detail = "Media Studio MCP is reachable."
     return {
         "configured": True,
-        "auth_present": not descriptor.auth_env_key or bool(token),
+        "auth_present": auth_present,
         "reachable": reachable,
         "app_name": descriptor.app_name,
         "tool": descriptor.tool,
         "job_tool": descriptor.job_tool,
         "workflow_configured": bool(descriptor.workflow_id),
-        "detail": "Media Studio MCP is reachable." if reachable else "Media Studio is configured but its MCP endpoint did not answer.",
+        "detail": detail,
     }
 
 
@@ -162,6 +176,22 @@ def list_media_studio_workflows(media_type: str = "video") -> list[dict[str, Any
 # start_video surfaces the real failure a moment later.
 _WORKFLOW_GRID_TTL_SECONDS = 60.0
 _workflow_grid_cache: dict[str, Any] = {"key": None, "at": 0.0, "grids": {}}
+
+
+def default_video_workflow_id() -> str:
+    """The workflow a motion request gets when the caller names none.
+
+    The registry marks its own default, so the studio does not hold a second
+    opinion about which one that is; if it marks none, the first video workflow
+    the backend publishes is still better than an empty id, which the backend
+    refuses.
+    """
+    try:
+        workflows = list_media_studio_workflows("video")
+    except Exception:  # noqa: BLE001 — a missing default must not break the call
+        return ""
+    marked = next((str(item.get("id") or "") for item in workflows if item.get("default")), "")
+    return marked or next((str(item.get("id") or "") for item in workflows if item.get("id")), "")
 
 
 def _workflow_frame_grid(descriptor: MediaStudioDescriptor, workflow_id: str | None) -> dict[str, Any] | None:
@@ -376,14 +406,20 @@ def start_video(
             name = _upload_image(descriptor, item["image_path"])
             uploaded_names.append(name)
             uploaded_ingredients.append({"image_path": name, "description": item["description"]})
+        # An agent lane rarely names a workflow — animate_scenes just asks for
+        # motion. Sending nothing made the backend answer "unknown video
+        # workflow_id: " (an empty id), which machine-private redaction then
+        # flattened to "MediaStudioError" and stalled the whole animation lane
+        # with no way to tell why. Resolve the registry's own default instead.
+        workflow_id = workflow_id or descriptor.workflow_id or default_video_workflow_id()
         duration = max(1 / 24, min(30.0, float(duration_seconds)))
         frame_rate = 24
         frames = _request_frame_count(
-            _workflow_frame_grid(descriptor, workflow_id or descriptor.workflow_id), duration, frame_rate,
+            _workflow_frame_grid(descriptor, workflow_id), duration, frame_rate,
         )
         client = _client(descriptor, requester_pub)
         arguments: dict[str, Any] = {
-            **({"workflow_id": workflow_id or descriptor.workflow_id} if workflow_id or descriptor.workflow_id else {}),
+            **({"workflow_id": workflow_id} if workflow_id else {}),
             **({"studio_lane": studio_lane.strip()[:512]} if studio_lane.strip() else {}),
             **({"run_on": run_on.strip()[:128]} if run_on.strip() else {}),
             **({"video_path": uploaded_video_name} if video is not None else {}),
@@ -478,9 +514,17 @@ def start_video(
                     or _generation_status(queued)
                     or ""
                 ).strip()[:400]
-            raise RuntimeError(
-                f"Media Studio did not return a job id{f': {reason}' if reason else ' (backend returned no id and no error detail)'}"
-            )
+            if reason in {"", "MediaStudioError"}:
+                # The backend runs machine-private, which redacts a job-specific
+                # failure down to its class name. That is right for a shared
+                # machine and useless to the owner staring at it, so say where
+                # the real reason is instead of repeating the class name.
+                reason = (
+                    "the backend redacted the reason (machine-private mode). "
+                    "Re-run with MEDIA_STUDIO_MCP_MACHINE_PRIVATE=0 on the gateway, "
+                    "or read the gateway log, to see which workflow or input it refused"
+                )
+            raise RuntimeError(f"Media Studio did not return a job id: {reason}")
         return {"job_id": job_id, "uploaded_names": list(uploaded_names), "provider": descriptor.app_name}
     except BaseException:
         for uploaded_name in uploaded_names:
@@ -991,7 +1035,36 @@ def _token(descriptor: MediaStudioDescriptor) -> str:
                 continue
             if value:
                 return value
+        # Nothing on disk. This token is not a credential anyone issues — it is
+        # a local secret shared between the studio and its own gateway, and the
+        # only thing that ever created one was a one-off migration script. So a
+        # machine that never ran that migration had no token, the gateway read
+        # "", and the entirely LOCAL image and video lanes reported themselves
+        # unavailable. Mint it here instead of asking the user for a secret that
+        # is ours to generate.
+        return _provision_gateway_token()
     return ""
+
+
+def _provision_gateway_token() -> str:
+    """Create the local gateway token if this machine has none.
+
+    Exclusive-create, so two processes racing at first launch end with one token
+    rather than two halves of a handshake.
+    """
+    candidates = _token_paths()
+    if not candidates:
+        return ""
+    path = candidates[-1]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileExistsError):
+            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                stream.write(secrets.token_urlsafe(48) + "\n")
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def _reachable(url: str, token: str) -> bool:
@@ -1774,3 +1847,101 @@ def _token_paths() -> list[Path]:
         str(media_state / "secure" / "zimg-token"),
     ]
     return [Path(value).expanduser() for value in candidates if value.strip()]
+
+
+# ── SAM3 matte (sprite sheet background removal) ────────────────────────────
+#
+# The gateway already owns a SAM3 selection route (/api/smart-mask): name an
+# object, get its silhouette back inline. The sprite pipeline needs exactly
+# that, once per extracted frame, so this is a proxy and not a second
+# implementation — the mask never touches disk on either side, and the frame
+# arrives already decrypted from the browser, so the vault key is not involved.
+#
+# A warm run is ~20s per frame and the first one loads a 3.45 GB checkpoint,
+# so the caller drives frames one at a time and shows progress. Batching them
+# into one request would only move the wait somewhere the user cannot see it.
+_SMART_MASK_POLL_SECONDS = 2.0
+
+
+def smart_mask(
+    image_base64: str,
+    *,
+    subject: str = "",
+    points: list[dict[str, Any]] | None = None,
+    confidence: float | None = None,
+    timeout_seconds: float = 240.0,
+    requester_pub: str = "",
+) -> dict[str, Any]:
+    """Segment one subject out of one frame and return its mask inline.
+
+    Either `subject` (text grounding: "the pink dragon") or `points` (taps) is
+    required — the gateway refuses a request with neither, and so does this,
+    before spending a round-trip on it.
+    """
+    if not str(image_base64 or "").strip():
+        raise ValueError("A frame is required")
+    if not str(subject or "").strip() and not points:
+        raise ValueError("Name the sprite or tap it so SAM3 knows what to keep")
+    descriptor = _required_descriptor()
+    body: dict[str, Any] = {"image_base64": image_base64}
+    if str(subject or "").strip():
+        body["prompt"] = str(subject).strip()[:400]
+    if points:
+        body["points"] = points
+    if confidence is not None:
+        body["confidence"] = float(confidence)
+    queued = _gateway_post_json(descriptor, "/api/smart-mask", body, requester_pub=requester_pub, timeout=60)
+    job_id = str(queued.get("id") or "").strip()
+    if not job_id:
+        raise RuntimeError("The mask service did not return a job id")
+
+    deadline = time.monotonic() + max(30.0, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        time.sleep(_SMART_MASK_POLL_SECONDS)
+        record = _private_json(descriptor, f"/api/job/{quote(job_id)}", requester_pub)
+        status = str(record.get("status") or "").strip().lower()
+        if status in {"success", "completed", "done"}:
+            mask = str(record.get("mask_base64") or "")
+            if not mask:
+                raise RuntimeError("The mask service returned no silhouette — try naming the sprite differently")
+            return {"mask_base64": mask, "elapsed_seconds": record.get("elapsed_seconds")}
+        if status in {"error", "failed", "cancelled"}:
+            raise RuntimeError(sanitize_error_detail(record.get("error")) or "Background removal failed")
+    raise TimeoutError("Background removal timed out")
+
+
+def _gateway_post_json(
+    descriptor: MediaStudioDescriptor,
+    path: str,
+    body: dict[str, Any],
+    *,
+    requester_pub: str = "",
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """POST JSON to one of the gateway's own HTTP routes (not the MCP).
+
+    The MCP speaks tools; a handful of gateway capabilities — smart-select
+    among them — are plain routes on the same origin as the upload base.
+    """
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    token = _token(descriptor)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    headers.update(_requester_headers(requester_pub))
+    request = urllib.request.Request(
+        urljoin(descriptor.upload_base.rstrip("/") + "/", path.lstrip("/")),
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        with contextlib.suppress(Exception):
+            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
+        raise RuntimeError(sanitize_error_detail(detail) or f"The media gateway refused the request (HTTP {exc.code})") from None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("The media gateway did not answer") from exc
+    return payload if isinstance(payload, dict) else {}
