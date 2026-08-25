@@ -96,6 +96,7 @@ from .private_access import (
     OWNER_SESSION_SECONDS,
     OwnerAccess,
     PrivateFieldCipher,
+    resolve_private_cipher,
     configure_private_cipher,
     e2e_media_exists,
     e2e_media_sidecar,
@@ -1196,9 +1197,7 @@ def build_control_app(
     enable_access_stamps()
     apply_shared_hive_env()
     runs = orchestrator or ContentOrchestrator(generation_metric_sink=record_hivemind_generation_metric)
-    cipher = private_cipher or PrivateFieldCipher.from_keychain(
-        service=os.environ.get("ZIMG_OUTPUT_KEYCHAIN_SERVICE", "zimage-output-encryption")
-    )
+    cipher = private_cipher or resolve_private_cipher()
     configure_private_cipher(cipher)
     access = owner_access or OwnerAccess.from_runtime(cipher)
     state_dir = Path(runs.store.path).parent

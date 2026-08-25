@@ -48,7 +48,19 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen --python ${{ matrix.python-version }}
+        run: uv sync --frozen --extra mcp --python ${{ matrix.python-version }}
+
+      # The media-studio MCP contract tests shell out to
+      # packages/media-gateway/bin/media-studio-mcp.mjs, which imports
+      # @modelcontextprotocol/sdk. Without its node_modules those 94 tests fail
+      # with ERR_MODULE_NOT_FOUND — a missing install, not a broken contract.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install media gateway node dependencies
+        run: npm ci --prefix packages/media-gateway
 
       - name: Compile Python sources
         run: uv run --no-sync python -m compileall app cli.py main.py webui test

@@ -137,6 +137,18 @@ def _resolve_private_cipher() -> PrivateFieldCipher:
     return cipher
 
 
+def resolve_private_cipher() -> PrivateFieldCipher:
+    """The cipher for private state, from wherever this machine keeps it.
+
+    CONTENT_STUDIO_PRIVATE_SECRET first, then the macOS Keychain. Public because
+    the app builder needs the same order every other reader uses: reaching
+    straight for the Keychain makes the studio unbuildable on Linux (its own
+    Docker image) and, under a sandboxed HOME, hangs for ten seconds creating a
+    keychain entry nobody asked for.
+    """
+    return _resolve_private_cipher()
+
+
 def runtime_private_cipher() -> PrivateFieldCipher | None:
     """Cipher used for new private writes; None only when encryption is disabled."""
     if not private_state_enabled():

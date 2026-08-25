@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hivemind_content_studio import hivemindos_models, mtplx_server, private_access
+from hivemind_content_studio import gpu_rentals, hivemindos_models, mtplx_server, private_access
 
 
 OPEN_GEN_DIST = Path(__file__).resolve().parents[2] / "packages" / "open-generative-ai" / "dist"
@@ -63,6 +63,37 @@ def _isolate_shared_hive_env(monkeypatch) -> None:
     reaching into the module.
     """
     monkeypatch.setenv("HIVE_ENV_FILES", str(Path(__file__).parent / "no-such-shared.env"))
+
+
+@pytest.fixture(autouse=True)
+def _private_cipher_needs_no_keychain(monkeypatch) -> None:
+    """Give private state a test secret so nothing reaches the macOS Keychain.
+
+    `PrivateFieldCipher.from_keychain()` shells out to /usr/bin/security and,
+    when there is no entry, CREATES one. On Linux that raises; under a sandboxed
+    HOME it hangs until the 10s timeout. Either way a test that merely builds
+    the app without handing it a cipher took the suite down for reasons that
+    have nothing to do with what it was testing.
+    """
+    monkeypatch.setenv(private_access.PRIVATE_SECRET_ENV, "test-private-state-secret")
+
+
+@pytest.fixture(autouse=True)
+def _rental_key_is_a_test_key(monkeypatch, tmp_path_factory) -> None:
+    """Give the rentals API a throwaway SSH identity instead of the developer's.
+
+    `RENTAL_SSH_KEY` points at ~/.hivemindos/gpu-rentals-ssh/vast_ed25519, which
+    exists on a machine that has rented before and nowhere else — so 52 rental
+    tests passed locally and 503'd on CI with "rental SSH key missing". The
+    suite must not depend on a key the developer happens to have, and must never
+    read the real one: a test that signs with the live identity is one bad mock
+    away from touching a real host.
+    """
+    directory = tmp_path_factory.mktemp("rental-ssh")
+    public = directory / "test_ed25519.pub"
+    public.write_text("ssh-ed25519 AAAATESTKEYFORTHESUITE test@studio\n", encoding="utf-8")
+    monkeypatch.setattr(gpu_rentals, "RENTAL_SSH_KEY", directory / "test_ed25519")
+    monkeypatch.setattr(gpu_rentals, "RENTAL_SSH_PUBKEY", public)
 
 
 @pytest.fixture(autouse=True)
