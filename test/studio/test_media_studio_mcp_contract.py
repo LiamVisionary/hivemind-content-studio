@@ -21,6 +21,17 @@ ROOT = Path(__file__).resolve().parents[2]
 MCP_SOURCE = ROOT / "packages" / "media-gateway" / "bin" / "media-studio-mcp.mjs"
 WORKFLOW_REGISTRY = ROOT / "packages" / "media-gateway" / "workflow-registry.json"
 
+def _file_or_skip(raw_path: str):
+    """The JSON at `raw_path`, or skip — same rule as `_graph_or_skip`, for the
+    files that are not a `{"prompt": …}` graph."""
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = ROOT / "packages" / "media-gateway" / path
+    if not path.is_file():
+        pytest.skip(f"workflow file is not on this machine: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _graph_or_skip(raw_path: str):
     """The workflow graph at `raw_path`, or skip.
 
@@ -900,8 +911,8 @@ def test_ltx_ingredients_workflow_uses_real_ic_reference_conditioning():
     registry_path = ROOT / "packages" / "media-gateway" / "workflow-registry.json"
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     workflow = next(item for item in registry["workflows"] if item["id"] == "ltx23-ic-ingredients-lora")
-    graph = json.loads(Path(workflow["api_workflow"]).read_text(encoding="utf-8"))["prompt"]
-    mobile = json.loads(Path(workflow["mobile_workflow"]).read_text(encoding="utf-8"))
+    graph = _graph_or_skip(workflow["api_workflow"])
+    mobile = _file_or_skip(workflow["mobile_workflow"])
 
     assert workflow["requires"] == {"prompt": True, "image": True}
     assert workflow["prompt_contract"]["type"] == "ltx23-ingredients"
