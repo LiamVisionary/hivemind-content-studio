@@ -15,7 +15,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.13"]
+        # pyproject declares requires-python = ">=3.11,<3.13", so a 3.13 job
+        # cannot even install: `uv sync` refuses the interpreter. Testing a
+        # version the project says it does not support was a red job that
+        # reported nothing.
+        python-version: ["3.11", "3.12"]
 
     services:
       redis:
@@ -61,6 +65,20 @@ jobs:
 
       - name: Install media gateway node dependencies
         run: npm ci --prefix packages/media-gateway
+
+      # The MCP contract tests build real ComfyUI graphs from reference clips,
+      # which means probing them with ffprobe. Without ffmpeg they fail as
+      # FileNotFoundError rather than telling anyone what is missing.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # The owner-gate test asserts the served page is the studio, and the
+      # studio is a built bundle. Without dist/ the app serves its "frontend
+      # build is missing" placeholder and the test reads that instead.
+      - name: Build the studio frontend
+        run: |
+          npm ci --prefix packages/open-generative-ai
+          npm --prefix packages/open-generative-ai run vite:build
 
       - name: Compile Python sources
         run: uv run --no-sync python -m compileall app cli.py main.py webui test

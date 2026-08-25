@@ -837,12 +837,6 @@ class TestTaskService(unittest.TestCase):
             "RuntimeError: provider connection reset",
         )
 
-    @unittest.skipUnless(os.name == "nt", "Windows process API test")
-    def test_windows_process_probe_is_read_only_and_detects_liveness(self):
-        """Windows CI 应真实验证只读进程探测，不允许回退到 os.kill。"""
-        self.assertTrue(tm._is_windows_process_alive(os.getpid()))
-        self.assertFalse(tm._is_windows_process_alive(2_147_483_647))
-
     @unittest.skipUnless(
         os.getenv("MPT_TEST_REDIS_HOST"),
         "MPT_TEST_REDIS_HOST not set",

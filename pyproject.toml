@@ -47,7 +47,10 @@ twelvelabs = [
     "twelvelabs>=1.2.8",
 ]
 mcp = [
-    "mcp>=1.9.0",
+    # 2.0 removed mcp.server.fastmcp, which this server is written against; the
+    # lock had already resolved 2.0.0, so a fresh `uv sync --extra mcp` produced
+    # an MCP server that exits with "Install MCP support" on import.
+    "mcp>=1.9.0,<2",
 ]
 dev = [
     "pytest>=8.0.0",
