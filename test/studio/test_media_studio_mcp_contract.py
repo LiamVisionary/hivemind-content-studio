@@ -21,6 +21,28 @@ ROOT = Path(__file__).resolve().parents[2]
 MCP_SOURCE = ROOT / "packages" / "media-gateway" / "bin" / "media-studio-mcp.mjs"
 WORKFLOW_REGISTRY = ROOT / "packages" / "media-gateway" / "workflow-registry.json"
 
+def _skip_without_local_workflow(workflow_id: str) -> None:
+    """Skip when the graph this workflow renders from is not on this machine.
+
+    These tests spawn the real MCP, which resolves the row's `api_workflow` and
+    posts the graph it finds there. Some rows point inside the operator's own
+    ComfyUI install, so on any other machine the MCP posts nothing and the test
+    fails as an empty capture list — which says "the MCP is broken" when the
+    truth is "that graph is not here".
+    """
+    registry = json.loads(
+        (ROOT / "packages" / "media-gateway" / "workflow-registry.json").read_text(encoding="utf-8")
+    )
+    row = next((item for item in registry["workflows"] if item["id"] == workflow_id), None)
+    if row is None:
+        return
+    path = Path(row.get("api_workflow") or "")
+    if not path.is_absolute():
+        path = ROOT / "packages" / "media-gateway" / path
+    if not path.is_file():
+        pytest.skip(f"{workflow_id}'s graph is not on this machine: {path}")
+
+
 def _file_or_skip(raw_path: str):
     """The JSON at `raw_path`, or skip — same rule as `_graph_or_skip`, for the
     files that are not a `{"prompt": …}` graph."""
@@ -996,6 +1018,7 @@ def test_ltx_ingredients_workflow_uses_real_ic_reference_conditioning():
 
 
 def test_ltx_ingredients_mcp_builds_prompt_contract_and_native_metadata(tmp_path):
+    _skip_without_local_workflow("ltx23-ic-ingredients-lora")
     captures = []
     square_response = ""
 
@@ -1595,6 +1618,7 @@ def _mcp_tool_result(reply: str) -> dict:
 
 
 def test_video_mcp_submission_preserves_the_app_tab_lane(tmp_path):
+    _skip_without_local_workflow("ltx23-regular-fp8")
     body = _capture_video_graph(
         tmp_path,
         "ltx23-regular-fp8",
