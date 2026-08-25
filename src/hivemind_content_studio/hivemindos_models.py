@@ -228,10 +228,32 @@ def device_id() -> str:
     return minted
 
 
+def _store_key_path() -> Path:
+    return _store_path().with_suffix(".key")
+
+
 def _cipher():
+    """The cipher for the account key at rest.
+
+    Keyed by a 0600 file this module owns rather than by the macOS Keychain: the
+    studio also runs in a Linux container, where a Keychain call raises and took
+    every one of these paths down with it. This is the same shape HivemindOS
+    uses for the same kind of secret — a generated key file beside the store —
+    so the credential is never plaintext on any platform.
+    """
     from . import private_access
 
-    return private_access.PrivateFieldCipher.from_keychain()
+    path = _store_key_path()
+    try:
+        secret = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        secret = ""
+    if not secret:
+        secret = base64.urlsafe_b64encode(os.urandom(48)).decode("ascii")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(secret, encoding="utf-8")
+        os.chmod(path, 0o600)
+    return private_access.PrivateFieldCipher.from_secret(secret)
 
 
 # Where the HivemindOS app keeps its own credit key, and the sibling file whose

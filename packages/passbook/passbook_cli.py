@@ -422,6 +422,89 @@ def cmd_seal(args: argparse.Namespace) -> int:
     return 0 if result.get("ok") else 1
 
 
+def cmd_secure(args: argparse.Namespace) -> int:
+    """Turn this machine's store from readable to signed-in, in one step.
+
+    Creating a profile, sealing, starting a broker and signing in are four
+    commands that are never useful apart, and asking for the same password four
+    times is how a security feature earns a reputation for being annoying. This
+    is the whole thing, once.
+    """
+    module = _vault_or_fail()
+    if module is None:
+        return _fail("The vault is not installed on this machine.", "Run:  passbook install")
+    import passbook_broker
+
+    existing = module.profiles()
+    names = passbook.key_names()
+    if not names:
+        return _fail("There is nothing in the store to secure.")
+
+    skip = list(module.DEFAULT_SKIP) + list(getattr(args, "skip", []) or [])
+    exposed = sorted(n for n in names if module.matches_skip(n, skip))
+
+    print(f"{len(names)} key(s) in {passbook.env_path()}")
+    if exposed:
+        print(f"{len(exposed)} will stay readable — they are compiled into client")
+        print("code or read before sign-in, so encrypting them protects nothing:")
+        for name in exposed:
+            print(f"   {name}")
+    print()
+
+    if existing:
+        profile = args.profile or module.active_profile_id()
+        print(f"Signing in to {next((p['label'] for p in existing if p['id'] == profile), profile)}.")
+        opened = _open_vault(module, profile, from_stdin=getattr(args, "password_stdin", False))
+        if opened is None:
+            return 1
+        dek, profile = opened
+        password = None
+    else:
+        print("Choose a password for this machine's vault. It is the only thing")
+        print("that opens these credentials, and nothing else on this machine")
+        print("stores it — so pick something you will not lose.")
+        try:
+            password = _ask_password("New vault password: ", confirm=True,
+                                     from_stdin=getattr(args, "password_stdin", False))
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+        except ValueError as error:
+            return _fail(str(error))
+        try:
+            made = module.create_profile(args.profile_name or "Owner", password=password)
+        except module.VaultError as error:
+            return _fail(str(error))
+        profile = made["id"]
+        dek = module.unlock_with_password(profile, password)
+        print(f"Created profile {made['label']}.")
+
+    result = module.seal_store(dek, profile_id=profile, skip=skip)
+    if not result.get("ok"):
+        return _fail(result.get("detail", "Sealing failed."))
+    print(result["detail"])
+
+    started = passbook_broker.start()
+    if not started.get("ok"):
+        print("The broker would not start, so nothing can read the store yet.", file=sys.stderr)
+        print(f"Start it by hand:  passbook broker start   ({started.get('detail', '')})", file=sys.stderr)
+        return 1
+    if password is None:
+        print("Now sign in so apps can read it again:  passbook signin")
+        return 0
+    answer = passbook_broker.signin(profile=profile, password=password, duration=args.duration)
+    if not answer.get("ok"):
+        print(f"Sealed, but signing in failed: {answer.get('error', '')}", file=sys.stderr)
+        print("Try:  passbook signin", file=sys.stderr)
+        return 1
+    print(answer.get("detail", "Signed in."))
+    print()
+    print("Done. The store is encrypted and apps read it through the broker.")
+    print("  passbook signout   lock it now")
+    print("  passbook unseal    put everything back in the clear")
+    return 0
+
+
 def cmd_unseal(args: argparse.Namespace) -> int:
     """The way back. A security feature you cannot reverse is one people refuse."""
     module = _vault_or_fail()
@@ -1462,6 +1545,16 @@ def build_parser() -> argparse.ArgumentParser:
     unseal.add_argument("--password-stdin", dest="password_stdin",
         action="store_true", help="read the password from stdin instead of prompting")
     unseal.set_defaults(func=cmd_unseal)
+
+    secure = subs.add_parser("secure",
+                             help="encrypt the store and sign in — the whole thing, once")
+    secure.add_argument("--profile-name", default="", help="name for a new profile")
+    secure.add_argument("--profile", default="", help="use an existing profile")
+    secure.add_argument("--skip", nargs="+", default=[], metavar="KEY",
+                        help="extra keys to leave readable, on top of the public-prefix defaults")
+    secure.add_argument("--for", dest="duration", default="", metavar="DURATION")
+    secure.add_argument("--password-stdin", dest="password_stdin", action="store_true")
+    secure.set_defaults(func=cmd_secure)
 
     profile_cmd = subs.add_parser("profile", help="who can open this machine's vault")
     profile_cmd.add_argument("--json", action="store_true")

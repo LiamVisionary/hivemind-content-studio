@@ -289,6 +289,19 @@ def test_the_account_key_is_encrypted_on_disk_and_never_stored_in_the_clear(no_a
     assert hivemindos_models.credit_token() == ""
 
 
+def test_the_key_at_rest_does_not_depend_on_a_macos_keychain(no_app) -> None:
+    """The studio also runs in a Linux container. Keying this off the Keychain
+    took every credit path down there — which is where CI found it."""
+    hivemindos_models.save_credit_token("hmos_credit_" + "a" * 30)
+
+    key_file = hivemindos_models._store_key_path()
+    assert key_file.exists()
+    assert oct(key_file.stat().st_mode)[-3:] == "600"
+    # A store without its key file is unreadable rather than a crash.
+    key_file.unlink()
+    assert hivemindos_models.credit_token() == ''
+
+
 def test_credits_are_bought_where_the_balance_lives(no_app, monkeypatch) -> None:
     """With the app running the balance is the machine's, so a second one bought
     here would split it. Without the app there is nowhere else to buy."""

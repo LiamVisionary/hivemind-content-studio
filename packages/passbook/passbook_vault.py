@@ -81,6 +81,8 @@ __all__ = [
     "add_password_factor",
     "available",
     "change_password",
+    "DEFAULT_SKIP",
+    "PUBLIC_PREFIXES",
     "create_profile",
     "is_sealed",
     "is_sealed_v1",
@@ -629,6 +631,18 @@ def set_skip_list(names: Iterable[str], *, root: Path | None = None) -> list[str
     vault["skip"] = sorted({str(name).strip() for name in names if str(name).strip()})
     _save_vault(vault, root=root)
     return vault["skip"]
+
+
+# Framework conventions for "this value is compiled into client-side code".
+# Every one of these is public by construction — the build inlines it into a
+# browser bundle — so sealing one protects nothing and breaks a build that runs
+# long before anybody could sign in.
+PUBLIC_PREFIXES = (
+    "NEXT_PUBLIC_", "VITE_", "REACT_APP_", "PUBLIC_",
+    "EXPO_PUBLIC_", "GATSBY_", "NUXT_PUBLIC_",
+)
+
+DEFAULT_SKIP = tuple(f"{prefix}*" for prefix in PUBLIC_PREFIXES)
 
 
 def matches_skip(name: str, patterns: Iterable[str]) -> bool:
