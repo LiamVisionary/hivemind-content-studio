@@ -4,9 +4,18 @@ The image side already learned this lesson the expensive way: dispatching on
 "is it local?" sent an OpenAI OAuth pick to MUAPI, and the fix was one table
 keyed by PROVIDER (``image_router.py``). Text models now have the same single
 table, for the same reason — the producer can run on a ``llama-server`` this app
-spawned or on HivemindOS's cloud routes, and those are different credentials,
-different billing and different privacy, so the choice cannot be re-derived from
-a naming convention at each call site.
+spawned, on HivemindOS's cloud routes, or on the owner's OWN provider accounts,
+and those are different credentials, different billing and different privacy, so
+the choice cannot be re-derived from a naming convention at each call site.
+
+Three sources, because there are three genuinely different bills:
+
+  ``local``       weights on this machine. Costs RAM and nothing else.
+  ``hivemindos``  HivemindOS's models on HivemindOS credits — the same balance
+                  and the same catalog as the HivemindOS app.
+  ``accounts``    the owner's own OpenAI key, ChatGPT sign-in, OpenRouter
+                  account, Grok grant. Billed by that provider to that account,
+                  out of the shared credential store both apps read.
 
 Two functions carry it:
 
@@ -22,15 +31,24 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import hivemindos_models, local_llm
+from . import hivemindos_models, local_llm, provider_models
 
 LOCAL = "local"
 HIVEMINDOS = hivemindos_models.PROVIDER
+ACCOUNTS = provider_models.SOURCE
 
 
 def source_of(model_id: str) -> str:
-    """Which source owns this id. The HivemindOS prefix is the only marker —
-    local ids are filesystem-derived and cannot be pattern-matched safely."""
+    """Which source owns this id.
+
+    The two cloud sources carry an explicit prefix and are checked first; local
+    is what remains, because local ids are filesystem-derived and cannot be
+    pattern-matched safely. Order matters: a guess here is a call made with the
+    wrong credential against the wrong endpoint, which is a charge on the wrong
+    account and invisible until the bill arrives.
+    """
+    if provider_models.is_account_model(model_id):
+        return ACCOUNTS
     return HIVEMINDOS if hivemindos_models.is_hivemindos_model(model_id) else LOCAL
 
 
@@ -41,7 +59,10 @@ def runtime_for(model_id: str) -> Any:
     lets ``story_producer``'s tasks stay written against an engine rather than
     against a provider.
     """
-    if source_of(model_id) == HIVEMINDOS:
+    source = source_of(model_id)
+    if source == ACCOUNTS:
+        return provider_models.runtime()
+    if source == HIVEMINDOS:
         return hivemindos_models.runtime()
     return local_llm.runtime()
 
@@ -56,10 +77,11 @@ def catalog() -> dict[str, Any]:
     """
     local = _local_source()
     cloud = _hivemindos_source()
+    accounts = _accounts_source()
     return {
-        "sources": {LOCAL: local, HIVEMINDOS: cloud},
-        "models": [*local["models"], *cloud["models"]],
-        "defaultModelId": default_model_id(local, cloud),
+        "sources": {LOCAL: local, HIVEMINDOS: cloud, ACCOUNTS: accounts},
+        "models": [*local["models"], *cloud["models"], *accounts["models"]],
+        "defaultModelId": default_model_id(local, cloud, accounts),
     }
 
 
@@ -135,20 +157,65 @@ def _hivemindos_source() -> dict[str, Any]:
     }
 
 
-def default_model_id(local: dict[str, Any], cloud: dict[str, Any]) -> str:
+def _accounts_source() -> dict[str, Any]:
+    """The owner's own provider accounts, as a source.
+
+    Never raises for the same reason the other two do not: a picker that drops a
+    whole source on a bad network looks to the owner like the feature was
+    removed, and the feature here is "the ChatGPT plan you already pay for".
+    """
+    try:
+        state = provider_models.status()
+    except Exception as exc:  # noqa: BLE001 — an account is never fatal
+        return {
+            "id": ACCOUNTS, "label": "Your accounts", "available": False,
+            "detail": str(exc), "remedy": "retry", "models": [], "accounts": [],
+            "defaultModelId": "",
+        }
+    return {
+        "id": ACCOUNTS,
+        "label": "Your accounts",
+        "available": bool(state.get("available")),
+        "detail": state.get("detail") or "",
+        "remedy": state.get("remedy") or "",
+        "models": state.get("models") or [],
+        # Per-account rows so the picker can show a provider that is connected
+        # but not answering, next to one that was never connected — two states
+        # with two different buttons, which one "unavailable" flag cannot carry.
+        "accounts": state.get("accounts") or [],
+        "defaultModelId": state.get("defaultModelId") or "",
+    }
+
+
+def default_model_id(
+    local: dict[str, Any], cloud: dict[str, Any], accounts: dict[str, Any] | None = None
+) -> str:
     """What to start a fresh install on.
 
-    A model already in RAM wins: it is free, private and answers now. Otherwise
-    the cloud default, which is the whole point of having one — a machine with no
-    weights on it used to have no producer at all. A local model that merely
-    fits comes last, because choosing it commits the owner to a multi-minute
-    load they did not ask for.
+    A model already in RAM wins: it is free, private and answers now.
+
+    Then HivemindOS, WHEN its credits are actually configured — that is the
+    house default and it stays the house default. But "available" alone is not
+    enough to lead with it: the gateway is reachable with no account at all, and
+    what answers then is the free tier, which is capped at 1024 output tokens
+    and drops half a section fill on the floor. So an owner with a connected
+    provider account of their own is sent there ahead of a capped free tier
+    rather than behind it.
+
+    A local model that merely fits comes last, because choosing it commits the
+    owner to a multi-minute load they did not ask for.
     """
     for model in local.get("models") or []:
         if model.get("fit") == "loaded":
             return model["id"]
+    cloud_id = str(cloud.get("defaultModelId") or hivemindos_models.DEFAULT_MODEL_ID)
+    if cloud.get("available") and (cloud.get("credits") or {}).get("configured"):
+        return cloud_id
+    account_id = str((accounts or {}).get("defaultModelId") or "")
+    if account_id:
+        return account_id
     if cloud.get("available"):
-        return str(cloud.get("defaultModelId") or hivemindos_models.DEFAULT_MODEL_ID)
+        return cloud_id
     for model in local.get("models") or []:
         if model.get("fit") in ("fits", "needs_unload"):
             return model["id"]

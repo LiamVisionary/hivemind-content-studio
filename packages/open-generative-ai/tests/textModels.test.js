@@ -117,12 +117,20 @@ test('the credit line is shown before a press, not after a refusal', async () =>
 test('every state a source can be broken in offers the action that repairs it', async () => {
   const { remedyFor, REMEDIES } = await load();
 
-  for (const key of ['add-local-model', 'link-hivemindos', 'open-hivemindos', 'top-up', 'connect-account', 'retry']) {
+  for (const key of ['add-local-model', 'link-hivemindos', 'open-hivemindos', 'top-up',
+                     'connect-account', 'connect-provider', 'retry']) {
     assert.ok(remedyFor(key)?.label, `${key} has no button`);
     assert.ok(remedyFor(key)?.action, `${key} has no action`);
   }
   assert.equal(remedyFor('something-new'), null);
-  assert.equal(Object.keys(REMEDIES).length, 6);
+  assert.equal(Object.keys(REMEDIES).length, 7);
+
+  // A provider account's repair has to name WHICH account — "Add key" with no
+  // key name is the same dead end as an error with no button. Those arrive as
+  // targets rather than as fixed ids, because the server owns the provider
+  // list and a hard-coded copy here is the half that goes stale.
+  assert.deepEqual(remedyFor('key:OPENROUTER_API_KEY'), { label: 'Add key', action: 'key', key: 'OPENROUTER_API_KEY' });
+  assert.deepEqual(remedyFor('oauth:openai'), { label: 'Sign in', action: 'oauth', provider: 'openai' });
 });
 
 test('a cloud model is never sent through the local load-and-wait path', async () => {
@@ -214,4 +222,91 @@ test('the link button has somewhere to land when the app never answers', async (
   assert.match(studio, /HivemindOS did not answer/);
   assert.match(studio, /paste an account key below/);
   assert.match(studio, /Paste an account key instead/);
+});
+
+// --------------------------------------------------------------------------
+// the owner's own accounts
+// --------------------------------------------------------------------------
+
+const ACCOUNT_ROWS = [
+  { id: 'account:openai/gpt-4.1', name: 'gpt-4.1', source: 'accounts', provider: 'openai', group: 'OpenAI', tier: 'account', badge: 'Your key', subtitle: '' },
+  { id: 'account:openrouter/anthropic/claude-4', name: 'anthropic/claude-4', source: 'accounts', provider: 'openrouter', group: 'OpenRouter', tier: 'account', badge: 'Your key', subtitle: '$3 in · $15 out /1M' },
+  { id: 'account:chatgpt/gpt-5.4', name: 'gpt-5.4', source: 'accounts', provider: 'chatgpt', group: 'ChatGPT (sign-in)', tier: 'account', badge: 'Sign-in', subtitle: '' },
+];
+
+const WITH_ACCOUNTS = {
+  ...CATALOG,
+  sources: {
+    ...CATALOG.sources,
+    accounts: {
+      id: 'accounts', label: 'Your accounts', available: true, detail: '', remedy: '',
+      models: ACCOUNT_ROWS,
+      accounts: [
+        { id: 'openai', label: 'OpenAI', kind: 'key', connected: true, live: true, count: 1, credential: 'OPENAI_API_KEY', connect: 'key:OPENAI_API_KEY', detail: '', remedy: '' },
+        { id: 'openrouter', label: 'OpenRouter', kind: 'key', connected: true, live: true, count: 1, credential: 'OPENROUTER_API_KEY', connect: 'key:OPENROUTER_API_KEY', detail: '', remedy: '' },
+        { id: 'chatgpt', label: 'ChatGPT (sign-in)', kind: 'oauth', connected: true, live: true, count: 1, credential: 'OPENAI_OAUTH_ACCESS_TOKEN', connect: 'oauth:openai', detail: '', remedy: '' },
+        { id: 'anthropic', label: 'Anthropic', kind: 'key', connected: false, live: false, count: 0, credential: '', connect: 'key:ANTHROPIC_API_KEY', detail: '', remedy: 'key:ANTHROPIC_API_KEY' },
+      ],
+      defaultModelId: 'account:chatgpt/gpt-5.4',
+    },
+  },
+  models: [...CATALOG.models, ...ACCOUNT_ROWS],
+};
+
+test('a model on the owner’s own account is never mistaken for a HivemindOS one', async () => {
+  const { tabOf, isAccountModel, isCloudModel, needsLoad, sourceIdForTab } = await load();
+
+  // Three different wallets. Filing an account model on either of the other
+  // tabs tells the owner the wrong thing about who is being billed.
+  assert.equal(tabOf(ACCOUNT_ROWS[0]), 'accounts');
+  assert.equal(isAccountModel(ACCOUNT_ROWS[0]), true);
+  assert.equal(isCloudModel(ACCOUNT_ROWS[0]), false);
+  // And it is not local either, so it must not go through the load-and-wait path.
+  assert.equal(needsLoad(ACCOUNT_ROWS[0]), false);
+  // Two of the four tabs are two halves of one source; the third source is its own.
+  assert.equal(sourceIdForTab('cloud'), 'hivemindos');
+  assert.equal(sourceIdForTab('accounts'), 'accounts');
+});
+
+test('the accounts tab says who pays before anything is pressed', async () => {
+  const { privacyLine, statusLine, summaryLine, accountsLine } = await load();
+
+  // The one sentence that is different about this tab, and the reason it needs
+  // its own: the story does not pass through HivemindOS at all.
+  assert.match(privacyLine(ACCOUNT_ROWS[0]), /billed to your own account there/i);
+  assert.match(privacyLine(ACCOUNT_ROWS[0]), /does not pass through HivemindOS/i);
+
+  // The provider's own price when it quoted one; otherwise the wallet.
+  assert.equal(statusLine(ACCOUNT_ROWS[1]), '$3 in · $15 out /1M');
+  assert.equal(statusLine(ACCOUNT_ROWS[0]), 'Billed to your own account');
+  assert.equal(summaryLine(ACCOUNT_ROWS[2]), 'gpt-5.4 · ChatGPT (sign-in) · Billed to your own account');
+  assert.equal(accountsLine(WITH_ACCOUNTS), '3 of 4 connected');
+});
+
+test('an account that was never connected is still listed, with the way to connect it', async () => {
+  const { accountsOf, accountFor, remedyFor } = await load();
+
+  // The tab is how someone finds out the ChatGPT plan they already pay for can
+  // write scenes. Filtering to what is connected can never tell them that.
+  assert.equal(accountsOf(WITH_ACCOUNTS).length, 4);
+  const anthropic = accountFor(WITH_ACCOUNTS, 'anthropic');
+  assert.equal(anthropic.connected, false);
+  // A sign-in and a key are different repairs and must not share a button.
+  assert.equal(remedyFor(anthropic.remedy).action, 'key');
+  assert.equal(remedyFor(accountFor(WITH_ACCOUNTS, 'chatgpt').connect).action, 'oauth');
+});
+
+test('choosing an account narrows the list to the models it can actually run', async () => {
+  const { modelsForAccount, modelsForTab, tabCounts } = await load();
+
+  // Six connected accounts is several hundred models, and "search 657 models"
+  // is not a decision anyone can make.
+  assert.deepEqual(modelsForAccount(WITH_ACCOUNTS, 'openrouter').map((row) => row.id),
+    ['account:openrouter/anthropic/claude-4']);
+  assert.equal(modelsForTab(WITH_ACCOUNTS, 'accounts').length, 3);
+  // The badge counts what the tab lists, so it cannot read one over a list of two.
+  assert.equal(tabCounts(WITH_ACCOUNTS).accounts, 3);
+  // Search still reaches the id, because an OpenRouter model is known by it.
+  assert.equal(modelsForAccount(WITH_ACCOUNTS, 'openrouter', 'claude').length, 1);
+  assert.equal(modelsForAccount(WITH_ACCOUNTS, 'openrouter', 'gemini').length, 0);
 });

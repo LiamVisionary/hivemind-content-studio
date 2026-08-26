@@ -53,7 +53,7 @@ from .generation_telemetry import generation_telemetry_snapshot, record_hivemind
 from .lanes import LANE_MATRIX
 from . import (
     comfy_lanes, hivemindos_models, image_router, local_llm, media_posters, muapi_proxy,
-    prompt_profiles, story_producer, text_models,
+    prompt_profiles, provider_models, story_producer, text_models,
 )
 from .manifest import load_manifest, write_manifest
 from .machine_privacy import machine_operation_receipt, machine_run_receipt
@@ -2278,6 +2278,13 @@ def build_control_app(
             raise HTTPException(status_code=400, detail={
                 "message": str(exc), "remedy": exc.remedy, "provider": "hivemindos",
             }) from exc
+        except provider_models.ProviderModelsError as exc:
+            # Same contract for the owner's own accounts: `remedy` names the
+            # account to reconnect or the key to add, so a refused credential
+            # arrives as a button rather than as the provider's 401 text.
+            raise HTTPException(status_code=400, detail={
+                "message": str(exc), "remedy": exc.remedy, "provider": exc.provider,
+            }) from exc
         except story_producer.StoryProducerError as exc:
             # 400 rather than 500: every one of these is something the owner can
             # act on — load a model, pick a bigger one, or ask for fewer at once.
@@ -4067,6 +4074,14 @@ def build_control_app(
     SETTABLE_CREDENTIALS: dict[str, str] = {
         "OPENAI_API_KEY": "OpenAI — GPT Image and the planner brain",
         "XAI_API_KEY": "xAI — Grok Imagine image and video",
+        # The producer's own accounts. Same names HivemindOS's provider catalog
+        # uses, into the same shared store, so a key added in either app is a
+        # key added for both — see `provider_models.PROVIDERS`.
+        "ANTHROPIC_API_KEY": "Anthropic — Claude, for the producer",
+        "OPENROUTER_API_KEY": "OpenRouter — hundreds of models on one account",
+        "GEMINI_API_KEY": "Google Gemini — for the producer",
+        "GROQ_API_KEY": "Groq — for the producer",
+        "VENICE_API_KEY": "Venice AI — for the producer",
         "ELEVENLABS_API_KEY": "ElevenLabs — cloud voice",
         "PEXELS_API_KEY": "Pexels — stock footage for the faceless lane",
         "PIXABAY_API_KEY": "Pixabay — stock footage for the faceless lane",
@@ -4262,6 +4277,10 @@ def build_control_app(
         # The new keys have to reach THIS process too, or the provider the owner
         # just configured stays unavailable until a restart.
         apply_shared_hive_env()
+        # And the account catalog has to be re-asked, or a provider connected
+        # here keeps reporting "not connected" for the rest of the cache TTL —
+        # which reads as a key that was rejected.
+        provider_models.forget_cache()
         return {"ok": True, **{key: written[key] for key in ("added", "updated", "kept")}, "path": written["path"]}
 
     @app.get("/api/oauth")

@@ -36,7 +36,7 @@ import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { LOCAL_MODEL_CATALOG } from '../lib/localModels.js';
 import {
   askProducer, connectHivemindosAccount, hivemindosLinkState, requestHivemindosLink,
-  startCreditTopUp, textModelCatalog,
+  saveProviderKey, startCreditTopUp, textModelCatalog,
 } from '../lib/localProducer.js';
 import { needsBrowserKey, runImage, transportFor } from '../lib/modelRunner.js';
 import {
@@ -45,10 +45,12 @@ import {
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { lastUsedModelId, rememberModelId, sortModels } from '../lib/promptHelperRuntime.js';
 import {
-  accountConnected, APP_ROUTE, creditsHome, creditsLine, HIVEMINDOS, LINK_POLL_MS, LINK_WAIT_MS,
+  ACCOUNTS, accountConnected, accountsLine, accountsOf, APP_ROUTE, creditsHome, creditsLine,
+  HIVEMINDOS, LINK_POLL_MS, LINK_WAIT_MS,
   LOCAL, localHeadroom,
-  modelsForTab, privacyLine,
-  recommendedId, remedyFor, routeOf, rowFor, sourceState, startingModelId, statusLine, summaryLine,
+  modelsForAccount, modelsForTab, privacyLine,
+  recommendedId, remedyFor, routeOf, rowFor, sourceIdForTab, sourceState, startingModelId,
+  statusLine, summaryLine,
   TABS, tabCounts, tabOf,
 } from '../lib/textModels.js';
 import { Icon } from '../ui/icons.jsx';
@@ -282,17 +284,141 @@ function ConnectAccount({ busy, linking, onConnect, onLink, onTopUp }) {
 // Enough rows to browse without turning the picker into a page of its own.
 const VISIBLE_MODELS = 40;
 
+/**
+ * The owner's provider accounts, as the first choice on their tab.
+ *
+ * Six connected accounts is several hundred models, and "search 657 models" is
+ * not a decision anyone can make. So the account comes first — it is the thing
+ * that differs (a different bill, a different privacy answer, a different
+ * plan) — and the model list follows from it.
+ *
+ * Accounts that are NOT connected are shown too, quieter, each with the one
+ * action that connects it. That is the whole discovery path for "the ChatGPT
+ * plan I already pay for can write these scenes".
+ */
+function AccountStrip({ catalog, selected, onSelect, onRemedy, busy }) {
+  const accounts = accountsOf(catalog);
+  const connected = accounts.filter((account) => account.connected);
+  const missing = accounts.filter((account) => !account.connected);
+  if (!accounts.length) return null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      {connected.length ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => onSelect('')}
+            className={cx(
+              'rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors',
+              selected ? 'border-line1 bg-bg2 text-ink3 hover:border-line2' : 'border-honey/60 bg-honey-tint text-ink1',
+            )}
+          >
+            All
+          </button>
+          {connected.map((account) => (
+            <button
+              key={account.id}
+              type="button"
+              onClick={() => onSelect(account.id)}
+              className={cx(
+                'rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors',
+                selected === account.id
+                  ? 'border-honey/60 bg-honey-tint text-ink1'
+                  : 'border-line1 bg-bg2 text-ink3 hover:border-line2',
+              )}
+            >
+              {account.label}
+              <span className="ml-1 text-[10px] font-normal text-ink3/80">{account.count}</span>
+              {/* A connected account that could not be asked is not the same as
+                  one that was never connected, and it does not get the same
+                  button. Saying so here keeps the count honest. */}
+              {account.connected && !account.count ? <span className="ml-1 text-warn">!</span> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {missing.length ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-ink3">Also available:</span>
+          {missing.map((account) => {
+            const remedy = remedyFor(account.remedy);
+            return (
+              <button
+                key={account.id}
+                type="button"
+                disabled={busy || !remedy}
+                onClick={() => remedy && onRemedy(remedy)}
+                className="rounded-md border border-dashed border-line2 bg-transparent px-2 py-1 text-[11px] text-ink3 transition-colors hover:border-honey/50 hover:text-ink2 disabled:opacity-50"
+              >
+                {account.label}
+                <span className="ml-1 text-[10px] text-ink3/70">{remedy?.label || 'not connected'}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * One provider key, taken and stored on the machine.
+ *
+ * It goes to the shared credential store — the same `~/.hivemindos/.env` the
+ * HivemindOS app reads — so a key added here is a key added for every Hive app
+ * on this machine, and never a second copy in this browser. The field is a
+ * password field and the value is never read back.
+ */
+function KeyField({ name, busy, onSave, onCancel }) {
+  const [value, setValue] = useState('');
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2 rounded-md border border-line1 bg-bg2 p-2"
+      onSubmit={(event) => { event.preventDefault(); if (value.trim()) onSave(name, value.trim()); }}
+    >
+      <span className="text-[11px] font-semibold text-ink2">{name}</span>
+      <TextInput
+        type="password"
+        autoComplete="off"
+        className="min-w-[14rem] flex-1"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder="Paste the key"
+      />
+      <Button size="sm" type="submit" disabled={busy || !value.trim()}>{busy ? 'Saving…' : 'Save'}</Button>
+      <Button size="sm" type="button" onClick={onCancel}>Cancel</Button>
+      <span className="w-full text-[10px] leading-snug text-ink3">
+        Stored on this machine in the shared credential store, alongside HivemindOS’s own keys.
+        It is never sent to HivemindOS and never kept in this browser.
+      </span>
+    </form>
+  );
+}
+
 function ProducerPicker({
   catalog, selectedId, tab, onTab, query, onQuery, onPick, onRemedy, onConnect, connecting,
-  onLink, linking,
+  onLink, linking, account, onAccount, keyField, onKeySave, onKeyCancel, savingKey,
 }) {
   const counts = tabCounts(catalog);
-  const state = sourceState(catalog, tab === LOCAL ? LOCAL : HIVEMINDOS);
-  const rows = modelsForTab(catalog, tab, query);
+  const state = sourceState(catalog, sourceIdForTab(tab));
+  // On the accounts tab the account chosen above narrows the list; with none
+  // chosen every connected account's models are offered at once.
+  const rows = tab === ACCOUNTS && account
+    ? modelsForAccount(catalog, account, query)
+    : modelsForTab(catalog, tab, query);
   const remedy = state.available ? null : remedyFor(state.remedy);
   const meta = TABS.find((entry) => entry.id === tab) || TABS[0];
   const recommended = recommendedId(catalog);
-  const line = tab === LOCAL ? localHeadroom(catalog) : creditsLine(catalog);
+  const line = tab === LOCAL ? localHeadroom(catalog)
+    : tab === ACCOUNTS ? accountsLine(catalog)
+    : creditsLine(catalog);
+  // Connected but empty-handed. Narrowed to the chosen account when there is
+  // one, so choosing OpenRouter does not explain Venice.
+  const brokenAccounts = tab === ACCOUNTS
+    ? accountsOf(catalog).filter((entry) => entry.connected && !entry.count
+        && (!account || entry.id === account))
+    : [];
   // A long list is searched, not scrolled: the cloud tab carries hundreds of
   // models and nobody finds one of those by dragging a scrollbar.
   const searchable = counts[tab] > 12;
@@ -320,21 +446,60 @@ function ProducerPicker({
 
       <p className="text-[11px] leading-snug text-ink3">
         {meta.blurb}
-        {tab === LOCAL ? null : <span className="text-ink3/70"> {creditsHome(catalog)}</span>}
+        {tab === LOCAL || tab === ACCOUNTS
+          ? null
+          : <span className="text-ink3/70"> {creditsHome(catalog)}</span>}
       </p>
 
       {!state.available ? (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-warn/40 bg-warn-tint p-2 text-[11px] text-ink2">
           <span>{state.detail || 'This source is not available right now.'}</span>
           {remedy ? (
-            <Button size="sm" className="ml-auto" onClick={() => onRemedy(remedy.action)}>{remedy.label}</Button>
+            <Button size="sm" className="ml-auto" onClick={() => onRemedy(remedy)}>{remedy.label}</Button>
           ) : null}
+        </div>
+      ) : null}
+
+      {tab === ACCOUNTS ? (
+        <AccountStrip
+          catalog={catalog}
+          selected={account}
+          onSelect={onAccount}
+          onRemedy={onRemedy}
+          busy={savingKey}
+        />
+      ) : null}
+
+      {tab === ACCOUNTS && keyField ? (
+        <KeyField name={keyField} busy={savingKey} onSave={onKeySave} onCancel={onKeyCancel} />
+      ) : null}
+
+      {/* A connected account that came back with nothing has a reason and a
+          repair, and both belong here rather than in an empty list. Without
+          this the tab shows "OpenRouter 0" and says nothing at all — which
+          reads as a key that was silently rejected. */}
+      {tab === ACCOUNTS && brokenAccounts.length ? (
+        <div className="flex flex-col gap-1.5">
+          {brokenAccounts.map((entry) => {
+            const fix = remedyFor(entry.remedy);
+            return (
+              <div
+                key={entry.id}
+                className="flex flex-wrap items-center gap-2 rounded-md border border-warn/40 bg-warn-tint p-2 text-[11px] text-ink2"
+              >
+                <span><b>{entry.label}</b> — {entry.detail || 'listed no models just now.'}</span>
+                {fix ? (
+                  <Button size="sm" className="ml-auto" onClick={() => onRemedy(fix)}>{fix.label}</Button>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       ) : null}
 
       {/* Offered before a press, not after a refusal: every paid row on these
           tabs needs an account, so the way to connect one belongs here. */}
-      {state.available && tab !== LOCAL && !accountConnected(catalog) ? (
+      {state.available && tab !== LOCAL && tab !== ACCOUNTS && !accountConnected(catalog) ? (
         <ConnectAccount
           busy={connecting}
           linking={linking}
@@ -367,6 +532,8 @@ function ProducerPicker({
               <span className="truncate font-semibold text-ink1">{model.name || model.id}</span>
               {model.id === recommended ? <Pill tone="honey">Default</Pill> : null}
               {model.tier === 'free' && model.source === HIVEMINDOS ? <Pill tone="ok">Free</Pill> : null}
+              {/* Which account pays, when several are listed together. */}
+              {model.source === ACCOUNTS && !account ? <Pill>{model.group}</Pill> : null}
             </span>
             <span className="truncate text-[10px] text-ink3/80">{statusLine(model)}</span>
           </button>
@@ -434,6 +601,12 @@ export function StoryStudio({ active = true } = {}) {
   // current answer came from rather than always on the first tab.
   const [producerTab, setProducerTab] = useState('');
   const [producerQuery, setProducerQuery] = useState('');
+  // Which of the owner's provider accounts the model list is narrowed to, and
+  // the key field a "not connected" account opened. Both are picker state, not
+  // session state: which account a model belongs to is carried by its id.
+  const [producerAccount, setProducerAccount] = useState('');
+  const [keyField, setKeyField] = useState('');
+  const [savingKey, setSavingKey] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [linking, setLinking] = useState(false);
   // Two pieces of state, because they answer different questions. `busy` is
@@ -582,7 +755,57 @@ export function StoryStudio({ active = true } = {}) {
     }
   }, [refreshRuntime]);
 
-  const runRemedy = useCallback(async (action) => {
+  /**
+   * Save one provider key into the machine's shared credential store.
+   *
+   * The value goes to the server and is never held in this browser. The catalog
+   * is re-read straight after, because an account that is connected but still
+   * shows "not connected" until a reload is indistinguishable from one that
+   * failed to connect.
+   */
+  const saveKey = useCallback(async (name, value) => {
+    setSavingKey(true);
+    try {
+      await saveProviderKey(name, value);
+      setKeyField('');
+      await refreshRuntime();
+      toast.success(`${name} saved. Its models are on the Your accounts tab.`);
+    } catch (error) {
+      toast.error(error?.message || 'That key could not be saved.');
+    } finally {
+      setSavingKey(false);
+    }
+  }, [refreshRuntime]);
+
+  const runRemedy = useCallback(async (remedy) => {
+    // Called both with a bare action (the older call sites) and with the whole
+    // remedy, because a provider account's repair has to name WHICH account.
+    const action = typeof remedy === 'string' ? remedy : String(remedy?.action || '');
+    if (action === 'accounts') {
+      setProducerOpen(true);
+      setProducerTab(ACCOUNTS);
+      return;
+    }
+    if (action === 'key') {
+      setProducerOpen(true);
+      setProducerTab(ACCOUNTS);
+      setKeyField(String(remedy?.key || ''));
+      return;
+    }
+    if (action === 'oauth') {
+      // The same sign-in the Providers view runs — one flow per account on this
+      // machine, so signing in here signs in for HivemindOS too.
+      try {
+        const url = await startOAuthLogin(String(remedy?.provider || ''));
+        window.open(url, '_blank', 'noopener,noreferrer');
+        toast('Finish the sign-in in the tab that opened, then press Try again.', { icon: '🔑', duration: 10000 });
+      } catch (error) {
+        toast.error(
+          error?.instruction ? `${error.message} ${error.instruction}` : (error?.message || 'Could not start the sign-in.'),
+        );
+      }
+      return;
+    }
     if (action === 'models') {
       window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'models' } }));
       return;
@@ -625,6 +848,33 @@ export function StoryStudio({ active = true } = {}) {
     window.open(url, '_blank', 'noopener,noreferrer');
   }, [runtime, refreshRuntime]);
 
+  /**
+   * A producer failure, shown with its repair when it named one.
+   *
+   * The engines answer refusals as `{message, remedy, provider}` — an expired
+   * ChatGPT sign-in, a key the provider rejected, credits that ran out — so a
+   * plain `toast.error(message)` throws the only actionable half away. This is
+   * the same rule the image side already follows after the OAuth error that had
+   * nothing to press.
+   */
+  const producerFailed = useCallback((error, fallback) => {
+    const message = error?.message || fallback;
+    const remedy = remedyFor(error?.remedy);
+    if (!remedy) { toast.error(message); return; }
+    toast.error((t) => (
+      <span className="flex flex-col gap-1.5 text-[12px]">
+        <span className="text-ink2">{message}</span>
+        <span className="flex gap-2">
+          <Button size="sm" onClick={() => { toast.dismiss(t.id); void runRemedy(remedy); }}>
+            {remedy.label}
+          </Button>
+          <Button size="sm" onClick={() => toast.dismiss(t.id)}>Dismiss</Button>
+        </span>
+      </span>
+    ), { duration: 12000 });
+  }, [runRemedy]);
+
+
   /** One ask, with no opinion about buttons. Throws; the callers decide whether
    *  a failure is a toast or one step of a longer job. */
   const runProducer = useCallback(async (task, brief, context, { onStatus, signal }) => {
@@ -657,7 +907,7 @@ export function StoryStudio({ active = true } = {}) {
         onStatus: setThinking, signal: controller.signal,
       });
     } catch (error) {
-      if (!error?.cancelled) toast.error(error?.message || 'The producer could not answer that.');
+      if (!error?.cancelled) producerFailed(error, 'The producer could not answer that.');
       return null;
     } finally {
       setBusy('');
@@ -709,6 +959,10 @@ export function StoryStudio({ active = true } = {}) {
     let draft = storyRef.current;
     let written = 0;
     let failure = '';
+    // The error object as well as its sentence: a refusal that named a repair
+    // has to keep it all the way to the summary toast, or the fill loop is the
+    // one place the fix gets dropped.
+    let failureError = null;
     let stopped = false;
     try {
       for (let index = 0; index < chunks.length; index += 1) {
@@ -732,6 +986,7 @@ export function StoryStudio({ active = true } = {}) {
           // same way — and what landed stays, so pressing Fill again asks only
           // for what is still blank.
           failure = error?.message || 'The producer could not answer that.';
+          failureError = error;
           break;
         }
         const accepted = acceptedValues(group, result?.values);
@@ -753,7 +1008,7 @@ export function StoryStudio({ active = true } = {}) {
       return;
     }
     if (failure) {
-      if (!written) toast.error(failure);
+      if (!written) producerFailed(failureError, failure);
       else toast(`Filled ${written} of ${total}, then the producer stopped: ${failure}`, { icon: '✍️', duration: 12000 });
       return;
     }
@@ -1308,6 +1563,12 @@ export function StoryStudio({ active = true } = {}) {
               onQuery={setProducerQuery}
               onPick={(id) => { setProducerId(id); rememberModelId(id); }}
               onRemedy={runRemedy}
+              account={producerAccount}
+              onAccount={setProducerAccount}
+              keyField={keyField}
+              onKeySave={saveKey}
+              onKeyCancel={() => setKeyField('')}
+              savingKey={savingKey}
               onConnect={connectAccount}
               connecting={connecting}
               onLink={linkThroughApp}

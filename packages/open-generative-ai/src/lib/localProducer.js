@@ -58,6 +58,18 @@ export function textModelCatalog({ signal = null } = {}) {
 }
 
 /**
+ * Store one provider key in the machine's shared credential store.
+ *
+ * The same store the HivemindOS app reads (`~/.hivemindos/.env`), so a key
+ * added from the producer picker is a key added for every Hive app here. The
+ * value crosses to the server once and is never read back — the studio only
+ * ever asks whether the NAME is set.
+ */
+export function saveProviderKey(name, value, { signal = null } = {}) {
+  return api('/api/passbook', { values: { [name]: value } }, { signal });
+}
+
+/**
  * Point this studio at the owner's HivemindOS account.
  *
  * The key spends the balance they already have — the same one the HivemindOS app

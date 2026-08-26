@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from hivemind_content_studio import gpu_rentals, hivemindos_models, mtplx_server, private_access
+from hivemind_content_studio import (
+    gpu_rentals, hivemindos_models, mtplx_server, private_access, provider_models,
+)
 
 
 OPEN_GEN_DIST = Path(__file__).resolve().parents[2] / "packages" / "open-generative-ai" / "dist"
@@ -118,6 +120,34 @@ def _isolate_hivemindos_models(monkeypatch) -> None:
     # to link a balance without being asked. A developer's real vault would make
     # "is an account connected?" answer differently on their machine than in CI.
     monkeypatch.setenv("HIVEMINDOS_HOME", str(Path(__file__).parent / "no-such-hivemindos"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_accounts(monkeypatch) -> None:
+    """No test may spend the developer's own OpenAI, ChatGPT or OpenRouter account.
+
+    The producer can now run on the owner's provider accounts, and those
+    credentials are read from the machine's shared store AND from the process
+    environment — so on a developer's machine `status()` finds six live accounts
+    and asks each one for its catalog with a real key. That is the same shape as
+    the leak that once rented eight GPUs: the variable is not the boundary, the
+    CREDENTIAL READ is.
+
+    So both seams are blocked. `stored_names()` reports nothing connected, which
+    stops discovery before it starts, and `credential()` returns nothing, which
+    stops any call that got past it from carrying a key. A test that wants a
+    connected provider patches these back with fake values, and one that forgets
+    gets "not connected" rather than a live request on someone's bill.
+
+    The catalog cache is cleared around every test as well: it is module state
+    with a ten-minute TTL, so one test's fake OpenRouter would otherwise still
+    be the answer several tests later.
+    """
+    provider_models.forget_cache()
+    monkeypatch.setattr(provider_models, "stored_names", lambda: set())
+    monkeypatch.setattr(provider_models, "credential", lambda name, reason="": "")
+    yield
+    provider_models.forget_cache()
 
 
 @dataclass(frozen=True)

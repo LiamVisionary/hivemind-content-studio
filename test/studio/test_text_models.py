@@ -498,8 +498,8 @@ def test_the_catalog_reports_a_broken_source_instead_of_dropping_it(monkeypatch)
     cloud = catalog["sources"]["hivemindos"]
     assert cloud["available"] is False
     assert cloud["remedy"] == "retry"
-    # Both sources are still listed, so the picker can show what is missing.
-    assert set(catalog["sources"]) == {"local", "hivemindos"}
+    # Every source is still listed, so the picker can show what is missing.
+    assert set(catalog["sources"]) == {"local", "hivemindos", "accounts"}
 
 
 def test_a_cloud_failure_keeps_its_repair_instead_of_becoming_a_producer_error(linked) -> None:

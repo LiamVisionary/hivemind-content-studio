@@ -21,14 +21,25 @@ import { formatBytes, modelStatus } from './promptHelperRuntime.js';
 
 export const LOCAL = 'local';
 export const HIVEMINDOS = 'hivemindos';
+/** The owner's OWN provider accounts — their OpenAI key, their ChatGPT
+ *  sign-in, their OpenRouter balance. Billed by that provider to that account,
+ *  never to HivemindOS credits, and read from the same shared credential store
+ *  the HivemindOS app uses, so connecting one anywhere connects it everywhere. */
+export const ACCOUNTS = 'accounts';
 
 /**
- * The three things an owner is actually choosing between.
+ * The four things an owner is actually choosing between.
  *
- * Local and HivemindOS are the two SOURCES; "Cloud models" is the second half of
- * the HivemindOS source, split out because a list of hundreds of named frontier
- * models is a different kind of decision from picking one of the house tiers,
- * and burying the first inside the second makes both worse.
+ * Local, HivemindOS and their own accounts are the three SOURCES; "Cloud
+ * models" is the second half of the HivemindOS source, split out because a list
+ * of hundreds of named frontier models is a different kind of decision from
+ * picking one of the house tiers, and burying the first inside the second makes
+ * both worse.
+ *
+ * The last tab is the one this picker was missing: an owner with a ChatGPT plan,
+ * an OpenAI key or an OpenRouter balance was being asked to buy HivemindOS
+ * credits to write a scene, with the credential for the model they wanted
+ * already sitting in the machine's shared store.
  */
 export const TABS = Object.freeze([
   {
@@ -48,6 +59,12 @@ export const TABS = Object.freeze([
     label: 'Cloud models',
     blurb: 'Every named model HivemindOS can reach, on the same credits.',
     privacy: 'The story is sent to HivemindOS to answer, and the answer is charged to your HivemindOS credits.',
+  },
+  {
+    id: ACCOUNTS,
+    label: 'Your accounts',
+    blurb: 'Models on accounts you already pay for — no HivemindOS credits spent.',
+    privacy: 'The story is sent straight to the provider you picked and billed to your own account there. It does not pass through HivemindOS.',
   },
 ]);
 
@@ -101,14 +118,26 @@ const HOUSE_GROUPS = new Set(['HivemindOS', 'Hive Compute']);
 
 export const isCloudModel = (row) => row?.source === HIVEMINDOS;
 
+/** A model on one of the owner's own provider accounts. */
+export const isAccountModel = (row) => row?.source === ACCOUNTS;
+
 /** A local model has to be loaded into RAM before it can answer; a cloud one is
  *  answered by a machine that is already running. */
 export const needsLoad = (row) => row?.source === LOCAL;
 
 /** The tab a row lives on. */
 export function tabOf(row) {
+  if (isAccountModel(row)) return ACCOUNTS;
   if (!isCloudModel(row)) return LOCAL;
   return HOUSE_GROUPS.has(row.group) ? HIVEMINDOS : 'cloud';
+}
+
+/** Which source's state backs a tab. Two of the four tabs are two halves of the
+ *  HivemindOS source, which is why this is a lookup and not `tab === source`. */
+export function sourceIdForTab(tabId) {
+  if (tabId === LOCAL) return LOCAL;
+  if (tabId === ACCOUNTS) return ACCOUNTS;
+  return HIVEMINDOS;
 }
 
 /** The model HivemindOS says to start on — its own answer, not a second copy of
@@ -124,6 +153,35 @@ export function rowFor(payload, id) {
 
 export function sourceState(payload, sourceId) {
   return payload?.sources?.[sourceId] || { available: false, models: [], detail: '', remedy: '' };
+}
+
+/** Every provider account this studio knows how to use, connected or not.
+ *
+ *  Not-connected accounts are listed on purpose: the tab is also how an owner
+ *  discovers that the ChatGPT plan they already pay for can write scenes. */
+export function accountsOf(payload) {
+  return sourceState(payload, ACCOUNTS).accounts || [];
+}
+
+export function accountFor(payload, providerId) {
+  return accountsOf(payload).find((account) => account.id === providerId) || null;
+}
+
+/** The rows belonging to one provider account. */
+export function modelsForAccount(payload, providerId, query = '') {
+  const rows = (payload?.models || []).filter(
+    (row) => isAccountModel(row) && row.provider === providerId,
+  );
+  return search(rows, query);
+}
+
+/** "3 of 9 connected" — what the accounts tab says about itself before any
+ *  provider is chosen. */
+export function accountsLine(payload) {
+  const accounts = accountsOf(payload);
+  if (!accounts.length) return '';
+  const connected = accounts.filter((account) => account.connected).length;
+  return connected ? `${connected} of ${accounts.length} connected` : 'none connected yet';
 }
 
 /**
@@ -176,6 +234,12 @@ export function startingModelId(payload, lastUsedId = '') {
  *  cloud model costs to run. */
 export function statusLine(row) {
   if (!row) return '';
+  // The provider's own price when it quoted one, else the account that pays —
+  // which is the fact that matters on this tab, because it is not the same
+  // wallet as either of the other two.
+  // Not "your <group> account" — the group is already beside it in every place
+  // this is shown, and "your ChatGPT (sign-in) account" reads as a stutter.
+  if (isAccountModel(row)) return row.subtitle || 'Billed to your own account';
   if (!isCloudModel(row)) return modelStatus(row);
   if (row.tier === 'free') return row.subtitle || 'Free daily allowance';
   return row.subtitle || 'HivemindOS credits';
@@ -185,7 +249,7 @@ export function statusLine(row) {
  *  opening the picker. */
 export function summaryLine(row) {
   if (!row) return 'no model chosen';
-  const where = isCloudModel(row) ? 'HivemindOS' : 'on this machine';
+  const where = isAccountModel(row) ? row.group : isCloudModel(row) ? 'HivemindOS' : 'on this machine';
   const status = statusLine(row);
   return status ? `${row.name || row.id} · ${where} · ${status}` : `${row.name || row.id} · ${where}`;
 }
@@ -217,11 +281,30 @@ export const REMEDIES = Object.freeze({
   // which spends the balance they already have. Buying a second one is the
   // fallback for someone who has never had HivemindOS credits at all.
   'connect-account': { label: 'Connect account', action: 'connect' },
+  // No provider account connected at all. Points at the tab rather than at one
+  // provider, because which one to connect is the owner's choice.
+  'connect-provider': { label: 'Connect an account', action: 'accounts' },
   retry: { label: 'Try again', action: 'refresh' },
 });
 
+/**
+ * The action that repairs a state, including the ones that name a target.
+ *
+ * A provider account's remedy has to say WHICH account — "Add key" with no key
+ * name is the same dead end as an error with no button — so those arrive as
+ * `key:OPENROUTER_API_KEY` or `oauth:openai` and are parsed here rather than
+ * enumerated: the server owns the provider list, and a hard-coded copy in the
+ * browser is the half that goes stale when a provider is added.
+ */
 export function remedyFor(remedy) {
-  return REMEDIES[String(remedy || '')] || null;
+  const value = String(remedy || '');
+  if (value.startsWith('key:')) {
+    return { label: 'Add key', action: 'key', key: value.slice(4) };
+  }
+  if (value.startsWith('oauth:')) {
+    return { label: 'Sign in', action: 'oauth', provider: value.slice(6) };
+  }
+  return REMEDIES[value] || null;
 }
 
 /**

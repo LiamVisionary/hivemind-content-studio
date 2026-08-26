@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import hivemindos_models, local_llm
+from . import hivemindos_models, local_llm, provider_models
 
 
 class StoryProducerError(RuntimeError):
@@ -653,12 +653,13 @@ def produce(
             )
         except local_llm.LocalLlmError as exc:
             raise StoryProducerError(str(exc)) from exc
-        except hivemindos_models.HivemindosModelsError as exc:
+        except (hivemindos_models.HivemindosModelsError, provider_models.ProviderModelsError) as exc:
             # A cloud failure that carries a REMEDY (no credits, HivemindOS not
-            # running, not linked) is not a bad answer and must not be retried —
-            # it has to reach the studio with its repair attached. Anything else
-            # from that engine is an answer problem, so it joins the local path
-            # and gets the same pointed retry.
+            # running, not linked, a sign-in that needs redoing) is not a bad
+            # answer and must not be retried — it has to reach the studio with
+            # its repair attached. Anything else from either cloud engine is an
+            # answer problem, so it joins the local path and gets the same
+            # pointed retry.
             if exc.remedy:
                 raise
             raise StoryProducerError(str(exc)) from exc
