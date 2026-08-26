@@ -93,6 +93,15 @@ fail_under = 70
 show_missing = true
 skip_covered = true
 
+[tool.hatch.metadata]
+# PassBook is depended on by git URL (see `project.dependencies`), which
+# hatchling calls a "direct reference" and refuses to build without this flag.
+# Newer hatchlings enforce it on EDITABLE builds too, so a machine that had a
+# working venv kept running until something invalidated it — and then every
+# cold start failed with a build-backend traceback rather than anything that
+# named the dependency. That is what took the studio down on 2026-08-26.
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["app", "src/hivemind_content_studio", "src/auto_clipper"]
 
