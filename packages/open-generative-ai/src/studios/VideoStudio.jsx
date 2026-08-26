@@ -816,15 +816,57 @@ export function VideoStudio({
       .filter((model) => !(rentedOnly && s.rentedMachines?.length) || servedByAnyMachine(s.rentedMachines, model));
   };
   const sendDescriptorFor = (source) => {
-    // Rented with nothing running is not a target. The model menu leaves its
-    // list unfiltered in that state (there is no machine to filter against),
-    // which would otherwise offer a source that cannot run anything.
-    if (source === 'rented' && !(s.rentedMachines || []).length) {
-      return {
-        available: false,
-        modelId: '', modelName: '', plan: null, switches: false,
-        reason: zh() ? '没有正在运行的机器' : 'No machine is running',
-      };
+    // A rented machine that is not LIVE is still a rented machine. "No machine
+    // is running" over a box that is merely unattached reads as "you have not
+    // rented anything", which is a different and wrong statement — and it hides
+    // the one-click fix the Source panel already offers. Same vocabulary the
+    // generate guard uses, so the two never disagree about what is wrong.
+    if (source === 'rented') {
+      const live = (s.rentedMachines || []).length;
+      const idle = (s.rentedIdle || []).length;
+      const broken = (s.rentedBroken || []).length;
+      const provisioning = (s.rentedProvisioning || []).length;
+      if (!live && !idle && !broken && !provisioning) {
+        return {
+          available: false,
+          modelId: '', modelName: '', plan: null, switches: false,
+          reason: zh() ? '还没有租用机器' : 'No machine rented yet',
+        };
+      }
+      // Rented stays choosable while a machine is coming online or waiting to
+      // be connected: the Source panel it lands on carries the button that
+      // fixes it, and refusing the choice here would hide that.
+      if (!live) {
+        const note = broken
+          ? (zh() ? '连接已断开——在“来源”面板重新连接' : 'connection lost — reconnect in the Source panel')
+          : idle
+            ? (zh() ? '尚未接入本工作室——点“用于本工作室”' : 'not connected to this studio yet — "Use it here"')
+            : (zh() ? '仍在上线中' : 'still coming online');
+        const offered = sourceOptions(source);
+        const chosen = offered.find((model) => model.id === s.setup.modelId) || offered[0] || null;
+        if (!chosen) {
+          return {
+            available: false, modelId: '', modelName: '', plan: null, switches: false,
+            reason: `${zh() ? '租用机器' : 'Rented machine'} — ${note}`,
+          };
+        }
+        const chosenEntry = resolveVideoModel(chosen.id, s.catalogs) || chosen;
+        return {
+          available: true,
+          modelId: chosen.id,
+          modelName: chosen.name || chosen.id,
+          switches: chosen.id !== s.setup.modelId,
+          note,
+          plan: deliveryPlan(
+            { modelId: chosen.id, modelFamily: String(chosen.workflowFamily || chosenEntry.workflowFamily || '') },
+            {
+              referenceLane: Boolean(referenceWorkflowForHivemindModel(chosen.id)),
+              ingredientsLane: Boolean(chosenEntry?.supportsIngredientImages),
+              endFrame: Boolean(chosenEntry?.supportsEndFrame),
+            },
+          ),
+        };
+      }
     }
     const offered = sourceOptions(source);
     const current = offered.find((model) => model.id === s.setup.modelId) || offered[0] || null;
@@ -861,7 +903,9 @@ export function VideoStudio({
   // the prompt box would wake the sender's menu for nothing.
   const sendSignature = [
     tabIdRef.current, tabActive, s.setup.modelId, s.setup.localMode, s.setup.rentedOnly,
-    (s.rentedMachines || []).length, (s.catalogs?.hivemindI2V || []).length, (s.catalogs?.allT2V || []).length,
+    (s.rentedMachines || []).length, (s.rentedIdle || []).length,
+    (s.rentedBroken || []).length, (s.rentedProvisioning || []).length,
+    (s.catalogs?.hivemindI2V || []).length, (s.catalogs?.allT2V || []).length,
   ].join('|');
   useEffect(() => {
     const sources = Object.fromEntries(SEND_SOURCES.map((source) => [source, sendDescriptorFor(source)]));

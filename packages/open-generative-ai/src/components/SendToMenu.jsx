@@ -31,40 +31,61 @@ export function useSendTargets(section = 'video') {
 
 function SourceRow({ source, descriptor, describeFor, selected, onSelect }) {
   const label = SOURCE_LABELS[source]?.[zh() ? 'zh' : 'en'] || source;
+  const available = Boolean(descriptor?.available);
   // The sender describes its own trip: how much of a production survives is a
   // property of the production and the target together, so a picture count
   // measured here would be a guess about somebody else's payload.
-  const consequence = descriptor?.available
-    ? (describeFor?.(descriptor.plan) || '')
+  const consequence = available
+    ? [descriptor.note, describeFor?.(descriptor.plan) || ''].filter(Boolean).join(' · ')
     : (descriptor?.reason || '');
   return (
     <button
       type="button"
       role="radio"
       aria-checked={selected}
-      disabled={!descriptor?.available}
+      disabled={!available}
       onClick={() => onSelect(source)}
       className={cx(
-        'flex w-full flex-col gap-0.5 rounded-md px-2.5 py-2 text-left transition-colors duration-150',
-        selected ? 'bg-honey-tint text-ink1' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
-        !descriptor?.available && 'cursor-not-allowed opacity-45 hover:bg-transparent',
+        'flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left transition-colors duration-150',
+        selected
+          ? 'border-honey/40 bg-honey-tint text-ink1'
+          : 'border-transparent text-ink2',
+        // Hover classes are emitted ONLY when the row can be chosen. Adding a
+        // disabled override alongside them left both in the class list and let
+        // stylesheet order decide, which is not a decision anybody made.
+        available && !selected && 'hover:border-line2 hover:bg-bg3 hover:text-ink1',
+        !available && 'cursor-not-allowed opacity-45',
       )}
     >
-      <span className="flex items-center gap-2 text-[13px] font-medium">
-        <Icon name={source === 'api' ? 'cloud' : 'cpu'} size={12} className="shrink-0 text-ink3" />
-        {label}
+      {/* Selection is a CONTROL, not a background tint. bg-bg2 over a bg-bg1
+          panel is six units of difference — hover and selected read as the same
+          ambiguous shading, and which row is armed becomes a guess. */}
+      <span
+        aria-hidden="true"
+        className={cx(
+          'mt-[3px] grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full border transition-colors duration-150',
+          selected ? 'border-honey' : 'border-line2',
+        )}
+      >
+        {selected ? <span className="h-1.5 w-1.5 rounded-full bg-honey" /> : null}
       </span>
-      {/* The subtitle IS the point: a source with no model named under it is a
-          choice made blind. `switches` matters as much as the name — this
-          source does not offer what is loaded now, so picking it moves the tab. */}
-      <span className="truncate pl-[18px] text-[11px] text-ink3">
-        {descriptor?.available
-          ? `${descriptor.switches ? (zh() ? '切换到 ' : 'switches to ') : ''}${descriptor.modelName || descriptor.modelId}`
-          : consequence}
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="flex items-center gap-1.5 text-[13px] font-medium">
+          <Icon name={source === 'api' ? 'cloud' : 'cpu'} size={12} className="shrink-0 text-ink3" />
+          {label}
+        </span>
+        {/* The subtitle IS the point: a source with no model named under it is a
+            choice made blind. `switches` matters as much as the name — this
+            source does not offer what is loaded now, so picking it moves the tab. */}
+        <span className="truncate text-[11px] text-ink3">
+          {available
+            ? `${descriptor.switches ? (zh() ? '切换到 ' : 'switches to ') : ''}${descriptor.modelName || descriptor.modelId}`
+            : consequence}
+        </span>
+        {available && consequence ? (
+          <span className="truncate text-[10px] text-ink3/80">{consequence}</span>
+        ) : null}
       </span>
-      {descriptor?.available && consequence ? (
-        <span className="truncate pl-[18px] text-[10px] text-ink3/80">{consequence}</span>
-      ) : null}
     </button>
   );
 }
