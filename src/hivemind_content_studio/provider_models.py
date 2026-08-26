@@ -40,6 +40,7 @@ What this module will NOT do:
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -50,6 +51,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from . import shared_env
@@ -539,9 +541,39 @@ def _price_line(pricing: Any) -> str:
     return f"{prompt} in · {completion} out /1M" if prompt and completion else ""
 
 
+# A model id that is one dated snapshot of another: `gpt-5-2025-08-07` beside
+# `gpt-5`, `claude-sonnet-4-20250514` beside `claude-sonnet-4`. Purely
+# structural — no model name appears here, so it keeps working for models that
+# do not exist yet.
+_SNAPSHOT = re.compile(r"^(?P<base>.+?)[-@](?P<stamp>\d{4}-\d{2}-\d{2}|\d{8}|\d{6}|\d{4})$")
+
+
+def _retired(row: dict[str, Any], today: str) -> bool:
+    """Has the provider already switched this model off?
+
+    OpenAI ships a `shutdown_date` and goes on listing the model past it —
+    nineteen of its hundred-and-thirty-two rows on this machine were already
+    dead. Offering those is offering a press that cannot work.
+    """
+    for key in ("shutdown_date", "expiration_date"):
+        value = str(row.get(key) or "").strip()[:10]
+        if value and value < today:
+            return True
+    return False
+
+
 def _chat_ids(rows: list[dict[str, Any]], pattern: str = "") -> list[dict[str, Any]]:
+    """The rows that are chat models, deduplicated and dated.
+
+    Three passes, because a catalog is not a menu. `/models` is one list for
+    every endpoint a provider sells, it keeps listing models it has already
+    retired, and it lists every dated snapshot of a model beside the model —
+    on this machine that was 49 duplicates and 19 dead rows out of 132, and
+    what reached the picker was ten near-identical `gpt-5-*` tiles.
+    """
     keep = re.compile(pattern) if pattern else None
-    out = []
+    today = datetime.date.today().isoformat()
+    live: list[dict[str, Any]] = []
     for row in rows:
         model_id = str(row.get("id") or "").strip()
         # Gemini's OpenAI-compatible catalog prefixes every id with `models/`;
@@ -553,8 +585,32 @@ def _chat_ids(rows: list[dict[str, Any]], pattern: str = "") -> list[dict[str, A
             continue
         if keep and not keep.search(model_id):
             continue
-        out.append({**row, "id": model_id})
-    return out
+        if _retired(row, today):
+            continue
+        live.append({**row, "id": model_id})
+
+    # A snapshot is only a snapshot when the model it pins is here too.
+    # Otherwise it is the only way to reach that model and must stay a
+    # first-class row.
+    present = {row["id"] for row in live}
+    snapshots: dict[str, int] = {}
+    for row in live:
+        # Two shapes of the same duplication: a date stapled on
+        # (`gpt-5-2025-08-07`) and a routing variant after a colon
+        # (`z-ai/glm-5.2:batch`, `:free`). Both tripled their base model in the
+        # list while being the same model to choose.
+        model_id = row["id"]
+        base = model_id.split(":", 1)[0] if ":" in model_id else ""
+        if not base or base not in present:
+            match = _SNAPSHOT.match(model_id)
+            base = match.group("base") if match else ""
+        if base and base in present:
+            row["pinned"] = base
+            snapshots[base] = snapshots.get(base, 0) + 1
+    for row in live:
+        if snapshots.get(row["id"]):
+            row["snapshots"] = snapshots[row["id"]]
+    return live
 
 
 def discover(provider: Provider, *, opener: Callable[..., Any] = urllib.request.urlopen,
@@ -646,21 +702,212 @@ def _chatgpt_models(*, opener: Callable[..., Any], present: set[str] | None) -> 
 
 
 # --------------------------------------------------------------------------
+# how popular a model is
+# --------------------------------------------------------------------------
+#
+# OpenRouter does NOT expose usage rankings. `?order=top-weekly` answers 200 and
+# is silently ignored — byte-identical to `?order=newest` and to no parameter at
+# all — and /activity, /models/rankings and the frontend routes are 403 or 404.
+# Its default ordering is newest-first (verified: `created` descending).
+#
+# What it does expose is how many independent providers host each model, one
+# model at a time: `/models/{slug}/endpoints`. That is a real demand signal —
+# hosts do not carry a model nobody asks for. Measured on this machine:
+# qwen3.8-27b 10, gemini-2.5-pro 8, gpt-5.4 7, claude-sonnet-4 5, and 1 apiece
+# for the long tail of models that were filling the picker.
+#
+# Because OpenRouter carries almost everything, one sweep of its catalog is a
+# GLOBAL popularity table: an OpenAI or Gemini row is scored by looking its name
+# up in the same table. It costs one request per model, so it is swept in the
+# background and kept on disk for a day — the picker is never made to wait for
+# it, and ranks by recency until it lands.
+
+# Above this many hosts a model is simply "widely carried", and more hosts stop
+# meaning more demand: an open-weights model is resold by everyone (GLM 5.2 sits
+# at 38) while a proprietary one has a single origin plus a few routers
+# (gpt-5.4 at 7, claude-sonnet-4 at 5). Left uncapped, the tab ranked resale
+# breadth and buried every model the owner actually came for. Capped, "widely
+# carried" is one bucket and recency orders inside it.
+POPULARITY_CAP = 8
+
+POPULARITY_TTL = 86_400.0
+_POPULARITY_WORKERS = 12
+# A sweep of 400+ models takes seconds, so it must never run twice at once.
+_sweep_lock = threading.Lock()
+_sweeping = False
+
+
+def _popularity_path() -> Path:
+    from .config import load_config
+
+    return load_config().data_dir / "provider-model-popularity.json"
+
+
+def _read_popularity() -> dict[str, Any]:
+    try:
+        value = json.loads(_popularity_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def popularity_key(model_name: str) -> str:
+    """The name a model is known by across every provider that carries it.
+
+    `openai/gpt-5.4`, `gpt-5.4` and `gpt-5.4-2025-08-07` are one model with one
+    audience, and they have to collapse to one key or the table only scores the
+    provider it was swept from.
+    """
+    base = str(model_name or "").strip().lower().split("/")[-1]
+    base = base.split(":")[0]
+    match = _SNAPSHOT.match(base)
+    if match:
+        base = match.group("base")
+    return base
+
+
+def popularity(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, int]:
+    """How many providers carry each model, by name. Never blocks, never raises.
+
+    A cold or stale table starts a background sweep and returns whatever it
+    has — including nothing, on the first ever open. Ranking degrades to
+    recency in that case, which is what OpenRouter itself defaults to.
+    """
+    stored = _read_popularity()
+    scores = stored.get("scores") if isinstance(stored.get("scores"), dict) else {}
+    fresh = float(stored.get("fetchedAt") or 0) + POPULARITY_TTL > time.time()
+    if not fresh:
+        _start_sweep(opener=opener)
+    return {str(key): int(value) for key, value in scores.items() if isinstance(value, int)}
+
+
+def _start_sweep(*, opener: Callable[..., Any]) -> None:
+    global _sweeping
+    with _sweep_lock:
+        if _sweeping:
+            return
+        _sweeping = True
+    thread = threading.Thread(target=_sweep, kwargs={"opener": opener},
+                              name="provider-popularity", daemon=True)
+    thread.start()
+
+
+def _sweep(*, opener: Callable[..., Any]) -> None:
+    global _sweeping
+    try:
+        provider = BY_ID["openrouter"]
+        if not credential_name(provider):
+            return
+        try:
+            token, _name = bearer(provider, opener=opener)
+        except ProviderModelsError:
+            return
+        headers = {"Authorization": f"Bearer {token}", **provider.headers}
+        try:
+            payload = _http_json(f"{_base_url(provider)}/models", headers=headers,
+                                 timeout=_DISCOVER_TIMEOUT, opener=opener)
+        except Exception:  # noqa: BLE001 — a sweep that cannot start is not an error
+            return
+        slugs = [str(row.get("id") or "") for row in (payload.get("data") or [])
+                 if isinstance(row, dict) and row.get("id")]
+
+        def count(slug: str) -> tuple[str, int]:
+            try:
+                data = _http_json(
+                    f"{_base_url(provider)}/models/{slug}/endpoints",
+                    headers=headers, timeout=10, opener=opener,
+                )
+                endpoints = ((data or {}).get("data") or {}).get("endpoints") or []
+                return slug, len(endpoints)
+            except Exception:  # noqa: BLE001 — one model failing must not end the sweep
+                return slug, 0
+
+        scores: dict[str, int] = {}
+        with ThreadPoolExecutor(max_workers=_POPULARITY_WORKERS) as pool:
+            for slug, hosts in pool.map(count, slugs):
+                if hosts:
+                    key = popularity_key(slug)
+                    scores[key] = max(scores.get(key, 0), hosts)
+        if not scores:
+            return
+        path = _popularity_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"fetchedAt": time.time(), "scores": scores}),
+                            encoding="utf-8")
+        except OSError:
+            pass
+    finally:
+        with _sweep_lock:
+            _sweeping = False
+
+
+# --------------------------------------------------------------------------
 # the catalog the picker renders
 # --------------------------------------------------------------------------
 
 
-def _row(provider: Provider, upstream: str, subtitle: str) -> dict[str, Any]:
+def _context_line(value: Any) -> str:
+    try:
+        tokens = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if tokens < 1000:
+        return ""
+    return f"{round(tokens / 1_000_000, 1)}M context" if tokens >= 1_000_000 else f"{round(tokens / 1000)}K context"
+
+
+def _row(provider: Provider, source: dict[str, Any], popular: dict[str, int]) -> dict[str, Any]:
+    """One model, as the picker shows it.
+
+    `name` is the provider's own display name when it gives one — "Anthropic:
+    Claude Sonnet 4" reads, `anthropic/claude-sonnet-4` is a slug — and the slug
+    stays on the row so searching for either finds it.
+
+    `subtitle` carries something that DIFFERS between rows. It used to be
+    "Billed to your own account" on all of them, which is stated once on the tab
+    and is noise forty times underneath it.
+    """
+    upstream = str(source["id"])
+    display = str(source.get("name") or source.get("display_name") or "").strip()
+    price = _price_line(source.get("pricing")) or _price_line(_venice_pricing(source))
+    context = _context_line(source.get("context_length")
+                            or (source.get("top_provider") or {}).get("context_length"))
     return {
         "id": model_id_for(provider, upstream),
-        "name": upstream,
-        "subtitle": subtitle,
+        "name": display or upstream,
+        "modelId": upstream,
+        "subtitle": " · ".join(part for part in (price, context) if part),
         "group": provider.label,
         "badge": "Sign-in" if provider.kind == "oauth" else "Your key",
         "tier": "account",
         "provider": provider.id,
         "source": SOURCE,
+        # How many providers carry this model, and when it appeared. The picker
+        # ranks on these; they are on the row so it does not have to ask again.
+        "hosts": min(popular.get(popularity_key(upstream), 0), POPULARITY_CAP),
+        "created": int(source.get("created") or 0),
+        # A dated pin of another row here (`gpt-5-2025-08-07` under `gpt-5`).
+        # Kept, because it may be exactly what someone needs, but not shown
+        # until they search for it.
+        "pinned": str(source.get("pinned") or ""),
+        "snapshots": int(source.get("snapshots") or 0),
     }
+
+
+def _venice_pricing(source: dict[str, Any]) -> dict[str, Any] | None:
+    """Venice quotes per MILLION already, nested under model_spec."""
+    spec = source.get("model_spec")
+    pricing = (spec or {}).get("pricing") if isinstance(spec, dict) else None
+    if not isinstance(pricing, dict):
+        return None
+    given, out = pricing.get("input"), pricing.get("output")
+    if not isinstance(given, dict) or not isinstance(out, dict):
+        return None
+    try:  # back to per-token, so one formatter serves every provider
+        return {"prompt": float(given["usd"]) / 1_000_000, "completion": float(out["usd"]) / 1_000_000}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def status(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
@@ -672,6 +919,7 @@ def status(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, 
     """
     present = stored_names()
     connected = [provider for provider in PROVIDERS if credential_name(provider, present)]
+    popular = popularity(opener=opener)
 
     found: dict[str, dict[str, Any]] = {}
     if connected:
@@ -694,15 +942,11 @@ def status(*, opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, 
         name = credential_name(provider, present)
         result = found.get(provider.id) or {}
         rows = sorted(
-            (
-                _row(provider, str(row["id"]),
-                     _price_line(row.get("pricing")) or str(row.get("description") or "")[:80])
-                for row in (result.get("models") or []) if row.get("id")
-            ),
-            # Providers return their catalogs in no order at all, and the picker
-            # shows the first 40 of them. Unsorted, "the first 40" is a
-            # different 40 on every refresh.
-            key=lambda entry: entry["name"],
+            (_row(provider, row, popular) for row in (result.get("models") or []) if row.get("id")),
+            # Most-carried first, then newest, then by name. A catalog's own
+            # order is either meaningless or newest-first, and alphabetical put
+            # `gpt-4-0613` above every model anyone would actually choose.
+            key=lambda entry: (-entry["hosts"], -entry["created"], entry["name"].lower()),
         )
         models.extend(rows)
         accounts.append({
@@ -761,7 +1005,7 @@ def _default_model(accounts: list[dict[str, Any]], models: list[dict[str, Any]])
         for wanted in provider.preferred:
             # Prefix, so a dated variant of the same model still counts and a
             # preference does not have to be re-pinned every release.
-            match = next((row for row in rows if str(row["name"]).startswith(wanted)), None)
+            match = next((row for row in rows if str(row["modelId"]).startswith(wanted)), None)
             if match:
                 return str(match["id"])
         return str(rows[0]["id"])

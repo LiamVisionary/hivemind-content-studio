@@ -688,6 +688,7 @@ dependencies = [
     { name = "moviepy" },
     { name = "openai" },
     { name = "packaging" },
+    { name = "passbook" },
     { name = "pillow-avif-plugin" },
     { name = "pillow-heif" },
     { name = "pydub" },
@@ -735,6 +736,7 @@ requires-dist = [
     { name = "moviepy", specifier = "==2.2.1" },
     { name = "openai", specifier = "==2.24.0" },
     { name = "packaging", specifier = "==24.2" },
+    { name = "passbook", git = "https://github.com/LiamVisionary/passbook.git" },
     { name = "pillow-avif-plugin", specifier = ">=1.4.6" },
     { name = "pillow-heif", specifier = ">=0.18.0" },
     { name = "pydub", specifier = "==0.25.1" },
@@ -1293,6 +1295,14 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a6/de/8b1895b107277d52f2b42d3a6806e69cfef0d5cf1d0ba343470b9d8e0a04/pandas-2.3.3-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:a68e15f780eddf2b07d242e17a04aa187a7ee12b40b930bfdd78070556550e98", size = 12771002, upload-time = "2025-09-29T23:20:26.76Z" },
     { url = "https://files.pythonhosted.org/packages/87/21/84072af3187a677c5893b170ba2c8fbe450a6ff911234916da889b698220/pandas-2.3.3-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:371a4ab48e950033bcf52b6527eccb564f52dc826c02afd9a1bc0ab731bba084", size = 13450971, upload-time = "2025-09-29T23:20:41.344Z" },
     { url = "https://files.pythonhosted.org/packages/86/41/585a168330ff063014880a80d744219dbf1dd7a1c706e75ab3425a987384/pandas-2.3.3-cp312-cp312-win_amd64.whl", hash = "sha256:a16dcec078a01eeef8ee61bf64074b4e524a2a3f4b3be9326420cabe59c4778b", size = 10992722, upload-time = "2025-09-29T23:20:54.139Z" },
+]
+
+[[package]]
+name = "passbook"
+version = "1.0.0"
+source = { git = "https://github.com/LiamVisionary/passbook.git#d94e1efa4f7773f75cf9fb386950b48e1e1b9ea4" }
+dependencies = [
+    { name = "cryptography" },
 ]
 
 [[package]]

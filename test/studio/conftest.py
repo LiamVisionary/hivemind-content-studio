@@ -146,6 +146,11 @@ def _isolate_provider_accounts(monkeypatch) -> None:
     provider_models.forget_cache()
     monkeypatch.setattr(provider_models, "stored_names", lambda: set())
     monkeypatch.setattr(provider_models, "credential", lambda name, reason="": "")
+    # And the popularity sweep, which is a background thread over 400+ live URLs.
+    # A test must neither start one nor be ranked by whatever the developer's
+    # machine happens to have cached — a test that passes because of a file in
+    # ~/data is a test that fails in CI.
+    monkeypatch.setattr(provider_models, "popularity", lambda **_: {})
     yield
     provider_models.forget_cache()
 

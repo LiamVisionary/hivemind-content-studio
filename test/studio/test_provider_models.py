@@ -382,3 +382,83 @@ def test_a_model_already_in_ram_still_wins_over_every_account() -> None:
     accounts = {"defaultModelId": "account:chatgpt/gpt-5.4"}
     paid = {"available": True, "credits": {"configured": True}, "defaultModelId": "hivemindos/custom:x"}
     assert text_models.default_model_id(local, paid, accounts) == "local.gguf"
+
+
+# --------------------------------------------------------------------------
+# a catalog is not a menu
+# --------------------------------------------------------------------------
+
+
+def test_ten_near_identical_tiles_for_one_model_collapse_to_one(connected) -> None:
+    """A provider lists every dated snapshot and routing variant beside the
+    model itself. Unfolded, the picker's first page was `gpt-5`, `gpt-5-2025-08-07`,
+    `gpt-5-chat-latest`, `gpt-5-codex`, `gpt-5-mini`, `gpt-5-mini-2025-08-07` …
+    — ten tiles for what is one decision."""
+    connected(OPENAI_API_KEY="k")
+    state = provider_models.status(opener=opener_for({"api.openai.com": {"data": [
+        {"id": "gpt-5"}, {"id": "gpt-5-2025-08-07"}, {"id": "gpt-5-mini"},
+        {"id": "glm-5.2"}, {"id": "glm-5.2:free"}, {"id": "glm-5.2:batch"},
+        # No base row here, so this one is the ONLY way to reach that model
+        # and has to stay a first-class row rather than being folded away.
+        {"id": "orphan-2025-01-01"},
+    ]}}))
+    shown = {row["modelId"] for row in state["models"] if not row["pinned"]}
+    assert shown == {"gpt-5", "gpt-5-mini", "glm-5.2", "orphan-2025-01-01"}
+    folded = {row["modelId"]: row["pinned"] for row in state["models"] if row["pinned"]}
+    assert folded == {"gpt-5-2025-08-07": "gpt-5", "glm-5.2:free": "glm-5.2", "glm-5.2:batch": "glm-5.2"}
+    # The base says how many it is standing in for, so nothing is silently capped.
+    assert next(r for r in state["models"] if r["modelId"] == "glm-5.2")["snapshots"] == 2
+
+
+def test_a_model_the_provider_has_already_switched_off_is_not_offered(connected) -> None:
+    """OpenAI ships `shutdown_date` and goes on listing the model past it —
+    nineteen of a hundred and thirty-two rows on a real machine were already
+    dead. Offering those is offering a press that cannot work."""
+    connected(OPENAI_API_KEY="k")
+    state = provider_models.status(opener=opener_for({"api.openai.com": {"data": [
+        {"id": "alive"},
+        {"id": "switched-off", "shutdown_date": "2020-01-01"},
+        {"id": "going-soon", "shutdown_date": "2999-01-01"},
+    ]}}))
+    assert {row["modelId"] for row in state["models"]} == {"alive", "going-soon"}
+
+
+def test_the_most_carried_models_come_first_but_resale_breadth_cannot_run_away(connected, monkeypatch) -> None:
+    """How many providers host a model is a real demand signal — hosts do not
+    carry what nobody asks for. But it counts RESELLERS: an open-weights model
+    sits at 38 while a proprietary flagship has one origin plus a few routers.
+    Uncapped, the tab ranked resale breadth and buried every model the owner
+    came for."""
+    monkeypatch.setattr(provider_models, "popularity",
+                        lambda **_: {"open-weights": 38, "flagship": 7, "nobody-hosts": 1})
+    connected(OPENAI_API_KEY="k")
+    state = provider_models.status(opener=opener_for({"api.openai.com": {"data": [
+        {"id": "nobody-hosts", "created": 3}, {"id": "flagship", "created": 2},
+        {"id": "open-weights", "created": 1},
+    ]}}))
+    assert [row["modelId"] for row in state["models"]] == ["open-weights", "flagship", "nobody-hosts"]
+    # Both widely-carried models land in one bucket, and recency orders inside it.
+    assert [row["hosts"] for row in state["models"]] == [provider_models.POPULARITY_CAP, 7, 1]
+
+
+def test_one_model_scores_the_same_whichever_account_it_is_reached_through() -> None:
+    """`openai/gpt-5.4` on OpenRouter, `gpt-5.4` on an OpenAI key and
+    `gpt-5.4-2025-08-07` pinned are one model with one audience. Without a
+    shared key the table only scores the provider it was swept from."""
+    for name in ("openai/gpt-5.4", "gpt-5.4", "gpt-5.4-2025-08-07", "openai/gpt-5.4:free"):
+        assert provider_models.popularity_key(name) == "gpt-5.4"
+
+
+def test_a_row_says_something_that_differs_from_the_row_above_it(connected) -> None:
+    """Every row used to read "Billed to your own account" — a sentence the tab
+    states once above them. The provider's own name, price and context are what
+    tell two rows apart."""
+    connected(OPENROUTER_API_KEY="k")
+    state = provider_models.status(opener=opener_for({"openrouter": {"data": [
+        {"id": "anthropic/claude-4", "name": "Anthropic: Claude 4", "context_length": 1_000_000,
+         "pricing": {"prompt": "0.000003", "completion": "0.000015"}},
+    ]}}))
+    row = state["models"][0]
+    assert row["name"] == "Anthropic: Claude 4"      # not the slug
+    assert row["modelId"] == "anthropic/claude-4"    # still searchable by it
+    assert row["subtitle"] == "$3 in · $15 out /1M · 1.0M context"

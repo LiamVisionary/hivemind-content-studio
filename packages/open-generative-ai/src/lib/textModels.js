@@ -172,7 +172,7 @@ export function modelsForAccount(payload, providerId, query = '') {
   const rows = (payload?.models || []).filter(
     (row) => isAccountModel(row) && row.provider === providerId,
   );
-  return search(rows, query);
+  return rankByUse(search(visible(rows, query), query));
 }
 
 /** "3 of 9 connected" — what the accounts tab says about itself before any
@@ -197,7 +197,19 @@ export function modelsForTab(payload, tabId, query = '') {
     const recommended = rowFor(payload, recommendedId(payload));
     if (recommended && tabOf(recommended) !== HIVEMINDOS) rows.unshift(recommended);
   }
-  return search(rows, query);
+  return rankByUse(search(visible(rows, query), query));
+}
+
+/** Everything worth listing for this query: the pins join in only once someone
+ *  types, because that is the only time they are what was wanted. */
+function visible(rows, query) {
+  return String(query || '').trim() ? rows : rows.filter((row) => !isPinnedVariant(row));
+}
+
+/** How many rows a tab is holding back, so the cap is never silent. */
+export function hiddenVariants(payload, tabId, providerId = '') {
+  return (payload?.models || []).filter((row) => tabOf(row) === tabId
+    && isPinnedVariant(row) && (!providerId || row.provider === providerId)).length;
 }
 
 /** Substring match over the things a person would actually type — the name they
@@ -207,6 +219,55 @@ export function search(rows, query) {
   if (!needle) return rows;
   return rows.filter((row) => `${row.name} ${row.id} ${row.subtitle || ''}`.toLowerCase().includes(needle));
 }
+
+/**
+ * How often the owner has actually chosen each model. The truest "popular"
+ * this studio can measure, and the only one that is about THEM.
+ *
+ * Per browser, in localStorage, because it is a convenience rather than a
+ * record — losing it costs one session of slightly worse ordering.
+ */
+const USE_KEY = 'hivemind.producer.modelUse';
+
+export function modelUseCounts() {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(USE_KEY) || '{}');
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+export function rememberModelUse(id) {
+  if (!id) return;
+  try {
+    const counts = modelUseCounts();
+    counts[id] = (Number(counts[id]) || 0) + 1;
+    window.localStorage.setItem(USE_KEY, JSON.stringify(counts));
+  } catch {
+    /* a browser that refuses storage still picks models fine */
+  }
+}
+
+/**
+ * The owner's own picks first, then the server's order.
+ *
+ * The server ranks by how many providers carry a model — a real demand signal,
+ * but a global one. What someone reaches for twice a week beats it, and after a
+ * few sessions this is the only ordering that matters to them.
+ */
+export function rankByUse(rows) {
+  const counts = modelUseCounts();
+  return rows
+    .map((row, index) => ({ row, index, used: Number(counts[row.id]) || 0 }))
+    .sort((a, b) => (b.used - a.used) || (a.index - b.index))
+    .map((entry) => entry.row);
+}
+
+/** A dated or routed pin of another row — `gpt-5-2025-08-07` under `gpt-5`,
+ *  `glm-5.2:free` under `glm-5.2`. Reachable by search, out of the way until
+ *  then: on this machine they were 139 of 637 rows. */
+export const isPinnedVariant = (row) => Boolean(row?.pinned);
 
 /** How many models each tab can offer, for the tab's own count badge.
  *
@@ -237,9 +298,10 @@ export function statusLine(row) {
   // The provider's own price when it quoted one, else the account that pays —
   // which is the fact that matters on this tab, because it is not the same
   // wallet as either of the other two.
-  // Not "your <group> account" — the group is already beside it in every place
-  // this is shown, and "your ChatGPT (sign-in) account" reads as a stutter.
-  if (isAccountModel(row)) return row.subtitle || 'Billed to your own account';
+  // Price and context when the provider quotes them, otherwise nothing. This
+  // used to read "Billed to your own account" on every row — a sentence the tab
+  // states once above them, and pure noise forty times underneath.
+  if (isAccountModel(row)) return row.subtitle || '';
   if (!isCloudModel(row)) return modelStatus(row);
   if (row.tier === 'free') return row.subtitle || 'Free daily allowance';
   return row.subtitle || 'HivemindOS credits';
@@ -250,7 +312,9 @@ export function statusLine(row) {
 export function summaryLine(row) {
   if (!row) return 'no model chosen';
   const where = isAccountModel(row) ? row.group : isCloudModel(row) ? 'HivemindOS' : 'on this machine';
-  const status = statusLine(row);
+  // On the collapsed bar the wallet IS the useful half, so an account row that
+  // has no price to show says so here rather than nowhere.
+  const status = statusLine(row) || (isAccountModel(row) ? 'billed to your own account' : '');
   return status ? `${row.name || row.id} · ${where} · ${status}` : `${row.name || row.id} · ${where}`;
 }
 

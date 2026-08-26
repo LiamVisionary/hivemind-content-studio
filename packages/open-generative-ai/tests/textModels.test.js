@@ -276,10 +276,13 @@ test('the accounts tab says who pays before anything is pressed', async () => {
   assert.match(privacyLine(ACCOUNT_ROWS[0]), /billed to your own account there/i);
   assert.match(privacyLine(ACCOUNT_ROWS[0]), /does not pass through HivemindOS/i);
 
-  // The provider's own price when it quoted one; otherwise the wallet.
+  // The provider's own price when it quoted one, and NOTHING when it did not:
+  // "Billed to your own account" under all forty rows is a sentence the tab
+  // states once above them.
   assert.equal(statusLine(ACCOUNT_ROWS[1]), '$3 in · $15 out /1M');
-  assert.equal(statusLine(ACCOUNT_ROWS[0]), 'Billed to your own account');
-  assert.equal(summaryLine(ACCOUNT_ROWS[2]), 'gpt-5.4 · ChatGPT (sign-in) · Billed to your own account');
+  assert.equal(statusLine(ACCOUNT_ROWS[0]), '');
+  // On the collapsed bar the wallet IS the useful half, so it says it there.
+  assert.equal(summaryLine(ACCOUNT_ROWS[2]), 'gpt-5.4 · ChatGPT (sign-in) · billed to your own account');
   assert.equal(accountsLine(WITH_ACCOUNTS), '3 of 4 connected');
 });
 
@@ -309,4 +312,51 @@ test('choosing an account narrows the list to the models it can actually run', a
   // Search still reaches the id, because an OpenRouter model is known by it.
   assert.equal(modelsForAccount(WITH_ACCOUNTS, 'openrouter', 'claude').length, 1);
   assert.equal(modelsForAccount(WITH_ACCOUNTS, 'openrouter', 'gemini').length, 0);
+});
+
+test('the picker does not list ten near-identical tiles for one model', async () => {
+  const { modelsForAccount, hiddenVariants, isPinnedVariant } = await load();
+
+  // A catalog lists every dated snapshot and routing variant beside the model
+  // itself — 139 of 637 rows on a real machine. Ten `gpt-5-*` tiles is not a
+  // choice anyone can make, so the pins wait until they are searched for.
+  const rows = [
+    { id: 'account:openai/gpt-5', name: 'gpt-5', source: 'accounts', provider: 'openai', group: 'OpenAI', pinned: '', snapshots: 2 },
+    { id: 'account:openai/gpt-5-2025-08-07', name: 'gpt-5-2025-08-07', source: 'accounts', provider: 'openai', group: 'OpenAI', pinned: 'gpt-5' },
+    { id: 'account:openai/gpt-5-mini', name: 'gpt-5-mini', source: 'accounts', provider: 'openai', group: 'OpenAI', pinned: '' },
+  ];
+  const payload = { models: rows, sources: { accounts: { available: true, models: rows, accounts: [] } } };
+
+  assert.deepEqual(modelsForAccount(payload, 'openai').map((r) => r.name), ['gpt-5', 'gpt-5-mini']);
+  // Never unreachable, only out of the way: searching for the pin finds it.
+  assert.deepEqual(modelsForAccount(payload, 'openai', '2025-08-07').map((r) => r.name), ['gpt-5-2025-08-07']);
+  // And never a silent cap — the tab can say how many it is holding back.
+  assert.equal(hiddenVariants(payload, 'accounts', 'openai'), 1);
+  assert.equal(isPinnedVariant(rows[1]), true);
+});
+
+test('what the owner keeps choosing outranks what the world hosts most', async () => {
+  const { modelsForAccount, rememberModelUse } = await load();
+
+  const rows = [
+    { id: 'account:openai/a', name: 'a', source: 'accounts', provider: 'openai', group: 'OpenAI', pinned: '' },
+    { id: 'account:openai/b', name: 'b', source: 'accounts', provider: 'openai', group: 'OpenAI', pinned: '' },
+  ];
+  const payload = { models: rows, sources: { accounts: { available: true, models: rows, accounts: [] } } };
+
+  const store = new Map();
+  globalThis.window = { localStorage: {
+    getItem: (k) => store.get(k) ?? null,
+    setItem: (k, v) => store.set(k, v),
+  } };
+  try {
+    // The server ranks globally — by how many providers carry a model. That is
+    // a real signal but it is not about this person; two picks beat it.
+    assert.deepEqual(modelsForAccount(payload, 'openai').map((r) => r.name), ['a', 'b']);
+    rememberModelUse('account:openai/b');
+    rememberModelUse('account:openai/b');
+    assert.deepEqual(modelsForAccount(payload, 'openai').map((r) => r.name), ['b', 'a']);
+  } finally {
+    delete globalThis.window;
+  }
 });

@@ -46,9 +46,9 @@ import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { lastUsedModelId, rememberModelId, sortModels } from '../lib/promptHelperRuntime.js';
 import {
   ACCOUNTS, accountConnected, accountsLine, accountsOf, APP_ROUTE, creditsHome, creditsLine,
-  HIVEMINDOS, LINK_POLL_MS, LINK_WAIT_MS,
+  HIVEMINDOS, hiddenVariants, LINK_POLL_MS, LINK_WAIT_MS,
   LOCAL, localHeadroom,
-  modelsForAccount, modelsForTab, privacyLine,
+  modelsForAccount, modelsForTab, privacyLine, rememberModelUse,
   recommendedId, remedyFor, routeOf, rowFor, sourceIdForTab, sourceState, startingModelId,
   statusLine, summaryLine,
   TABS, tabCounts, tabOf,
@@ -84,7 +84,7 @@ import {
 import { STORY_EXAMPLE } from './story/example.js';
 import { blankStory, producerIsRunning, restoreStory } from './story/state.js';
 import {
-  acceptedValues, blankFieldsIn, fieldMap, fillBrief, fillChunks, storyContext, writePath,
+  acceptedValues, blankFieldsIn, fieldMap, fieldsFor, fillBrief, fillChunks, storyContext, writePath,
 } from './story/fields.js';
 
 const STAGES = [
@@ -96,8 +96,13 @@ const STAGES = [
   { id: 'ship', label: 'Gate', icon: 'check' },
 ];
 
-function StageHeader({ index, stage, done, busy, blanks, onFillSection, children }) {
+function StageHeader({ index, stage, done, busy, blanks, fields, onFillSection, children }) {
   const running = producerIsRunning(busy, `fill-section:${stage.id}`);
+  // A section with nothing blank used to leave a dead grey button reading
+  // "Nothing blank" — the one state where the director most wants another pass
+  // at it. It offers the redraft instead, and names how many fields that is so
+  // it is never a surprise.
+  const redraft = !running && blanks === 0 && fields > 0;
   return (
     <div className="flex items-center gap-2.5">
       <span className={cx(
@@ -113,13 +118,14 @@ function StageHeader({ index, stage, done, busy, blanks, onFillSection, children
         {onFillSection ? (
           <Button
             size="sm"
-            icon={running ? 'refresh' : 'wand'}
-            onClick={() => onFillSection(stage.id)}
+            icon={running || redraft ? 'refresh' : 'wand'}
+            onClick={() => onFillSection(stage.id, { redraft })}
             loading={running}
-            disabled={Boolean(busy) || blanks === 0}
-            className={blanks === 0 ? 'opacity-50' : ''}
+            disabled={Boolean(busy) || (blanks === 0 && !redraft)}
           >
-            {running ? 'Filling…' : blanks ? `Fill ${blanks} blank${blanks === 1 ? '' : 's'}` : 'Nothing blank'}
+            {running ? (redraft ? 'Redrafting…' : 'Filling…')
+              : blanks ? `Fill ${blanks} blank${blanks === 1 ? '' : 's'}`
+              : `Redraft ${fields}`}
           </Button>
         ) : null}
       </div>
@@ -423,6 +429,7 @@ function ProducerPicker({
   // models and nobody finds one of those by dragging a scrollbar.
   const searchable = counts[tab] > 12;
   const shown = rows.slice(0, VISIBLE_MODELS);
+  const pinned = hiddenVariants(catalog, tab, tab === ACCOUNTS ? account : '');
 
   return (
     <div className="flex flex-col gap-2">
@@ -522,7 +529,7 @@ function ProducerPicker({
           <button
             key={`${tab}:${model.id}`}
             type="button"
-            onClick={() => onPick(model.id)}
+            onClick={() => { rememberModelUse(model.id); onPick(model.id); }}
             className={cx(
               'flex flex-col rounded-md border p-2 text-left text-[12px] transition-colors',
               selectedId === model.id ? 'border-honey/60 bg-honey-tint' : 'border-line1 bg-bg2 hover:border-line2',
@@ -540,10 +547,16 @@ function ProducerPicker({
         ))}
       </div>
 
-      {/* Never a silent cap: a search that matched more than fits says so. */}
+      {/* Never a silent cap — neither the display limit nor the folded pins. */}
       {rows.length > shown.length ? (
         <p className="text-[11px] text-ink3">
           Showing {shown.length} of {rows.length} matches. Type more of the name to narrow it.
+        </p>
+      ) : null}
+      {!query && pinned ? (
+        <p className="text-[11px] text-ink3">
+          {pinned} dated and routing variant{pinned === 1 ? '' : 's'} of these models
+          {' '}({'\u201C'}…-2025-08-07{'\u201D'}, {'\u201C'}:free{'\u201D'}) are folded away. Search for one to pick it.
         </p>
       ) : null}
       {state.available && !rows.length ? (
@@ -890,7 +903,7 @@ export function StoryStudio({ active = true } = {}) {
 
   const ask = useCallback(async (task, brief, context, { busyKey = '' } = {}) => {
     if (!producer) {
-      toast.error('Pick a local model for the producer first.');
+      toast.error('Pick a model for the producer first.');
       setProducerOpen(true);
       return null;
     }
@@ -929,6 +942,12 @@ export function StoryStudio({ active = true } = {}) {
     STAGES.map((stage) => [stage.id, blankFieldsIn(stage.id, story).length]),
   ), [story]);
 
+  // How many fields a redraft would rewrite, for the button that offers it once
+  // a section has no blanks left.
+  const stageFields = useMemo(() => Object.fromEntries(
+    STAGES.map((stage) => [stage.id, fieldsFor(stage.id, story).length]),
+  ), [story]);
+
   /**
    * Write the named fields from everything else the director has written.
    *
@@ -940,7 +959,7 @@ export function StoryStudio({ active = true } = {}) {
     const entries = ids.map((id) => specs.get(id)).filter(Boolean);
     if (!entries.length) return;
     if (!producer) {
-      toast.error('Pick a local model for the producer first.');
+      toast.error('Pick a model for the producer first.');
       setProducerOpen(true);
       return;
     }
@@ -1579,7 +1598,7 @@ export function StoryStudio({ active = true } = {}) {
 
         {/* ── 1. Concept ───────────────────────────────────────────── */}
         <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={0} stage={STAGES[0]} done={conceptDone} busy={busy} blanks={blanks.concept} onFillSection={fillSection}>
+          <StageHeader index={0} stage={STAGES[0]} done={conceptDone} busy={busy} blanks={blanks.concept} fields={stageFields.concept} onFillSection={fillSection}>
             {story.concepts.length ? <Pill tone="neutral">{story.concepts.length} drafted</Pill> : null}
           </StageHeader>
           <p className="text-[12px] leading-snug text-ink3">
@@ -1722,7 +1741,7 @@ export function StoryStudio({ active = true } = {}) {
 
         {/* ── 2. Characters ────────────────────────────────────────── */}
         <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={1} stage={STAGES[1]} done={charactersDone} busy={busy} blanks={blanks.characters} onFillSection={fillSection}>
+          <StageHeader index={1} stage={STAGES[1]} done={charactersDone} busy={busy} blanks={blanks.characters} fields={stageFields.characters} onFillSection={fillSection}>
             <Button size="sm" icon="plus" onClick={() => update((current) => ({ ...current, characters: [...current.characters, blankCharacter()] }))}>
               Add character
             </Button>
@@ -1822,7 +1841,7 @@ export function StoryStudio({ active = true } = {}) {
 
         {/* ── 3. Location ──────────────────────────────────────────── */}
         <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={2} stage={STAGES[2]} done={locationDone} busy={busy} blanks={blanks.location} onFillSection={fillSection} />
+          <StageHeader index={2} stage={STAGES[2]} done={locationDone} busy={busy} blanks={blanks.location} fields={stageFields.location} onFillSection={fillSection} />
           <p className="text-[12px] leading-snug text-ink3">
             One empty plate, so no later prompt has to rebuild the place. Empty on purpose:
             a figure in the plate argues with the character sheets in every render.
@@ -1918,7 +1937,7 @@ export function StoryStudio({ active = true } = {}) {
 
         {/* ── 4. Storyboard ────────────────────────────────────────── */}
         <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={3} stage={STAGES[3]} done={boardDone} busy={busy} blanks={blanks.board} onFillSection={fillSection} />
+          <StageHeader index={3} stage={STAGES[3]} done={boardDone} busy={busy} blanks={blanks.board} fields={stageFields.board} onFillSection={fillSection} />
           <p className="text-[12px] leading-snug text-ink3">
             A board is direction, not a contract. Expect the video model to interpret it —
             when a beat has to be exact, drop to two frames and generate only that.
@@ -2024,7 +2043,7 @@ export function StoryStudio({ active = true } = {}) {
 
         {/* ── 5. Motion ────────────────────────────────────────────── */}
         <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={4} stage={STAGES[4]} done={motionDone} busy={busy} blanks={blanks.motion} onFillSection={fillSection}>
+          <StageHeader index={4} stage={STAGES[4]} done={motionDone} busy={busy} blanks={blanks.motion} fields={stageFields.motion} onFillSection={fillSection}>
             <Pill tone={budget.fits ? 'neutral' : 'warn'}>{budget.chars} chars</Pill>
           </StageHeader>
           <p className="text-[12px] leading-snug text-ink3">
@@ -2179,7 +2198,7 @@ export function StoryStudio({ active = true } = {}) {
 
         {/* ── 6. Gate ──────────────────────────────────────────────── */}
         <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={5} stage={STAGES[5]} done={verdict.state === 'ship'} busy={busy} blanks={blanks.ship} onFillSection={fillSection}>
+          <StageHeader index={5} stage={STAGES[5]} done={verdict.state === 'ship'} busy={busy} blanks={blanks.ship} fields={stageFields.ship} onFillSection={fillSection}>
             <Pill tone={verdict.state === 'ship' ? 'ok' : verdict.state === 'blocked' ? 'danger' : 'honey'}>
               {verdict.headline}
             </Pill>
