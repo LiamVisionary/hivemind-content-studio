@@ -450,138 +450,144 @@ export function PassBookView({ active = true }) {
     // Machines, Providers, History and the rest. Same wrapper every other hub
     // view uses; the difference was never deliberate.
     return (
-        <div className={active ? 'flex flex-col gap-5' : 'hidden'}>
+        <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
             <HubToolbar
                 eyebrow={zh() ? '本机共享凭据' : 'Shared on this machine'}
                 title="PassBook"
                 actions={<Button onClick={load} disabled={busy}>{zh() ? '刷新' : 'Refresh'}</Button>}
             />
+            {/* The page scrolls INSIDE the view, the way every other hub
+                page does. Without this the root was a plain `flex flex-col`
+                with no `min-h-0 flex-1` and no scroll container, so anything
+                past the fold was simply unreachable. */}
+            <div className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-4 md:p-5">
 
-            <Card className="flex flex-col gap-2 p-4">
-                <div className="flex flex-wrap items-center gap-2">
-                    <Pill>{zh() ? `${stored} 个已保存` : `${stored} stored`}</Pill>
-                    <Pill>{zh() ? `工作区 ${state.workspace || 'main'}` : `workspace ${state.workspace || 'main'}`}</Pill>
-                    {(state.apps || []).map((app) => <Pill key={app}>{app}</Pill>)}
-                </div>
-                <p className="text-xs leading-relaxed text-ink2">
-                    {zh()
-                        ? '这些密钥保存在本机的共享存储中，本机上每个 Hive 应用都能使用。在此粘贴一次即可，安装 HivemindOS 后会沿用同一存储。'
-                        : 'These keys live in one store shared by every Hive app on this machine. Paste a key once and they all have it — and installing HivemindOS later adopts this same store rather than starting another.'}
-                </p>
-                <p className="font-mono text-[10px] text-ink3">{state.path}</p>
-                {state.writes_to && state.writes_to !== state.path ? (
-                    <p className="text-[11px] text-ink3">
-                        {zh() ? '新密钥将写入此工作区：' : 'New keys are written to this workspace: '}
-                        <span className="font-mono">{state.writes_to}</span>
-                    </p>
-                ) : null}
-            </Card>
-
-            <div>
-                <SectionLabel>{zh() ? '此工作室使用的密钥' : 'Keys this studio uses'}</SectionLabel>
-                <div className="mt-2 grid gap-2 md:grid-cols-2">
-                    {(state.settable || []).map((row) => (
-                        <CredentialRow
-                            key={row.key}
-                            row={row}
-                            value={drafts[row.key]}
-                            busy={busy}
-                            onChange={(key, value) => setDrafts((current) => ({ ...current, [key]: value }))}
-                            onSave={save}
-                        />
-                    ))}
-                </div>
-                {notice ? <p className="mt-2 text-xs text-ink2">{notice}</p> : null}
-            </div>
-
-            <div>
-                <SectionLabel>{zh() ? '静态加密' : 'Encryption at rest'}</SectionLabel>
-                <Card className="mt-2 flex flex-col gap-2 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                        <p className="text-xs text-ink2">{sealing.detail}</p>
-                        <StatusPill
-                            ok={Boolean(sealing.fully_sealed)}
-                            label={sealing.fully_sealed ? (zh() ? '已加密' : 'Encrypted') : (zh() ? '明文' : 'Plaintext')}
-                        />
+                <Card className="flex flex-col gap-2 p-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <Pill>{zh() ? `${stored} 个已保存` : `${stored} stored`}</Pill>
+                        <Pill>{zh() ? `工作区 ${state.workspace || 'main'}` : `workspace ${state.workspace || 'main'}`}</Pill>
+                        {(state.apps || []).map((app) => <Pill key={app}>{app}</Pill>)}
                     </div>
-                    <p className="text-[11px] leading-relaxed text-ink3">
+                    <p className="text-xs leading-relaxed text-ink2">
                         {zh()
-                            ? '加密可防止磁盘泄露：被盗的笔记本、备份或同步的主目录。它无法阻止以你的身份运行的程序读取密钥。'
-                            : 'This protects the store at rest — a stolen laptop, a backup, a synced home folder. It does not stop code running as you from reading a key.'}
+                            ? '这些密钥保存在本机的共享存储中，本机上每个 Hive 应用都能使用。在此粘贴一次即可，安装 HivemindOS 后会沿用同一存储。'
+                            : 'These keys live in one store shared by every Hive app on this machine. Paste a key once and they all have it — and installing HivemindOS later adopts this same store rather than starting another.'}
                     </p>
-                    {sealing.supported && !sealing.fully_sealed ? (
-                        <Button variant="primary" className="self-start" disabled={busy} onClick={seal}>
-                            {zh() ? '加密存储' : 'Encrypt the store'}
-                        </Button>
+                    <p className="font-mono text-[10px] text-ink3">{state.path}</p>
+                    {state.writes_to && state.writes_to !== state.path ? (
+                        <p className="text-[11px] text-ink3">
+                            {zh() ? '新密钥将写入此工作区：' : 'New keys are written to this workspace: '}
+                            <span className="font-mono">{state.writes_to}</span>
+                        </p>
                     ) : null}
-                    {!sealing.supported ? (
-                        <p className="text-[11px] text-ink3">{sealing.keystore || sealing.detail}</p>
-                    ) : null}
                 </Card>
-            </div>
 
-            <Pending pending={access?.pending} busy={busy} onResolve={resolve} />
-
-            <div>
-                <SectionLabel>{zh() ? '暂停询问' : 'Stop being asked'}</SectionLabel>
-                <div className="mt-2">
-                    <Unlocks access={access} busy={busy} onUnlock={unlock} onLock={lock} />
+                <div>
+                    <SectionLabel>{zh() ? '此工作室使用的密钥' : 'Keys this studio uses'}</SectionLabel>
+                    <div className="mt-2 grid gap-2 md:grid-cols-2">
+                        {(state.settable || []).map((row) => (
+                            <CredentialRow
+                                key={row.key}
+                                row={row}
+                                value={drafts[row.key]}
+                                busy={busy}
+                                onChange={(key, value) => setDrafts((current) => ({ ...current, [key]: value }))}
+                                onSave={save}
+                            />
+                        ))}
+                    </div>
+                    {notice ? <p className="mt-2 text-xs text-ink2">{notice}</p> : null}
                 </div>
-            </div>
 
-            <div>
-                <SectionLabel>{zh() ? '访问方式' : 'How each key is answered'}</SectionLabel>
-                <div className="mt-2">
-                    <AccessModes access={access} keys={state.keys} busy={busy} onSetMode={setMode} />
+                <div>
+                    <SectionLabel>{zh() ? '静态加密' : 'Encryption at rest'}</SectionLabel>
+                    <Card className="mt-2 flex flex-col gap-2 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs text-ink2">{sealing.detail}</p>
+                            <StatusPill
+                                ok={Boolean(sealing.fully_sealed)}
+                                label={sealing.fully_sealed ? (zh() ? '已加密' : 'Encrypted') : (zh() ? '明文' : 'Plaintext')}
+                            />
+                        </div>
+                        <p className="text-[11px] leading-relaxed text-ink3">
+                            {zh()
+                                ? '加密可防止磁盘泄露：被盗的笔记本、备份或同步的主目录。它无法阻止以你的身份运行的程序读取密钥。'
+                                : 'This protects the store at rest — a stolen laptop, a backup, a synced home folder. It does not stop code running as you from reading a key.'}
+                        </p>
+                        {sealing.supported && !sealing.fully_sealed ? (
+                            <Button variant="primary" className="self-start" disabled={busy} onClick={seal}>
+                                {zh() ? '加密存储' : 'Encrypt the store'}
+                            </Button>
+                        ) : null}
+                        {!sealing.supported ? (
+                            <p className="text-[11px] text-ink3">{sealing.keystore || sealing.detail}</p>
+                        ) : null}
+                    </Card>
                 </div>
-            </div>
 
-            <div>
-                <SectionLabel>{zh() ? '已链接的机器' : 'Linked machines'}</SectionLabel>
-                <Card className="mt-2 flex flex-col gap-2 p-4">
-                    <LinkedMachines links={links} busy={busy} onRevoke={revoke} />
-                </Card>
-            </div>
+                <Pending pending={access?.pending} busy={busy} onResolve={resolve} />
 
-            <div>
-                <SectionLabel>{zh() ? '读取代理' : 'Read broker'}</SectionLabel>
-                <Card className="mt-2 flex flex-col gap-2 p-4">
-                    <Broker broker={broker} />
-                </Card>
-            </div>
+                <div>
+                    <SectionLabel>{zh() ? '暂停询问' : 'Stop being asked'}</SectionLabel>
+                    <div className="mt-2">
+                        <Unlocks access={access} busy={busy} onUnlock={unlock} onLock={lock} />
+                    </div>
+                </div>
 
-            <div>
-                <SectionLabel>{zh() ? '访问记录' : 'Access record'}</SectionLabel>
-                <Card className="mt-2 flex flex-col gap-2 p-4">
-                    {ledger?.available ? (
-                        <>
-                            <div className="flex items-center justify-between gap-3">
-                                <p className="text-xs text-ink2">{ledger.detail}</p>
-                                <StatusPill
-                                    ok={Boolean(ledger.intact)}
-                                    label={ledger.intact ? (zh() ? '未被篡改' : 'Unaltered') : (zh() ? '已被更改' : 'Altered')}
-                                />
-                            </div>
-                            <div className="max-h-64 overflow-y-auto">
-                                {(ledger.rows || []).slice().reverse().map((row) => (
-                                    <div
-                                        key={row.proofHash || `${row.at}-${row.keyCount}`}
-                                        className="flex items-baseline justify-between gap-3 border-b border-line/40 py-1.5 last:border-0"
-                                    >
-                                        <span className="truncate font-mono text-[11px] text-ink2">
-                                            {(row.keys || []).join(', ') || '—'}
-                                        </span>
-                                        <span className="shrink-0 text-[10px] text-ink3">
-                                            {row.app} · {relative(row.at)}
-                                        </span>
-                                    </div>
-                                ))}
-                            </div>
-                        </>
-                    ) : (
-                        <p className="text-xs text-ink3">{ledger?.detail || (zh() ? '未记录访问。' : 'No access record on this machine.')}</p>
-                    )}
-                </Card>
+                <div>
+                    <SectionLabel>{zh() ? '访问方式' : 'How each key is answered'}</SectionLabel>
+                    <div className="mt-2">
+                        <AccessModes access={access} keys={state.keys} busy={busy} onSetMode={setMode} />
+                    </div>
+                </div>
+
+                <div>
+                    <SectionLabel>{zh() ? '已链接的机器' : 'Linked machines'}</SectionLabel>
+                    <Card className="mt-2 flex flex-col gap-2 p-4">
+                        <LinkedMachines links={links} busy={busy} onRevoke={revoke} />
+                    </Card>
+                </div>
+
+                <div>
+                    <SectionLabel>{zh() ? '读取代理' : 'Read broker'}</SectionLabel>
+                    <Card className="mt-2 flex flex-col gap-2 p-4">
+                        <Broker broker={broker} />
+                    </Card>
+                </div>
+
+                <div>
+                    <SectionLabel>{zh() ? '访问记录' : 'Access record'}</SectionLabel>
+                    <Card className="mt-2 flex flex-col gap-2 p-4">
+                        {ledger?.available ? (
+                            <>
+                                <div className="flex items-center justify-between gap-3">
+                                    <p className="text-xs text-ink2">{ledger.detail}</p>
+                                    <StatusPill
+                                        ok={Boolean(ledger.intact)}
+                                        label={ledger.intact ? (zh() ? '未被篡改' : 'Unaltered') : (zh() ? '已被更改' : 'Altered')}
+                                    />
+                                </div>
+                                <div className="max-h-64 overflow-y-auto">
+                                    {(ledger.rows || []).slice().reverse().map((row) => (
+                                        <div
+                                            key={row.proofHash || `${row.at}-${row.keyCount}`}
+                                            className="flex items-baseline justify-between gap-3 border-b border-line/40 py-1.5 last:border-0"
+                                        >
+                                            <span className="truncate font-mono text-[11px] text-ink2">
+                                                {(row.keys || []).join(', ') || '—'}
+                                            </span>
+                                            <span className="shrink-0 text-[10px] text-ink3">
+                                                {row.app} · {relative(row.at)}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </>
+                        ) : (
+                            <p className="text-xs text-ink3">{ledger?.detail || (zh() ? '未记录访问。' : 'No access record on this machine.')}</p>
+                        )}
+                    </Card>
+                </div>
             </div>
         </div>
     );

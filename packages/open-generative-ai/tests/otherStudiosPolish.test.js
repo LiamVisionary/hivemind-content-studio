@@ -158,3 +158,37 @@ test('the prompt helper offers Refine with tucked-away controls, not a revision 
     // Image mode never sends shot knobs.
     assert.match(dialog, /mediaType === 'video' \? refineShots : 'keep'/);
 });
+
+test('every hub page hides itself when another one is open, and scrolls when it is', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const dir = path.join(__dirname, '../src/hub/views');
+    const views = fs.readdirSync(dir).filter((f) => f.endsWith('View.jsx'));
+    assert.ok(views.length >= 8, 'expected the hub to still have its pages');
+
+    for (const file of views) {
+        const src = fs.readFileSync(path.join(dir, file), 'utf8');
+        // CanvasView is one line that hands the whole page to ToolSurface, which
+        // owns both rules for it.
+        if (/ToolSurface/.test(src) && src.length < 800) continue;
+
+        // Hub pages stay MOUNTED and are display-toggled, so a page that does
+        // not hide itself is painted on top of whichever one is actually open.
+        // PassBook shipped without the `active` prop at all and covered
+        // Machines, Providers and History (2026-08-26).
+        assert.match(
+            src,
+            /active \? 'flex min-h-0 flex-1 flex-col' : 'hidden'/,
+            `${file} must hide itself and size itself like every other hub page`,
+        );
+        // And the page has to scroll INSIDE itself: `min-h-0 flex-1` with no
+        // scroll container anywhere below makes everything past the fold
+        // unreachable, which is the same page's second bug the same day.
+        // ModelsView delegates that to whichever tab body it renders.
+        const delegates = /RunnableModels|InstalledAssets|CivitaiBrowser/.test(src);
+        assert.ok(
+            /overflow-y-auto/.test(src) || delegates,
+            `${file} has no scroll container and does not delegate to one`,
+        );
+    }
+});
