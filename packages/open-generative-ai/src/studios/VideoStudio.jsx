@@ -4238,7 +4238,7 @@ export function VideoStudio({
                 onClick={() => { s.promptHelperOpen = true; bump(); }}
                 title={zh()
                   ? '让本地助手按当前模型的提示词指南、演员表和片长改写提示词'
-                  : "Rewrite what is in the box with the local helper — it knows this model's prompting guide, the cast, the lane and the clip length"}
+                  : "Rewrite what is in the box with the prompt helper — it knows this model's prompting guide, the cast, the lane and the clip length"}
               />
             </>
             )}

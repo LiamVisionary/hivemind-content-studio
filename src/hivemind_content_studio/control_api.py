@@ -2303,10 +2303,18 @@ def build_control_app(
             body.targetModel, media_type=body.mediaType,
             first_frame=body.hasFirstFrame, last_frame=body.hasLastFrame,
         )
-        runtime = local_llm.runtime()
+        # Whichever engine owns this id — the same lookup the Story producer
+        # uses. The helper was locked to `local_llm`, so an owner with no GGUF
+        # on the machine had a dialog that could not write anything while the
+        # producer one screen over was happily using their ChatGPT plan.
+        runtime = text_models.runtime_for(body.modelId)
         warnings: list[str] = []
         image = (body.imageBase64 or "").strip() or None
-        if image and not runtime.model_sees_images(body.modelId):
+        # Vision is a LOCAL question: a GGUF needs a projector file beside it,
+        # which is why this check exists at all. A cloud model's vision support
+        # is the provider's business and asking the local runtime about an id it
+        # has never seen answers "no" for every one of them.
+        if image and text_models.source_of(body.modelId) == text_models.LOCAL and not runtime.model_sees_images(body.modelId):
             # Say so rather than quietly writing a prompt about an image the
             # model was never shown.
             warnings.append(
@@ -2368,6 +2376,13 @@ def build_control_app(
                 return runtime.chat(model_id=body.modelId, messages=history, image=image)
             except local_llm.LocalLlmError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except (hivemindos_models.HivemindosModelsError, provider_models.ProviderModelsError) as exc:
+                # Same contract as the producer route: a refusal that names a
+                # repair reaches the browser as a button, not as a 401.
+                raise HTTPException(status_code=400, detail={
+                    "message": str(exc), "remedy": exc.remedy,
+                    "provider": getattr(exc, "provider", "") or "hivemindos",
+                }) from exc
 
         prompt = prompt_profiles.normalize(profile, _write(messages))
         edited = None

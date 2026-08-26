@@ -3311,7 +3311,7 @@ export function ImageStudio({
             onClick={() => { s.localPromptHelperOpen = true; bump(); }}
             title={!s.prompt.trim()
               ? helperDisabledTitle
-              : (zh() ? '用本机的本地模型润色这个想法' : 'Refine this idea with a local LLM on this machine')}
+              : (zh() ? '用提示助手润色这个想法' : 'Refine this idea with the prompt helper')}
           />
 
           {helper ? (

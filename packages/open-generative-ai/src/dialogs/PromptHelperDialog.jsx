@@ -1,22 +1,25 @@
-// Prompt helper: refine an idea into a prompt using a local LLM on this machine.
+// Prompt helper: refine an idea into a prompt, on whichever model is chosen.
 //
-// Replaces the per-workflow ComfyUI prompt_assistant node. The owner picks any
-// GGUF the studio can find, and the app runs it in a llama-server it owns, so
-// load and unload are real actions here rather than something only LM Studio
-// could do.
+// Replaces the per-workflow ComfyUI prompt_assistant node. It used to be local
+// only — any GGUF the studio could find, run in a llama-server this app owns —
+// which meant a machine with no weights on it had a dialog that could not write
+// anything, while the Story producer one screen over was happily using the
+// owner's ChatGPT plan. It now offers the same three sources the producer does
+// (`components/ModelSourcePicker.jsx`, `lib/useModelSources.js`).
 //
-// The memory UX is the load-bearing part. A 30 GB model loaded while a video
-// generation holds 20 GB is an OOM that kills the generation, so the picker
-// disables anything that cannot fit, and the "unload others first" toggle is
-// what makes the borderline ones reachable at all.
+// The memory UX is still the load-bearing part FOR A LOCAL MODEL. A 30 GB model
+// loaded while a video generation holds 20 GB is an OOM that kills the
+// generation, so the picker disables anything that cannot fit and the "unload
+// others first" toggle is what makes the borderline ones reachable. None of
+// that applies to a cloud model, so none of it is shown for one — a load step
+// that is skipped, and a RAM header that would be warning about the wrong
+// resource.
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { Modal } from '../ui/Modal.jsx';
 import { Icon } from '../ui/icons.jsx';
 import { Button, Card, CollapsibleSection, IconButton, Pill, SectionLabel, Segmented, Spinner, TextArea, Toggle, cx } from '../ui/kit.jsx';
 import {
-    blockedReason,
-    canSelect,
     describeWritingFor,
     externalHold,
     formatBytes,
@@ -24,9 +27,11 @@ import {
     modelStatus,
     preferredModelId,
     rememberModelId,
-    sortModels,
 } from '../lib/promptHelperRuntime.js';
 import { flattenApiDetail } from '../lib/muapiErrors.js';
+import { ModelSourcePicker } from '../components/ModelSourcePicker.jsx';
+import { useModelSources } from '../lib/useModelSources.js';
+import { LOCAL, needsLoad, rowFor, startingModelId, statusLine, tabOf } from '../lib/textModels.js';
 import { referenceToLocalImageInput } from '../lib/hivemindStudio.js';
 import { videoContactSheet } from '../lib/contactSheet.js';
 import { characterNoteLines, charactersMentionedIn } from '../lib/h3Characters.js';
@@ -108,6 +113,12 @@ export function PromptHelperDialog({
     // A slow load must not overwrite state from a newer one the user kicked off.
     const requestRef = useRef(0);
 
+    // Both sources of truth: the CATALOG drives the picker (local, HivemindOS
+    // and the owner's own accounts), while the local runtime snapshot still
+    // drives the things only a local model has — RAM, load/unload, and the
+    // files on disk that cannot be used.
+    const sources = useModelSources({ enabled: open });
+
     const refresh = useCallback(async () => {
         try {
             const data = await api('/api/prompt-helper/runtime');
@@ -121,6 +132,10 @@ export function PromptHelperDialog({
                 lastUsedId: lastUsedModelId(),
                 loadedId: data.loaded?.[0]?.modelId || '',
             }));
+            // `preferredModelId` only knows about this machine, so on a box with
+            // no GGUF on it the dialog used to settle on nothing and every
+            // action was silently inert. The catalog decides in that case — and
+            // it can answer with HivemindOS or one of the owner's own accounts.
         } catch (exc) {
             setError(exc.message);
         }
@@ -136,8 +151,12 @@ export function PromptHelperDialog({
     // one-line summary that reads "pick a model" with nothing to click.
     useEffect(() => {
         if (!open || snapshot === null) return;
+        if (!selected && sources.catalog) {
+            const fallback = startingModelId(sources.catalog, lastUsedModelId());
+            if (fallback) { setSelected(fallback); return; }
+        }
         if (!selected) setPickerOpen(true);
-    }, [open, snapshot, selected]);
+    }, [open, snapshot, selected, sources.catalog]);
 
     // Picking a model is a durable choice, not a per-open one: the next open
     // starts here, on this machine, whatever ends up loaded in the meantime.
@@ -146,16 +165,20 @@ export function PromptHelperDialog({
         rememberModelId(modelId);
     }, []);
 
-    const models = sortModels(snapshot?.models);
-    const selectedModel = models.find((m) => m.id === selected) || null;
-    const isLoaded = selectedModel?.fit === 'loaded';
+    const selectedModel = rowFor(sources.catalog, selected);
+    // Which tab the picker opens on: the one the owner last moved to, else the
+    // one the chosen model lives on, else this machine.
+    const pickerTab = sources.tab || (selectedModel ? tabOf(selectedModel) : LOCAL);
+    // Only a local model has to be pulled into RAM before it can answer; a
+    // cloud one is served by a machine that is already running.
+    const isLoaded = !needsLoad(selectedModel) || selectedModel?.fit === 'loaded';
     const held = externalHold(snapshot);
 
     const run = async ({ refine = null } = {}) => {
         // Silence here reads as a dead button. Both of these are reachable —
         // no model is selected when nothing is loaded on a fresh open.
         if (!selectedModel) {
-            setError('Pick a local model first.');
+            setError('Pick a model first.');
             setPickerOpen(true);
             return;
         }
@@ -417,7 +440,14 @@ export function PromptHelperDialog({
                             ) : selectedModel ? (
                                 <span className="min-w-0 truncate text-[11px] font-medium normal-case tracking-normal text-ink2">
                                     {selectedModel.name}
-                                    <span className="text-ink3"> · {modelStatus(selectedModel)}</span>
+                                    {/* `modelStatus` speaks RAM, which is the
+                                        wrong sentence for a model that is not
+                                        on this machine — and a cloud row with
+                                        no price quoted has nothing to add, so
+                                        it must not leave a dangling separator. */}
+                                    {statusLine(selectedModel)
+                                        ? <span className="text-ink3"> · {statusLine(selectedModel)}</span>
+                                        : null}
                                 </span>
                             ) : (
                                 <span className="text-[11px] font-medium normal-case tracking-normal text-honey">pick a model</span>
@@ -428,8 +458,11 @@ export function PromptHelperDialog({
                 {pickerOpen ? (<>
                 {/* Memory header — the numbers the load decision is made from.
                     Nothing to say until the runtime has answered: "0 GB free"
-                    over an empty model list read as a broken machine. */}
-                {snapshot === null ? (
+                    over an empty model list read as a broken machine. And
+                    nothing to say at all on a cloud tab: a model served by a
+                    machine that is already running does not spend this RAM, so
+                    "0 GB free" beside it is a warning about the wrong thing. */}
+                {pickerTab !== LOCAL ? null : snapshot === null ? (
                     <Card className="flex items-center gap-2 p-3 text-xs text-ink3">
                         <Spinner size={13} /> Checking this machine's RAM and models…
                     </Card>
@@ -465,88 +498,51 @@ export function PromptHelperDialog({
                 )}
 
                 <div>
-                    <div className="mb-2 flex items-center justify-between gap-3">
-                        <SectionLabel>Local model</SectionLabel>
-                        {/* Toggle renders the switch only, so the wording lives here. */}
-                        <span className="flex items-center gap-2 text-[11px] text-ink2">
-                            Unload others first
-                            <Toggle
-                                checked={unloadOthers}
-                                onChange={setUnloadOthers}
-                                label="Unload other models before loading"
-                                disabled={Boolean(busy)}
-                            />
-                        </span>
-                    </div>
-                    <div className="flex max-h-64 flex-col gap-1.5 overflow-y-auto" role="radiogroup" aria-label="Local model">
-                        {snapshot === null ? (
-                            <p className="flex items-center gap-2 px-1 py-3 text-xs text-ink3"><Spinner size={12} /> Looking for GGUF models…</p>
-                        ) : models.length === 0 ? (
-                            <p className="px-1 py-3 text-xs text-ink3">No GGUF models found on this machine.</p>
+                    {/* No SectionLabel here: the collapsible header above is
+                        already labelled "Model", and two of them read as two
+                        different sections. */}
+                    <div className="mb-2 flex items-center justify-end gap-3">
+                        {/* RAM is a LOCAL concern. On a cloud tab there is
+                            nothing here to unload and the toggle would be a
+                            control that does nothing. */}
+                        {pickerTab === LOCAL ? (
+                            <span className="flex items-center gap-2 text-[11px] text-ink2">
+                                Unload others first
+                                <Toggle
+                                    checked={unloadOthers}
+                                    onChange={setUnloadOthers}
+                                    label="Unload other models before loading"
+                                    disabled={Boolean(busy)}
+                                />
+                            </span>
                         ) : null}
-                        {models.map((model) => {
-                            const selectable = canSelect(model, { unloadOthers });
-                            const reason = blockedReason(model, { unloadOthers });
-                            const active = model.id === selected;
-                            const pickable = selectable && !busy;
-                            const pick = () => { if (pickable) choose(model.id); };
-                            // A div with role=radio rather than a <button>: the
-                            // Unload control sits INSIDE the row, and a button in
-                            // a button is invalid HTML that a screen reader reads
-                            // as one control.
-                            return (
-                                <div
-                                    key={model.id}
-                                    role="radio"
-                                    aria-checked={active}
-                                    aria-disabled={!pickable || undefined}
-                                    tabIndex={pickable ? 0 : -1}
-                                    onClick={pick}
-                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } }}
-                                    title={reason || model.id}
-                                    className={cx(
-                                        'flex items-center gap-3 rounded-lg border px-3 py-2 text-left transition-colors',
-                                        pickable ? 'cursor-pointer' : 'cursor-not-allowed',
-                                        active ? 'border-honey bg-bg2' : 'border-line1 hover:bg-bg2',
-                                        !selectable && 'opacity-40 hover:bg-transparent',
-                                    )}
-                                >
-                                    <div className="min-w-0 flex-1">
-                                        <div className="truncate text-xs font-medium text-ink1">{model.name}</div>
-                                        <div className="truncate text-[11px] text-ink3">
-                                            {[model.architecture, model.quantization].filter(Boolean).join(' · ')}
-                                            {reason ? ` — ${reason}` : ''}
-                                        </div>
-                                    </div>
-                                    {/* Only a model with a projector can read the
-                                        start frame; without one the opening shot
-                                        is written blind. */}
-                                    {(imageUrl || videoUrl) && model.vision ? (
-                                        <Pill tone="info">sees your {videoUrl ? 'clip' : 'frame'}</Pill>
-                                    ) : null}
-                                    {model.fit === 'loaded' ? (
-                                        <>
-                                            <Pill tone="ok" dot>{model.provider === 'mtplx' ? 'Serving' : 'In RAM'}</Pill>
-                                            <IconButton
-                                                icon="x"
-                                                size="xs"
-                                                label={model.provider === 'mtplx' ? 'Stop the MTPLX server' : `Unload ${model.name}`}
-                                                disabled={Boolean(busy)}
-                                                onClick={(e) => { e.stopPropagation(); unload(model.id); }}
-                                                onKeyDown={(e) => e.stopPropagation()}
-                                            />
-                                        </>
-                                    ) : (
-                                        <span className="shrink-0 text-[11px] text-ink3">{modelStatus(model)}</span>
-                                    )}
-                                </div>
-                            );
-                        })}
                     </div>
+                    <ModelSourcePicker
+                        {...sources.pickerProps}
+                        tab={pickerTab}
+                        selectedId={selected}
+                        onPick={choose}
+                        // Unload stays ON the row it acts on. A model holding
+                        // 20 GB is the reason this dialog has a memory UX at
+                        // all, and moving that control away from the model it
+                        // frees is how it stops being used.
+                        rowAction={(model) => (model.fit === 'loaded' ? (
+                            <IconButton
+                                icon="close"
+                                size="sm"
+                                disabled={Boolean(busy)}
+                                // An MTPLX slot is a server this app adopted rather
+                                // than a model it loaded, so "Unload" is the wrong
+                                // verb for what the button does to it.
+                                label={model.provider === 'mtplx' ? 'Stop the MTPLX server' : `Unload ${model.name}`}
+                                onClick={(event) => { event.stopPropagation(); void unload(model.id); }}
+                            />
+                        ) : null)}
+                    />
                     {/* A GGUF that is on disk but cannot be offered used to just
                         not appear, which reads as "the picker is hiding models"
                         — most often it is a symlink whose target was deleted. */}
-                    {snapshot?.unavailable?.length ? (
+                    {pickerTab === LOCAL && snapshot?.unavailable?.length ? (
                         <details className="mt-2">
                             <summary className="cursor-pointer text-[11px] text-ink3">
                                 {snapshot.unavailable.length} file{snapshot.unavailable.length > 1 ? 's' : ''} on disk cannot be used

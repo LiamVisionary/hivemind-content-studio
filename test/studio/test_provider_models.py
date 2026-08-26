@@ -462,3 +462,17 @@ def test_a_row_says_something_that_differs_from_the_row_above_it(connected) -> N
     assert row["name"] == "Anthropic: Claude 4"      # not the slug
     assert row["modelId"] == "anthropic/claude-4"    # still searchable by it
     assert row["subtitle"] == "$3 in · $15 out /1M · 1.0M context"
+
+
+def test_the_prompt_helper_runs_on_whichever_engine_owns_the_model(monkeypatch) -> None:
+    """The helper was locked to `local_llm`, so a machine with no GGUF on it had
+    a dialog that could not write anything — while the Story producer one screen
+    over was happily using the owner's ChatGPT plan. Both go through the same
+    lookup now."""
+    assert text_models.runtime_for("account:chatgpt/gpt-5.4").__class__ is provider_models.AccountsRuntime
+    # And vision stays a LOCAL question: a GGUF needs a projector file beside
+    # it, which is what `model_sees_images` answers. Asking the local runtime
+    # about a cloud id answers "no" for every one of them, which would drop the
+    # start frame from every cloud prompt without saying so.
+    assert text_models.source_of("account:chatgpt/gpt-5.4") != text_models.LOCAL
+    assert text_models.source_of("some-model.gguf") == text_models.LOCAL

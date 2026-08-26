@@ -217,8 +217,11 @@ test('the link button has somewhere to land when the app never answers', async (
   assert.ok(LINK_WAIT_MS <= 120000, 'a button that waits this long reads as hung');
   assert.ok(LINK_POLL_MS >= 1000 && LINK_POLL_MS < LINK_WAIT_MS);
 
-  const studio = fs.readFileSync(new URL('../src/studios/StoryStudio.jsx', import.meta.url), 'utf8');
-  // The three things that keep it from being a dead button.
+  // The link flow moved into the shared hook when the prompt helper started
+  // offering the same sources; the three things that keep it from being a dead
+  // button did not change.
+  const studio = fs.readFileSync(new URL('../src/lib/useModelSources.js', import.meta.url), 'utf8')
+    + fs.readFileSync(new URL('../src/components/ModelSourcePicker.jsx', import.meta.url), 'utf8');
   assert.match(studio, /HivemindOS did not answer/);
   assert.match(studio, /paste an account key below/);
   assert.match(studio, /Paste an account key instead/);

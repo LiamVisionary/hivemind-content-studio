@@ -85,9 +85,13 @@ test('ClipPrep says which side of the motion budget binds, the right way round',
 
 test('the prompt helper waits for the runtime snapshot and keeps Unload out of the row button', () => {
     const dialog = read('src/dialogs/PromptHelperDialog.jsx');
+    const picker = read('src/components/ModelSourcePicker.jsx');
     assert.match(dialog, /Checking this machine's RAM and models…/);
-    assert.match(dialog, /role="radio"/);
-    assert.doesNotMatch(dialog, /role="button"/, 'no control nested in a button');
+    // The rows themselves moved to the shared picker when the prompt helper
+    // stopped being local-only, but the rule did not: a row carries a control
+    // of its own, so it cannot be a <button>.
+    assert.match(picker, /role="radio"/);
+    assert.doesNotMatch(picker, /role="button"/, 'no control nested in a button');
     assert.match(dialog, /label=\{model\.provider === 'mtplx' \? 'Stop the MTPLX server' : `Unload \$\{model\.name\}`\}/);
     assert.match(dialog, /describeWritingFor\(\{ cast, references \}\)/);
     assert.match(dialog, /https:\/\/github\.com\/ggml-org\/llama\.cpp\/releases/);
