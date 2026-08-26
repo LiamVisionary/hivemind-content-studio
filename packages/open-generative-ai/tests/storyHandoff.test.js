@@ -198,6 +198,17 @@ test('re-weaving the landed prompt changes nothing', async () => {
     assert.equal(second.prompt, first.prompt);
 });
 
+test('a scene picture is one member, so each row answers for itself', async () => {
+    // The References panel edits scene pictures per ROW — "is this a place or
+    // is it staging" — so a member holding two of them could not answer.
+    const { storyHandoff } = await loadHandoff();
+    const scenes = storyHandoff(story(), { script: 's', plan: await planFor('h3') })
+        .cast.filter((member) => member.kind === 'scene');
+    assert.equal(scenes.length, 2);
+    for (const member of scenes) assert.equal(member.data.images.length, 1);
+    assert.deepEqual(scenes.map((member) => member.retention), ['attribute_transfer', 'weak_reference']);
+});
+
 /* ---------------- the cast stays honest afterwards ---------------- */
 
 test('a picture dropped on the composer joins a person, never the location plate', async () => {

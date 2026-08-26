@@ -69,7 +69,16 @@ import { ReferenceThumb } from './ReferenceThumb.jsx';
 import { KIND_META, describeReferenceRejection } from './referenceKinds.js';
 import { zh } from './videoLogic.js';
 
-const KINDS = ['images', 'videos', 'audios'];
+// Scene sits directly under the character pictures because that is where its
+// <Picture N> labels continue from: one row, numbered in order of supply, shown
+// as two sections because what each contributes is a different promise.
+const KINDS = ['images', 'scene', 'videos', 'audios'];
+
+/** A place or a staging sheet — the two things a non-subject picture can be. */
+export const SCENE_ROLES = Object.freeze([
+  { id: 'attribute_transfer', label: () => (zh() ? '地点' : 'A place') },
+  { id: 'weak_reference', label: () => (zh() ? '分镜' : 'Staging') },
+]);
 
 function fileLabel(item) {
   const name = String(item?.name || '').trim();
@@ -133,7 +142,7 @@ function RowSwitch({ on, disabled = false, title, onClick, children }) {
 
 function ReferenceRow({
   kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio, onToggleMotion, onToggleCompact,
-  compactLocked = false, onPrep,
+  compactLocked = false, onPrep, role = '', onRole,
 }) {
   const meta = KIND_META[kind];
   const url = typeof item === 'string' ? item : item?.url;
@@ -159,11 +168,11 @@ function ReferenceRow({
     <div className="flex flex-col gap-1 rounded-md border border-line1 bg-bg2 p-1 pr-1.5">
       <div className="flex items-center gap-2">
         <div className="h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3">
-          {kind === 'images' || kind === 'videos' ? (
+          {kind === 'images' || kind === 'scene' || kind === 'videos' ? (
             <ReferenceThumb
               url={url}
               posterUrl={posterUrl}
-              kind={kind === 'images' ? 'image' : 'video'}
+              kind={kind === 'videos' ? 'video' : 'image'}
               alt={meta.tag(index)}
               icon={meta.icon}
               onPosterCaptured={onPosterCaptured}
@@ -179,14 +188,42 @@ function ReferenceRow({
             {primaryTag}
             {secondaryTag ? <span className="text-ink3">{` + ${secondaryTag}`}</span> : null}
             {soundOnly ? <span className="ml-1 font-sans text-ink3">{zh() ? '仅声音' : 'sound only'}</span> : null}
+            {kind === 'scene' ? (
+              <span className="ml-1 font-sans text-ink3">
+                {(role || 'attribute_transfer') === 'weak_reference'
+                  ? (zh() ? '分镜方向' : 'staging direction')
+                  : (zh() ? '地点' : 'the place')}
+              </span>
+            ) : null}
             {!soundOnly && item?.compact && !compactLocked ? <span className="ml-1 font-sans text-ink3">{zh() ? '紧凑' : 'compact'}</span> : null}
           </span>
         </span>
         {/* Motion rows carry their switches on a strip of their own below;
             pictures and voice clips have nothing to switch, so the remove
             button stays on the line. */}
-        {kind !== 'videos' ? removeButton : null}
+        {kind !== 'videos' && kind !== 'scene' ? removeButton : null}
       </div>
+      {/* A scene picture's one decision, on the row itself: is this the PLACE,
+          or is it staging direction? It is the difference between "the room,
+          its light and its layout carry" and "read the order of the action and
+          copy none of it", and it used to be reachable only from a chip in
+          another control. */}
+      {kind === 'scene' ? (
+        <div className="flex items-center gap-1 pl-11">
+          {SCENE_ROLES.map((option) => (
+            <RowSwitch
+              key={option.id}
+              on={(role || 'attribute_transfer') === option.id}
+              title={KIND_META.scene.hint()}
+              onClick={() => onRole?.(option.id)}
+            >
+              {option.label()}
+            </RowSwitch>
+          ))}
+          <span className="flex-1" />
+          {removeButton}
+        </div>
+      ) : null}
       {kind === 'videos' ? (
         <div className="hive-edge-fade flex items-center gap-1 overflow-x-auto pl-11">
           {/* What of the clip is used. MOTION is its movement (<Video N>);
@@ -265,9 +302,13 @@ function ReferenceRow({
 export function ReferenceSection({
   kind, items, limit, labels, onAdd, onRemove, onToggleAudio, onToggleMotion, onToggleCompact, compactLocked = false,
   busy, recent, onPickRecent, dropTarget, posters = {}, onPosterCaptured, onPrep,
+  // Character pictures and scene pictures share ONE row of slots (they are one
+  // <Picture N> sequence), so both sections count against the same total.
+  used = null, roles = {}, onRole,
 }) {
   const meta = KIND_META[kind];
-  const full = items.length >= limit;
+  const taken = used == null ? items.length : used;
+  const full = taken >= limit;
   const rowKeys = referenceRowKeys(items);
   return (
     <div
@@ -284,7 +325,17 @@ export function ReferenceSection({
           under every heading. */}
       <div className="flex items-baseline justify-between gap-2">
         <SectionLabel>{meta.label()}</SectionLabel>
-        <span className="text-[10px] text-ink3">{items.length}/{limit}</span>
+        {/* A shared row says both numbers: how many are in THIS section, and
+            how much of the one picture budget is spoken for. "2 of 4/9" read as
+            arithmetic nobody could parse. */}
+        <span
+          className="text-[10px] text-ink3"
+          title={used == null ? undefined : (zh()
+            ? '角色图与场景图共用同一组图片位'
+            : 'Character pictures and scene pictures share one row of slots')}
+        >
+          {used == null ? `${items.length}/${limit}` : `${items.length} · ${taken}/${limit}`}
+        </span>
       </div>
       {items.map((item, index) => (
         <ReferenceRow
@@ -301,6 +352,8 @@ export function ReferenceSection({
           onToggleCompact={() => onToggleCompact?.(index)}
           compactLocked={compactLocked}
           onPrep={onPrep ? () => onPrep(index) : null}
+          role={roles[typeof item === 'string' ? item : item?.url] || ''}
+          onRole={onRole ? (next) => onRole(typeof item === 'string' ? item : item?.url, next) : null}
         />
       ))}
       <button
@@ -322,8 +375,8 @@ export function ReferenceSection({
         // Saved clips and voice notes get a wider tile with their filename:
         // six identical film icons told you nothing about which clip was which,
         // which is the one thing this list exists to answer.
-        <div className={cx('flex gap-1', kind === 'images' ? 'flex-wrap' : 'flex-col')}>
-          {recent.slice(0, 6).map((entry) => (kind === 'images' ? (
+        <div className={cx('flex gap-1', kind === 'images' || kind === 'scene' ? 'flex-wrap' : 'flex-col')}>
+          {recent.slice(0, 6).map((entry) => (kind === 'images' || kind === 'scene' ? (
             <button
               key={entry.id}
               type="button"
@@ -364,6 +417,13 @@ export function ReferenceSection({
 
 export function ReferencesMenu({
   images = [],
+  // Which of `images` are places or staging sheets rather than people, and what
+  // each one IS. They live at the END of `images`, because order of supply is
+  // the <Picture N> numbering and a prompt whose first picture is a storyboard
+  // reads worse to anyone reviewing it.
+  scene = [],
+  sceneRoles = {},
+  onSceneRole = null,
   audios = [],
   videos = [],
   prompt = '',
@@ -519,17 +579,29 @@ export function ReferencesMenu({
     } catch { /* a thumbnail is a nicety; the local decode already drew it */ }
   }, []);
 
-  const values = { images, videos, audios };
+  // One row of picture slots, shown as two sections. The panel owns the split
+  // so a caller keeps handing it (and getting back) the single ordered list the
+  // model is actually sent.
+  const sceneSet = new Set(scene);
+  const characterImages = images.filter((url) => !sceneSet.has(url));
+  const orderedImages = [...characterImages, ...scene];
+  const values = { images: characterImages, scene, videos, audios };
   // `onWeave` is accepted for compatibility and not rendered: the weave has one
   // home (Prompt Check, and the cast strip's own readout).
   void onWeave;
-  const labels = referenceLabels({ images, videos, audios });
-  const motionWarning = motionReferenceWarning({ prompt, videos, images });
+  const allLabels = referenceLabels({ images: orderedImages, videos, audios });
+  const labels = {
+    images: allLabels.images.slice(0, characterImages.length),
+    scene: allLabels.images.slice(characterImages.length),
+    videos: allLabels.videos,
+    audios: allLabels.audios,
+  };
+  const motionWarning = motionReferenceWarning({ prompt, videos, images: orderedImages });
   const timeWarning = unscriptedTimeWarning({ prompt, durationSeconds, videos, audios });
-  const total = images.length + videos.length + audios.length;
+  const total = orderedImages.length + videos.length + audios.length;
   // H3 rations references four ways at once; only the per-kind count was ever
   // visible here. See referenceBudgetReport for what the other three are.
-  const budget = referenceBudgetReport({ images, videos, audios, durations });
+  const budget = referenceBudgetReport({ images: orderedImages, videos, audios, durations });
 
   // Measure whatever is newly attached. Keyed on the url LIST rather than the
   // arrays themselves — those are rebuilt every render, and depending on them
@@ -558,7 +630,14 @@ export function ReferencesMenu({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clipUrlKey]);
 
-  const emit = (kind, next) => onChange[kind]?.(next);
+  // The character row and the scene row are two halves of ONE list: either one
+  // emits the whole thing, in supply order, so the labels the model is sent can
+  // never disagree with the labels the panel drew.
+  const emit = (kind, next) => {
+    if (kind === 'images') return onChange.images?.([...next, ...scene]);
+    if (kind === 'scene') return onChange.scene?.(next);
+    return onChange[kind]?.(next);
+  };
 
   const attach = (kind, url, name = '') => {
     if (!url) return;
@@ -574,8 +653,8 @@ export function ReferencesMenu({
       toast(zh() ? `已作为 ${tag} 附加` : `Already attached as ${tag}`, { icon: '📎' });
       return;
     }
-    if (current.length >= limits[kind]) return;
-    if (kind === 'images') emit('images', [...current, url]);
+    if ((kind === 'images' || kind === 'scene' ? orderedImages.length : current.length) >= limits[kind === 'scene' ? 'images' : kind]) return;
+    if (kind === 'images' || kind === 'scene') emit(kind, [...current, url]);
     else if (kind === 'videos') emit('videos', [...current, { url, name, useAudio: false, compact: false }]);
     else emit('audios', [...current, { url, name }]);
   };
@@ -700,8 +779,11 @@ export function ReferencesMenu({
           )}
         >
           {/* The character these rows add up to, above the rows themselves. */}
+          {/* A persona is a PERSON. Its pictures are the character half of the
+              row; a location plate saved into somebody's identity is a plate
+              that follows them into every later clip. */}
           <PersonaBar
-            images={images}
+            images={characterImages}
             videos={videos}
             audios={audios}
             persona={persona}
@@ -726,7 +808,10 @@ export function ReferencesMenu({
               key={kind}
               kind={kind}
               items={values[kind]}
-              limit={limits[kind]}
+              limit={limits[kind === 'scene' ? 'images' : kind]}
+              used={kind === 'images' || kind === 'scene' ? orderedImages.length : null}
+              roles={kind === 'scene' ? sceneRoles : undefined}
+              onRole={kind === 'scene' ? onSceneRole : null}
               labels={labels[kind]}
               busy={busyKind === kind}
               recent={recent[kind] || []}
@@ -756,7 +841,7 @@ export function ReferencesMenu({
               // No picture attached means the clip is the character reference
               // (the info line below says exactly that), and identity needs
               // pixels — so the compact switch is held off rather than offered.
-              compactLocked={kind === 'videos' && referenceVideoCompactLocked({ images })}
+              compactLocked={kind === 'videos' && referenceVideoCompactLocked({ images: orderedImages })}
               onPrep={kind === 'videos' ? (index) => setPrepIndex(index) : null}
             />
           ))}
@@ -816,7 +901,7 @@ export function ReferencesMenu({
                   : `Dialogue runs about ${timeWarning.spoken}s; the clip is ${timeWarning.duration}s. Roughly ${timeWarning.gap}s is unaccounted for — shorten the clip, write more line, or say what fills the time and that nobody else speaks.`)}
             </p>
           ) : null}
-          {motionReferenceRows(videos).length && !images.length ? (
+          {motionReferenceRows(videos).length && !orderedImages.length ? (
             // No picture: the clip is the character reference, and the model is
             // told so — the exclusion advice below is for the picture+clip case.
             <p className="rounded-md border border-line1 px-2 py-1.5 text-[10px] leading-snug text-ink3">

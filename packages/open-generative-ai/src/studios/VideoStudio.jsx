@@ -35,7 +35,7 @@ import { RestyleMenu } from './video/RestyleMenu.jsx';
 import { CastStrip } from './video/CastStrip.jsx';
 import {
   castPersonaIdentity, castRenderGender, castRows, castSubjects, isWovenForReference,
-  reconcileCast, toCastMember, weavePrompt, weaveTarget,
+  reconcileCast, sceneMember, toCastMember, weavePrompt, weaveTarget,
 } from '../lib/promptWeave.js';
 import { allocateCast } from '../lib/castPrompt.js';
 import { liveStandIns } from '../lib/subjectTemplate.js';
@@ -1171,6 +1171,60 @@ export function VideoStudio({
   const onCharacterRefsChange = (urls) => {
     s.setup = { ...s.setup, referenceImageUrls: (Array.isArray(urls) ? urls : []).filter(Boolean) };
     afterRowsChanged();
+  };
+
+  /* ---------------- scene references ---------------- */
+  //
+  // A place or a staging sheet: the same <Picture N> row as the character
+  // pictures, supplied last, but annotated in the cast as a `scene` member so
+  // the compiler writes it its own retention contract instead of promising that
+  // somebody's face carries out of an empty room. ONE member per picture, so
+  // "is this a place or is it staging" is answerable per row.
+  const sceneMembersNow = () => s.cast.filter((member) => member.kind === 'scene');
+  const sceneUrls = () => sceneMembersNow().flatMap((member) => member.data?.images || []);
+  const sceneRoleMap = () => Object.fromEntries(sceneMembersNow().flatMap(
+    (member) => (member.data?.images || []).map((url) => [url, member.retention || 'attribute_transfer']),
+  ));
+  const onSceneRefsChange = (urls) => {
+    const next = (Array.isArray(urls) ? urls : []).filter(Boolean);
+    const roles = sceneRoleMap();
+    // Kept across the rebuild: a sender's own sentence for a picture ("the
+    // empty harbour bus stand plate for this clip") is only wrong once the
+    // picture is deliberately re-classified, not because a different row was
+    // edited.
+    const said = Object.fromEntries(sceneMembersNow().flatMap(
+      (member) => (member.data?.images || []).map(
+        (url) => [url, { name: member.name || '', carries: member.carries || '' }],
+      ),
+    ));
+    // Read BEFORE the cast is rebuilt. Asking afterwards makes a picture that
+    // was just removed from the scene row look like it had never been one, so
+    // it stayed in the list and reappeared among the character pictures.
+    const wasScene = new Set(sceneUrls());
+    const characters = (s.setup.referenceImageUrls || []).filter((url) => !wasScene.has(url));
+    // Rebuilt rather than patched: the row IS the truth about which pictures are
+    // scenes, and a member left holding a picture the row no longer has would
+    // write a definition for a label nothing fills.
+    const kept = s.cast.filter((member) => member.kind !== 'scene');
+    s.cast = [...kept, ...next.map((url, index) => sceneMember({
+      key: `scene:${index}:${url}`,
+      name: said[url]?.name || '',
+      carries: said[url]?.carries || '',
+      images: [url],
+      retention: roles[url] || 'attribute_transfer',
+    }))];
+    setRows({ ...currentRows(), images: [...characters, ...next] });
+    afterRowsChanged();
+  };
+  const onSceneRole = (url, retention) => {
+    s.cast = s.cast.map((member) => (member.kind === 'scene' && (member.data?.images || []).includes(url)
+      // A picture re-classified by hand loses the sentence a sender wrote for
+      // it: a plate called staging is no longer described as a plate.
+      ? { ...member, retention, carries: '' }
+      : member));
+    rememberCast();
+    if (weaveTargetNow() === 'reference' && s.setup.prompt.trim()) acceptPrompt(s.setup.prompt, { announce: false });
+    bump();
   };
 
   // Voice clips (<Audio N>) and motion clips (<Video N>) of the same Reference
@@ -4249,8 +4303,12 @@ export function VideoStudio({
                   audios: referenceEntry.referenceSlots?.audios || 3,
                   videos: referenceEntry.referenceSlots?.videos || 3,
                 }}
+                scene={sceneUrls()}
+                sceneRoles={sceneRoleMap()}
+                onSceneRole={onSceneRole}
                 onChange={{
                   images: onCharacterRefsChange,
+                  scene: onSceneRefsChange,
                   audios: onReferenceAudiosChange,
                   videos: onReferenceVideosChange,
                 }}

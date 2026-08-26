@@ -549,11 +549,16 @@ export function CastStrip({
   const change = (key, patch) => setMembers((list) => list.map((item) => (
     item.key === key ? { ...item, ...patch } : item
   )), { announce: false });
+  // Reorder over the PEOPLE, which is what the strip shows. Scene references
+  // are members too — they hold picture slots — but they are not in the shot,
+  // so they neither appear here nor take a position in the order.
   const move = (index, delta) => setMembers((list) => {
+    const order = list.map((_, i) => i).filter((i) => !isScene(list[i]));
+    const from = order[index];
+    const to = order[index + delta];
+    if (from === undefined || to === undefined) return list;
     const next = [...list];
-    const to = index + delta;
-    if (to < 0 || to >= next.length) return list;
-    [next[index], next[to]] = [next[to], next[index]];
+    [next[from], next[to]] = [next[to], next[from]];
     return next;
   });
 
@@ -618,27 +623,26 @@ export function CastStrip({
     : target === 'h3-text'
       ? (zh() ? '文字模式' : 'Text lane')
       : '';
-  const unwoven = target === 'reference' && members.length > 0 && !promptEmpty && !woven;
-  // Subjects are numbered over the PEOPLE. A scene reference sits in the strip
-  // in cast order (which is supply order, and so picture order) but takes no
-  // <Subject N> — showing it one would name a subject the prompt never defines.
-  const subjectNumbers = (() => {
-    let seen = 0;
-    return members.map((member) => (isScene(member) ? 0 : (seen += 1)));
-  })();
+  // WHO is in the shot. A location plate and a storyboard are members of the
+  // cast — they own picture slots and carry their own retention contract — but
+  // nobody is in them, and listing a storyboard under "In the shot" is the
+  // question Liam asked on 2026-08-27. They are edited where they are
+  // attached: their own row in the References panel.
+  const people = members.filter((member) => !isScene(member));
+  const unwoven = target === 'reference' && people.length > 0 && !promptEmpty && !woven;
 
   return (
     <div className="flex flex-wrap items-center gap-1.5" data-cast-strip>
       <span className="mr-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">
         {zh() ? '镜头里是谁' : 'In the shot'}
       </span>
-      {members.map((member, index) => (
+      {people.map((member, index) => (
         <MemberChip
           key={member.key}
           member={member}
           index={index}
-          number={subjectNumbers[index]}
-          total={members.length}
+          number={index + 1}
+          total={people.length}
           onChange={change}
           onRemove={remove}
           onMove={move}
@@ -667,7 +671,7 @@ export function CastStrip({
             )}
           >
             <Icon name="plus" size={12} />
-            {members.length ? (zh() ? '加入' : 'Add') : (zh() ? '加入某人' : 'Add someone')}
+            {people.length ? (zh() ? '加入' : 'Add') : (zh() ? '加入某人' : 'Add someone')}
           </button>
         )}
       >
@@ -678,7 +682,7 @@ export function CastStrip({
                 ? '顺序即编号：第一位是 <Subject 1>。提示词里用 <Subject N> 指代，换人也能用。'
                 : 'Order is the numbering — the first member is <Subject 1>. Prompts written against <Subject N> work with any cast.'}
             </p>
-            {referenceLane && !members.length ? (
+            {referenceLane && !people.length ? (
               <button
                 type="button"
                 onClick={() => { onAttach?.(); close(); }}
@@ -705,11 +709,11 @@ export function CastStrip({
               className="flex items-center gap-1.5 rounded-md border border-dashed border-line2 px-2 py-1.5 text-[11px] font-medium text-ink2 transition-colors hover:border-honey hover:bg-honey-tint hover:text-honey"
             >
               <Icon name="plus" size={12} />
-              {members.length ? (zh() ? '另一位成员' : 'Another person') : (zh() ? '仅用文字定义的成员' : 'A person described in text')}
+              {people.length ? (zh() ? '另一位成员' : 'Another person') : (zh() ? '仅用文字定义的成员' : 'A person described in text')}
             </button>
             {referenceLane ? <AddPersona members={members} onAdd={(member) => { add(member); close(); }} /> : null}
             <AddCharacter members={members} onAdd={(member) => { add(member); close(); }} />
-            {members.length ? null : (
+            {people.length ? null : (
               <p className="text-[10px] leading-snug text-ink3">
                 {zh() ? `角色 ID 默认${PERSONA_DEFAULT_STYLE}` : `A person from pictures is rendered ${PERSONA_DEFAULT_STYLE}.`}
               </p>
@@ -751,7 +755,7 @@ export function CastStrip({
       {h3 && lane ? (
         <span className="inline-flex items-center gap-1.5 text-[10px] text-ink3" data-weave-status>
           <span>{lane}</span>
-          {target === 'reference' && members.length ? (
+          {target === 'reference' && people.length ? (
             unwoven ? (
               <button
                 type="button"

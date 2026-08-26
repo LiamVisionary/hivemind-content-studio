@@ -17,6 +17,25 @@ export const KIND_META = {
       ? '主体、服装、场景、风格。'
       : 'Subjects, clothing, environments, style.'),
   },
+  // A picture that is a PLACE or a STAGING sheet, not a person. It rides in the
+  // same <Picture N> row as the character pictures (order of supply is the
+  // numbering, so scenes are supplied last), and lives in its own section here
+  // because what it CONTRIBUTES is different: a character picture promises that
+  // a face carries, a scene picture promises that a room does — and one told to
+  // the model as the other is how an empty plate comes back with a stranger in
+  // it.
+  scene: {
+    accept: 'image/*',
+    label: () => (zh() ? '场景与分镜' : 'Scene & staging'),
+    add: () => (zh() ? '添加场景参考' : 'Add scene reference'),
+    tag: (index) => `<Picture ${index + 1}>`,
+    icon: 'image',
+    hint: () => (zh()
+      ? '地点图或分镜图。地点：建筑、材质、光线与布局会带入；分镜：只作为动作顺序与构图方向，画风与分格都不会带入。两者都不是主体。'
+      : 'A location plate or a storyboard. A place carries its architecture, materials, light and layout; '
+        + 'staging is read as the order of the action and roughly where things sit, and its drawing style and '
+        + 'panel grid do not carry. Neither is a subject.'),
+  },
   videos: {
     accept: 'video/*',
     label: () => (zh() ? '动作参考' : 'Motion references'),

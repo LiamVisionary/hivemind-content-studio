@@ -171,7 +171,10 @@ test('the panel names the label that already holds it, and never attaches twice'
     // into a full row would come back as silence rather than "already attached".
     const guard = menu.indexOf('const attached = referenceAttachIndex(current, url);');
     assert.ok(guard > 0, 'attach() consults the row it is adding to');
-    assert.ok(guard < menu.indexOf('if (current.length >= limits[kind]) return;'));
+    // The row-full return moved when the picture row was split into character
+    // and scene sections: both count against ONE picture budget, so the guard
+    // is written against the combined list.
+    assert.ok(guard < menu.indexOf('>= limits[kind === \'scene\' ? \'images\' : kind]) return;'));
     assert.match(menu.slice(guard), /Already attached as \$\{tag\}/);
 });
 
@@ -576,7 +579,7 @@ test('each video row carries a Compact switch beside its sound switch, held off 
 
     // The lock is the shared rule, not a second opinion: no picture attached.
     assert.match(menu, /import \{[^}]*referenceVideoCompactLocked[^}]*\} from '\.\.\/\.\.\/lib\/h3References\.js'/s);
-    assert.match(menu, /compactLocked=\{kind === 'videos' && referenceVideoCompactLocked\(\{ images \}\)\}/);
+    assert.match(menu, /compactLocked=\{kind === 'videos' && referenceVideoCompactLocked\(\{ images: orderedImages \}\)\}/);
     // Toggling flips THAT row only, the same way the sound switch does.
     assert.match(menu, /onToggleCompact=\{\(index\) => emit\('videos', videos\.map\(\(item, i\) => \(\s*i === index && !isSoundOnlyReference\(item\) \? \{ \.\.\.item, compact: !item\.compact \} : item\s*\)\)\)\}/);
     // Default OFF on every way a clip arrives — picked, dropped, or prepped in
