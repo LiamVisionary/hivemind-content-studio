@@ -656,13 +656,17 @@ export function VideoStudio({
       referenceAudios: rows.audios,
     });
   };
-  const runWeave = (text, { standIns, scaffold = false } = {}) => weavePrompt(text, {
+  const runWeave = (text, { standIns, scaffold = false, template = null } = {}) => weavePrompt(text, {
     cast: s.cast,
     limits: weaveLimits(),
     durationSeconds: Number(s.setup.duration) || 0,
     target: weaveTargetNow(),
     standIns: standIns === undefined ? s.standIns : standIns,
     scaffold,
+    // A door that arrives with the creative half already broken out rather than
+    // flattened into one paragraph — the Story studio. Ignored by every target
+    // that is not the six-section form, which then renders `text` as it came.
+    template,
   });
   // A snapshot the Undo on a weave toast restores.
   const weaveSnapshot = () => ({
@@ -696,9 +700,9 @@ export function VideoStudio({
   // the Shot Builder, the hub's insert bridge, a canvas restore, the Weave
   // button, or the attach that changed who is in the shot. `standIns` rides
   // with a freshly rendered starter; undefined means "what the composer holds".
-  const acceptPrompt = (text, { standIns, scaffold = false, announce = true } = {}) => {
+  const acceptPrompt = (text, { standIns, scaffold = false, announce = true, template = null } = {}) => {
     syncCast();
-    const woven = runWeave(text, { standIns, scaffold });
+    const woven = runWeave(text, { standIns, scaffold, template });
     if (announce && woven.refit.changed) announceRefit(woven.refit);
     s.standIns = woven.standIns;
     s.castWarnings = woven.warnings;
@@ -723,6 +727,40 @@ export function VideoStudio({
       setRows({ images, videos, audios });
     }
     return acceptPrompt(s.setup.prompt);
+  };
+  /**
+   * A whole Story studio production, landed in one pass.
+   *
+   * The character sheets are the subjects, the location plate and the board are
+   * scene references, and the beats, soundscape and music are the creative
+   * half. All of it is written BEFORE the weave runs, because the weave picks
+   * its grammar from what is attached: attach first and the six-section H3 form
+   * follows on its own. Handing the script over with nothing attached — which
+   * is what this handoff used to do — could only ever produce prose about
+   * references that were not there.
+   *
+   * Returns what actually landed, so the caller can say so rather than claim an
+   * attachment a model with no reference lane quietly refused.
+   */
+  const applyStoryProduction = (setup) => {
+    const cast = Array.isArray(setup?.cast) ? setup.cast : [];
+    const runSeconds = Number(setup?.seconds) || 0;
+    const lane = referenceLaneAvailable();
+    const next = { ...s.setup };
+    if (runSeconds > 0) next.duration = runSeconds;
+    if (setup?.aspect) next.ar = String(setup.aspect);
+    s.setup = next;
+    if (lane && cast.length) {
+      s.cast = cast;
+      const { images, videos, audios } = allocateCast(cast.map(toCastMember), { limits: weaveLimits() });
+      setRows({ images, videos, audios });
+    }
+    // After the rows, never before: attaching references is what can cap the
+    // clip, so a length set first is one the reference budget may refuse.
+    s.setup = withDurationThatFits(s.setup);
+    acceptPrompt(String(setup?.script || ''), { template: lane ? (setup?.template || null) : null });
+    persistVideoPreferences();
+    return { attached: Boolean(lane && cast.length) };
   };
   // The rows changed by hand — a file dropped, a row removed, a Persona ID
   // loaded. The cast follows, and a written prompt has the new cast woven in;
@@ -2903,6 +2941,24 @@ export function VideoStudio({
             restored ? setup.context : null,
             restored ? s.setup.modelId : (setup.context.model || null),
           );
+        }
+        focusPrompt();
+        return;
+      }
+      // A whole production from the Story studio: sheets, plate, board, beats,
+      // soundscape and length together. Reference mode has no start or end
+      // frame — the registry is explicit that H3's reference lane takes up to
+      // nine pictures INSTEAD of one — so there is nothing to put in a frame
+      // slot here, and the pictures are the conditioning.
+      if (setup?.format === 'story-production') {
+        const landed = applyStoryProduction(setup);
+        const pictures = Number(setup?.counts?.pictures) || 0;
+        if (pictures && !landed.attached) {
+          toast(zh()
+            ? `这个故事带来了 ${pictures} 张参考图，但当前模型没有参考通道，因此未附加。切换到 MiniMax H3 后按“编织”。`
+            : `${pictures} reference${pictures === 1 ? '' : 's'} came with this story, but the selected model has `
+              + 'no reference lane, so nothing was attached. Switch to MiniMax H3 and press Weave.',
+          { icon: '📎', duration: 12000 });
         }
         focusPrompt();
         return;

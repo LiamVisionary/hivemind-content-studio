@@ -56,9 +56,19 @@ const STYLE_LABELS = {
 };
 
 const isPersonaLike = (member) => member?.kind === 'persona';
+// A place or a staging sheet: it occupies picture slots and gets its own
+// retention contract, but it is nobody — no <Subject N>, no voice, no order in
+// the speaking sense. The strip shows it so you can SEE that the room in your
+// references is a room and not a third person.
+const isScene = (member) => member?.kind === 'scene';
+const isStaging = (member) => member?.retention === 'weak_reference';
 
 function memberName(member) {
   if (member.name) return member.name;
+  if (isScene(member)) {
+    if (isStaging(member)) return zh() ? '分镜' : 'Storyboard';
+    return zh() ? '场景' : 'Location';
+  }
   if (member.key === REFERENCES_KEY) return zh() ? '你的参考' : 'Your references';
   if (String(member.key || '').startsWith('person:')) return zh() ? '新成员' : 'New person';
   return zh() ? '角色 ID' : 'Persona';
@@ -191,23 +201,39 @@ function AddCharacter({ members, onAdd }) {
 
 /* ---------------- one member ---------------- */
 
-function NumberBadge({ index, kind }) {
+function NumberBadge({ member, number }) {
+  if (isScene(member)) {
+    return (
+      <span
+        className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-bg3 text-[10px] text-ink2"
+        aria-label={isStaging(member)
+          ? (zh() ? '分镜参考（不是主体）' : 'staging reference, not a subject')
+          : (zh() ? '场景参考（不是主体）' : 'place reference, not a subject')}
+      >
+        {isStaging(member) ? '▤' : '▣'}
+      </span>
+    );
+  }
   return (
     <span
       className={cx(
         'grid h-5 w-5 shrink-0 place-items-center rounded-full font-mono text-[10px] font-bold',
-        kind === 'character' ? 'bg-bg3 text-ink1' : 'bg-honey text-bg0',
+        member?.kind === 'character' ? 'bg-bg3 text-ink1' : 'bg-honey text-bg0',
       )}
-      aria-label={`<Subject ${index + 1}>`}
+      aria-label={`<Subject ${number}>`}
     >
-      {index + 1}
+      {number}
     </span>
   );
 }
 
-function MemberEditor({ member, index, total, onChange, onRemove, onMove, onDraftLook, onAddMedia, referenceLane, close }) {
+function MemberEditor({
+  member, index, number, total, onChange, onRemove, onMove, onDraftLook, onAddMedia, referenceLane, close,
+}) {
   const [drafting, setDrafting] = useState(false);
-  const subject = `<Subject ${index + 1}>`;
+  const subject = isScene(member)
+    ? (isStaging(member) ? 'weak_reference' : 'attribute_transfer')
+    : `<Subject ${number}>`;
   const draftLook = async () => {
     if (!onDraftLook) return;
     setDrafting(true);
@@ -223,7 +249,7 @@ function MemberEditor({ member, index, total, onChange, onRemove, onMove, onDraf
   return (
     <div className="flex w-full flex-col gap-2">
       <div className="flex items-center gap-2">
-        <NumberBadge index={index} kind={member.kind} />
+        <NumberBadge member={member} number={number} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[12px] font-semibold text-ink1">{memberName(member)}</span>
           <span className="block truncate font-mono text-[10px] text-honey">{subject}</span>
@@ -262,7 +288,52 @@ function MemberEditor({ member, index, total, onChange, onRemove, onMove, onDraf
         </span>
       </div>
 
-      {isPersonaLike(member) ? (
+      {isScene(member) ? (
+        <div className="flex flex-col gap-2">
+          <p className="text-[10px] leading-snug text-ink3">
+            {zh()
+              ? (isStaging(member)
+                ? '按分镜方向使用：只读取动作顺序与大致构图。画风、分格、边框都不会带入，成片始终是一个连续镜头。'
+                : '按地点使用：建筑、材质、色调、光线与布局会带入。它不是主体，里面也没有人。')
+              : (isStaging(member)
+                ? 'Used as staging direction only — the order of the action and roughly where things sit. '
+                  + 'Its drawing style, panel grid and borders do not carry, and the clip stays one continuous take.'
+                : 'Used as the place — architecture, materials, palette, light and layout carry. '
+                  + 'It is not a subject and holds nobody.')}
+          </p>
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">
+              {zh() ? '这张图是什么' : 'What this picture is'}
+            </span>
+            <div className="flex gap-1">
+              {[
+                ['attribute_transfer', zh() ? '地点' : 'A place'],
+                ['weak_reference', zh() ? '分镜' : 'Staging'],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  // The story hands over its own sentence for this picture
+                  // ("the empty harbour bus stand plate…"). Re-classifying it
+                  // by hand means that sentence no longer describes it, so the
+                  // override goes and the mode's own wording takes over —
+                  // otherwise a plate switched to Staging kept being called a
+                  // plate while being contracted as a storyboard.
+                  onClick={() => onChange(member.key, { retention: value, carries: '' })}
+                  className={cx(
+                    'rounded px-2 py-1 text-[11px] transition-colors',
+                    (member.retention || 'attribute_transfer') === value
+                      ? 'bg-honey-tint text-honey'
+                      : 'text-ink3 hover:bg-bg3 hover:text-ink2',
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : isPersonaLike(member) ? (
         <>
           <p className="text-[10px] leading-snug text-ink3">
             {zh()
@@ -381,7 +452,7 @@ function MemberEditor({ member, index, total, onChange, onRemove, onMove, onDraf
 }
 
 function MemberChip({
-  member, index, total, onChange, onRemove, onMove, onDraftLook, onAddMedia, referenceLane,
+  member, index, number, total, onChange, onRemove, onMove, onDraftLook, onAddMedia, referenceLane,
   open, onOpenChange, drag,
 }) {
   // Controlled, not a Menu: the strip auto-opens a just-added person so the
@@ -401,9 +472,11 @@ function MemberChip({
       <button
         type="button"
         onClick={() => { if (!drag.happened()) onOpenChange(!open); }}
-        title={isPersonaLike(member)
-          ? (zh() ? '名字、性别、外貌、参考、顺序（可拖动排序）' : 'Name, gender, look, references, order — drag to reorder')
-          : (zh() ? '画风、声音、顺序（可拖动排序）' : 'Style, voice, order — drag to reorder')}
+        title={isScene(member)
+          ? (zh() ? '这张图是地点还是分镜（可拖动排序）' : 'Whether this picture is a place or staging — drag to reorder')
+          : isPersonaLike(member)
+            ? (zh() ? '名字、性别、外貌、参考、顺序（可拖动排序）' : 'Name, gender, look, references, order — drag to reorder')
+            : (zh() ? '画风、声音、顺序（可拖动排序）' : 'Style, voice, order — drag to reorder')}
         className={cx(
           'inline-flex h-7 max-w-[260px] cursor-grab items-center gap-1.5 rounded-md border px-1.5 text-[12px] transition-colors active:cursor-grabbing',
           open ? 'border-honey bg-honey-tint' : 'border-line1 bg-bg2 hover:border-line2 hover:bg-bg3',
@@ -411,10 +484,12 @@ function MemberChip({
           drag.fromIndex === index && 'opacity-50',
         )}
       >
-        <NumberBadge index={index} kind={member.kind} />
+        <NumberBadge member={member} number={number} />
         <span className="truncate font-medium text-ink1">{memberName(member)}</span>
         <span className="hidden truncate text-[10px] text-ink3 sm:inline">
-          {isPersonaLike(member) ? describeMember(member, { zh: zh() }) : (zh() ? '已知角色' : 'known character')}
+          {isPersonaLike(member) || isScene(member)
+            ? describeMember(member, { zh: zh() })
+            : (zh() ? '已知角色' : 'known character')}
         </span>
       </button>
       {open ? (
@@ -422,6 +497,7 @@ function MemberChip({
           <MemberEditor
             member={member}
             index={index}
+            number={number}
             total={total}
             onChange={onChange}
             onRemove={onRemove}
@@ -543,6 +619,13 @@ export function CastStrip({
       ? (zh() ? '文字模式' : 'Text lane')
       : '';
   const unwoven = target === 'reference' && members.length > 0 && !promptEmpty && !woven;
+  // Subjects are numbered over the PEOPLE. A scene reference sits in the strip
+  // in cast order (which is supply order, and so picture order) but takes no
+  // <Subject N> — showing it one would name a subject the prompt never defines.
+  const subjectNumbers = (() => {
+    let seen = 0;
+    return members.map((member) => (isScene(member) ? 0 : (seen += 1)));
+  })();
 
   return (
     <div className="flex flex-wrap items-center gap-1.5" data-cast-strip>
@@ -554,6 +637,7 @@ export function CastStrip({
           key={member.key}
           member={member}
           index={index}
+          number={subjectNumbers[index]}
           total={members.length}
           onChange={change}
           onRemove={remove}

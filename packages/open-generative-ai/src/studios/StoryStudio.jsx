@@ -79,6 +79,7 @@ import {
 } from './story/qa.js';
 import { STORY_EXAMPLE } from './story/example.js';
 import { blankStory, producerIsRunning, restoreStory } from './story/state.js';
+import { storyHandoff } from './story/handoff.js';
 import {
   acceptedValues, blankFieldsIn, fieldMap, fieldsFor, fillBrief, fillChunks, storyContext, writePath,
 } from './story/fields.js';
@@ -1135,15 +1136,31 @@ export function StoryStudio({ active = true } = {}) {
     toast.success(`Compressed to ${String(result.script).length} characters.`);
   };
 
+  /**
+   * Hand the whole production over, not just the paragraph.
+   *
+   * This used to post the script alone and then tell you to go and arm your own
+   * references — which meant the Video studio opened with prose describing
+   * pictures that were not attached, and, because the composer picks its
+   * grammar from what IS attached, could only render that prose as prose. The
+   * sheets are subjects, the plate and the board are scene references, and the
+   * beats, soundscape and length travel as structure, so H3's six-section
+   * reference format is what the composer lands on by itself.
+   */
   const sendToVideo = () => {
     if (!script) { toast.error('There is no script to send yet.'); return; }
-    loadStudioSetup('video', { primaryPrompt: script });
+    const handoff = storyHandoff(story, { script });
+    loadStudioSetup('video', handoff);
     window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'video' } }));
-    const sheets = story.characters.filter((row) => row.sheetUrl).length + (story.location.plateUrl ? 1 : 0);
+    const { subjects, scenes, pictures } = handoff.counts;
+    const parts = [];
+    if (subjects) parts.push(`${subjects} character sheet${subjects === 1 ? '' : 's'}`);
+    if (scenes) parts.push(`${scenes === 1 ? 'the location plate' : 'the plate and the board'}`);
     toast.success(
-      `Script sent to the Video studio (${story.motion.seconds}s). `
-      + (sheets ? `Arm your ${sheets} reference${sheets === 1 ? '' : 's'} there — they are already in the picker.` : ''),
-      { duration: 7000 },
+      pictures
+        ? `Sent to the Video studio — ${story.motion.seconds}s, with ${parts.join(' and ')} attached as references.`
+        : `Sent to the Video studio (${story.motion.seconds}s). Nothing was drawn yet, so no references went with it.`,
+      { duration: 8000 },
     );
   };
 
@@ -1748,7 +1765,7 @@ export function StoryStudio({ active = true } = {}) {
               {drawing === 'board' ? 'Drawing…' : story.board.sheetUrl ? 'Redraw the board' : 'Draw the board'}
             </Button>
             <span className="text-[11px] text-ink3">
-              Arm the {story.characters.filter((row) => row.sheetUrl).length} sheet(s) and the plate as references in the picker — they are already there.
+              The sheets and this board travel to the Video studio with the script — the sheets as subjects, the plate and the board as places.
             </span>
           </div>
           {story.board.sheetUrl ? <Plate url={story.board.sheetUrl} alt="Storyboard sheet" /> : null}

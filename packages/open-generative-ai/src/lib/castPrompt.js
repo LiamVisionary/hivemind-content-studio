@@ -37,10 +37,16 @@ export const PERSONA_DEFAULT_STYLE =
   'photoreal live-action, real human skin texture and hair, shot on camera — not illustrated, not stylised';
 
 /** A persona member: brings references. */
-export function castPersona(name, persona, { style = PERSONA_DEFAULT_STYLE } = {}) {
+export function castPersona(name, persona, { style = PERSONA_DEFAULT_STYLE, noun = '' } = {}) {
   return {
     kind: 'persona',
     style: String(style || ''),
+    // What to CALL this subject in its definition — "the woman shown in
+    // <Picture 1>". Derived from gender for a Hive Persona ID, which is a
+    // photographed human by construction; supplied for a cast that is not
+    // necessarily human, because "the person shown in <Picture 2>" written
+    // about a cat is a contradiction the model has to resolve on its own.
+    noun: String(noun || ''),
     // '' for a member that was never named — the rows attached by hand. The
     // definition then binds the subject to its references alone, which is the
     // honest description; a made-up placeholder name would reach the model.
@@ -69,6 +75,21 @@ export function castPersona(name, persona, { style = PERSONA_DEFAULT_STYLE } = {
   };
 }
 
+/**
+ * Whether anybody in this cast brings a voice — a clone to bind, or a known
+ * character's own named voice. Read from the MEMBERS rather than from the
+ * allocated roles because it decides the speaking order, which the allocation
+ * needs before it runs.
+ */
+function memberCarriesVoice(members = []) {
+  return (members || []).some((member) => {
+    if (member?.kind === 'character') return Boolean(member.voice || member.voiceQuality);
+    if (member?.kind !== 'persona') return false;
+    return (member.audios || []).length > 0
+      || (member.videos || []).some((item) => item?.useAudio || item?.motion === false);
+  });
+}
+
 /** A character member: brings a name the model already knows. */
 export function castCharacter(name, sourceForm = '', { style = '', voice = '', voiceQuality = '' } = {}) {
   return {
@@ -84,6 +105,55 @@ export function castCharacter(name, sourceForm = '', { style = '', voice = '', v
     // it. A name the model cannot place falls back to a generic adult male, so
     // the description is the difference between a cartoon sponge and an old man.
     voiceQuality: String(voiceQuality || ''),
+  };
+}
+
+/**
+ * How a scene reference is described, and what it is allowed to carry.
+ *
+ * H3's retention grammar already has the two tags this needs (the registry's
+ * prompt_contract lists fully_preserved | partially_preserved |
+ * attribute_transfer | weak_reference per label) — the compiler simply never
+ * wrote a picture that was not a person.
+ */
+export const SCENE_RETENTION = Object.freeze({
+  attribute_transfer: {
+    definition: 'a reference for the place itself: its architecture, materials, palette, light and layout',
+    retention: 'attribute_transfer — the place, its light, its materials and its layout carry. It is not a '
+      + 'subject, nobody appearing in it is a subject, and its exact framing is not copied.',
+  },
+  weak_reference: {
+    definition: 'a staging sheet: the order of the action and roughly where things sit in frame',
+    retention: 'weak_reference — read it as staging direction only. Nothing in it carries literally: not its '
+      + 'drawing style, not its panel grid, not its borders, labels or captions, and no face in it is a '
+      + 'subject. The clip is ONE continuous take and must never come back as a grid of panels.',
+  },
+});
+
+export const sceneRetention = (member) => SCENE_RETENTION[member?.retention] || SCENE_RETENTION.attribute_transfer;
+
+/**
+ * A scene member: a place or a staging sheet. Brings pictures, but is nobody.
+ *
+ * The failure this exists to stop: a location plate attached alongside two
+ * character sheets is, to the current compiler, a third person — it gets a
+ * <Subject N>, a definition reading "the person shown in <Picture 3>", and a
+ * fully_preserved contract promising that somebody's face and wardrobe carry
+ * out of an empty room. Left undescribed instead, H3 reads an unlabelled
+ * picture as another subject and puts a person in the room. Neither is what an
+ * empty plate is for, so it gets its own kind.
+ */
+export function castScene(name, { images = [], retention = 'attribute_transfer', carries = '' } = {}) {
+  return {
+    kind: 'scene',
+    name: String(name || ''),
+    retention: SCENE_RETENTION[retention] ? retention : 'attribute_transfer',
+    // Overrides the retention mode's default sentence when the caller knows
+    // something more specific ("the empty harbour shelter at blue hour").
+    carries: String(carries || ''),
+    images: (images || []).filter(Boolean).map(String),
+    videos: [],
+    audios: [],
   };
 }
 
@@ -122,9 +192,19 @@ export function allocateCast(members = [], { limits = DEFAULT_LIMITS, speakingOr
   // not in cast order, which is what this got wrong (2026-08-12: both of a
   // woman's lines came out of a cartoon's mouth). A member who never speaks
   // gets no id at all rather than consuming one.
-  const order = Array.isArray(speakingOrder) && speakingOrder.length
-    ? speakingOrder.map(Number).filter((i) => Number.isInteger(i) && i >= 0 && i < members.length)
-    : members.map((_, index) => index);
+  // A scene reference is nobody, so it is never in the speaking order — and
+  // never consumes an id that would then be missing from the subject it belongs
+  // to further down the list.
+  // An EXPLICIT empty order means nobody speaks — which is not the same as no
+  // order at all, and the difference is load-bearing now that beats can be
+  // supplied. A script whose beats carry no dialogue has no speakers, and
+  // handing every subject an id anyway wrote "<Subject 2> speaks as S2" about a
+  // cat with no lines, then warned that two subjects speak without an (Sx)
+  // pairing — a warning that fires on every silent clip is one nobody reads.
+  const isScene = (member) => member?.kind === 'scene';
+  const order = Array.isArray(speakingOrder)
+    ? speakingOrder.map(Number).filter((i) => Number.isInteger(i) && i >= 0 && i < members.length && !isScene(members[i]))
+    : members.map((_, index) => index).filter((index) => !isScene(members[index]));
   const speakerFor = new Map(order.map((memberIndex, position) => [memberIndex, `S${position + 1}`]));
   const images = [];
   const videos = [];
@@ -132,18 +212,25 @@ export function allocateCast(members = [], { limits = DEFAULT_LIMITS, speakingOr
   const roles = [];
   const overflow = [];
 
+  // Roles stay MEMBER-indexed (beats address a member), while subjects are
+  // numbered over the people only — the two stopped being the same list the
+  // moment a picture could belong to nobody.
+  let subjectCount = 0;
   for (const [index, member] of members.entries()) {
+    const scene = isScene(member);
+    if (!scene) subjectCount += 1;
     const role = {
       member,
-      subject: `<Subject ${index + 1}>`,
+      subject: scene ? '' : `<Subject ${subjectCount}>`,
+      subjectIndex: scene ? 0 : subjectCount,
       // Per member, never per audio reference: two subjects in one clip must
       // never share an id or the model merges their lines.
-      speaker: speakerFor.get(index) || '',
+      speaker: scene ? '' : (speakerFor.get(index) || ''),
       pictures: [],
       videos: [],
       audios: [],
     };
-    if (member.kind === 'persona') {
+    if (member.kind === 'persona' || scene) {
       const room = (kind, list) => {
         const free = Math.max(0, cap[kind] - { images, videos, audios }[kind].length);
         if (list.length > free) overflow.push({ member: member.name, kind, dropped: list.length - free });
@@ -171,7 +258,7 @@ export function allocateCast(members = [], { limits = DEFAULT_LIMITS, speakingOr
   // soundtrack switched on claims an <Audio N> just BEFORE its <Video N>.
   const labels = referenceLabels({ images, videos, audios });
   for (const role of roles) {
-    if (role.member.kind !== 'persona') continue;
+    if (role.member.kind === 'character') continue;
     role.pictures = labels.images.slice(role.pictureIndex, role.pictureIndex + role.pictureCount);
     role.videos = labels.videos.slice(role.videoIndex, role.videoIndex + role.videoCount);
     role.audios = labels.audios.slice(role.audioIndex, role.audioIndex + role.audioCount);
@@ -228,9 +315,29 @@ export function characterSubjectLines({
 export const APPEARANCE_BLANK =
   '[hair, face, build, wardrobe — write it out. Identity holds from these words as much as from the pictures]';
 
+/**
+ * The definition line for a reference that is a place, not a person.
+ *
+ * H3's format asks for EVERY reference to be labelled in subject_definitions,
+ * and the label is doing real work here: a picture nothing accounts for is read
+ * as one more subject, which is how an empty location plate comes back with a
+ * stranger standing in it. So the line names the label, says what it
+ * contributes, and states outright that it holds nobody.
+ */
+function sceneDefinition(role) {
+  const labels = role.pictures || [];
+  if (!labels.length) return '';
+  const plural = labels.length > 1;
+  const what = String(role.member.carries || '').trim() || sceneRetention(role.member).definition;
+  const named = String(role.member.name || '').trim();
+  return `${labels.join(' and ')} ${plural ? 'are' : 'is'} ${what}${named ? ` — ${named}` : ''}. `
+    + `${plural ? 'They hold' : 'It holds'} no subject and ${plural ? 'are' : 'is'} not a person.`;
+}
+
 /** How the model should be told to identify this member. */
 function subjectDefinition(role, shared = false) {
   const { member, subject } = role;
+  if (member.kind === 'scene') return sceneDefinition(role);
   if (member.kind === 'character') {
     return characterSubjectLines({
       subject,
@@ -245,7 +352,7 @@ function subjectDefinition(role, shared = false) {
   // The noun comes from the persona's saved gender; "the person" when it was
   // never set — a persona is a photographed human by construction, and the
   // reference scaffold always said so (the two writers are one path now).
-  const noun = member.gender ? personaGenderWords(member.gender).noun : 'person';
+  const noun = member.noun || (member.gender ? personaGenderWords(member.gender).noun : 'person');
   if (role.pictures.length === 1) parts.push(`the ${noun} shown in ${role.pictures[0]}`);
   else if (role.pictures.length > 1) parts.push(`the ${noun} shown in ${role.pictures.join(', ')}`);
   // No picture: the first clip is the character reference — MiniMax's own
@@ -286,6 +393,10 @@ function subjectDefinition(role, shared = false) {
 /** The retention contract for every reference this cast brought. */
 function retentionLines(role) {
   if (role.member.kind === 'character') return [];
+  if (role.member.kind === 'scene') {
+    const mode = sceneRetention(role.member);
+    return (role.pictures || []).map((label) => `${label}: ${mode.retention}`);
+  }
   const lines = [];
   // The SUBJECT gets a contract of its own, before the pictures that identify
   // it. A per-picture line says what that picture contributes; this says the
@@ -495,11 +606,31 @@ export function compileCastPrompt({
   previousCast = [], standIns = [], scaffold = false,
 } = {}) {
   const beats = Array.isArray(template.beats) ? template.beats : [];
-  // Beats know who speaks and when, so they ARE the speaking order — an
-  // explicit one is honoured, but nothing has to supply it.
-  const order = speakingOrder || (beats.length ? speakingOrderFromBeats(beats) : null);
+  // Who speaks — and first, whether ANYBODY does.
+  //
+  // Beats know both: an explicit order is honoured, and beats carrying no line
+  // are a script with no speakers. Without beats the script itself answers — a
+  // description with no <d> and no (Sx) is a silent clip. Handing every subject
+  // an id regardless wrote "<Subject 2> speaks as S2" about a moth with no
+  // lines, and then warned that two subjects speak with no (Sx) pairing in the
+  // description; a warning that fires on every silent clip is one nobody reads.
+  // The scaffold is the exception — its whole job is to write a stub line, so
+  // it wants the ids.
+  //
+  // A voice ATTACHED is an intent to speak, whatever the script says yet: the
+  // clone has to be bound to a speaker id or it drifts onto whoever the model
+  // decides is talking, so a cast carrying any voice is never silent.
+  const written = `${template.summary || ''}\n${template.detailed_description || ''}`;
+  const someoneSpeaks = scaffold || memberCarriesVoice(members) || /<d>|\(S\d+\)/.test(written);
+  const order = speakingOrder
+    || (beats.length ? speakingOrderFromBeats(beats) : (someoneSpeaks ? null : []));
   const allocation = allocateCast(members, { limits, speakingOrder: order });
   const { roles } = allocation;
+  // `roles` is member-indexed (a beat addresses a member). Everything that
+  // indexes by SUBJECT number — the recast pass, the stand-in binding, the
+  // label-overflow check — reads this list instead, because a scene reference
+  // takes a member slot without taking a subject number.
+  const subjectRoles = roles.filter((role) => role.member.kind !== 'scene');
   const anyVoice = roles.some((role) => roleVoiceLabel(role));
 
   // The creative half is CARRIED, not preserved: everything in it that names a
@@ -517,14 +648,14 @@ export function compileCastPrompt({
   const binding = bindStandIns(
     CREATIVE.map((name) => carried[name]).join(SEAM),
     Array.isArray(standIns) ? standIns : [],
-    (index) => roles[index - 1]?.subject || null,
+    (index) => subjectRoles[index - 1]?.subject || null,
   );
   binding.text.split(SEAM).forEach((text, index) => { carried[CREATIVE[index]] = text; });
-  const recast = (text) => recastCreative(text, roles, previousCast);
+  const recast = (text) => recastCreative(text, subjectRoles, previousCast);
 
   const sections = [];
   sections.push(['subject_definitions',
-    roles.map((role, _index, all) => subjectDefinition(role, all.length > 1)).join('\n')]);
+    roles.map((role) => subjectDefinition(role, subjectRoles.length > 1)).filter(Boolean).join('\n')]);
 
   // Description before summary: the stand-in is bound where it is first
   // written, and a summary that repeats the phrase binds on its own pass.
@@ -597,7 +728,7 @@ export function compileCastPrompt({
   // the only take that put one subject's lines in the other's mouth
   // (2026-08-13). Both constraints are satisfiable at once — order the script so
   // the first voice heard is also <Subject 1> — so crossing is never worth it.
-  const crossed = roles.filter((role, index) => role.speaker && role.speaker !== `S${index + 1}`);
+  const crossed = subjectRoles.filter((role) => role.speaker && role.speaker !== `S${role.subjectIndex}`);
   if (crossed.length) {
     const pairs = crossed.map((role) => `${role.subject}=${role.speaker}`).join(', ');
     warnings.push(
@@ -637,7 +768,7 @@ export function compileCastPrompt({
   // nothing rather than saying so.
   const creative = [summary, description, soundscape, music].filter(Boolean).join('\n');
   const filled = {
-    Subject: roles.length,
+    Subject: subjectRoles.length,
     Picture: allocation.labels.images.length,
     Video: allocation.labels.videos.filter((label) => label.video).length,
     Audio: allocation.labels.audios.length + allocation.labels.videos.filter((label) => label.audio).length,
@@ -694,7 +825,8 @@ const DESCRIPTION_PLACEHOLDER = 'Medium shot of <Subject 1> against [setting], i
   + '<Subject 1> looks into the lens to speak, then holds a beat of stillness.';
 
 /** A summary for a prompt that had none: one line naming every subject and what drives it. */
-function summaryFor(roles) {
+function summaryFor(allRoles) {
+  const roles = (allRoles || []).filter((role) => role.member.kind !== 'scene');
   if (!roles.length) return '';
   const clauses = roles.map((role) => {
     const voice = roleVoiceLabel(role);

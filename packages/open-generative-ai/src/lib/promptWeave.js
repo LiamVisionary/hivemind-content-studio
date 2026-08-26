@@ -26,6 +26,12 @@
 //   persona      a saved Hive Persona ID added from the Cast menu. Brings its
 //                own media, which the weave loads into the rows.
 //   character    a name H3 already knows. Brings text, occupies no slot.
+//   scene        a place or a staging sheet — the Story studio's location plate
+//                and storyboard. Occupies picture slots and carries its own
+//                retention contract, but is nobody: no <Subject N>, no speaker,
+//                no voice. A picture the cast cannot account for is one H3
+//                reads as another person, which is how an empty room comes back
+//                with a stranger in it.
 //
 // WHAT happens is the text in the composer — a starter, a library prompt, the
 // helper's draft, the Shot Builder's timeline, or something typed. Starters
@@ -42,9 +48,11 @@
 // Pure: no React, no storage, no network. The studio calls it; tests prove it.
 import {
   PERSONA_DEFAULT_STYLE,
+  SCENE_RETENTION,
   applyCastToPrompt,
   castCharacter,
   castPersona,
+  castScene,
   isSixSectionPrompt,
   parseSixSections,
 } from './castPrompt.js';
@@ -131,6 +139,24 @@ export function newPersonMember(members = []) {
   };
 }
 
+/**
+ * A place or a staging sheet, as a member.
+ *
+ * Held in the cast rather than beside it because the cast IS the annotation
+ * that says what each reference row is: a picture the cast cannot account for
+ * is one H3 reads as another person, and the whole point of an empty location
+ * plate is that it holds nobody. It occupies picture slots and gets its own
+ * retention contract; it never takes a <Subject N>, a speaker id or a voice.
+ */
+export const sceneMember = ({ key, name = '', images = [], retention = 'attribute_transfer', carries = '' } = {}) => ({
+  key: String(key || 'scene'),
+  kind: 'scene',
+  name: String(name || ''),
+  retention: SCENE_RETENTION[retention] ? retention : 'attribute_transfer',
+  carries: String(carries || ''),
+  data: { v: 1, images: [...images].filter(Boolean), videos: [], audios: [] },
+});
+
 /** The references attached by hand, as a member. `persona` names it when a Persona ID is loaded. */
 export const referencesMember = ({ images = [], videos = [], audios = [], persona = null, gender = '', look = '' } = {}) => ({
   key: persona?.id ? `persona:${persona.id}` : REFERENCES_KEY,
@@ -148,7 +174,25 @@ export const referencesMember = ({ images = [], videos = [], audios = [], person
 
 /** Studio member -> the cast description castPrompt.js compiles. */
 export function toCastMember(member) {
-  if (member.kind === 'persona') return castPersona(member.name, member.data);
+  if (member.kind === 'scene') {
+    return castScene(member.name, {
+      images: (member.data?.images || []).map(urlOf).filter(Boolean),
+      retention: member.retention,
+      carries: member.carries,
+    });
+  }
+  // A member may carry its own render style. The photoreal default is right for
+  // a Hive Persona ID — a photographed human — and wrong for a Story studio cast,
+  // where the production's own style covers everyone and "real human skin
+  // texture and hair" was being asserted about a cat. An empty string is a
+  // deliberate choice and writes no style line at all.
+  if (member.kind === 'persona') {
+    if (member.style === undefined && !member.noun) return castPersona(member.name, member.data);
+    return castPersona(member.name, member.data, {
+      ...(member.style === undefined ? {} : { style: member.style }),
+      noun: member.noun || '',
+    });
+  }
   return castCharacter(member.name, characterPromptText(member.entry), {
     style: characterStyleById(member.styleId).style,
     voice: member.useVoice ? characterVoiceText(member.entry) : '',
@@ -161,12 +205,15 @@ export function toCastMember(member) {
 }
 
 const isPersonaLike = (member) => member?.kind === 'persona';
+const isScene = (member) => member?.kind === 'scene';
+/** Members that occupy reference rows — people and places alike. */
+const holdsMedia = (member) => isPersonaLike(member) || isScene(member);
 const urlOf = (item) => (typeof item === 'string' ? item : String(item?.url || ''));
 const ROW_KINDS = ['images', 'videos', 'audios'];
 
 /** Whether a member brings any media at all. */
 export function memberHasMedia(member) {
-  if (!isPersonaLike(member)) return false;
+  if (!holdsMedia(member)) return false;
   return ROW_KINDS.some((kind) => (member.data?.[kind] || []).length > 0);
 }
 
@@ -197,9 +244,9 @@ export function reconcileCast(members = [], rows = {}, { persona = null, claimNe
     videos: (rows.videos || []).filter((item) => urlOf(item)),
     audios: (rows.audios || []).filter((item) => urlOf(item)),
   };
-  const personaLike = list.filter(isPersonaLike);
+  const carriers = list.filter(holdsMedia);
   const owned = new Map(); // url -> member key
-  for (const member of personaLike) {
+  for (const member of carriers) {
     for (const kind of ROW_KINDS) {
       for (const item of member.data?.[kind] || []) {
         const url = urlOf(item);
@@ -208,10 +255,10 @@ export function reconcileCast(members = [], rows = {}, { persona = null, claimNe
     }
   }
 
-  const next = list.map((member) => (isPersonaLike(member)
+  const next = list.map((member) => (holdsMedia(member)
     ? { ...member, data: { ...(member.data || {}), images: [], videos: [], audios: [] } }
     : member));
-  const byKey = new Map(next.filter(isPersonaLike).map((member) => [member.key, member]));
+  const byKey = new Map(next.filter(holdsMedia).map((member) => [member.key, member]));
   const unowned = { images: [], videos: [], audios: [] };
   for (const kind of ROW_KINDS) {
     for (const item of attached[kind]) {
@@ -224,6 +271,9 @@ export function reconcileCast(members = [], rows = {}, { persona = null, claimNe
   const anyUnowned = ROW_KINDS.some((kind) => unowned[kind].length);
   if (anyUnowned) {
     const holders = next.filter(isPersonaLike);
+    // Only PEOPLE claim unowned media. A picture dropped on the composer is a
+    // person's until told otherwise; landing it on the location plate would
+    // silently make it part of the room.
     // `claimNew` says WHO the newly attached media is for — set when the user
     // pressed "+ Pictures" on a member's chip, or just added another person.
     // Without it: a single person takes everything (adding a picture to the
@@ -266,14 +316,14 @@ export function reconcileCast(members = [], rows = {}, { persona = null, claimNe
   // A derived member with no media left leaves the shot; one the user added on
   // purpose (`explicit`) stays — it may be text-defined, or still waiting for
   // its pictures. Removing it is the ✕ on its chip.
-  return next.filter((member) => !isPersonaLike(member) || memberHasMedia(member) || member.explicit);
+  return next.filter((member) => !holdsMedia(member) || memberHasMedia(member) || member.explicit);
 }
 
 /** The rows the whole cast occupies, in cast order — what the References panel should hold. */
 export function castRows(members = []) {
   const rows = { images: [], videos: [], audios: [] };
   for (const member of members) {
-    if (!isPersonaLike(member)) continue;
+    if (!holdsMedia(member)) continue;
     for (const kind of ROW_KINDS) rows[kind].push(...(member.data?.[kind] || []));
   }
   return rows;
@@ -295,7 +345,7 @@ export function castPersonaIdentity(members = []) {
 
 /** The gender a template should render for: whoever holds <Subject 1>. */
 export function castRenderGender(members = []) {
-  const first = (members || [])[0];
+  const first = (members || []).filter((member) => !isScene(member))[0];
   if (!first) return '';
   if (isPersonaLike(first)) return normalizePersonaGender(first.data?.gender);
   return normalizePersonaGender(first.entry?.gender);
@@ -314,7 +364,7 @@ function memberHasVoice(member) {
  * the owner's vault and never leaves the browser).
  */
 export function castSubjects(members = []) {
-  return (members || []).map((member, index) => ({
+  return (members || []).filter((member) => !isScene(member)).map((member, index) => ({
     subject: index + 1,
     kind: isPersonaLike(member) ? 'persona' : 'character',
     gender: isPersonaLike(member) ? normalizePersonaGender(member.data?.gender) : normalizePersonaGender(member.entry?.gender),
@@ -326,6 +376,12 @@ export function castSubjects(members = []) {
 
 /** "You · 3 pictures · voice" / "SpongeBob · known character" for a chip. */
 export function describeMember(member, { zh = false } = {}) {
+  if (isScene(member)) {
+    const count = (member.data?.images || []).length;
+    const staging = member.retention === 'weak_reference';
+    if (zh) return staging ? `分镜参考 · ${count} 张` : `场景参考 · ${count} 张`;
+    return `${staging ? 'staging sheet' : 'place'} · ${count} picture${count === 1 ? '' : 's'} · nobody`;
+  }
   if (!isPersonaLike(member)) return zh ? '已知角色' : 'known character';
   const data = member.data || {};
   const parts = [];
@@ -366,9 +422,15 @@ export function weaveTarget({ h3 = false, referenceLane = false, rows = null } =
  */
 export function castApplication({
   members = [], prompt = '', limits = DEFAULT_LIMITS, durationSeconds = 0, standIns = [], scaffold = false,
+  template = null,
 } = {}) {
   const result = applyCastToPrompt(prompt, {
     members: members.map(toCastMember), limits: limits || DEFAULT_LIMITS, durationSeconds, standIns, scaffold,
+    // A door that arrives with the creative half already broken out — the Story
+    // studio hands over beats, a soundscape and a music rule rather than one
+    // paragraph — supplies it here. Everything else passes null and the prompt
+    // text is parsed for it, exactly as before.
+    ...(template ? { template } : {}),
   });
   const { images, videos, audios } = result.allocation;
   return {
@@ -416,6 +478,10 @@ function weaveCharacterProse(text, entry) {
  * `standIns`  the stand-ins recorded when the text was rendered (or null).
  * `scaffold`  true for the explicit Weave button: write the dialogue stub and a
  *             placeholder shot for an empty composer.
+ * `template`  the creative half already broken out (beats, summary, soundscape,
+ *             music, an opening style line) for a door that HAS the structure —
+ *             the Story studio's six staged decisions. Reference target only;
+ *             every other target renders `text` as it arrived.
  *
  * Returns { prompt, rows, warnings, refit, persona, standIns } where `rows` is
  * null when the weave did not decide the rows (no reference target), `refit`
@@ -423,6 +489,7 @@ function weaveCharacterProse(text, entry) {
  */
 export function weavePrompt(text, {
   cast = [], limits = DEFAULT_LIMITS, durationSeconds = 0, target = 'prose', standIns = null, scaffold = false,
+  template = null,
 } = {}) {
   const source = String(text || '');
   const live = liveStandIns(source, standIns || []);
@@ -433,7 +500,7 @@ export function weavePrompt(text, {
   let remaining = live;
 
   if (target === 'reference' && cast.length) {
-    const woven = castApplication({ members: cast, prompt: source, limits, durationSeconds, standIns: live, scaffold });
+    const woven = castApplication({ members: cast, prompt: source, limits, durationSeconds, standIns: live, scaffold, template });
     prompt = woven.prompt;
     rows = { images: woven.images, videos: woven.videos, audios: woven.audios };
     warnings = woven.warnings;
@@ -444,9 +511,10 @@ export function weavePrompt(text, {
     // a TEXT-DEFINED person's own description (name, gender, look — a person
     // with pictures cannot be rendered here, so their stand-in stays as
     // written), and a character nothing mentions is written in.
-    const characters = cast.filter((member) => !isPersonaLike(member));
+    const people = cast.filter((member) => !isScene(member));
+    const characters = people.filter((member) => !isPersonaLike(member));
     const bound = bindStandIns(source, live, (index) => {
-      const member = cast[index - 1];
+      const member = people[index - 1];
       if (!member) return null;
       if (!isPersonaLike(member)) return characterPromptText(member.entry);
       if (memberHasMedia(member)) return null;
@@ -456,7 +524,7 @@ export function weavePrompt(text, {
     remaining = bound.remaining;
     if (target === 'h3-text' || target === 'prose') {
       for (const member of characters) {
-        if (!bound.bound.includes(cast.indexOf(member) + 1)) prompt = weaveCharacterProse(prompt, member.entry);
+        if (!bound.bound.includes(people.indexOf(member) + 1)) prompt = weaveCharacterProse(prompt, member.entry);
       }
     }
     persona = castPersonaIdentity(cast);
