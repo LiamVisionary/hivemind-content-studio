@@ -39,8 +39,8 @@ import {
 } from '../lib/promptWeave.js';
 import { allocateCast } from '../lib/castPrompt.js';
 import { liveStandIns } from '../lib/subjectTemplate.js';
-import { deliveryPlan } from '../lib/videoDelivery.js';
-import { SEND_SOURCES, publishSendTarget } from '../lib/studioTargets.js';
+import { publishSendTarget } from '../lib/studioTargets.js';
+import { videoSourceDescriptors } from './video/videoSendTargets.js';
 import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
@@ -320,6 +320,8 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // A History "Load in Studio" that arrived before the workflow catalog did,
     // held until the catalog can resolve its model.
     pendingRestore: null,
+    // A Story production waiting for the workflow catalog to name its model.
+    pendingStory: null,
     // Scene timeline: which chain is on screen, which shots the user dropped
     // from the cut, and the built cut itself (an object URL — revoked when it
     // is replaced, so a rebuild never leaks the old one).
@@ -763,6 +765,27 @@ export function VideoStudio({
         setLocalMode(wantsLocal, wantsRented);
       }
     }
+    // …then the model the sender wrote FOR. A tab opened for the first time
+    // boots into its own default, which is not what the picker was looking at:
+    // the story arrived compiled for H3's reference lane and landed on a cloud
+    // model with nowhere to put its pictures. Selected through the studio's own
+    // transitions, never a raw modelId write, so the family gates that read
+    // `modelFamily` cannot answer for the previous model.
+    if (setup?.modelId && setup.modelId !== s.setup.modelId) {
+      const wanted = resolveVideoModel(setup.modelId, s.catalogs);
+      if (wanted) {
+        if (isHivemindVideoModelId(wanted.id)) selectHiveModel(wanted);
+        else selectRegularModel(wanted);
+      } else if (!s.catalogs.hivemindI2V.length) {
+        // The workflow catalog loads over the network and a first visit to this
+        // studio navigates here the moment the sender has its payload, so the
+        // production can arrive BEFORE the catalog it names a model from. Hold
+        // it and land it again when the catalog does — the same race, and the
+        // same cure, as a "Load in Studio" that outran its catalog.
+        s.pendingStory = setup;
+        return { attached: 0, wanted: 0, deferred: true };
+      }
+    }
     const referenceOk = referenceLaneAvailable();
     const ingredientsModel = currentIngredientModel(s.setup, s.catalogs);
     const next = { ...s.setup };
@@ -801,106 +824,13 @@ export function VideoStudio({
    * What this tab would run on each source, published for anything that wants
    * to send work here (lib/studioTargets.js).
    *
-   * Only a mounted studio can answer this. The model that a source lands on is
-   * the current one when that source offers it and the first one it does offer
-   * otherwise — the same list, filtered the same way, that this tab's own model
-   * menu shows. Guessing it from the id in the sender would be a second copy of
-   * a rule that has already drifted once.
+   * A mounted tab publishes its LIVE setup, which is the half the picker cannot
+   * get from storage — this tab may have been switched to another model since
+   * the last save, and a background tab never saves at all. The resolution
+   * itself is shared with the unmounted case (video/videoSendTargets.js): two
+   * answers to "which model would this source land on" is the drift that rule
+   * exists to prevent.
    */
-  const sourceOptions = (source) => {
-    const localMode = source !== 'api';
-    const rentedOnly = source === 'rented';
-    const probe = { ...s.setup, localMode, rentedOnly };
-    return generationModelsFor(probe, s.catalogs)
-      .filter((model) => !hasSourceToggle || isLocalVideoModel(model.id) === localMode)
-      .filter((model) => !(rentedOnly && s.rentedMachines?.length) || servedByAnyMachine(s.rentedMachines, model));
-  };
-  const sendDescriptorFor = (source) => {
-    // A rented machine that is not LIVE is still a rented machine. "No machine
-    // is running" over a box that is merely unattached reads as "you have not
-    // rented anything", which is a different and wrong statement — and it hides
-    // the one-click fix the Source panel already offers. Same vocabulary the
-    // generate guard uses, so the two never disagree about what is wrong.
-    if (source === 'rented') {
-      const live = (s.rentedMachines || []).length;
-      const idle = (s.rentedIdle || []).length;
-      const broken = (s.rentedBroken || []).length;
-      const provisioning = (s.rentedProvisioning || []).length;
-      if (!live && !idle && !broken && !provisioning) {
-        return {
-          available: false,
-          modelId: '', modelName: '', plan: null, switches: false,
-          reason: zh() ? '还没有租用机器' : 'No machine rented yet',
-        };
-      }
-      // Rented stays choosable while a machine is coming online or waiting to
-      // be connected: the Source panel it lands on carries the button that
-      // fixes it, and refusing the choice here would hide that.
-      if (!live) {
-        const note = broken
-          ? (zh() ? '连接已断开——在“来源”面板重新连接' : 'connection lost — reconnect in the Source panel')
-          : idle
-            ? (zh() ? '尚未接入本工作室——点“用于本工作室”' : 'not connected to this studio yet — "Use it here"')
-            : (zh() ? '仍在上线中' : 'still coming online');
-        const offered = sourceOptions(source);
-        const chosen = offered.find((model) => model.id === s.setup.modelId) || offered[0] || null;
-        if (!chosen) {
-          return {
-            available: false, modelId: '', modelName: '', plan: null, switches: false,
-            reason: `${zh() ? '租用机器' : 'Rented machine'} — ${note}`,
-          };
-        }
-        const chosenEntry = resolveVideoModel(chosen.id, s.catalogs) || chosen;
-        return {
-          available: true,
-          modelId: chosen.id,
-          modelName: chosen.name || chosen.id,
-          switches: chosen.id !== s.setup.modelId,
-          note,
-          plan: deliveryPlan(
-            { modelId: chosen.id, modelFamily: String(chosen.workflowFamily || chosenEntry.workflowFamily || '') },
-            {
-              referenceLane: Boolean(referenceWorkflowForHivemindModel(chosen.id)),
-              ingredientsLane: Boolean(chosenEntry?.supportsIngredientImages),
-              endFrame: Boolean(chosenEntry?.supportsEndFrame),
-            },
-          ),
-        };
-      }
-    }
-    const offered = sourceOptions(source);
-    const current = offered.find((model) => model.id === s.setup.modelId) || offered[0] || null;
-    if (!current) {
-      return {
-        available: false,
-        modelId: '', modelName: '', plan: null, switches: false,
-        reason: zh() ? '这个来源暂无视频模型' : 'No video model on this source',
-      };
-    }
-    const entry = resolveVideoModel(current.id, s.catalogs) || current;
-    const probe = { modelId: current.id, modelFamily: String(current.workflowFamily || entry.workflowFamily || '') };
-    return {
-      available: true,
-      modelId: current.id,
-      modelName: current.name || current.id,
-      // True when this source does not offer the model loaded now, so choosing
-      // it MOVES the tab onto a different one. Said out loud rather than
-      // presented as the model already in hand.
-      switches: current.id !== s.setup.modelId,
-      // The catalog is the only authority on what a workflow can be sent, so
-      // the lanes are read off the entry rather than inferred from the family.
-      plan: deliveryPlan(probe, {
-        referenceLane: Boolean(referenceWorkflowForHivemindModel(current.id)),
-        ingredientsLane: Boolean(entry?.supportsIngredientImages),
-        endFrame: Boolean(entry?.supportsEndFrame),
-      }),
-    };
-  };
-  // Republished when what this tab IS changes — the model, the source, the
-  // rentals it can reach, the catalogs it resolves against. Keyed on a
-  // signature rather than left dependency-free: the registry notifies its
-  // listeners on every write, and an unpublish/republish on every keystroke in
-  // the prompt box would wake the sender's menu for nothing.
   const sendSignature = [
     tabIdRef.current, tabActive, s.setup.modelId, s.setup.localMode, s.setup.rentedOnly,
     (s.rentedMachines || []).length, (s.rentedIdle || []).length,
@@ -908,7 +838,18 @@ export function VideoStudio({
     (s.catalogs?.hivemindI2V || []).length, (s.catalogs?.allT2V || []).length,
   ].join('|');
   useEffect(() => {
-    const sources = Object.fromEntries(SEND_SOURCES.map((source) => [source, sendDescriptorFor(source)]));
+    const sources = videoSourceDescriptors({
+      setup: s.setup,
+      catalogs: s.catalogs,
+      machines: {
+        live: s.rentedMachines || [],
+        idle: s.rentedIdle || [],
+        broken: s.rentedBroken || [],
+        provisioning: s.rentedProvisioning || [],
+      },
+      hasSourceToggle: isLocalAIAvailable(),
+      zh: zh(),
+    });
     return publishSendTarget(`video:${tabIdRef.current}`, {
       section: 'video',
       tabId: tabIdRef.current,
@@ -2732,6 +2673,14 @@ export function VideoStudio({
     // A "Load in Studio" that arrived before this catalog did. It outranks the
     // persisted preferences below — the user asked for THIS clip's setup, and
     // letting the defaults win would quietly hand back the wrong settings.
+    // A whole Story production that arrived before this catalog did. Landed
+    // first: it names the model everything else in the payload was written for.
+    if (s.pendingStory) {
+      const pending = s.pendingStory;
+      s.pendingStory = null;
+      applyStoryProduction(pending);
+      return;
+    }
     if (s.pendingRestore) {
       const pending = s.pendingRestore;
       s.pendingRestore = null;
@@ -3111,8 +3060,9 @@ export function VideoStudio({
       if (setup?.format === 'story-production') {
         const landed = applyStoryProduction(setup);
         // Only when the model MOVED under the handoff. A story sent to a target
-        // that never had a picture lane already said so on the Story page.
-        if (landed.wanted && !landed.attached) {
+        // that never had a picture lane already said so on the Story page, and
+        // one still waiting for its catalog has not been attempted yet.
+        if (!landed.deferred && landed.wanted && !landed.attached) {
           toast(zh()
             ? `这个故事带来了 ${landed.wanted} 张图，但当前模型没有对应的通道，因此未附加。`
             : `${landed.wanted} picture${landed.wanted === 1 ? '' : 's'} came with this story, but the model now `

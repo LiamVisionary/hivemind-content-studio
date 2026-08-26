@@ -16,6 +16,8 @@
 // Module state, deliberately: it describes what is mounted right now. Nothing
 // here is persisted — a target that is not on screen is not a target.
 
+import { loadTabState, saveTabState } from './studioTabs.js';
+
 const targets = new Map(); // key -> descriptor
 const listeners = new Set();
 
@@ -41,6 +43,20 @@ export function listSendTargets(section = 'video') {
   return [...targets.values()]
     .filter((entry) => entry.section === section)
     .sort((a, b) => (Number(a.index) || 0) - (Number(b.index) || 0));
+}
+
+/**
+ * Live targets over resolved ones, by tab.
+ *
+ * A mounted tab knows its CURRENT setup, which storage cannot: it may have been
+ * switched since the last save, and a background tab never saves at all. A tab
+ * that is not mounted is still a real destination, so the resolved answer fills
+ * in for it rather than the tab vanishing from the list.
+ */
+export function mergeSendTargets(live = [], resolved = []) {
+  const byTab = new Map((resolved || []).map((entry) => [entry.tabId, entry]));
+  for (const entry of live || []) byTab.set(entry.tabId, entry);
+  return [...byTab.values()].sort((a, b) => (Number(a.index) || 0) - (Number(b.index) || 0));
 }
 
 /** Called whenever the set of targets, or any one of them, changes. */
@@ -73,7 +89,16 @@ export const SOURCE_LABELS = Object.freeze({
  */
 export function selectSendTarget(section, tabId) {
   if (typeof window === 'undefined') return;
+  const wanted = Number(tabId);
+  // Written to the strip's own storage FIRST, because the common case is that
+  // the target studio is not mounted yet — there is nothing listening, and the
+  // strip reads this when it comes up. The event is for the case where it IS
+  // mounted and has to move now.
+  try {
+    const state = loadTabState(section);
+    if (state.tabs.some((tab) => tab.id === wanted)) saveTabState(section, { ...state, activeId: wanted });
+  } catch { /* storage disabled — the event below still handles a mounted strip */ }
   window.dispatchEvent(new CustomEvent('studio-select-tab', {
-    detail: { studioType: section, tabId: Number(tabId) },
+    detail: { studioType: section, tabId: wanted },
   }));
 }

@@ -246,7 +246,7 @@ const drawn = (story) => (story?.characters || []).filter((character) => charact
  * unchanged: it is the last-resort text if even the written prompt cannot be
  * used, and it is what the user saw on the Story page.
  */
-export function storyHandoff(story, { script = '', plan = null } = {}) {
+export function storyHandoff(story, { script = '', plan = null, modelId = '' } = {}) {
   const target = plan || deliveryPlan(null);
   const subjects = storySubjects(story);
   const scenes = storyScenes(story);
@@ -271,6 +271,11 @@ export function storyHandoff(story, { script = '', plan = null } = {}) {
   return {
     format: 'story-production',
     grammar,
+    // The model the story was WRITTEN for. Carried so the target lands on it
+    // rather than on whatever it would otherwise have booted into — a plan and
+    // a model that disagree is a prompt in the wrong grammar with the wrong
+    // things attached.
+    modelId: String(modelId || ''),
     script: String(script || ''),
     prompt: written.prompt,
     // Only where the target reads one. H3 documents that "no X" does not work,

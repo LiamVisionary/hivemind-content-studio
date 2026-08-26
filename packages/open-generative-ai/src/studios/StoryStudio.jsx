@@ -82,6 +82,7 @@ import { blankStory, producerIsRunning, restoreStory } from './story/state.js';
 import { describeHandoff, storyHandoff } from './story/handoff.js';
 import { SendToMenu } from '../components/SendToMenu.jsx';
 import { selectSendTarget } from '../lib/studioTargets.js';
+import { resolveVideoSendTargets } from './video/videoSendTargets.js';
 import {
   acceptedValues, blankFieldsIn, fieldMap, fieldsFor, fillBrief, fillChunks, storyContext, writePath,
 } from './story/fields.js';
@@ -1158,7 +1159,13 @@ export function StoryStudio({ active = true } = {}) {
    */
   const sendToVideo = ({ tabId, source, descriptor }) => {
     if (!script) { toast.error('There is no script to send yet.'); return; }
-    const handoff = storyHandoff(story, { script, plan: descriptor?.plan || null });
+    const handoff = storyHandoff(story, {
+      script,
+      plan: descriptor?.plan || null,
+      // The row named a model; the target must land on THAT one, or the prompt
+      // arrives written for a model nothing selected.
+      modelId: descriptor?.modelId || '',
+    });
     // The tab has to be in front before the setup bridge will drain into it.
     selectSendTarget('video', tabId);
     loadStudioSetup('video', { ...handoff, source });
@@ -1938,6 +1945,7 @@ export function StoryStudio({ active = true } = {}) {
               icon="film"
               label="Open in the Video studio"
               disabled={!script}
+              resolve={resolveVideoSendTargets}
               describeFor={describeSendTo}
               onSend={sendToVideo}
             />

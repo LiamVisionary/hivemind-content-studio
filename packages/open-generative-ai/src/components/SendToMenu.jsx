@@ -17,16 +17,35 @@ import { Menu, MenuHeading } from '../ui/Menu.jsx';
 import { Button, cx } from '../ui/kit.jsx';
 import { Icon } from '../ui/icons.jsx';
 import {
-  SEND_SOURCES, SOURCE_LABELS, listSendTargets, selectSendTarget, subscribeSendTargets,
+  SEND_SOURCES, SOURCE_LABELS, listSendTargets, mergeSendTargets, selectSendTarget, subscribeSendTargets,
 } from '../lib/studioTargets.js';
 
 const zh = () => getLang() === 'zh-CN';
 
-/** Live view of what is mounted, re-read whenever a studio republishes. */
-export function useSendTargets(section = 'video') {
+/**
+ * Every place work can be sent — mounted or not.
+ *
+ * `resolve` answers for the tabs that are not mounted, from what the target
+ * studio already has on disk. Without it a session that had never opened the
+ * Video studio was told to go and open it and come back, which is not a
+ * fallback, it is homework.
+ */
+export function useSendTargets(section = 'video', resolve = null) {
   const [, bump] = useState(0);
+  const [resolved, setResolved] = useState([]);
   useEffect(() => subscribeSendTargets(() => bump((n) => n + 1)), []);
-  return listSendTargets(section);
+  // Once per open: the catalog and the rentals both move, and this hook is only
+  // mounted while the panel is.
+  useEffect(() => {
+    if (!resolve) return undefined;
+    let alive = true;
+    Promise.resolve(resolve())
+      .then((list) => { if (alive) setResolved(Array.isArray(list) ? list : []); })
+      .catch(() => { if (alive) setResolved([]); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return mergeSendTargets(listSendTargets(section), resolved);
 }
 
 function SourceRow({ source, descriptor, describeFor, selected, onSelect }) {
@@ -91,18 +110,15 @@ function SourceRow({ source, descriptor, describeFor, selected, onSelect }) {
 }
 
 /**
- * The picker.
+ * The panel's contents, mounted only while it is open.
  *
- * `describeFor(plan)` is the sender's own one-line answer to "what would
- * actually travel there" — it is given the target's delivery plan and knows its
- * payload, which nothing here does. `onSend({ tabId, source, descriptor })` is
- * called once, on Send — never on a row click, because choosing where to look
- * is not choosing to go.
+ * Its own component so the unmounted-target resolve runs once per OPEN rather
+ * than once per page: the catalog and the rentals both move, and a menu that
+ * answered from whatever was cached when the page loaded would offer a machine
+ * that has since gone away.
  */
-export function SendToMenu({
-  section = 'video', describeFor = null, disabled = false, label, icon = 'film', onSend,
-}) {
-  const targets = useSendTargets(section);
+function SendToBody({ section, resolve, describeFor, onSend, close }) {
+  const targets = useSendTargets(section, resolve);
   const [tabId, setTabId] = useState(null);
   const [source, setSource] = useState('');
 
@@ -116,6 +132,88 @@ export function SendToMenu({
   const descriptor = target?.sources?.[chosen] || null;
   const ready = Boolean(target && descriptor?.available);
 
+  if (!target) {
+    return (
+      <p className="px-2.5 py-4 text-center text-[11px] leading-snug text-ink3">
+        {zh() ? '正在读取视频工作室的设置…' : 'Reading the Video studio’s settings…'}
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      {/* Only when there is a choice to make. One tab is not a decision. */}
+      {targets.length > 1 ? (
+        <>
+          <MenuHeading>{zh() ? '发送到哪个标签' : 'Which tab'}</MenuHeading>
+          <div className="flex flex-wrap gap-1 px-1.5 pb-1" role="radiogroup">
+            {targets.map((entry) => (
+              <button
+                key={entry.tabId}
+                type="button"
+                role="radio"
+                aria-checked={entry.tabId === target.tabId}
+                onClick={() => { setTabId(entry.tabId); setSource(''); }}
+                className={cx(
+                  'rounded px-2 py-1 text-[11px] transition-colors',
+                  entry.tabId === target.tabId
+                    ? 'bg-honey-tint text-honey'
+                    : 'text-ink3 hover:bg-bg3 hover:text-ink2',
+                )}
+              >
+                {entry.label}
+                {entry.active ? ` · ${zh() ? '当前' : 'front'}` : ''}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
+
+      <MenuHeading>{zh() ? '在哪里运行' : 'Run it on'}</MenuHeading>
+      <div role="radiogroup" className="flex flex-col">
+        {SEND_SOURCES.map((entry) => (
+          <SourceRow
+            key={entry}
+            source={entry}
+            descriptor={target.sources?.[entry] || null}
+            describeFor={describeFor}
+            selected={entry === chosen}
+            onSelect={setSource}
+          />
+        ))}
+      </div>
+      <div className="mt-1 border-t border-line1 px-1.5 pb-0.5 pt-2">
+        <Button
+          variant="primary"
+          className="w-full justify-center"
+          disabled={!ready}
+          onClick={() => {
+            if (!ready) return;
+            onSend?.({ tabId: target.tabId, source: chosen, descriptor, target });
+            close();
+          }}
+        >
+          {zh() ? '发送' : 'Send'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The picker.
+ *
+ * `resolve()` answers for targets that are not mounted — the Video studio does
+ * not have to have been opened for this session to know what it would run.
+ * `describeFor(plan)` is the sender's own one-line answer to "what would
+ * actually travel there"; it is given the target's delivery plan and knows its
+ * payload, which nothing here does. `onSend({ tabId, source, descriptor })` is
+ * called once, on Send — never on a row click, because choosing where to look
+ * is not choosing to go.
+ */
+export function SendToMenu({
+  section = 'video', resolve = null, describeFor = null, disabled = false, label, icon = 'film', onSend,
+}) {
   return (
     <Menu
       up
@@ -127,74 +225,13 @@ export function SendToMenu({
       )}
     >
       {(close) => (
-        <div className="flex flex-col gap-1">
-          {targets.length === 0 ? (
-            <p className="px-2.5 py-4 text-center text-[11px] leading-snug text-ink3">
-              {zh()
-                ? '视频工作室还没有打开。先打开一次，这里就会列出它的标签页。'
-                : 'The Video studio has not been opened yet. Visit it once and its tabs will be listed here.'}
-            </p>
-          ) : null}
-
-          {/* Only when there is a choice to make. One tab is not a decision. */}
-          {targets.length > 1 ? (
-            <>
-              <MenuHeading>{zh() ? '发送到哪个标签' : 'Which tab'}</MenuHeading>
-              <div className="flex flex-wrap gap-1 px-1.5 pb-1" role="radiogroup">
-                {targets.map((entry) => (
-                  <button
-                    key={entry.key}
-                    type="button"
-                    role="radio"
-                    aria-checked={entry.tabId === (target?.tabId ?? null)}
-                    onClick={() => { setTabId(entry.tabId); setSource(''); }}
-                    className={cx(
-                      'rounded px-2 py-1 text-[11px] transition-colors',
-                      entry.tabId === (target?.tabId ?? null)
-                        ? 'bg-honey-tint text-honey'
-                        : 'text-ink3 hover:bg-bg3 hover:text-ink2',
-                    )}
-                  >
-                    {entry.label}
-                    {entry.active ? ` · ${zh() ? '当前' : 'front'}` : ''}
-                  </button>
-                ))}
-              </div>
-            </>
-          ) : null}
-
-          {target ? (
-            <>
-              <MenuHeading>{zh() ? '在哪里运行' : 'Run it on'}</MenuHeading>
-              <div role="radiogroup" className="flex flex-col">
-                {SEND_SOURCES.map((entry) => (
-                  <SourceRow
-                    key={entry}
-                    source={entry}
-                    descriptor={target.sources?.[entry] || null}
-                    describeFor={describeFor}
-                    selected={entry === chosen}
-                    onSelect={setSource}
-                  />
-                ))}
-              </div>
-              <div className="mt-1 border-t border-line1 px-1.5 pb-0.5 pt-2">
-                <Button
-                  variant="primary"
-                  className="w-full justify-center"
-                  disabled={!ready}
-                  onClick={() => {
-                    if (!ready) return;
-                    onSend?.({ tabId: target.tabId, source: chosen, descriptor, target });
-                    close();
-                  }}
-                >
-                  {zh() ? '发送' : 'Send'}
-                </Button>
-              </div>
-            </>
-          ) : null}
-        </div>
+        <SendToBody
+          section={section}
+          resolve={resolve}
+          describeFor={describeFor}
+          onSend={onSend}
+          close={close}
+        />
       )}
     </Menu>
   );
