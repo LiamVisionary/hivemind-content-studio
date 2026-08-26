@@ -1,10 +1,12 @@
 """This app's adapter onto PassBook.
 
 PassBook is the standard for sharing one credential store between the apps on a
-machine; it lives in `packages/passbook` as a dependency-free single file (plus
-a Node twin), so other projects can drop it in unchanged. This module is the
-thin binding: it names this app, keeps the function names the rest of the studio
-already imports, and adds nothing of its own.
+machine. It has its own repository and is installed here as an ordinary
+dependency — https://github.com/LiamVisionary/passbook — rather than vendored,
+because a copy of a standard inside one of its consumers drifts from the
+original and then quietly disagrees with it. This module is the thin binding: it
+names this app, keeps the function names the rest of the studio already imports,
+and adds nothing of its own.
 
 On a machine running HivemindOS the store PassBook resolves is the hive env —
 the same `~/.hivemindos/.env` that `hive-env-check` and `hive-env-run` already
@@ -22,16 +24,11 @@ Two rules that matter more than the code:
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-_STANDARD = Path(__file__).resolve().parents[2] / "packages" / "passbook"
-if str(_STANDARD) not in sys.path:
-    sys.path.insert(0, str(_STANDARD))
-
-import passbook  # noqa: E402  — the vendored standard, resolved above
+import passbook
 
 APP_ID = "hivemind-content-studio"
 APP_NAME = "Hivemind Content Studio"
