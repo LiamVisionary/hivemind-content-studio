@@ -16,7 +16,9 @@
 //
 // Pure and JSX-free so the node:test suite can prove the mapping.
 import { sceneMember } from '../../lib/promptWeave.js';
+import { deliveryPlan, grammarFor } from '../../lib/videoDelivery.js';
 import { identityLines } from './characterSheet.js';
+import { characterPhrase, writeStoryFor } from './grammars.js';
 import { MUSIC_RULES, worldBreathesSentence } from './motionScript.js';
 
 const text = (value) => String(value ?? '').trim().replace(/\s+/g, ' ');
@@ -182,34 +184,118 @@ export function storySound(story) {
 }
 
 /**
- * Everything the Video studio needs, in one object.
+ * One line saying what would actually travel to a target — for a Send-to menu.
  *
- * `script` is the prose the motion stage already renders, and rides along
- * unchanged: it is what a model with no reference lane gets, and what the
- * composer shows if the references cannot be attached. `template` is the same
- * content as structure, used when the target IS H3's reference format.
+ * Built from the HANDOFF rather than from a count, because how many pictures
+ * survive the trip is a property of the production and the target together: a
+ * storyboard is a scene reference to H3 and nothing at all to LTX's ingredients
+ * lane, so "4 pictures" is the wrong answer to both.
  */
-export function storyHandoff(story, { script = '' } = {}) {
+export function describeHandoff(handoff, { zh = false } = {}) {
+  const { pictures = 0, available = 0, unattached = 0 } = handoff?.counts || {};
+  const kind = handoff?.grammar === 'ltx-ingredients'
+    ? (zh ? '配料参考' : 'ingredient references')
+    : (zh ? '参考图' : 'reference pictures');
+  const trimmed = handoff?.seconds < handoff?.askedSeconds
+    ? (zh ? `，裁到 ${handoff.seconds} 秒` : `, trimmed to ${handoff.seconds}s`)
+    : '';
+  if (!available) return `${zh ? '只发送脚本' : 'the script only'}${trimmed}`;
+  if (!pictures) return `${zh ? `没有图片通道 — ${available} 张不会随行` : `no picture lane — ${available} would not travel`}${trimmed}`;
+  const some = unattached
+    ? (zh ? `${available} 张中的 ${pictures} 张作为${kind}` : `${pictures} of ${available} as ${kind}`)
+    : (zh ? `${pictures} 张作为${kind}` : `${pictures} as ${kind}`);
+  return `${some}${trimmed}`;
+}
+
+/**
+ * The pictures this story has, as LTX ingredient views.
+ *
+ * LTX's ingredients lane stitches reference views into one sheet and lets each
+ * view carry its own caption, which is exactly the shape a character sheet and
+ * its identity lines already are. Characters first, then the place — the
+ * stitched sheet reads in supply order the same way H3's pictures do.
+ */
+export function storyIngredients(story, { max = 12 } = {}) {
+  const views = drawn(story).map((character) => ({
+    url: character.sheetUrl,
+    description: characterPhrase(character) || text(character.name),
+  }));
+  if (story?.location?.plateUrl) {
+    views.push({
+      url: story.location.plateUrl,
+      description: `The setting, with no one in it: ${text(story.location.place) || 'the location'}`,
+    });
+  }
+  return views.slice(0, max);
+}
+
+const drawn = (story) => (story?.characters || []).filter((character) => character?.sheetUrl);
+
+/**
+ * Everything the Video studio needs, in one object — shaped for THIS target.
+ *
+ * `plan` comes from lib/videoDelivery.js and is the only thing that decides
+ * what travels: the same production goes to H3's reference lane as a cast plus
+ * a structured template, to LTX as stitched ingredient views plus a paragraph,
+ * and to a model with no picture lane as its own prose with nothing attached
+ * and an honest count of what could not come. Omitted, the plan is the one that
+ * promises least, because a handoff that assumes a lane it does not have is the
+ * bug this whole module exists to fix.
+ *
+ * `script` is the prose the motion stage already renders and rides along
+ * unchanged: it is the last-resort text if even the written prompt cannot be
+ * used, and it is what the user saw on the Story page.
+ */
+export function storyHandoff(story, { script = '', plan = null } = {}) {
+  const target = plan || deliveryPlan(null);
   const subjects = storySubjects(story);
-  const cast = [...subjects, ...storyScenes(story)];
+  const scenes = storyScenes(story);
+  const available = drawn(story).length
+    + (story?.location?.plateUrl ? 1 : 0)
+    + (story?.board?.sheetUrl ? 1 : 0);
+  const kind = target.pictures?.kind || '';
+  const cast = kind === 'reference' ? [...subjects, ...scenes] : [];
+  const ingredients = kind === 'ingredients' ? storyIngredients(story, { max: target.pictures.max }) : [];
+  const attached = kind === 'reference'
+    ? Math.min(cast.reduce((sum, member) => sum + (member.data?.images || []).length, 0), target.pictures.max)
+    : ingredients.length;
+  const grammar = grammarFor(target, { pictures: attached }).id;
   const label = subjectLabeller(subjects);
+  // The reference grammar is compiled by the weave from the cast and the
+  // template — never here. Every other grammar is written out.
+  const written = grammar === 'h3-reference'
+    ? { prompt: '', negativePrompt: '' }
+    : writeStoryFor(grammar, story);
+  const asked = seconds(story?.motion?.seconds);
+  const runtime = target.maxSeconds ? Math.min(asked, target.maxSeconds) : asked;
   return {
     format: 'story-production',
+    grammar,
     script: String(script || ''),
+    prompt: written.prompt,
+    // Only where the target reads one. H3 documents that "no X" does not work,
+    // and Seedance takes its prohibitions inside the prompt instead.
+    negativePrompt: target.negatives ? written.negativePrompt : '',
     cast,
-    seconds: seconds(story?.motion?.seconds),
+    ingredients,
+    seconds: runtime,
+    // What was asked for, so a clamp can be said out loud rather than noticed
+    // later as a beat that never rendered.
+    askedSeconds: asked,
     aspect: text(story?.aspect),
-    template: {
+    template: kind === 'reference' ? {
       summary: label(text(story?.promise) || text(story?.title)),
       style: storyStyleLine(story, subjects),
       beats: storyBeats(story, label),
       ...storySound(story),
-    },
-    // What the toast should be able to say without recounting the cast.
+    } : null,
+    // What the toast should be able to say without recounting anything.
     counts: {
-      subjects: cast.filter((member) => member.kind !== 'scene').length,
-      scenes: cast.filter((member) => member.kind === 'scene').length,
-      pictures: cast.reduce((sum, member) => sum + (member.data?.images || []).length, 0),
+      subjects: subjects.length,
+      scenes: scenes.length,
+      available,
+      pictures: attached,
+      unattached: Math.max(0, available - attached),
     },
   };
 }

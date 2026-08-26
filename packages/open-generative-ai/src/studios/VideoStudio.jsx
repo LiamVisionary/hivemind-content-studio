@@ -39,6 +39,8 @@ import {
 } from '../lib/promptWeave.js';
 import { allocateCast } from '../lib/castPrompt.js';
 import { liveStandIns } from '../lib/subjectTemplate.js';
+import { deliveryPlan } from '../lib/videoDelivery.js';
+import { SEND_SOURCES, publishSendTarget } from '../lib/studioTargets.js';
 import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
@@ -744,24 +746,136 @@ export function VideoStudio({
    */
   const applyStoryProduction = (setup) => {
     const cast = Array.isArray(setup?.cast) ? setup.cast : [];
+    const ingredients = Array.isArray(setup?.ingredients) ? setup.ingredients : [];
     const runSeconds = Number(setup?.seconds) || 0;
-    const lane = referenceLaneAvailable();
+    // What this target can actually take, checked against the LIVE studio
+    // rather than trusted from the handoff: the story wrote itself for the
+    // model the Send-to picker was looking at, and nothing stops the model
+    // changing in between.
+    // The source the sender picked, applied through the same transition the
+    // studio's own toggle uses — a raw flag flip would leave a model the source
+    // does not serve, which is exactly how the Machines handoff once landed on
+    // the wrong model (rented-handoff-claim-and-model).
+    if (setup?.source && hasSourceToggle) {
+      const wantsRented = setup.source === 'rented';
+      const wantsLocal = setup.source !== 'api';
+      if (wantsLocal !== Boolean(s.setup.localMode) || wantsRented !== Boolean(s.setup.rentedOnly)) {
+        setLocalMode(wantsLocal, wantsRented);
+      }
+    }
+    const referenceOk = referenceLaneAvailable();
+    const ingredientsModel = currentIngredientModel(s.setup, s.catalogs);
     const next = { ...s.setup };
     if (runSeconds > 0) next.duration = runSeconds;
     if (setup?.aspect) next.ar = String(setup.aspect);
+    // Only where the target reads one. Written before the weave so a refit sees
+    // the finished setup.
+    if (typeof setup?.negativePrompt === 'string') next.negativePrompt = setup.negativePrompt;
     s.setup = next;
-    if (lane && cast.length) {
+    let attached = 0;
+    if (referenceOk && cast.length) {
       s.cast = cast;
       const { images, videos, audios } = allocateCast(cast.map(toCastMember), { limits: weaveLimits() });
       setRows({ images, videos, audios });
+      attached = images.length;
+    } else if (ingredientsModel && ingredients.length) {
+      // LTX stitches reference views into one sheet, and each view carries its
+      // own caption — which is what a character sheet and its identity lines
+      // already are.
+      const max = ingredientsModel.ingredientInputs?.max_images || 12;
+      s.sharedIngredientSelections = ingredients.slice(0, max).map((item) => ({ ...item }));
+      s.selectedIngredientSheet = 'stitched';
+      attached = s.sharedIngredientSelections.length;
     }
     // After the rows, never before: attaching references is what can cap the
     // clip, so a length set first is one the reference budget may refuse.
     s.setup = withDurationThatFits(s.setup);
-    acceptPrompt(String(setup?.script || ''), { template: lane ? (setup?.template || null) : null });
+    // The written prompt is the story in THIS target's grammar; the script is
+    // the prose the Story page showed, kept as the last resort.
+    const text = String(setup?.prompt || '').trim() || String(setup?.script || '');
+    acceptPrompt(text, { template: referenceOk && cast.length ? (setup?.template || null) : null });
     persistVideoPreferences();
-    return { attached: Boolean(lane && cast.length) };
+    return { attached, wanted: Number(setup?.counts?.pictures) || 0 };
   };
+  /**
+   * What this tab would run on each source, published for anything that wants
+   * to send work here (lib/studioTargets.js).
+   *
+   * Only a mounted studio can answer this. The model that a source lands on is
+   * the current one when that source offers it and the first one it does offer
+   * otherwise — the same list, filtered the same way, that this tab's own model
+   * menu shows. Guessing it from the id in the sender would be a second copy of
+   * a rule that has already drifted once.
+   */
+  const sourceOptions = (source) => {
+    const localMode = source !== 'api';
+    const rentedOnly = source === 'rented';
+    const probe = { ...s.setup, localMode, rentedOnly };
+    return generationModelsFor(probe, s.catalogs)
+      .filter((model) => !hasSourceToggle || isLocalVideoModel(model.id) === localMode)
+      .filter((model) => !(rentedOnly && s.rentedMachines?.length) || servedByAnyMachine(s.rentedMachines, model));
+  };
+  const sendDescriptorFor = (source) => {
+    // Rented with nothing running is not a target. The model menu leaves its
+    // list unfiltered in that state (there is no machine to filter against),
+    // which would otherwise offer a source that cannot run anything.
+    if (source === 'rented' && !(s.rentedMachines || []).length) {
+      return {
+        available: false,
+        modelId: '', modelName: '', plan: null, switches: false,
+        reason: zh() ? '没有正在运行的机器' : 'No machine is running',
+      };
+    }
+    const offered = sourceOptions(source);
+    const current = offered.find((model) => model.id === s.setup.modelId) || offered[0] || null;
+    if (!current) {
+      return {
+        available: false,
+        modelId: '', modelName: '', plan: null, switches: false,
+        reason: zh() ? '这个来源暂无视频模型' : 'No video model on this source',
+      };
+    }
+    const entry = resolveVideoModel(current.id, s.catalogs) || current;
+    const probe = { modelId: current.id, modelFamily: String(current.workflowFamily || entry.workflowFamily || '') };
+    return {
+      available: true,
+      modelId: current.id,
+      modelName: current.name || current.id,
+      // True when this source does not offer the model loaded now, so choosing
+      // it MOVES the tab onto a different one. Said out loud rather than
+      // presented as the model already in hand.
+      switches: current.id !== s.setup.modelId,
+      // The catalog is the only authority on what a workflow can be sent, so
+      // the lanes are read off the entry rather than inferred from the family.
+      plan: deliveryPlan(probe, {
+        referenceLane: Boolean(referenceWorkflowForHivemindModel(current.id)),
+        ingredientsLane: Boolean(entry?.supportsIngredientImages),
+        endFrame: Boolean(entry?.supportsEndFrame),
+      }),
+    };
+  };
+  // Republished when what this tab IS changes — the model, the source, the
+  // rentals it can reach, the catalogs it resolves against. Keyed on a
+  // signature rather than left dependency-free: the registry notifies its
+  // listeners on every write, and an unpublish/republish on every keystroke in
+  // the prompt box would wake the sender's menu for nothing.
+  const sendSignature = [
+    tabIdRef.current, tabActive, s.setup.modelId, s.setup.localMode, s.setup.rentedOnly,
+    (s.rentedMachines || []).length, (s.catalogs?.hivemindI2V || []).length, (s.catalogs?.allT2V || []).length,
+  ].join('|');
+  useEffect(() => {
+    const sources = Object.fromEntries(SEND_SOURCES.map((source) => [source, sendDescriptorFor(source)]));
+    return publishSendTarget(`video:${tabIdRef.current}`, {
+      section: 'video',
+      tabId: tabIdRef.current,
+      index: tabIdRef.current,
+      label: `${zh() ? '标签' : 'Tab'} ${tabIdRef.current || 1}`,
+      active: Boolean(tabActive),
+      current: s.setup.rentedOnly ? 'rented' : s.setup.localMode ? 'local' : 'api',
+      sources,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sendSignature]);
   // The rows changed by hand — a file dropped, a row removed, a Persona ID
   // loaded. The cast follows, and a written prompt has the new cast woven in;
   // an empty composer waits for text (there is nothing to weave into yet).
@@ -2952,12 +3066,13 @@ export function VideoStudio({
       // slot here, and the pictures are the conditioning.
       if (setup?.format === 'story-production') {
         const landed = applyStoryProduction(setup);
-        const pictures = Number(setup?.counts?.pictures) || 0;
-        if (pictures && !landed.attached) {
+        // Only when the model MOVED under the handoff. A story sent to a target
+        // that never had a picture lane already said so on the Story page.
+        if (landed.wanted && !landed.attached) {
           toast(zh()
-            ? `这个故事带来了 ${pictures} 张参考图，但当前模型没有参考通道，因此未附加。切换到 MiniMax H3 后按“编织”。`
-            : `${pictures} reference${pictures === 1 ? '' : 's'} came with this story, but the selected model has `
-              + 'no reference lane, so nothing was attached. Switch to MiniMax H3 and press Weave.',
+            ? `这个故事带来了 ${landed.wanted} 张图，但当前模型没有对应的通道，因此未附加。`
+            : `${landed.wanted} picture${landed.wanted === 1 ? '' : 's'} came with this story, but the model now `
+              + 'selected has no lane for them, so nothing was attached.',
           { icon: '📎', duration: 12000 });
         }
         focusPrompt();

@@ -143,6 +143,19 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
 
   useEffect(() => { saveTabState(studioType, state); }, [studioType, state]);
 
+  // Another studio asking for a specific tab before it sends work there. The
+  // one-shot setup bridge only drains into the tab that is mounted AND active
+  // (app/promptTarget.js), so choosing a target means fronting it first.
+  useEffect(() => {
+    const onSelect = (event) => {
+      if (event?.detail?.studioType !== studioType) return;
+      const wanted = Number(event.detail.tabId);
+      setState((prev) => (prev.tabs.some((tab) => tab.id === wanted) ? selectTab(prev, wanted) : prev));
+    };
+    window.addEventListener('studio-select-tab', onSelect);
+    return () => window.removeEventListener('studio-select-tab', onSelect);
+  }, [studioType]);
+
   // A new or re-selected tab scrolls into view: once the strip overflows, the
   // + button and the newest tab used to vanish off the right edge.
   useEffect(() => {

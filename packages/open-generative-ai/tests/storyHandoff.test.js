@@ -12,6 +12,16 @@ import test from 'node:test';
 
 const loadHandoff = () => import('../src/studios/story/handoff.js');
 const loadWeave = () => import('../src/lib/promptWeave.js');
+const loadDelivery = () => import('../src/lib/videoDelivery.js');
+
+// The four targets this story can be sent to, as the matrix describes them.
+const planFor = async (kind) => {
+    const { deliveryPlan } = await loadDelivery();
+    if (kind === 'h3') return deliveryPlan({ modelFamily: 'minimax', modelId: 'hivemind:minimax-h3' }, { referenceLane: true });
+    if (kind === 'ltx-ingredients') return deliveryPlan({ modelFamily: 'ltx-2.3', modelId: 'hivemind:ltx23-ic-ingredients-lora' }, { ingredientsLane: true, endFrame: true });
+    if (kind === 'ltx') return deliveryPlan({ modelFamily: 'ltx-2.3', modelId: 'hivemind:ltx23-regular-fp8' }, { endFrame: true });
+    return deliveryPlan({ modelId: 'seedance-2.5-t2v' }, {});
+};
 
 const LIMITS = { images: 9, videos: 3, audios: 3 };
 
@@ -51,7 +61,7 @@ const story = (overrides = {}) => ({
 const weaveHandoff = async (input) => {
     const { storyHandoff } = await loadHandoff();
     const { weavePrompt } = await loadWeave();
-    const handoff = storyHandoff(input, { script: 'the prose script' });
+    const handoff = storyHandoff(input, { script: 'the prose script', plan: await planFor('h3') });
     return {
         handoff,
         ...weavePrompt(handoff.script, {
@@ -65,10 +75,10 @@ const weaveHandoff = async (input) => {
 
 test('every drawn sheet, the plate and the board travel with the script', async () => {
     const { storyHandoff } = await loadHandoff();
-    const handoff = storyHandoff(story(), { script: 'the prose script' });
+    const handoff = storyHandoff(story(), { script: 'the prose script', plan: await planFor('h3') });
     assert.equal(handoff.format, 'story-production');
     assert.equal(handoff.script, 'the prose script');
-    assert.deepEqual(handoff.counts, { subjects: 2, scenes: 2, pictures: 4 });
+    assert.deepEqual(handoff.counts, { subjects: 2, scenes: 2, available: 4, pictures: 4, unattached: 0 });
     assert.equal(handoff.seconds, 15);
     assert.equal(handoff.aspect, '9:16');
 });
@@ -77,14 +87,14 @@ test('a character whose sheet was never drawn is not in the cast', async () => {
     const { storyHandoff } = await loadHandoff();
     const input = story();
     input.characters[1].sheetUrl = '';
-    const handoff = storyHandoff(input, { script: 's' });
+    const handoff = storyHandoff(input, { script: 's', plan: await planFor('h3') });
     assert.equal(handoff.counts.subjects, 1);
     assert.equal(handoff.cast.filter((member) => member.kind !== 'scene').length, 1);
 });
 
 test('the identity lines the sheet stage wrote become the subject appearance', async () => {
     const { storyHandoff } = await loadHandoff();
-    const [first] = storyHandoff(story(), { script: 's' }).cast;
+    const [first] = storyHandoff(story(), { script: 's', plan: await planFor('h3') }).cast;
     assert.match(first.data.look, /Halvard/);
     assert.match(first.data.look, /heavy shoulders, work coat/);
     assert.deepEqual(first.data.images, ['https://x/halvard.png']);
@@ -179,7 +189,7 @@ test('re-weaving the landed prompt changes nothing', async () => {
     // clip quietly acquiring a speaker the moment anything was touched.
     const { storyHandoff } = await loadHandoff();
     const { weavePrompt } = await loadWeave();
-    const handoff = storyHandoff(story(), { script: 'the prose script' });
+    const handoff = storyHandoff(story(), { script: 'the prose script', plan: await planFor('h3') });
     const options = {
         cast: handoff.cast, limits: LIMITS, durationSeconds: handoff.seconds, target: 'reference',
     };
@@ -193,7 +203,7 @@ test('re-weaving the landed prompt changes nothing', async () => {
 test('a picture dropped on the composer joins a person, never the location plate', async () => {
     const { storyHandoff } = await loadHandoff();
     const { reconcileCast, castRows } = await loadWeave();
-    const { cast } = storyHandoff(story(), { script: 's' });
+    const { cast } = storyHandoff(story(), { script: 's', plan: await planFor('h3') });
     const rows = castRows(cast);
     const next = reconcileCast(cast, { ...rows, images: [...rows.images, 'https://x/dropped.png'] });
     const place = next.find((member) => member.key === 'story:place');
@@ -208,7 +218,7 @@ test('a picture dropped on the composer joins a person, never the location plate
 test('removing the plate leaves the subjects and their pictures untouched', async () => {
     const { storyHandoff } = await loadHandoff();
     const { reconcileCast, castRows } = await loadWeave();
-    const { cast } = storyHandoff(story(), { script: 's' });
+    const { cast } = storyHandoff(story(), { script: 's', plan: await planFor('h3') });
     const kept = cast.filter((member) => member.key !== 'story:place');
     const next = reconcileCast(kept, castRows(kept));
     assert.equal(next.length, 3);
@@ -220,9 +230,71 @@ test('removing the plate leaves the subjects and their pictures untouched', asyn
 test('the helper is told about the people only', async () => {
     const { storyHandoff } = await loadHandoff();
     const { castSubjects } = await loadWeave();
-    const subjects = castSubjects(storyHandoff(story(), { script: 's' }).cast);
+    const subjects = castSubjects(storyHandoff(story(), { script: 's', plan: await planFor('h3') }).cast);
     assert.equal(subjects.length, 2);
     assert.deepEqual(subjects.map((row) => row.subject), [1, 2]);
+});
+
+/* ---------------- every other target ---------------- */
+
+test('LTX takes the sheets as stitched ingredient views, with their own captions', async () => {
+    const { storyHandoff } = await loadHandoff();
+    const handoff = storyHandoff(story(), { script: 's', plan: await planFor('ltx-ingredients') });
+    assert.equal(handoff.grammar, 'ltx-ingredients');
+    assert.equal(handoff.cast.length, 0, 'ingredients are not a cast');
+    assert.deepEqual(handoff.ingredients.map((view) => view.url), [
+        'https://x/halvard.png', 'https://x/moth.png', 'https://x/plate.png',
+    ]);
+    assert.match(handoff.ingredients[0].description, /Halvard, the night driver/);
+    assert.ok(!handoff.ingredients[0].description.includes('Silhouette:'),
+        'a paragraph caption must not carry the sheet prompt’s labels');
+    assert.match(handoff.ingredients[2].description, /with no one in it/);
+    // The board is not a character or a prop, so it does not become an ingredient.
+    assert.equal(handoff.counts.unattached, 1);
+});
+
+test('an LTX prompt is one paragraph with no shot markers, and its negatives leave the prompt', async () => {
+    const { storyHandoff } = await loadHandoff();
+    const handoff = storyHandoff(story(), { script: 's', plan: await planFor('ltx-ingredients') });
+    assert.ok(!/\[Shot \d\]/.test(handoff.prompt), 'LTX has no shot grammar');
+    assert.ok(!/00:\d\d\./.test(handoff.prompt), 'LTX has no timecodes');
+    assert.ok(!handoff.prompt.includes('\n'), 'one paragraph');
+    assert.match(handoff.prompt, /from the reference sheet/);
+    // The sheet carries the look; repeating it in the paragraph makes the two compete.
+    assert.ok(!handoff.prompt.includes('deep-set eyes'), 'the look belongs to the sheet here');
+    assert.equal(handoff.negativePrompt, 'no on-screen text');
+    assert.ok(!handoff.prompt.includes('on-screen text'),
+        'on the native distilled path an unwanted thing named in the positive prompt is one asked for');
+});
+
+test('with no picture lane the LTX paragraph describes the characters itself', async () => {
+    const { storyHandoff } = await loadHandoff();
+    const handoff = storyHandoff(story(), { script: 's', plan: await planFor('ltx') });
+    assert.equal(handoff.grammar, 'ltx-paragraph');
+    assert.equal(handoff.ingredients.length, 0);
+    assert.equal(handoff.counts.unattached, 4, 'all four pictures stay behind, and that is said');
+    assert.match(handoff.prompt, /Halvard, the night driver, a man/);
+});
+
+test('Seedance gets labelled blocks and keeps its prohibitions in the prompt', async () => {
+    const { storyHandoff } = await loadHandoff();
+    const handoff = storyHandoff(story(), { script: 's', plan: await planFor('seedance') });
+    assert.equal(handoff.grammar, 'seedance-blocks');
+    for (const block of ['SUBJECT:', 'SETTING:', 'VISUAL STYLE:', 'TIMELINE:', 'CAMERA:', 'AUDIO:', 'GOAL:']) {
+        assert.ok(handoff.prompt.includes(block), `missing ${block}`);
+    }
+    // Seedance takes prohibitions in the prompt; H3 documents that they do not work.
+    assert.match(handoff.prompt, /No on-screen text/);
+    assert.equal(handoff.negativePrompt, '', 'Seedance has no negative field here');
+});
+
+test('a run longer than the target holds is clamped, and what was asked for is kept', async () => {
+    const { storyHandoff } = await loadHandoff();
+    const ltx = storyHandoff(story(), { script: 's', plan: await planFor('ltx') });
+    assert.equal(ltx.askedSeconds, 15);
+    assert.equal(ltx.seconds, 10, 'LTX holds a scene for about ten seconds');
+    const h3 = storyHandoff(story(), { script: 's', plan: await planFor('h3') });
+    assert.equal(h3.seconds, 15);
 });
 
 /* ---------------- the model without a reference lane ---------------- */
@@ -230,7 +302,7 @@ test('the helper is told about the people only', async () => {
 test('with no reference target the prose script is what lands', async () => {
     const { storyHandoff } = await loadHandoff();
     const { weavePrompt } = await loadWeave();
-    const handoff = storyHandoff(story(), { script: 'the prose script' });
+    const handoff = storyHandoff(story(), { script: 'the prose script', plan: await planFor('h3') });
     const woven = weavePrompt(handoff.script, {
         cast: [], limits: LIMITS, durationSeconds: handoff.seconds, target: 'prose', template: handoff.template,
     });

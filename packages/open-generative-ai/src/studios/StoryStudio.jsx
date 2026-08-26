@@ -79,7 +79,9 @@ import {
 } from './story/qa.js';
 import { STORY_EXAMPLE } from './story/example.js';
 import { blankStory, producerIsRunning, restoreStory } from './story/state.js';
-import { storyHandoff } from './story/handoff.js';
+import { describeHandoff, storyHandoff } from './story/handoff.js';
+import { SendToMenu } from '../components/SendToMenu.jsx';
+import { selectSendTarget } from '../lib/studioTargets.js';
 import {
   acceptedValues, blankFieldsIn, fieldMap, fieldsFor, fillBrief, fillChunks, storyContext, writePath,
 } from './story/fields.js';
@@ -1136,31 +1138,41 @@ export function StoryStudio({ active = true } = {}) {
     toast.success(`Compressed to ${String(result.script).length} characters.`);
   };
 
+  // What this production would actually look like once it arrived somewhere —
+  // asked of the real handoff, so the menu never promises a picture that this
+  // target has no lane for. Cheap: the handoff is a pure mapping.
+  const describeSendTo = (plan) => describeHandoff(storyHandoff(story, { script, plan }));
+
   /**
-   * Hand the whole production over, not just the paragraph.
+   * Hand the whole production over, not just the paragraph — to a chosen tab,
+   * on a chosen source, written for the model that source is on.
    *
-   * This used to post the script alone and then tell you to go and arm your own
-   * references — which meant the Video studio opened with prose describing
-   * pictures that were not attached, and, because the composer picks its
-   * grammar from what IS attached, could only render that prose as prose. The
-   * sheets are subjects, the plate and the board are scene references, and the
-   * beats, soundscape and length travel as structure, so H3's six-section
-   * reference format is what the composer lands on by itself.
+   * This used to post the script alone into whichever video tab happened to be
+   * in front, on whatever source it happened to be on. Two things were wrong
+   * with that and they were the same thing: nothing was attached, so the
+   * composer — which picks its grammar from what IS attached — could only
+   * render the prose as prose. Now the target is chosen first and the story is
+   * written FOR it (lib/videoDelivery.js): a cast and a six-section prompt for
+   * H3's reference lane, stitched ingredient views and a paragraph for LTX,
+   * labelled blocks for Seedance, and an honest count of what could not travel.
    */
-  const sendToVideo = () => {
+  const sendToVideo = ({ tabId, source, descriptor }) => {
     if (!script) { toast.error('There is no script to send yet.'); return; }
-    const handoff = storyHandoff(story, { script });
-    loadStudioSetup('video', handoff);
+    const handoff = storyHandoff(story, { script, plan: descriptor?.plan || null });
+    // The tab has to be in front before the setup bridge will drain into it.
+    selectSendTarget('video', tabId);
+    loadStudioSetup('video', { ...handoff, source });
     window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'video' } }));
-    const { subjects, scenes, pictures } = handoff.counts;
-    const parts = [];
-    if (subjects) parts.push(`${subjects} character sheet${subjects === 1 ? '' : 's'}`);
-    if (scenes) parts.push(`${scenes === 1 ? 'the location plate' : 'the plate and the board'}`);
+    const { pictures, unattached } = handoff.counts;
+    const where = descriptor?.modelName ? ` on ${descriptor.modelName}` : '';
+    const carried = pictures
+      ? `${pictures} picture${pictures === 1 ? '' : 's'} attached`
+      : 'nothing attached';
     toast.success(
-      pictures
-        ? `Sent to the Video studio — ${story.motion.seconds}s, with ${parts.join(' and ')} attached as references.`
-        : `Sent to the Video studio (${story.motion.seconds}s). Nothing was drawn yet, so no references went with it.`,
-      { duration: 8000 },
+      `Sent to the Video studio${where} — ${handoff.seconds}s, ${carried}.`
+      + (unattached ? ` ${unattached} could not travel: this model has no lane for ${unattached === 1 ? 'it' : 'them'}.` : '')
+      + (handoff.seconds < handoff.askedSeconds ? ` Trimmed from ${handoff.askedSeconds}s — that is as long as this model holds a scene.` : ''),
+      { duration: 9000 },
     );
   };
 
@@ -1921,7 +1933,14 @@ export function StoryStudio({ active = true } = {}) {
           <ProducerStatus task="compress" busy={busy} status={thinking} onCancel={cancelProducer} />
 
           <div className="flex flex-wrap items-center gap-2">
-            <Button icon="film" onClick={sendToVideo} disabled={!script}>Open in the Video studio</Button>
+            <SendToMenu
+              section="video"
+              icon="film"
+              label="Open in the Video studio"
+              disabled={!script}
+              describeFor={describeSendTo}
+              onSend={sendToVideo}
+            />
             <Button size="sm" icon="copy" onClick={() => { navigator.clipboard?.writeText(script); toast.success('Script copied.'); }}>Copy</Button>
           </div>
         </Card>
