@@ -292,7 +292,7 @@ function LinkedMachines({ links, busy, onRevoke }) {
     );
 }
 
-export function PassBookView() {
+export function PassBookView({ active = true }) {
     const [state, setState] = useState(null);
     const [ledger, setLedger] = useState(null);
     const [links, setLinks] = useState(null);
@@ -444,8 +444,13 @@ export function PassBookView() {
     const sealing = state.sealing || {};
     const stored = (state.settable || []).filter((row) => row.configured).length;
 
+    // Every hub page stays MOUNTED and is display-toggled, so a view that does
+    // not hide itself is painted on top of whichever page is actually open —
+    // this one had no `active` prop at all and rendered its whole panel over
+    // Machines, Providers, History and the rest. Same wrapper every other hub
+    // view uses; the difference was never deliberate.
     return (
-        <div className="flex flex-col gap-5">
+        <div className={active ? 'flex flex-col gap-5' : 'hidden'}>
             <HubToolbar
                 eyebrow={zh() ? '本机共享凭据' : 'Shared on this machine'}
                 title="PassBook"

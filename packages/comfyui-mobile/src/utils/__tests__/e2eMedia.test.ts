@@ -8,8 +8,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const PY = '/Users/liam/comfy/hivemind-content-studio/.venv/bin/python';
-const SEAL = '/Users/liam/comfy/hivemind-content-studio/packages/media-gateway/media_seal.py';
+// Resolved from this file, not from where the checkout happens to live: an
+// absolute path here breaks the moment the repository is moved, which is
+// exactly what happened on 2026-08-26.
+const ROOT = fileURLToPath(new URL('../../../../../', import.meta.url));
+const PY = `${ROOT}.venv/bin/python`;
+const SEAL = `${ROOT}packages/media-gateway/media_seal.py`;
 const PASSPHRASE = 'mobile-vault-pass';
 const PBKDF2_ITERATIONS = 600_000;
 

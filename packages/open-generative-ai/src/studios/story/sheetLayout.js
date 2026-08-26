@@ -138,3 +138,51 @@ export function bestGrid(count, { cell = '1:1', partialRows = false, canvases = 
   }
   return best || sheetLayout({ cell, cols: 1, rows: total, canvases });
 }
+
+/**
+ * Pixel dimensions for a canvas ratio, matching the server's own table
+ * (`_IMAGE_ASPECT_DIMENSIONS` in media_studio.py) so the two cannot disagree.
+ *
+ * Sent ALONGSIDE the ratio, never instead of it. A provider that reads
+ * `aspect_ratio` gets what it wants; one that only reads width/height — which
+ * is what a ComfyUI workflow's latent node actually takes — gets a shape rather
+ * than falling back to whatever the workflow was saved with. A sheet drawn at
+ * the workflow's own landscape default is the stretched storyboard, and from
+ * the browser it is indistinguishable from a provider that obeyed us.
+ */
+const CANVAS_PIXELS = Object.freeze({
+  '16:9': [1344, 768],
+  '9:16': [768, 1344],
+  '4:3': [1152, 864],
+  '3:4': [864, 1152],
+  '1:1': [1024, 1024],
+});
+
+export function canvasPixels(aspect) {
+  const exact = CANVAS_PIXELS[String(aspect || '').trim()];
+  if (exact) return { width: exact[0], height: exact[1] };
+  // An unlisted ratio still gets a shape: about a megapixel, on the multiple of
+  // 64 every diffusion latent wants.
+  const wanted = ratioValue(aspect, 0);
+  if (!(wanted > 0)) return null;
+  const snap = (value) => Math.max(256, Math.round(value / 64) * 64);
+  return { width: snap(Math.sqrt(1024 * 1024 * wanted)), height: snap(Math.sqrt(1024 * 1024 / wanted)) };
+}
+
+/**
+ * Did the picture we got back have the shape we asked for?
+ *
+ * Providers snap, ignore and substitute ratios, and a grid sheet is where that
+ * shows worst: every panel inside it is squashed by the same factor. Checked
+ * against the ratio actually requested, with enough slack for a provider that
+ * rounds to its own bucket.
+ */
+export function canvasMismatch(requested, width, height) {
+  const wanted = ratioValue(requested, 0);
+  if (!(wanted > 0) || !(width > 0) || !(height > 0)) return null;
+  const got = width / height;
+  // 0.12 in log space is about 13% — wider than any legitimate rounding to a
+  // 64-pixel grid, narrower than 4:3 is from 1:1.
+  if (ratioDistance(got, wanted) <= 0.12) return null;
+  return { requested, got: `${width}x${height}`, wantedValue: wanted, gotValue: got };
+}

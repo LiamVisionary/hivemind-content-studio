@@ -9,8 +9,12 @@ const path = require('node:path');
 // gateway seals bytes to the vault PUBLIC key, and only the browser's private
 // key (via e2eVault.decryptMedia) can recover them. If this passes, the server
 // genuinely cannot decrypt media it produced.
-const PY = '/Users/liam/comfy/hivemind-content-studio/.venv/bin/python';
-const SEAL = '/Users/liam/comfy/hivemind-content-studio/packages/media-gateway/media_seal.py';
+// Resolved from this file, not from where the checkout happens to live: an
+// absolute path here breaks the moment the repository is moved, which is
+// exactly what happened on 2026-08-26.
+const ROOT = path.resolve(__dirname, '../../..');
+const PY = path.join(ROOT, '.venv/bin/python');
+const SEAL = path.join(ROOT, 'packages/media-gateway/media_seal.py');
 
 test('python seals media to the vault public key; only the browser private key decrypts', async () => {
     const v = await import(`../src/lib/e2eVault.js?case=${Date.now()}-interop`);

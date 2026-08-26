@@ -43,6 +43,7 @@ import {
   fetchOAuthStatus, readinessFor, readinessFromError, refreshMuapiKeyLocation, startOAuthLogin,
 } from '../lib/providerReadiness.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
+import { canvasMismatch, canvasPixels } from './story/sheetLayout.js';
 import { lastUsedModelId, rememberModelId, sortModels } from '../lib/promptHelperRuntime.js';
 import {
   ACCOUNTS, accountConnected, accountsLine, accountsOf, APP_ROUTE, creditsHome, creditsLine,
@@ -125,12 +126,27 @@ function StageHeader({ index, stage, done, busy, blanks, fields, onFillSection, 
           >
             {running ? (redraft ? 'Redrafting…' : 'Filling…')
               : blanks ? `Fill ${blanks} blank${blanks === 1 ? '' : 's'}`
-              : `Redraft ${fields}`}
+              : redraft ? `Redraft ${fields}`
+              // A section whose fields do not exist yet — no characters added,
+              // no beats written. "Redraft 0" was a second dead label in place
+              // of the first one; this says what is actually true.
+              : 'Nothing to write yet'}
           </Button>
         ) : null}
       </div>
     </div>
   );
+}
+
+/** The real pixel size of a rendered image, or null if it cannot be read. */
+function measureCanvas(url) {
+  return new Promise((resolve) => {
+    if (!url) { resolve(null); return; }
+    const probe = new Image();
+    probe.onload = () => resolve({ width: probe.naturalWidth, height: probe.naturalHeight });
+    probe.onerror = () => resolve(null);
+    probe.src = url;
+  });
 }
 
 function Plate({ url, alt, className = '' }) {
@@ -957,11 +973,11 @@ export function StoryStudio({ active = true } = {}) {
    */
   const fill = useCallback(async (ids, { busyKey = '' } = {}) => {
     const entries = ids.map((id) => specs.get(id)).filter(Boolean);
-    if (!entries.length) return;
+    if (!entries.length) return { written: 0 };
     if (!producer) {
       toast.error('Pick a model for the producer first.');
       setProducerOpen(true);
-      return;
+      return { written: 0 };
     }
     // Several asks, not one. See fillChunks: a seventeen-field section asked for
     // in a single answer overruns the model's room, and a cut-off answer used to
@@ -984,37 +1000,47 @@ export function StoryStudio({ active = true } = {}) {
     let failureError = null;
     let stopped = false;
     try {
-      for (let index = 0; index < chunks.length; index += 1) {
-        const group = chunks[index];
-        const context = storyContext(draft, { omit: group.map((entry) => entry.id) });
-        if (!Object.keys(context).length) {
-          failure = 'Nothing to go on yet — write something first, anywhere in the story.';
-          break;
-        }
-        const step = chunks.length > 1 ? ` · ${index + 1} of ${chunks.length}` : '';
-        const onStatus = (line) => setThinking(`${line}${step}`);
+      // Every chunk at once. They used to run one after another so a later
+      // chunk could read what an earlier one wrote, but that made a seventeen-
+      // field section four round trips deep — minutes of waiting for asks that
+      // do not actually depend on each other. They all read the same story
+      // instead, which is the story the director is looking at while they wait.
+      const context = storyContext(draft, { omit: entries.map((entry) => entry.id) });
+      if (!Object.keys(context).length) {
+        failure = 'Nothing to go on yet — write something first, anywhere in the story.';
+      } else {
+        let landedChunks = 0;
+        const onStatus = (line) => setThinking(
+          chunks.length > 1 ? `${line} · ${landedChunks} of ${chunks.length} back` : line,
+        );
         onStatus('Waking the producer…');
-        let result = null;
-        try {
-          result = await runProducer('fill', fillBrief(group), context, {
-            onStatus, signal: controller.signal,
-          });
-        } catch (error) {
-          if (error?.cancelled) { stopped = true; break; }
-          // Stopping beats grinding through four more asks that will fail the
-          // same way — and what landed stays, so pressing Fill again asks only
-          // for what is still blank.
-          failure = error?.message || 'The producer could not answer that.';
-          failureError = error;
-          break;
+        const settled = await Promise.allSettled(chunks.map((group) => runProducer(
+          'fill', fillBrief(group), context, { onStatus: () => {}, signal: controller.signal },
+        ).then((result) => { landedChunks += 1; onStatus('Writing…'); return result; })));
+
+        // Applied in chunk order, not completion order, so two runs of the same
+        // press write the same story.
+        for (let index = 0; index < chunks.length; index += 1) {
+          const outcome = settled[index];
+          if (outcome.status === 'rejected') {
+            const error = outcome.reason;
+            if (error?.cancelled) { stopped = true; continue; }
+            // The first real refusal is the one reported: five chunks failing
+            // on one dead credential is one problem, not five toasts.
+            if (!failure) {
+              failure = error?.message || 'The producer could not answer that.';
+              failureError = error;
+            }
+            continue;
+          }
+          const accepted = acceptedValues(chunks[index], outcome.value?.values);
+          const landed = Object.keys(accepted);
+          if (!landed.length) continue;
+          const apply = (current) => landed.reduce((next, id) => writePath(next, id, accepted[id]), current);
+          draft = apply(draft);
+          update(apply);
+          written += landed.length;
         }
-        const accepted = acceptedValues(group, result?.values);
-        const landed = Object.keys(accepted);
-        if (!landed.length) continue;
-        const apply = (current) => landed.reduce((next, id) => writePath(next, id, accepted[id]), current);
-        draft = apply(draft);
-        update(apply);
-        written += landed.length;
       }
     } finally {
       setBusy('');
@@ -1024,30 +1050,51 @@ export function StoryStudio({ active = true } = {}) {
     const total = entries.length;
     if (stopped) {
       if (written) toast(`Stopped — ${written} of ${total} written.`, { icon: '✍️' });
-      return;
+      return { written, stopped: true };
     }
     if (failure) {
       if (!written) producerFailed(failureError, failure);
       else toast(`Filled ${written} of ${total}, then the producer stopped: ${failure}`, { icon: '✍️', duration: 12000 });
-      return;
+      return { written, failed: true };
     }
     if (!written) {
       toast.error('Nothing usable came back for that.');
-      return;
+      return { written: 0 };
     }
     if (written < total) {
       toast(`Filled ${written} of ${total} — the rest came back empty. Press Fill again for those.`, { icon: '✍️' });
     }
+    return { written };
   }, [producer, runProducer, specs, update]);
 
-  const fillSection = useCallback((sectionId) => {
-    const blanks = blankFieldsIn(sectionId, storyRef.current);
-    if (!blanks.length) {
-      toast('Nothing blank in this section. Use a field\u2019s own wand to rewrite one.', { icon: '✍️' });
+  const fillSection = useCallback(async (sectionId, { redraft = false } = {}) => {
+    // A redraft asks for every field in the section, not just the empty ones —
+    // which is the whole point of offering it once nothing is blank.
+    const entries = redraft
+      ? fieldsFor(sectionId, storyRef.current)
+      : blankFieldsIn(sectionId, storyRef.current);
+    if (!entries.length) {
+      toast('Nothing to write in this section.', { icon: '\u270D\uFE0F' });
       return;
     }
-    void fill(blanks.map((entry) => entry.id), { busyKey: `fill-section:${sectionId}` });
-  }, [fill]);
+    // A redraft overwrites work the director may have written by hand. The
+    // button naming the count stops that being a surprise; keeping the version
+    // it replaced stops it being a loss.
+    const before = redraft ? storyRef.current : null;
+    const outcome = await fill(entries.map((entry) => entry.id), { busyKey: `fill-section:${sectionId}` });
+    // What `fill` reports, NOT what the ref says: `update()` is a React setter
+    // and the re-render that moves `storyRef.current` has not happened by the
+    // time this await resolves, so comparing references here always said
+    // "nothing changed" and the Undo never appeared.
+    if (before && outcome?.written) {
+      toast((t) => (
+        <span className="flex items-center gap-2 text-[12px]">
+          <span>Redrafted {entries.length} field{entries.length === 1 ? '' : 's'}.</span>
+          <Button size="sm" onClick={() => { update(() => before); toast.dismiss(t.id); }}>Undo</Button>
+        </span>
+      ), { icon: '\u270D\uFE0F', duration: 12000 });
+    }
+  }, [fill, update]);
 
   const fillOne = useCallback((ids) => { void fill(ids); }, [fill]);
 
@@ -1165,7 +1212,23 @@ export function StoryStudio({ active = true } = {}) {
     try {
       const result = await runImage({ row: model, shared: { prompt, aspect_ratio: aspect, seed: -1 } });
       const reference = await promoteOutputToReference(result.url, { kind: 'image', name }).catch(() => '');
-      return reference || result.url;
+      const url = reference || result.url;
+      const drawn = result.url;
+      // And check what actually came back. A provider that ignores the ratio
+      // squashes every panel on a grid sheet by the same factor, and from here
+      // that is indistinguishable from one that obeyed — so it is measured,
+      // named, and said out loud rather than shown as if it were what we asked
+      // for.
+      void measureCanvas(drawn).then((size) => {
+        const off = size && canvasMismatch(aspect, size.width, size.height);
+        if (off) {
+          toast(
+            `The ${label} came back ${off.got} — ${model?.name || model?.id || 'that model'} ignored the ${aspect} canvas that was asked for, so the panels are squashed. Draw it with a different model, or set the clip aspect to match.`,
+            { icon: '📐', duration: 14000 },
+          );
+        }
+      });
+      return url;
     } catch (error) {
       console.warn(`[StoryStudio] ${label} generation failed:`, error?.message || error);
       // A failure that names its own fix is offered as the fix. The provider's

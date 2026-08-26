@@ -28,6 +28,7 @@
 // resolves to a transport the caller built nothing for is refused, loudly,
 // instead of being sent a payload shaped for somewhere else.
 import { isLocalAIAvailable, localAI } from './localInferenceClient.js';
+import { canvasPixels } from '../studios/story/sheetLayout.js';
 import { generateHivemindVideo, isHivemindStudioEnabled } from './hivemindStudio.js';
 import { flattenApiDetail } from './muapiErrors.js';
 import { muapi } from './muapi.js';
@@ -229,9 +230,18 @@ export async function runImage({ row, shared = {}, extra = null, signal = null }
     throw new Error('There is nothing to draw yet.');
   }
   if (route.transport === 'local') {
+    // The ratio AND the pixels, for this transport only. The local bridge hands
+    // the job to a workflow whose latent node takes width/height, so a bridge
+    // build that does not translate `aspect_ratio` silently falls back to
+    // whatever shape the workflow was saved with — landscape, usually. On a
+    // grid sheet that squashes every panel by the same factor, and from the
+    // browser it looks identical to a provider that obeyed. MUAPI and the
+    // studio route are left alone: they read the ratio, and unknown fields in
+    // a MUAPI payload are a 400.
+    const pixels = canvasPixels(payload.aspect_ratio);
     // `model` LAST: the row is the routing identity, and a payload that
     // carries its own model must not be able to redirect the run.
-    const result = await localAI.generate({ ...payload, model: row.id });
+    const result = await localAI.generate({ ...pixels, ...payload, model: row.id });
     if (!result?.url) throw new Error('Nothing came back.');
     return { ...result, provider: row.provider || 'local', model: row.id };
   }

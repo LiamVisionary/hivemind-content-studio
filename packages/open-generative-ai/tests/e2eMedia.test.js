@@ -5,8 +5,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const PY = '/Users/liam/comfy/hivemind-content-studio/.venv/bin/python';
-const SEAL = '/Users/liam/comfy/hivemind-content-studio/packages/media-gateway/media_seal.py';
+// Resolved from this file, not from where the checkout happens to live: an
+// absolute path here breaks the moment the repository is moved, which is
+// exactly what happened on 2026-08-26.
+const ROOT = path.resolve(__dirname, '../../..');
+const PY = path.join(ROOT, '.venv/bin/python');
+const SEAL = path.join(ROOT, 'packages/media-gateway/media_seal.py');
 
 function stubStudioBrowser() {
     const session = new Map([['hivemind.ownerPassphrase.once', JSON.stringify({ password: 'media-pass', expiresAt: Date.now() + 1e6 })]]);
