@@ -446,10 +446,19 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     return subtitle_path
 
 
-def get_video_materials(task_id, params, video_terms, audio_duration):
+def get_video_materials(task_id, params, video_terms, audio_duration, scene_paths=None):
+    """Material paths for the whole video.
+
+    `scene_paths`, when a list is passed, is filled with one list of paths per
+    scene. It is an opt-in out-parameter rather than a second return value
+    because the return shape is mocked in several tests and depended on by the
+    stop-at-materials route; a caller that does not care passes nothing and sees
+    exactly what it saw before.
+    """
     staged = scene_service.normalize(getattr(params, "scenes", None))
     if staged:
-        return _scene_materials(task_id, params, staged, audio_duration)
+        return _scene_materials(task_id, params, staged, audio_duration,
+                                scene_paths=scene_paths)
 
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
@@ -492,7 +501,7 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
         return downloaded_videos
 
 
-def _scene_materials(task_id, params, staged, audio_duration):
+def _scene_materials(task_id, params, staged, audio_duration, scene_paths=None):
     """Footage for each scene, in scene order, each for its own share of time.
 
     Downloaded per scene rather than once for the video, which is the point: a
@@ -535,12 +544,15 @@ def _scene_materials(task_id, params, staged, audio_duration):
                 f"scene {scene.scene_id} produced no usable material",
             )
             return None
+        if scene_paths is not None:
+            scene_paths.append(list(paths))
         collected.extend(paths)
     return collected
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
+    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration,
+    path_transitions=None,
 ):
     final_video_paths = []
     combined_video_paths = []
@@ -552,7 +564,12 @@ def generate_final_videos(
     )
     # 多视频生成默认会打散素材以增加差异；但“按文案顺序匹配素材”追求的是
     # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。
-    if params.match_materials_to_script:
+    #
+    # 场景同理，而且更硬：场景的全部意义就是“这一段画面属于这一段话”。random
+    # 模式下 _prioritize_unique_source_clips 会打乱片段顺序，场景边界随即消失，
+    # 于是功能看上去在跑、实际上什么都没保证。
+    staged_for_order = scene_service.normalize(getattr(params, "scenes", None))
+    if params.match_materials_to_script or staged_for_order:
         video_concat_mode = VideoConcatMode.sequential
     elif params.video_count == 1:
         video_concat_mode = params.video_concat_mode
@@ -577,6 +594,7 @@ def generate_final_videos(
             max_clip_duration=params.video_clip_duration,
             threads=params.n_threads,
             clip_speed=params.video_clip_speed,
+            path_transitions=path_transitions,
         )
 
         _progress += 50 / params.video_count / 2
@@ -775,8 +793,9 @@ def _run_pipeline(
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
     # 5. Get video materials
+    scene_paths: list[list[str]] = []
     downloaded_videos = get_video_materials(
-        task_id, params, video_terms, audio_duration
+        task_id, params, video_terms, audio_duration, scene_paths=scene_paths
     )
     if not downloaded_videos:
         return _mark_task_failed(
@@ -802,6 +821,12 @@ def _run_pipeline(
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
+    # Which transition each scene's own footage carries. Empty for a task with
+    # no scenes, and for scenes that named none — composition then falls through
+    # to the video-level mode, exactly as before.
+    path_transitions = scene_service.transitions_by_path(
+        scene_service.normalize(getattr(params, "scenes", None)), scene_paths
+    )
     final_video_paths, combined_video_paths, generation_warnings = generate_final_videos(
         task_id,
         params,
@@ -809,6 +834,7 @@ def _run_pipeline(
         audio_file,
         subtitle_path,
         audio_duration,
+        path_transitions=path_transitions,
     )
 
     if not final_video_paths:

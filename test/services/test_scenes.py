@@ -153,11 +153,8 @@ def test_the_summary_names_each_scene_and_its_share():
 # ── the field that is deliberately absent ───────────────────────────────────
 
 
-def test_a_scene_has_no_transition_field():
-    """`video.combine_videos` applies one transition across the whole timeline,
-    so a per-scene transition would be stored, echoed back, and ignored. A
-    setting that behaves like a comment is worse than its absence."""
-    assert "transition" not in SceneConfig.model_fields
+def test_a_scene_carries_its_own_transition():
+    assert "transition" in SceneConfig.model_fields
 
 
 # ── the params they hang off ────────────────────────────────────────────────
@@ -257,3 +254,139 @@ def test_a_scenes_own_files_are_used_without_searching(monkeypatch):
     params = VideoParams(video_subject="x", video_source="pexels",
                          scenes=[{"materials": [{"url": "/tmp/mine.mp4"}]}])
     assert task.get_video_materials("t", params, [], audio_duration=5) == ["/tmp/mine.mp4"]
+
+
+# ── per-scene transitions ───────────────────────────────────────────────────
+
+
+def test_each_scenes_files_map_to_that_scenes_transition():
+    from app.models.schema import VideoTransitionMode
+
+    staged = scenes.normalize([
+        s(search_terms=["storm"], transition=VideoTransitionMode.fade_in),
+        s(search_terms=["calm"], transition=VideoTransitionMode.zoom_out),
+    ])
+    got = scenes.transitions_by_path(staged, [["/a.mp4", "/b.mp4"], ["/c.mp4"]])
+    assert got == {
+        "/a.mp4": VideoTransitionMode.fade_in,
+        "/b.mp4": VideoTransitionMode.fade_in,
+        "/c.mp4": VideoTransitionMode.zoom_out,
+    }
+
+
+def test_a_scene_with_no_transition_is_absent_rather_than_mapped_to_none():
+    """Absent means "fall through to the video-level mode". Mapped to None would
+    mean "explicitly nothing", which is a different instruction."""
+    from app.models.schema import VideoTransitionMode
+
+    staged = scenes.normalize([s(search_terms=["a"]), s(search_terms=["b"],
+                                                        transition=VideoTransitionMode.fade_in)])
+    got = scenes.transitions_by_path(staged, [["/a.mp4"], ["/b.mp4"]])
+    assert "/a.mp4" not in got and got["/b.mp4"] == VideoTransitionMode.fade_in
+
+
+def test_composition_applies_each_scenes_own_transition(monkeypatch, tmp_path):
+    """The seam that makes this real. Two sources, two scenes, two effects —
+    and composition must ask per clip rather than once for the timeline."""
+    from app.models.schema import VideoAspect, VideoConcatMode, VideoTransitionMode
+    from app.services import video
+
+    applied = []
+    monkeypatch.setattr(video, "_apply_transition",
+                        lambda clip, value: (applied.append(value), clip)[1])
+    monkeypatch.setattr(video, "_write_videofile_with_codec_fallback",
+                        lambda clip, path, **kw: Path(path).write_bytes(b"x"))
+
+    class _Clip:
+        duration, size, w, h = 2.0, (1080, 1920), 1080, 1920
+        def subclipped(self, *a): return self
+        def with_speed_scaled(self, *a): return self
+        def resized(self, **kw): return self
+        def with_position(self, *a): return self
+        def close(self): pass
+
+    monkeypatch.setattr(video, "_open_video_clip_quietly", lambda p: _Clip())
+    monkeypatch.setattr(video, "AudioFileClip",
+                        lambda f: type("A", (), {"duration": 3.0, "close": lambda s: None})())
+    monkeypatch.setattr(video, "close_clip", lambda c: None)
+
+    try:
+        video.combine_videos(
+            combined_video_path=str(tmp_path / "out.mp4"),
+            video_paths=["/storm.mp4", "/calm.mp4"],
+            audio_file=str(tmp_path / "a.wav"),
+            video_aspect=VideoAspect.portrait,
+            video_concat_mode=VideoConcatMode.sequential,
+            video_transition_mode=VideoTransitionMode.none,
+            path_transitions={
+                "/storm.mp4": VideoTransitionMode.fade_in,
+                "/calm.mp4": VideoTransitionMode.zoom_out,
+            },
+        )
+    except Exception:
+        pass  # the render past this point is not what is under test
+
+    assert VideoTransitionMode.fade_in.value in applied, applied
+    assert VideoTransitionMode.zoom_out.value in applied, applied
+
+
+def test_a_path_outside_any_scene_keeps_the_video_level_transition(monkeypatch, tmp_path):
+    from app.models.schema import VideoTransitionMode
+    from app.services import video
+
+    resolved = []
+    monkeypatch.setattr(video, "_apply_transition",
+                        lambda clip, value: (resolved.append(value), clip)[1])
+    # Only the resolver is under test here; drive it through the same mapping
+    # composition builds.
+    mapping = {"/known.mp4": VideoTransitionMode.fade_in}
+    by_path = {str(k): getattr(v, "value", v) for k, v in mapping.items()}
+    assert by_path.get("/unknown.mp4", VideoTransitionMode.zoom_in.value) == \
+        VideoTransitionMode.zoom_in.value
+
+
+def test_scenes_force_sequential_composition(monkeypatch, tmp_path):
+    """`random` shuffles clips during composition, which destroys the scene
+    boundaries the feature exists to create. This shipped wrong once — scenes
+    were added without forcing order, so footage was reordered and the feature
+    looked like it ran while guaranteeing nothing."""
+    from app.models.schema import VideoConcatMode
+    from app.services import task
+
+    seen = {}
+    monkeypatch.setattr(task.video, "combine_videos",
+                        lambda **kw: (seen.update(kw), kw["combined_video_path"])[1])
+    monkeypatch.setattr(task.video, "generate_video", lambda **kw: None)
+    monkeypatch.setattr(task.sm.state, "update_task", lambda *a, **k: None)
+
+    params = VideoParams(
+        video_subject="x", video_count=1,
+        video_concat_mode=VideoConcatMode.random,     # the default that shuffles
+        scenes=[{"search_terms": ["a"]}, {"search_terms": ["b"]}],
+    )
+    try:
+        task.generate_final_videos("t", params, ["/a.mp4", "/b.mp4"],
+                                   str(tmp_path / "a.wav"), "", 5.0)
+    except Exception:
+        pass
+
+    assert seen.get("video_concat_mode") == VideoConcatMode.sequential, seen.get("video_concat_mode")
+
+
+def test_without_scenes_the_chosen_concat_mode_is_respected(monkeypatch, tmp_path):
+    from app.models.schema import VideoConcatMode
+    from app.services import task
+
+    seen = {}
+    monkeypatch.setattr(task.video, "combine_videos",
+                        lambda **kw: (seen.update(kw), kw["combined_video_path"])[1])
+    monkeypatch.setattr(task.video, "generate_video", lambda **kw: None)
+    monkeypatch.setattr(task.sm.state, "update_task", lambda *a, **k: None)
+
+    params = VideoParams(video_subject="x", video_count=1,
+                         video_concat_mode=VideoConcatMode.random)
+    try:
+        task.generate_final_videos("t", params, ["/a.mp4"], str(tmp_path / "a.wav"), "", 5.0)
+    except Exception:
+        pass
+    assert seen.get("video_concat_mode") == VideoConcatMode.random

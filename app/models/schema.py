@@ -68,11 +68,9 @@ class SceneConfig(BaseModel):
     the pictures roughly follow the words. A scene makes that boundary explicit:
     its own narration, its own terms or its own files, its own duration.
 
-    There is deliberately no `transition` here. `video.combine_videos` applies
-    one transition mode across the whole timeline, so a per-scene transition
-    would be accepted, stored, echoed back and silently ignored — a field that
-    reads like a setting and behaves like a comment. It belongs here when
-    composition can honour it.
+    `transition` is the effect this scene's own clips carry. Composition resolves
+    it per clip from the scene the source belongs to, falling back to the
+    video-level mode for anything not under a scene.
     """
 
     scene_id: int = Field(
@@ -95,6 +93,10 @@ class SceneConfig(BaseModel):
     duration: Optional[float] = Field(
         default=None, ge=0.5,
         description="Seconds this scene should run. Unstated scenes split what is left.",
+    )
+    transition: Optional[VideoTransitionMode] = Field(
+        default=None,
+        description="Transition for this scene's clips. Falls back to the video-level mode.",
     )
 
 

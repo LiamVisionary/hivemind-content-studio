@@ -16,13 +16,19 @@ The two are alternatives, not layers. When scenes are given they decide the
 terms and the material order outright, and `match_materials_to_script` has
 nothing left to guess at; the pipeline says so rather than letting both run.
 
-## What is deliberately not here
+## Transitions
 
-`SceneConfig` has no `transition` field. `video.combine_videos` applies ONE
-transition mode across the whole timeline, so a per-scene transition could be
-accepted, stored, echoed back — and silently ignored. A field that reads like a
-setting and behaves like a comment is worse than its absence. It belongs here
-once composition can honour it.
+Composition used to read one transition mode for the whole timeline, so a
+per-scene one could only have been stored and ignored. It resolves per clip now,
+from the scene its source file belongs to — `transitions_by_path` builds that
+map, and anything absent from it keeps the video-level mode.
+
+## Order is not optional here
+
+Scenes only mean anything if the footage plays in scene order, and `random`
+concat mode shuffles clips during composition. So a task with scenes composes
+sequentially, the same way `match_materials_to_script` does and for the same
+reason.
 """
 
 from __future__ import annotations
@@ -165,3 +171,26 @@ def describe(scenes: Sequence[SceneConfig], budget: Sequence[float]) -> str:
         )
         lines.append(f"  scene {scene.scene_id}: {seconds:.1f}s, {source}")
     return "\n".join(lines)
+
+
+def transitions_by_path(
+    scenes: Sequence[SceneConfig],
+    paths_by_scene: Sequence[Sequence[str]],
+) -> dict[str, object]:
+    """Map every source file to the transition its scene asked for.
+
+    Keyed by path because that is what survives into composition: clips are
+    subclipped and reordered there, and the source path is the only thing that
+    still says which scene a frame came from.
+
+    Scenes that named no transition are left out rather than mapped to None, so
+    composition falls through to the video-level mode instead of being told
+    "explicitly nothing".
+    """
+    found: dict[str, object] = {}
+    for scene, paths in zip(scenes, paths_by_scene):
+        if scene.transition is None:
+            continue
+        for path in paths:
+            found[str(path)] = scene.transition
+    return found

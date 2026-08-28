@@ -9,7 +9,7 @@ import tempfile
 import unicodedata
 from contextlib import ExitStack, redirect_stdout
 from functools import lru_cache
-from typing import List
+from typing import Any, List, Mapping
 from loguru import logger
 import numpy as np
 from moviepy import (
@@ -535,6 +535,43 @@ def get_bgm_file(bgm_type: str = "random", bgm_file: str = ""):
     return ""
 
 
+def _apply_transition(clip, transition_value):
+    """One clip, one transition. Lifted out of `combine_videos` so the mode can
+    differ per clip — a scene's own transition — instead of being read once for
+    the whole timeline.
+
+    `shuffle_side` is drawn per clip on purpose: it was drawn per clip before
+    this was extracted, and a slide that always came from the same edge would be
+    a different look, not a refactor.
+    """
+    shuffle_side = random.choice(["left", "right", "top", "bottom"])
+    if transition_value in (None, VideoTransitionMode.none.value):
+        return clip
+    if transition_value == VideoTransitionMode.fade_in.value:
+        return video_effects.fadein_transition(clip, 1)
+    if transition_value == VideoTransitionMode.fade_out.value:
+        return video_effects.fadeout_transition(clip, 1)
+    if transition_value == VideoTransitionMode.slide_in.value:
+        return video_effects.slidein_transition(clip, 1, shuffle_side)
+    if transition_value == VideoTransitionMode.slide_out.value:
+        return video_effects.slideout_transition(clip, 1, shuffle_side)
+    if transition_value == VideoTransitionMode.zoom_in.value:
+        return video_effects.zoomin_transition(clip, 1)
+    if transition_value == VideoTransitionMode.zoom_out.value:
+        return video_effects.zoomout_transition(clip, 1)
+    if transition_value == VideoTransitionMode.shuffle.value:
+        transition_funcs = [
+            lambda c: video_effects.fadein_transition(c, 1),
+            lambda c: video_effects.fadeout_transition(c, 1),
+            lambda c: video_effects.slidein_transition(c, 1, shuffle_side),
+            lambda c: video_effects.slideout_transition(c, 1, shuffle_side),
+            lambda c: video_effects.zoomin_transition(c, 1),
+            lambda c: video_effects.zoomout_transition(c, 1),
+        ]
+        return random.choice(transition_funcs)(clip)
+    return clip
+
+
 def combine_videos(
     combined_video_path: str,
     video_paths: List[str],
@@ -545,7 +582,11 @@ def combine_videos(
     max_clip_duration: int = 5,
     threads: int = 2,
     clip_speed: float = 1.0,
+    path_transitions: Mapping[str, Any] | None = None,
 ) -> str:
+    """`path_transitions` maps a source video path to the transition its SCENE
+    asked for. Paths absent from it fall back to `video_transition_mode`, so a
+    caller that knows nothing about scenes behaves exactly as before."""
     audio_clip = AudioFileClip(audio_file)
     try:
         # 这里只需要读取旁白音频时长来决定素材视频拼接长度；后续不会再使用
@@ -563,6 +604,16 @@ def combine_videos(
 
     # 兼容 API 直接调用时未传转场模式的情况，避免后续访问 .value 时崩溃。
     transition_value = getattr(video_transition_mode, "value", video_transition_mode)
+
+    _by_path = {
+        str(path): getattr(mode, "value", mode)
+        for path, mode in (path_transitions or {}).items()
+        if mode is not None
+    }
+
+    def resolve_transition(source_path: str):
+        """This clip's scene transition, else the video's own."""
+        return _by_path.get(str(source_path), transition_value)
     normalized_clip_speed = utils.normalize_clip_speed(clip_speed)
     if normalized_clip_speed != 1.0:
         # 只记录一次最终生效值，既方便定位 API 越界参数被归一化的问题，
@@ -663,32 +714,13 @@ def combine_videos(
                     clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
                     clip = CompositeVideoClip([background, clip_resized])
                     
-            shuffle_side = random.choice(["left", "right", "top", "bottom"])
-            if transition_value in (None, VideoTransitionMode.none.value):
-                clip = clip
-            elif transition_value == VideoTransitionMode.fade_in.value:
-                clip = video_effects.fadein_transition(clip, 1)
-            elif transition_value == VideoTransitionMode.fade_out.value:
-                clip = video_effects.fadeout_transition(clip, 1)
-            elif transition_value == VideoTransitionMode.slide_in.value:
-                clip = video_effects.slidein_transition(clip, 1, shuffle_side)
-            elif transition_value == VideoTransitionMode.slide_out.value:
-                clip = video_effects.slideout_transition(clip, 1, shuffle_side)
-            elif transition_value == VideoTransitionMode.zoom_in.value:
-                clip = video_effects.zoomin_transition(clip, 1)
-            elif transition_value == VideoTransitionMode.zoom_out.value:
-                clip = video_effects.zoomout_transition(clip, 1)
-            elif transition_value == VideoTransitionMode.shuffle.value:
-                transition_funcs = [
-                    lambda c: video_effects.fadein_transition(c, 1),
-                    lambda c: video_effects.fadeout_transition(c, 1),
-                    lambda c: video_effects.slidein_transition(c, 1, shuffle_side),
-                    lambda c: video_effects.slideout_transition(c, 1, shuffle_side),
-                    lambda c: video_effects.zoomin_transition(c, 1),
-                    lambda c: video_effects.zoomout_transition(c, 1),
-                ]
-                shuffle_transition = random.choice(transition_funcs)
-                clip = shuffle_transition(clip)
+            # Resolved per clip, from the scene its source belongs to. Without a
+            # map this is the video-level mode for every clip, which is what it
+            # was before scenes existed.
+            clip = _apply_transition(
+                clip,
+                resolve_transition(subclipped_item.source_file_path),
+            )
 
             if clip.duration > max_clip_duration:
                 clip = clip.subclipped(0, max_clip_duration)
