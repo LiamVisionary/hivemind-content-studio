@@ -40,6 +40,8 @@ import {
 } from '../lib/hivemindStudio.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
+import { CivitaiPostDialog } from '../components/CivitaiPostDialog.jsx';
+import { civitaiResourcesFromLoras } from '../lib/civitaiPost.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
 import { OWNERSHIP_HEADING, applyReferenceRoles, normalizeReferenceRoles, referenceLabelStyleFor } from '../lib/imageReferenceRoles.js';
@@ -325,6 +327,7 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     viewerUrl: null,
     // Upscaled entry whose before/after compare overlay is open (null = closed).
     compareEntry: null,
+    civitaiPost: null,
     // Entry the Expand (outpaint) dialog is open for, and its in-flight state.
     expandEntry: null,
     expandBusy: false,
@@ -3489,6 +3492,17 @@ export function ImageStudio({
             const entry = viewerEntry;
             downloadImage(s.viewerUrl, imageDownloadName(entry?.model, entry?.id));
           }}
+          onPostToCivitai={() => {
+            // Resources come from the context captured for THIS output, not the
+            // panel's current selection — a public post must not credit a LoRA
+            // that had nothing to do with the picture.
+            const made = s.contextStore.recall(s.viewerUrl);
+            s.civitaiPost = {
+              url: s.viewerUrl,
+              entry: { ...viewerEntry, civitaiResources: civitaiResourcesFromLoras(made?.loras, s.availableLoras) },
+            };
+            bump();
+          }}
           onUpscale={isLocalAIAvailable() ? (mode) => upscaleEntry(viewerEntry, mode) : undefined}
           onCompare={viewerEntry?.sourceUrl ? () => { s.compareEntry = viewerEntry; bump(); } : undefined}
           onExpand={isLocalAIAvailable() && krea2LocalModel() && viewerEntry
@@ -3516,6 +3530,15 @@ export function ImageStudio({
           // now — only actual upscales should say "Upscaled".
           afterLabel={/upscaled/i.test(s.compareEntry.model || '') ? 'Upscaled' : 'Result'}
           onClose={() => { s.compareEntry = null; bump(); }}
+        />
+      ) : null}
+
+      {s.civitaiPost ? (
+        <CivitaiPostDialog
+          url={s.civitaiPost.url}
+          entry={s.civitaiPost.entry}
+          filename={imageDownloadName(s.civitaiPost.entry?.model, s.civitaiPost.entry?.id)}
+          onClose={() => { s.civitaiPost = null; bump(); }}
         />
       ) : null}
 

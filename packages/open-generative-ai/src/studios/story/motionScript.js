@@ -71,6 +71,24 @@ export function defaultBeats(seconds = 15, count = 3) {
 }
 
 /**
+ * Beats laid end to end from zero, each keeping its own length.
+ *
+ * Run after a reorder and after a removal. A list whose third beat starts at 5s
+ * while its second ends at 15s is not a timeline: `motionScript` prints the
+ * spans it is given, so the overlap becomes two beats claiming the same second
+ * and a gap nobody scripted at the end.
+ */
+export function relayBeats(beats = []) {
+  let at = 0;
+  return (Array.isArray(beats) ? beats : []).map((beat) => {
+    const span = Math.max(0, second(beat?.to) - second(beat?.from));
+    const row = { ...beat, from: second(at), to: second(at + span) };
+    at += span;
+    return row;
+  });
+}
+
+/**
  * The sentence that makes the world breathe: one force, and what each depth
  * does about it.
  *

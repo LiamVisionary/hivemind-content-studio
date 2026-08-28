@@ -57,15 +57,17 @@ REQUEST_TIMEOUT = 30
 _session = requests.Session()
 
 
-def _api_key() -> str:
-    """RunPod credentials.
+# RUNPOD_API_KEY first, then RUNPOD_MANAGEMENT_API_KEY — the shared hive env
+# already carries the latter for unrelated fleet work, and it is NOT
+# necessarily the same account that holds this studio's rental credit. The
+# studio-specific name wins so the two can differ on one machine. Declared as
+# the provider's `env_names` so the studio can name the key it is missing.
+ENV_NAMES = ("RUNPOD_API_KEY", "RUNPOD_MANAGEMENT_API_KEY")
 
-    RUNPOD_API_KEY first, then RUNPOD_MANAGEMENT_API_KEY — the shared hive env
-    already carries the latter for unrelated fleet work, and it is NOT
-    necessarily the same account that holds this studio's rental credit. The
-    studio-specific name wins so the two can differ on one machine.
-    """
-    for name in ("RUNPOD_API_KEY", "RUNPOD_MANAGEMENT_API_KEY"):
+
+def _api_key() -> str:
+    """RunPod credentials, by the names above and in that order."""
+    for name in ENV_NAMES:
         value = os.environ.get(name, "").strip()
         if value:
             return value
@@ -276,12 +278,10 @@ class RunPodProvider:
     key = "runpod"
     label = "RunPod"
     credit_url = "runpod.io/console/billing"
+    env_names = ENV_NAMES
 
     def configured(self) -> bool:
-        return any(
-            os.environ.get(name, "").strip()
-            for name in ("RUNPOD_API_KEY", "RUNPOD_MANAGEMENT_API_KEY")
-        )
+        return any(os.environ.get(name, "").strip() for name in ENV_NAMES)
 
     # --- shopping ----------------------------------------------------------
 

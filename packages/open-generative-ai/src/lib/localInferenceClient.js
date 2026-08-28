@@ -128,6 +128,27 @@ class LocalInferenceClient {
         };
     }
 
+    // ── Civitai inspiration finder ────────────────────────────────────────
+    // Same bridge and same key as the model browser, different endpoint: this
+    // one browses generated images and videos for the prompt attached to them.
+    supportsCivitaiImages() {
+        return isLocalAIAvailable() && typeof window.localAI.searchCivitaiImages === 'function';
+    }
+
+    async searchCivitaiImages(params) {
+        if (!this.supportsCivitaiImages()) throw new Error('The inspiration finder is available through Unified Studio.');
+        const data = await window.localAI.searchCivitaiImages(params);
+        return {
+            items: Array.isArray(data?.items) ? data.items : [],
+            baseModelOptions: Array.isArray(data?.baseModelOptions) ? data.baseModelOptions : [],
+            nextCursor: typeof data?.nextCursor === 'string' ? data.nextCursor : '',
+            // How many raw results the gateway read to fill this page. Shown so
+            // a thin page reads as "Civitai had little with a prompt", not as a
+            // broken filter.
+            scanned: Number(data?.scanned) || 0,
+        };
+    }
+
     // Civitai's own base-model vocabulary for the browse filter. Never throws: the
     // filter falls back to the values the search results carry.
     async listCivitaiBaseModels() {

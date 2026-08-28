@@ -1,23 +1,32 @@
 // Story Studio — a character-led short, produced one decision at a time.
 //
-// The pipeline is concept → character sheets → location plate → storyboard →
-// motion script → gate. It is a separate studio rather than a mode of the Video
-// studio because the expensive decisions all happen BEFORE a video model is
-// asked for anything: which pair, what they are locked to, where it is, how
-// many beats, and what actually moves. By the time a clip is generated, all of
-// that should already be settled and visible.
+// Four decisions, one on screen at a time: the story, the cast and the place,
+// what happens, and whether it ships. It used to be six cards down one page,
+// which meant the only way to learn whether the plate had been drawn was to
+// scroll past everything else to find out — and every one of the forty fields
+// that exist for the times you disagree with the producer was in the way of the
+// four presses that are the actual work.
+//
+// It is a separate studio rather than a mode of the Video studio because the
+// expensive decisions all happen BEFORE a video model is asked for anything:
+// which pair, what they are locked to, where it is, how many beats, and what
+// actually moves. By the time a clip is generated, all of that should already
+// be settled and visible.
 //
 // What lives where, and why:
-//   concept     the producer (a local LLM, lib/localProducer.js) drafts options;
-//               the director picks. Options before decisions, every time.
-//   sheets      drawn here, then promoted to persistent references — so they
-//               show up in the Video studio's reference picker with no export.
-//   plate       the same, and deliberately EMPTY. The sheets own the characters.
-//   board       direction for the render, not a shot list it will trace.
+//   story       the producer (a local LLM, or HivemindOS, or the owner's own
+//               accounts) drafts options; the director locks one. Options
+//               before decisions, every time. What survives is a CONTRACT that
+//               every later stage quotes.
+//   cast        sheets and an empty plate, drawn here and promoted straight to
+//               persistent references — so they show up in the Video studio's
+//               reference picker with no export. The plate is empty on purpose:
+//               the sheets own the characters.
 //   motion      built here, generated in the Video studio. That studio already
 //               owns model choice, reference budget, lanes and resume; a second
-//               video composer in here would be a second set of all of it.
-//   gate        the checks in the order they are cheap to fix, and a repair per
+//               video composer in here would be a second set of all of it. The
+//               storyboard rides along as direction, not as a shot list.
+//   ship        the checks in the order they are cheap to fix, and a repair per
 //               failure that names ONE layer to change.
 //
 // Method credit: the production sequence follows The Viral Character Method
@@ -27,7 +36,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
-import { useMediaSrc } from '../hooks/hooks.js';
 import { registerPromptInserter, loadStudioSetup } from '../app/promptTarget.js';
 import { defaultPick, fetchCapabilityMatrix, rankModels, serverRows } from '../lib/capabilityMatrix.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
@@ -43,99 +51,45 @@ import {
   fetchOAuthStatus, readinessFor, readinessFromError, refreshMuapiKeyLocation, startOAuthLogin,
 } from '../lib/providerReadiness.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
-import { canvasMismatch, canvasPixels } from './story/sheetLayout.js';
-import { ModelSourcePicker } from '../components/ModelSourcePicker.jsx';
+import { canvasMismatch } from './story/sheetLayout.js';
 import { lastUsedModelId, rememberModelId, sortModels } from '../lib/promptHelperRuntime.js';
 import {
-  ACCOUNTS, APP_ROUTE, HIVEMINDOS, LINK_POLL_MS, LINK_WAIT_MS, LOCAL, privacyLine, remedyFor, routeOf, rowFor, sourceState, startingModelId, summaryLine, tabOf,
+  ACCOUNTS, APP_ROUTE, HIVEMINDOS, LINK_POLL_MS, LINK_WAIT_MS, LOCAL,
+  remedyFor, routeOf, rowFor, sourceState, startingModelId, tabOf,
 } from '../lib/textModels.js';
-import { Icon } from '../ui/icons.jsx';
-import {
-  Button, Card, EmptyState, Field, IconButton, NativeSelect, Pill, SectionLabel, Segmented, Slider,
-  Spinner, StudioLayout, TextArea, TextInput, cx,
-} from '../ui/kit.jsx';
+import { Button, StudioLayout } from '../ui/kit.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
-import { ModelFitPicker } from './ModelFitPicker.jsx';
 
 import {
-  conceptBrief, conceptCount, contactSheetLayout, contactSheetPrompt, contractBlanks, contractSentence,
-  normalizeConcepts, SHORTLIST_CRITERIA, TONES,
+  conceptBrief, contactSheetLayout, contactSheetPrompt, contractBlanks, normalizeConcepts,
 } from './story/concept.js';
+import { blankCharacter, characterSheetPrompt, neverChangeLine } from './story/characterSheet.js';
+import { locationPrompt } from './story/location.js';
 import {
-  blankCharacter, characterSheetPrompt, IDENTITY_LOCKS, neverChangeLine,
-  SHEET_AUDIT, SHEET_BACKGROUNDS, SILHOUETTE_TEST,
-} from './story/characterSheet.js';
-import { LOCATION_ASPECTS, locationGaps, locationPrompt, MOTION_SOURCES } from './story/location.js';
-import {
-  blankPanel, BOARD_FORMATS, boardFormat, boardLayout, boardPrompt, boardWarnings, defaultPanels, recommendBoard, SHOT_REASONS,
+  blankPanel, boardFormat, boardLayout, boardPrompt, boardWarnings, defaultPanels,
 } from './story/board.js';
 import {
-  AUDIO_LAYERS, budgetReport, defaultBeats, motionScript, MOTION_LAYERS, MUSIC_RULES,
-  scriptWarnings, segmentPlan, tighten,
+  budgetReport, defaultBeats, motionScript, scriptWarnings, segmentPlan, tighten,
 } from './story/motionScript.js';
-import {
-  buildCaption, CAPTION_BEATS, FINISH_ORDER, ITERATION_LAYERS, QA_CHECKS,
-  repairsFor, shipVerdict, SIGNAL_READS,
-} from './story/qa.js';
+import { QA_CHECKS, buildCaption, shipVerdict } from './story/qa.js';
 import { STORY_EXAMPLE } from './story/example.js';
-import { blankStory, producerIsRunning, restoreStory } from './story/state.js';
+import { blankStory, restoreStory } from './story/state.js';
 import { describeHandoff, storyHandoff } from './story/handoff.js';
-import { SendToMenu } from '../components/SendToMenu.jsx';
 import { selectSendTarget } from '../lib/studioTargets.js';
-import { resolveVideoSendTargets } from './video/videoSendTargets.js';
-import {
-  acceptedValues, blankFieldsIn, fieldMap, fieldsFor, fillBrief, fillChunks, storyContext, writePath,
-} from './story/fields.js';
+import { blankFieldsIn, fieldMap, fieldsFor, fillBrief, fillChunks, storyContext, writePath, acceptedValues } from './story/fields.js';
 
-const STAGES = [
-  { id: 'concept', label: 'Concept', icon: 'sparkles' },
-  { id: 'characters', label: 'Characters', icon: 'persona' },
-  { id: 'location', label: 'Location', icon: 'globe' },
-  { id: 'board', label: 'Storyboard', icon: 'grid' },
-  { id: 'motion', label: 'Motion', icon: 'film' },
-  { id: 'ship', label: 'Gate', icon: 'check' },
-];
+import { STORY_STAGES, StageRail } from './story/StageRail.jsx';
+import { ProducerBar } from './story/ProducerBar.jsx';
+import { StoryStage } from './story/StoryStage.jsx';
+import { CastStage } from './story/CastStage.jsx';
+import { MotionStage } from './story/MotionStage.jsx';
+import { ShipStage } from './story/ShipStage.jsx';
+import { PromptDock } from './story/PromptDock.jsx';
 
-function StageHeader({ index, stage, done, busy, blanks, fields, onFillSection, children }) {
-  const running = producerIsRunning(busy, `fill-section:${stage.id}`);
-  // A section with nothing blank used to leave a dead grey button reading
-  // "Nothing blank" — the one state where the director most wants another pass
-  // at it. It offers the redraft instead, and names how many fields that is so
-  // it is never a surprise.
-  const redraft = !running && blanks === 0 && fields > 0;
-  return (
-    <div className="flex items-center gap-2.5">
-      <span className={cx(
-        'grid h-6 w-6 shrink-0 place-items-center rounded-full border text-[11px] font-bold',
-        done ? 'border-transparent bg-ok-tint text-ok' : 'border-line1 bg-bg2 text-ink3',
-      )}
-      >
-        {done ? <Icon name="check" size={13} /> : index + 1}
-      </span>
-      <SectionLabel className="!mb-0">{stage.label}</SectionLabel>
-      <div className="ml-auto flex items-center gap-2">
-        {children}
-        {onFillSection ? (
-          <Button
-            size="sm"
-            icon={running || redraft ? 'refresh' : 'wand'}
-            onClick={() => onFillSection(stage.id, { redraft })}
-            loading={running}
-            disabled={Boolean(busy) || (blanks === 0 && !redraft)}
-          >
-            {running ? (redraft ? 'Redrafting…' : 'Filling…')
-              : blanks ? `Fill ${blanks} blank${blanks === 1 ? '' : 's'}`
-              : redraft ? `Redraft ${fields}`
-              // A section whose fields do not exist yet — no characters added,
-              // no beats written. "Redraft 0" was a second dead label in place
-              // of the first one; this says what is actually true.
-              : 'Nothing to write yet'}
-          </Button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
+/** The old six sections a stage's fill covers. The registry is still keyed by
+ *  them, because they are the units the producer answers in — a fill that asked
+ *  for the cast and the place in one object would overrun a small model. */
+const SECTIONS_OF = { story: ['concept'], cast: ['characters', 'location'], motion: ['motion'], ship: ['ship'] };
 
 /** The real pixel size of a rendered image, or null if it cannot be read. */
 function measureCanvas(url) {
@@ -147,96 +101,6 @@ function measureCanvas(url) {
     probe.src = url;
   });
 }
-
-function Plate({ url, alt, className = '' }) {
-  const src = useMediaSrc(url);
-  if (!src) return null;
-  return <img src={src} alt={alt} className={cx('max-h-80 rounded-md border border-line1', className)} />;
-}
-
-/**
- * What the producer is doing, beside the button that asked it.
- *
- * The producer bar at the top of the studio says the same thing, but a stage
- * button can be a whole page below it — and the wait here is not a spinner's
- * worth. Loading a local model off a cold cache is minutes, and "Loading Qwen3
- * 30B…" is the only thing that distinguishes that from a hung request.
- */
-function ProducerStatus({ task, busy, status, onCancel }) {
-  if (!producerIsRunning(busy, task)) return null;
-  return (
-    <span className="flex items-center gap-2 text-[11px] text-ink3">
-      <Spinner size={12} />
-      {status || 'Working…'}
-      <Button size="sm" onClick={onCancel}>Cancel</Button>
-    </span>
-  );
-}
-
-/**
- * The wand beside one input: write this field from everything else.
- *
- * Deliberately an icon and not a labelled button. There is one on nearly every
- * field in the studio, and forty "Auto-fill"s would drown the writing they sit
- * next to.
- */
-function FillButton({ busyKey, busy, onClick, hint }) {
-  const running = producerIsRunning(busy, busyKey);
-  return (
-    <IconButton
-      icon={running ? 'refresh' : 'wand'}
-      label={hint}
-      size="sm"
-      onClick={onClick}
-      disabled={Boolean(busy)}
-      className={cx('!h-5 !w-5 shrink-0', running && 'animate-spin text-honey')}
-    />
-  );
-}
-
-/**
- * A labelled input with its own fill button, reading its label and guidance from
- * the field registry.
- *
- * Defined at module scope on purpose: a component declared inside the studio
- * would be a new type on every render, so React would unmount and remount the
- * input underneath it and the field would lose focus on every keystroke.
- */
-function FillField({ spec, id, busy, onFill, className = '', children }) {
-  return (
-    <Field
-      label={spec?.label || id}
-      hint={spec?.hint}
-      className={className}
-      labelRight={(
-        <FillButton
-          busyKey={`fill:${id}`}
-          busy={busy}
-          onClick={() => onFill([id])}
-          hint={`Write ${spec?.label || id} from the rest of the story`}
-        />
-      )}
-    >
-      {children}
-    </Field>
-  );
-}
-
-
-/**
- * Which model thinks for you, and where it runs.
- *
- * Three tabs because there are three genuinely different answers, not because a
- * list of hundreds needed chopping up: a model on this machine (free, private,
- * as fast as the hardware), one of HivemindOS's own tiers, or any named model
- * HivemindOS can reach. The last two are the same credits and the same account
- * as the HivemindOS app — the studio calls that app's own model surface rather
- * than keeping a second catalog or a second bill.
- *
- * A source that cannot answer right now says so ON its tab, with the button that
- * repairs it. An empty tab with no explanation is how "the producer is broken"
- * gets reported for something that is one press from working.
- */
 
 /**
  * A failure that carries its own repair, rendered with the repair in it.
@@ -259,28 +123,19 @@ function reconnectToast(t, readiness, onFix) {
   );
 }
 
-/** A list of objections, shown as objections rather than as errors — every one
- *  of them is something the director may have chosen on purpose. */
-function Notes({ items, tone = 'warn' }) {
-  if (!items?.length) return null;
-  return (
-    <ul className={cx('flex flex-col gap-1 text-[11px] leading-snug', tone === 'warn' ? 'text-warn' : 'text-ink3')}>
-      {items.map((item) => <li key={item}>• {item}</li>)}
-    </ul>
-  );
-}
-
 export function StoryStudio({ active = true } = {}) {
   const [story, setStory] = useState(blankStory);
   const [hydrated, setHydrated] = useState(false);
+  const [stage, setStage] = useState('story');
+  const [promptOpen, setPromptOpen] = useState(false);
 
-  // The producer — one local model for the whole session rather than one per
-  // stage. Which model is thinking is a session decision, not a stage decision.
+  // The producer — one model for the whole session rather than one per stage.
+  // Which model is thinking is a session decision, not a stage decision.
   const [runtime, setRuntime] = useState(null);
   const [producerId, setProducerId] = useState('');
   const [producerOpen, setProducerOpen] = useState(false);
   // Which tab the picker is on, and what is typed in its search box. The tab
-  // follows the CHOSEN model when the picker opens, so "Change" lands where the
+  // follows the CHOSEN model when the picker opens, so it lands where the
   // current answer came from rather than always on the first tab.
   const [producerTab, setProducerTab] = useState('');
   const [producerQuery, setProducerQuery] = useState('');
@@ -349,7 +204,7 @@ export function StoryStudio({ active = true } = {}) {
 
   /* ---------------- the producer's model ---------------- */
 
-  // One catalog for both engines. A machine with no local weights on it used to
+  // One catalog for every engine. A machine with no local weights on it used to
   // have no producer at all; HivemindOS's models answer for it now, on the same
   // credits as the HivemindOS app itself.
   const refreshRuntime = useCallback(async () => {
@@ -369,19 +224,12 @@ export function StoryStudio({ active = true } = {}) {
   const localProducerModels = useMemo(() => sortModels(sourceState(runtime, LOCAL).models), [runtime]);
   const producer = rowFor(runtime, producerId);
   const producerTabOpen = producerTab || (producer ? tabOf(producer) : LOCAL);
-  // What ensureProducerModel needs to know about THIS machine, in the shape it
-  // already reads, so a cloud catalog does not send it looking for a local id.
+  // What askProducer needs to know about THIS machine, in the shape it already
+  // reads, so a cloud catalog does not send it looking for a local id.
   const localSnapshot = useMemo(() => ({ models: localProducerModels }), [localProducerModels]);
 
   const cancelProducer = useCallback(() => abortRef.current?.abort(), []);
 
-  /**
-   * The repair a source offered, performed.
-   *
-   * Every state this picker can be in that stops a press is paired with one of
-   * these, so the owner is never told what is wrong without being shown where to
-   * fix it — the project's rule since the OAuth error that had nothing to press.
-   */
   /**
    * Connect the owner's HivemindOS account, once.
    *
@@ -460,6 +308,14 @@ export function StoryStudio({ active = true } = {}) {
     }
   }, [refreshRuntime]);
 
+  /**
+   * The repair a source offered, performed.
+   *
+   * Every state this picker can be in that stops a press is paired with one of
+   * these, so the owner is never told what is wrong without being shown where
+   * to fix it — the project's rule since the OAuth error that had nothing to
+   * press.
+   */
   const runRemedy = useCallback(async (remedy) => {
     // Called both with a bare action (the older call sites) and with the whole
     // remedy, because a provider account's repair has to name WHICH account.
@@ -536,9 +392,7 @@ export function StoryStudio({ active = true } = {}) {
    *
    * The engines answer refusals as `{message, remedy, provider}` — an expired
    * ChatGPT sign-in, a key the provider rejected, credits that ran out — so a
-   * plain `toast.error(message)` throws the only actionable half away. This is
-   * the same rule the image side already follows after the OAuth error that had
-   * nothing to press.
+   * plain `toast.error(message)` throws the only actionable half away.
    */
   const producerFailed = useCallback((error, fallback) => {
     const message = error?.message || fallback;
@@ -556,7 +410,6 @@ export function StoryStudio({ active = true } = {}) {
       </span>
     ), { duration: 12000 });
   }, [runRemedy]);
-
 
   /** One ask, with no opinion about buttons. Throws; the callers decide whether
    *  a failure is a toast or one step of a longer job. */
@@ -597,7 +450,7 @@ export function StoryStudio({ active = true } = {}) {
       setThinking('');
       abortRef.current = null;
     }
-  }, [producer, runProducer]);
+  }, [producer, runProducer, producerFailed]);
 
   /* ---------------- auto-fill ---------------- */
 
@@ -605,18 +458,6 @@ export function StoryStudio({ active = true } = {}) {
   // fields each re-scanning six sections would rebuild the registry forty times
   // a keystroke.
   const specs = useMemo(() => fieldMap(story), [story]);
-
-  // How many blanks each stage's fill button would write. Shown on the button
-  // so pressing it is never a surprise.
-  const blanks = useMemo(() => Object.fromEntries(
-    STAGES.map((stage) => [stage.id, blankFieldsIn(stage.id, story).length]),
-  ), [story]);
-
-  // How many fields a redraft would rewrite, for the button that offers it once
-  // a section has no blanks left.
-  const stageFields = useMemo(() => Object.fromEntries(
-    STAGES.map((stage) => [stage.id, fieldsFor(stage.id, story).length]),
-  ), [story]);
 
   /**
    * Write the named fields from everything else the director has written.
@@ -626,7 +467,8 @@ export function StoryStudio({ active = true } = {}) {
    * a field offered as evidence for itself comes back as what is already there.
    */
   const fill = useCallback(async (ids, { busyKey = '' } = {}) => {
-    const entries = ids.map((id) => specs.get(id)).filter(Boolean);
+    const registry = fieldMap(storyRef.current);
+    const entries = ids.map((id) => registry.get(id)).filter(Boolean);
     if (!entries.length) return { written: 0 };
     if (!producer) {
       toast.error('Pick a model for the producer first.');
@@ -641,10 +483,9 @@ export function StoryStudio({ active = true } = {}) {
     abortRef.current = controller;
     setBusy(busyKey || `fill:${entries[0].id}`);
     setThinking('Waking the producer…');
-    // The story as it is being written, so chunk three can see what chunk one
-    // wrote. Kept locally because React has not necessarily re-rendered between
-    // two awaits, and a stale context is how the second half of a section ends
-    // up contradicting the first.
+    // The story as it is being written, so the summary can compare against it.
+    // Kept locally because React has not necessarily re-rendered between two
+    // awaits.
     let draft = storyRef.current;
     let written = 0;
     let failure = '';
@@ -716,26 +557,30 @@ export function StoryStudio({ active = true } = {}) {
       return { written: 0 };
     }
     if (written < total) {
-      toast(`Filled ${written} of ${total} — the rest came back empty. Press Fill again for those.`, { icon: '✍️' });
+      toast(`Filled ${written} of ${total} — the rest came back empty. Press Draft again for those.`, { icon: '✍️' });
     }
     return { written };
-  }, [producer, runProducer, specs, update]);
+  }, [producer, runProducer, update, producerFailed]);
 
-  const fillSection = useCallback(async (sectionId, { redraft = false } = {}) => {
-    // A redraft asks for every field in the section, not just the empty ones —
-    // which is the whole point of offering it once nothing is blank.
-    const entries = redraft
-      ? fieldsFor(sectionId, storyRef.current)
-      : blankFieldsIn(sectionId, storyRef.current);
+  /**
+   * One stage's blanks, or its whole set of fields once nothing is blank.
+   *
+   * A redraft overwrites work the director may have written by hand, so the
+   * button names the count before it runs and this keeps the version it
+   * replaced behind an Undo.
+   */
+  const fillStage = useCallback(async (stageId) => {
+    const sections = SECTIONS_OF[stageId] || [];
+    const current = storyRef.current;
+    const blank = sections.flatMap((section) => blankFieldsIn(section, current));
+    const redraft = blank.length === 0;
+    const entries = redraft ? sections.flatMap((section) => fieldsFor(section, current)) : blank;
     if (!entries.length) {
-      toast('Nothing to write in this section.', { icon: '\u270D\uFE0F' });
+      toast('Nothing to write in this stage yet.', { icon: '✍️' });
       return;
     }
-    // A redraft overwrites work the director may have written by hand. The
-    // button naming the count stops that being a surprise; keeping the version
-    // it replaced stops it being a loss.
-    const before = redraft ? storyRef.current : null;
-    const outcome = await fill(entries.map((entry) => entry.id), { busyKey: `fill-section:${sectionId}` });
+    const before = redraft ? current : null;
+    const outcome = await fill(entries.map((entry) => entry.id), { busyKey: `fill-section:${stageId}` });
     // What `fill` reports, NOT what the ref says: `update()` is a React setter
     // and the re-render that moves `storyRef.current` has not happened by the
     // time this await resolves, so comparing references here always said
@@ -746,7 +591,7 @@ export function StoryStudio({ active = true } = {}) {
           <span>Redrafted {entries.length} field{entries.length === 1 ? '' : 's'}.</span>
           <Button size="sm" onClick={() => { update(() => before); toast.dismiss(t.id); }}>Undo</Button>
         </span>
-      ), { icon: '\u270D\uFE0F', duration: 12000 });
+      ), { icon: '✍️', duration: 12000 });
     }
   }, [fill, update]);
 
@@ -854,7 +699,7 @@ export function StoryStudio({ active = true } = {}) {
    */
   const draw = useCallback(async ({ key, label, model, prompt, aspect, name }) => {
     if (!prompt) { toast.error('There is nothing to draw yet.'); return ''; }
-    if (!model) { toast.error('Pick a model to draw it with.'); return ''; }
+    if (!model) { toast.error('Pick a model to draw it with — under “Drawn with”.'); return ''; }
     // Only the MUAPI key lives in this browser. Every other credential is
     // checked where it actually is, so asking for a MUAPI key because a model
     // is "not local" is how an OpenAI OAuth pick used to open the wrong dialog.
@@ -905,16 +750,16 @@ export function StoryStudio({ active = true } = {}) {
     }
   }, [refreshOAuth, fixReadiness]);
 
-  /* ---------------- stage 1: concept ---------------- */
+  /* ---------------- stage 1: the story ---------------- */
 
   const brief = story.brief;
-  const setBrief = (patch) => update((current) => ({ ...current, brief: { ...current.brief, ...patch } }));
+  const setBrief = useCallback((patch) => update((current) => ({ ...current, brief: { ...current.brief, ...patch } })), [update]);
 
   const askConcepts = async () => {
     const result = await ask('concepts', conceptBrief(brief));
     if (!result) return;
     const concepts = normalizeConcepts(result, { count: brief.count });
-    if (!concepts.length) { toast.error('No usable concepts came back — try again, or a larger model.'); return; }
+    if (!concepts.length) { toast.error('No usable directions came back — try again, or a larger model.'); return; }
     update({ concepts, shortlist: [], ranking: null, lockedId: '', contactSheetUrl: '' });
   };
 
@@ -934,15 +779,16 @@ export function StoryStudio({ active = true } = {}) {
 
   const drawContactSheet = async () => {
     const chosen = story.concepts.filter((concept) => story.shortlist.includes(concept.id));
+    const rows = chosen.length ? chosen : story.concepts;
     const url = await draw({
       key: 'contact',
       label: 'contact sheet',
       model: sheetModel,
-      prompt: contactSheetPrompt(chosen.length ? chosen : story.concepts, { style: story.style, world: brief.world }),
+      prompt: contactSheetPrompt(rows, { style: story.style, world: brief.world }),
       // The canvas the prompt's own grid was laid out for — the sheet says how
       // many cells across it is, so it cannot also be asked for a canvas of a
       // different shape.
-      aspect: contactSheetLayout((chosen.length ? chosen : story.concepts).length).canvas,
+      aspect: contactSheetLayout(rows.length).canvas,
       name: 'story-contact-sheet.png',
     });
     if (url) update({ contactSheetUrl: url });
@@ -960,27 +806,25 @@ export function StoryStudio({ active = true } = {}) {
       sheetUrl: '',
       audit: {},
     }));
-    update({
-      title: result.title || story.title,
-      promise: result.promise || story.promise,
-      contract: { ...story.contract, ...(result.contract || {}) },
-      characters: characters.length ? characters : story.characters,
-    });
+    update((current) => ({
+      ...current,
+      title: result.title || current.title,
+      promise: result.promise || current.promise,
+      contract: { ...current.contract, ...(result.contract || {}) },
+      characters: characters.length ? characters : current.characters,
+    }));
     toast.success('Contract locked. Every later stage quotes it.');
   };
 
-  const contractGaps = contractBlanks(story.contract);
-  const conceptDone = contractGaps.length === 0 && story.characters.length > 0;
+  /* ---------------- stage 2: cast and place ---------------- */
 
-  /* ---------------- stage 2: characters ---------------- */
-
-  const patchCharacter = (index, patch) => update((current) => ({
+  const patchCharacter = useCallback((index, patch) => update((current) => ({
     ...current,
     characters: current.characters.map((row, i) => (i === index ? { ...row, ...patch } : row)),
-  }));
+  })), [update]);
 
   const drawSheet = async (index) => {
-    const character = story.characters[index];
+    const character = storyRef.current.characters[index];
     const url = await draw({
       // Keyed per character: two cards both testing `drawing === 'character
       // sheet'` spun each other's button.
@@ -994,11 +838,7 @@ export function StoryStudio({ active = true } = {}) {
     if (url) patchCharacter(index, { sheetUrl: url, audit: {} });
   };
 
-  const charactersDone = story.characters.length > 0 && story.characters.every((row) => row.sheetUrl);
-
-  /* ---------------- stage 3: location ---------------- */
-
-  const setLocation = (patch) => update((current) => ({ ...current, location: { ...current.location, ...patch } }));
+  const setLocation = useCallback((patch) => update((current) => ({ ...current, location: { ...current.location, ...patch } })), [update]);
 
   const askLocations = async () => {
     const result = await ask('location', 'Offer location directions for this contract.', {
@@ -1023,17 +863,38 @@ export function StoryStudio({ active = true } = {}) {
     if (url) setLocation({ plateUrl: url });
   };
 
-  const gaps = locationGaps(story.location);
-  const locationDone = Boolean(story.location.plateUrl);
+  /**
+   * Write the cast and the place from the locked contract.
+   *
+   * With no characters at all there is nothing for a field fill to write into,
+   * and the old studio answered that press with "Nothing to write yet". The
+   * contract already names both halves of the pair, so the rows are seeded from
+   * it rather than asking the director to add two blanks and name them again.
+   */
+  const draftCast = useCallback(async () => {
+    let current = storyRef.current;
+    if (!current.characters.length) {
+      const seeds = [current.contract.who, current.contract.other]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      if (!seeds.length) {
+        toast.error('Lock a direction on the story stage first — the cast is written from the contract.');
+        return;
+      }
+      const seeded = seeds.map((role) => ({ ...blankCharacter(), role }));
+      update((row) => ({ ...row, characters: seeded }));
+      // Written straight onto the ref as well: `fill` reads the story from here
+      // for its context and its registry, and the re-render that would move it
+      // has not happened by the next line.
+      current = { ...current, characters: seeded };
+      storyRef.current = current;
+    }
+    await fillStage('cast');
+  }, [update, fillStage]);
 
-  /* ---------------- stage 4: board ---------------- */
+  /* ---------------- stage 3: what happens ---------------- */
 
-  const setBoard = (patch) => update((current) => ({ ...current, board: { ...current.board, ...patch } }));
-
-  const recommendation = useMemo(() => recommendBoard({
-    beats: story.motion.beats.filter((beat) => beat.action).length,
-    seconds: story.motion.seconds,
-  }), [story.motion.beats, story.motion.seconds]);
+  const setBoard = useCallback((patch) => update((current) => ({ ...current, board: { ...current.board, ...patch } })), [update]);
 
   const changeFormat = (format) => setBoard({ format, panels: defaultPanels(format) });
 
@@ -1058,9 +919,13 @@ export function StoryStudio({ active = true } = {}) {
     if (result.title && !story.title) update({ title: result.title });
   };
 
-  const patchPanel = (index, patch) => setBoard({
-    panels: story.board.panels.map((row, i) => (i === index ? { ...row, ...patch } : row)),
-  });
+  const patchPanel = useCallback((index, patch) => update((current) => ({
+    ...current,
+    board: {
+      ...current.board,
+      panels: current.board.panels.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    },
+  })), [update]);
 
   const boardText = useMemo(() => boardPrompt({
     format: story.board.format,
@@ -1090,16 +955,19 @@ export function StoryStudio({ active = true } = {}) {
     if (url) setBoard({ sheetUrl: url });
   };
 
-  const boardNotes = boardWarnings(story.board.panels, story.board.format);
-  const boardDone = Boolean(story.board.sheetUrl);
+  const boardNotes = useMemo(
+    () => boardWarnings(story.board.panels, story.board.format),
+    [story.board.panels, story.board.format],
+  );
 
-  /* ---------------- stage 5: motion ---------------- */
-
-  const setMotion = (patch) => update((current) => ({ ...current, motion: { ...current.motion, ...patch } }));
-  const setLayer = (id, value) => setMotion({ layers: { ...story.motion.layers, [id]: value } });
-  const patchBeat = (index, patch) => setMotion({
-    beats: story.motion.beats.map((row, i) => (i === index ? { ...row, ...patch } : row)),
-  });
+  const setMotion = useCallback((patch) => update((current) => ({ ...current, motion: { ...current.motion, ...patch } })), [update]);
+  const patchBeat = useCallback((index, patch) => update((current) => ({
+    ...current,
+    motion: {
+      ...current.motion,
+      beats: current.motion.beats.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    },
+  })), [update]);
 
   const askBeats = async () => {
     const result = await ask('beats', `Write the motion direction for a ${story.motion.seconds}-second generation.`, {
@@ -1117,7 +985,7 @@ export function StoryStudio({ active = true } = {}) {
     setMotion({
       force: result.force || story.motion.force,
       layers: { ...story.motion.layers, ...(result.layers || {}) },
-      beats: beats.length ? beats : story.motion.beats,
+      beats: beats.length ? beats : defaultBeats(story.motion.seconds, story.motion.beats.length || 3),
       camera: result.camera || story.motion.camera,
       audio: result.audio || story.motion.audio,
       negatives: result.negatives || story.motion.negatives,
@@ -1138,6 +1006,51 @@ export function StoryStudio({ active = true } = {}) {
     setMotion({ override: result.script });
     toast.success(`Compressed to ${String(result.script).length} characters.`);
   };
+
+  /* ---------------- stage 4: the gate ---------------- */
+
+  const setVerdict = useCallback((id, value) => update((current) => ({
+    ...current,
+    qa: { ...current.qa, verdicts: { ...current.qa.verdicts, [id]: current.qa.verdicts[id] === value ? '' : value } },
+  })), [update]);
+
+  const setCaption = useCallback((id, value) => update((current) => ({
+    ...current, qa: { ...current.qa, caption: { ...current.qa.caption, [id]: value } },
+  })), [update]);
+
+  const verdict = useMemo(() => shipVerdict(story.qa.verdicts), [story.qa.verdicts]);
+  const caption = useMemo(() => buildCaption(story.qa.caption), [story.qa.caption]);
+  const segments = useMemo(
+    () => segmentPlan({ totalSeconds: story.segments.total, perGeneration: story.segments.per }),
+    [story.segments],
+  );
+
+  /**
+   * Record that this production was approved — the one thing the gate can
+   * actually decide, and the half still worth having a month later.
+   *
+   * Blocked while a blocking check has failed, because "ship it anyway" is not
+   * a decision this stage is willing to record silently.
+   */
+  const ship = () => {
+    if (story.qa.shipped) {
+      update((current) => ({ ...current, qa: { ...current.qa, shipped: '' } }));
+      return;
+    }
+    if (verdict.state === 'blocked') {
+      toast.error(verdict.headline);
+      return;
+    }
+    update((current) => ({ ...current, qa: { ...current.qa, shipped: new Date().toISOString() } }));
+    toast.success(
+      verdict.untested.length
+        ? `Shipped with ${verdict.untested.length} check${verdict.untested.length === 1 ? '' : 's'} unrun. Finish in order: join, sound, caption, upscale.`
+        : 'Shipped. Finish in order: join the takes, balance the sound, write the caption, upscale last.',
+      { duration: 8000 },
+    );
+  };
+
+  /* ---------------- the handoff ---------------- */
 
   // What this production would actually look like once it arrived somewhere —
   // asked of the real handoff, so the menu never promises a picture that this
@@ -1183,31 +1096,11 @@ export function StoryStudio({ active = true } = {}) {
     );
   };
 
-  const motionDone = Boolean(script) && notes.length === 0;
-
-  /* ---------------- stage 6: gate ---------------- */
-
-  const setVerdict = (id, value) => update((current) => ({
-    ...current,
-    qa: { ...current.qa, verdicts: { ...current.qa.verdicts, [id]: current.qa.verdicts[id] === value ? '' : value } },
-  }));
-  const setCaption = (id, value) => update((current) => ({
-    ...current, qa: { ...current.qa, caption: { ...current.qa.caption, [id]: value } },
-  }));
-
-  const verdict = useMemo(() => shipVerdict(story.qa.verdicts), [story.qa.verdicts]);
-  const caption = useMemo(() => buildCaption(story.qa.caption), [story.qa.caption]);
-  const segments = useMemo(
-    () => segmentPlan({ totalSeconds: story.segments.total, perGeneration: story.segments.per }),
-    [story.segments],
-  );
-
   /* ---------------- prompt bridge ---------------- */
 
   // The explore dock and the hub insert into whichever studio is visible. Here
   // there is no single prompt box, so the insert lands where text is most
-  // likely wanted: the motion script once one exists, the world of the brief
-  // before that.
+  // likely wanted: the motion script once one exists, the brief before that.
   useEffect(() => {
     if (!active) return undefined;
     return registerPromptInserter((text) => {
@@ -1215,12 +1108,66 @@ export function StoryStudio({ active = true } = {}) {
       if (current.motion.override || current.motion.beats.some((beat) => beat.action)) {
         const base = current.motion.override || motionScript(current.motion);
         setMotion({ override: `${base}${base.endsWith('\n') ? '' : '\n'}${text}` });
+        setPromptOpen(true);
       } else {
-        setBrief({ world: `${current.brief.world}${current.brief.world ? '\n' : ''}${text}` });
+        setBrief({ pitch: `${current.brief.pitch}${current.brief.pitch ? '\n' : ''}${text}` });
+        setStage('story');
       }
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active]);
+  }, [active, setMotion, setBrief]);
+
+  /* ---------------- what the rail says ---------------- */
+
+  const contractGaps = contractBlanks(story.contract);
+  const writtenBeats = story.motion.beats.filter((beat) => String(beat.action || '').trim()).length;
+  const sheetsDrawn = story.characters.filter((row) => row.sheetUrl).length;
+
+  const stages = useMemo(() => STORY_STAGES.map((entry) => {
+    if (entry.id === 'story') {
+      return {
+        ...entry,
+        done: contractGaps.length === 0 && story.characters.length > 0,
+        status: story.lockedId
+          ? `Locked — ${story.title || 'contract written'}`
+          // A contract can be whole without a card ever having been locked —
+          // the worked example, or a director who wrote their own idea. The
+          // badge says done either way, so the line has to agree with it.
+          : contractGaps.length === 0
+            ? `Contract written${story.title ? ` — ${story.title}` : ''}`
+            : story.concepts.length
+              ? `${story.concepts.length} direction${story.concepts.length === 1 ? '' : 's'} drafted`
+              : 'Nothing drafted yet',
+      };
+    }
+    if (entry.id === 'cast') {
+      return {
+        ...entry,
+        done: story.characters.length > 0 && sheetsDrawn === story.characters.length && Boolean(story.location.plateUrl),
+        status: `${story.characters.length} character${story.characters.length === 1 ? '' : 's'}`
+          + (story.characters.length ? ` · ${sheetsDrawn} of ${story.characters.length} drawn` : '')
+          + ` · plate ${story.location.plateUrl ? 'drawn' : 'not drawn'}`,
+      };
+    }
+    if (entry.id === 'motion') {
+      return {
+        ...entry,
+        done: Boolean(script) && notes.length === 0,
+        status: `${writtenBeats} beat${writtenBeats === 1 ? '' : 's'} · ${story.motion.seconds}s`
+          + ` · board ${story.board.sheetUrl ? 'drawn' : story.board.panels.some((panel) => panel.verb) ? 'drafted' : 'empty'}`,
+      };
+    }
+    return {
+      ...entry,
+      done: verdict.state === 'ship',
+      status: story.qa.shipped
+        ? 'Shipped'
+        : `${QA_CHECKS.length - verdict.untested.length} of ${QA_CHECKS.length} checked`,
+    };
+  }), [
+    contractGaps.length, story.characters.length, story.lockedId, story.title, story.concepts.length,
+    sheetsDrawn, story.location.plateUrl, script, notes.length, writtenBeats, story.motion.seconds,
+    story.board.sheetUrl, story.board.panels, verdict.state, verdict.untested.length, story.qa.shipped,
+  ]);
 
   // Anything that means a production is already under way. Loading the example
   // replaces all of it, so it asks first — the sheets and plates survive in the
@@ -1240,813 +1187,204 @@ export function StoryStudio({ active = true } = {}) {
       board: { ...STORY_EXAMPLE.board, sheetUrl: '' },
       characters: STORY_EXAMPLE.characters.map((row) => ({ ...blankCharacter(), ...row, sheetUrl: '', audit: {} })),
     });
+    setStage('story');
     toast('Loaded a worked example — every field filled with the kind of thing that belongs in it.', { icon: '🚌' });
   };
 
   const startOver = () => {
-    if (!window.confirm('Clear this production? The sheets and plates stay in your references.')) return;
+    if (hasWork && !window.confirm('Clear this production and start a new one? The sheets and plates stay in your references.')) return;
     update(blankStory());
+    setStage('story');
   };
 
-  /* ---------------- panel ---------------- */
+  /* ---------------- the cast draft's own label ---------------- */
 
-  const panel = (
-    <>
-      <div>
-        <SectionLabel>Production</SectionLabel>
-        <FillField spec={specs.get('style')} id="style" busy={busy} onFill={fillOne}>
-          <TextArea
-            rows={2}
-            value={story.style}
-            onChange={(event) => update({ style: event.target.value })}
-            placeholder="muted painterly animation, soft grain, restrained palette"
-          />
-        </FillField>
-        <Field label="Aspect ratio" hint="The plate and the panels. Short-form is vertical; a 16:9 plate reframed to 9:16 loses the foreground the motion lives in.">
-          <NativeSelect value={story.aspect} onChange={(event) => update({ aspect: event.target.value })}>
-            {LOCATION_ASPECTS.map((ratio) => <option key={ratio} value={ratio}>{ratio}</option>)}
-          </NativeSelect>
-        </Field>
-        <Field label="Sheet background" hint="Plain and flat. A busy background makes the sheet useless as a reference.">
-          <NativeSelect value={story.sheetBackground} onChange={(event) => update({ sheetBackground: event.target.value })}>
-            {SHEET_BACKGROUNDS.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
-          </NativeSelect>
-        </Field>
-      </div>
+  const castBlanks = useMemo(
+    () => blankFieldsIn('characters', story).length + blankFieldsIn('location', story).length,
+    [story],
+  );
+  const castFields = useMemo(
+    () => fieldsFor('characters', story).length + fieldsFor('location', story).length,
+    [story],
+  );
 
-      <div>
-        <SectionLabel>Clip</SectionLabel>
-        <Field label="Length" hint="One generation. Longer stories are split below rather than asked for in one go.">
-          <Slider value={story.motion.seconds} min={5} max={30} step={1} onChange={(value) => setMotion({ seconds: value })} format={(value) => `${value}s`} />
-        </Field>
-        <Field label="Character limit" hint="Some generators cap the prompt. 0 means no cap, and the compressor stays out of the way.">
-          <Slider value={story.motion.limit} min={0} max={2000} step={50} onChange={(value) => setMotion({ limit: value })} format={(value) => (value ? `${value}` : 'none')} />
-        </Field>
-      </div>
+  /* ---------------- render ---------------- */
 
-      <div className="flex flex-col gap-2">
-        <Button icon="sparkles" size="sm" onClick={loadExample}>Load example</Button>
-        <Button icon="trash" size="sm" onClick={startOver}>Start over</Button>
-      </div>
-      {matrixError ? <p className="text-[11px] leading-snug text-warn">{matrixError}</p> : null}
-    </>
+  const rail = (
+    <StageRail
+      stages={stages}
+      stage={stage}
+      onStage={setStage}
+      title={story.title}
+      promise={story.promise}
+      locked={Boolean(story.lockedId) && contractGaps.length === 0}
+      onNew={startOver}
+      onExample={loadExample}
+    />
+  );
+
+  const dock = (
+    <PromptDock
+      story={story}
+      script={script}
+      overridden={Boolean(story.motion.override)}
+      budget={budget}
+      open={promptOpen}
+      onToggle={() => setPromptOpen((open) => !open)}
+      onScript={(value) => setMotion({ override: value })}
+      onRevert={() => setMotion({ override: '' })}
+      onTighten={() => setMotion({ override: tighten(script) })}
+      onCompress={compress}
+      busy={busy}
+      onCopy={() => { navigator.clipboard?.writeText(script); toast.success('Script copied.'); }}
+      onSend={sendToVideo}
+      describeSendTo={describeSendTo}
+    />
   );
 
   return (
-    <StudioLayout panel={panel} panelTitle="Story settings">
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 p-4">
+    <StudioLayout panel={rail} panelTitle="Stages" panelWidth="w-[252px]" composer={dock}>
+      <ProducerBar
+        summary={[story.title || 'Untitled production', `${story.motion.seconds}s`, story.aspect].join(' · ')}
+        producer={producer}
+        open={producerOpen}
+        onOpen={setProducerOpen}
+        busy={busy}
+        thinking={thinking}
+        onCancel={cancelProducer}
+        warning={matrixError}
+        picker={{
+          catalog: runtime,
+          selectedId: producerId,
+          tab: producerTabOpen,
+          onTab: setProducerTab,
+          query: producerQuery,
+          onQuery: setProducerQuery,
+          onPick: (id) => { setProducerId(id); rememberModelId(id); },
+          onRemedy: runRemedy,
+          account: producerAccount,
+          onAccount: setProducerAccount,
+          keyField,
+          onKeySave: saveKey,
+          onKeyCancel: () => setKeyField(''),
+          savingKey,
+          onConnect: connectAccount,
+          connecting,
+          onLink: linkThroughApp,
+          linking,
+        }}
+      />
+
+      <div className="mx-auto flex w-full max-w-[820px] flex-col gap-5 px-9 pb-12 pt-7 max-sm:px-4">
         {!isHivemindStudioEnabled() ? (
-          <Card className="border-warn/40 p-3 text-[13px] text-ink2">
+          <p className="m-0 rounded-lg border border-warn/40 bg-warn/[0.08] p-3 text-[13px] leading-snug text-ink2">
             The producer runs on this machine’s models and on HivemindOS. Open the studio from the
             Hivemind Content Studio shell so it can reach them.
-          </Card>
+          </p>
         ) : null}
 
-        {/* ── Producer ─────────────────────────────────────────────── */}
-        <Card className="flex flex-col gap-2 p-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <Icon name="persona" size={15} className="text-ink3" />
-            <span className="text-[12px] font-semibold text-ink2">Producer</span>
-            <span className="text-[12px] text-ink3">{summaryLine(producer)}</span>
-            {busy ? <Pill tone="honey" dot>{thinking || 'Working…'}</Pill> : null}
-            <div className="ml-auto flex items-center gap-2">
-              {busy ? <Button size="sm" onClick={cancelProducer}>Cancel</Button> : null}
-              <Button size="sm" icon="sliders" onClick={() => setProducerOpen((open) => !open)}>
-                {producerOpen ? 'Done' : 'Change'}
-              </Button>
-            </div>
-          </div>
-          {/* The privacy sentence follows the CHOSEN model. One sentence for both
-              engines would be false for one of them. */}
-          <p className="text-[11px] leading-snug text-ink3">
-            It drafts options; you pick. {privacyLine(producer)}
-          </p>
-          {producerOpen ? (
-            <ModelSourcePicker
-              catalog={runtime}
-              selectedId={producerId}
-              tab={producerTabOpen}
-              onTab={setProducerTab}
-              query={producerQuery}
-              onQuery={setProducerQuery}
-              onPick={(id) => { setProducerId(id); rememberModelId(id); }}
-              onRemedy={runRemedy}
-              account={producerAccount}
-              onAccount={setProducerAccount}
-              keyField={keyField}
-              onKeySave={saveKey}
-              onKeyCancel={() => setKeyField('')}
-              savingKey={savingKey}
-              onConnect={connectAccount}
-              connecting={connecting}
-              onLink={linkThroughApp}
-              linking={linking}
-            />
-          ) : null}
-        </Card>
-
-        {/* ── 1. Concept ───────────────────────────────────────────── */}
-        <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={0} stage={STAGES[0]} done={conceptDone} busy={busy} blanks={blanks.concept} fields={stageFields.concept} onFillSection={fillSection}>
-            {story.concepts.length ? <Pill tone="neutral">{story.concepts.length} drafted</Pill> : null}
-          </StageHeader>
-          <p className="text-[12px] leading-snug text-ink3">
-            The expensive mistake is a good render of the wrong pair. Compare eight, keep two or
-            three, lock one — then everything downstream is built on a decision you actually made.
-          </p>
-
-          <div className="grid gap-2 sm:grid-cols-2">
-            <FillField spec={specs.get('brief.person')} id="brief.person" busy={busy} onFill={fillOne}>
-              <TextInput value={brief.person} onChange={(event) => setBrief({ person: event.target.value })} placeholder="a night-shift florist" />
-            </FillField>
-            <FillField spec={specs.get('brief.companion')} id="brief.companion" busy={busy} onFill={fillOne}>
-              <TextInput value={brief.companion} onChange={(event) => setBrief({ companion: event.target.value })} placeholder="a stubborn pigeon" />
-            </FillField>
-          </div>
-          <Field label="The relationship should feel">
-            <Segmented value={brief.tone} onChange={(value) => setBrief({ tone: value })} options={TONES.map((entry) => ({ value: entry.id, label: entry.label }))} />
-          </Field>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <FillField spec={specs.get('brief.world')} id="brief.world" busy={busy} onFill={fillOne}>
-              <TextInput value={brief.world} onChange={(event) => setBrief({ world: event.target.value })} placeholder="a harbour tram shelter in the rain" />
-            </FillField>
-            <FillField spec={specs.get('brief.avoid')} id="brief.avoid" busy={busy} onFill={fillOne}>
-              <TextInput value={brief.avoid} onChange={(event) => setBrief({ avoid: event.target.value })} placeholder="no dialogue, no on-screen text" />
-            </FillField>
-          </div>
-          <Field label="How many concepts" hint="Fewer than five is not a comparison.">
-            <Slider value={brief.count} min={3} max={12} step={1} onChange={(value) => setBrief({ count: conceptCount(value) })} />
-          </Field>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button icon="wand" onClick={askConcepts} loading={busy === 'concepts'} disabled={Boolean(busy)}>
-              Ask for {conceptCount(brief.count)} concepts
-            </Button>
-            <ProducerStatus task="concepts" busy={busy} status={thinking} onCancel={cancelProducer} />
-            {story.concepts.length ? (
-              <Button size="sm" icon="stack" onClick={askShortlist} loading={busy === 'shortlist'} disabled={Boolean(busy)}>Compare them</Button>
-            ) : null}
-            <ProducerStatus task="shortlist" busy={busy} status={thinking} onCancel={cancelProducer} />
-            {story.shortlist.length ? (
-              <Button size="sm" icon="grid" onClick={drawContactSheet} loading={drawing === 'contact'} disabled={Boolean(drawing)}>
-                {drawing === 'contact' ? 'Drawing…' : 'Draw a contact sheet'}
-              </Button>
-            ) : null}
-          </div>
-
-          {story.ranking?.reason ? (
-            <p className="rounded-md border border-line1 bg-bg2 p-2 text-[12px] leading-snug text-ink2">{story.ranking.reason}</p>
-          ) : null}
-
-          {story.concepts.length ? (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {story.concepts.map((concept) => {
-                const ranked = story.ranking?.ranked?.find((row) => String(row.id) === concept.id);
-                const shortlisted = story.shortlist.includes(concept.id);
-                const locked = story.lockedId === concept.id;
-                return (
-                  <div
-                    key={concept.id}
-                    className={cx(
-                      'flex flex-col gap-1.5 rounded-md border p-2.5 text-[12px] transition-colors',
-                      locked ? 'border-ok/60 bg-ok-tint' : shortlisted ? 'border-honey/60 bg-honey-tint' : 'border-line1 bg-bg2',
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] font-bold text-ink3">{concept.id}</span>
-                      <span className="truncate font-semibold text-ink1">{concept.title || concept.pair}</span>
-                      {ranked ? (
-                        <Pill tone="neutral" className="ml-auto">
-                          {Object.values(ranked.scores || {}).reduce((sum, value) => sum + (Number(value) || 0), 0) || '—'}
-                        </Pill>
-                      ) : null}
-                    </div>
-                    {concept.title ? <p className="text-ink2">{concept.pair}</p> : null}
-                    <p className="text-ink3"><b className="text-ink2">Hook</b> — {concept.hook}</p>
-                    <p className="text-ink3"><b className="text-ink2">Friction</b> — {concept.friction}</p>
-                    <p className="text-ink3"><b className="text-ink2">Reward</b> — {concept.reward}</p>
-                    <p className="text-ink3"><b className="text-ink2">Signature</b> — {concept.signature}</p>
-                    {ranked?.why ? <p className="italic text-ink3">{ranked.why}</p> : null}
-                    <div className="mt-auto flex items-center gap-2 pt-1">
-                      <Button size="sm" onClick={() => toggleShortlist(concept.id)}>
-                        {shortlisted ? 'Drop from shortlist' : 'Shortlist'}
-                      </Button>
-                      <Button
-                        size="sm"
-                        icon="check"
-                        onClick={() => lockConcept(concept)}
-                        loading={busy === 'contract' && story.lockedId === concept.id}
-                        disabled={Boolean(busy)}
-                      >
-                        {locked ? 'Locked' : 'Lock this one'}
-                      </Button>
-                      <ProducerStatus task={story.lockedId === concept.id ? 'contract' : ''} busy={busy} status={thinking} onCancel={cancelProducer} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <EmptyState
-              icon="sparkles"
-              title={busy === 'concepts' ? (thinking || 'Working…') : 'No concepts yet'}
-              hint={busy === 'concepts'
-                ? 'The producer is a local model on this machine. A cold one takes a minute to load before it writes anything.'
-                : SHORTLIST_CRITERIA.map((entry) => entry.label).join(' · ')}
-            />
-          )}
-
-          {story.contactSheetUrl ? <Plate url={story.contactSheetUrl} alt="Contact sheet of the shortlisted directions" /> : null}
-
-          <div className="rounded-md border border-line1 bg-bg2 p-2.5">
-            <SectionLabel>The contract</SectionLabel>
-            <p className="mb-2 text-[12px] leading-snug text-ink2">{contractSentence(story.contract)}</p>
-            <div className="grid gap-2 sm:grid-cols-3">
-              {[
-                ['pressure', 'When this happens'], ['who', 'this character'], ['goal', 'tries to'],
-                ['other', 'while this one'], ['behavior', 'responds by'], ['reward', 'turning it into'],
-              ].map(([field, label]) => (
-                <FillField key={field} spec={{ ...specs.get(`contract.${field}`), label }} id={`contract.${field}`} busy={busy} onFill={fillOne}>
-                  <TextInput
-                    value={story.contract[field]}
-                    onChange={(event) => update((current) => ({ ...current, contract: { ...current.contract, [field]: event.target.value } }))}
-                  />
-                </FillField>
-              ))}
-            </div>
-            {contractGaps.length ? (
-              <Notes items={[`Still blank: ${contractGaps.join(', ')}. A half-written contract reads as finished to every later stage.`]} />
-            ) : null}
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              <FillField spec={specs.get('title')} id="title" busy={busy} onFill={fillOne}>
-                <TextInput value={story.title} onChange={(event) => update({ title: event.target.value })} />
-              </FillField>
-              <FillField spec={specs.get('promise')} id="promise" busy={busy} onFill={fillOne}>
-                <TextInput value={story.promise} onChange={(event) => update({ promise: event.target.value })} />
-              </FillField>
-            </div>
-          </div>
-        </Card>
-
-        {/* ── 2. Characters ────────────────────────────────────────── */}
-        <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={1} stage={STAGES[1]} done={charactersDone} busy={busy} blanks={blanks.characters} fields={stageFields.characters} onFillSection={fillSection}>
-            <Button size="sm" icon="plus" onClick={() => update((current) => ({ ...current, characters: [...current.characters, blankCharacter()] }))}>
-              Add character
-            </Button>
-          </StageHeader>
-          <p className="text-[12px] leading-snug text-ink3">
-            One sheet per recurring character: front, exact side, back, on one plain canvas.
-            The locks below are ranked by how badly each one shows when it drifts. {SILHOUETTE_TEST}
-          </p>
-
-          <ModelFitPicker
-            label="Sheet model"
-            rows={sheetChoices}
-            value={sheetModel}
-            onChange={setSheetModel}
-            readinessFor={rowReadiness}
-            onFixReadiness={fixReadiness}
-            busyAction={fixing}
-          />
-
-          {story.characters.length ? story.characters.map((character, index) => (
-            <div key={character.id || index} className="flex flex-col gap-2 rounded-md border border-line1 bg-bg2 p-3">
-              <div className="grid gap-2 sm:grid-cols-3">
-                {['name', 'role', 'species'].map((key) => (
-                  <FillField
-                    key={key}
-                    spec={specs.get(`characters[${index}].${key}`)}
-                    id={`characters[${index}].${key}`}
-                    busy={busy}
-                    onFill={fillOne}
-                  >
-                    <TextInput value={character[key] || ''} onChange={(event) => patchCharacter(index, { [key]: event.target.value })} />
-                  </FillField>
-                ))}
-              </div>
-              {IDENTITY_LOCKS.map((lock) => (
-                <FillField
-                  key={lock.id}
-                  spec={{ ...specs.get(`characters[${index}].${lock.id}`), label: lock.label, hint: lock.hint }}
-                  id={`characters[${index}].${lock.id}`}
-                  busy={busy}
-                  onFill={fillOne}
-                >
-                  <TextArea rows={2} value={character[lock.id] || ''} onChange={(event) => patchCharacter(index, { [lock.id]: event.target.value })} />
-                </FillField>
-              ))}
-              <FillField
-                spec={{
-                  ...specs.get(`characters[${index}].never`),
-                  hint: 'Quoted verbatim by the board and by every repair. Leave it empty and the locks above are used instead.',
-                }}
-                id={`characters[${index}].never`}
-                busy={busy}
-                onFill={fillOne}
-              >
-                <TextArea rows={2} value={character.never} onChange={(event) => patchCharacter(index, { never: event.target.value })} placeholder={neverChangeLine(character)} />
-              </FillField>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  icon="image"
-                  onClick={() => drawSheet(index)}
-                  loading={drawing === `sheet:${index}`}
-                  disabled={Boolean(drawing)}
-                >
-                  {drawing === `sheet:${index}` ? 'Drawing…' : character.sheetUrl ? 'Redraw the sheet' : 'Draw the sheet'}
-                </Button>
-                <Button size="sm" icon="trash" onClick={() => update((current) => ({ ...current, characters: current.characters.filter((_, i) => i !== index) }))}>
-                  Remove
-                </Button>
-              </div>
-              {character.sheetUrl ? (
-                <>
-                  <Plate url={character.sheetUrl} alt={`${character.name} reference sheet`} />
-                  <SectionLabel>Audit before this becomes a reference</SectionLabel>
-                  <div className="grid gap-1 sm:grid-cols-2">
-                    {SHEET_AUDIT.map((check) => (
-                      <label key={check.id} className="flex items-start gap-2 text-[12px] leading-snug text-ink2">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(character.audit?.[check.id])}
-                          onChange={(event) => patchCharacter(index, { audit: { ...character.audit, [check.id]: event.target.checked } })}
-                          className="mt-0.5 accent-honey"
-                        />
-                        {check.label}
-                      </label>
-                    ))}
-                  </div>
-                  {SHEET_AUDIT.some((check) => !character.audit?.[check.id]) ? (
-                    <Notes items={['Unticked items are not failures — they are unchecked. A drifting sheet costs every generation built on it.']} tone="ink" />
-                  ) : <Pill tone="ok">Audited</Pill>}
-                </>
-              ) : null}
-            </div>
-          )) : (
-            <EmptyState icon="persona" title="No characters yet" hint="Lock a concept above and the producer writes the identity locks, or add one by hand." />
-          )}
-        </Card>
-
-        {/* ── 3. Location ──────────────────────────────────────────── */}
-        <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={2} stage={STAGES[2]} done={locationDone} busy={busy} blanks={blanks.location} fields={stageFields.location} onFillSection={fillSection} />
-          <p className="text-[12px] leading-snug text-ink3">
-            One empty plate, so no later prompt has to rebuild the place. Empty on purpose:
-            a figure in the plate argues with the character sheets in every render.
-          </p>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" icon="wand" onClick={askLocations} loading={busy === 'location'} disabled={Boolean(busy)}>Suggest directions</Button>
-            <ProducerStatus task="location" busy={busy} status={thinking} onCancel={cancelProducer} />
-            <ModelFitPicker
-              label="Plate model"
-              rows={plateChoices}
-              value={plateModel}
-              onChange={setPlateModel}
-              readinessFor={rowReadiness}
-              onFixReadiness={fixReadiness}
-              busyAction={fixing}
-            />
-          </div>
-
-          {story.locationOptions.length ? (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {story.locationOptions.map((option, index) => (
-                <button
-                  key={`${option.place}-${index}`}
-                  type="button"
-                  onClick={() => chooseLocation(option)}
-                  className={cx(
-                    'flex flex-col gap-1 rounded-md border p-2.5 text-left text-[12px] transition-colors',
-                    story.location.place === option.place ? 'border-honey/60 bg-honey-tint' : 'border-line1 bg-bg2 hover:border-line2',
-                  )}
-                >
-                  <span className="font-semibold text-ink1">{option.place}</span>
-                  <span className="text-ink3">{[option.time, option.weather, option.palette].filter(Boolean).join(' · ')}</span>
-                  <span className="text-ink3">Moves: {(option.motion || []).join(', ')}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="grid gap-2 sm:grid-cols-2">
-            {['place', 'time', 'weather', 'palette', 'accent', 'lights'].map((key) => (
-              <FillField key={key} spec={specs.get(`location.${key}`)} id={`location.${key}`} busy={busy} onFill={fillOne}>
-                <TextInput value={story.location[key]} onChange={(event) => setLocation({ [key]: event.target.value })} />
-              </FillField>
-            ))}
-          </div>
-          <FillField spec={specs.get('location.depth')} id="location.depth" busy={busy} onFill={fillOne}>
-            <TextArea rows={2} value={story.location.depth} onChange={(event) => setLocation({ depth: event.target.value })} />
-          </FillField>
-
-          <Field label="What can move" hint="Decided here, while looking at the place — the motion stage draws from this list.">
-            <div className="flex flex-col gap-1.5">
-              {MOTION_SOURCES.map((source) => (
-                <div key={source.id} className="flex flex-wrap items-center gap-1.5">
-                  <span className="w-28 shrink-0 text-[11px] font-semibold text-ink2">{source.label}</span>
-                  {source.examples.map((example) => {
-                    const on = story.location.motion.includes(example);
-                    return (
-                      <button
-                        key={example}
-                        type="button"
-                        onClick={() => setLocation({
-                          motion: on
-                            ? story.location.motion.filter((entry) => entry !== example)
-                            : [...story.location.motion, example],
-                        })}
-                        className={cx(
-                          'rounded-full border px-2 py-0.5 text-[11px] transition-colors',
-                          on ? 'border-honey/60 bg-honey-tint text-ink1' : 'border-line1 bg-bg2 text-ink3 hover:border-line2',
-                        )}
-                      >
-                        {example}
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          </Field>
-          <FillField spec={specs.get('location.forbid')} id="location.forbid" busy={busy} onFill={fillOne}>
-            <TextInput value={story.location.forbid} onChange={(event) => setLocation({ forbid: event.target.value })} placeholder="no people, no signage text" />
-          </FillField>
-
-          <Notes items={gaps} />
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button icon="image" onClick={drawPlate} loading={drawing === 'plate'} disabled={Boolean(drawing) || !story.location.place}>
-              {drawing === 'plate' ? 'Drawing…' : story.location.plateUrl ? 'Redraw the plate' : 'Draw the plate'}
-            </Button>
-          </div>
-          {story.location.plateUrl ? <Plate url={story.location.plateUrl} alt="Empty location plate" /> : null}
-        </Card>
-
-        {/* ── 4. Storyboard ────────────────────────────────────────── */}
-        <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={3} stage={STAGES[3]} done={boardDone} busy={busy} blanks={blanks.board} fields={stageFields.board} onFillSection={fillSection} />
-          <p className="text-[12px] leading-snug text-ink3">
-            A board is direction, not a contract. Expect the video model to interpret it —
-            when a beat has to be exact, drop to two frames and generate only that.
-          </p>
-
-          <Field label="Density">
-            <Segmented
-              value={story.board.format}
-              onChange={changeFormat}
-              options={BOARD_FORMATS.map((entry) => ({ value: entry.id, label: entry.label }))}
-            />
-          </Field>
-          <p className="text-[12px] leading-snug text-ink3">{boardFormat(story.board.format).best}</p>
-          {recommendation.id !== story.board.format ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-md border border-honey/40 bg-honey-tint p-2 text-[12px] text-ink2">
-              <span>Suggested: <b>{boardFormat(recommendation.id).label}</b> — {recommendation.why}</span>
-              <Button size="sm" className="ml-auto" onClick={() => changeFormat(recommendation.id)}>Use it</Button>
-            </div>
-          ) : null}
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" icon="wand" onClick={askBoard} loading={busy === 'board'} disabled={Boolean(busy)}>Draft the panels</Button>
-            <ProducerStatus task="board" busy={busy} status={thinking} onCancel={cancelProducer} />
-            <FillField spec={specs.get('board.arc')} id="board.arc" busy={busy} onFill={fillOne} className="!mb-0 flex-1">
-              <TextInput value={story.board.arc} onChange={(event) => setBoard({ arc: event.target.value })} placeholder="from what feeling to what feeling" />
-            </FillField>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            {story.board.panels.map((panelRow, index) => (
-              <div key={panelRow.n} className="grid gap-2 rounded-md border border-line1 bg-bg2 p-2.5 sm:grid-cols-[auto_1fr_1fr]">
-                <div className="flex flex-col">
-                  <span className="text-[11px] font-bold text-ink3">{panelRow.n}</span>
-                  <span className="text-[11px] font-semibold text-ink2">{panelRow.job}</span>
-                </div>
-                <FillField
-                  spec={{ ...specs.get(`board.panels[${index}].verb`), label: 'Dominant action', hint: index === 0 ? panelRow.asks : '' }}
-                  id={`board.panels[${index}].verb`}
-                  busy={busy}
-                  onFill={fillOne}
-                >
-                  <TextArea rows={2} value={panelRow.verb} onChange={(event) => patchPanel(index, { verb: event.target.value })} />
-                </FillField>
-                <div className="flex flex-col gap-1.5">
-                  <FillField
-                    spec={{ ...specs.get(`board.panels[${index}].shot`), label: 'Shot' }}
-                    id={`board.panels[${index}].shot`}
-                    busy={busy}
-                    onFill={fillOne}
-                  >
-                    <NativeSelect value={panelRow.shot} onChange={(event) => patchPanel(index, { shot: event.target.value })}>
-                      <option value="">Pick one</option>
-                      {SHOT_REASONS.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
-                    </NativeSelect>
-                  </FillField>
-                  <FillField
-                    spec={{ ...specs.get(`board.panels[${index}].reason`), label: 'Camera reason' }}
-                    id={`board.panels[${index}].reason`}
-                    busy={busy}
-                    onFill={fillOne}
-                  >
-                    <TextInput value={panelRow.reason} onChange={(event) => patchPanel(index, { reason: event.target.value })} placeholder="the viewer now needs to discover…" />
-                  </FillField>
-                  <FillField
-                    spec={{ ...specs.get(`board.panels[${index}].motion`), label: 'What moves' }}
-                    id={`board.panels[${index}].motion`}
-                    busy={busy}
-                    onFill={fillOne}
-                  >
-                    <TextInput value={panelRow.motion} onChange={(event) => patchPanel(index, { motion: event.target.value })} placeholder="what moves in this panel" />
-                  </FillField>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <Notes items={boardNotes} />
-
-          <details className="rounded-md border border-line1 bg-bg2">
-            <summary className="cursor-pointer px-3 py-2 text-[12px] font-semibold text-ink2">The prompt this draws from</summary>
-            <div className="p-2"><TextArea rows={12} value={boardText} readOnly className="font-mono text-[11px]" /></div>
-          </details>
-
-          <ModelFitPicker
-            label="Board model"
-            rows={boardChoices}
-            value={boardModel}
-            onChange={setBoardModel}
-            readinessFor={rowReadiness}
-            onFixReadiness={fixReadiness}
-            busyAction={fixing}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <Button icon="grid" onClick={drawBoard} loading={drawing === 'board'} disabled={Boolean(drawing) || !boardText}>
-              {drawing === 'board' ? 'Drawing…' : story.board.sheetUrl ? 'Redraw the board' : 'Draw the board'}
-            </Button>
-            <span className="text-[11px] text-ink3">
-              The sheets and this board travel to the Video studio with the script — the sheets as subjects, the plate and the board as places.
-            </span>
-          </div>
-          {story.board.sheetUrl ? <Plate url={story.board.sheetUrl} alt="Storyboard sheet" /> : null}
-        </Card>
-
-        {/* ── 5. Motion ────────────────────────────────────────────── */}
-        <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={4} stage={STAGES[4]} done={motionDone} busy={busy} blanks={blanks.motion} fields={stageFields.motion} onFillSection={fillSection}>
-            <Pill tone={budget.fits ? 'neutral' : 'warn'}>{budget.chars} chars</Pill>
-          </StageHeader>
-          <p className="text-[12px] leading-snug text-ink3">
-            The references say what exists. This says what happens — timed action, an emotional
-            turn, a world that moves because of something, a camera with a reason, and sound
-            from things you can see.
-          </p>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" icon="wand" onClick={askBeats} loading={busy === 'beats'} disabled={Boolean(busy)}>Draft the motion</Button>
-            <ProducerStatus task="beats" busy={busy} status={thinking} onCancel={cancelProducer} />
-            <Button size="sm" onClick={() => setMotion({ beats: defaultBeats(story.motion.seconds, story.motion.beats.length || 3) })}>
-              Re-time the beats to {story.motion.seconds}s
-            </Button>
-          </div>
-
-          <FillField
-            spec={{ ...specs.get('motion.force'), hint: 'One cause. Everything below is a response to it — that is the difference between a world and a wiggle.' }}
-            id="motion.force"
+        {stage === 'story' ? (
+          <StoryStage
+            story={story}
+            specs={specs}
             busy={busy}
+            thinking={thinking}
+            drawing={drawing}
             onFill={fillOne}
-          >
-            <TextInput value={story.motion.force} onChange={(event) => setMotion({ force: event.target.value })} placeholder="wind off the harbour, carrying rain" />
-          </FillField>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {MOTION_LAYERS.map((layer) => (
-              <FillField
-                key={layer.id}
-                spec={{ ...specs.get(`motion.layers.${layer.id}`), label: layer.label, hint: layer.hint }}
-                id={`motion.layers.${layer.id}`}
-                busy={busy}
-                onFill={fillOne}
-              >
-                {/* rows=2: a layer is a clause about what responds to the force,
-                    not a noun. One row clipped them mid-word. */}
-                <TextArea rows={2} value={story.motion.layers[layer.id] || ''} onChange={(event) => setLayer(layer.id, event.target.value)} />
-              </FillField>
-            ))}
-          </div>
+            onUpdate={update}
+            onBrief={setBrief}
+            draft={askConcepts}
+            onCancel={cancelProducer}
+            onCompare={askShortlist}
+            onContactSheet={drawContactSheet}
+            onShortlist={toggleShortlist}
+            onLock={lockConcept}
+            onFillContract={() => { void fillStage('story'); }}
+          />
+        ) : null}
 
-          <SectionLabel>Beats</SectionLabel>
-          <div className="flex flex-col gap-2">
-            {story.motion.beats.map((beat, index) => (
-              <div key={index} className="grid gap-2 rounded-md border border-line1 bg-bg2 p-2.5 sm:grid-cols-[10rem_1fr_1fr]">
-                <div className="flex items-center gap-1">
-                  {/* !px-2: the shared input pads for a sentence, and two digits
-                      plus the number spinner do not fit what is left of a 56px
-                      box — 10 rendered as a clipped "1". */}
-                  <TextInput type="number" value={beat.from} onChange={(event) => patchBeat(index, { from: Number(event.target.value) })} className="w-[4.25rem] !px-2" />
-                  <span className="text-[11px] text-ink3">→</span>
-                  <TextInput type="number" value={beat.to} onChange={(event) => patchBeat(index, { to: Number(event.target.value) })} className="w-[4.25rem] !px-2" />
-                  <span className="text-[11px] text-ink3">s</span>
-                </div>
-                <FillField
-                  spec={{ ...specs.get(`motion.beats[${index}].action`), label: 'One dominant action' }}
-                  id={`motion.beats[${index}].action`}
-                  busy={busy}
-                  onFill={fillOne}
-                >
-                  <TextArea rows={2} value={beat.action} onChange={(event) => patchBeat(index, { action: event.target.value })} />
-                </FillField>
-                <FillField
-                  spec={{ ...specs.get(`motion.beats[${index}].emotion`), label: 'What it changes' }}
-                  id={`motion.beats[${index}].emotion`}
-                  busy={busy}
-                  onFill={fillOne}
-                >
-                  <TextArea rows={2} value={beat.emotion} onChange={(event) => patchBeat(index, { emotion: event.target.value })} />
-                </FillField>
-              </div>
-            ))}
-            <div className="flex items-center gap-2">
-              <Button size="sm" icon="plus" onClick={() => setMotion({ beats: [...story.motion.beats, { from: story.motion.beats.at(-1)?.to || 0, to: story.motion.seconds, action: '', emotion: '' }] })}>
-                Add a beat
-              </Button>
-              {story.motion.beats.length > 1 ? (
-                <Button size="sm" icon="trash" onClick={() => setMotion({ beats: story.motion.beats.slice(0, -1) })}>Drop the last</Button>
-              ) : null}
-            </div>
-          </div>
+        {stage === 'cast' ? (
+          <CastStage
+            story={story}
+            specs={specs}
+            busy={busy}
+            thinking={thinking}
+            drawing={drawing}
+            onFill={fillOne}
+            onUpdate={update}
+            onLocation={setLocation}
+            onPatchCharacter={patchCharacter}
+            onAddCharacter={() => update((current) => ({ ...current, characters: [...current.characters, blankCharacter()] }))}
+            onRemoveCharacter={(index) => update((current) => ({
+              ...current, characters: current.characters.filter((_, i) => i !== index),
+            }))}
+            onDrawSheet={drawSheet}
+            onDrawPlate={drawPlate}
+            onChooseLocation={chooseLocation}
+            onSuggestPlaces={askLocations}
+            draft={draftCast}
+            onCancel={cancelProducer}
+            draftLabel={castBlanks ? 'Draft the cast and the place' : `Redraft ${castFields} fields`}
+            draftHint={castBlanks
+              ? `from the locked contract · ${castBlanks} field${castBlanks === 1 ? '' : 's'} still blank`
+              : 'everything is written — this rewrites all of it, with an Undo'}
+            sheetChoices={sheetChoices}
+            sheetModel={sheetModel}
+            onSheetModel={setSheetModel}
+            plateChoices={plateChoices}
+            plateModel={plateModel}
+            onPlateModel={setPlateModel}
+            readinessFor={rowReadiness}
+            onFixReadiness={fixReadiness}
+            fixing={fixing}
+          />
+        ) : null}
 
-          <div className="grid gap-2 sm:grid-cols-2">
-            <FillField
-              spec={{ ...specs.get('motion.camera'), hint: 'Two to four motivated changes. Each one because the viewer now needs to discover something.' }}
-              id="motion.camera"
-              busy={busy}
-              onFill={fillOne}
-            >
-              <TextArea rows={2} value={story.motion.camera} onChange={(event) => setMotion({ camera: event.target.value })} />
-            </FillField>
-            <FillField
-              spec={{ ...specs.get('motion.audio'), hint: AUDIO_LAYERS.map((layer) => layer.label).join(' · ') }}
-              id="motion.audio"
-              busy={busy}
-              onFill={fillOne}
-            >
-              <TextArea rows={2} value={story.motion.audio} onChange={(event) => setMotion({ audio: event.target.value })} />
-            </FillField>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <Field label="Music">
-              <NativeSelect value={story.motion.music} onChange={(event) => setMotion({ music: event.target.value })}>
-                {MUSIC_RULES.map((rule) => <option key={rule.id} value={rule.id}>{rule.label}</option>)}
-              </NativeSelect>
-            </Field>
-            <FillField spec={specs.get('motion.negatives')} id="motion.negatives" busy={busy} onFill={fillOne}>
-              <TextInput value={story.motion.negatives} onChange={(event) => setMotion({ negatives: event.target.value })} />
-            </FillField>
-          </div>
+        {stage === 'motion' ? (
+          <MotionStage
+            story={story}
+            specs={specs}
+            busy={busy}
+            thinking={thinking}
+            drawing={drawing}
+            onFill={fillOne}
+            onMotion={setMotion}
+            onPatchBeat={patchBeat}
+            onBoard={setBoard}
+            onPatchPanel={patchPanel}
+            draft={askBeats}
+            onCancel={cancelProducer}
+            onDraftBoard={askBoard}
+            onDrawBoard={drawBoard}
+            onChangeFormat={changeFormat}
+            boardText={boardText}
+            boardNotes={boardNotes}
+            notes={notes}
+            boardChoices={boardChoices}
+            boardModel={boardModel}
+            onBoardModel={setBoardModel}
+            readinessFor={rowReadiness}
+            onFixReadiness={fixReadiness}
+            fixing={fixing}
+          />
+        ) : null}
 
-          <Notes items={notes} />
-
-          <Field
-            label="The script"
-            hint={story.motion.override ? 'Edited by hand — the fields above no longer rewrite it.' : 'Rebuilt from the fields above as you type.'}
-            labelRight={story.motion.override ? (
-              <Button size="sm" onClick={() => setMotion({ override: '' })}>Back to the built one</Button>
-            ) : null}
-          >
-            <TextArea
-              rows={14}
-              value={script}
-              onChange={(event) => setMotion({ override: event.target.value })}
-              className="font-mono text-[11px]"
-            />
-          </Field>
-
-          <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink3">
-            <span>{budget.chars} characters{budget.limit ? ` of ${budget.limit}` : ''}.</span>
-            {budget.savings > 0 ? (
-              <>
-                <span className="text-warn">
-                  {budget.savings} of them say nothing{budget.emptyPhrases.length ? ` (${budget.emptyPhrases.join(', ')})` : ''}.
-                </span>
-                <Button size="sm" onClick={() => setMotion({ override: tighten(script) })}>Cut them</Button>
-              </>
-            ) : null}
-            {budget.over ? (
-              <Button size="sm" icon="scissors" onClick={compress} loading={busy === 'compress'} disabled={Boolean(busy)}>
-                Compress by {budget.over}
-              </Button>
-            ) : null}
-          </div>
-
-          <ProducerStatus task="compress" busy={busy} status={thinking} onCancel={cancelProducer} />
-
-          <div className="flex flex-wrap items-center gap-2">
-            <SendToMenu
-              section="video"
-              icon="film"
-              label="Open in the Video studio"
-              disabled={!script}
-              resolve={resolveVideoSendTargets}
-              describeFor={describeSendTo}
-              onSend={sendToVideo}
-            />
-            <Button size="sm" icon="copy" onClick={() => { navigator.clipboard?.writeText(script); toast.success('Script copied.'); }}>Copy</Button>
-          </div>
-        </Card>
-
-        {/* ── 6. Gate ──────────────────────────────────────────────── */}
-        <Card className="flex flex-col gap-3 p-4">
-          <StageHeader index={5} stage={STAGES[5]} done={verdict.state === 'ship'} busy={busy} blanks={blanks.ship} fields={stageFields.ship} onFillSection={fillSection}>
-            <Pill tone={verdict.state === 'ship' ? 'ok' : verdict.state === 'blocked' ? 'danger' : 'honey'}>
-              {verdict.headline}
-            </Pill>
-          </StageHeader>
-          <p className="text-[12px] leading-snug text-ink3">{verdict.detail}</p>
-
-          <div className="flex flex-col gap-1.5">
-            {QA_CHECKS.map((check) => {
-              const state = story.qa.verdicts[check.id] || '';
-              return (
-                <div key={check.id} className="flex flex-col gap-1 rounded-md border border-line1 bg-bg2 p-2.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[12px] font-semibold text-ink1">{check.label}</span>
-                    {check.blocks ? <Pill tone="neutral">blocks publishing</Pill> : null}
-                    <div className="ml-auto flex items-center gap-1">
-                      <Button size="sm" onClick={() => setVerdict(check.id, 'pass')} className={state === 'pass' ? '!border-ok/60 !bg-ok-tint' : ''}>Pass</Button>
-                      <Button size="sm" onClick={() => setVerdict(check.id, 'fail')} className={state === 'fail' ? '!border-warn/60 !bg-warn/10' : ''}>Fail</Button>
-                    </div>
-                  </div>
-                  <p className="text-[11px] leading-snug text-ink3">{check.asks}</p>
-                  {state === 'fail' ? repairsFor(check.id).map((repair) => (
-                    <div key={repair.id} className="rounded border border-warn/40 bg-warn/10 p-2 text-[11px] leading-snug text-ink2">
-                      <b>{repair.label}</b> — {repair.cause}
-                      <br />
-                      Repair the <b>{repair.stage}</b> stage: {repair.fix}
-                    </div>
-                  )) : null}
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="rounded-md border border-line1 bg-bg2 p-2.5">
-            <SectionLabel>Longer than one generation?</SectionLabel>
-            <div className="mb-2 grid gap-2 sm:grid-cols-2">
-              <Field label="Whole story"><Slider value={story.segments.total} min={5} max={120} step={5} onChange={(value) => update((current) => ({ ...current, segments: { ...current.segments, total: value } }))} format={(value) => `${value}s`} /></Field>
-              <Field label="Per generation"><Slider value={story.segments.per} min={5} max={30} step={1} onChange={(value) => update((current) => ({ ...current, segments: { ...current.segments, per: value } }))} format={(value) => `${value}s`} /></Field>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              {segments.map((segment) => (
-                <div key={segment.index} className="text-[12px] leading-snug text-ink2">
-                  <b>Generation {segment.index}</b> · {segment.from}–{segment.to}s — one job: {segment.job}.
-                  {segment.boundary ? <span className="text-ink3"> {segment.boundary}</span> : null}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="rounded-md border border-line1 bg-bg2 p-2.5">
-            <SectionLabel>Caption</SectionLabel>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {CAPTION_BEATS.map((beat) => (
-                <FillField
-                  key={beat.id}
-                  spec={{ ...specs.get(`qa.caption.${beat.id}`), label: beat.label, hint: beat.asks }}
-                  id={`qa.caption.${beat.id}`}
-                  busy={busy}
-                  onFill={fillOne}
-                >
-                  <TextArea rows={2} value={story.qa.caption[beat.id] || ''} onChange={(event) => setCaption(beat.id, event.target.value)} />
-                </FillField>
-              ))}
-            </div>
-            {caption.caption ? (
-              <p className="mt-2 rounded border border-line1 bg-bg1 p-2 text-[12px] leading-snug text-ink2">{caption.caption}</p>
-            ) : null}
-            <Notes items={caption.problems} />
-          </div>
-
-          <div className="grid gap-2 sm:grid-cols-2">
-            <div className="rounded-md border border-line1 bg-bg2 p-2.5">
-              <SectionLabel>Finish, in this order</SectionLabel>
-              <ol className="flex flex-col gap-0.5 text-[12px] text-ink2">
-                {FINISH_ORDER.map((step, index) => <li key={step}>{index + 1}. {step}</li>)}
-              </ol>
-              <p className="mt-1 text-[11px] leading-snug text-ink3">
-                An upscale sharpens pixels. It does not repair acting, an unclear action, a broken
-                identity or a dead world.
-              </p>
-            </div>
-            <div className="rounded-md border border-line1 bg-bg2 p-2.5">
-              <SectionLabel>Then change one thing</SectionLabel>
-              <p className="text-[11px] leading-snug text-ink3">{ITERATION_LAYERS.join(' · ')}</p>
-              <div className="mt-1.5 flex flex-col gap-1 text-[11px] leading-snug text-ink3">
-                {SIGNAL_READS.map((row) => (
-                  <div key={row.id}><b className="text-ink2">{row.signal}</b> — {row.means} <i>{row.next}</i></div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </Card>
+        {stage === 'ship' ? (
+          <ShipStage
+            story={story}
+            specs={specs}
+            busy={busy}
+            verdict={verdict}
+            caption={caption}
+            segments={segments}
+            onFill={fillOne}
+            onUpdate={update}
+            onVerdict={setVerdict}
+            onCaption={setCaption}
+            onShip={ship}
+            onFillCaption={() => { void fillStage('ship'); }}
+          />
+        ) : null}
       </div>
 
       {authOpen ? <AuthModal onClose={() => setAuthOpen(false)} onSaved={() => setAuthOpen(false)} /> : null}

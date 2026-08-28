@@ -59,6 +59,9 @@ const field = (id, label, hint, extra = {}) => ({ id, label, hint, kind: 'line',
 // Guidance is written for the model, in the imperative, and stays short: it is
 // repeated into every fill request and the budget belongs to the answer.
 const CONCEPT_FIELDS = [
+  field('brief.pitch', 'The brief',
+    'The whole idea in one or two sentences: a pair, a place, and the feeling. Not a list of fields.',
+    { kind: 'text' }),
   field('brief.person', 'Human', 'The person in the pair. A specific role and situation, not a name.'),
   field('brief.companion', 'Companion', 'The animal or creature. Say its size and what makes its silhouette its own.'),
   field('brief.world', 'World', 'Where this lives. Somewhere with weather, depth and something that can move.'),

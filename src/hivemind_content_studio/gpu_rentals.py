@@ -2162,7 +2162,8 @@ def _instance_dto(instance: Instance, probe: bool = False) -> dict:
 
 # --- public operations ------------------------------------------------------
 
-_offer_cache: dict[str, tuple[float, list[Offer], int]] = {}
+# (when, offers, the link-speed floor that produced them, marketplace failures)
+_offer_cache: dict[str, tuple[float, list[Offer], int, list[dict]]] = {}
 
 # How far above the quoted price a fallback may land before we stop and
 # re-quote instead. The Rent button shows ONE number; the ask behind it can be
@@ -2188,6 +2189,32 @@ def _forget_offers(tier: str) -> None:
 OFFER_CACHE_SECONDS = 45
 
 
+def _shut_marketplace_keys() -> list[str]:
+    """Marketplace keys this machine HOLDS but cannot open.
+
+    The store lists a sealed key by name, and that name is the only thing that
+    separates two states which look identical from here — nothing in the
+    environment either way — and have opposite repairs. "Never added" is fixed
+    by adding a key. "Added, but sealed on a machine whose vault is locked" is
+    fixed by signing in to PassBook, and telling that owner to go and find an
+    API key they already bought is how an afternoon disappears.
+
+    Same predicate as provider_models._held_but_shut, asked of the rental keys.
+    """
+    try:
+        from .shared_env import stored_key_names
+
+        held = stored_key_names()
+    except Exception:  # noqa: BLE001 — a store we cannot reach is not "shut"
+        return []
+    return [
+        name
+        for provider in rental_providers.all_providers()
+        for name in getattr(provider, "env_names", ())
+        if name in held and not os.environ.get(name, "").strip()
+    ]
+
+
 def _require_a_marketplace() -> list:
     """The configured providers, or a 503 saying so.
 
@@ -2196,11 +2223,29 @@ def _require_a_marketplace() -> list:
     responses from the user — one is a missing API key, the other is a market
     to wait out. An unconfigured studio used to say so plainly because the
     single Vast key raised on use; keep that.
+
+    And there is a third state, which used to wear the first one's message.
+    PassBook seals the shared store in place: the keys stay listed by name and
+    their values become `hive-sealed:...`, which the reader drops. So a studio
+    whose vault is locked has no credentials AND no missing keys, and telling
+    that owner to "set VAST_API_KEY in the environment" sends them to buy a
+    second key for an account they are already paying for.
     """
     providers = rental_providers.configured_providers()
     if not providers:
-        names = " or ".join(f"{p.label} ({p.key.upper()}_API_KEY)"
-                            for p in rental_providers.all_providers())
+        shut = _shut_marketplace_keys()
+        if shut:
+            raise GpuRentalError(
+                f"the marketplace keys ({', '.join(shut)}) are in this machine's "
+                f"shared store, but sealed — the vault is locked. Sign in to "
+                f"PassBook (`passbook signin`) and restart the stack to unlock "
+                f"them; they are not missing.",
+                status_code=503,
+            )
+        names = " or ".join(
+            f"{p.label} ({' or '.join(getattr(p, 'env_names', ())) or p.key.upper() + '_API_KEY'})"
+            for p in rental_providers.all_providers()
+        )
         raise GpuRentalError(
             f"no GPU marketplace is configured — set {names} in the environment",
             status_code=503,
@@ -2208,26 +2253,71 @@ def _require_a_marketplace() -> list:
     return providers
 
 
-def _provider_offers(query: OfferQuery) -> list[Offer]:
-    """Shop every configured marketplace and pool the results.
+def _marketplace_failure(provider, exc: ProviderError) -> dict:
+    """One marketplace's silence, in words the owner can act on.
+
+    Not the upstream string. Vast answers an unusable key with `Vast API POST
+    /v0/bundles/ failed: Invalid user key`, which reads as a bug in the studio
+    and names no repair; RunPod answers `{"error":{}}` and names nothing at
+    all. What the owner needs is which marketplace went quiet, why, and the one
+    thing that fixes it — so each failure carries its own repair, and the raw
+    line rides along for a log rather than for a toast.
+    """
+    text = str(exc)
+    lowered = text.lower()
+    names = " or ".join(getattr(provider, "env_names", ())) or "its API key"
+    if any(marker in lowered for marker in
+           ("invalid user key", "unauthorized", "401", "403", "auth_error", "forbidden")):
+        return {
+            "provider": provider.key, "label": provider.label, "kind": "credentials",
+            "why": f"{provider.label} rejected the key it was given",
+            "fix": f"Check {names}. If it is in the shared store but sealed, sign in "
+                   f"to PassBook (`passbook signin`) and restart the stack.",
+            "detail": text,
+        }
+    if "429" in lowered or "too many requests" in lowered or "rate limit" in lowered:
+        return {
+            "provider": provider.key, "label": provider.label, "kind": "rate-limit",
+            "why": f"{provider.label} is rate-limiting this account",
+            "fix": "Nothing to fix — the next poll normally clears it.",
+            "detail": text,
+        }
+    return {
+        "provider": provider.key, "label": provider.label, "kind": "unreachable",
+        "why": f"{provider.label} did not answer",
+        "fix": "Usually the marketplace itself; the next poll retries.",
+        "detail": text,
+    }
+
+
+def _provider_offers(query: OfferQuery) -> tuple[list[Offer], list[dict]]:
+    """Shop every configured marketplace: pool the offers, KEEP the failures.
 
     A provider that fails is skipped, not fatal. With one marketplace a
     credentials or rate-limit error WAS the answer; with two, letting it
     propagate would blank a Machines view that the other provider could still
     have filled. Total absence of providers is still fatal (see above) — it is
     the case that cannot be waited out.
+
+    But skipped is not the same as unmentioned, and that is the half this used
+    to get wrong. An empty pool renders as "No RTX 5090 offers match right
+    now", which is a claim about the MARKET — and on 2026-08-28 it was made
+    while both marketplaces were answering 401 to a sealed credential and Vast
+    alone listed 39 rentable 5090s. The failures therefore travel with the
+    offers, and the caller says which of the two happened.
     """
     offers: list[Offer] = []
+    failures: list[dict] = []
     for provider in _require_a_marketplace():
         try:
             offers.extend(provider.search_offers(query))
-        except ProviderError:
-            continue
-    return offers
+        except ProviderError as exc:
+            failures.append(_marketplace_failure(provider, exc))
+    return offers, failures
 
 
 def _search_offers(tier: str, prefer: str = "balanced",
-                   gpu_class: str | None = None) -> tuple[list[Offer], int]:
+                   gpu_class: str | None = None) -> tuple[list[Offer], int, list[dict]]:
     """Offers for a tier, across its whole GPU ladder unless one is named.
 
     prefer="balanced" (default) requires a link fast enough to fetch the tier
@@ -2241,18 +2331,26 @@ def _search_offers(tier: str, prefer: str = "balanced",
     key = f"{tier}:{prefer}:{gpu_class or 'ladder'}"
     cached = _offer_cache.get(key)
     if cached and time.time() - cached[0] < OFFER_CACHE_SECONDS:
-        return cached[1], cached[2]
+        return cached[1], cached[2], cached[3]
     floor = 500 if prefer == "cheapest" else tier_min_down_mbps(tier)
     # dict.fromkeys: prefer="cheapest" starts AT 500, so the plain tuple asked
     # the same question twice on the way down.
     ladder = list(dict.fromkeys((floor, floor // 2, 500)))
-    fallback: tuple[list[Offer], int] | None = None
+    fallback: tuple[list[Offer], int, list[dict]] | None = None
     for candidate_floor in ladder:
-        offers = _provider_offers(_offer_query(tier, candidate_floor, gpu_class))
+        offers, failures = _provider_offers(_offer_query(tier, candidate_floor, gpu_class))
         if not offers:
+            # Nothing came back — but WHY decides whether relaxing helps. A
+            # link-speed floor no host clears is worth stepping down from; a
+            # marketplace that refused our credentials answers the lower floor
+            # exactly the same way, so asking twice more only delays the one
+            # message that is any use. Stop, and carry the reason out.
+            if failures and len(failures) >= len(rental_providers.configured_providers()):
+                _offer_cache[key] = (time.time(), [], candidate_floor, failures)
+                return [], candidate_floor, failures
             continue
         if fallback is None:
-            fallback = (offers, candidate_floor)
+            fallback = (offers, candidate_floor, failures)
         # Relax on what can actually be RENTED, not on what the API returned.
         # This loop used to stop at the first non-empty response, and the
         # filters that run afterwards — min_ram_gb, the half-power SKU drop,
@@ -2264,15 +2362,15 @@ def _search_offers(tier: str, prefer: str = "balanced",
         # nothing but the extra query, and only on the path that would
         # otherwise have shown the user an empty rung.
         if _rank_offers(tier, offers, limit=1):
-            _offer_cache[key] = (time.time(), offers, candidate_floor)
-            return offers, candidate_floor
+            _offer_cache[key] = (time.time(), offers, candidate_floor, failures)
+            return offers, candidate_floor, failures
     if fallback is not None:
         # Every floor came back unrentable. Return the strictest non-empty set
         # anyway: the caller renders an empty rung either way, and this keeps
         # min_down_mbps honest about which floor produced it.
-        _offer_cache[key] = (time.time(), fallback[0], fallback[1])
+        _offer_cache[key] = (time.time(), fallback[0], fallback[1], fallback[2])
         return fallback
-    return [], 500
+    return [], 500, []
 
 
 def _rank_offers(tier: str, offers: list[Offer], limit: int = 8) -> list[dict]:
@@ -2337,7 +2435,7 @@ def list_offers(tier: str, prefer: str = "balanced", gpu_class: str | None = Non
             f"{TIERS[tier]['label']} workload",
             status_code=400,
         )
-    offers, floor = _search_offers(tier, prefer, gpu_class)
+    offers, floor, failures = _search_offers(tier, prefer, gpu_class)
     return {
         "tier": tier,
         "tier_label": TIERS[tier]["label"],
@@ -2346,6 +2444,9 @@ def list_offers(tier: str, prefer: str = "balanced", gpu_class: str | None = Non
         "min_down_mbps": floor,
         "prefer": prefer,
         "gpu_class": gpu_class,
+        # Which marketplaces did not answer this search, if any. An empty
+        # `offers` with a failure here is not a sold-out market.
+        "marketplace_failures": failures,
         "offers": _rank_offers(tier, offers),
     }
 
@@ -2359,7 +2460,7 @@ def rental_plan(tier: str, prefer: str = "balanced") -> dict:
     if tier not in TIERS:
         raise GpuRentalError(f"unknown tier: {tier}", status_code=400)
     spec = TIERS[tier]
-    offers, floor = _search_offers(tier, prefer)
+    offers, floor, failures = _search_offers(tier, prefer)
     classes = tier_gpu_classes(tier)
     grouped: dict[str, list[Offer]] = {key: [] for key in classes}
     for offer in offers:
@@ -2441,6 +2542,12 @@ def rental_plan(tier: str, prefer: str = "balanced") -> dict:
         "floor_class": classes[0],
         "reference_class": REFERENCE_GPU_CLASS,
         "studio_pages": spec["studio_pages"],
+        # Which marketplaces went quiet on this search. The rungs cannot say
+        # it: an unpriced rung is drawn identically whether the market is sold
+        # out or the marketplace refused to talk to us, and the view has to
+        # tell the owner which one it is looking at.
+        "marketplace_failures": failures,
+        "shopped": [p.key for p in rental_providers.configured_providers()],
         "classes": rungs,
     }
 
@@ -2666,8 +2773,8 @@ def create_rental(
     # (and, for a batch, the other machines' slots). The pin is still tried
     # FIRST below: it is a preference, not a constraint, because failing
     # outright because one ask evaporated is a dead end, not safety.
-    ranked = _rank_offers(tier, _search_offers(tier, prefer, gpu_class)[0],
-                          limit=max(8, count * 3))
+    searched, _floor, search_failures = _search_offers(tier, prefer, gpu_class)
+    ranked = _rank_offers(tier, searched, limit=max(8, count * 3))
     # Candidates are (provider, native offer id). A bare id from an older
     # client still parses, as Vast.
     pinned = RentalRef.parse(offer_id) if offer_id is not None else None
@@ -2704,6 +2811,15 @@ def create_rental(
                 f"${cheapest_now:.3f}/hr. Nothing was rented; the quote has been refreshed, "
                 "rent again to take it at that price",
                 status_code=409,
+            )
+        if search_failures:
+            # Not a sold-out market: nobody was asked successfully. Renting is
+            # where this matters most — "no offers match the tier filters" sent
+            # the owner to loosen filters that were never consulted.
+            raise GpuRentalError(
+                "nothing was rented because no marketplace answered — "
+                + "; ".join(f"{f['why']}. {f['fix']}" for f in search_failures),
+                status_code=502,
             )
         raise GpuRentalError("no offers currently match the tier filters", status_code=409)
     # Cheapest quote in the qualifying set, and the account it would be spent

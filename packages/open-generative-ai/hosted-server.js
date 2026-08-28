@@ -284,6 +284,44 @@ const CIVITAI_SEARCH_PARAMS = [
   'nsfw', 'checkpointType', 'primaryFileOnly', 'supportsGeneration', 'limit', 'cursor', 'page',
 ];
 
+const CIVITAI_IMAGE_PARAMS = [
+  'type', 'baseModels', 'sort', 'period', 'nsfw', 'username', 'limit', 'cursor',
+  'postId', 'modelId', 'modelVersionId',
+];
+
+// One inspiration card, with the artwork routed through this bridge. `stillPath`
+// is the poster for a video card so a grid of clips costs about what a grid of
+// stills costs; the motion is only fetched when a card is hovered.
+function slimCivitaiImage(item) {
+  const source = String(item.cardUrl || item.url || '');
+  const previewPath = source ? `/local-ai/model-preview/${previewRef(source)}` : '';
+  return {
+    id: String(item.id || ''),
+    kind: item.kind === 'video' ? 'video' : 'image',
+    previewPath,
+    stillPath: previewPath ? `${previewPath}?anim=0` : '',
+    width: Number(item.width) || 0,
+    height: Number(item.height) || 0,
+    baseModel: String(item.baseModel || ''),
+    username: String(item.username || ''),
+    pageUrl: String(item.pageUrl || ''),
+    nsfw: Boolean(item.nsfw),
+    nsfwLevel: String(item.nsfwLevel || ''),
+    createdAt: item.createdAt || null,
+    stats: item.stats || {},
+    prompt: String(item.prompt || ''),
+    negativePrompt: String(item.negativePrompt || ''),
+    sampler: String(item.sampler || ''),
+    scheduler: String(item.scheduler || ''),
+    steps: Number(item.steps) || null,
+    cfgScale: Number(item.cfgScale) || null,
+    seed: item.seed == null ? null : Number(item.seed),
+    clipSkip: Number(item.clipSkip) || null,
+    modelName: String(item.modelName || ''),
+    resources: Array.isArray(item.resources) ? item.resources : [],
+  };
+}
+
 function previewRef(value) {
   return Buffer.from(String(value), 'utf8').toString('base64url');
 }
@@ -591,6 +629,35 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
         installedFileIds: (installed.fileIds || []).map(String),
         baseModelOptions: (data.baseModelOptions || []).map(String),
         nextCursor: String((data.metadata || {}).nextCursor || ''),
+      });
+    } catch (error) {
+      return sendJson(res, upstreamStatus(error), { error: error.message });
+    }
+  }
+  // The inspiration finder. Same Civitai key and the same privacy rule as the
+  // model browser: only ids, prompts and numbers cross to the browser, and the
+  // artwork itself is fetched through /local-ai/model-preview so the page never
+  // opens a connection to Civitai's CDN. The full-resolution CDN url is
+  // deliberately NOT forwarded — "Open on Civitai" uses the image's PAGE, which
+  // is a visit the owner chose to make.
+  if (pathname === '/local-ai/civitai-images' && req.method === 'GET') {
+    const token = readToken();
+    if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });
+    const search = new URLSearchParams();
+    for (const key of CIVITAI_IMAGE_PARAMS) {
+      const value = query.get(key);
+      if (value !== null && value !== '' && String(value).length <= 200) search.set(key, String(value));
+    }
+    try {
+      const data = await requestJson(`${ZIMAGE_URL}/api/civitai/images?${search}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 90000,
+      });
+      return sendJson(res, 200, {
+        items: (data.items || []).map(slimCivitaiImage),
+        baseModelOptions: (data.baseModelOptions || []).map(String),
+        nextCursor: String((data.metadata || {}).nextCursor || ''),
+        scanned: Number((data.metadata || {}).scanned || 0),
       });
     } catch (error) {
       return sendJson(res, upstreamStatus(error), { error: error.message });

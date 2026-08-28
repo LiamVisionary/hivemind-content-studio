@@ -35,6 +35,39 @@ function refuseCiphertext(url) {
 }
 
 /**
+ * The decrypted bytes behind `url`, or a refusal.
+ *
+ * Split out of downloadMedia so that every path which takes plaintext OUT of
+ * the studio runs the same ciphertext check. Saving an envelope to disk is a
+ * wasted click; handing one to a third party would publish a file nobody can
+ * open under a name that claims otherwise — so both go through here.
+ *
+ * Returns `{ ok: true, blob }`, or the same `{ ok: false, blocked, reason,
+ * message }` shape downloadMedia has always returned.
+ */
+export async function resolvePlaintextMedia(url) {
+  let response;
+  try {
+    response = await fetch(await resolveMediaSrc(url));
+  } catch {
+    // A URL already proven to be ciphertext we can't open.
+    if (mediaSealFailure(url)) return refuseCiphertext(url);
+    return { ok: false, blocked: false, unreachable: true };
+  }
+  // The check that depends on no bookkeeping: if the bytes still announce
+  // themselves as a sealed envelope, they are ciphertext.
+  if (isSealedEnvelopeResponse(response)) {
+    try { response.body?.cancel(); } catch { /* already consumed */ }
+    return refuseCiphertext(url);
+  }
+  try {
+    return { ok: true, blob: await response.blob() };
+  } catch {
+    return { ok: false, blocked: false, unreachable: true };
+  }
+}
+
+/**
  * Save `url` to disk as `filename`. When no filename is given, the registered
  * model-derived name is used, so callers that don't know the model still get the
  * right one. Falls back to opening the media in a new tab, which is better than
@@ -43,24 +76,17 @@ function refuseCiphertext(url) {
  */
 export async function downloadMedia(url, filename) {
   const name = filename || mediaDownloadNameFor(url) || '';
-  let response;
-  try {
-    response = await fetch(await resolveMediaSrc(url));
-  } catch {
-    // A URL already proven to be ciphertext we can't open: a new tab would show
-    // the envelope JSON, which is no better than saving it.
-    if (mediaSealFailure(url)) return refuseCiphertext(url);
-    window.open(url, '_blank');
-    return { ok: false, blocked: false };
-  }
-  // The check that depends on no bookkeeping: if the bytes about to be written
-  // still announce themselves as a sealed envelope, they are ciphertext.
-  if (isSealedEnvelopeResponse(response)) {
-    try { response.body?.cancel(); } catch { /* already consumed */ }
-    return refuseCiphertext(url);
+  const resolved = await resolvePlaintextMedia(url);
+  if (!resolved.ok) {
+    // Unreadable but not ciphertext: a new tab is still better than nothing.
+    if (resolved.unreachable) {
+      window.open(url, '_blank');
+      return { ok: false, blocked: false };
+    }
+    return resolved;
   }
   try {
-    const blob = await response.blob();
+    const blob = resolved.blob;
     // Name the blob too: if anything downstream re-derives a name from this
     // object rather than the anchor, it still agrees.
     const payload = name ? new File([blob], name, { type: blob.type }) : blob;

@@ -608,7 +608,7 @@ def test_a_registered_lora_reaches_both_providers_from_one_source(monkeypatch, t
     monkeypatch.setattr(gpu_rentals, "_rank_offers", lambda tier, offers, limit=8: [
         {"provider": "runpod", "offer_id": "NVIDIA GeForce RTX 5090",
          "usd_per_hour": 0.69, "setup_minutes": 2.0}])
-    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], 500))
+    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], 500, []))
     gpu_rentals.create_rental("image")
     assert rental_manifest["url"] in captured["spec"].onstart, \
         "RunPod is handed the same script, pointing at the same manifest"
@@ -655,7 +655,7 @@ def test_lora_disk_sizing_reaches_the_offer_search_and_the_launch(monkeypatch, t
     monkeypatch.setattr(gpu_rentals, "_presign_r2_get", lambda key: "https://r2.example/x")
     monkeypatch.setattr(gpu_rentals, "_assert_affordable", lambda *a, **k: None)
     monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAA")
-    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], 500))
+    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], 500, []))
     monkeypatch.setattr(gpu_rentals, "_rank_offers", lambda tier, offers, limit=8: [
         {"provider": "runpod", "offer_id": "NVIDIA GeForce RTX 5090",
          "usd_per_hour": 0.69, "setup_minutes": 2.0}])
@@ -731,3 +731,155 @@ def test_runpod_network_volume_calls_go_to_the_rest_api(monkeypatch) -> None:
     assert runpod_provider.PROVIDER.list_network_volumes()[0]["id"] == "nv-9"
     runpod_provider.PROVIDER.delete_network_volume("nv-9")
     assert calls[-1] == ("DELETE", "/networkvolumes/nv-9", None)
+
+
+# --- a silent marketplace is not an empty market ----------------------------
+#
+# 2026-08-28: the Machines view said "No RTX 5090 offers match right now" while
+# Vast alone listed 39 rentable 5090s. Both marketplaces were refusing a sealed
+# credential (`hive-sealed:...` reached them as a bearer token), _provider_offers
+# swallowed both refusals, and an empty pool renders exactly like a sold-out
+# market. These tests hold the line that the two never look alike again.
+
+
+def _both_configured(monkeypatch) -> None:
+    monkeypatch.setenv("VAST_API_KEY", "k")
+    monkeypatch.setenv("RUNPOD_API_KEY", "k")
+
+
+def _no_keys(monkeypatch) -> None:
+    for name in ("VAST_API_KEY", "RUNPOD_API_KEY", "RUNPOD_MANAGEMENT_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _store(tmp_path: Path, monkeypatch, text: str) -> None:
+    store = tmp_path / "store.env"
+    store.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("HIVE_ENV_FILES", str(store))
+
+
+def test_a_locked_vault_is_not_a_missing_key(tmp_path: Path, monkeypatch) -> None:
+    """The state the sealed store actually leaves behind.
+
+    PassBook seals values in place: the NAME stays on the line and the value
+    becomes ciphertext, which the reader drops. So the studio has no credential
+    and no missing key — and "set VAST_API_KEY in the environment" sends an
+    owner to buy a second key for the account they already pay for.
+    """
+    _no_keys(monkeypatch)
+    _store(tmp_path, monkeypatch,
+           'VAST_API_KEY="hive-sealed:v2:notarealciphertext"\n'
+           'RUNPOD_MANAGEMENT_API_KEY="hive-sealed:v2:notarealciphertext"\n')
+
+    with pytest.raises(gpu_rentals.GpuRentalError) as raised:
+        gpu_rentals.rental_plan("minimax")
+
+    message = str(raised.value)
+    assert "passbook signin" in message
+    assert "VAST_API_KEY" in message and "RUNPOD_MANAGEMENT_API_KEY" in message
+    assert "not missing" in message
+    assert "set VAST_API_KEY in the environment" not in message
+
+
+def test_no_keys_at_all_still_names_the_keys_to_set(tmp_path: Path, monkeypatch) -> None:
+    """The other half: a studio that genuinely has no marketplace says which
+    variables would give it one — including the name RunPod really answers to
+    in the shared hive env, which is not the one guessed from its key."""
+    _no_keys(monkeypatch)
+    _store(tmp_path, monkeypatch, "SOMETHING_ELSE=1\n")
+
+    with pytest.raises(gpu_rentals.GpuRentalError) as raised:
+        gpu_rentals.rental_plan("minimax")
+
+    message = str(raised.value)
+    assert "no GPU marketplace is configured" in message
+    assert "VAST_API_KEY" in message and "RUNPOD_MANAGEMENT_API_KEY" in message
+    assert "passbook" not in message.lower()
+
+
+def _refuse(monkeypatch, *, vast: str | None, runpod: str | None) -> None:
+    """Make each marketplace refuse with a given upstream message (None = fine)."""
+    for provider, text in ((vast_provider.VastProvider, vast),
+                           (runpod_provider.RunPodProvider, runpod)):
+        if text is None:
+            continue
+
+        def boom(self, query, _text=text):
+            raise ProviderError(_text)
+
+        monkeypatch.setattr(provider, "search_offers", boom)
+
+
+def test_both_marketplaces_refusing_is_reported_not_rendered_as_sold_out(monkeypatch) -> None:
+    """The bug itself. Every rung is unpriced either way, so the plan has to
+    carry the reason — and the reason has to name the repair, not the endpoint
+    that failed."""
+    _both_configured(monkeypatch)
+    _refuse(monkeypatch,
+            vast="Vast API POST /v0/bundles/ failed: Invalid user key",
+            runpod='RunPod GraphQL failed: HTTP 401 {"error":{}}')
+
+    plan = gpu_rentals.rental_plan("minimax")
+
+    assert all(rung["usd_per_hour"] is None for rung in plan["classes"])
+    failures = plan["marketplace_failures"]
+    assert {f["provider"] for f in failures} == {"vast", "runpod"}
+    assert all(f["kind"] == "credentials" for f in failures)
+    assert all("passbook signin" in f["fix"] for f in failures)
+    # The upstream line is kept for a log, never as the thing the owner reads.
+    assert any("Invalid user key" in f["detail"] for f in failures)
+    assert all("/v0/bundles/" not in f["why"] for f in failures)
+
+
+def test_a_refused_marketplace_is_not_asked_again_at_every_link_floor(monkeypatch) -> None:
+    """Relaxing the link-speed floor exists to find slower hosts. It cannot fix
+    a 401, so a search where every marketplace refused stops at the first floor
+    instead of asking the same broken question three times."""
+    _both_configured(monkeypatch)
+    calls = []
+
+    def boom(self, query):
+        calls.append(query.min_down_mbps)
+        raise ProviderError("HTTP 401")
+
+    monkeypatch.setattr(vast_provider.VastProvider, "search_offers", boom)
+    monkeypatch.setattr(runpod_provider.RunPodProvider, "search_offers", boom)
+
+    gpu_rentals.list_offers("minimax")
+
+    assert len(set(calls)) == 1, "the link-speed ladder was walked over a credentials failure"
+    assert len(calls) == 2, "one ask per marketplace, once"
+
+
+def test_one_marketplace_failing_is_said_next_to_the_others_offers(monkeypatch) -> None:
+    """A half-shopped market is still a market — the offers stand, and the
+    missing marketplace is named rather than silently dropped, because a rung
+    priced off one provider looks identical to a rung priced off two."""
+    _both_configured(monkeypatch)
+    _refuse(monkeypatch, vast=None, runpod="RunPod GraphQL failed: HTTP 401")
+    monkeypatch.setattr(vast_provider.VastProvider, "search_offers", lambda self, q: [
+        Offer(provider="vast", offer_id="1", gpu_name="RTX 5090", usd_per_hour=0.47,
+              ram_gb=62.0, down_mbps=9000, dlperf=199.2)])
+
+    payload = gpu_rentals.list_offers("minimax")
+
+    assert [o["provider"] for o in payload["offers"]] == ["vast"]
+    assert [f["provider"] for f in payload["marketplace_failures"]] == ["runpod"]
+
+
+def test_renting_when_nobody_answered_says_why_instead_of_blaming_the_filters(monkeypatch) -> None:
+    """The same lie costs the most here: "no offers currently match the tier
+    filters" sent the owner to loosen filters that were never consulted."""
+    _both_configured(monkeypatch)
+    monkeypatch.setattr(gpu_rentals, "_assert_affordable", lambda *a, **k: None)
+    _refuse(monkeypatch, vast="Vast API POST /v0/bundles/ failed: Invalid user key",
+            runpod="RunPod GraphQL failed: HTTP 401")
+
+    with pytest.raises(gpu_rentals.GpuRentalError) as raised:
+        gpu_rentals.create_rental("minimax")
+
+    message = str(raised.value)
+    assert "no marketplace answered" in message
+    assert "passbook signin" in message
+    assert "tier filters" not in message
+    assert raised.value.status_code == 502

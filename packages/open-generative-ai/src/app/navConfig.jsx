@@ -20,6 +20,7 @@ export const NAV_SECTIONS = [
     label: () => (zh() ? '生产' : 'Produce'),
     items: [
       { page: 'planner', icon: 'sparkles', label: () => (zh() ? '规划器' : 'Planner') },
+      { page: 'inspo', icon: 'star', label: () => (zh() ? '灵感' : 'Inspo') },
       { page: 'runs', icon: 'stack', label: () => (zh() ? '运行' : 'Runs') },
       { page: 'history', icon: 'clock', label: () => (zh() ? '历史' : 'History') },
     ],
@@ -45,6 +46,7 @@ export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'cinema', 'lip
 export const HUB_PAGES = {
   planner: 'create',
   canvas: 'canvas',
+  inspo: 'inspo',
   models: 'models',
   runs: 'runs',
   history: 'history',

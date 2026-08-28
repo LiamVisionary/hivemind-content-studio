@@ -105,7 +105,7 @@ function MetaRow({ label, value }) {
 
 export function ViewerModal({
   url, entry, onClose, onBackToSetup, onRegenerate, onDownload, onUpscale, onCompare, onExpand, onInpaint, onAngles, onSequence,
-  onUseAsVideoFrame, videoFrameBusy,
+  onUseAsVideoFrame, videoFrameBusy, onPostToCivitai,
   // Walking the gallery from inside the viewer: position = { index, total } (0-based).
   onPrev, onNext, position = null,
 }) {
@@ -177,6 +177,11 @@ export function ViewerModal({
               label={videoFrameBusy ? 'Sending…' : 'Use as video starting frame'}
               onClick={onUseAsVideoFrame}
             />
+          ) : null}
+          {/* Sits beside Download because it is the same decision one step
+              further: this one leaves the machine, and unencrypted. */}
+          {onPostToCivitai ? (
+            <ActionButton variant="neutral" icon="upload" label="Post to Civitai" onClick={onPostToCivitai} />
           ) : null}
           <ActionButton variant="primary" icon="download" label={t('common.download')} onClick={onDownload} />
         </>

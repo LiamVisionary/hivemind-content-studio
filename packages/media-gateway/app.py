@@ -9400,12 +9400,33 @@ def civitai_download_url(url, token_override=None):
     return parsed._replace(query=query).geturl()
 
 
-def civitai_json(path, params=None, token_override=None):
+def civitai_json(path, params=None, token_override=None, retries=0):
+    """One Civitai API call.
+
+    `retries` is opt-in and defaults to off, so the download and update paths
+    behave exactly as before. The images feed passes a budget because Civitai's
+    /images endpoint returns a transient 503 often enough to matter — measured
+    2026-08-28 at roughly one call in three, on requests that succeed
+    unchanged a second later.
+    """
     query = urlencode({k: v for k, v in (params or {}).items() if v not in (None, '', [])}, doseq=True)
     url = CIVITAI_API + path + (('?' + query) if query else '')
-    req = Request(url, headers=civitai_headers(token_override))
-    with urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode('utf-8'))
+    attempt = 0
+    while True:
+        try:
+            req = Request(url, headers=civitai_headers(token_override))
+            with urlopen(req, timeout=30) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except HTTPError as e:
+            # Only the upstream-is-busy family is worth repeating; a 401 or a
+            # 404 means the same thing however many times it is asked.
+            if attempt >= retries or e.code not in (429, 500, 502, 503, 504):
+                raise
+        except (URLError, TimeoutError):
+            if attempt >= retries:
+                raise
+        attempt += 1
+        time.sleep(min(2 ** attempt * 0.4, 3.0))
 
 
 def civitai_search_models(params):
@@ -9438,6 +9459,150 @@ def civitai_search_models(params):
         if not cursor or not batch:
             break
     return {'items': items[:requested], 'metadata': {**metadata, 'pagesFetched': pages, 'requestedLimit': requested, 'returned': min(len(items), requested)}}
+
+
+# --- Civitai inspiration feed (images + videos with usable prompts) ---------
+# Distinct from civitai_search_models above: that browses MODELS to install,
+# this browses what people MADE with them, for the prompt attached.
+#
+# The whole feature rests on a prompt actually being there, and Civitai's API
+# does not guarantee one. `withMeta=true` INCLUDES the meta object; it does not
+# filter by it, so a raw page is roughly half unusable (measured 2026-08-28:
+# 100 raw -> 37 image / 49 video items with a usable prompt). Two consequences,
+# both handled here rather than in the UI:
+#   * the caller's limit is a target to fill, so cursors are followed like
+#     civitai_search_models does, and
+#   * "has a prompt" has to mean more than "the key exists" — see below.
+
+# Prompts that are present but carry nothing to reuse. Seen in the wild: a bare
+# link back to another Civitai image as the entire "prompt", and settings notes
+# ("turbo lora strength 1.75, 3/7 steps + VFI") parked in negativePrompt.
+_CIVITAI_URL_ONLY = re.compile(r'^\s*https?://\S+\s*$', re.I)
+CIVITAI_MIN_PROMPT_CHARS = 12
+
+
+def civitai_image_prompt(item):
+    """The reusable prompt on an image, or '' when there is nothing to load."""
+    prompt = str(((item.get('meta') or {}).get('prompt') or '')).strip()
+    if len(prompt) < CIVITAI_MIN_PROMPT_CHARS:
+        return ''
+    if _CIVITAI_URL_ONLY.match(prompt):
+        return ''
+    return prompt
+
+
+def civitai_search_images(params):
+    """Civitai images/videos that carry a usable prompt, filling `limit`.
+
+    Same cursor-following shape as civitai_search_models, with the filter
+    applied per page: the caller asks for 24 usable results, not 24 rows of
+    which a random half are blank.
+    """
+    clean = {k: v for k, v in (params or {}).items() if v not in (None, '', [])}
+    try:
+        requested = max(1, min(200, int(clean.get('limit') or 24)))
+    except Exception:
+        requested = 24
+    # Over-fetch: at the measured ~40% yield, asking for exactly `requested`
+    # would spend a page per handful. 100 is Civitai's own per-page ceiling.
+    clean['limit'] = str(min(100, max(requested * 2, 50)))
+    clean['withMeta'] = 'true'
+    items = []
+    metadata = {}
+    cursor = clean.get('cursor')
+    pages = 0
+    scanned = 0
+    while len(items) < requested and pages < 6:
+        if cursor:
+            clean['cursor'] = cursor
+        data = civitai_json('/images', clean, retries=3)
+        pages += 1
+        batch = data.get('items') or []
+        scanned += len(batch)
+        items.extend(i for i in batch if civitai_image_prompt(i))
+        metadata = data.get('metadata') or {}
+        cursor = metadata.get('nextCursor') or None
+        if not cursor or not batch:
+            break
+    return {
+        'items': items[:requested],
+        # nextCursor is what the NEXT "Load more" resumes from, so it has to be
+        # the cursor past the last page actually read — not the one that came
+        # back with the page the last kept item happened to be on.
+        'metadata': {
+            **metadata,
+            'pagesFetched': pages,
+            'scanned': scanned,
+            'requestedLimit': requested,
+            'returned': min(len(items), requested),
+        },
+    }
+
+
+def civitai_image_media_urls(item):
+    """(display url, poster url) for a result card.
+
+    image.civitai.com takes transforms as a PATH segment, so the stored
+    `original=true` becomes `width=<n>`. On a video that yields a smaller
+    TRANSCODED mp4 rather than a still (confirmed 2026-08-28), which is what the
+    card wants anyway — it plays on hover, exactly like the model browser's.
+    """
+    url = str(item.get('url') or '')
+    if not url:
+        return '', ''
+    card = re.sub(r'/original=true/', '/width=450/', url, count=1)
+    return url, (card if card != url else url)
+
+
+def summarize_civitai_image(item):
+    """One inspiration card. Only the fields the finder and the studio hand-off
+    read — the raw payload carries reaction breakdowns and moderation flags that
+    have no business crossing the bridge."""
+    meta = item.get('meta') or {}
+    full, card = civitai_image_media_urls(item)
+    # Civitai records the canvas as "832x1216"; the studios want the two numbers.
+    width = item.get('width')
+    height = item.get('height')
+    size = str(meta.get('Size') or meta.get('size') or '')
+    if (not width or not height) and re.fullmatch(r'\d+x\d+', size):
+        width, height = (int(part) for part in size.split('x'))
+    resources = []
+    for entry in (meta.get('civitaiResources') or [])[:12]:
+        if not isinstance(entry, dict):
+            continue
+        resources.append({
+            'type': entry.get('type'),
+            'weight': entry.get('weight'),
+            'modelVersionId': entry.get('modelVersionId'),
+            'modelVersionName': entry.get('modelVersionName'),
+        })
+    return {
+        'id': item.get('id'),
+        'url': full,
+        'cardUrl': card,
+        'kind': 'video' if str(item.get('type') or '').lower() == 'video' else 'image',
+        'width': width,
+        'height': height,
+        'baseModel': item.get('baseModel') or '',
+        'username': item.get('username') or '',
+        'postId': item.get('postId'),
+        'nsfw': bool(item.get('nsfw')),
+        'nsfwLevel': item.get('nsfwLevel') or '',
+        'createdAt': item.get('createdAt'),
+        'stats': item.get('stats') or {},
+        'pageUrl': f"https://civitai.com/images/{item.get('id')}" if item.get('id') else '',
+        'prompt': civitai_image_prompt(item),
+        'negativePrompt': str(meta.get('negativePrompt') or '').strip(),
+        'sampler': meta.get('sampler') or meta.get('Sampler') or '',
+        'scheduler': meta.get('Schedule type') or meta.get('scheduler') or '',
+        'steps': meta.get('steps') or meta.get('Steps'),
+        'cfgScale': meta.get('cfgScale') or meta.get('CFG scale'),
+        'seed': meta.get('seed') or meta.get('Seed'),
+        'clipSkip': meta.get('clipSkip') or meta.get('Clip skip'),
+        'modelName': meta.get('Model') or '',
+        'resources': resources,
+        'modelVersionIds': item.get('modelVersionIds') or [],
+    }
 
 
 def resolve_civitai_url(value):
@@ -11337,6 +11502,34 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/civitai/base-models":
             force = qs.get('refresh', [''])[0] in {'1', 'true', 'yes'}
             return self.send_json({"baseModels": civitai_base_model_options(force=force), "currentBaseModels": current_base_models()})
+        if parsed.path == "/api/civitai/images":
+            params = {k: qs.get(k, [None])[0] for k in ['username', 'sort', 'period', 'cursor', 'limit', 'postId', 'modelId', 'modelVersionId']}
+            # Civitai's own vocabulary, echoed back rather than trusted: an
+            # unknown `type` is dropped instead of forwarded, so a stray value
+            # cannot turn into a 400 the finder has to explain.
+            kind = qs.get('type', [None])[0]
+            if kind in {'image', 'video'}:
+                params['type'] = kind
+            nsfw = qs.get('nsfw', [None])[0]
+            if nsfw in {'true', 'false', 'None', 'Soft', 'Mature', 'X'}:
+                params['nsfw'] = nsfw
+            bases = qs.get('baseModels', [])
+            if bases:
+                params['baseModels'] = ','.join(bases)
+            if not params.get('limit'):
+                params['limit'] = '24'
+            try:
+                data = civitai_search_images(params)
+                return self.send_json({
+                    "items": [summarize_civitai_image(i) for i in data.get('items', [])],
+                    "metadata": data.get('metadata', {}),
+                    "baseModelOptions": civitai_base_model_options(),
+                })
+            except Exception as e:
+                # Civitai 503s under load often enough to matter (seen on a
+                # plain baseModels query, fine on retry), so the finder gets the
+                # reason and offers a retry rather than an empty grid.
+                return self.send_json({"error": str(e)}, 502)
         if parsed.path == "/api/civitai/search":
             params = {k: qs.get(k, [None])[0] for k in ['query','tag','username','sort','period','supportsGeneration','fromPlatform','earlyAccess','primaryFileOnly','cursor','page','limit']}
             nsfw = qs.get('nsfw', [None])[0]

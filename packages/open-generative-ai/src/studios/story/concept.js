@@ -42,8 +42,13 @@ const text = (value) => String(value ?? '').trim().replace(/\s+/g, ' ');
 
 /** The brief the producer answers. Written as fields rather than a paragraph so
  *  a half-filled brief still asks a complete question. */
-export function conceptBrief({ person = '', companion = '', tone = '', world = '', count = 8, avoid = '' } = {}) {
+export function conceptBrief({ pitch = '', person = '', companion = '', tone = '', world = '', count = 8, avoid = '' } = {}) {
   const lines = [
+    // The one line the director actually wrote, first. The fields below stay
+    // even when it is filled: a pitch says "a night bus driver and a moth at
+    // 2am" and the fields say which half is which, which is what stops a
+    // producer answering with eight moths.
+    text(pitch) ? `Brief: ${text(pitch)}` : '',
     `Human: ${text(person) || 'your choice — pick something specific'}`,
     `Companion: ${text(companion) || 'your choice — an animal or creature'}`,
     `The relationship should feel: ${text(tone) || 'your choice'}`,
@@ -51,7 +56,7 @@ export function conceptBrief({ person = '', companion = '', tone = '', world = '
     `How many concepts: ${conceptCount(count)}`,
   ];
   if (text(avoid)) lines.push(`Must never appear: ${text(avoid)}`);
-  return lines.join('\n');
+  return lines.filter(Boolean).join('\n');
 }
 
 /** 3–12. A list shorter than three is not a comparison; longer than a dozen is

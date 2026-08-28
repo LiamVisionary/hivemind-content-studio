@@ -209,6 +209,32 @@ test('a beat past the end of the clip is reported, because it silently never hap
   assert.match(warnings.join(' '), /runs to 8s but the clip is 5s/);
 });
 
+test('reordering beats re-times them, because a timeline cannot overlap itself', async () => {
+  // Dragging the third beat to the front used to carry its 10-15s span with it,
+  // so the clip claimed 10-15s, 0-5s, 5-10s. motionScript prints the spans it
+  // is handed, so the take opened five seconds late and two beats fought over
+  // the same second.
+  const { relayBeats } = await loadMotion();
+
+  const moved = relayBeats([
+    { from: 10, to: 15, action: 'he pulls away' },
+    { from: 0, to: 5, action: 'the moth lands' },
+    { from: 5, to: 10, action: 'his hand stops' },
+  ]);
+
+  assert.deepEqual(moved.map((beat) => [beat.from, beat.to]), [[0, 5], [5, 10], [10, 15]]);
+  // The writing rides along untouched — only the clock moves.
+  assert.deepEqual(moved.map((beat) => beat.action), ['he pulls away', 'the moth lands', 'his hand stops']);
+});
+
+test('a removed beat does not leave a hole in the middle of the clip', async () => {
+  const { relayBeats } = await loadMotion();
+
+  const left = relayBeats([{ from: 0, to: 4, action: 'a' }, { from: 8, to: 12, action: 'b' }]);
+
+  assert.deepEqual(left.map((beat) => [beat.from, beat.to]), [[0, 4], [4, 8]]);
+});
+
 test('unscripted time is reported as time the model fills by itself', async () => {
   const { scriptWarnings } = await loadMotion();
 
@@ -515,28 +541,47 @@ test('a loaded model is not loaded again', async () => {
   assert.deepEqual(calls, ['/api/prompt-helper/runtime']);
 });
 
+/**
+ * Everything the Story studio renders from, as one string.
+ *
+ * The invariants below are about the studio's SURFACE, not about one file — and
+ * since the four-stage rebuild that surface is the container plus one component
+ * per stage. Reading the directory rather than listing it means a sixth stage
+ * cannot quietly opt out of them.
+ */
+async function storySurface() {
+  const { readFile, readdir } = await import('node:fs/promises');
+  const dir = new URL('../src/studios/story/', import.meta.url);
+  const names = (await readdir(dir)).filter((name) => name.endsWith('.jsx'));
+  const parts = await Promise.all([
+    readFile(new URL('../src/studios/StoryStudio.jsx', import.meta.url), 'utf8'),
+    ...names.map((name) => readFile(new URL(name, dir), 'utf8')),
+  ]);
+  // Comment lines are dropped: a fix's own comment quotes the broken
+  // expression, and an assertion that its own explanation trips is useless.
+  return parts.join('\n').split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
+}
+
 test('no producer button gates its spinner on the status text', async () => {
   // The bug this pins: the busy flag and the status message were one string.
   // `setThinking('concepts…')` drove `loading={thinking === 'concepts…'}`, and
   // askProducer's own onStatus overwrote it on the first tick — so the spinner
   // vanished while the button stayed disabled, which is a dead button.
-  const { readFile } = await import('node:fs/promises');
-  const raw = await readFile(new URL('../src/studios/StoryStudio.jsx', import.meta.url), 'utf8');
-  // Comment lines are dropped: the fix's own comment quotes the broken
-  // expression, and an assertion that its own explanation trips is useless.
-  const source = raw.split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
+  const source = await storySurface();
 
   assert.equal(/loading=\{thinking\s*===/.test(source), false);
   assert.equal(/disabled=\{Boolean\(thinking\)\}/.test(source), false);
   // Every task the studio asks for has a spinner keyed to the run itself.
   for (const task of ['concepts', 'shortlist', 'contract', 'location', 'board', 'beats', 'compress']) {
-    assert.ok(source.includes(`busy === '${task}'`), `${task} has no spinner of its own`);
+    assert.ok(
+      source.includes(`producerIsRunning(busy, '${task}')`),
+      `${task} has no spinner of its own`,
+    );
   }
 });
 
 test('one character card drawing a sheet does not spin the other card', async () => {
-  const { readFile } = await import('node:fs/promises');
-  const source = await readFile(new URL('../src/studios/StoryStudio.jsx', import.meta.url), 'utf8');
+  const source = await storySurface();
 
   // Both cards rendered `loading={drawing === 'character sheet'}`, so drawing
   // the second one showed the first one working too.
@@ -564,12 +609,11 @@ test('only the row whose ask is running reports itself as working', async () => 
 });
 
 test('the running-status row is never gated on a bare inequality again', async () => {
-  const { readFile } = await import('node:fs/promises');
-  const raw = await readFile(new URL('../src/studios/StoryStudio.jsx', import.meta.url), 'utf8');
-  const source = raw.split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
+  const source = await storySurface();
 
   assert.equal(/if\s*\(busy\s*!==\s*task\)/.test(source), false);
-  assert.ok(source.includes('producerIsRunning(busy, task)'));
+  assert.equal(/busy\s*!==\s*task/.test(source), false);
+  assert.ok(/producerIsRunning\(busy, /.test(source));
 });
 
 /* ---------------- auto-fill: what the producer is told, and what it may write ---------------- */

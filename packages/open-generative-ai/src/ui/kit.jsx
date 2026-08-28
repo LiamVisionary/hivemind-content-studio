@@ -666,13 +666,18 @@ function ComposerSlot({ drop, children }) {
 
 // Workspace-first studio frame: left params panel, main canvas, optional bottom composer.
 // On < lg the panel collapses into a toggleable sheet.
-export function StudioLayout({ panel, panelTitle = 'Settings', composer, composerDrop, children }) {
+export function StudioLayout({
+  panel, panelTitle = 'Settings', composer, composerDrop, children,
+  // A settings panel is 320px; a stage rail is narrower, because its rows are
+  // one line of status each rather than sliders and pickers.
+  panelWidth = 'w-[320px]',
+}) {
   const [panelOpen, setPanelOpen] = useState(false);
   return (
     <div className="relative flex min-h-0 flex-1">
       {panel ? (
         <>
-          <aside className="hidden w-[320px] shrink-0 flex-col gap-4 overflow-y-auto border-r border-line1 bg-bg1 p-4 lg:flex">
+          <aside className={cx('hidden shrink-0 flex-col gap-4 overflow-y-auto border-r border-line1 bg-bg1 p-4 lg:flex', panelWidth)}>
             {panel}
           </aside>
           {panelOpen ? (

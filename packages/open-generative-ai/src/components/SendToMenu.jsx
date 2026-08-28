@@ -213,13 +213,16 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
  */
 export function SendToMenu({
   section = 'video', resolve = null, describeFor = null, disabled = false, label, icon = 'film', onSend,
+  // The Story studio's dock makes this the page's primary action, so the
+  // trigger has to be able to look like one.
+  variant = 'neutral',
 }) {
   return (
     <Menu
       up
       width="w-[19rem]"
       trigger={(open, toggle) => (
-        <Button icon={icon} disabled={disabled} onClick={toggle} aria-expanded={open}>
+        <Button variant={variant} icon={icon} disabled={disabled} onClick={toggle} aria-expanded={open}>
           {label || (zh() ? '发送到…' : 'Send to…')}
         </Button>
       )}

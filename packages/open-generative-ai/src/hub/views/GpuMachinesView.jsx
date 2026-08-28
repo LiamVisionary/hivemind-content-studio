@@ -94,7 +94,7 @@ function rankClasses(classes, rankBy) {
 }
 
 // Discrete slider over a workload's GPU ladder, ordered by the chosen axis.
-function PerformanceSlider({ classes, index, onChange, disabled }) {
+function PerformanceSlider({ classes, index, onChange, disabled, unshopped }) {
   const max = classes.length - 1;
   const pct = max ? (index / max) * 100 : 100;
   return (
@@ -147,7 +147,13 @@ function PerformanceSlider({ classes, index, onChange, disabled }) {
             {/* The price on the axis itself: the trade-off has to be readable
                 without selecting each stop in turn. */}
             <span className="font-mono text-[10px] text-ink3">
-              {rung.usd_per_hour ? `$${rung.usd_per_hour.toFixed(2)}/hr` : 'sold out'}
+              {/* "sold out" is a claim about the market, and it is only ours to
+                  make when a marketplace actually answered. With none of them
+                  answering, every stop on the ladder read as sold out while the
+                  cards were listed and rentable. */}
+              {rung.usd_per_hour
+                ? `$${rung.usd_per_hour.toFixed(2)}/hr`
+                : (unshopped ? 'no price' : 'sold out')}
             </span>
           </button>
         ))}
@@ -196,6 +202,11 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
   }, [plan, rung]);
 
   const hourly = rung?.usd_per_hour || 0;
+  // The marketplaces that did not answer THIS search. Without them an unpriced
+  // rung reads as a sold-out market and a priced one reads as the whole market,
+  // and on 2026-08-28 neither was true: both marketplaces were refusing a
+  // sealed credential while Vast alone listed 39 rentable 5090s.
+  const troubles = plan?.marketplace_failures || [];
   // The marketplace this rung would actually be rented from — the rungs are
   // ranked cheapest-first across every provider, so the cheapest offer is the
   // one the server will take, and its account is the one that has to fund it.
@@ -246,6 +257,7 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
             classes={classes}
             index={index}
             disabled={busy}
+            unshopped={troubles.length > 0}
             onChange={(i) => setGpuClass(classes[i]?.gpu_class || '')}
           />
           <small className="mt-1 text-[11px] text-ink3">{rung?.note}</small>
@@ -304,7 +316,29 @@ function RentConfigurator({ plans, prefer, onPrefer, account, busy, onRent }) {
                   ? ' · models already on a warm volume, nothing to download'
                   : ` (${plan.download_gb}GB of models)`}
               </small>
+              {/* A price from half the market is not the market's price. */}
+              {troubles.length ? (
+                <small className="rounded border border-warn/40 bg-warn/10 px-2 py-1 text-[11px] text-warn">
+                  {troubles.map((t) => t.why).join('; ')} — this is what is left of the
+                  market. {troubles[0].fix}
+                </small>
+              ) : null}
             </>
+          ) : troubles.length ? (
+            /* Not a sold-out market: nobody was successfully asked. Saying "no
+               offers match" here is what sent an owner looking for cards that
+               were listed the whole time, so name the marketplace that went
+               quiet and the one thing that fixes it. */
+            <div className="flex flex-col gap-1">
+              {troubles.map((trouble) => (
+                <small
+                  key={trouble.provider}
+                  className="rounded border border-warn/40 bg-warn/10 px-2 py-1 text-[11px] text-warn"
+                >
+                  <b>{trouble.why}.</b> {trouble.fix}
+                </small>
+              ))}
+            </div>
           ) : (
             <small className="text-[12px] text-warn">
               No {rung?.label} offers match right now — try another rung or Lowest price.

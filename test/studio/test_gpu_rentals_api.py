@@ -2936,7 +2936,7 @@ def test_a_new_rental_mounts_the_stocked_volume_and_a_cold_one_does_not(tmp_path
     monkeypatch.setattr(gpu_rentals, "_assert_affordable", lambda *a, **k: None)
     monkeypatch.setattr(gpu_rentals, "_forget_offers", lambda tier: None)
     offer = {"provider": "runpod", "offer_id": "NVIDIA GeForce RTX 5090", "usd_per_hour": 0.89, "warm": True}
-    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], {}))
+    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], 500, []))
     monkeypatch.setattr(gpu_rentals, "_rank_offers", lambda *a, **k: [offer])
     out = gpu_rentals.create_rental("minimax", gpu_class="rtx5090")
     assert out["rental_id"] == "runpod:pod1"
@@ -2993,7 +2993,7 @@ def test_a_stocking_rental_only_considers_the_volume_providers_offers(tmp_path: 
     monkeypatch.setattr(gpu_rentals, "_onstart_script", lambda tier: "#!/bin/bash\ntrue\n")
     monkeypatch.setattr(gpu_rentals, "_assert_affordable", lambda *a, **k: None)
     monkeypatch.setattr(gpu_rentals, "_forget_offers", lambda tier: None)
-    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], {}))
+    monkeypatch.setattr(gpu_rentals, "_search_offers", lambda *a, **k: ([], 500, []))
     monkeypatch.setattr(gpu_rentals, "_rank_offers", lambda *a, **k: [
         {"provider": "vast", "offer_id": "123", "usd_per_hour": 0.60},
         {"provider": "runpod", "offer_id": "NVIDIA GeForce RTX 5090", "usd_per_hour": 0.69},

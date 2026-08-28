@@ -22,7 +22,7 @@ export const producerIsRunning = (busy, task) => Boolean(task) && busy === task;
  *  session is one thing to persist, restore and clear. */
 export function blankStory() {
   return {
-    brief: { person: '', companion: '', tone: 'cute', world: '', count: 8, avoid: '' },
+    brief: { pitch: '', person: '', companion: '', tone: 'cute', world: '', count: 8, avoid: '' },
     style: '',
     aspect: '9:16',
     concepts: [],
@@ -42,7 +42,10 @@ export function blankStory() {
       seconds: 15, force: '', layers: {}, beats: defaultBeats(15, 3),
       camera: '', audio: '', music: 'none', negatives: '', limit: 0, override: '',
     },
-    qa: { verdicts: {}, caption: {} },
+    // `shipped` is an ISO date, not a boolean: what the gate records is WHEN
+    // this production was approved, which is the half that is still useful a
+    // month later.
+    qa: { verdicts: {}, caption: {}, shipped: '' },
     segments: { total: 15, per: 15 },
   };
 }

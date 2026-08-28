@@ -40,6 +40,7 @@ from .approval_config import load_approval_ledger
 from .agent_runtime import attach_script
 from .approval_ledger import ApprovalLedger
 from .asset_store import AssetStore
+from . import civitai_post
 from .canvas_history import (
     CanvasDeleteFetcher,
     CanvasGatewayClient,
@@ -1375,6 +1376,10 @@ def build_control_app(
 
     # Routes the sign-in screen itself must reach before anyone is signed in.
     # Deliberately a small, exact set: everything else stays behind the gate.
+    # Exactly the alphabet secrets.token_urlsafe produces, and a length no
+    # shorter than the 32 bytes civitai_post mints.
+    _TOKEN_PATH_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
+
     _GATE_ROUTES = frozenset({
         "/api/accounts",
         "/api/accounts/unlock",
@@ -1390,6 +1395,29 @@ def build_control_app(
         # thing it can do is complete a hand-over that was already requested.
         "/api/hivemindos/models/link-callback",
     })
+
+    def _civitai_staged_route(path: str, method: str) -> bool:
+        """One file, staged for a Civitai post, being read back.
+
+        This has to be reachable without a session, and that is not a gap — it
+        is the mechanism. Civitai's post composer fetches the media from the
+        BROWSER (confirmed in their `intent/post.tsx`: `await fetch(src)`), and
+        that request is cross-origin to civitai.com, so it carries no cookie of
+        ours. A gated URL would 401 and the handoff could not work at all.
+
+        What stands in for the session is the same thing the HivemindOS
+        link-callback above relies on: an unguessable token this studio minted
+        itself, moments ago, because the owner asked to post that exact file.
+        It is 32 random bytes, it names one file and nothing else, it expires
+        on its own, and the studio drops it as soon as the post is made.
+        """
+        if method not in {"GET", "HEAD", "OPTIONS"} or not path.startswith("/civitai/staged/"):
+            return False
+        # "<token>/<filename>" — the filename is cosmetic (Civitai names the
+        # attachment after the URL's last segment), so only the token is
+        # checked, and only against the alphabet it is minted from.
+        rest = path.removeprefix("/civitai/staged/").split("/", 1)
+        return bool(rest and _TOKEN_PATH_RE.fullmatch(rest[0]))
 
     def _machine_token_presented(request: Request) -> bool:
         """A caller holding the control or operator bearer token.
@@ -1447,6 +1475,7 @@ def build_control_app(
             allowed = (
                 account is not None
                 or request.url.path in _GATE_ROUTES
+                or _civitai_staged_route(request.url.path, request.method)
                 or _machine_route_allowed(request.url.path, request.method)
             )
             if not allowed:
@@ -1955,6 +1984,9 @@ def build_control_app(
             "local-ai/library",
             "local-ai/civitai-search",
             "local-ai/civitai-base-models",
+            # The inspiration finder: Civitai images/videos that carry a
+            # reusable prompt. Read-only, same bridge, same Civitai key.
+            "local-ai/civitai-images",
         }
         dynamic_local_ai_route = any(
             path.startswith(prefix)
@@ -2007,6 +2039,130 @@ def build_control_app(
             # show a bare "HTTP 503" for this.
             return JSONResponse({"detail": str(exc), "error": str(exc)}, status_code=503)
         return Response(content=content, status_code=status, media_type=content_type.split(";", 1)[0])
+
+    # --- posting a creation to Civitai -------------------------------------
+    # See civitai_post.py for why this is shaped the way it is: Civitai has no
+    # upload API, its post composer fetches the media from the BROWSER, and so
+    # the studio's job is to hold one plaintext copy at a URL the browser can
+    # read, for a few minutes, and then forget it.
+
+    # NOT under /api/civitai/*: the tailnet HTTPS proxy routes that whole prefix
+    # to the MEDIA GATEWAY (its Civitai model search and downloads live there),
+    # so a staging route inside it would 404 for every session reached over the
+    # ts.net URL — which is most of them.
+    @app.post("/api/civitai-post/stage", dependencies=[Depends(require_owner)])
+    async def civitai_post_stage(
+        request: Request,
+        file: UploadFile = File(...),
+        title: Annotated[str, Form()] = "",
+        description: Annotated[str, Form()] = "",
+        tags: Annotated[str, Form()] = "",
+        meta: Annotated[str, Form()] = "",
+    ) -> dict:
+        """Take the decrypted bytes, write the generation metadata into them,
+        and answer with the Civitai URL to open.
+
+        The media arrives already decrypted: the browser holds the vault key,
+        so it is the only side that CAN unseal an output. What crosses here is
+        plaintext by the time it is sent, which is the whole point of the
+        feature and is why nothing on this route touches the seal.
+        """
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="That file is empty.")
+        try:
+            parsed_meta = json.loads(meta) if meta else {}
+            if not isinstance(parsed_meta, dict):
+                parsed_meta = {}
+        except json.JSONDecodeError:
+            parsed_meta = {}
+        content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+        if not content_type:
+            content_type = mimetypes.guess_type(file.filename or "")[0] or ""
+        try:
+            staged, stamped = await asyncio.to_thread(
+                civitai_post.stage,
+                data=data,
+                content_type=content_type,
+                filename=file.filename or "",
+                meta=parsed_meta,
+            )
+        except civitai_post.CivitaiPostError as exc:
+            # Always a named limit ("this clip runs 300s, the limit is 245s"),
+            # so it is shown to the owner as written.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # The media URL has to be absolute AND reachable from the browser that
+        # is signed in to Civitai — which is this browser. Its own origin is
+        # therefore the only correct answer: guessing a hostname here is how a
+        # tailnet session ends up handed a localhost URL it cannot open.
+        origin = str(request.headers.get("origin") or "").rstrip("/")
+        if not origin:
+            base = request.base_url
+            origin = f"{base.scheme}://{base.netloc}".rstrip("/")
+        media_url = f"{origin}/civitai/staged/{staged.token}/{staged.filename}"
+        tag_list = [tag.strip() for tag in str(tags or "").split(",") if tag.strip()]
+        return {
+            "ok": True,
+            "token": staged.token,
+            "mediaUrl": media_url,
+            "intentUrl": civitai_post.intent_url(
+                media_url, title=title, description=description, tags=tag_list
+            ),
+            "expiresAt": staged.expires_at,
+            "bytes": staged.path.stat().st_size,
+            "kind": staged.kind,
+            # Whether the prompt actually travelled INSIDE the file. False is a
+            # normal outcome (no ffmpeg, an odd container), and the studio says
+            # so rather than implying Civitai will find settings that are not
+            # there.
+            "metadataEmbedded": bool(stamped),
+        }
+
+    @app.api_route("/civitai/staged/{token}/{filename}", methods=["GET", "HEAD", "OPTIONS"])
+    async def civitai_staged_media(token: str, filename: str, request: Request) -> Response:
+        """Serve one staged file to Civitai's post composer.
+
+        Deliberately outside the sign-in gate — see _civitai_staged_route. The
+        response is readable only from Civitai's own origins, and only while the
+        token lives.
+        """
+        origin = civitai_post.cors_origin(request.headers.get("origin"))
+        headers = {
+            "Cache-Control": "no-store",
+            # The composer reads these bytes with fetch().blob(), so without a
+            # matching CORS header the read fails and the media never attaches.
+            **({"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if origin else {}),
+            # Chrome treats civitai.com -> this machine as a public-to-private
+            # request and preflights it; without this the fetch is blocked
+            # before it is ever made.
+            **({"Access-Control-Allow-Private-Network": "true"} if origin else {}),
+        }
+        if request.method == "OPTIONS":
+            return Response(
+                status_code=204,
+                headers={
+                    **headers,
+                    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                    "Access-Control-Max-Age": "600",
+                },
+            )
+        staged = await asyncio.to_thread(civitai_post.read_staged, token)
+        if staged is None:
+            raise HTTPException(status_code=404, detail="That staged media has expired.")
+        return FileResponse(
+            staged.path,
+            media_type=staged.content_type,
+            filename=staged.filename,
+            headers=headers,
+        )
+
+    @app.delete("/api/civitai-post/stage/{token}", dependencies=[Depends(require_owner)])
+    async def civitai_post_unstage(token: str) -> dict:
+        """Drop a staging as soon as the post is made or abandoned, rather than
+        leaving plaintext to wait out its TTL."""
+        return {"ok": True, "dropped": await asyncio.to_thread(civitai_post.drop_staged, token)}
 
     def _build_simple_catalog() -> dict:
         brains: list[dict] = []

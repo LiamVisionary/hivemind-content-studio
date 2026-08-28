@@ -45,6 +45,8 @@ import { VIDEO_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studi
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import { peekMediaDuration } from '../lib/mediaDuration.js';
+import { CivitaiPostDialog } from '../components/CivitaiPostDialog.jsx';
+import { civitaiResourcesFromLoras } from '../lib/civitaiPost.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 // joinClips itself is imported dynamically inside joinChainFrom — it carries
 // mediabunny, which should not weigh down the studio chunk until a join runs.
@@ -310,6 +312,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     authOpen: false,
     authRetry: null,
     civitaiOpen: false,
+    // Posting a finished CLIP to Civitai — unrelated to civitaiOpen above,
+    // which is the LoRA downloader.
+    civitaiPost: null,
     promptHelperOpen: false,
     resumeRemaining: 0,
     deleteTarget: null,
@@ -4636,6 +4641,29 @@ export function VideoStudio({
                 >
                   {t('video.download')}
                 </Button>
+                <Button
+                  variant="neutral"
+                  icon="upload"
+                  onClick={() => {
+                    const entry = s.generationHistory.find((e) => e.url === s.resultUrl);
+                    // Same rule as the Image studio: the LoRAs recorded against
+                    // THIS clip's context, never the composer's current pick.
+                    const made = s.contextStore.recall(s.resultUrl);
+                    s.civitaiPost = {
+                      url: s.resultUrl,
+                      entry: {
+                        ...(entry || { model: s.resultModel }),
+                        civitaiResources: civitaiResourcesFromLoras(made?.loras, s.availableVideoLoras),
+                      },
+                    };
+                    bump();
+                  }}
+                  title={zh()
+                    ? '把这段视频未加密地发布到 Civitai'
+                    : 'Publish this clip to Civitai — it leaves this device unencrypted'}
+                >
+                  {zh() ? '发布到 Civitai' : 'Post to Civitai'}
+                </Button>
                 <Button variant="neutral" icon="plus" onClick={newPrompt}>{t('video.new')}</Button>
               </div>
             </div>
@@ -4775,6 +4803,15 @@ export function VideoStudio({
             s.authRetry = null;
             if (retry) retry();
           }}
+        />
+      ) : null}
+
+      {s.civitaiPost ? (
+        <CivitaiPostDialog
+          url={s.civitaiPost.url}
+          entry={s.civitaiPost.entry}
+          filename={videoDownloadName(s.civitaiPost.entry?.model || s.resultModel, s.civitaiPost.entry?.id)}
+          onClose={() => { s.civitaiPost = null; bump(); }}
         />
       ) : null}
 

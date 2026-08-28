@@ -305,12 +305,32 @@
     };
   }
 
+  // The inspiration finder. Artwork paths are relative to this bridge (it
+  // proxies Civitai's CDN so the page never talks to it), so they get the same
+  // apiBase treatment as every other preview.
+  async function searchCivitaiImages(params) {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params || {})) {
+      if (value !== undefined && value !== null && value !== '' && value !== false) query.set(key, String(value));
+    }
+    const data = await jsonFetch(`/local-ai/civitai-images?${query}`);
+    return {
+      ...data,
+      items: (data.items || []).map((item) => ({
+        ...item,
+        previewUrl: item.previewPath ? `${apiBase}${item.previewPath}` : '',
+        stillUrl: item.stillPath ? `${apiBase}${item.stillPath}` : '',
+      })),
+    };
+  }
+
   window.localAI = {
     isElectron: true,
     isHosted: true,
     getBinaryStatus: () => jsonFetch('/local-ai/binary-status'),
     listLibrary,
     searchCivitai,
+    searchCivitaiImages,
     listCivitaiBaseModels: () => jsonFetch('/local-ai/civitai-base-models'),
     downloadBinary: async () => ({ ok: true, source: 'hosted' }),
     listModels: () => jsonFetch('/local-ai/models'),

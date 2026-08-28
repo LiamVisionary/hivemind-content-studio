@@ -10,6 +10,7 @@
 // which is the thing the concept stage is actually for.
 export const STORY_EXAMPLE = Object.freeze({
   brief: {
+    pitch: 'A night bus driver and a large pale moth, in an empty estuary terminus at 2am. Strange, no dialogue.',
     person: 'the driver of the last night bus',
     companion: 'a large pale moth that rides on the fare machine',
     tone: 'strange',
@@ -19,6 +20,70 @@ export const STORY_EXAMPLE = Object.freeze({
   },
   style: 'muted painterly animation, soft grain, restrained palette',
   aspect: '9:16',
+  // The eight the contract below was chosen from. They are here because the
+  // story stage is the one stage whose point is the COMPARISON — an example
+  // that arrives with the winner already locked and nothing beside it shows
+  // the decision's result and hides the decision.
+  concepts: [
+    {
+      id: 'A', title: 'Last Service', pair: 'a night bus driver and a large pale moth',
+      hook: 'The moth lands on a ticket the machine never printed.',
+      friction: 'He is trying to finish a shift without looking at anything.',
+      reward: 'The first thing he has looked at properly all night.',
+      signature: 'a thermos lid worn as a cup',
+    },
+    {
+      id: 'B', title: 'Low Tide', pair: 'a harbour welder and a one-eyed gull',
+      hook: 'The gull steals a glove and waits to be chased.',
+      friction: 'Every minute spent chasing it is a minute the weld cools.',
+      reward: 'He stops chasing it and starts throwing to it.',
+      signature: 'a glove cuff bound in tape',
+    },
+    {
+      id: 'C', title: 'Night Shift', pair: 'a hospital porter and a corridor cat',
+      hook: 'The cat is asleep on the trolley he needs.',
+      friction: 'The trolley is due on a ward two floors up.',
+      reward: 'He takes the long way round with both of them aboard.',
+      signature: 'one squeaking wheel',
+    },
+    {
+      id: 'D', title: 'Signal Box', pair: 'a signalman and a robin on the lever frame',
+      hook: 'The robin sits on the lever he has to pull.',
+      friction: 'The train is four minutes out and does not wait.',
+      reward: 'The lever moves slowly enough for the robin to decide.',
+      signature: 'brass polished to a mirror',
+    },
+    {
+      id: 'E', title: 'Kiosk', pair: 'a night florist and a stubborn pigeon',
+      hook: 'The pigeon will not leave the bucket.',
+      friction: 'It is the one bucket the morning order needs.',
+      reward: 'She makes up a second bucket rather than move it.',
+      signature: 'wet newspaper wrapping',
+    },
+    {
+      id: 'F', title: 'Fog Warning', pair: 'a lighthouse keeper and a hermit crab',
+      hook: 'The crab has taken the spare lens cap for a shell.',
+      friction: 'It is the only spare, and the fog is coming in.',
+      reward: 'He files the log with the cap listed as lost at sea.',
+      signature: 'a lens cap worn as a shell',
+    },
+    {
+      id: 'G', title: 'Last Round', pair: 'a bowls-green groundsman and a heron',
+      hook: 'The heron stands exactly where the roller has to go.',
+      friction: 'The green has to be flat before the morning match.',
+      reward: 'He rolls around it and calls the line fair.',
+      signature: 'a roller handle bound in old inner tube',
+    },
+    {
+      id: 'H', title: 'Depot', pair: 'a tram cleaner and a spider that rebuilds nightly',
+      hook: 'The web is back across the same window every night.',
+      friction: 'That window is the one the inspector checks.',
+      reward: 'He starts cleaning around it.',
+      signature: 'a cloth folded into quarters',
+    },
+  ],
+  shortlist: ['A', 'C', 'F'],
+  lockedId: 'A',
   title: 'Last Service',
   promise: 'The driver who has stopped noticing anyone is quietly kept company.',
   contract: {

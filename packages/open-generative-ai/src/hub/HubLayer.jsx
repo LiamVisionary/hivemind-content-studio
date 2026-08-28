@@ -17,6 +17,7 @@ import { cx } from '../ui/kit.jsx';
 import { activateHubView, setHubRootEl, setHubVisible, startHub } from './hubData.js';
 import { PlannerView } from './views/PlannerView.jsx';
 import { CanvasView } from './views/CanvasView.jsx';
+import { InspoView } from './views/InspoView.jsx';
 import { ModelsView } from './views/ModelsView.jsx';
 import { RunsView } from './views/RunsView.jsx';
 import { HistoryView } from './views/HistoryView.jsx';
@@ -60,6 +61,7 @@ export function HubLayer({ visible, view }) {
           Canvas iframe and every decrypted thumbnail with it). */}
       <ErrorBoundary label="Planner" hidden={current !== 'create'}><PlannerView active={current === 'create'} /></ErrorBoundary>
       <ErrorBoundary label="Canvas" hidden={current !== 'canvas'}><CanvasView active={current === 'canvas'} /></ErrorBoundary>
+      <ErrorBoundary label="Inspo" hidden={current !== 'inspo'}><InspoView active={current === 'inspo'} /></ErrorBoundary>
       <ErrorBoundary label="Models" hidden={current !== 'models'}><ModelsView active={current === 'models'} /></ErrorBoundary>
       <ErrorBoundary label="Runs" hidden={current !== 'runs'}><RunsView active={current === 'runs'} /></ErrorBoundary>
       <ErrorBoundary label="History" hidden={current !== 'history'}><HistoryView active={current === 'history'} /></ErrorBoundary>

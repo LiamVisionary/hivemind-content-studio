@@ -246,6 +246,13 @@ class Provider(Protocol):
     label: str
     # Where the user tops up, quoted verbatim in the out-of-credit message.
     credit_url: str
+    # Every environment variable this provider accepts as its credential, in
+    # the order it tries them. Declared rather than guessed from `key`, because
+    # the guess is right for exactly one of the two: RunPod also answers to
+    # RUNPOD_MANAGEMENT_API_KEY, which is the name the shared hive env actually
+    # uses. A studio that cannot name the key it is missing cannot tell "never
+    # set up" from "set up but sealed" — and those have opposite repairs.
+    env_names: tuple[str, ...]
 
     def configured(self) -> bool:
         """True when this provider has credentials to work with.

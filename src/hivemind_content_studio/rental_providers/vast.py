@@ -30,11 +30,18 @@ REQUEST_TIMEOUT = 30
 _session = requests.Session()
 
 
+# The credential, by name, in one place — the provider declares it (see the
+# Provider protocol) so the studio can say which key is missing without
+# guessing at it.
+ENV_NAMES = ("VAST_API_KEY",)
+
+
 def _api_key() -> str:
-    value = os.environ.get("VAST_API_KEY", "").strip()
-    if not value:
-        raise ProviderError("VAST_API_KEY is not configured in the environment", status_code=503)
-    return value
+    for name in ENV_NAMES:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    raise ProviderError("VAST_API_KEY is not configured in the environment", status_code=503)
 
 
 def request(method: str, path: str, payload: dict | None = None) -> dict:
@@ -121,9 +128,10 @@ class VastProvider:
     key = "vast"
     label = "Vast.ai"
     credit_url = "vast.ai"
+    env_names = ENV_NAMES
 
     def configured(self) -> bool:
-        return bool(os.environ.get("VAST_API_KEY", "").strip())
+        return any(os.environ.get(name, "").strip() for name in ENV_NAMES)
 
     # --- shopping ----------------------------------------------------------
 
