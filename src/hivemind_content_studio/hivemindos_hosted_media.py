@@ -175,6 +175,20 @@ def _headers(token: str) -> dict[str, str]:
 
 
 def _dashboard_token() -> str:
+    """The device token, from the process, then HivemindOS's own file, then PassBook.
+
+    The last step used to hand-parse `~/.hivemindos/.env` with `_env_file_value`,
+    which is the machine's PassBook store — and reading it that way is wrong in a
+    specific, silent way. PassBook writes an encrypted value as the literal text
+    `hive-sealed:<ciphertext>`, so on a sealed store a line-splitting reader does
+    not come back empty: it comes back with the ciphertext, which is a non-empty
+    string, so it wins the loop and is sent as the device token. The dashboard
+    then answers "unauthorised" and nothing anywhere names the real cause.
+
+    Asking PassBook instead gets the value decrypted by the broker, scoped to the
+    workspace that is asking, and recorded. The files above it stay hand-read on
+    purpose: they belong to the HivemindOS project, not to this machine's store.
+    """
     direct = os.environ.get("HIVEMINDOS_DASHBOARD_DEVICE_TOKEN", "").strip()
     if direct:
         return direct
@@ -184,7 +198,6 @@ def _dashboard_token() -> str:
         Path(os.environ["HIVEMINDOS_ENV_FILE"]).expanduser() if os.environ.get("HIVEMINDOS_ENV_FILE") else None,
         Path(configured_root).expanduser() / ".env.local" if configured_root else None,
         root.parent / "hivemind-os" / ".env.local",
-        Path.home() / ".hivemindos" / ".env",
     ]
     for candidate in candidates:
         if candidate is None:
@@ -192,7 +205,12 @@ def _dashboard_token() -> str:
         value = _env_file_value(candidate, "HIVEMINDOS_DASHBOARD_DEVICE_TOKEN")
         if value:
             return value
-    return ""
+
+    from .shared_env import request_credential
+
+    return request_credential(
+        "HIVEMINDOS_DASHBOARD_DEVICE_TOKEN", reason="HivemindOS hosted media"
+    ).strip()
 
 
 def _env_file_value(path: Path, key: str) -> str:

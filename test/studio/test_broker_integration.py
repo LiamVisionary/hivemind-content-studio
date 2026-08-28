@@ -15,22 +15,15 @@ against `OPENAI_API_KEY` these tests passed alone and failed in the suite.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+import time
 
+import passbook
+import passbook_access
+import passbook_broker
+import passbook_stamp
 import pytest
 
-PACKAGE = Path(__file__).resolve().parents[2] / "packages" / "passbook"
-sys.path.insert(0, str(PACKAGE))
-
-import time  # noqa: E402
-
-import passbook  # noqa: E402
-import passbook_access  # noqa: E402
-import passbook_broker  # noqa: E402
-import passbook_stamp  # noqa: E402
-
-from hivemind_content_studio import shared_env  # noqa: E402
+from hivemind_content_studio import shared_env
 
 GRANTED_KEY = "PB_BROKER_TEST_GRANTED"
 WITHHELD_KEY = "PB_BROKER_TEST_WITHHELD"

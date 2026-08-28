@@ -99,7 +99,9 @@ Templates surface in three places: the Simple composer's **Templates** menu (ins
 
 ## Quick start
 
-The studio automatically fills missing server-side variables from `~/.hivemindos/.env`; explicit process or project values take precedence. Provider secrets never enter the browser or the provider catalog response. `hive-env-run` remains useful for consistency with other HivemindOS tools, but is no longer required just to make the studio discover shared provider credentials.
+Credentials come from [PassBook](https://github.com/LiamVisionary/passbook), the machine's shared credential store — `$HIVE_HOME`, else `~/.hivemindos/.env`. The studio joins that store at startup and fills only the server-side variables that are missing; an explicit process or project value always wins. Provider secrets never enter the browser or the provider catalog response.
+
+`passbook run --` puts the store in front of a command and records which key was read and who asked. The studio does not need it — it asks PassBook directly — but it is what you want for anything that does not. `hive-env-run --` is the older shim over the same store and still works.
 
 ```bash
 uv sync --extra dev --extra mcp
@@ -107,8 +109,8 @@ npm --prefix packages/open-generative-ai ci
 npm --prefix packages/comfyui-mobile ci
 npm --prefix packages/media-gateway ci
 npm run build:embedded
-hive-env-run -- uv run content-studio doctor
-hive-env-run -- uv run content-studio providers
+passbook run -- uv run content-studio doctor
+passbook run -- uv run content-studio providers
 ```
 
 Start the complete local stack:
@@ -124,9 +126,9 @@ Private runtime state is outside Git under `~/.hivemindos/media-studio`. Existin
 Start a durable run. It advances deterministic work and stops with structured `next_actions` when an agent, provider, evaluator, or operator is needed:
 
 ```bash
-hive-env-run -- uv run content-studio run execute examples/briefs/first-frame-animation-ad.yaml --privacy local-first --max-cost-usd 10
-hive-env-run -- uv run content-studio run list
-hive-env-run -- uv run content-studio run get <run-id>
+passbook run -- uv run content-studio run execute examples/briefs/first-frame-animation-ad.yaml --privacy local-first --max-cost-usd 10
+passbook run -- uv run content-studio run list
+passbook run -- uv run content-studio run get <run-id>
 ```
 
 SQLite is authoritative for run/step/event/budget state. The versioned manifest is authoritative for the brief, provider selections, artifacts, provenance, approval, publish drafts, and receipts.
@@ -174,8 +176,8 @@ uv run content-studio mcp-tools
 Media Studio discovery is also read-only:
 
 ```bash
-hive-env-run -- uv run content-studio media-studio status
-hive-env-run -- uv run content-studio media-studio tools
+passbook run -- uv run content-studio media-studio status
+passbook run -- uv run content-studio media-studio tools
 ```
 
 Media Studio is also available through the `animate_scenes` intent. Its local/fleet generation never implies approval to publish the result.
@@ -204,7 +206,7 @@ uv run content-studio approval decide <approval-id> --decision approve --decided
 uv run content-studio approve <manifest.json> --reviewer <name> --rights-note "Owned/approved media and claims reviewed." --approval-token <one-time-token>
 ```
 
-Live publishing additionally requires both `CONTENT_STUDIO_ENABLE_LIVE_PUBLISH=true` and `--confirm LIVE_PUBLISH`. Use `hive-env-run --` so credentials remain in the shared HivemindOS environment.
+Live publishing additionally requires both `CONTENT_STUDIO_ENABLE_LIVE_PUBLISH=true` and `--confirm LIVE_PUBLISH`. Use `passbook run --` so credentials stay in the shared store and every read is recorded.
 
 After distribution, attach platform outcomes to the same run:
 
@@ -240,7 +242,7 @@ Podcli's own AI clip selection is **off** by default. Stock Podcli hands the who
 `claude` or `codex` binary on PATH; `patches/podcli-ai-select-default-off.patch` makes that an explicit
 `--ai-select` opt-in, and `auto-clipper doctor` fails an install that is missing the gate.
 
-The optional operator console is secondary and starts locally with `hive-env-run -- uv run content-studio-api`. It reads the same state store; authenticated mutations require `CONTENT_STUDIO_CONTROL_TOKEN`.
+The optional operator console is secondary and starts locally with `passbook run -- uv run content-studio-api`. It reads the same state store; authenticated mutations require `CONTENT_STUDIO_CONTROL_TOKEN`.
 
 The repository also snapshots the relevant Shared Brain skills under `skills/shared/` and vendors the audited Clueso workflow shelf under `skills/vendor/clueso-ai/`. `skills/hivemind-content-studio/SKILL.md` is linked into `.agents/skills/` as the canonical entry skill; provider adapters are operational references, not duplicate implementations.
 

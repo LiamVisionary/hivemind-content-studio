@@ -89,3 +89,52 @@ def test_hosted_media_refuses_to_exceed_the_consumed_approval_maximum(tmp_path: 
             idempotency_key="run-1:keyframe:1",
             opener=opener,
         )
+
+
+def test_a_sealed_store_does_not_yield_ciphertext_as_the_device_token(tmp_path: Path, monkeypatch) -> None:
+    """PassBook writes an encrypted value as the literal `hive-sealed:<...>`.
+
+    Reading the store by splitting lines therefore does not fail on a sealed
+    store — it succeeds with the ciphertext, which is a non-empty string that
+    then travels to the dashboard as the device token. The request comes back
+    unauthorised and nothing in the failure names the encryption. So the check
+    is not "did we get a token" but "is what we got the sealed text".
+    """
+    import passbook
+
+    home = tmp_path / "hive"
+    monkeypatch.setenv("HIVE_HOME", str(home))
+    monkeypatch.delenv("HIVE_ENV_FILES", raising=False)
+    monkeypatch.delenv("HIVEMINDOS_DASHBOARD_DEVICE_TOKEN", raising=False)
+    monkeypatch.delenv("HIVEMINDOS_ENV_FILE", raising=False)
+    monkeypatch.delenv("HIVEMINDOS_PROJECT_ROOT", raising=False)
+    passbook.ensure(app="test")
+
+    # What a sealed store looks like on disk, written the way passbook_seal
+    # leaves it. The value is deliberately not a real ciphertext; the prefix is
+    # the whole point.
+    env_path = passbook.env_path()
+    env_path.write_text(
+        'HIVEMINDOS_DASHBOARD_DEVICE_TOKEN="hive-sealed:v2:notarealciphertext"\n',
+        encoding="utf-8",
+    )
+
+    token = _dashboard_token()
+    assert not token.startswith("hive-sealed:"), (
+        f"the sealed text was handed out as a device token: {token[:16]}..."
+    )
+
+
+def test_an_unsealed_store_value_still_reaches_the_caller(tmp_path: Path, monkeypatch) -> None:
+    """The fallback has to keep working, or the fix above is just a deletion."""
+    import passbook
+
+    monkeypatch.setenv("HIVE_HOME", str(tmp_path / "hive"))
+    monkeypatch.delenv("HIVE_ENV_FILES", raising=False)
+    monkeypatch.delenv("HIVEMINDOS_DASHBOARD_DEVICE_TOKEN", raising=False)
+    monkeypatch.delenv("HIVEMINDOS_ENV_FILE", raising=False)
+    monkeypatch.delenv("HIVEMINDOS_PROJECT_ROOT", raising=False)
+    passbook.ensure(app="test")
+    passbook.set_values({"HIVEMINDOS_DASHBOARD_DEVICE_TOKEN": "from-the-store"})
+
+    assert _dashboard_token() == "from-the-store"

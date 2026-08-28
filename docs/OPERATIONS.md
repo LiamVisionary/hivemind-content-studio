@@ -5,7 +5,7 @@
 Run with shared credentials without copying secrets:
 
 ```bash
-hive-env-run -- uv run content-studio doctor
+passbook run -- uv run content-studio doctor
 ```
 
 Project/process environment wins over the shared hive environment, so a project-specific provider can override a fleet default without changing files.
@@ -81,7 +81,7 @@ Do not replace a remote/Tailnet service URL with client-local `127.0.0.1`. The l
 
 ## MCP and browser studio
 
-Run the stdio MCP server with `hive-env-run -- uv run content-studio-mcp`. Agents should begin with `studio://capabilities` and `studio://providers`, create a run with `execute_content_run`, and inspect `studio://runs/<id>/next-actions` after every external step.
+Run the stdio MCP server with `passbook run -- uv run content-studio-mcp`. Agents should begin with `studio://capabilities` and `studio://providers`, create a run with `execute_content_run`, and inspect `studio://runs/<id>/next-actions` after every external step.
 
 Build embedded web packages once after dependency or frontend changes:
 

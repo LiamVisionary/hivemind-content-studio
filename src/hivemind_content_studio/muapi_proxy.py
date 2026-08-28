@@ -99,8 +99,8 @@ def forward(
     key = server_key()
     if not key:
         raise MuapiProxyError(
-            "MUAPI_API_KEY is not set on this machine. Add it to the shared Hive "
-            "environment (~/.hivemindos/.env) and restart the studio."
+            "MUAPI_API_KEY is not set on this machine. Add it with "
+            "`passbook add MUAPI_API_KEY` and restart the studio."
         )
     upstream_path = safe_path(path)
     url = f"{UPSTREAM}/{upstream_path}"

@@ -36,6 +36,30 @@ CONTENT_STUDIO_PORT="8765"
 OPEN_GEN_PORT="8794"
 ZIMG_TOKEN_FILE="${ZIMG_TOKEN_FILE:-$MEDIA_STATE_ROOT/secure/zimg-token}"
 
+# Start a service with the machine's shared credentials loaded.
+#
+# PassBook owns the store, so `passbook run` is the direct route and it names
+# the asking service, which is the difference that matters: without --app every
+# read in the access ledger is attributed to the wrapper, and five services
+# collapse into one row that says nothing about who wanted the key.
+#
+# `hive-env-run` is the older shim over the same store and stays as the
+# fallback, because a machine can have HivemindOS without having run
+# `passbook install` yet. Running bare is last: the services still start, they
+# just see only what this shell already exported.
+with_credentials() {
+  local app="$1"
+  shift
+  if command -v passbook >/dev/null 2>&1; then
+    passbook run --app "$app" -- "$@"
+  elif command -v hive-env-run >/dev/null 2>&1; then
+    hive-env-run -- "$@"
+  else
+    log "no passbook and no hive-env-run; $app starts without the shared store"
+    "$@"
+  fi
+}
+
 load_hardware_profile() {
   if [ -f "$APP/hardware_profile.py" ]; then
     eval "$(python3 "$APP/hardware_profile.py" --shell 2>/dev/null)" || true
@@ -456,7 +480,7 @@ PY
 	  COMFY_REMOTE_LANES="${RENTAL_COMFY_REMOTE_LANES:-}" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
-  hive-env-run -- python3 app.py \
+  with_credentials z-image-api python3 app.py \
     >> "$PRIV/z-image-api.log" 2>&1 &
   pid="$!"
   children+=("$pid")
@@ -476,7 +500,7 @@ PY
 	  COMFY_LANES="$comfy_lanes" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
-  hive-env-run -- npm run start >> "$PRIV/z-image-frontend.log" 2>&1 &
+  with_credentials z-image-frontend npm run start >> "$PRIV/z-image-frontend.log" 2>&1 &
   pid="$!"
   children+=("$pid")
   log "Z-Image browser frontend child pid=$pid"
@@ -491,7 +515,7 @@ PY
   OGA_PORT="$OPEN_GEN_PORT" \
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
   ZIMAGE_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
-  hive-env-run -- node hosted-server.js >> "$PRIV/open-generative-ai.log" 2>&1 &
+  with_credentials open-generative-ai node hosted-server.js >> "$PRIV/open-generative-ai.log" 2>&1 &
   pid="$!"
   children+=("$pid")
   log "OpenGen local inference bridge child pid=$pid url=http://127.0.0.1:$OPEN_GEN_PORT"
@@ -506,7 +530,7 @@ PY
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
 	  COMFY_LANES="$comfy_lanes" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
-  hive-env-run -- uv run content-studio-api \
+  with_credentials hivemind-content-studio uv run content-studio-api \
     >> "$PRIV/hivemind-content-studio.log" 2>&1 &
   pid="$!"
   children+=("$pid")
@@ -539,7 +563,7 @@ PY
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
   MEDIA_STUDIO_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
   MEDIA_STUDIO_E2E_PUB_FILE="${MEDIA_STUDIO_E2E_PUB_FILE:-$MEDIA_STATE_ROOT/secure/agent-e2e-pub}" \
-  hive-env-run -- node "$APP/bin/media-studio-mcp.mjs" --http >> "$PRIV/media-studio-mcp.log" 2>&1 &
+  with_credentials media-studio-mcp node "$APP/bin/media-studio-mcp.mjs" --http >> "$PRIV/media-studio-mcp.log" 2>&1 &
   pid="$!"
   children+=("$pid")
   log "Media Studio MCP HTTP child pid=$pid url=http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT/mcp"

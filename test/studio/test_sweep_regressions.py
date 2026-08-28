@@ -101,7 +101,15 @@ def test_xai_and_openai_resolve_their_keys_from_the_same_shared_env(monkeypatch,
     assert generation.provider_credential("OPENAI_API_KEY") == "from-process"
 
 
-def test_a_missing_xai_key_names_the_shared_env_and_the_other_lane(monkeypatch, tmp_path) -> None:
+def test_a_missing_xai_key_names_how_to_add_it_and_the_other_lane(monkeypatch, tmp_path) -> None:
+    """The message has to be actionable, and it used to name a file to edit.
+
+    Pointing at `~/.hivemindos/.env` was fine advice for a plaintext store and
+    bad advice for a sealed one: a hand-added line for a key that is already
+    there, sealed, leaves the store with two entries for one name. Naming the
+    command instead is the whole difference, so what is asserted here is that a
+    command appears — not the sentence it appears in.
+    """
     monkeypatch.setenv("HIVE_ENV_FILES", str(tmp_path / "absent.env"))
     monkeypatch.delenv("XAI_API_KEY", raising=False)
 
@@ -112,8 +120,9 @@ def test_a_missing_xai_key_names_the_shared_env_and_the_other_lane(monkeypatch, 
             confirm=generation.PAID_GENERATION_CONFIRMATION,
         )
 
-    assert "shared hive env" in str(failure.value)
-    assert "OAuth" in str(failure.value)
+    message = str(failure.value)
+    assert "passbook add XAI_API_KEY" in message, message
+    assert "OAuth" in message, message
 
 
 # ── generated media that named itself wrongly ─────────────────────────────

@@ -35,15 +35,56 @@ APP_NAME = "Hivemind Content Studio"
 
 DEFAULT_HIVE_ENV_FILES = (Path("~/.hivemindos/.env"),)
 
+# The marker PassBook writes in place of an encrypted value.
+_SEALED = "hive-sealed:"
+
 
 def parse_env_file(env_file: str | Path) -> dict[str, str]:
+    """One store file, read the way PassBook reads it — never as ciphertext.
+
+    `parse_env_text` is the raw parser: it returns exactly what is on the line,
+    and on a sealed store what is on the line is `hive-sealed:<ciphertext>`.
+    Handing that back is worse than handing back nothing, because ciphertext is
+    a non-empty string. It survives every `if not value` check, gets written
+    into `os.environ` by `apply_shared_hive_env`, wins the process-environment
+    branch of `provider_models.credential`, and leaves as
+    `Authorization: Bearer hive-sealed:...`. ChatGPT answers "Could not parse
+    your authentication token. Please try signing in again", the studio offers
+    a reconnect button, and signing in again writes a token that is sealed and
+    fails the same way. Nothing in that loop names the encryption.
+
+    So this ends where PassBook's own reader ends: a value that cannot be opened
+    on this machine is ABSENT, which reads as "not connected" and sends the
+    owner to the one repair that works — signing in to PassBook.
+    """
     path = Path(env_file).expanduser()
     if not path.is_file():
         return {}
     try:
-        return passbook.parse_env_text(path.read_text(encoding="utf-8"))
+        values = passbook.parse_env_text(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         return {}
+    return _opened(values)
+
+
+def _opened(values: dict[str, str]) -> dict[str, str]:
+    """Decrypt what this machine is allowed to; drop what stays shut.
+
+    A machine with no key, or a locked vault, is the stolen-file case: the names
+    remain listable, the values are simply not there.
+    """
+    if not any(str(value).startswith(_SEALED) for value in values.values()):
+        return values
+    try:
+        import passbook_seal
+
+        values = passbook_seal.unseal_all(values)
+    except ImportError:
+        pass
+    except Exception:  # noqa: BLE001 — a store this machine cannot open reads as shut
+        pass
+    return {name: value for name, value in values.items()
+            if not str(value).startswith(_SEALED)}
 
 
 def configured_hive_env_files(environment: Mapping[str, str] | None = None) -> tuple[Path, ...]:
@@ -59,6 +100,28 @@ def configured_hive_env_files(environment: Mapping[str, str] | None = None) -> t
     if configured:
         return tuple(Path(item).expanduser() for item in configured.split(os.pathsep) if item.strip())
     return (passbook.env_path(source),)
+
+
+def stored_key_names() -> set[str]:
+    """Every name the configured store holds, sealed ones included.
+
+    Names, not values: a sealed key is listable on any machine, and that is what
+    tells "this credential exists but is locked" apart from "this credential was
+    never added". `hive_env_status()` cannot answer this, because it asks
+    PassBook about the MACHINE store and so ignores `HIVE_ENV_FILES` — which
+    means it reads a developer's real credentials from inside a test run, and in
+    production it answers about a store this process was told not to use.
+    """
+    names: set[str] = set()
+    for env_file in configured_hive_env_files():
+        path = Path(env_file).expanduser()
+        if not path.is_file():
+            continue
+        try:
+            names.update(passbook.parse_env_text(path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError):
+            continue
+    return names
 
 
 def load_shared_hive_env(
@@ -143,7 +206,14 @@ def request_credential(name: str, *, reason: str = "") -> str:
         workspace_id=passbook.workspace(),
         stores=redirected,
     )
-    return granted.get(name, "")
+    value = granted.get(name, "")
+    # `request` applies the fleet precedence rule — the process environment
+    # outranks the store — so a sealed value that reached `os.environ` comes
+    # BACK OUT of here even though the store's own reader had already dropped
+    # it. That makes the poisoning contagious: filtering it at one call site
+    # does not stop the next one. It ends here instead, at the door every
+    # credential read in the studio goes through.
+    return "" if str(value).startswith(_SEALED) else value
 
 
 def enable_access_stamps(*, actor_did: str = "") -> bool:

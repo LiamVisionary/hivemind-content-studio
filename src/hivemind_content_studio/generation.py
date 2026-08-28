@@ -208,7 +208,7 @@ def generate_openai_image_asset(
     api_key = provider_credential("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "OPENAI_API_KEY is not set — add it to the shared hive env (~/.hivemindos/.env). "
+            "OPENAI_API_KEY is not set — add it with `passbook add OPENAI_API_KEY`. "
             "ChatGPT/Codex OAuth is a separate credential; pick the GPT Image OAuth provider to use it"
         )
     bounded_prompt = _validate_openai_image_args(
@@ -353,7 +353,7 @@ def generate_xai_imagine_asset(
         api_key = provider_credential("XAI_API_KEY")
         if not api_key:
             raise RuntimeError(
-                "XAI_API_KEY is not set — add it to the shared hive env (~/.hivemindos/.env) "
+                "XAI_API_KEY is not set — add it with `passbook add XAI_API_KEY` "
                 "or connect xAI over OAuth and pick the xAI Imagine OAuth provider instead"
             )
         path = (

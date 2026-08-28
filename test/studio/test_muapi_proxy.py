@@ -51,9 +51,14 @@ def test_nothing_is_forwarded_without_a_key_on_this_machine(monkeypatch) -> None
     with pytest.raises(muapi_proxy.MuapiProxyError) as excinfo:
         muapi_proxy.forward(method="POST", path="api/v1/flux", opener=lambda *a, **k: None)
 
-    # And it says where to put it, rather than "not configured".
-    assert "MUAPI_API_KEY" in str(excinfo.value)
-    assert ".hivemindos/.env" in str(excinfo.value)
+    # And it says how to put it there, rather than "not configured". It used to
+    # name the store file, which stopped being good advice once the store could
+    # be sealed: a hand-added line for a key that is already there, sealed,
+    # leaves two entries for one name. What matters is that a repair is named,
+    # so that is what is asserted — not the sentence carrying it.
+    message = str(excinfo.value)
+    assert "MUAPI_API_KEY" in message, message
+    assert "passbook add MUAPI_API_KEY" in message, message
 
 
 def test_this_machines_key_is_attached_and_the_callers_is_not(monkeypatch) -> None:

@@ -1300,7 +1300,7 @@ wheels = [
 [[package]]
 name = "passbook"
 version = "1.0.0"
-source = { git = "https://github.com/LiamVisionary/passbook.git#d94e1efa4f7773f75cf9fb386950b48e1e1b9ea4" }
+source = { git = "https://github.com/LiamVisionary/passbook.git#e16c94869589cfe835ba4c51d39ca059d0abbda8" }
 dependencies = [
     { name = "cryptography" },
 ]

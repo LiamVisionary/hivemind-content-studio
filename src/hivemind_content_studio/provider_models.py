@@ -287,6 +287,34 @@ def stored_names() -> set[str]:
     return names
 
 
+def _held_but_shut(names: tuple[str, ...]) -> bool:
+    """Is this credential in the store, but not openable by this process?
+
+    The two states look identical at the call site — nothing comes back either
+    way — and they have opposite repairs. Never connected is fixed by signing in
+    to the provider. Connected but sealed, on a machine whose vault is locked,
+    is fixed by signing in to PassBook, and telling that owner to reconnect
+    their account sends them to re-authenticate something that is not broken.
+    The store lists sealed keys by NAME, which is exactly what separates them.
+    """
+    if not names:
+        return False
+    try:
+        held = shared_env.stored_key_names()
+    except Exception:  # noqa: BLE001 — a store we cannot reach is not "shut"
+        return False
+    return any(name in held for name in names if name)
+
+
+def _shut_refusal(provider: Provider) -> ProviderModelsError:
+    return ProviderModelsError(
+        f"{provider.label} is connected, but its credentials are sealed and this "
+        f"machine's vault is locked. Sign in to PassBook (`passbook signin`) to "
+        f"unlock it — reconnecting the account will not help.",
+        remedy=provider.connect, provider=provider.id,
+    )
+
+
 def credential_name(provider: Provider, present: set[str] | None = None) -> str:
     held = stored_names() if present is None else present
     for name in provider.env:
@@ -302,7 +330,14 @@ def credential(name: str, *, reason: str = "") -> str:
     fleet uses, so a project can override a fleet-wide default by exporting it.
     """
     direct = os.environ.get(name, "").strip()
-    if direct:
+    # Ciphertext is not a credential. A sealed value that reached the process
+    # environment — from here, or from a parent that read the store the wrong
+    # way — is non-empty, so it would otherwise win this branch and go out as a
+    # bearer token, and the provider's refusal would name the account rather
+    # than the encryption. Ignoring it falls through to the broker, which can
+    # actually open it; if the broker cannot, the caller gets "not connected",
+    # which is both true and repairable.
+    if direct and not direct.startswith("hive-sealed:"):
         return direct
     try:
         return shared_env.request_credential(name, reason=reason or "producer model call").strip()
@@ -368,6 +403,8 @@ def grant_token(provider: Provider, *, opener: Callable[..., Any] = urllib.reque
 
     refresh = credential(provider.refresh_env, reason="grant refresh") if provider.refresh_env else ""
     if not refresh:
+        if _held_but_shut((provider.env[0], provider.refresh_env)):
+            raise _shut_refusal(provider)
         raise ProviderModelsError(
             f"{provider.label} is not connected yet.",
             remedy=provider.connect, provider=provider.id,
@@ -442,6 +479,8 @@ def bearer(provider: Provider, present: set[str] | None = None, *,
         )
     value = credential(name, reason=f"{provider.label} producer call")
     if not value:
+        if _held_but_shut((name,)):
+            raise _shut_refusal(provider)
         raise ProviderModelsError(
             f"{provider.label}'s key could not be read from the shared store.",
             remedy=provider.connect, provider=provider.id,
