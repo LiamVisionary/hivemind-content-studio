@@ -312,6 +312,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "aimlapi",
                 "evolink",
                 "ollama",
+                "lmstudio",
                 "oneapi",
                 "litellm",
                 "groq",

@@ -223,6 +223,15 @@ LLM_PROVIDER_REGISTRY = (
         show_api_key=False,
     ),
     LLMProviderSpec(
+        "lmstudio",
+        "LM Studio",
+        api_key_url="https://lmstudio.ai/docs/app/api/endpoints/openai",
+        # LM Studio 自身不校验凭证，所以 key 永远不是必填。字段仍然显示：
+        # 一旦服务暴露到 loopback 之外，通常前面会有一层需要 token 的代理，
+        # 那个 token 必须能在界面上填，而不是去手改 config.toml。
+        requires_api_key=False,
+    ),
+    LLMProviderSpec(
         "oneapi",
         "OneAPI",
         api_key_url="https://github.com/songquanpeng/one-api",

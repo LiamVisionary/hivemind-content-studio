@@ -2015,14 +2015,22 @@ def _render_settings_dialog():
             )
 
             provider_tip_context = {}
-            if llm_provider == "ollama":
-                llm_default_base_url = config.get_default_ollama_base_url()
+            # Ollama and LM Studio are the same shape: an OpenAI-compatible
+            # server on loopback whose reachable address depends on whether this
+            # process is in a container. Same resolution, same hint, different
+            # port — so the branch is over the pair rather than duplicated.
+            _LOCAL_SERVERS = {
+                "ollama": config.get_default_ollama_base_url,
+                "lmstudio": config.get_default_lmstudio_base_url,
+            }
+            if llm_provider in _LOCAL_SERVERS:
+                llm_default_base_url = _LOCAL_SERVERS[llm_provider]()
                 if not llm_base_url:
                     llm_base_url = llm_default_base_url
                 docker_hint = ""
                 if config.is_running_in_container():
                     docker_hint = tr_optional(
-                        "llm_provider_tips.ollama.docker_hint",
+                        f"llm_provider_tips.{llm_provider}.docker_hint",
                         fallback_language="en",
                     )
                 provider_tip_context["docker_hint"] = docker_hint

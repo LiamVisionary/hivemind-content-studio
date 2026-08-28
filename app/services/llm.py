@@ -180,6 +180,14 @@ def _generate_response(prompt: str, app_config=None) -> str:
             if not base_url:
                 base_url = config.get_default_ollama_base_url()
 
+        # LM Studio 同样不校验凭证，但 OpenAI SDK 要求 api_key 非空，因此填入
+        # 约定的占位值。与 Ollama 不同的是这里保留用户填写的值：服务一旦暴露
+        # 到本机之外，前面那层代理的 token 必须能透传过去。
+        if llm_provider == "lmstudio":
+            api_key = api_key or "lm-studio"
+            if not base_url:
+                base_url = config.get_default_lmstudio_base_url()
+
         if adapter == "azure":
             api_version = runtime_app_config.get(
                 provider.config_key("api_version"), "2024-02-15-preview"

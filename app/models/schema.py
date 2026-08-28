@@ -61,6 +61,43 @@ class MaterialInfo:
     source_info: Optional[dict[str, Any]] = None
 
 
+class SceneConfig(BaseModel):
+    """One named part of a video, with its own footage and its own share of time.
+
+    `match_materials_to_script` already asks for keywords in narrative order so
+    the pictures roughly follow the words. A scene makes that boundary explicit:
+    its own narration, its own terms or its own files, its own duration.
+
+    There is deliberately no `transition` here. `video.combine_videos` applies
+    one transition mode across the whole timeline, so a per-scene transition
+    would be accepted, stored, echoed back and silently ignored — a field that
+    reads like a setting and behaves like a comment. It belongs here when
+    composition can honour it.
+    """
+
+    scene_id: int = Field(
+        default=0, ge=0,
+        description="1-based scene number. Left at 0, one is assigned in order.",
+    )
+    script: str = Field(
+        default="", max_length=8000,
+        description="This scene's narration. Scenes with a script are joined, in order, "
+                    "to form the video's script.",
+    )
+    search_terms: Optional[List[str]] = Field(
+        default=None,
+        description="Keywords for this scene's footage. Derived from its script when absent.",
+    )
+    materials: Optional[List[MaterialInfo]] = Field(
+        default=None,
+        description="This scene's own files. Takes precedence over search_terms.",
+    )
+    duration: Optional[float] = Field(
+        default=None, ge=0.5,
+        description="Seconds this scene should run. Unstated scenes split what is left.",
+    )
+
+
 class VideoParams(BaseModel):
     """
     {
@@ -85,6 +122,10 @@ class VideoParams(BaseModel):
     video_clip_duration: int = Field(default=5, ge=1)
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
+    # Scenes decide terms and material order outright. When they are given,
+    # `match_materials_to_script` has nothing left to guess at and the pipeline
+    # says so rather than letting a heuristic and an instruction both run.
+    scenes: Optional[List["SceneConfig"]] = None
     video_count: int = Field(default=1, ge=1)
 
     video_source: Optional[str] = "pexels"

@@ -392,32 +392,54 @@ def get_container_default_gateway_ip(route_path: str = "/proc/net/route") -> str
     return ""
 
 
-def get_default_ollama_base_url() -> str:
-    """
-    返回 Ollama 的默认 OpenAI-compatible base_url。
+# 本地推理服务的默认 OpenAI-compatible 端口。两者都只监听本机，因此容器内
+# 需要改指向宿主机，解析规则完全一致，只有端口和日志中的服务名不同。
+OLLAMA_DEFAULT_PORT = 11434
+LMSTUDIO_DEFAULT_PORT = 1234
 
-    用户显式配置 `ollama_base_url` 时不会走这里；这里只处理“未配置时的
+
+def get_default_local_service_base_url(port: int, service_name: str) -> str:
+    """
+    返回本机推理服务的默认 OpenAI-compatible base_url。
+
+    用户显式配置对应的 `*_base_url` 时不会走这里；这里只处理“未配置时的
     最佳默认值”。容器内默认指向宿主机，普通本机运行默认指向 localhost。
+    `service_name` 只用于日志，便于区分是哪个服务在回退。
     """
     if not is_running_in_container():
-        return "http://localhost:11434/v1"
+        return f"http://localhost:{port}/v1"
 
     if _can_resolve_hostname(_DOCKER_HOST_GATEWAY_NAME):
-        return f"http://{_DOCKER_HOST_GATEWAY_NAME}:11434/v1"
+        return f"http://{_DOCKER_HOST_GATEWAY_NAME}:{port}/v1"
 
     gateway_ip = get_container_default_gateway_ip()
     if gateway_ip:
         logger.info(
             "host.docker.internal is not resolvable, fallback to container "
-            f"default gateway for Ollama: {gateway_ip}"
+            f"default gateway for {service_name}: {gateway_ip}"
         )
-        return f"http://{gateway_ip}:11434/v1"
+        return f"http://{gateway_ip}:{port}/v1"
 
     logger.warning(
         "failed to resolve host.docker.internal and container default gateway; "
-        "fallback to host.docker.internal for Ollama"
+        f"fallback to host.docker.internal for {service_name}"
     )
-    return f"http://{_DOCKER_HOST_GATEWAY_NAME}:11434/v1"
+    return f"http://{_DOCKER_HOST_GATEWAY_NAME}:{port}/v1"
+
+
+def get_default_ollama_base_url() -> str:
+    """返回 Ollama 的默认 OpenAI-compatible base_url。"""
+    return get_default_local_service_base_url(OLLAMA_DEFAULT_PORT, "Ollama")
+
+
+def get_default_lmstudio_base_url() -> str:
+    """
+    返回 LM Studio 的默认 OpenAI-compatible base_url。
+
+    LM Studio 的本地服务器默认监听 1234 端口并暴露 `/v1`，与 Ollama 一样
+    只监听本机，因此容器内的解析规则完全复用同一个实现。
+    """
+    return get_default_local_service_base_url(LMSTUDIO_DEFAULT_PORT, "LM Studio")
 
 _APP_SECRET_DEFAULTS = {
     "api_key": "",

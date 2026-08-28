@@ -9,6 +9,7 @@ from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
 from app.services import bgm as bgm_service
+from app.services import scenes as scene_service
 from app.services import (
     elevenlabs_music,
     llm,
@@ -116,6 +117,17 @@ def _mark_task_failed(task_id: str, stage: str, error: str) -> dict:
 
 def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
+    # Scenes that carry their own narration ARE the script, joined in order. A
+    # model asked to write one afterwards would produce a second, different
+    # script for footage already chosen scene by scene, and the voiceover would
+    # stop describing what is on screen.
+    staged = scene_service.normalize(getattr(params, "scenes", None))
+    if staged:
+        spoken = scene_service.combined_script(staged, fallback=params.video_script.strip())
+        if spoken:
+            logger.debug(f"video script, from {len(staged)} scene(s):\n{spoken}")
+            return spoken
+
     video_script = params.video_script.strip()
     if not video_script:
         video_script = llm.generate_script(
@@ -137,6 +149,25 @@ def generate_script(task_id, params):
 
 def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
+    # Scenes name their own footage, so there is no video-level keyword list to
+    # generate: each scene's terms come from its own script and stay attached to
+    # it. Flattened here only because the terms are also saved for the record;
+    # the material step asks per scene.
+    staged = scene_service.normalize(getattr(params, "scenes", None))
+    if staged:
+        if params.match_materials_to_script:
+            logger.info(
+                "scenes are set, so material order follows them; "
+                "match_materials_to_script has nothing left to order"
+            )
+        per_scene = scene_service.terms_for(
+            staged,
+            generate=lambda subject, script, amount: llm.generate_terms(
+                video_subject=subject, video_script=script, amount=amount),
+            video_subject=params.video_subject,
+        )
+        return [term for terms in per_scene for term in terms]
+
     video_terms = params.video_terms
     if not video_terms:
         # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
@@ -416,6 +447,10 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
 
 
 def get_video_materials(task_id, params, video_terms, audio_duration):
+    staged = scene_service.normalize(getattr(params, "scenes", None))
+    if staged:
+        return _scene_materials(task_id, params, staged, audio_duration)
+
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
@@ -455,6 +490,53 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             )
             return None
         return downloaded_videos
+
+
+def _scene_materials(task_id, params, staged, audio_duration):
+    """Footage for each scene, in scene order, each for its own share of time.
+
+    Downloaded per scene rather than once for the video, which is the point: a
+    single pooled download cannot be attributed back to the section that needed
+    it, so a long first scene eats the budget and the last one plays over
+    whatever is left.
+
+    A scene that produces nothing fails the task rather than being skipped. The
+    alternative is a video that is silently shorter than it was asked to be,
+    with no line anywhere saying which part went missing.
+    """
+    budget = scene_service.durations(staged, audio_duration * params.video_count)
+    logger.info(f"\n\n## collecting materials for {len(staged)} scene(s)\n"
+                + scene_service.describe(staged, budget))
+
+    collected: list[str] = []
+    for scene, seconds in zip(staged, budget):
+        if scene.materials:
+            processed = video.preprocess_video(
+                materials=list(scene.materials),
+                clip_duration=params.video_clip_duration,
+            )
+            paths = [m.url for m in processed]
+        else:
+            paths = material.download_videos(
+                task_id=task_id,
+                search_terms=scene.search_terms or [],
+                source=params.video_source,
+                video_aspect=params.video_aspect,
+                # Within one scene the order is the scene's own; there is no
+                # narrative left to preserve below this level.
+                video_concat_mode=params.video_concat_mode,
+                audio_duration=seconds,
+                max_clip_duration=params.video_clip_duration,
+            )
+        if not paths:
+            _mark_task_failed(
+                task_id,
+                "materials",
+                f"scene {scene.scene_id} produced no usable material",
+            )
+            return None
+        collected.extend(paths)
+    return collected
 
 
 def generate_final_videos(
