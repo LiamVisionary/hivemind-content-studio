@@ -559,6 +559,11 @@ class TestTaskService(unittest.TestCase):
                 "1\n00:00:00,000 --> 00:00:01,000\nHello world.\n\n",
                 encoding="utf-8",
             )
+            # `create` returns the path it wrote, and the caller now treats a
+            # falsy return as "nothing was written" (upstream PR #1244). A fake
+            # that writes the file but returns None is a fake of the OLD
+            # contract, and reads to the caller as a failure.
+            return subtitle_file
 
         try:
             with (

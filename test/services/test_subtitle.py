@@ -35,14 +35,21 @@ class TestSubtitleService(unittest.TestCase):
         with patch.object(subtitle, "WhisperModel", None):
             self.assertEqual(subtitle.create("audio.mp3"), "")
 
-    def test_create_returns_none_when_whisper_model_cannot_load(self):
-        """模型下载或初始化失败时必须返回失败结果，并允许任务层更新状态。"""
+    def test_create_returns_a_falsy_result_when_whisper_model_cannot_load(self):
+        """模型下载或初始化失败时必须返回失败结果，并允许任务层更新状态。
+
+        `create` now returns the path it wrote, so a failure is `""` rather than
+        `None` — upstream PR #1244. What this asserts is the docstring's own
+        requirement, a failure result the caller can test, rather than which
+        falsy value carries it.
+        """
         with patch.object(subtitle, "model", None), patch.object(
             subtitle,
             "WhisperModel",
             side_effect=RuntimeError("model unavailable"),
         ):
-            self.assertIsNone(subtitle.create("audio.mp3"))
+            self.assertFalsy = subtitle.create("audio.mp3")
+            self.assertEqual(self.assertFalsy, "")
 
     def test_create_writes_punctuated_and_trailing_segments(self):
         """
