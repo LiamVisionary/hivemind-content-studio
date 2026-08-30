@@ -47,11 +47,24 @@ ZIMG_TOKEN_FILE="${ZIMG_TOKEN_FILE:-$MEDIA_STATE_ROOT/secure/zimg-token}"
 # fallback, because a machine can have HivemindOS without having run
 # `passbook install` yet. Running bare is last: the services still start, they
 # just see only what this shell already exported.
+# The keys this stack actually needs, from the access ledger rather than from
+# memory. Named so each service is handed ten credentials instead of the three
+# hundred in the store: `passbook run` without --only passes the lot, and every
+# one of those is a key some dependency could read, log, or ship in a crash
+# report. It also means the machine can seal reads and stop trusting this app
+# by name — a grant is proof of how the process started, which a name is not.
+STUDIO_KEYS="GOOGLE_AI_STUDIO_API_KEY HIVEMINDOS_DASHBOARD_DEVICE_TOKEN
+OPENAI_API_KEY OPENAI_OAUTH_ACCESS_TOKEN OPENAI_OAUTH_ACCOUNT_ID
+OPENAI_OAUTH_EXPIRES_AT OPENAI_OAUTH_REFRESH_TOKEN OPENROUTER_API_KEY
+VENICE_API_KEY XAI_API_KEY"
+
 with_credentials() {
   local app="$1"
   shift
   if command -v passbook >/dev/null 2>&1; then
-    passbook run --app "$app" -- "$@"
+    local only=()
+    for key in $STUDIO_KEYS; do only+=(--only "$key"); done
+    passbook run --app "$app" "${only[@]}" -- "$@"
   elif command -v hive-env-run >/dev/null 2>&1; then
     hive-env-run -- "$@"
   else
