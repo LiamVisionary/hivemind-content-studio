@@ -1,0 +1,13 @@
+{
+  "_generated": "python -m hivemind_content_studio.identity --write",
+  "_source": "src/hivemind_content_studio/identity.py",
+  "productName": "Hivemind Content Studio",
+  "bundleId": "ai.hivemindos.content-studio",
+  "copyright": "Copyright © 2026 LiamVisionary",
+  "copyrightHolder": "LiamVisionary",
+  "supportDirName": "Hivemind Content Studio",
+  "legacySupportDirName": "open-generative-ai",
+  "sourceUrl": "https://github.com/LiamVisionary/hivemind-content-studio",
+  "license": "AGPL-3.0-or-later",
+  "maintainer": "LiamVisionary <vibe@withami.ai>"
+}

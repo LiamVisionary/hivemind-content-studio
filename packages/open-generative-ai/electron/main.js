@@ -2,11 +2,14 @@ const { app, BrowserWindow, shell, dialog } = require('electron');
 const path = require('path');
 const { register: registerLocalInference } = require('./lib/localInference');
 const { register: registerWan2gp } = require('./lib/wan2gpProvider');
+// Generated from src/hivemind_content_studio/identity.py, which is the only
+// place the product name and bundle id are written down.
+const identity = require('./identity.json');
 
 process.on('uncaughtException', (err) => {
     console.error('Uncaught exception:', err);
     try {
-        dialog.showErrorBox('Open Generative AI — Unexpected Error', err && err.stack ? err.stack : String(err));
+        dialog.showErrorBox(`${identity.productName} — Unexpected Error`, err && err.stack ? err.stack : String(err));
     } catch (_) {
         // dialog unavailable this early; the console log above is the fallback
     }
@@ -40,7 +43,7 @@ function createWindow() {
         ...(isMac ? { titleBarStyle: 'hiddenInset' } : {}),
         backgroundColor: '#0d0d0d',
         show: false,
-        title: 'Open Generative AI',
+        title: identity.productName,
     });
 
     const studioUrl = process.env.HIVEMIND_STUDIO_URL || 'http://127.0.0.1:8765';
@@ -77,7 +80,7 @@ app.whenReady().then(() => {
         console.error('Failed to register local-ai/wan2gp handlers:', err);
         dialog.showErrorBox(
             'Local AI features unavailable',
-            `Open Generative AI started, but local model support failed to initialize:\n\n${err.message}`
+            `${identity.productName} started, but local model support failed to initialize:\n\n${err.message}`
         );
     }
 

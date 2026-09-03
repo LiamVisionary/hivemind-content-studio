@@ -136,6 +136,22 @@ def test_unified_runtime_endpoint_is_read_only_and_uses_the_canonical_snapshot(t
     assert response.json()["surface"]["status"] == "online"
 
 
+def test_version_answers_before_sign_in_and_names_the_source(tmp_path: Path, monkeypatch) -> None:
+    # The About panel and the AGPL's source offer both need this without a
+    # session, so it is deliberately unauthenticated — and must stay free of
+    # anything about the machine it is running on.
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    response = client.get("/api/version")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["product"] == "Hivemind Content Studio"
+    assert body["license"] == "AGPL-3.0-or-later"
+    assert body["source_url"] == "https://github.com/LiamVisionary/hivemind-content-studio"
+    assert set(body) == {"product", "version", "commit", "license", "source_url", "build_date"}
+
+
 def test_operator_can_decide_approvals_but_receipt_is_returned_only_after_auth(tmp_path: Path, monkeypatch) -> None:
     client, _, approvals = _client(tmp_path, monkeypatch)
     request = approvals.request(run_id="run-1", kind="paid-generation", provider="muapi", amount_usd=1, target="run-1:keyframe", reason="test")

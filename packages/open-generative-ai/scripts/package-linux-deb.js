@@ -5,7 +5,11 @@ const { execFileSync } = require('child_process');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const PACKAGE_JSON = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
-const PRODUCT_NAME = PACKAGE_JSON.build?.productName || 'Open Generative AI';
+// The electron-builder config moved out of package.json's `build` field into
+// electron-builder.config.cjs; both read the same generated identity, which is
+// written down once in src/hivemind_content_studio/identity.py.
+const IDENTITY = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'electron', 'identity.json'), 'utf8'));
+const PRODUCT_NAME = IDENTITY.productName;
 const PACKAGE_NAME = 'open-generative-ai';
 const COMMAND_NAME = 'open-generative-ai';
 const INSTALL_DIR_NAME = PACKAGE_NAME;
@@ -174,7 +178,7 @@ Version: ${version}
 Section: graphics
 Priority: optional
 Architecture: ${debArch}
-Maintainer: Open Generative AI Team
+Maintainer: ${IDENTITY.maintainer}
 Depends: ${LINUX_DEPENDS}
 Description: Local-first generative AI studio for image, video, and design workflows
 `,

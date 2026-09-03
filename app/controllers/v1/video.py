@@ -13,7 +13,6 @@ from app.config import config
 from app.controllers import base
 from app.controllers.manager.base_manager import TaskQueueFullError
 from app.controllers.manager.memory_manager import InMemoryTaskManager
-from app.controllers.manager.redis_manager import RedisTaskManager
 from app.controllers.v1.base import new_router
 from app.models.exception import HttpException
 from app.models.schema import (
@@ -50,6 +49,12 @@ _max_queued_tasks = config.app.get("max_queued_tasks", 100)
 redis_url = f"redis://:{_redis_password}@{_redis_host}:{_redis_port}/{_redis_db}"
 # 根据配置选择合适的任务管理器
 if _enable_redis:
+    # Imported here, not at module scope: `redis` is a faceless-webui extra and
+    # the desktop bundle does not carry it. A top-level import made this whole
+    # router — and every module that reaches it — unimportable without a package
+    # nobody with enable_redis off ever uses.
+    from app.controllers.manager.redis_manager import RedisTaskManager
+
     task_manager = RedisTaskManager(
         max_concurrent_tasks=_max_concurrent_tasks,
         redis_url=redis_url,
