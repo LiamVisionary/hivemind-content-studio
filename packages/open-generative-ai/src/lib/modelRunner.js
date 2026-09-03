@@ -27,7 +27,7 @@
 // which doubles as the caller's declaration of what it can serve: a row that
 // resolves to a transport the caller built nothing for is refused, loudly,
 // instead of being sent a payload shaped for somewhere else.
-import { isLocalAIAvailable, localAI } from './localInferenceClient.js';
+import { isLocalAIAvailable, localAI, localCatalogStatusNow } from './localInferenceClient.js';
 import { canvasPixels } from '../studios/story/sheetLayout.js';
 import { generateHivemindVideo, isHivemindStudioEnabled } from './hivemindStudio.js';
 import { flattenApiDetail } from './muapiErrors.js';
@@ -94,12 +94,39 @@ export function transportFor(row) {
   // A row from the browser's own catalog is local whatever it calls its
   // provider — that catalog is the local inventory by definition.
   if (row?.source === 'local') {
-    return {
-      transport: 'local',
-      label: PROVIDER_TRANSPORTS[provider]?.label || 'this machine',
-      runnable: isLocalAIAvailable(),
-      reason: isLocalAIAvailable() ? '' : 'This model runs on this machine, and the local bridge is not available in this window.',
-    };
+    const label = PROVIDER_TRANSPORTS[provider]?.label || 'this machine';
+    if (!isLocalAIAvailable()) {
+      return {
+        transport: 'local',
+        label,
+        runnable: false,
+        reason: 'This model runs on this machine, and the local bridge is not available in this window.',
+      };
+    }
+    // A bridge in the window is not the same as an engine that can run
+    // something. The catalog fetch already asked; this reads its verdict so
+    // Image, Story and Sprite refuse an unrunnable local row identically
+    // rather than each discovering it at Generate time.
+    const status = localCatalogStatusNow();
+    if (status === 'unreachable') {
+      return {
+        transport: 'local',
+        label,
+        runnable: false,
+        reason: 'The local engine is starting — this model runs on this machine, which is not answering yet.',
+      };
+    }
+    if (status === 'empty') {
+      return {
+        transport: 'local',
+        label,
+        runnable: false,
+        reason: 'No local model is installed yet — open Models to install one.',
+      };
+    }
+    // 'discovering' stays runnable: the answer is milliseconds away and a
+    // picker that greys itself out on every mount is its own bug.
+    return { transport: 'local', label, runnable: true, reason: '' };
   }
   if (NON_MODEL_PROVIDERS.has(provider)) {
     return { transport: 'none', label: provider, runnable: false, reason: 'This is a renderer, not an image model.' };

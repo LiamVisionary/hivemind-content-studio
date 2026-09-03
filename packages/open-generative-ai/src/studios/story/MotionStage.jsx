@@ -197,7 +197,7 @@ function BoardPanel({ panel, index, specs, busy, onFill, onPatch, aspect }) {
 export function MotionStage({
   story, specs, busy, thinking, drawing, onFill, onMotion, onPatchBeat, onBoard, onPatchPanel,
   draft, onCancel, onDraftBoard, onDrawBoard, onChangeFormat, boardText, boardNotes, notes,
-  boardChoices, boardModel, onBoardModel, readinessFor, onFixReadiness, fixing,
+  boardChoices, boardModel, onBoardModel, readinessFor, onFixReadiness, fixing, localNotice = null,
 }) {
   // The dragged row lives in a ref as well as in state. `drop` can land in the
   // same tick as `dragstart` — a fast flick, or anything driving the events
@@ -482,6 +482,7 @@ export function MotionStage({
 
         <Notes items={boardNotes} />
 
+        {localNotice}
         <ModelFitPicker
           label="Board model"
           rows={boardChoices}

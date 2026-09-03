@@ -119,6 +119,7 @@ def unified_runtime_snapshot(
     probe_fn = probe or _http_probe
 
     comfy_url, comfy_error = _configured_url(env, ("COMFYUI_URL", "COMFY_HTTP", "COMFY_HTTP_DEFAULT"), "http://127.0.0.1:8188/")
+    bridge_url, bridge_error = _configured_url(env, ("OPEN_GENERATIVE_AI_URL", "OGA_URL"), "http://127.0.0.1:8794/")
     flux_url, flux_error = _configured_url(env, ("SWIFT_FLUX2_SERVER_URL", "FLUX2_SERVER_URL"), "http://127.0.0.1:8791/")
     backend_url, backend_error = _configured_url(env, ("MEDIA_STUDIO_BACKEND_URL", "ZIMAGE_API_URL", "ZIMG_BACKEND_URL"), "http://127.0.0.1:8787/")
 
@@ -137,6 +138,18 @@ def unified_runtime_snapshot(
             url=backend_url,
             health_path="healthz",
             misconfigured=backend_error,
+        ),
+        # Everything the studio calls "local" reaches its models through this
+        # bridge, so "is the thing behind /local-ai up?" had no answer here
+        # while the studio was already showing an empty picker because of it.
+        _remote_component(
+            id="open-generative-ai-bridge",
+            label="Local Model Bridge",
+            description="Serves the studio and answers /local-ai for local model discovery and generation.",
+            source_repository="Open-Generative-AI",
+            url=bridge_url,
+            health_path="health",
+            misconfigured=bridge_error,
         ),
         _remote_component(
             id="comfyui",

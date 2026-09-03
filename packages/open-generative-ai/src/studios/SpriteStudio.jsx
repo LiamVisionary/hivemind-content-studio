@@ -24,9 +24,9 @@ import { toast } from 'react-hot-toast';
 import { useMediaSrc } from '../hooks/hooks.js';
 import { defaultPick, EVIDENCE_LABELS, fetchCapabilityMatrix, rankModels, RATING_LABELS, serverRows } from '../lib/capabilityMatrix.js';
 import { isHivemindStudioEnabled, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
-import { isLocalAIAvailable, localAI } from '../lib/localInferenceClient.js';
+import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { needsBrowserKey, runImage, runVideo, studioRow, transportFor } from '../lib/modelRunner.js';
-import { LOCAL_MODEL_CATALOG } from '../lib/localModels.js';
+import { useLocalImageCatalog } from '../lib/useLocalCatalog.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { registerPromptInserter } from '../app/promptTarget.js';
 import { Icon } from '../ui/icons.jsx';
@@ -35,6 +35,7 @@ import {
   Button, Card, EmptyState, Field, NativeSelect, Pill, ProgressBar, SectionLabel, Segmented, Slider,
   Spinner, StudioLayout, TextArea, cx,
 } from '../ui/kit.jsx';
+import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
 import { ModelFitPicker, RATING_TONE } from './ModelFitPicker.jsx';
 import { UploadPicker } from './UploadPicker.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
@@ -131,7 +132,8 @@ export function SpriteStudio({ active = true } = {}) {
   const [matrix, setMatrix] = useState(null);
   const [matrixError, setMatrixError] = useState('');
   const [matrixOpen, setMatrixOpen] = useState(false);
-  const [localModels, setLocalModels] = useState(() => LOCAL_MODEL_CATALOG.filter((model) => model.type !== 'video'));
+  // What this machine can actually run, and why the list is empty when it is.
+  const { models: localModels, status: localStatus, refresh: refreshLocalCatalog } = useLocalImageCatalog();
 
   // Stage 1 — the sprite
   const [subject, setSubject] = useState('');
@@ -196,17 +198,6 @@ export function SpriteStudio({ active = true } = {}) {
       .then((payload) => { if (alive) setMatrix(payload); })
       .catch(() => { if (alive) setMatrixError('Could not read the capability matrix — models are listed unrated.'); });
     return () => { alive = false; };
-  }, []);
-
-  // The local inventory the server has never heard of.
-  useEffect(() => {
-    if (!isLocalAIAvailable()) return;
-    localAI.listModels().then((models) => {
-      const discovered = (Array.isArray(models) ? models : []).filter((model) => (
-        model?.type !== 'video' && model?.state !== 'not-downloaded' && model?.ready !== false
-      ));
-      if (discovered.length) setLocalModels(discovered);
-    }).catch(() => { /* the static catalog is a fine fallback */ });
   }, []);
 
   const imageChoices = useMemo(() => {
@@ -541,6 +532,11 @@ export function SpriteStudio({ active = true } = {}) {
           </div>
 
           <ModelFitPicker label="Drawing model" rows={imageChoices} value={imageModel} onChange={setImageModel} />
+          {/* Only when this machine offers nothing: the cloud rows above are a
+              real answer, so a warning beside them would be noise. */}
+          {isLocalAIAvailable() && localStatus !== 'ready' && !localModels.length
+            ? <LocalCatalogNotice status={localStatus} onCheckAgain={refreshLocalCatalog} />
+            : null}
 
           {spriteUrl ? <SpritePreview url={spriteUrl} alt="The sprite" /> : null}
         </Card>

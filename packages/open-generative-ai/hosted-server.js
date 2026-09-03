@@ -9,7 +9,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
-const { loadHostedImageModels, loadHostedWorkflowModels } = require('./hosted-local-models');
+const { loadHostedImageModels, loadHostedWorkflowModels, missingWeightFiles } = require('./hosted-local-models');
 const { discoverAutoImageWorkflows } = require('./auto-workflow-discovery');
 
 const ROOT = __dirname;
@@ -223,6 +223,67 @@ function listModels() {
   return [...registryModels, ...autoModels];
 }
 
+// ── Is anything actually runnable right now? ─────────────────────────────
+//
+// /local-ai/models used to answer "these workflows are registered", which the
+// studio read as "these models will run". Two things separate the one from the
+// other: the weights being on disk (hosted-local-models resolves the graph's
+// checkpoints) and the lane behind this bridge being up. The second is a
+// network call, so it is asked at most once every five seconds and shared by
+// every model in the answer.
+const LANE_PROBE_TTL_MS = 5000;
+let laneProbe = { at: 0, answered: false };
+
+function probeLane() {
+  return new Promise((resolve) => {
+    let target;
+    try { target = new URL(`${String(ZIMAGE_URL).replace(/\/$/, '')}/comfy/system_stats`); } catch { resolve(false); return; }
+    const mod = target.protocol === 'https:' ? https : http;
+    const token = readToken();
+    const request = mod.request({
+      method: 'GET',
+      hostname: target.hostname,
+      port: target.port,
+      path: target.pathname,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      timeout: 2500,
+    }, (up) => {
+      // ANY answer counts. A 401 or a 502 is the lane talking — only a dead
+      // socket means nothing is listening, and calling a running engine
+      // offline because it answered 404 would disable Generate for no reason.
+      up.resume();
+      resolve(true);
+    });
+    request.on('error', () => resolve(false));
+    request.on('timeout', () => { request.destroy(); resolve(false); });
+    request.end();
+  });
+}
+
+async function laneAnswers() {
+  const now = Date.now();
+  if (laneProbe.at && now - laneProbe.at < LANE_PROBE_TTL_MS) return laneProbe.answered;
+  const answered = await probeLane();
+  laneProbe = { at: Date.now(), answered };
+  return answered;
+}
+
+// `ready` is only ever false on evidence: a checkpoint the graph names and the
+// models directory does not hold, or a lane that did not answer at all.
+async function listModelsWithReadiness() {
+  const models = listModels();
+  if (!models.length) return models;
+  const laneOk = await laneAnswers();
+  return models.map((model) => {
+    const missing = missingWeightFiles(model.workflowFile);
+    if (missing.length) {
+      return { ...model, ready: false, readyReason: 'missing-weights', missingWeights: missing.slice(0, 4) };
+    }
+    if (!laneOk) return { ...model, ready: false, readyReason: 'engine-offline' };
+    return { ...model, ready: true, readyReason: 'ok' };
+  });
+}
+
 function listWorkflowModels() {
   let registryModels = [];
   try {
@@ -432,7 +493,7 @@ async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) 
   if (pathname === '/local-ai/binary-status') {
     return sendJson(res, 200, { exists: true, hosted: true, dataDir: LOCAL_AI_DIR, modelsDir: path.join(LOCAL_AI_DIR, 'models'), zimage: ZIMAGE_URL });
   }
-  if (pathname === '/local-ai/models') return sendJson(res, 200, listModels());
+  if (pathname === '/local-ai/models') return sendJson(res, 200, await listModelsWithReadiness());
   if (pathname === '/local-ai/prompt-helper' && req.method === 'POST') {
     const token = readToken();
     if (!token) return sendJson(res, 500, { error: 'Media Studio token unavailable' });

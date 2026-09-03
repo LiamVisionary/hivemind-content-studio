@@ -41,7 +41,8 @@ import { defaultPick, fetchCapabilityMatrix, rankModels, serverRows } from '../l
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
 import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
-import { LOCAL_MODEL_CATALOG } from '../lib/localModels.js';
+import { useLocalImageCatalog } from '../lib/useLocalCatalog.js';
+import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
 import {
   askProducer, connectHivemindosAccount, hivemindosLinkState, requestHivemindosLink,
   saveProviderKey, startCreditTopUp, textModelCatalog,
@@ -163,7 +164,10 @@ export function StoryStudio({ active = true } = {}) {
   // that only learns this from a failed request has already wasted the press.
   const [oauth, setOauth] = useState(null);
   const [fixing, setFixing] = useState('');
-  const [localModels] = useState(() => LOCAL_MODEL_CATALOG.filter((model) => model.type !== 'video'));
+  // Discovered, not assumed. Story used to list the desktop sd.cpp catalog as
+  // "On this machine" and default to the first workable row in it, which in a
+  // hosted studio is an id the bridge refuses.
+  const { models: localModels, status: localStatus, refresh: refreshLocalCatalog } = useLocalImageCatalog();
   const [sheetModel, setSheetModel] = useState(null);
   const [plateModel, setPlateModel] = useState(null);
   const [boardModel, setBoardModel] = useState(null);
@@ -684,6 +688,12 @@ export function StoryStudio({ active = true } = {}) {
   const sheetChoices = useMemo(() => choicesFor('story_character_sheet'), [choicesFor]);
   const plateChoices = useMemo(() => choicesFor('story_location'), [choicesFor]);
   const boardChoices = useMemo(() => choicesFor('story_board'), [choicesFor]);
+
+  // Shown beside the pickers only when this machine offers nothing at all —
+  // with cloud rows on screen a local warning would be noise.
+  const localNotice = isLocalAIAvailable() && localStatus !== 'ready' && !localModels.length
+    ? <LocalCatalogNotice status={localStatus} onCheckAgain={refreshLocalCatalog} />
+    : null;
 
   useEffect(() => { if (!sheetModel && sheetChoices.length) setSheetModel(defaultPick(sheetChoices)); }, [sheetChoices, sheetModel]);
   useEffect(() => { if (!plateModel && plateChoices.length) setPlateModel(defaultPick(plateChoices)); }, [plateChoices, plateModel]);
@@ -1334,6 +1344,7 @@ export function StoryStudio({ active = true } = {}) {
             plateChoices={plateChoices}
             plateModel={plateModel}
             onPlateModel={setPlateModel}
+            localNotice={localNotice}
             readinessFor={rowReadiness}
             onFixReadiness={fixReadiness}
             fixing={fixing}
@@ -1363,6 +1374,7 @@ export function StoryStudio({ active = true } = {}) {
             boardChoices={boardChoices}
             boardModel={boardModel}
             onBoardModel={setBoardModel}
+            localNotice={localNotice}
             readinessFor={rowReadiness}
             onFixReadiness={fixReadiness}
             fixing={fixing}

@@ -1,7 +1,103 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const DEFAULT_ASPECT_RATIOS = ['1:1', '4:3', '3:4', '16:9', '9:16'];
+
+/* ── Installed-ness, per workflow ──────────────────────────────────────────
+ *
+ * A registry entry describes a graph; it is not proof the weights are on disk.
+ * The studio used to list every entry as runnable, so "no model installed" and
+ * "four models installed" looked identical — and the first Generate was where
+ * the difference showed up.
+ *
+ * Only the graph-shipping lanes can be checked from here: `comfy-api-image`
+ * and the auto-detected drop-ins name their checkpoints IN the graph, so those
+ * names resolve against ComfyUI's models directory. The Python-builder lanes
+ * choose their checkpoint server-side, so this reports nothing missing for
+ * them rather than guessing a filename and hiding a workflow that works.
+ */
+const WEIGHT_INPUT_KEYS = /^(ckpt_name|unet_name|model_name|checkpoint_name|diffusion_model)$/i;
+const WEIGHT_SUFFIX = /\.(safetensors|ckpt|gguf|sft|pt|pth)$/i;
+const WEIGHT_DIR_SCAN_DEPTH = 2;
+const WEIGHT_INDEX_TTL_MS = 5000;
+
+function comfyModelsRoot() {
+  const explicit = String(process.env.COMFY_MODELS_DIR || '').trim();
+  if (explicit) return explicit;
+  return path.join(process.env.COMFY_DIR || path.join(os.homedir(), 'comfy/ComfyUI'), 'models');
+}
+
+let weightIndex = { root: '', at: 0, names: null };
+
+// Basenames of every weight file under the models root, one bounded walk,
+// cached for five seconds so a page full of model rows is one scan and not one
+// stat per checkpoint per request.
+function installedWeightNames(root = comfyModelsRoot()) {
+  const now = Date.now();
+  if (weightIndex.root === root && now - weightIndex.at < WEIGHT_INDEX_TTL_MS) return weightIndex.names;
+  let names = null;                                   // null = could not look
+  try {
+    if (fs.statSync(root).isDirectory()) {
+      names = new Set();
+      const walk = (dir, depth) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.name.startsWith('.')) continue;
+          if (entry.isDirectory()) {
+            if (depth < WEIGHT_DIR_SCAN_DEPTH) walk(path.join(dir, entry.name), depth + 1);
+          } else if (WEIGHT_SUFFIX.test(entry.name)) {
+            names.add(entry.name.toLowerCase());
+          }
+        }
+      };
+      walk(root, 0);
+    }
+  } catch {
+    names = null;
+  }
+  weightIndex = { root, at: now, names };
+  return names;
+}
+
+/** Weight filenames an API-format graph loads, deduplicated. */
+function graphWeightFiles(workflowFile) {
+  let graph;
+  try {
+    const data = JSON.parse(fs.readFileSync(workflowFile, 'utf8'));
+    graph = data && typeof data === 'object' && !Array.isArray(data) && data.prompt && typeof data.prompt === 'object'
+      ? data.prompt
+      : data;
+  } catch {
+    return [];
+  }
+  if (!graph || typeof graph !== 'object' || Array.isArray(graph)) return [];
+  const files = new Set();
+  for (const node of Object.values(graph)) {
+    const inputs = (node && node.inputs) || {};
+    for (const [key, value] of Object.entries(inputs)) {
+      if (typeof value !== 'string' || !WEIGHT_INPUT_KEYS.test(key)) continue;
+      if (!WEIGHT_SUFFIX.test(value)) continue;
+      files.add(path.basename(value));
+    }
+  }
+  return [...files];
+}
+
+/**
+ * Which of a workflow's weights are not on this machine.
+ *
+ * Empty means "nothing known to be missing" — which is also the answer when
+ * there is no graph to read or no models directory to read it against. A model
+ * is only ever reported unready on positive evidence.
+ */
+function missingWeightFiles(workflowFile, root = comfyModelsRoot()) {
+  if (!workflowFile) return [];
+  const installed = installedWeightNames(root);
+  if (!installed) return [];
+  const wanted = graphWeightFiles(workflowFile);
+  if (!wanted.length) return [];
+  return wanted.filter((file) => !installed.has(file.toLowerCase()));
+}
 
 function mergeWorkflowDefinition(base, override) {
   if (!base || typeof base !== 'object' || Array.isArray(base)) return structuredClone(override);
@@ -135,6 +231,9 @@ function loadHostedImageModels(registryPath) {
 
 module.exports = {
   DEFAULT_ASPECT_RATIOS,
+  comfyModelsRoot,
+  graphWeightFiles,
+  missingWeightFiles,
   loadHostedImageModels,
   loadHostedWorkflowModels,
   normalizePromptHelper,
