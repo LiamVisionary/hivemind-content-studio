@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import binascii
+import getpass
 import hashlib
 import html
 import json
@@ -828,7 +829,7 @@ def output_encryption_password(create=True):
         return _output_encryption_password
     if not OUTPUT_ENCRYPTION_ENABLED:
         return None
-    account = os.environ.get("USER") or "liam"
+    account = getpass.getuser()
     try:
         proc = subprocess.run(
             ["/usr/bin/security", "find-generic-password", "-s", OUTPUT_ENCRYPTION_SERVICE, "-a", account, "-w"],

@@ -47,7 +47,7 @@ def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, ContentOrchestrato
         private_cipher=cipher,
     )
     client = TestClient(app)
-    response = client.post("/api/owner/unlock", json={"password": "test-owner-password"})
+    response = client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"})
     assert response.status_code == 200
     return client, orchestrator, approvals
 
@@ -74,7 +74,7 @@ def test_control_api_is_a_thin_run_viewer_with_owner_or_operator_mutations(tmp_p
     assert response.json()["runs"][0]["run_id"] == run["run_id"]
     assert client.post("/api/owner/lock").status_code == 200
     assert client.post(f"/api/runs/{run['run_id']}/cancel", json={"reason": "stop"}).status_code == 401
-    assert client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"}).status_code == 200
     owner_cancelled = client.post(f"/api/runs/{run['run_id']}/cancel", json={"reason": "stop"})
     assert owner_cancelled.status_code == 200
     assert owner_cancelled.json()["status"] == "cancelled"
@@ -339,7 +339,7 @@ def test_media_studio_video_is_owner_visible_but_machine_callers_receive_only_a_
 
     guessed_url = "/api/media-studio/generated/mock-ltx.mp4"
     assert client.get(guessed_url, headers={"Authorization": "Bearer control-secret"}).status_code == 401
-    assert client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"}).status_code == 200
     assert client.get(guessed_url).content == b"mock-video"
 
 
@@ -840,7 +840,7 @@ def test_encrypted_media_reference_survives_reload_and_is_staged_only_for_genera
     )
     assert machine.status_code == 403
 
-    assert client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"}).status_code == 200
     assert client.delete(reference_url).status_code == 200
     assert not encrypted_path.exists()
     assert client.get(reference_url).status_code == 404

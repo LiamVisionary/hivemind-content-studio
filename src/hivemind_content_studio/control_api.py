@@ -182,10 +182,6 @@ class FavoriteBody(BaseModel):
     favorite: bool
 
 
-class OwnerUnlockBody(BaseModel):
-    password: str
-
-
 class PassBookBody(BaseModel):
     """Credentials the owner is adding to the machine's shared store.
 
@@ -207,6 +203,11 @@ class PassBookRevokeBody(BaseModel):
 class AccountUnlockBody(BaseModel):
     account_id: int
     password: str
+
+
+class AccountSetupBody(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    password: str = Field(min_length=1)
 
 
 class AccountCreateBody(BaseModel):
@@ -1110,7 +1111,7 @@ def _write_inline_audio(value: str, destination_dir: Path, *, label: str = "") -
 
 
 def _machine_route_allowed(path: str, method: str) -> bool:
-    if path.startswith("/api/owner/") or path == "/healthz":
+    if path in {"/api/owner/session", "/api/owner/lock", "/healthz"}:
         return True
     if method == "GET" and path in {
         "/api/catalog",
@@ -1215,10 +1216,12 @@ def build_control_app(
     # workspace at start/finish so each History lists only its own clips.
     gateway_claims = GatewayOutputClaims(state_dir / "gateway-output-claims.sqlite3")
     workspaces = AccountWorkspaces(state_dir, cipher=cipher)
-    # The owner account inherits whatever password the studio was already
-    # configured with — env hash in production, injected hash under test — so
-    # `access` stays the single source of truth for it rather than this module
-    # reading the environment a second time and drifting from it.
+    # The owner account inherits whatever seed the studio was given — the env
+    # hash on a headless box, an injected hash under test, nothing at all on a
+    # fresh install — so `access` stays the single source of truth for it rather
+    # than this module reading the environment a second time and drifting from
+    # it. With no seed the owner row has no credentials and the gate asks for
+    # them (see setup_owner below).
     owner_account = bootstrap_accounts(
         store=account_store, state_dir=state_dir, legacy_password_hash=access.password_hash,
         # An injected canvas store is already open on a path its owner chose;
@@ -1311,7 +1314,6 @@ def build_control_app(
         # str(exc): an exception message can carry a path or a prompt.
         return JSONResponse({"detail": UNEXPECTED_ERROR_DETAIL}, status_code=500)
 
-    unlock_failures: dict[str, deque[float]] = defaultdict(deque)
     repository_root = Path(__file__).resolve().parents[2]
     open_gen_dist = repository_root / "packages/open-generative-ai/dist"
     # Staging for external tools (ComfyUI reads plaintext from here and the
@@ -1382,6 +1384,7 @@ def build_control_app(
 
     _GATE_ROUTES = frozenset({
         "/api/accounts",
+        "/api/accounts/setup",
         "/api/accounts/unlock",
         "/api/accounts/webauthn/authenticate/options",
         "/api/accounts/webauthn/authenticate",
@@ -1675,7 +1678,48 @@ def build_control_app(
             "accounts": [entry.public() for entry in account_store.list_accounts()],
             "signed_in_as": account.id if account else None,
             "expires_in_seconds": _session_remaining_seconds(request) if account else SESSION_SECONDS,
+            # A fresh install: the owner row exists but nobody has claimed it.
+            # The gate shows the setup card instead of the picker until then.
+            "setup_required": _setup_required(),
         }
+
+    def _setup_required() -> bool:
+        owner = account_store.get(owner_account.id)
+        return owner is not None and not owner.has_password and owner.passkey_count == 0
+
+    @app.post("/api/accounts/setup")
+    def setup_owner(body: AccountSetupBody, request: Request) -> JSONResponse:
+        """First run: name the studio and set the owner's passphrase.
+
+        Reachable before sign-in because there is nothing to sign in with yet.
+        Three things bound it: it only works from this machine (the person at
+        the keyboard is the owner of a fresh install by definition), it is
+        throttled like unlock, and it succeeds exactly once — the moment the
+        owner holds any credential this answers 409 for good.
+        """
+        client = request.client.host if request.client else ""
+        if client not in {"127.0.0.1", "::1", "localhost"}:
+            raise HTTPException(status_code=403, detail="Set up the studio from the machine it runs on")
+        key = _throttle_key(request, owner_account.id)
+        _guard_throttle(key)
+        if not _setup_required():
+            login_throttle.fail(key)
+            raise HTTPException(status_code=409, detail="This studio is already set up")
+        # Name first: it can fail validation, and a failure must leave the row
+        # exactly as unclaimed as it found it.
+        try:
+            account_store.rename(owner_account.id, body.name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        account_store.set_password(owner_account.id, body.password)
+        login_throttle.success(key)
+        account = account_store.get(owner_account.id)
+        assert account is not None
+        return _sign_in(
+            JSONResponse({"ok": True, "account": account.public(),
+                          "expires_in_seconds": account_access.session_seconds}),
+            request, account,
+        )
 
     @app.post("/api/accounts/unlock")
     def unlock_account(body: AccountUnlockBody, request: Request) -> JSONResponse:
@@ -1837,8 +1881,8 @@ def build_control_app(
             request, account,
         )
 
-    # Kept so an old tab, a bookmark or the fallback lock page still works; both
-    # now speak to the owner workspace rather than a studio-wide password.
+    # The in-app session probe and the topbar lock button. Both speak to the
+    # signed-in workspace; there is no studio-wide password any more.
     @app.get("/api/owner/session")
     def owner_session(request: Request) -> dict:
         account = getattr(request.state, "account", None)
@@ -1849,28 +1893,10 @@ def build_control_app(
             "expires_in_seconds": _session_remaining_seconds(request) if account else OWNER_SESSION_SECONDS,
         }
 
-    @app.post("/api/owner/unlock")
-    def owner_unlock(body: OwnerUnlockBody, request: Request) -> JSONResponse:
-        key = _throttle_key(request, owner_account.id)
-        _guard_throttle(key)
-        account = account_store.get(owner_account.id)
-        stored = account_store.password_hash(owner_account.id) if account else None
-        if account is None or not verify_password(stored, body.password):
-            login_throttle.fail(key)
-            raise HTTPException(status_code=401, detail="Wrong password")
-        login_throttle.success(key)
-        if is_legacy_password_hash(stored):
-            account_store.set_password(account.id, body.password)
-        return _sign_in(
-            JSONResponse({"ok": True, "expires_in_seconds": account_access.session_seconds}),
-            request, account,
-        )
-
     @app.post("/api/owner/lock")
     def owner_lock() -> JSONResponse:
         response = JSONResponse({"ok": True})
         response.delete_cookie(ACCOUNT_COOKIE, path="/", samesite="lax")
-        response.delete_cookie(access.cookie_name, path="/", samesite="lax")
         return response
 
     def _studio_shell() -> Response:

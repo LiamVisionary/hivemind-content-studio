@@ -199,8 +199,68 @@ function renderTiles() {
   list.append(add);
 }
 
+// ── first run ────────────────────────────────────────────────────────────────
+// A studio nobody has claimed yet has an owner row with no password and no
+// passkey. There is nothing to pick between and nothing to sign in with, so the
+// setup card replaces the picker until someone names the place.
+
+function showSetup() {
+  el('picker').hidden = true;
+  el('setup').hidden = false;
+  el('setup-name').focus();
+}
+
+async function setUpStudio(event) {
+  event.preventDefault();
+  el('setup-error').textContent = '';
+  const name = el('setup-name').value.trim();
+  const password = el('setup-password').value;
+  if (password !== el('setup-confirm').value) {
+    el('setup-error').textContent = 'Those two passphrases are different. Type the same one twice.';
+    el('setup-confirm').value = '';
+    el('setup-confirm').focus();
+    return;
+  }
+  el('setup-submit').disabled = true;
+  let payload;
+  try {
+    payload = await api('/api/accounts/setup', { name, password });
+  } catch (error) {
+    el('setup-submit').disabled = false;
+    el('setup-error').textContent = error.message || 'Could not set this studio up.';
+    return;
+  }
+  // Setup signed us in, which is exactly what enrolling a passkey needs — so
+  // fall into the same offer a first password sign-in gets.
+  chosen = payload.account;
+  el('setup').hidden = true;
+  if (window.PublicKeyCredential) {
+    offerPasskey(chosen, password, { fromSetup: true });
+    return;
+  }
+  handOff(chosen.id, { passphrase: password });
+  location.reload();
+}
+
+// The post-sign-in passkey offer, shown on the sign-in card with its body
+// swapped out. `fromSetup` hides the way back: on a fresh studio there is no
+// other workspace to choose.
+function offerPasskey(account, password, { fromSetup = false } = {}) {
+  pendingPassword = password;
+  el('who-avatar').className = `avatar c-${account.colour || 'amber'}`;
+  el('who-avatar').textContent = initial(account.name);
+  el('who-name').textContent = account.name;
+  el('error').textContent = '';
+  el('signin-body').hidden = true;
+  el('enrol').hidden = false;
+  el('back').hidden = fromSetup;
+  el('signin').hidden = false;
+  el('enrol-add').focus();
+}
+
 function choose(account) {
   chosen = account;
+  el('back').hidden = false;
   el('picker').hidden = true;
   el('signin').hidden = false;
   el('who-avatar').className = `avatar c-${account.colour || 'amber'}`;
@@ -421,9 +481,7 @@ async function signInWithPassword(event) {
   // this is the only moment we hold both a proven session and the passphrase,
   // which is exactly what enrolling against the vault needs.
   if (!chosen.has_passkey && window.PublicKeyCredential && !passkeyOfferHidden(chosen.id)) {
-    pendingPassword = password;
-    el('signin-body').hidden = true;
-    el('enrol').hidden = false;
+    offerPasskey(chosen, password);
     return;
   }
   handOff(payload.account.id, { passphrase: password });
@@ -513,18 +571,21 @@ async function addPasskey() {
 }
 
 async function start() {
+  let payload;
   try {
-    const payload = await api('/api/accounts');
+    payload = await api('/api/accounts');
     accounts = payload.accounts || [];
   } catch {
     el('lede').textContent = 'This studio is not reachable right now.';
     return;
   }
+  if (payload.setup_required) { showSetup(); return; }
   renderTiles();
   // The picker always shows now — even with one workspace there is a real
   // choice on it, because the "New workspace" tile sits beside the accounts.
 }
 
+el('setup-form').addEventListener('submit', setUpStudio);
 el('passkey').addEventListener('click', () => signInWithPasskey(chosen));
 el('password-form').addEventListener('submit', signInWithPassword);
 el('back').addEventListener('click', back);
@@ -579,6 +640,30 @@ def account_gate_html() -> str:
       </div>
       <ul class="tiles" id="tiles"></ul>
     </div>
+
+    <section class="card" id="setup" hidden aria-labelledby="setup-title">
+      <div style="display:grid;justify-items:center;gap:6px">
+        <div class="mark" aria-hidden="true">{_HIVE_GLYPH}</div>
+        <p class="eyebrow">Hivemind Content Studio</p>
+      </div>
+      <h2 id="setup-title" style="text-align:center">Name your studio and set a passphrase</h2>
+      <p class="lede" style="margin:0 auto">Nobody has opened this studio yet. The name is what you'll
+        see on the sign-in screen. The passphrase unlocks your library and encrypts everything in it,
+        so keep it somewhere safe — nobody can reset it for you.</p>
+      <form id="setup-form">
+        <label>Studio name
+          <input id="setup-name" type="text" autocomplete="off" maxlength="40" required>
+        </label>
+        <label>Passphrase
+          <input id="setup-password" type="password" autocomplete="new-password" required>
+        </label>
+        <label>Type it again
+          <input id="setup-confirm" type="password" autocomplete="new-password" required>
+        </label>
+        <button class="primary" id="setup-submit" type="submit">Open the studio</button>
+      </form>
+      <p class="error" id="setup-error" role="alert"></p>
+    </section>
 
     <section class="card" id="signin" hidden aria-labelledby="signin-title">
       <div class="who">

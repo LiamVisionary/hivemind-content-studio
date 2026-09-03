@@ -444,12 +444,12 @@ def test_a_bogus_assertion_is_refused(client):
     assert client.get("/api/studio-state/opengen-composer").status_code == 401
 
 
-# ── the legacy owner path still works ────────────────────────────────────────
+# ── an existing store keeps working ──────────────────────────────────────────
 
-def test_the_old_owner_unlock_still_signs_into_the_owner_workspace(client):
-    """An open tab, a bookmark, or the fallback lock page must keep working."""
-    assert client.post("/api/owner/unlock", json={"password": "wrong"}).status_code == 401
-    assert client.post("/api/owner/unlock", json={"password": OWNER_PASSWORD}).status_code == 200
+def test_the_session_probe_reports_the_workspace_that_signed_in(client):
+    """The topbar and the in-app vault modal both read /api/owner/session."""
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "wrong"}).status_code == 401
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD}).status_code == 200
     session = client.get("/api/owner/session").json()
     assert session["unlocked"] is True and session["account"]["id"] == 1
     assert client.get("/api/accounts").json()["signed_in_as"] == 1
@@ -480,3 +480,92 @@ def test_gpu_rentals_follow_any_signed_in_workspace(client, monkeypatch):
     _sign_in(client, second, "second-pass")
     reached = client.get("/api/gpu-rentals")
     assert reached.status_code not in (401, 403)
+
+
+# ── first run ────────────────────────────────────────────────────────────────
+
+def _unclaimed(tmp_path: Path, monkeypatch, *, host: str = "127.0.0.1") -> TestClient:
+    """A studio nobody has ever opened: no seed hash, no accounts store."""
+    monkeypatch.delenv("CONTENT_STUDIO_OWNER_PASSWORD_HASH", raising=False)
+    monkeypatch.setenv("CONTENT_STUDIO_RUNS_DIR", str(tmp_path / "runs"))
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    app = build_control_app(
+        orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
+        control_token="control-secret",
+        operator_token="operator-secret",
+        # from_runtime, not for_testing: the claim is that a real boot with no
+        # environment seed leaves the owner with no credentials at all.
+        owner_access=OwnerAccess.from_runtime(cipher),
+        private_cipher=cipher,
+    )
+    return TestClient(app, client=(host, 51000))
+
+
+def test_no_owner_password_ships_in_the_source(monkeypatch):
+    monkeypatch.delenv("CONTENT_STUDIO_OWNER_PASSWORD_HASH", raising=False)
+    cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
+    assert OwnerAccess.from_runtime(cipher).password_hash is None
+    seeded = hashlib.sha256(b"seeded").hexdigest()
+    monkeypatch.setenv("CONTENT_STUDIO_OWNER_PASSWORD_HASH", seeded)
+    assert OwnerAccess.from_runtime(cipher).password_hash == seeded
+
+
+def test_a_fresh_studio_asks_to_be_named_before_anything_else(tmp_path: Path, monkeypatch):
+    fresh = _unclaimed(tmp_path, monkeypatch)
+    payload = fresh.get("/api/accounts").json()
+    assert payload["setup_required"] is True
+    owner = payload["accounts"][0]
+    assert owner["has_password"] is False and owner["has_passkey"] is False
+    # …and the gate carries the card that flag switches on.
+    gate = fresh.get("/", headers={"accept": "text/html"})
+    assert gate.status_code == 200
+    assert "Name your studio and set a passphrase" in gate.text
+    assert 'id="setup-form"' in gate.text and "payload.setup_required" in gate.text
+
+
+def test_an_unclaimed_studio_cannot_be_unlocked(tmp_path: Path, monkeypatch):
+    """No credentials means no password opens it."""
+    fresh = _unclaimed(tmp_path, monkeypatch)
+    assert fresh.post("/api/accounts/unlock",
+                      json={"account_id": 1, "password": "anything"}).status_code == 401
+    assert fresh.get("/api/studio-state/opengen-composer").status_code == 401
+
+
+def test_setup_names_the_studio_signs_in_and_only_ever_runs_once(tmp_path: Path, monkeypatch):
+    fresh = _unclaimed(tmp_path, monkeypatch)
+    done = fresh.post("/api/accounts/setup", json={"name": "Bee Studio", "password": "first-passphrase"})
+    assert done.status_code == 200, done.text
+    assert done.json()["account"]["name"] == "Bee Studio"
+    # Signed in on the spot, which is what enrolling a passkey next needs.
+    after = fresh.get("/api/accounts").json()
+    assert after["signed_in_as"] == 1 and after["setup_required"] is False
+    assert after["accounts"][0]["name"] == "Bee Studio"
+    assert fresh.get("/api/studio-state/opengen-composer").status_code == 200
+    # And the door closes behind it, signed in or not.
+    assert fresh.post("/api/accounts/setup",
+                      json={"name": "Someone Else", "password": "second"}).status_code == 409
+    fresh.post("/api/accounts/sign-out")
+    assert fresh.post("/api/accounts/setup",
+                      json={"name": "Someone Else", "password": "second"}).status_code == 409
+    # The passphrase that was set is the one that opens it afterwards.
+    _sign_in(fresh, 1, "first-passphrase")
+
+
+def test_setup_is_refused_from_anywhere_but_this_machine(tmp_path: Path, monkeypatch):
+    """Whoever is at the keyboard owns a fresh install; nobody on the tailnet does."""
+    remote = _unclaimed(tmp_path, monkeypatch, host="10.0.0.9")
+    refused = remote.post("/api/accounts/setup", json={"name": "Not Yours", "password": "pw"})
+    assert refused.status_code == 403
+    assert remote.get("/api/accounts").json()["setup_required"] is True
+
+
+def test_a_studio_that_is_already_set_up_never_shows_the_setup_card(tmp_path: Path, monkeypatch):
+    """An existing store signs in as it always did, seed hash or no seed hash."""
+    monkeypatch.delenv("CONTENT_STUDIO_OWNER_PASSWORD_HASH", raising=False)
+    store = AccountStore(tmp_path / "accounts.sqlite3")
+    store.create(name="Owner", password=OWNER_PASSWORD, is_owner=True)
+    already = _unclaimed(tmp_path, monkeypatch)
+    assert already.get("/api/accounts").json()["setup_required"] is False
+    assert already.post("/api/accounts/setup",
+                        json={"name": "Hijack", "password": "pw"}).status_code == 409
+    _sign_in(already, 1, OWNER_PASSWORD)

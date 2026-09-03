@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import getpass
 import hashlib
 import hmac
 import json
@@ -22,7 +23,6 @@ from cryptography.hazmat.primitives.asymmetric import padding as _rsa_padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
-OWNER_PASSWORD_HASH = "497fc4936661952e9ed6aec6b3b96030130fbfa716e5edacf118e8e792b46107"
 OWNER_COOKIE = "hivemind_content_studio_owner"
 OWNER_SESSION_SECONDS = 24 * 60 * 60
 ENCRYPTED_PREFIX = "enc:v1:"
@@ -52,7 +52,7 @@ class PrivateFieldCipher:
 
     @classmethod
     def from_keychain(cls, *, service: str = "zimage-output-encryption", create: bool = True) -> "PrivateFieldCipher":
-        account = os.environ.get("USER") or "liam"
+        account = getpass.getuser()
         command = ["/usr/bin/security", "find-generic-password", "-s", service, "-a", account, "-w"]
         try:
             result = subprocess.run(command, check=False, capture_output=True, timeout=10)
@@ -374,25 +374,30 @@ def staged_private_media(
 
 @dataclass(frozen=True)
 class OwnerAccess:
-    password_hash: str
+    """What the owner workspace is seeded with on first boot.
+
+    `password_hash` is None on a fresh install: the owner then names the studio
+    and sets a passphrase on the gate's first screen. The only other source is
+    CONTENT_STUDIO_OWNER_PASSWORD_HASH, the non-interactive seed for a headless
+    or fleet box that nobody will sit in front of. No default ships in code.
+    """
+
+    password_hash: str | None
     signing_secret: bytes
     cookie_name: str = OWNER_COOKIE
     session_seconds: int = OWNER_SESSION_SECONDS
 
     @classmethod
     def from_runtime(cls, cipher: PrivateFieldCipher) -> "OwnerAccess":
-        password_hash = os.environ.get("CONTENT_STUDIO_OWNER_PASSWORD_HASH", OWNER_PASSWORD_HASH).strip().lower()
-        if len(password_hash) != 64:
+        seed = os.environ.get("CONTENT_STUDIO_OWNER_PASSWORD_HASH", "").strip().lower()
+        if seed and (len(seed) != 64 or any(ch not in "0123456789abcdef" for ch in seed)):
             raise RuntimeError("CONTENT_STUDIO_OWNER_PASSWORD_HASH must be a SHA-256 hex digest")
-        return cls(password_hash=password_hash, signing_secret=cipher.derive("owner-session-v1"))
+        return cls(password_hash=seed or None, signing_secret=cipher.derive("owner-session-v1"))
 
     @classmethod
-    def for_testing(cls, *, password: str, cipher: PrivateFieldCipher) -> "OwnerAccess":
-        return cls(password_hash=hashlib.sha256(password.encode("utf-8")).hexdigest(), signing_secret=cipher.derive("owner-session-v1"))
-
-    def password_matches(self, password: str) -> bool:
-        supplied = hashlib.sha256(password.encode("utf-8")).hexdigest()
-        return hmac.compare_digest(supplied, self.password_hash)
+    def for_testing(cls, *, password: str | None, cipher: PrivateFieldCipher) -> "OwnerAccess":
+        digest = hashlib.sha256(password.encode("utf-8")).hexdigest() if password else None
+        return cls(password_hash=digest, signing_secret=cipher.derive("owner-session-v1"))
 
     def issue(self, *, now: int | None = None) -> str:
         issued = int(time.time()) if now is None else int(now)
@@ -413,54 +418,3 @@ class OwnerAccess:
             return int(expires_text) > current and hmac.compare_digest(supplied, expected)
         except (TypeError, ValueError, base64.binascii.Error):
             return False
-
-
-def owner_unlock_html() -> str:
-    """Standalone lock screen; protected static assets remain unreachable."""
-    return """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>Hivemind Content Studio</title>
-  <style>
-    :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#0c0c0e;color:#f2f2f3;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
-    main{width:min(400px,100%);display:grid;gap:14px;padding:32px;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:#111114;box-shadow:0 24px 64px -24px rgba(0,0,0,.75)}
-    .mark{width:40px;height:40px;display:grid;place-items:center;border-radius:10px;background:rgba(246,178,27,.12);color:#f6b21b}
-    p{margin:0;color:#a3a3ac;font-size:13px;line-height:1.55}.eyebrow{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:#f6b21b}
-    h1{margin:0;font-size:20px;font-weight:650;letter-spacing:-0.01em;color:#f2f2f3}
-    form{display:grid;gap:10px}label{display:grid;gap:6px;font-size:12px;font-weight:500;color:#a3a3ac}
-    input{width:100%;height:44px;padding:0 14px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:#17171b;color:#f2f2f3;font:inherit;font-size:14px;outline:0;transition:border-color .15s}
-    input:hover{border-color:rgba(255,255,255,.16)}input:focus{border-color:rgba(246,178,27,.6);box-shadow:0 0 0 3px rgba(246,178,27,.14)}
-    button{min-height:44px;border:0;border-radius:10px;background:#f6b21b;color:#1a1205;font:600 14px inherit;cursor:pointer;transition:background .15s}
-    button:hover{background:#ffc94a}button:active{transform:translateY(1px)}
-    .error{min-height:18px;color:#f26d5f;font-size:12px}
-  </style>
-</head>
-<body>
-  <main>
-    <div class="mark" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5 20 7v10l-8 4.5L4 17V7l8-4.5z"/><path d="M12 8.2 15.4 10v4L12 15.8 8.6 14v-4L12 8.2z" fill="currentColor" stroke="none"/></svg></div>
-    <p class="eyebrow">Private owner access</p>
-    <h1>Hivemind Content Studio is locked</h1>
-    <p>Enter the same private password used by the image studio. This browser stays unlocked for 24 hours.</p>
-    <form id="unlock-form">
-      <label>Password<input id="password" type="password" autocomplete="current-password" autofocus required></label>
-      <p class="error" id="error" role="alert"></p>
-      <button type="submit">Unlock studio</button>
-    </form>
-  </main>
-  <script>
-    document.getElementById('unlock-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const password = document.getElementById('password').value;
-      const error = document.getElementById('error');
-      error.textContent = '';
-      const response = await fetch('/api/owner/unlock', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});
-      if (!response.ok) { error.textContent = response.status === 429 ? 'Too many attempts. Wait a minute and try again.' : 'Wrong password. Try again.'; return; }
-      sessionStorage.setItem('hivemind.ownerPassphrase.once', JSON.stringify({password, expiresAt: Date.now() + 24 * 60 * 60 * 1000}));
-      location.reload();
-    });
-  </script>
-</body>
-</html>"""

@@ -119,7 +119,7 @@ Start the complete local stack:
 uv run content-studio stack start
 ```
 
-Then visit `http://127.0.0.1:8765`. The supervisor starts the Content Studio API, embedded OpenGen local-inference bridge, media gateway, ComfyUI lanes, ComfyUI Mobile, MCP, and optional native MLX sidecar. Use `uv run content-studio stack status|stop|restart|url` for lifecycle control. Run `python3 scripts/bootstrap_unified_studio.py --install-links` only when intentionally replacing the stable legacy launcher link; it archives the previous launcher and prints its rollback path.
+Then visit `http://127.0.0.1:8765`. The first screen on a fresh install asks you to name your studio and set a passphrase (from that machine only); a headless or fleet box that nobody sits in front of can seed the owner instead with `CONTENT_STUDIO_OWNER_PASSWORD_HASH` (the SHA-256 hex digest of the passphrase) and `CONTENT_STUDIO_OWNER_NAME`. The supervisor starts the Content Studio API, embedded OpenGen local-inference bridge, media gateway, ComfyUI lanes, ComfyUI Mobile, MCP, and optional native MLX sidecar. Use `uv run content-studio stack status|stop|restart|url` for lifecycle control. Run `python3 scripts/bootstrap_unified_studio.py --install-links` only when intentionally replacing the stable legacy launcher link; it archives the previous launcher and prints its rollback path.
 
 Private runtime state is outside Git under `~/.hivemindos/media-studio`. Existing gateway history and settings are migrated there by `scripts/migrate_media_state.py`. ComfyUI models, workflows, custom nodes, generated outputs, and caches remain under the configured ComfyUI/private model directories; deleting donor source checkouts does not remove them.
 
