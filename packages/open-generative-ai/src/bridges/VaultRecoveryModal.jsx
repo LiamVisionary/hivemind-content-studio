@@ -1,7 +1,11 @@
-// One-time E2E vault recovery-key modal (React port of vaultRecoveryBanner.js).
-// Behavior contract preserved: shows once per emitted key, ack gated by an explicit
-// checkbox, ack persisted under localStorage 'hivemind.vault.recoveryAck'. The key
-// itself arrives via the module-level buffer registered before React mounts.
+// One-time E2E vault recovery-key modal.
+//
+// Shows for EVERY emitted key, ack gated by an explicit checkbox. There is
+// deliberately no persisted "already acknowledged" flag: a key is announced
+// exactly once per vault creation, and vault identity is per account — a
+// global flag set by workspace A used to swallow workspace B's only recovery
+// path on the same browser profile, unseen. The key itself arrives via the
+// module-level buffer registered before React mounts.
 import { useEffect, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { subscribeRecoveryKey, clearBufferedRecoveryKey } from './recoveryKeyBuffer.js';
@@ -10,25 +14,14 @@ import { Icon } from '../ui/icons.jsx';
 import { Button } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
 
-const ACK_KEY = 'hivemind.vault.recoveryAck';
 const zh = () => getLang() === 'zh-CN';
-
-function alreadyAcked() {
-  try { return localStorage.getItem(ACK_KEY) === '1'; } catch { return false; }
-}
 
 export function VaultRecoveryModal() {
   const [recoveryKey, setRecoveryKey] = useState(null);
   const [stored, setStored] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  useEffect(
-    () =>
-      subscribeRecoveryKey((key) => {
-        if (!alreadyAcked()) setRecoveryKey(key);
-      }),
-    [],
-  );
+  useEffect(() => subscribeRecoveryKey(setRecoveryKey), []);
 
   if (!recoveryKey) return null;
 
@@ -59,7 +52,6 @@ export function VaultRecoveryModal() {
   };
 
   const acknowledge = () => {
-    try { localStorage.setItem(ACK_KEY, '1'); } catch { /* non-critical */ }
     clearBufferedRecoveryKey();
     setRecoveryKey(null);
   };
