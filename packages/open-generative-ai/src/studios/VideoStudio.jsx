@@ -20,6 +20,9 @@ import { toast } from 'react-hot-toast';
 
 import { muapi } from '../lib/muapi.js';
 import { localRow, muapiKeyMissing, muapiRow, runVideo, studioRow } from '../lib/modelRunner.js';
+import { describeFailure } from '../lib/describeFailure.js';
+import { runFailureRemedy } from '../lib/failureRemedy.js';
+import { toastFailure } from '../ui/failureToast.jsx';
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { fitShotTimeline } from '../lib/shotTimeline.js';
 import { isWan2gpModelId } from '../lib/localModels.js';
@@ -100,8 +103,9 @@ import { getComposerSection, hydrateComposerState, updateComposerSection } from 
 import { useMediaPoster, useMediaSrc } from '../hooks/hooks.js';
 import { Icon } from '../ui/icons.jsx';
 import {
-  AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, Field, IconButton, NativeSelect,
-  Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput, Toggle, cx,
+  AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, FailureCallout, Field, IconButton,
+  NativeSelect, Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput,
+  Toggle, cx,
 } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
@@ -289,6 +293,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // generation / canvas
     generating: false,
     generateError: '',
+    // The same failure, read: { title, detail, remedy } from describeFailure.
+    // The sentence stays the server's (it is already sanitized); what this adds
+    // is the button beside it and the raw tail behind Details.
+    generateFailure: null,
     videoUploading: false,
     progress: { stage: 'preparing', value: null },
     progressContext: null,
@@ -1457,7 +1465,7 @@ export function VideoStudio({
         continueSceneFrom(upload.url, s.setup.modelId);
       } catch (err) {
         console.error('[VideoStudio] Clip upload failed:', err);
-        toast.error(`${zh() ? '视频上传失败' : 'Video upload failed'}: ${err.message}`);
+        toastFailure(err, { operation: zh() ? '视频上传' : 'Video upload' });
       } finally {
         s.videoUploading = false;
         bump();
@@ -1483,7 +1491,7 @@ export function VideoStudio({
       persistVideoPreferences();
     } catch (err) {
       console.error('[VideoStudio] Video upload failed:', err);
-      toast.error(`${zh() ? '视频上传失败' : 'Video upload failed'}: ${err.message}`);
+      toastFailure(err, { operation: zh() ? '视频上传' : 'Video upload' });
     } finally {
       s.videoUploading = false;
       bump();
@@ -2888,6 +2896,7 @@ export function VideoStudio({
     s.lastSubmittedContext = captureGenerationContext(prompt);
     void primeCompletionPing();
     s.generateError = '';
+    s.generateFailure = null;
     s.generating = true;
     s.abortController = new AbortController();
     s.resultUrl = null;
@@ -3247,12 +3256,20 @@ export function VideoStudio({
         // User cancelled — reset quietly, no error surface (cancelGeneration
         // already handled the backend interrupt + state reset).
         s.generateError = '';
+        s.generateFailure = null;
       } else {
         console.error(e);
-        // Errors no longer vanish into the button label: a persistent, copyable
-        // callout in the canvas (ONCE — not a callout and a toast saying the
-        // same thing), with a Try again. A non-Error throw still gets a message.
-        s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
+        // Errors no longer vanish into the button label: a persistent callout in
+        // the canvas (ONCE — not a callout and a toast saying the same thing),
+        // with a Try again and, where the failure named one, the button that
+        // repairs it. The lane's own sentences are already sanitized server-side,
+        // so describeFailure keeps them and only adds the action.
+        const failure = describeFailure(e, {
+          transport: isWan2gpLocal ? 'local' : isHivemindLocal ? 'studio' : 'muapi',
+          operation: zh() ? '生成' : 'Generation',
+        });
+        s.generateFailure = failure;
+        s.generateError = failure.title || (zh() ? '生成失败' : 'Generation failed');
       }
     } finally {
       if (typeof unsubscribeProgress === 'function') unsubscribeProgress();
@@ -3262,7 +3279,7 @@ export function VideoStudio({
       if (s.activeCloudRequestId) { removePendingJob(s.activeCloudRequestId); s.activeCloudRequestId = null; }
       s.abortController = null;
       s.generating = false;
-      if (!hadError) s.generateError = '';
+      if (!hadError) { s.generateError = ''; s.generateFailure = null; }
       bump();
     }
   };
@@ -3309,6 +3326,7 @@ export function VideoStudio({
     stopGenerationProgress();
     s.generating = false;
     s.generateError = '';
+    s.generateFailure = null;
     bump();
     // With a job id the toast comes from the backend's verdict above; without
     // one there is nothing to stop and the reset IS the whole cancel.
@@ -3563,6 +3581,7 @@ export function VideoStudio({
       if (live && !s.generating) {
         s.generating = true;
         s.generateError = '';
+        s.generateFailure = null;
         s.resultUrl = null;
         s.resultModel = null;
         // A fresh controller so Cancel can still stop the resumed poll — without
@@ -3615,7 +3634,12 @@ export function VideoStudio({
           } catch (e) {
             if (!e?.cancelled && e?.name !== 'AbortError') {
               console.warn('[VideoStudio] Video resume failed:', live.requestId, e?.message);
-              s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
+              const failure = describeFailure(e, {
+                transport: isLocalJob ? 'studio' : 'muapi',
+                operation: zh() ? '生成' : 'Generation',
+              });
+              s.generateFailure = failure;
+              s.generateError = failure.title || (zh() ? '生成失败' : 'Generation failed');
             }
             stopGenerationProgress();
           } finally {
@@ -3742,7 +3766,7 @@ export function VideoStudio({
             ? `这个故事带来了 ${landed.wanted} 张图，但当前模型没有对应的通道，因此未附加。`
             : `${landed.wanted} picture${landed.wanted === 1 ? '' : 's'} came with this story, but the model now `
               + 'selected has no lane for them, so nothing was attached.',
-          { icon: '📎', duration: 12000 });
+          { duration: 12000 });
         }
         focusPrompt();
         return;
@@ -5150,32 +5174,34 @@ export function VideoStudio({
         composerDrop={composerDrop}
       >
         <div className="flex flex-col gap-4 p-4 md:p-5">
-          {s.generateError ? (
-            <div className="flex items-start justify-between gap-3 rounded-md border border-danger/40 bg-danger-tint px-3.5 py-3">
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-danger">
-                  {zh() ? '生成失败' : 'Generation failed'}
-                  {(() => {
-                    // Name the box when the run was promised to a rented one —
-                    // "it failed" on a rental means a different next step.
-                    if (!s.setup.rentedOnly) return '';
-                    const machine = servingMachineFor(s.setup, s.setup.modelId, s.rentedMachines);
-                    if (!machine) return zh() ? '（租用机器）' : ' on the rented machine';
-                    return zh()
-                      ? `（租用机器 ${machine.gpu || ''} ${machine.rental_id || ''}）`
-                      : ` on ${machine.gpu || 'the rented machine'} (${machine.rental_id || 'rented'})`;
-                  })()}
-                </div>
-                <div className="mt-1 break-words font-mono text-xs text-danger/90">{s.generateError}</div>
-              </div>
-              <div className="flex shrink-0 items-center gap-1.5">
-                <Button size="sm" variant="neutral" icon="refresh" onClick={() => { s.generateError = ''; bump(); void generate(); }}>
-                  {zh() ? '重试' : 'Try again'}
-                </Button>
-                <IconButton icon="x" label={zh() ? '关闭' : 'Dismiss'} size="sm" onClick={() => { s.generateError = ''; bump(); }} />
-              </div>
-            </div>
-          ) : null}
+          {s.generateError ? (() => {
+            // Name the box when the run was promised to a rented one — "it
+            // failed" on a rental means a different next step.
+            const onRented = (() => {
+              if (!s.setup.rentedOnly) return '';
+              const machine = servingMachineFor(s.setup, s.setup.modelId, s.rentedMachines);
+              if (!machine) return zh() ? '（租用机器）' : ' on the rented machine';
+              return zh()
+                ? `（租用机器 ${machine.gpu || ''} ${machine.rental_id || ''}）`
+                : ` on ${machine.gpu || 'the rented machine'} (${machine.rental_id || 'rented'})`;
+            })();
+            return (
+              <FailureCallout
+                title={`${s.generateError}${onRented}`}
+                detail={s.generateFailure?.detail || ''}
+                remedy={s.generateFailure?.remedy || null}
+                onRemedy={(remedy) => void runFailureRemedy(remedy, {
+                  onMuapiKey: () => { s.authRetry = () => generate(); s.authOpen = true; bump(); },
+                  onRetry: () => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); },
+                })}
+                onRetry={() => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); }}
+                retryLabel={zh() ? '重试' : 'Try again'}
+                detailsLabel={zh() ? '详情' : 'Details'}
+                onDismiss={() => { s.generateError = ''; s.generateFailure = null; bump(); }}
+                dismissLabel={zh() ? '关闭' : 'Dismiss'}
+              />
+            );
+          })() : null}
 
           {s.generating ? (
             <Card className="flex flex-col gap-3 p-4">

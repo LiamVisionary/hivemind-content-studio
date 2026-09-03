@@ -12,6 +12,7 @@ import { ConfirmModal } from '../../ui/Modal.jsx';
 import { Menu } from '../../ui/Menu.jsx';
 import { LibraryDeleteButton, LibraryStateNote, SaveNameModal } from '../../ui/SavedLibrary.jsx';
 import { Button, cx } from '../../ui/kit.jsx';
+import { toastFailure } from '../../ui/failureToast.jsx';
 
 const sameName = (left, right) => String(left || '').trim().toLowerCase() === String(right || '').trim().toLowerCase();
 
@@ -56,7 +57,7 @@ export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, ba
       setSaveOpen(false);
       toast.success(replaced ? `Updated “${name}”.` : `Saved “${name}”.`);
     } catch (error) {
-      toast.error(error.message);
+      toastFailure(error, { operation: 'That LoRA group' });
     } finally {
       setSaving(false);
     }
@@ -83,7 +84,7 @@ export function LoraGroupsMenu({ selection, getSelection, loras, baseModelId, ba
       if (sameName(entry.name, activeName)) setActiveName('');
       toast(`Deleted “${entry.name}”.`);
     } catch (error) {
-      toast.error(error.message);
+      toastFailure(error, { operation: 'That LoRA group' });
     }
   };
 

@@ -73,7 +73,7 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
       if (!opened) {
         // A blocked popup is not a failure — the link is still good, and the
         // dialog now shows it as one to click.
-        toast(zh() ? '浏览器拦截了新标签页，请点击下面的链接。' : 'Your browser blocked the new tab — use the link below.', { icon: '🔗' });
+        toast(zh() ? '浏览器拦截了新标签页，请点击下面的链接。' : 'Your browser blocked the new tab — use the link below.');
       }
     } catch (err) {
       setError(err?.message || 'Could not hand this to Civitai.');

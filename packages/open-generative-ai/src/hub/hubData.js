@@ -6,12 +6,12 @@
 // from hubApp.js — when in doubt, that file is the contract.
 import { useSyncExternalStore } from 'react';
 import { toast } from 'react-hot-toast';
-import { toastFailure } from '../lib/failureToast.js';
 import { setApiStatus as setApiStatusStore } from '../app/statusStore.js';
 import { decryptMedia } from '../lib/e2eVault.js';
 import { loadStudioSetup } from '../app/promptTarget.js';
 import { updateComposerSection } from '../lib/composerState.js';
 import { basenameOf, resolveGenerationSetup } from '../lib/generationSetupStore.js';
+import { describeFailure } from '../lib/describeFailure.js';
 
 // Prompt fields sealed to the owner vault arrive as "vseal:v1:{envelope}". The
 // server holds no key — decrypt them in-browser for display. Fail-soft so a
@@ -266,36 +266,82 @@ export const providerLabel = (value) => ({
   'xai-imagine-api': 'xAI · Imagine API',
   'xai-imagine-oauth': 'xAI · Imagine OAuth',
   'hivemindos-hosted-media': 'HivemindOS · Hosted media',
-  'media-studio-mcp': 'HivemindOS · this machine’s studio',
+  'media-studio-mcp': 'HivemindOS · Media Studio MCP',
   'upload-post': 'Upload-Post',
 }[value] || value);
 
+/**
+ * Every hub request, and the one reading of a hub failure.
+ *
+ * The ~26 callers below do `toastFailed(error)`; making each of them
+ * translate its own failure is how a raw traceback, a JSON body or another
+ * product's error prose used to reach a toast. So the translation happens HERE,
+ * once, and `error.message` is already a sentence by the time a caller shows
+ * it. `error.technical` keeps the original for a Details row, and
+ * `error.remedy`/`error.oauthProvider` survive so a refusal can still become a
+ * button (see describeFailure).
+ */
 export async function api(path, options = {}) {
   const isForm = options.body instanceof FormData;
-  const response = await fetch(path, {
-    ...options,
-    headers: { ...(isForm ? {} : { 'Content-Type': 'application/json' }), ...(options.headers || {}) },
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      headers: { ...(isForm ? {} : { 'Content-Type': 'application/json' }), ...(options.headers || {}) },
+    });
+  } catch (cause) {
+    // The browser's own "Failed to fetch" — the studio API restarted, or is not
+    // running. Two words that mean nothing, translated where every caller gets it.
+    const error = new Error(cause?.message || 'Failed to fetch');
+    const read = describeFailure(error, { operation: 'That request' });
+    const failure = new Error(read.title);
+    failure.technical = String(cause?.message || '');
+    failure.remedyAction = read.remedy;
+    throw failure;
+  }
   const contentType = response.headers.get('content-type') || '';
   const payload = contentType.includes('json') ? await response.json() : await response.text();
   if (!response.ok) {
-    const detail = typeof payload === 'object' ? payload.detail : payload;
-    const sentence = Array.isArray(detail)
-      ? detail.map((item) => item.msg).join(' · ')
-      : (typeof detail === 'string' ? detail : detail?.message) || `Request failed (${response.status})`;
-    const error = new Error(sentence);
-    // The server answers a 500 with an incident id that also appears in its
-    // log, and refusals like PassBook's with `{message, remedy}` — both were
-    // lost here, because only `detail` was read and an object detail became
-    // the string "[object Object]". Carrying them on the error is what lets a
-    // failure offer the action that repairs it instead of a dead sentence.
-    error.status = response.status;
-    error.detail = detail;
-    error.remedy = (typeof detail === 'object' && !Array.isArray(detail) ? detail?.remedy : '') || '';
-    error.incident = (typeof payload === 'object' ? payload?.incident : '') || '';
+    // A gateway proxied through this API answers `{error}` rather than
+    // `{detail}`; reading only one of the two collapses it to "Request failed".
+    const detail = typeof payload === 'object' ? (payload.detail ?? payload.error) : payload;
+    const raw = Array.isArray(detail)
+      ? detail.map((item) => item?.msg || item?.message || String(item)).filter(Boolean).join(' · ')
+      : (typeof detail === 'object' && detail ? String(detail.message || detail.error || '') : String(detail || ''));
+    const carrier = new Error(raw || `Request failed (${response.status})`);
+    carrier.status = response.status;
+    if (detail && typeof detail === 'object') {
+      carrier.remedy = String(detail.remedy || '');
+      carrier.oauthProvider = String(detail.provider || '');
+    } else if (typeof payload === 'object' && payload?.remedy) {
+      carrier.remedy = String(payload.remedy || '');
+    }
+    const read = describeFailure(carrier, { operation: 'That request' });
+    const error = new Error(read.title);
+    error.status = carrier.status;
+    error.remedy = carrier.remedy || '';
+    error.oauthProvider = carrier.oauthProvider || '';
+    error.remedyAction = read.remedy;
+    error.technical = read.detail || (read.title === carrier.message ? '' : carrier.message);
+    // The 500 handler mints an incident id and writes it beside the traceback in
+    // the studio log. It is the one thing that makes a bug report answerable, so
+    // it rides on the error for the toast's Copy details action (incidentOf).
+    error.incident = (typeof payload === 'object' ? String(payload?.incident || '') : '') || '';
     throw error;
   }
   return payload;
+}
+
+/**
+ * Show a failure api() has already read.
+ *
+ * Every error that reaches these handlers came through `api()` above, which
+ * translated it — so this is deliberately thin, and it is the ONE place a hub
+ * failure becomes a toast, rather than twenty-six copies of
+ * `toastFailed(error)` that each had to be trusted separately.
+ */
+export function toastFailed(error) {
+  toast.error(error?.message || 'That did not work.');
 }
 
 export function routeValue(provider, model, auth = '') {
@@ -624,8 +670,11 @@ export async function createSimpleRun(plan) {
     void loadPrompts({ quiet: true });
     return true;
   } catch (error) {
-    replaceThreadItem(loading.id, { kind: 'runError', message: error.message });
-    toastFailure(error);
+    // The thread item IS the display. A toast saying the same words is the
+    // "shown twice" DESIGN.md §4 bans.
+    replaceThreadItem(loading.id, {
+      kind: 'runError', message: error.message, detail: error.technical || '', action: error.remedyAction || null,
+    });
     return false;
   } finally {
     setSimpleBusy(false);
@@ -678,8 +727,15 @@ export async function submitSimplePrompt() {
     notifyHub();
     if (plan.mode === 'brief') await createSimpleRun(plan);
   } catch (error) {
-    pushThread({ kind: 'assistant', error: true, message: error.message });
-    toastFailure(error);
+    // Sentence, repair and evidence — the bubble carries all three, so nothing
+    // toasts beside it.
+    pushThread({
+      kind: 'assistant',
+      error: true,
+      message: error.message,
+      detail: error.technical || '',
+      action: error.remedyAction || null,
+    });
   } finally {
     setSimpleBusy(false);
   }
@@ -746,6 +802,9 @@ export function buildRunGenerationCards(run) {
     const status = generationStageStatus(run, 'keyframes', artifacts, expected, attempt);
     stages.push({
       id: `${run.run_id}:image`, kind: 'image', intent: 'generate_keyframes', title: 'Image generation', status,
+      // The step a "Retry step" button has to name — a card that shows a
+      // failure without one is the dead end this card used to be.
+      stepId: 'keyframes',
       prompt: run.brief?.concept || run.brief?.goal || '', provider, model: generationModel(run, provider, 'keyframe'),
       detail: generationStageDetail(run, 'keyframes', 'image', artifacts, expected, status), artifacts, sourceArtifacts: referenceArtifacts,
       createdAt: attempt?.createdAt, completedAt: attempt?.completedAt, error: attempt?.error_type || '',
@@ -760,6 +819,7 @@ export function buildRunGenerationCards(run) {
     const status = generationStageStatus(run, 'motion', artifacts, expected, attempt);
     stages.push({
       id: `${run.run_id}:video`, kind: 'video', intent: 'animate_scenes', title: 'Video generation', status,
+      stepId: 'motion',
       prompt: run.brief?.concept || run.brief?.goal || '', provider, model: generationModel(run, provider, 'motion'),
       detail: generationStageDetail(run, 'motion', 'video', artifacts, expected, status), artifacts,
       sourceArtifacts: records.filter((artifact) => artifact.role === 'keyframe'), createdAt: attempt?.createdAt,
@@ -997,7 +1057,7 @@ export async function loadPrompts({ quiet = false, force = false } = {}) {
     hubState.canvasPage = page;
     hubState.canvasHasMore = hasMore;
   } catch (error) {
-    if (!quiet) toastFailure(error);
+    if (!quiet) toastFailed(error);
   } finally {
     // An explicit load owns canvasLoading, so its flip back must publish even
     // when the data came back identical (filter change, manual refresh).
@@ -1034,7 +1094,7 @@ export async function loadMoreCanvasHistory() {
     hubState.canvasFormats = [...new Set([...hubState.canvasFormats, ...(payload.filters?.formats || [])])].sort();
     hubState.canvasModels = [...new Set([...hubState.canvasModels, ...(payload.filters?.models || [])])].sort((left, right) => left.localeCompare(right));
   } catch (error) {
-    toastFailure(error);
+    toastFailed(error);
   } finally {
     hubState.canvasLoading = false;
   }
@@ -1073,7 +1133,7 @@ export async function loadGenerationTelemetry({ quiet = false } = {}) {
     if (changed) notifyHub();
     return changed;
   } catch (error) {
-    if (!quiet) toastFailure(error);
+    if (!quiet) toastFailed(error);
     return false;
   }
 }
@@ -1384,7 +1444,7 @@ export async function loadCanvasOutputInStudio(historyId) {
     window.dispatchEvent(new CustomEvent('navigate', { detail: { page: section } }));
     toast(isVideo ? 'Loaded the exact settings into the Video studio.' : 'Loaded the exact settings into the Image studio.');
   } catch (error) {
-    toastFailure(error);
+    toastFailed(error);
   }
 }
 
@@ -1398,7 +1458,7 @@ export async function loadCanvasOutputInCanvas(historyId) {
     notifyHub();
     toast('Loaded the exact encrypted workflow and generated output in Canvas.');
   } catch (error) {
-    toastFailure(error);
+    toastFailed(error);
   }
 }
 
@@ -1433,7 +1493,7 @@ export async function copyCanvasPrompt(historyId) {
     if (!setup?.primaryPrompt) throw new Error('This output has no recoverable prompt.');
     await copyText(setup.primaryPrompt);
   } catch (error) {
-    toastFailure(error);
+    toastFailed(error);
   }
 }
 
@@ -1454,7 +1514,7 @@ export async function deleteCanvasOutput(historyId) {
     toast('Output and its local traces were permanently deleted.');
     return true;
   } catch (error) {
-    toastFailure(error);
+    toastFailed(error);
     return false;
   }
 }
@@ -1484,7 +1544,7 @@ export async function setPromptFavorite(promptId, favorite) {
     const index = hubState.prompts.findIndex((entry) => entry.prompt_id === promptId);
     if (index >= 0) hubState.prompts[index] = await decryptPromptEntry(payload.prompt);
     notifyHub();
-  } catch (error) { toastFailure(error); }
+  } catch (error) { toastFailed(error); }
 }
 
 // Returns false on failure so the confirm modal stays open (same contract as
@@ -1496,7 +1556,7 @@ export async function deletePrompt(promptId) {
     notifyHub();
     return true;
   } catch (error) {
-    toastFailure(error);
+    toastFailed(error);
     return false;
   }
 }
@@ -1752,7 +1812,7 @@ export async function createWorkflowRun() {
     navigateHub('runs');
     return run;
   } catch (error) {
-    toastFailure(error);
+    toastFailed(error);
     return null;
   }
 }
@@ -1852,7 +1912,7 @@ export async function runAction(action, runId, stepId) {
     hubState.selectedRunId = run.run_id;
     notifyHub();
     toast(`${titleCase(action)} completed.`);
-  } catch (error) { toastFailure(error); }
+  } catch (error) { toastFailed(error); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1885,7 +1945,7 @@ export async function refreshOAuth() {
     await loadOAuth();
     return true;
   } catch (error) {
-    toast.error(`Could not read provider status — ${error.message}`);
+    toastFailed(error);
     return false;
   }
 }
@@ -1903,7 +1963,7 @@ export async function startOAuth(provider) {
     else toast.error('The sign-in tab was blocked. Use the link on the card to open it.');
     return { url: result.authorize_url, opened };
   } catch (error) {
-    toastFailure(error);
+    toastFailed(error);
     return null;
   }
 }
@@ -1916,9 +1976,7 @@ function setApiOnline(online) {
   // React topbar subscribes to the status store (the old #hub-api-status DOM
   // contract is gone); the hub store keeps the verdict so views can show an
   // offline/stale state of their own.
-  // No label of its own: the store owns the wording, so the hub poll and the
-  // heartbeat can never disagree about what the same state is called.
-  setApiStatusStore(online ? 'online' : 'offline');
+  setApiStatusStore(online ? 'online' : 'offline', online ? 'Local API ready' : 'API unavailable');
   const next = Boolean(online);
   if (hubState.apiOnline !== next) {
     hubState.apiOnline = next;
@@ -1953,7 +2011,7 @@ export async function refreshAll({ quiet = false } = {}) {
     return true;
   } catch (error) {
     setApiOnline(false);
-    if (!quiet) toastFailure(error);
+    if (!quiet) toastFailed(error);
     return false;
   }
 }

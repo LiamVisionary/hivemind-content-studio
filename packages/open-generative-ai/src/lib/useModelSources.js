@@ -91,7 +91,7 @@ export function useModelSources({ enabled = true, onOpen = null } = {}) {
         if (state === 'expired') break;
       }
       toast('HivemindOS did not answer. Open it and try again, or paste an account key below.',
-        { icon: '🐝', duration: 10000 });
+        { duration: 10000 });
     } catch (error) {
       toast.error(error?.message || 'Could not ask HivemindOS to link.');
     } finally {
@@ -106,7 +106,7 @@ export function useModelSources({ enabled = true, onOpen = null } = {}) {
     if (action === 'oauth') {
       try {
         window.open(await startOAuthLogin(String(remedy?.provider || '')), '_blank', 'noopener,noreferrer');
-        toast('Finish the sign-in in the tab that opened, then press Try again.', { icon: '🔑', duration: 10000 });
+        toast('Finish the sign-in in the tab that opened, then press Try again.', { duration: 10000 });
       } catch (error) {
         toast.error(error?.instruction ? `${error.message} ${error.instruction}`
           : (error?.message || 'Could not start the sign-in.'));
@@ -125,21 +125,21 @@ export function useModelSources({ enabled = true, onOpen = null } = {}) {
       if (routeOf(catalog) === APP_ROUTE) {
         const url = sourceState(catalog, HIVEMINDOS).url;
         if (url) window.open(url, '_blank', 'noopener,noreferrer');
-        toast('Add credits in HivemindOS — this studio spends the same balance.', { icon: '🐝', duration: 8000 });
+        toast('Add credits in HivemindOS — this studio spends the same balance.', { duration: 8000 });
         return;
       }
       try {
         const { checkoutUrl } = await startCreditTopUp();
         if (!checkoutUrl) throw new Error('HivemindOS did not return a checkout page.');
         window.open(checkoutUrl, '_blank', 'noopener,noreferrer');
-        toast('Finish the checkout in the tab that opened, then press Try again.', { icon: '💳', duration: 10000 });
+        toast('Finish the checkout in the tab that opened, then press Try again.', { duration: 10000 });
       } catch (error) {
         toast.error(error?.message || 'Could not open the HivemindOS checkout.');
       }
       return;
     }
     const url = sourceState(catalog, HIVEMINDOS).url;
-    if (!url) { toast('HivemindOS is not installed on this machine yet.', { icon: '🐝' }); return; }
+    if (!url) { toast('HivemindOS is not installed on this machine yet.'); return; }
     window.open(url, '_blank', 'noopener,noreferrer');
   }, [catalog, refresh, show]);
 

@@ -317,12 +317,21 @@ test('with no saved preference the studio boots on the Local source when local m
 
 /* ---------------- failure surface, composer row, misc ---------------- */
 
-test('a failed generation leaves a persistent callout and toasts once, without dumping the request to the console', () => {
+test('a failed generation leaves ONE callout — described, with its remedy — and no toast beside it', () => {
     const studio = read('src/studios/ImageStudio.jsx');
-    assert.match(studio, /s\.generateError = e\?\.message \|\| \(zh\(\) \? '生成失败' : 'Generation failed'\);\n\s+toast\.error\(s\.generateError\);/);
+    // Both generation paths hand the error to describeFailure rather than
+    // pasting the provider's words into two places at once.
+    assert.match(studio, /failGeneration\(e, 'local'\);/);
+    assert.match(studio, /failGeneration\(e, 'muapi'\);/);
+    assert.doesNotMatch(studio, /toast\.error\(s\.generateError\)/);
     assert.doesNotMatch(studio, /console\.error\('\[Local\] generation error:', e\)/);
     assert.doesNotMatch(studio, /console\.error\(e\);/);
-    assert.match(studio, /\{s\.generateError \? \(\s*<div className="[^"]*bg-danger-tint[^"]*" role="alert">/);
+    // The callout is the shared primitive, and its remedy button is wired to a
+    // mechanism this studio actually has.
+    assert.match(studio, /\{s\.generateError \? \(\s*<FailureCallout/);
+    assert.match(studio, /remedy=\{s\.generateFailure\?\.remedy \|\| null\}/);
+    assert.match(studio, /onRemedy=\{\(remedy\) => void runFailureRemedy\(remedy, \{/);
+    assert.match(studio, /onLowerResolution: lowerResolution,/);
     assert.match(studio, /\{zh\(\) \? '重试' : 'Try again'\}/);
 });
 

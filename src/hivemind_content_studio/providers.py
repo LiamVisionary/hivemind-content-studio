@@ -25,34 +25,75 @@ class Provider:
     cost: str
     side_effects: tuple[str, ...]
     fallback: str | None = None
+    # The credential names this provider actually needs, so a card can offer the
+    # field instead of printing an env-var name at somebody. `requirement` is
+    # prose and drifts; this is the machine-readable half, declared once here
+    # because this module is the single source of truth for providers.
+    keys: tuple[str, ...] = ()
+
+
+# What a key is called in a sentence. The card says "Needs an OpenAI API key",
+# not "OPENAI_API_KEY is not set in the shared Hive environment" — the env name
+# stays available as the field's own label for whoever needs it.
+KEY_LABELS: dict[str, str] = {
+    "OPENAI_API_KEY": "an OpenAI API key",
+    "XAI_API_KEY": "an xAI API key",
+    "MUAPI_API_KEY": "a MUAPI key",
+    "ELEVENLABS_API_KEY": "an ElevenLabs key",
+    "PEXELS_API_KEY": "a Pexels key",
+    "PIXABAY_API_KEY": "a Pixabay key",
+    "HIGGSFIELD_API_KEY_ID": "a Higgsfield key id",
+    "HIGGSFIELD_API_KEY_SECRET": "a Higgsfield key secret",
+    "UPLOAD_POST_API_KEY": "an Upload-Post key",
+    "UPLOAD_POST_USERNAME": "an Upload-Post account name",
+    "POSTIZ_API_KEY": "a Postiz key",
+    "OPENAI_BASE_URL": "an OpenAI-compatible base URL",
+    "ACE_STEP_API_BASE_URL": "an ACE-Step server URL",
+    "UNIVERSAL_TTS_URL": "a Universal TTS server URL",
+}
+
+
+def needs_sentence(provider: Provider, available: bool) -> str:
+    """One sentence saying what this provider is waiting for, or "" when ready.
+
+    Never present a problem without its fix: the card renders this beside an
+    "Add key" field for every name in `keys`, so the sentence and the repair sit
+    together instead of the sentence pointing at a page.
+    """
+    if available or not provider.keys:
+        return ""
+    labels = [KEY_LABELS.get(key, key) for key in provider.keys]
+    if len(labels) == 1:
+        return f"Needs {labels[0]}."
+    return f"Needs {', '.join(labels[:-1])} and {labels[-1]}."
 
 
 PROVIDER_MATRIX: tuple[Provider, ...] = (
     Provider("agent-runtime", ("script", "metadata"), "local", "Any stdin/stdout agent command or agent calling the studio MCP", "local/BYOK", ("filesystem", "agent-generation"), "openai-compatible"),
-    Provider("openai-compatible", ("script", "metadata"), "local", "OPENAI_BASE_URL + OPENAI_API_KEY", "local/BYOK", ("network",), "manual"),
+    Provider("openai-compatible", ("script", "metadata"), "local", "OPENAI_BASE_URL + OPENAI_API_KEY", "local/BYOK", ("network",), "manual", keys=("OPENAI_BASE_URL", "OPENAI_API_KEY")),
     Provider("stickman-renderer", ("image", "keyframe", "stickman"), "local", "Pillow + ffmpeg", "local", ("filesystem",), "comfyui"),
     Provider("static-text-renderer", ("image", "keyframe", "static-ad"), "local", "Pillow", "local", ("filesystem",), "comfyui"),
     Provider("comfyui", ("image", "keyframe", "motion"), "local", "ComfyUI or HivemindOS image/video route", "local", ("filesystem", "network"), "media-studio-mcp"),
-    Provider("openai-gpt-image", ("image", "keyframe", "image-editing"), "cloud", "OPENAI_API_KEY", "paid", ("network", "filesystem", "spend"), "openai-gpt-image-oauth"),
+    Provider("openai-gpt-image", ("image", "keyframe", "image-editing"), "cloud", "OPENAI_API_KEY", "paid", ("network", "filesystem", "spend"), "openai-gpt-image-oauth", keys=("OPENAI_API_KEY",)),
     Provider("openai-gpt-image-oauth", ("image", "keyframe", "image-editing"), "cloud", "HivemindOS OpenAI ChatGPT/Codex OAuth (beta)", "paid/subscription", ("network", "filesystem", "spend"), "openai-gpt-image"),
-    Provider("xai-imagine-api", ("image", "keyframe", "motion", "video", "image-to-video", "video-editing"), "cloud", "XAI_API_KEY", "paid", ("network", "filesystem", "spend"), "xai-imagine-oauth"),
+    Provider("xai-imagine-api", ("image", "keyframe", "motion", "video", "image-to-video", "video-editing"), "cloud", "XAI_API_KEY", "paid", ("network", "filesystem", "spend"), "xai-imagine-oauth", keys=("XAI_API_KEY",)),
     Provider("xai-imagine-oauth", ("image", "keyframe", "motion", "video", "image-to-video", "video-editing"), "cloud", "HivemindOS xAI OAuth with api:access", "paid", ("network", "filesystem", "spend"), "xai-imagine-api"),
     Provider("media-studio-mcp", ("motion", "video", "image-to-video"), "tailnet", "HivemindOS Media Studio mcpVideo preference + optional MEDIA_STUDIO_TOKEN", "local/fleet", ("filesystem", "network", "generation"), "comfyui"),
     Provider("palmier-pro", ("assembly", "timeline", "export"), "local", "Palmier Pro open at PALMIER_MCP_URL", "local editor; generation may require upstream plan", ("filesystem", "network", "project-write"), "moneyprinterturbo"),
     Provider("clueso-mcp", ("video-workflow", "video-editing", "localization", "documentation"), "manual", "Authenticated Clueso MCP in the active agent runtime", "provider account/plan; verify before generation", ("network", "external-upload", "project-write", "generation", "unknown-cost"), "local studio providers"),
     Provider("moneyprinterturbo", ("faceless", "assembly", "subtitles"), "local", "ffmpeg + Python dependencies", "local", ("filesystem",), "ffmpeg"),
     Provider("auto-clipper", ("ingest", "transcript", "clip", "rights", "monetization"), "local", "yt-dlp + ffmpeg + optional Podcli", "local", ("filesystem", "network"), "muapi-ai-clipping"),
-    Provider("universal-tts", ("voice",), "local", "UNIVERSAL_TTS_URL", "local", ("network", "filesystem"), "edge-tts"),
-    Provider("elevenlabs", ("voice", "line-voice", "lip-sync-audio"), "cloud", "ELEVENLABS_API_KEY + per-run voice id", "paid", ("network", "filesystem", "spend"), "universal-tts"),
-    Provider("ace-step", ("music",), "local", "ACE_STEP_API_BASE_URL or ace-step executable", "local", ("network", "filesystem"), "muapi"),
-    Provider("pexels", ("stock-video", "stock-image"), "cloud", "PEXELS_API_KEY or PEXELS_API_KEYS", "free/BYOK", ("network", "filesystem"), "pixabay"),
-    Provider("pixabay", ("stock-video", "stock-image", "music"), "cloud", "PIXABAY_API_KEY or PIXABAY_API_KEYS", "free/BYOK", ("network", "filesystem"), "local-media"),
+    Provider("universal-tts", ("voice",), "local", "UNIVERSAL_TTS_URL", "local", ("network", "filesystem"), "edge-tts", keys=("UNIVERSAL_TTS_URL",)),
+    Provider("elevenlabs", ("voice", "line-voice", "lip-sync-audio"), "cloud", "ELEVENLABS_API_KEY + per-run voice id", "paid", ("network", "filesystem", "spend"), "universal-tts", keys=("ELEVENLABS_API_KEY",)),
+    Provider("ace-step", ("music",), "local", "ACE_STEP_API_BASE_URL or ace-step executable", "local", ("network", "filesystem"), "muapi", keys=("ACE_STEP_API_BASE_URL",)),
+    Provider("pexels", ("stock-video", "stock-image"), "cloud", "PEXELS_API_KEY or PEXELS_API_KEYS", "free/BYOK", ("network", "filesystem"), "pixabay", keys=("PEXELS_API_KEY",)),
+    Provider("pixabay", ("stock-video", "stock-image", "music"), "cloud", "PIXABAY_API_KEY or PIXABAY_API_KEYS", "free/BYOK", ("network", "filesystem"), "local-media", keys=("PIXABAY_API_KEY",)),
     Provider("hivemindos-hosted-media", ("image", "keyframe", "motion", "image-to-video"), "cloud", "Local HivemindOS /api/hivemindos/media route + shared hosted credits", "hosted credits + 25%", ("network", "filesystem", "delegated-spend"), "muapi"),
-    Provider("muapi", ("image", "keyframe", "motion", "image-to-video", "music", "lip-sync", "clip"), "cloud", "MUAPI_API_KEY or MUAPI_KEY", "paid", ("network", "filesystem", "spend"), "local providers"),
-    Provider("higgsfield-cloud", ("image", "keyframe", "motion", "image-to-video", "ugc", "analysis"), "cloud", "HIGGSFIELD_API_KEY_ID + HIGGSFIELD_API_KEY_SECRET", "paid", ("network", "filesystem", "spend"), "higgsfield-consumer"),
+    Provider("muapi", ("image", "keyframe", "motion", "image-to-video", "music", "lip-sync", "clip"), "cloud", "MUAPI_API_KEY or MUAPI_KEY", "paid", ("network", "filesystem", "spend"), "local providers", keys=("MUAPI_API_KEY",)),
+    Provider("higgsfield-cloud", ("image", "keyframe", "motion", "image-to-video", "ugc", "analysis"), "cloud", "HIGGSFIELD_API_KEY_ID + HIGGSFIELD_API_KEY_SECRET", "paid", ("network", "filesystem", "spend"), "higgsfield-consumer", keys=("HIGGSFIELD_API_KEY_ID", "HIGGSFIELD_API_KEY_SECRET")),
     Provider("higgsfield-consumer", ("image", "keyframe", "motion", "image-to-video", "ugc", "analysis"), "cloud", "Authenticated higgsfield CLI session", "paid", ("network", "filesystem", "spend"), "higgsfield-cloud"),
     Provider("postiz", ("publish", "schedule"), "local", "POSTIZ_URL + POSTIZ_API_KEY + platform integration IDs", "self-hosted/BYOK", ("network", "publish"), "upload-post"),
-    Provider("upload-post", ("publish", "schedule"), "cloud", "UPLOAD_POST_API_KEY + UPLOAD_POST_USERNAME", "paid", ("network", "publish"), "postiz"),
+    Provider("upload-post", ("publish", "schedule"), "cloud", "UPLOAD_POST_API_KEY + UPLOAD_POST_USERNAME", "paid", ("network", "publish"), "postiz", keys=("UPLOAD_POST_API_KEY", "UPLOAD_POST_USERNAME")),
 )
 
 
@@ -167,7 +208,15 @@ def readiness(provider: Provider, cfg: StudioConfig | None = None) -> dict:
         detail = "Any agent may attach a script; execution is limited to operator-registered CONTENT_STUDIO_RUNTIME_<ID>_COMMAND entries"
     elif provider.mode == "manual":
         available = True
-    return {**asdict(provider), "roles": list(provider.roles), "side_effects": list(provider.side_effects), "available": available, "detail": detail}
+    return {
+        **asdict(provider),
+        "roles": list(provider.roles),
+        "side_effects": list(provider.side_effects),
+        "keys": list(provider.keys),
+        "available": available,
+        "detail": detail,
+        "needs": needs_sentence(provider, available),
+    }
 
 
 def provider_report(cfg: StudioConfig | None = None) -> list[dict]:

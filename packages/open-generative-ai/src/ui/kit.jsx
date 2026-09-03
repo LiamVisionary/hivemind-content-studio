@@ -488,6 +488,68 @@ export function Pill({ tone = 'neutral', dot = false, children, className = '', 
   );
 }
 
+// The one shape a failure takes anywhere in the app (DESIGN.md §4).
+//
+// Three rules live here rather than in twelve call sites: a failure is shown
+// ONCE (this callout, never also a toast); it says one sentence a person can
+// read, not the provider's words; and it carries the repair beside the sentence
+// instead of pointing at a page two clicks away. The technical tail — the raw
+// message, the traceback, whatever the upstream said — is kept, because it is
+// what makes a bug reportable, but it goes behind a Details disclosure so the
+// first thing read is the sentence and not the stack.
+//
+// `remedy` is the repair, `{ label }` plus whatever the caller's runner needs;
+// `onRemedy` receives it. `onRetry`/`onDismiss` are the two ways out DESIGN.md
+// requires; omit either and its button is not rendered.
+export function FailureCallout({
+  title,
+  detail = '',
+  remedy = null,
+  onRemedy = null,
+  onRetry = null,
+  onDismiss = null,
+  retryLabel = 'Try again',
+  detailsLabel = 'Details',
+  dismissLabel = 'Dismiss',
+  retryDisabled = false,
+  className = '',
+}) {
+  // A detail identical to the sentence above it is noise, not evidence.
+  const tail = String(detail || '').trim();
+  const showDetail = Boolean(tail) && tail !== String(title || '').trim();
+  return (
+    <div
+      className={cx('flex items-start justify-between gap-3 rounded-md border border-danger/40 bg-danger-tint px-3.5 py-3', className)}
+      role="alert"
+    >
+      <div className="min-w-0">
+        <div className="text-xs font-semibold text-danger">{title}</div>
+        {showDetail ? (
+          <details className="mt-1.5">
+            <summary className="cursor-pointer list-none text-[11px] font-medium text-danger/80 hover:text-danger">
+              {detailsLabel}
+            </summary>
+            <div className="mt-1 max-h-40 overflow-y-auto break-words font-mono text-[11px] leading-relaxed text-danger/90 [overflow-wrap:anywhere]">
+              {tail}
+            </div>
+          </details>
+        ) : null}
+      </div>
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+        {remedy && onRemedy ? (
+          <Button size="sm" variant="primary" onClick={() => onRemedy(remedy)}>{remedy.label}</Button>
+        ) : null}
+        {onRetry ? (
+          <Button size="sm" variant="neutral" icon="refresh" disabled={retryDisabled} onClick={onRetry}>
+            {retryLabel}
+          </Button>
+        ) : null}
+        {onDismiss ? <IconButton icon="x" label={dismissLabel} size="sm" onClick={onDismiss} /> : null}
+      </div>
+    </div>
+  );
+}
+
 export function EmptyState({ icon = 'sparkles', title, hint, action, className = '' }) {
   return (
     <div className={cx('flex flex-col items-center justify-center gap-3 px-6 py-14 text-center', className)}>

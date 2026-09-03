@@ -70,6 +70,7 @@ import { PersonaBar } from './PersonaBar.jsx';
 import { ReferenceThumb } from './ReferenceThumb.jsx';
 import { KIND_META, describeReferenceRejection } from './referenceKinds.js';
 import { zh } from './videoLogic.js';
+import { toastFailure } from '../../ui/failureToast.jsx';
 
 // Scene sits directly under the character pictures because that is where its
 // <Picture N> labels continue from: one row, numbered in order of supply, shown
@@ -677,7 +678,7 @@ export function ReferencesMenu({
     if (attached >= 0) {
       const label = labels[kind][attached];
       const tag = label?.video || label || KIND_META[kind].tag(attached);
-      toast(zh() ? `已作为 ${tag} 附加` : `Already attached as ${tag}`, { icon: '📎' });
+      toast(zh() ? `已作为 ${tag} 附加` : `Already attached as ${tag}`);
       return;
     }
     if ((kind === 'images' || kind === 'scene' ? orderedImages.length : current.length) >= limits[kind === 'scene' ? 'images' : kind]) return;
@@ -718,7 +719,7 @@ export function ReferencesMenu({
       attach(kind, uploaded.url, uploaded.name);
     } catch (err) {
       console.error('[ReferencesMenu] upload failed:', err);
-      toast.error(`${zh() ? '参考上传失败' : 'Reference upload failed'}: ${err.message}`);
+      toastFailure(err, { operation: zh() ? '参考上传' : 'Reference upload' });
     }
   };
 
@@ -992,7 +993,7 @@ export function ReferencesMenu({
               )));
             } catch (err) {
               console.error('[ReferencesMenu] prepared clip upload failed:', err);
-              toast.error(`${zh() ? '片段上传失败' : 'Prepared clip upload failed'}: ${err.message}`);
+              toastFailure(err, { operation: zh() ? '片段上传' : 'Prepared clip upload' });
             }
           }}
         />

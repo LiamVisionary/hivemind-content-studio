@@ -10,7 +10,7 @@ import { Icon } from '../../ui/icons.jsx';
 import { Button, ProgressBar, cx } from '../../ui/kit.jsx';
 import {
   generationArtifactUrl, generationProgressPct, generationStatusLabel,
-  generationTiming, providerLabel,
+  generationTiming, humanize, providerLabel, runAction,
 } from '../hubData.js';
 import { Lightbox } from './Lightbox.jsx';
 import { StatusPill } from './StatusPill.jsx';
@@ -109,8 +109,27 @@ export const GenerationCard = memo(function GenerationCard({ run, card, onOpenRu
 
       {progress != null ? <ProgressBar value={progress / 100} /> : null}
 
+      {/* `card.error` is the attempt's error_type — a slug like
+          `provider_refused`, which is a machine's word, not a sentence. Say it
+          in words and offer the step again, rather than printing the slug in
+          mono and leaving the run stuck. */}
       {card.status === 'error' ? (
-        <p className="rounded-md bg-danger-tint px-3 py-2 font-mono text-xs text-danger">{card.error || card.detail}</p>
+        <div className="flex items-start justify-between gap-3 rounded-md bg-danger-tint px-3 py-2">
+          <p className="min-w-0 text-xs leading-relaxed text-danger">
+            {card.error ? humanize(card.error) : card.detail}
+          </p>
+          {card.stepId ? (
+            <Button
+              size="sm"
+              variant="neutral"
+              icon="refresh"
+              className="shrink-0"
+              onClick={() => void runAction('retry', run.run_id, card.stepId)}
+            >
+              Retry step
+            </Button>
+          ) : null}
+        </div>
       ) : null}
 
       <div className="flex items-start gap-3 rounded-md bg-bg1 p-2.5">

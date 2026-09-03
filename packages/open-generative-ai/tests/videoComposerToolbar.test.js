@@ -55,8 +55,11 @@ test('keyboard, confirms, and the canvas actions behave', () => {
     // Strip tiles draw a poster <img>, not a <video> per entry.
     assert.match(studio, /function HistoryThumb\(\{ url \}\) \{\s*const \{ poster, resolved, pending \} = useMediaPoster\(url, \{ kind: 'video' \}\);/);
     assert.match(read('src/studios/video/ChainTimeline.jsx'), /useMediaPoster\(url, \{ kind: 'video' \}\)/);
-    // The failure callout offers Try again and says it once (no duplicate toast).
-    assert.match(studio, /s\.generateError = e\?\.message \|\| \(zh\(\) \? '生成失败' : 'Generation failed'\);/);
+    // The failure callout offers Try again and says it once (no duplicate toast) —
+    // and, since the failure is read through describeFailure, the repair it named.
+    assert.match(studio, /s\.generateError = failure\.title \|\| \(zh\(\) \? '生成失败' : 'Generation failed'\);/);
+    assert.match(studio, /<FailureCallout/);
+    assert.match(studio, /remedy=\{s\.generateFailure\?\.remedy \|\| null\}/);
     assert.doesNotMatch(studio, /toast\.error\(e\.message\)/);
     // The "still stopping" notice has a lifetime.
     assert.doesNotMatch(studio, /toast\.loading\(zh\(\)\s*\? '正在停止/);

@@ -26,13 +26,28 @@ export const PROVIDER_OAUTH = Object.freeze({
 });
 
 /** Providers whose credential is an API key held on the server, named so a
- *  missing one can say WHICH key rather than "not configured". */
+ *  missing one can say WHICH key rather than "not configured".
+ *
+ *  The catalog row is the source of truth when it carries one (providers.py
+ *  now declares `keys` on every provider that needs credentials); this map is
+ *  the fallback for rows fetched from an older server, and for the hosted
+ *  route whose token is not a provider key. */
 export const PROVIDER_KEYS = Object.freeze({
   'openai-gpt-image': 'OPENAI_API_KEY',
   'xai-imagine-api': 'XAI_API_KEY',
   'higgsfield-cloud': 'HIGGSFIELD_API_KEY_ID and HIGGSFIELD_API_KEY_SECRET',
   'hivemindos-hosted-media': 'HIVEMINDOS_DASHBOARD_DEVICE_TOKEN',
 });
+
+/** The credential names a row is waiting for: what the catalog declared, else
+ *  the map above. Returns [] when the row needs none this browser can name. */
+export function keyNamesFor(row) {
+  const declared = Array.isArray(row?.keys) ? row.keys.filter(Boolean).map(String) : [];
+  if (declared.length) return declared;
+  const known = PROVIDER_KEYS[String(row?.provider || '')];
+  // The legacy map's Higgsfield entry is prose, not a name — split it back.
+  return known ? known.split(/\s+and\s+/) : [];
+}
 
 /**
  * Ask this machine whether it holds the MUAPI key, and remember the answer.
@@ -167,12 +182,28 @@ export function readinessFor(row, { oauth = null } = {}) {
     return { state: 'ready', label: 'Connected', detail: '', action: null, blocks: false };
   }
 
-  const key = PROVIDER_KEYS[provider];
-  if (key && row?.available === false) {
+  const keys = keyNamesFor(row);
+  if (keys.length && row?.available === false) {
     return {
       state: 'key',
       label: 'Not configured',
-      detail: `${key} is not set in the shared Hive environment.`,
+      // The sentence the server wrote, when it wrote one — "Needs a MUAPI key"
+      // rather than an env-var name aimed at whoever set the machine up.
+      detail: String(row?.needs || '') || `${keys.join(' and ')} is not set in the shared Hive environment.`,
+      // Never a state without its repair: this opens the same inline key field
+      // the producer picker uses, rather than leaving the row a dead end.
+      action: { kind: 'key', key: keys[0], keys, label: 'Add key' },
+      blocks: true,
+    };
+  }
+  // A row the server says is unavailable is unavailable, whether or not this
+  // browser can name its credential. Calling it ready and failing at generation
+  // time is the exact experience this module replaces.
+  if (row?.available === false) {
+    return {
+      state: 'offline',
+      label: 'Unavailable',
+      detail: String(row?.needs || row?.detail || '') || 'This provider is not set up on this machine yet.',
       action: null,
       blocks: true,
     };

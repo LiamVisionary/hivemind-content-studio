@@ -549,6 +549,27 @@ export async function previewHivemindIngredientSheet(items, { aspectRatio = '16:
     };
 }
 
+/**
+ * A lane refusal as an Error that still carries its repair.
+ *
+ * The routes answer `{message, remedy, provider}` when a failure has a fix —
+ * an account to connect, a balance to top up — and `new Error(detail)` on that
+ * object produced the string "[object Object]". So the message is read out of
+ * the shape, and the remedy is attached the way modelRunner.js attaches it, so
+ * the studio's callout can render the button instead of the sentence alone.
+ */
+function laneError(detail, fallback) {
+    const shape = detail && typeof detail === 'object' ? detail : null;
+    const error = new Error(
+        (shape ? String(shape.message || shape.error || '') : String(detail || '')) || fallback,
+    );
+    if (shape) {
+        error.remedy = String(shape.remedy || '');
+        error.oauthProvider = String(shape.provider || '');
+    }
+    return error;
+}
+
 export async function generateHivemindVideo(params) {
     // References (image + video) are sealed to the owner vault at rest, so they
     // are always decrypted in-browser and re-sent inline as base64 — the server
@@ -747,12 +768,14 @@ export async function generateHivemindVideo(params) {
         // Older studio API without the start route: single blocking request.
         const legacy = await postJson('/api/media-studio/video');
         if (!legacy.response.ok || legacy.data.ok === false) {
-            throw new Error(legacy.data.detail || legacy.data.error || `The studio could not start that generation (HTTP ${legacy.response.status}).`);
+            throw laneError(legacy.data.detail || legacy.data.error,
+                `The studio could not start that generation (HTTP ${legacy.response.status}).`);
         }
         return finished(legacy.data);
     }
     if (!start.response.ok || start.data.ok === false || !start.data.job_id) {
-        throw new Error(start.data.detail || start.data.error || `The studio could not start that generation (HTTP ${start.response.status}).`);
+        throw laneError(start.data.detail || start.data.error,
+            `The studio could not start that generation (HTTP ${start.response.status}).`);
     }
     // A server that already finished synchronously answers with the media URL.
     if (start.data.url || start.data.media_url || start.data.output_url) return finished(start.data);
@@ -870,8 +893,11 @@ export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds 
             continue; // transient network blip — the job survives server-side
         }
         if (payload.status === 'error' || payload.ok === false) {
+            // laneError carries the server's remedy so the callout can render a
+            // button; `retryable` is the backend saying this one is worth
+            // pressing it for (a restart or a lane that stopped answering).
             throw Object.assign(
-                new Error(payload.detail || payload.error || 'The studio reported a failed generation.'),
+                laneError(payload.detail || payload.error, 'The studio reported a failed generation.'),
                 ...(payload.retryable ? [{ retryable: true }] : []),
             );
         }

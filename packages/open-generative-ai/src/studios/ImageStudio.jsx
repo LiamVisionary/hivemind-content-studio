@@ -16,6 +16,8 @@ import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
 import { localRow, muapiRow, needsBrowserKey, runImage } from '../lib/modelRunner.js';
+import { describeFailure } from '../lib/describeFailure.js';
+import { runFailureRemedy } from '../lib/failureRemedy.js';
 // Still imported for the NON-generation calls — polling a resumed job and
 // uploading a reference. Generation goes through runImage().
 import { muapi } from '../lib/muapi.js';
@@ -73,8 +75,9 @@ import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { useMediaSrc } from '../hooks/hooks.js';
 import { Icon } from '../ui/icons.jsx';
 import {
-  AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, Field, IconButton, NativeSelect,
-  Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput, Toggle, cx,
+  AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, FailureCallout, Field, IconButton,
+  NativeSelect, Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput,
+  Toggle, cx,
 } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { StudioLayout } from '../ui/kit.jsx';
@@ -320,6 +323,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     activeGeneration: null,
     // Last failure, kept on the canvas (copyable) until dismissed or the next run.
     generateError: '',
+    // The same failure, read: { title, detail, remedy } from describeFailure.
+    // The callout carries all three, which is why nothing toasts beside it.
+    generateFailure: null,
     localProgress: { active: false, pct: 0, label: '' },
     // Smooth, time-based ETA bar. Image generation exposes no real per-step
     // progress on any path, so the bar is driven by elapsed / expected (from the
@@ -1772,8 +1778,42 @@ export function ImageStudio({
     finishImageProgress(false);
     s.generating = false;
     s.generateError = '';
+    s.generateFailure = null;
     bump();
     toast(zh() ? '已取消生成。' : 'Generation cancelled.');
+  };
+
+  /**
+   * One reading of a failed run, kept on the canvas and nowhere else.
+   *
+   * `describeFailure` turns whatever threw into a sentence plus the button that
+   * repairs it; the callout renders all three parts, so there is deliberately
+   * no toast beside this (DESIGN.md §4: a failure is shown once).
+   */
+  const failGeneration = (error, transport) => {
+    const failure = describeFailure(error, {
+      transport,
+      operation: zh() ? '生成' : 'Generation',
+      // Only the local lane has a size dial to step down; a cloud model's
+      // "Lower resolution" would point at a control this screen does not own.
+      canLowerResolution: transport === 'local' && LOCAL_BASE_SIZES.some((size) => size && size < (s.baseSize || 1280)),
+    });
+    s.generateFailure = failure;
+    s.generateError = failure.title || (zh() ? '生成失败' : 'Generation failed');
+  };
+
+  /** Step the local short side down one tier — what "Lower resolution" means. */
+  const lowerResolution = () => {
+    const sizes = LOCAL_BASE_SIZES.filter(Boolean).sort((a, b) => b - a);
+    const current = s.baseSize || sizes[0];
+    const next = sizes.find((size) => size < current);
+    if (!next) return;
+    s.baseSize = next;
+    persistImagePreferences();
+    s.generateError = '';
+    s.generateFailure = null;
+    bump();
+    toast(zh() ? `分辨率已降到 ${next} 短边。` : `Resolution lowered to a ${next}px short side.`);
   };
 
   const generateNow = async () => {
@@ -1852,15 +1892,16 @@ export function ImageStudio({
 
       const huntIds = coupleOptions || sheetActive ? [] : armedHuntIds();
       if (huntIds.length) {
-        toast(`Strength Hunt: sweeping ${huntIds.length === 2 ? 'two LoRAs' : 'one LoRA'} 0 → current — the labeled sheet arrives as the result.`, { icon: '🎯' });
+        toast(`Strength Hunt: sweeping ${huntIds.length === 2 ? 'two LoRAs' : 'one LoRA'} 0 → current — the labeled sheet arrives as the result.`);
       }
       if (sheetActive) {
         const preset = CHARACTER_SHEET_PRESETS.find((p) => p.value === s.characterSheetPreset);
-        toast(`Character sheet: generating ${preset?.label || s.characterSheetPreset} views of your reference — the labeled sheet arrives as the result.`, { icon: '🧍' });
+        toast(`Character sheet: generating ${preset?.label || s.characterSheetPreset} views of your reference — the labeled sheet arrives as the result.`);
       }
 
       s.generating = true;
       s.generateError = '';
+      s.generateFailure = null;
       s.localProgress = { active: true, pct: 0, label: t('common.generating') };
       const run = { jobId: null, cancelled: false, unsub: null };
       s.activeGeneration = run;
@@ -2001,8 +2042,7 @@ export function ImageStudio({
         // Message only — the error object carries the request (prompt included),
         // which has no business in the console.
         console.warn('[ImageStudio] local generation failed:', e?.message || e);
-        s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
-        toast.error(s.generateError);
+        failGeneration(e, 'local');
       } finally {
         if (run.jobId) removePendingJob(run.jobId);
         if (s.activeGeneration === run) {
@@ -2039,6 +2079,7 @@ export function ImageStudio({
 
     s.generating = true;
     s.generateError = '';
+    s.generateFailure = null;
     // The muapi client polls with this signal, so Cancel stops the provider poll
     // at once (and frees the serial queue) instead of just ignoring a late result.
     const run = { jobId: null, cancelled: false, unsub: null, abort: new AbortController() };
@@ -2137,8 +2178,7 @@ export function ImageStudio({
       if (capturedRequestId) removePendingJob(capturedRequestId);
       finishImageProgress(false);
       console.warn('[ImageStudio] cloud generation failed:', e?.message || e);
-      s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
-      toast.error(s.generateError);
+      failGeneration(e, 'muapi');
     } finally {
       if (s.activeGeneration === run) {
         s.activeGeneration = null;
@@ -2234,6 +2274,7 @@ export function ImageStudio({
       if (live && !s.generating) {
         s.generating = true;
         s.generateError = '';
+        s.generateFailure = null;
         // Cancel has to be able to stop a resumed poll too — by job id, the same
         // way it stops a fresh one.
         const run = { jobId: live.requestId, cancelled: false, unsub: null };
@@ -2260,7 +2301,7 @@ export function ImageStudio({
           } catch (e) {
             if (run.cancelled || e?.cancelled) return;
             console.warn('[ImageStudio] Image resume failed:', live.requestId, e.message);
-            s.generateError = e?.message || (zh() ? '生成失败' : 'Generation failed');
+            failGeneration(e, 'muapi');
             finishImageProgress(false);
           } finally {
             removePendingJob(live.requestId);
@@ -3466,21 +3507,26 @@ export function ImageStudio({
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       <StudioLayout panel={panel} panelTitle={zh() ? '图像设置' : 'Image settings'} composer={composer} composerDrop={composerDrop}>
         <div className="flex flex-col gap-4 p-4 md:p-5">
-          {/* The last failure stays on the canvas, copyable, until dismissed or
-              the next run — a 4 s toast is no place for an OOM traceback. */}
+          {/* The last failure stays on the canvas until dismissed or the next
+              run — one sentence, the button that repairs it, and the raw text
+              behind Details. Nothing toasts beside it (DESIGN.md §4). */}
           {s.generateError ? (
-            <div className="flex items-start justify-between gap-3 rounded-md border border-danger/40 bg-danger-tint px-3.5 py-3" role="alert">
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-danger">{zh() ? '生成失败' : 'Generation failed'}</div>
-                <div className="mt-1 break-words font-mono text-xs text-danger/90">{s.generateError}</div>
-              </div>
-              <div className="flex shrink-0 items-center gap-1">
-                <Button size="sm" variant="neutral" icon="refresh" disabled={s.generating || generateBlocked} onClick={generate}>
-                  {zh() ? '重试' : 'Try again'}
-                </Button>
-                <IconButton icon="x" label={zh() ? '关闭' : 'Dismiss'} size="sm" onClick={() => { s.generateError = ''; bump(); }} />
-              </div>
-            </div>
+            <FailureCallout
+              title={s.generateError}
+              detail={s.generateFailure?.detail || ''}
+              remedy={s.generateFailure?.remedy || null}
+              onRemedy={(remedy) => void runFailureRemedy(remedy, {
+                onMuapiKey: () => { authRetryRef.current = () => generate(); s.authOpen = true; bump(); },
+                onLowerResolution: lowerResolution,
+                onRetry: () => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); },
+              })}
+              onRetry={generate}
+              retryDisabled={s.generating || generateBlocked}
+              retryLabel={zh() ? '重试' : 'Try again'}
+              detailsLabel={zh() ? '详情' : 'Details'}
+              onDismiss={() => { s.generateError = ''; s.generateFailure = null; bump(); }}
+              dismissLabel={zh() ? '关闭' : 'Dismiss'}
+            />
           ) : null}
 
           {s.generating ? (() => {

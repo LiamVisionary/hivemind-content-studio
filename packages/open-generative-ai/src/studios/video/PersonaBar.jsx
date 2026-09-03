@@ -37,6 +37,7 @@ import { LibraryDeleteButton, LibraryStateNote, SaveNameModal } from '../../ui/S
 import { SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
 import { ReferenceThumb } from './ReferenceThumb.jsx';
 import { zh } from './videoLogic.js';
+import { toastFailure } from '../../ui/failureToast.jsx';
 
 const BAR_BUTTON = 'rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50';
 
@@ -157,7 +158,7 @@ export function PersonaBar({
         ? (zh() ? `已更新“${name}”。` : `Updated “${name}”.`)
         : (zh() ? `已保存角色“${name}”。` : `Saved “${name}”.`));
     } catch (error) {
-      toast.error(error.message);
+      toastFailure(error, { operation: 'That persona' });
     } finally {
       setSaving(false);
     }
@@ -172,7 +173,7 @@ export function PersonaBar({
       await saveLibraryEntry(LIBRARIES.personas, { name: activeEntry.name, data: current });
       toast.success(zh() ? `已更新“${activeEntry.name}”。` : `Updated “${activeEntry.name}”.`);
     } catch (error) {
-      toast.error(error.message);
+      toastFailure(error, { operation: 'That persona' });
     } finally {
       setSaving(false);
     }
@@ -196,7 +197,7 @@ export function PersonaBar({
         toast.success(zh() ? `已导出“${entry.name}”。` : `Exported “${entry.name}”.`);
       }
     } catch (error) {
-      toast.error(error.message);
+      toastFailure(error, { operation: 'That persona' });
     } finally {
       setBusyTransfer('');
     }
@@ -259,7 +260,7 @@ export function PersonaBar({
       if (persona?.id === entry.id) onPersonaChange?.(null);
       toast(zh() ? `已删除“${entry.name}”。` : `Deleted “${entry.name}”.`);
     } catch (error) {
-      toast.error(error.message);
+      toastFailure(error, { operation: 'That persona' });
     }
   };
 

@@ -1721,6 +1721,38 @@ def _out_of_memory_advice(reason: str) -> str:
     )
 
 
+# What Python says when nothing is listening on the other end. The first line
+# of a URLError is `<urlopen error [Errno 61] Connection refused>` — a sentence
+# about a library, kept verbatim by the sanitizer below and shown to a person
+# with a Try-again button beside it. This is the same failure said in words.
+_UNREACHABLE_RE = re.compile(
+    r"urlopen error|connection refused|errno 61|errno 111|\[winerror 10061\]"
+    r"|connection reset|remote end closed connection|expecting value: line 1 column 1",
+    re.IGNORECASE,
+)
+_TIMEOUT_RE = re.compile(r"timed out|timeout", re.IGNORECASE)
+
+
+def _lane_unreachable_advice(reason: str) -> str:
+    """"The lane stopped answering", when that is what the error means.
+
+    A render that dies because its ComfyUI went away is not a bad request and
+    not a bug in the graph — it is a machine that is no longer there, and the
+    only useful thing to say is that, plus what to try.
+    """
+    if not _UNREACHABLE_RE.search(reason or ""):
+        return ""
+    if _TIMEOUT_RE.search(reason):
+        return (
+            "The ComfyUI lane stopped answering part-way through this render. "
+            "Check it is still running, then try again."
+        )
+    return (
+        "The ComfyUI lane is not answering. Check it is running on this machine "
+        "(or that the rented one is still connected), then try again."
+    )
+
+
 # Where a path names the person or the machine: home directories, temp
 # staging, rental workspaces and mounted volumes. Only these roots are
 # reduced to basenames, so an API route like /api/generate in an HTTP error
@@ -1758,6 +1790,10 @@ def sanitize_error_detail(text: object, limit: int = 300) -> str:
     if not raw.strip():
         return ""
     advice = _out_of_memory_advice(raw)
+    if advice:
+        return advice
+    # A lane that went away says so in words rather than in urllib's.
+    advice = _lane_unreachable_advice(raw)
     if advice:
         return advice
     head, stderr_section = raw, ""

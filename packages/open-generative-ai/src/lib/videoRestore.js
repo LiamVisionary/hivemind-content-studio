@@ -478,8 +478,11 @@ export async function rentalForLane(laneName) {
 async function readJson(response) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(String(data?.detail?.error || data?.detail || data?.error || 'The restore service refused that.'));
+    const error = new Error(String(data?.detail?.error || data?.detail?.message || data?.detail || data?.error || 'The restore service refused that.'));
     error.operational = Boolean(data?.operational);
+    // The refusal names its repair — an unconnected account, an empty balance —
+    // so the caller can offer the button instead of the sentence alone.
+    error.remedy = String(data?.detail?.remedy || data?.remedy || '');
     throw error;
   }
   return data;

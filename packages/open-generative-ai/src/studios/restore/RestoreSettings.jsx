@@ -15,8 +15,9 @@
 // wants the hosted one, and getting that backwards is what costs money.
 import { Icon } from '../../ui/icons.jsx';
 import {
-  Card, Field, NativeSelect, SectionLabel, Segmented, Slider, Toggle, cx,
+  Button, Card, Field, NativeSelect, SectionLabel, Segmented, Slider, Toggle, cx,
 } from '../../ui/kit.jsx';
+import { remedyFor } from '../../lib/textModels.js';
 import {
   CLOUD_LANE, COLOR_CORRECTIONS, RESOLUTION_PRESETS, RESTORE_MODELS,
   describeChunkPlan, describeCloudPrice, describeLane, describePrice, describeTensorRt, laneHasTensorRt,
@@ -40,77 +41,82 @@ function laneBadge(lane) {
 }
 
 
-function LaneRow({ lane, selected, onSelect, price, cloudQuote }) {
+function LaneRow({ lane, selected, onSelect, price, cloudQuote, onRemedy }) {
   const usable = lane.available;
   const hosted = lane.lane === CLOUD_LANE;
+  // The repair the capabilities payload named. It renders OUTSIDE the row —
+  // the row is a `<button disabled>`, and a button nested in a disabled button
+  // never receives a click, which is how "Settings → HivemindOS account" came
+  // to be a sentence instead of a door.
+  const remedy = !usable && lane.remedy ? remedyFor(lane.remedy) : null;
   return (
-    <button
-      type="button"
-      disabled={!usable}
-      onClick={() => onSelect(lane.lane)}
-      className={cx(
-        'w-full rounded-lg border px-3 py-2 text-left transition-colors',
-        selected ? 'border-honey bg-bg2' : 'border-line1 bg-bg1 hover:bg-bg2',
-        !usable && 'cursor-not-allowed opacity-50',
-      )}
-    >
-      <span className="flex items-center gap-2">
-        <Icon name={lane.paid ? 'cloud' : 'cpu'} size={14} />
-        <span className="text-sm font-medium text-ink1">{laneName(lane)}</span>
-        {usable ? (
-          <span className={cx(
-            'ml-auto rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase',
-            lane.paid ? 'bg-bg3 text-ink2' : 'bg-honey/20 text-honey',
-          )}>
-            {laneBadge(lane)}
-          </span>
-        ) : (
-          // No price on a machine that cannot run the job: "free" beside
-          // "cannot do this" reads as an offer.
-          <span className="ml-auto rounded bg-bg3 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-ink3">
-            Unavailable
-          </span>
+    <div className="flex flex-col gap-1.5">
+      <button
+        type="button"
+        disabled={!usable}
+        onClick={() => onSelect(lane.lane)}
+        className={cx(
+          'w-full rounded-lg border px-3 py-2 text-left transition-colors',
+          selected ? 'border-honey bg-bg2' : 'border-line1 bg-bg1 hover:bg-bg2',
+          !usable && 'cursor-not-allowed opacity-50',
         )}
-      </span>
-      <span className="mt-1 block text-[11px] leading-snug text-ink3">{describeLane(lane)}</span>
-      {usable && describeTensorRt(lane) ? (
-        <span className={cx(
-          'mt-1 flex items-center gap-1 text-[11px] leading-snug',
-          laneHasTensorRt(lane) ? 'text-honey' : 'text-ink3',
-        )}>
-          <Icon name={laneHasTensorRt(lane) ? 'pulse' : 'info'} size={11} />
-          {describeTensorRt(lane)}
+      >
+        <span className="flex items-center gap-2">
+          <Icon name={lane.paid ? 'cloud' : 'cpu'} size={14} />
+          <span className="text-sm font-medium text-ink1">{laneName(lane)}</span>
+          {usable ? (
+            <span className={cx(
+              'ml-auto rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase',
+              lane.paid ? 'bg-bg3 text-ink2' : 'bg-honey/20 text-honey',
+            )}>
+              {laneBadge(lane)}
+            </span>
+          ) : (
+            // No price on a machine that cannot run the job: "free" beside
+            // "cannot do this" reads as an offer.
+            <span className="ml-auto rounded bg-bg3 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-ink3">
+              Unavailable
+            </span>
+          )}
         </span>
+        <span className="mt-1 block text-[11px] leading-snug text-ink3">{describeLane(lane)}</span>
+        {usable && describeTensorRt(lane) ? (
+          <span className={cx(
+            'mt-1 flex items-center gap-1 text-[11px] leading-snug',
+            laneHasTensorRt(lane) ? 'text-honey' : 'text-ink3',
+          )}>
+            <Icon name={laneHasTensorRt(lane) ? 'pulse' : 'info'} size={11} />
+            {describeTensorRt(lane)}
+          </span>
+        ) : null}
+        {/* A lane that cannot run the job says why, and — where the owner can do
+            something about it — what to do. "Unavailable" on its own is the same
+            sentence as "broken", and only one of the two is true here. */}
+        {!usable && lane.reason ? (
+          <span className="mt-1 block text-[11px] leading-snug text-ink3">{lane.reason}</span>
+        ) : null}
+        {selected && hosted ? (
+          <span className="mt-1 block text-[11px] font-medium text-ink2">
+            {/* The price, or an honest absence of one. Never nothing: a paid lane
+                showing no figure reads as free. */}
+            {describeCloudPrice(cloudQuote)
+              || (cloudQuote === undefined ? 'Pricing this render…' : 'This render could not be priced — nothing will be charged without a figure here.')}
+          </span>
+        ) : null}
+        {selected && lane.paid && !hosted && price ? (
+          <span className="mt-1 block text-[11px] font-medium text-ink2">{describePrice(price)}</span>
+        ) : null}
+      </button>
+      {remedy && onRemedy ? (
+        <Button size="sm" className="self-start" onClick={() => onRemedy(remedy)}>{remedy.label}</Button>
       ) : null}
-      {/* A lane that cannot run the job says why, and — where the owner can do
-          something about it — what to do. "Unavailable" on its own is the same
-          sentence as "broken", and only one of the two is true here. */}
-      {!usable && lane.reason ? (
-        <span className="mt-1 block text-[11px] leading-snug text-ink3">
-          {lane.reason}
-          {lane.remedy === 'connect' ? (
-            <>{' '}<span className="text-honey">Settings → HivemindOS account.</span></>
-          ) : null}
-        </span>
-      ) : null}
-      {selected && hosted ? (
-        <span className="mt-1 block text-[11px] font-medium text-ink2">
-          {/* The price, or an honest absence of one. Never nothing: a paid lane
-              showing no figure reads as free. */}
-          {describeCloudPrice(cloudQuote)
-            || (cloudQuote === undefined ? 'Pricing this render…' : 'This render could not be priced — nothing will be charged without a figure here.')}
-        </span>
-      ) : null}
-      {selected && lane.paid && !hosted && price ? (
-        <span className="mt-1 block text-[11px] font-medium text-ink2">{describePrice(price)}</span>
-      ) : null}
-    </button>
+    </div>
   );
 }
 
 export function RestoreSettings({
   lanes, selectedLane, onSelectLane, price, cloudQuote,
-  settings, onChange, plan, source, busy,
+  settings, onChange, plan, source, busy, onRemedy = null,
 }) {
   const set = (key) => (value) => onChange({ ...settings, [key]: value });
   const model = RESTORE_MODELS.find((item) => item.id === settings.model) || RESTORE_MODELS[2];
@@ -128,6 +134,7 @@ export function RestoreSettings({
             cloudQuote={cloudQuote}
             selected={lane.lane === selectedLane}
             onSelect={onSelectLane}
+            onRemedy={onRemedy}
           />
         )) : (
           <Card className="p-3 text-[11px] leading-snug text-ink3">

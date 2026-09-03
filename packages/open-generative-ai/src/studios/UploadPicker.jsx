@@ -54,6 +54,7 @@ import { useDismissable } from '../ui/Menu.jsx';
 import { ConfirmModal, Modal } from '../ui/Modal.jsx';
 import { Icon } from '../ui/icons.jsx';
 import { Button, SectionLabel, Spinner, cx } from '../ui/kit.jsx';
+import { toastFailure } from '../ui/failureToast.jsx';
 
 // What a dropped/picked file has to be to get in. MIME first; some browsers
 // hand over an empty type for HEIC/AVIF (and for anything dragged out of a
@@ -268,7 +269,7 @@ export function UploadPicker({
       }
     } catch (err) {
       console.error('[UploadPicker] Upload failed:', err);
-      toast.error(`Image upload failed: ${err.message}`);
+      toastFailure(err, { operation: 'Image upload' });
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
