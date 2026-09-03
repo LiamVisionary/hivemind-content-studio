@@ -21,9 +21,7 @@ KREA2_IDENTITY_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-krea2-i
 SEEDVR2_TRT_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-seedvr2-trt"
 OPEN_GEN="$STUDIO_ROOT/packages/open-generative-ai"
 CONTENT_STUDIO="$STUDIO_ROOT"
-CLOUDFLARED="$HOME/.local/bin/cloudflared"
 TAILSCALE_CLI="/Applications/Tailscale.app/Contents/MacOS/tailscale"
-TAILSCALE_PROXY="$HOME/.local/bin/zimage-tailscale-proxy"
 TAILSCALE_HTTPS_PROXY="$APP/tailscale-https-proxy.js"
 TAILSCALE_HTTPS_PORT="8789"
 MEDIA_STUDIO_MCP_PORT="${MEDIA_STUDIO_MCP_PORT:-8796}"
@@ -111,7 +109,6 @@ TLS_CERT="$TLS_DIR/zimage-tailscale.crt"
 TLS_KEY="$TLS_DIR/zimage-tailscale.key"
 LOG_DIR="$HOME/Library/Logs"
 SUP_LOG="$LOG_DIR/zimage-stack-supervisor.log"
-URL_FILE="$PRIV/z-image-remote-url.txt"
 LOCK_DIR="$PRIV/zimage-stack-supervise.lock"
 
 mkdir -p "$PRIV/output" "$PRIV/z_image_outputs" "$PRIV/debug_outputs" "$PRIV/input" "$PRIV/temp" "$PRIV/temp-anima" "$PRIV/temp-ltx" "$LOG_DIR" "$TLS_DIR" "$MEDIA_STATE_ROOT/state/media-gateway" "$MEDIA_STATE_ROOT/secure"
@@ -139,15 +136,6 @@ wait_http() {
     sleep 2
   done
   return 0
-}
-
-write_tunnel_url_once() {
-  local cf_log="$PRIV/z-image-cloudflared.log"
-  local url
-  url=$(grep -Eo 'https://[-a-zA-Z0-9.]+\.trycloudflare\.com' "$cf_log" 2>/dev/null | tail -1 || true)
-  if [ -n "$url" ]; then
-    printf '%s\n' "$url" > "$URL_FILE"
-  fi
 }
 
 tailscale_ip() {
@@ -224,10 +212,7 @@ start_children() {
   : > "$PRIV/z-image-frontend.log"
   : > "$PRIV/hivemind-content-studio.log"
   : > "$PRIV/media-studio-mcp.log"
-  : > "$PRIV/z-image-cloudflared.log"
-  : > "$PRIV/z-image-tailscale-proxy.log"
   : > "$PRIV/z-image-tailscale-https-proxy.log"
-  rm -f "$URL_FILE"
   if [ -L "$COMFY/custom_nodes/comfyui-mobile-frontend" ] || [ ! -e "$COMFY/custom_nodes/comfyui-mobile-frontend" ]; then
     ln -sfn "$MOBILE" "$COMFY/custom_nodes/comfyui-mobile-frontend"
   else
@@ -608,40 +593,15 @@ PY
     return 1
   fi
 
-  if [ -n "$ts_ip" ] && [ -x "$TAILSCALE_PROXY" ]; then
-    "$TAILSCALE_PROXY" --listen-host "$ts_ip" --listen-port 8788 --target-host 127.0.0.1 --target-port 8788 \
-      >> "$PRIV/z-image-tailscale-proxy.log" 2>&1 &
+  if [ -n "$ts_ip" ] && [ -f "$TAILSCALE_HTTPS_PROXY" ] && ensure_tls_cert "$ts_ip"; then
+    cd "$APP" || return 1
+    TAILSCALE_IP="$ts_ip" TAILSCALE_HTTPS_PORT="$TAILSCALE_HTTPS_PORT" ZIMAGE_TLS_CERT="$TLS_CERT" ZIMAGE_TLS_KEY="$TLS_KEY" ZIMAGE_TARGET="http://127.0.0.1:8788" HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" MEDIA_STUDIO_MCP_TARGET="http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT" \
+      node "$TAILSCALE_HTTPS_PROXY" >> "$PRIV/z-image-tailscale-https-proxy.log" 2>&1 &
     pid="$!"
     children+=("$pid")
-    log "Tailscale proxy child pid=$pid url=http://$ts_ip:8788"
-
-    if [ -f "$TAILSCALE_HTTPS_PROXY" ] && ensure_tls_cert "$ts_ip"; then
-      cd "$APP" || return 1
-      TAILSCALE_IP="$ts_ip" TAILSCALE_HTTPS_PORT="$TAILSCALE_HTTPS_PORT" ZIMAGE_TLS_CERT="$TLS_CERT" ZIMAGE_TLS_KEY="$TLS_KEY" ZIMAGE_TARGET="http://127.0.0.1:8788" HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" MEDIA_STUDIO_MCP_TARGET="http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT" \
-        node "$TAILSCALE_HTTPS_PROXY" >> "$PRIV/z-image-tailscale-https-proxy.log" 2>&1 &
-      pid="$!"
-      children+=("$pid")
-      log "Tailscale HTTPS proxy child pid=$pid url=https://$ts_ip:$TAILSCALE_HTTPS_PORT"
-    else
-      log "Tailscale HTTPS proxy/cert unavailable; secure mobile URL disabled"
-    fi
+    log "Tailscale HTTPS proxy child pid=$pid url=https://$ts_ip:$TAILSCALE_HTTPS_PORT"
   else
-    log "Tailscale IP/proxy not available; tailnet URL disabled"
-  fi
-
-  if [ "${ZIMAGE_ENABLE_CLOUDFLARED:-0}" = "1" ] && [ -x "$CLOUDFLARED" ]; then
-    "$CLOUDFLARED" tunnel --no-autoupdate --loglevel info --logfile "$PRIV/z-image-cloudflared.log" --url http://127.0.0.1:8788 &
-    pid="$!"
-    children+=("$pid")
-    log "Cloudflare tunnel child pid=$pid"
-    for _ in $(seq 1 45); do
-      write_tunnel_url_once
-      [ -s "$URL_FILE" ] && break
-      sleep 1
-    done
-    [ -s "$URL_FILE" ] && log "remote URL: $(cat "$URL_FILE")" || log "remote URL not assigned yet"
-  else
-    log "cloudflared disabled; use Tailscale instead"
+    log "Tailscale HTTPS proxy/cert unavailable; tailnet URL disabled"
   fi
 }
 
@@ -728,7 +688,6 @@ supervise() {
     fi
     while true; do
       sleep 20
-      write_tunnel_url_once
       for pid in "${children[@]:-}"; do
         if ! kill -0 "$pid" 2>/dev/null; then
           log "child pid $pid exited; restarting whole stack"
@@ -815,11 +774,6 @@ status() {
     if [ -n "$pids" ]; then echo "  :$port pid(s): $pids"; else echo "  :$port not listening"; fi
   done
   echo
-  if [ -s "$URL_FILE" ]; then
-    echo "Cloudflare URL: $(cat "$URL_FILE")"
-  else
-    echo "Cloudflare URL: disabled"
-  fi
   local ts_ip
   ts_ip="$(tailscale_ip || true)"
   if [ -n "$ts_ip" ]; then

@@ -13,6 +13,8 @@ import { isSoundOnlyReference, referenceVideoCanvas } from './h3References.js';
 export { isHivemindVideoModelId, workflowIdFromHivemindModelId };
 
 const VIDEO_SELECTION_KEY = 'hivemind.explore.videoSelection';
+// Retired 2026-09-03 with the explore dock's generation-option switches. The key
+// is still scrubbed on owner lock so a tab left open before the change is cleaned.
 const OPTIONS_KEY = 'hivemind.explore.options';
 const PENDING_JOBS_KEY = 'muapi_pending_jobs';
 const MEDIA_STUDIO_REFERENCE_PREFIX = '/api/media-studio/references/';
@@ -483,18 +485,6 @@ export async function referenceToLocalImageInput(source) {
     if (value.startsWith('data:')) return { image_base64: value };
     if (/^https?:\/\//i.test(value)) return { image_url: value };
     return { image_base64: await mediaSourceToDataUrl(value, 'image') };
-}
-
-export function getHivemindStudioOptions() {
-    try {
-        return { promptHelper: true, passthrough: false, walkthrough: false, ...JSON.parse(sessionStorage.getItem(OPTIONS_KEY) || '{}') };
-    } catch {
-        return { promptHelper: true, passthrough: false, walkthrough: false };
-    }
-}
-
-function saveHivemindStudioOptions(options) {
-    sessionStorage.setItem(OPTIONS_KEY, JSON.stringify(options));
 }
 
 export function getSavedHivemindVideoSelection() {

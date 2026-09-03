@@ -16,7 +16,6 @@ def test_component_manifest_matches_embedded_source_roots() -> None:
     assert manifest["schema_version"] == 1
     destinations = {item["id"]: item["destination"] for item in manifest["components"]}
     assert destinations == {
-        "unified-image-studio-template": "packages/unified-studio-launcher",
         "Open-Generative-AI": "packages/open-generative-ai",
         "comfyui-mobile-frontend": "packages/comfyui-mobile",
         "hive-image-stack": "packages/media-gateway",

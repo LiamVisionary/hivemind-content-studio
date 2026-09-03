@@ -1,8 +1,9 @@
 /**
  * Test script for MiniMax provider integration.
  *
- * Verifies that the MiniMax Image 01 model is correctly registered in models.js
- * and that the model definition has the expected structure.
+ * Verifies that the MiniMax Image 01 model is correctly registered in the
+ * hand-maintained MUAPI catalog (src/lib/modelsData.js) and that the model
+ * definition has the expected structure.
  *
  * Usage:
  *   node scripts/test_minimax_provider.js
@@ -21,14 +22,14 @@ const ROOT = join(__dirname, "..");
 // ── 1. Model registration check ──────────────────────────────────────────────
 
 const modelsContent = readFileSync(
-  join(ROOT, "src", "lib", "models.js"),
+  join(ROOT, "src", "lib", "modelsData.js"),
   "utf-8"
 );
 
 // Extract the t2iModels JSON array via a simple regex
 const t2iMatch = modelsContent.match(/export const t2iModels = (\[[\s\S]*?\]);/);
 if (!t2iMatch) {
-  console.error("FAIL: Could not parse t2iModels from src/lib/models.js");
+  console.error("FAIL: Could not parse t2iModels from src/lib/modelsData.js");
   process.exit(1);
 }
 
@@ -45,7 +46,7 @@ const minimaxModel = t2iModels.find((m) => m.id === "minimax-image-01");
 if (!minimaxModel) {
   console.error(
     'FAIL: "minimax-image-01" not found in t2iModels.\n' +
-      "Expected it to be registered in src/lib/models.js."
+      "Expected it to be registered in src/lib/modelsData.js."
   );
   process.exit(1);
 }
@@ -86,21 +87,7 @@ console.log(
   `      aspect ratios: ${minimaxModel.inputs.aspect_ratio.enum.join(", ")}`
 );
 
-// ── 2. models_dump.json check ─────────────────────────────────────────────────
-
-const dump = JSON.parse(
-  readFileSync(join(ROOT, "models_dump.json"), "utf-8")
-);
-const dumpEntry = dump.t2i?.find((m) => m.id === "minimax-image-01");
-if (!dumpEntry) {
-  console.error(
-    'FAIL: "minimax-image-01" not found in models_dump.json t2i section'
-  );
-  process.exit(1);
-}
-console.log("PASS: minimax-image-01 found in models_dump.json");
-
-// ── 3. Live API smoke test (optional) ────────────────────────────────────────
+// ── 2. Live API smoke test (optional) ────────────────────────────────────────
 
 const apiKey = process.env.MUAPI_KEY;
 if (!apiKey) {

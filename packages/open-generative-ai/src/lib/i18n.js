@@ -64,22 +64,13 @@ const translations = {
         'nav.video': 'Video',
         'nav.lipsync': 'Lip sync',
         'nav.cinema': 'Cinema',
-        'nav.workflows': 'Workflows',
-        'nav.agents': 'Agents',
         'nav.mcpcli': 'Agents & API',
         'nav.settings': 'Settings',
-
-        // Sidebar
-        'sidebar.canvas': 'Canvas',
-        'sidebar.video': 'Video',
-        'sidebar.library': 'Library',
-        'sidebar.settings': 'Settings',
 
         // Common
         'common.generate': 'Generate',
         'common.clearReferences': 'Clear',
         'common.startFresh': 'Start fresh',
-        'common.openWebApp': 'Open the web app',
         'common.generating': 'Generating…',
         'common.download': 'Download',
         'common.cancel': 'Cancel',
@@ -238,17 +229,9 @@ const translations = {
         'cinema.selectSettings': 'Select camera settings to see preview...',
         'cinema.generationFailed': 'Generation failed: ',
 
-        // Agent Studio
-        'agents.title': 'Agent Studio',
-        'agents.webOnly': 'Available in the web app at open-generative-ai.com',
-
-        // Workflow Studio
-        'workflows.title': 'Workflow Studio',
-        'workflows.webOnly': 'Available in the web app at open-generative-ai.com',
-
         // Local Model Manager
         'localModels.title': 'Local models',
-        'localModels.webOnly': 'Local model inference is only available in the desktop app (Electron build). Use npm run electron:build to build.',
+        'localModels.webOnly': 'Local models are managed by the desktop app.',
         'localModels.inferenceEngine': 'Inference engine',
         'localModels.checking': 'Checking...',
         'localModels.installed': 'Installed and ready',
@@ -284,7 +267,6 @@ const translations = {
         // MCP & CLI page
         'mcp.tagline': 'For developers & AI agents',
         'mcp.title': 'MCP & CLI',
-        'mcp.subtitle': 'Use Open Generative AI from your terminal, your IDE, or any MCP-compatible assistant. Generate cinematic images, videos, and audio across 100+ models — without leaving your workflow.',
         'mcp.quickStart': 'Quick start',
     },
     zh: {
@@ -293,22 +275,13 @@ const translations = {
         'nav.video': '视频',
         'nav.lipsync': '唇语同步',
         'nav.cinema': '电影工作室',
-        'nav.workflows': '工作流',
-        'nav.agents': '智能体',
         'nav.mcpcli': '代理与 API',
         'nav.settings': '设置',
-
-        // Sidebar
-        'sidebar.canvas': '画布',
-        'sidebar.video': '视频',
-        'sidebar.library': '素材库',
-        'sidebar.settings': '设置',
 
         // Common
         'common.generate': '生成',
         'common.clearReferences': '清除',
         'common.startFresh': '重新开始',
-        'common.openWebApp': '打开网页版',
         'common.generating': '生成中…',
         'common.download': '下载',
         'common.cancel': '取消',
@@ -466,17 +439,9 @@ const translations = {
         'cinema.selectSettings': '选择摄像机设置以查看预览...',
         'cinema.generationFailed': '生成失败：',
 
-        // Agent Studio
-        'agents.title': '智能体工作室',
-        'agents.webOnly': '在网页应用 open-generative-ai.com 上可用',
-
-        // Workflow Studio
-        'workflows.title': '工作流工作室',
-        'workflows.webOnly': '在网页应用 open-generative-ai.com 上可用',
-
         // Local Model Manager
         'localModels.title': '本地模型',
-        'localModels.webOnly': '本地模型推理仅在桌面应用（Electron 构建版）中可用。使用 npm run electron:build 进行构建。',
+        'localModels.webOnly': '本地模型由桌面应用管理。',
         'localModels.inferenceEngine': '推理引擎',
         'localModels.checking': '检查中...',
         'localModels.installed': '已安装，可以使用',
@@ -512,7 +477,6 @@ const translations = {
         // MCP & CLI page
         'mcp.tagline': '面向开发者与 AI 智能体',
         'mcp.title': 'MCP & CLI',
-        'mcp.subtitle': '在终端、IDE 或任何兼容 MCP 的助手中使用 Open Generative AI。跨 100+ 模型生成电影级图像、视频和音频 — 无需离开您的工作流。',
         'mcp.quickStart': '快速开始',
     },
 };

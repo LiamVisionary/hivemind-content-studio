@@ -39,16 +39,6 @@ SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
         ("durable-runs", "provider-routing", "approvals", "publishing", "metrics"),
     ),
     SourceRepository(
-        "unified-image-studio-template",
-        "Unified Media Studio Template",
-        "https://github.com/LiamVisionary/unified-image-studio-template",
-        None,
-        "package",
-        "embedded",
-        "packages/unified-studio-launcher",
-        ("service-catalog", "repository-bootstrap", "desktop-launchers"),
-    ),
-    SourceRepository(
         "Open-Generative-AI",
         "Open Generative AI",
         "https://github.com/LiamVisionary/Open-Generative-AI",

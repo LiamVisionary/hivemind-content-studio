@@ -63,7 +63,6 @@ Manifest schema v2 assigns every artifact a stable id, SHA-256, byte size, MIME 
 | `packages/open-generative-ai` | embedded Explore UI, model catalog, local inference, desktop IPC bridge | canonical run state, approvals, or publishing |
 | `packages/comfyui-mobile` | embedded Canvas workflow editor, queue, output browser, and model manager | canonical run state or direct publishing |
 | `engines/flux-2-swift-mlx` and `engines/z-image-swift` | native Apple Silicon generation engines | browser shell, orchestration, approval, or distribution |
-| `packages/unified-studio-launcher` | portable service manifest, workflow installers, tests, and launcher patterns | a second production dashboard or runtime state machine |
 
 ## Unified all-in-one Studio
 

@@ -78,7 +78,6 @@ function sendLanding(req, res) {
     <div class="buttons">
       <a class="btn" href="/app/">Open Media Studio</a>
       <a class="btn secondary" href="/mobile/">Open ComfyUI Mobile</a>
-      <a class="btn secondary" href="http://${listenHost}:8788/">HTTP fallback</a>
     </div>
     <p class="meta">HTTPS origin: https://${host}</p>
   </main>
