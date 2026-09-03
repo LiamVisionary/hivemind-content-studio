@@ -32,6 +32,7 @@ export default [
     plugins: {
       'react-hooks': stubNamespace(['exhaustive-deps', 'rules-of-hooks']),
       'jsx-a11y': stubNamespace(['media-has-caption']),
+      react: stubNamespace(['no-array-index-key']),
     },
     linterOptions: {
       // The stub above reports nothing, so every directive it covers would
