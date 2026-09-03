@@ -266,7 +266,7 @@ export const providerLabel = (value) => ({
   'xai-imagine-api': 'xAI · Imagine API',
   'xai-imagine-oauth': 'xAI · Imagine OAuth',
   'hivemindos-hosted-media': 'HivemindOS · Hosted media',
-  'media-studio-mcp': 'HivemindOS · Media Studio MCP',
+  'media-studio-mcp': 'HivemindOS · this machine’s studio',
   'upload-post': 'Upload-Post',
 }[value] || value);
 
@@ -323,6 +323,11 @@ export async function api(path, options = {}) {
     error.oauthProvider = carrier.oauthProvider || '';
     error.remedyAction = read.remedy;
     error.technical = read.detail || (read.title === carrier.message ? '' : carrier.message);
+    // The raw shape the server sent, kept alongside the reading of it: a refusal
+    // like PassBook's answers `{message, remedy}`, and a caller that wants the
+    // server's own words (rather than the sentence chosen for the toast) has
+    // nowhere else to read them.
+    error.detail = detail;
     // The 500 handler mints an incident id and writes it beside the traceback in
     // the studio log. It is the one thing that makes a bug report answerable, so
     // it rides on the error for the toast's Copy details action (incidentOf).
