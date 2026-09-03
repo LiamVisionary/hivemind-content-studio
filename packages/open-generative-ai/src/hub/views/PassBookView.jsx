@@ -8,12 +8,11 @@
 // Three things it never does: show a value, offer a key this studio does not
 // use, or replace a key another app may be relying on without being asked. The
 // API enforces all three; the UI is written so they are also obvious.
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getLang } from '../../lib/i18n.js';
 import { Button, Card, Field, Pill, SectionLabel, Spinner, TextInput } from '../../ui/kit.jsx';
 import { api } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
-import { StatusPill } from '../components/StatusPill.jsx';
 
 const zh = () => getLang() === 'zh-CN';
 
@@ -39,10 +38,9 @@ function CredentialRow({ row, value, onChange, onSave, busy }) {
                     <p className="truncate font-mono text-xs font-semibold text-ink1">{row.key}</p>
                     <p className="mt-0.5 truncate text-[11px] text-ink3">{row.label}</p>
                 </div>
-                <StatusPill
-                    ok={configured}
-                    label={configured ? (zh() ? '已保存' : 'Stored') : (zh() ? '未设置' : 'Not set')}
-                />
+                <Pill tone={configured ? 'ok' : 'neutral'} dot>
+                    {configured ? (zh() ? '已保存' : 'Stored') : (zh() ? '未设置' : 'Not set')}
+                </Pill>
             </div>
             {configured && !editing ? (
                 <button
@@ -101,7 +99,7 @@ function Pending({ pending, busy, onResolve }) {
                 </h4>
             </div>
             {pending.map((item) => (
-                <div key={item.id} className="flex flex-col gap-2 border-b border-line/40 pb-3 last:border-0 last:pb-0">
+                <div key={item.id} className="flex flex-col gap-2 border-b border-line1 pb-3 last:border-0 last:pb-0">
                     <p className="text-xs text-ink1">
                         <span className="font-semibold">{item.app}</span>{' '}
                         {zh() ? '请求' : 'wants'} <span className="font-mono text-[11px]">{(item.keys || []).join(', ')}</span>
@@ -139,7 +137,9 @@ function Unlocks({ access, busy, onUnlock, onLock }) {
                                     : (zh() ? '所有密钥' : 'Every key')}
                                 {item.app ? ` · ${item.app}` : ''}
                             </p>
-                            <StatusPill ok label={zh() ? `剩余 ${Math.round(item.remaining_seconds / 60)} 分钟` : `${Math.round(item.remaining_seconds / 60)}m left`} />
+                            <Pill tone="honey" dot>
+                                {zh() ? `剩余 ${Math.round(item.remaining_seconds / 60)} 分钟` : `${Math.round(item.remaining_seconds / 60)}m left`}
+                            </Pill>
                         </div>
                     ))}
                     <Button className="self-start" disabled={busy} onClick={onLock}>
@@ -190,7 +190,7 @@ function AccessModes({ access, keys, busy, onSetMode }) {
             {(keys || []).map((key) => {
                 const mode = (rules[key] || {}).mode || fallback;
                 return (
-                    <div key={key} className="flex flex-col gap-1.5 border-b border-line/40 pb-2.5 last:border-0 last:pb-0">
+                    <div key={key} className="flex flex-col gap-1.5 border-b border-line1 pb-2.5 last:border-0 last:pb-0">
                         <p className="font-mono text-[11px] text-ink1">{key}</p>
                         <div className="flex flex-wrap gap-1.5">
                             {(access.modes || []).filter((m) => m !== 'window').map((m) => (
@@ -230,10 +230,9 @@ function Broker({ broker }) {
                         ? (zh() ? `所有读取都经过代理，模式 ${broker.mode}。` : `Reads go through the broker, in ${broker.mode} mode.`)
                         : (zh() ? '未运行，每个应用各自记录读取。' : 'Not running — each app records its own reads, so the record has gaps.')}
                 </p>
-                <StatusPill
-                    ok={Boolean(broker.running)}
-                    label={broker.running ? (zh() ? '运行中' : 'Running') : (zh() ? '已停止' : 'Stopped')}
-                />
+                <Pill tone={broker.running ? 'ok' : 'warn'} dot>
+                    {broker.running ? (zh() ? '运行中' : 'Running') : (zh() ? '已停止' : 'Stopped')}
+                </Pill>
             </div>
             {!broker.running ? (
                 <p className="text-[11px] text-ink3">
@@ -269,16 +268,15 @@ function LinkedMachines({ links, busy, onRevoke }) {
                         : 'No linked machines. Add one with `passbook-link request` on the machine that needs keys.'}
                 </p>
             ) : rows.map((row) => (
-                <div key={`${row.role}-${row.did}`} className="flex flex-col gap-1 border-b border-line/40 py-2 last:border-0">
+                <div key={`${row.role}-${row.did}`} className="flex flex-col gap-1 border-b border-line1 py-2 last:border-0">
                     <div className="flex items-center justify-between gap-3">
                         <span className="text-xs text-ink1">
                             {row.lent ? (zh() ? '借出给' : 'Lent to') : (zh() ? '借自' : 'Borrowed from')}{' '}
                             <span className="font-mono text-[11px] text-ink2">{row.fingerprint || row.did}</span>
                         </span>
-                        <StatusPill
-                            ok={row.active}
-                            label={row.active ? (zh() ? '有效' : 'Active') : row.revoked ? (zh() ? '已撤销' : 'Revoked') : (zh() ? '已过期' : 'Expired')}
-                        />
+                        <Pill tone={row.active ? 'ok' : row.revoked ? 'neutral' : 'warn'} dot>
+                            {row.active ? (zh() ? '有效' : 'Active') : row.revoked ? (zh() ? '已撤销' : 'Revoked') : (zh() ? '已过期' : 'Expired')}
+                        </Pill>
                     </div>
                     <p className="font-mono text-[11px] text-ink3">{(row.keys || []).join(', ') || '—'}</p>
                     {row.lent && row.active ? (
@@ -301,8 +299,12 @@ export function PassBookView({ active = true }) {
     const [drafts, setDrafts] = useState({});
     const [busy, setBusy] = useState(false);
     const [notice, setNotice] = useState('');
+    // True after a load that could not read the store: the page then offers a
+    // way back in instead of spinning forever.
+    const [failed, setFailed] = useState(false);
+    const loadedRef = useRef(false);
 
-    const load = async () => {
+    const load = useCallback(async () => {
         const [store, record, linked, brokered, rules] = await Promise.all([
             api('/api/passbook').catch(() => null),
             api('/api/passbook/access?limit=40').catch(() => null),
@@ -311,12 +313,28 @@ export function PassBookView({ active = true }) {
             api('/api/passbook/policy').catch(() => null),
         ]);
         setState(store);
+        setFailed(!store);
         setLedger(record);
         setLinks(linked);
         setBroker(brokered);
         setAccess(rules);
-    };
-    useEffect(() => { load(); }, []);
+    }, []);
+
+    // Every hub page stays mounted from the first hub navigation, so the five
+    // requests wait for the page to actually be opened (same gate ModelsView
+    // uses) — opening History must not read the credential store.
+    useEffect(() => {
+        if (!active || loadedRef.current) return;
+        loadedRef.current = true;
+        void load();
+    }, [active, load]);
+
+    // The topbar Refresh re-reads a page that has been opened at least once.
+    useEffect(() => {
+        const onRefresh = () => { if (loadedRef.current) void load(); };
+        window.addEventListener('hivemind-hub-refresh', onRefresh);
+        return () => window.removeEventListener('hivemind-hub-refresh', onRefresh);
+    }, [load]);
 
     const save = async (key, replacing) => {
         const value = String(drafts[key] || '').trim();
@@ -411,183 +429,185 @@ export function PassBookView({ active = true }) {
         }
     };
 
-    if (!state) {
-        return (
-            <div className="flex h-40 items-center justify-center">
-                <Spinner />
-            </div>
-        );
-    }
-
-    // A build that cannot reach the real home has a packaging problem, not a
-    // credential problem. Saying so here is the difference between a five-minute
-    // fix and a week of "why are all my keys missing".
-    if (state.home_is_container) {
-        return (
-            <div className="flex flex-col gap-4">
-                <HubToolbar eyebrow={zh() ? '共享凭据' : 'Shared credentials'} title="PassBook" />
-                <Card className="flex flex-col gap-2 border-rose/40 p-4">
-                    <h4 className="text-sm font-semibold text-ink1">
-                        {zh() ? '此版本无法访问共享存储' : 'This build cannot reach the shared store'}
-                    </h4>
-                    <p className="text-xs leading-relaxed text-ink2">{state.detail}</p>
-                    <p className="text-xs leading-relaxed text-ink3">
-                        {zh()
-                            ? '请在不启用 App Sandbox 的情况下发布，或使用 HIVE_HOME 指向真实存储启动。'
-                            : 'Ship this build without the App Sandbox, or launch it with HIVE_HOME pointing at the real store.'}
-                    </p>
-                </Card>
-            </div>
-        );
-    }
-
-    const sealing = state.sealing || {};
-    const stored = (state.settable || []).filter((row) => row.configured).length;
+    const sealing = state?.sealing || {};
+    const stored = (state?.settable || []).filter((row) => row.configured).length;
 
     // Every hub page stays MOUNTED and is display-toggled, so a view that does
     // not hide itself is painted on top of whichever page is actually open —
     // this one had no `active` prop at all and rendered its whole panel over
     // Machines, Providers, History and the rest. Same wrapper every other hub
-    // view uses; the difference was never deliberate.
+    // view uses; the difference was never deliberate. The loading and
+    // container branches live INSIDE it for the same reason: an early return
+    // above the gate painted a spinner strip under every other hub page.
     return (
         <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
             <HubToolbar
-                eyebrow={zh() ? '本机共享凭据' : 'Shared on this machine'}
+                kicker={zh() ? '本机共享凭据' : 'Shared on this machine'}
                 title="PassBook"
-                actions={<Button onClick={load} disabled={busy}>{zh() ? '刷新' : 'Refresh'}</Button>}
+                right={<Button onClick={() => void load()} disabled={busy}>{zh() ? '刷新' : 'Refresh'}</Button>}
             />
             {/* The page scrolls INSIDE the view, the way every other hub
                 page does. Without this the root was a plain `flex flex-col`
                 with no `min-h-0 flex-1` and no scroll container, so anything
                 past the fold was simply unreachable. */}
             <div className="custom-scrollbar flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-4 md:p-5">
-
-                <Card className="flex flex-col gap-2 p-4">
-                    <div className="flex flex-wrap items-center gap-2">
-                        <Pill>{zh() ? `${stored} 个已保存` : `${stored} stored`}</Pill>
-                        <Pill>{zh() ? `工作区 ${state.workspace || 'main'}` : `workspace ${state.workspace || 'main'}`}</Pill>
-                        {(state.apps || []).map((app) => <Pill key={app}>{app}</Pill>)}
-                    </div>
-                    <p className="text-xs leading-relaxed text-ink2">
-                        {zh()
-                            ? '这些密钥保存在本机的共享存储中，本机上每个 Hive 应用都能使用。在此粘贴一次即可，安装 HivemindOS 后会沿用同一存储。'
-                            : 'These keys live in one store shared by every Hive app on this machine. Paste a key once and they all have it — and installing HivemindOS later adopts this same store rather than starting another.'}
-                    </p>
-                    <p className="font-mono text-[10px] text-ink3">{state.path}</p>
-                    {state.writes_to && state.writes_to !== state.path ? (
-                        <p className="text-[11px] text-ink3">
-                            {zh() ? '新密钥将写入此工作区：' : 'New keys are written to this workspace: '}
-                            <span className="font-mono">{state.writes_to}</span>
-                        </p>
-                    ) : null}
-                </Card>
-
-                <div>
-                    <SectionLabel>{zh() ? '此工作室使用的密钥' : 'Keys this studio uses'}</SectionLabel>
-                    <div className="mt-2 grid gap-2 md:grid-cols-2">
-                        {(state.settable || []).map((row) => (
-                            <CredentialRow
-                                key={row.key}
-                                row={row}
-                                value={drafts[row.key]}
-                                busy={busy}
-                                onChange={(key, value) => setDrafts((current) => ({ ...current, [key]: value }))}
-                                onSave={save}
-                            />
-                        ))}
-                    </div>
-                    {notice ? <p className="mt-2 text-xs text-ink2">{notice}</p> : null}
-                </div>
-
-                <div>
-                    <SectionLabel>{zh() ? '静态加密' : 'Encryption at rest'}</SectionLabel>
-                    <Card className="mt-2 flex flex-col gap-2 p-4">
-                        <div className="flex items-center justify-between gap-3">
-                            <p className="text-xs text-ink2">{sealing.detail}</p>
-                            <StatusPill
-                                ok={Boolean(sealing.fully_sealed)}
-                                label={sealing.fully_sealed ? (zh() ? '已加密' : 'Encrypted') : (zh() ? '明文' : 'Plaintext')}
-                            />
+                {!state ? (
+                    failed ? (
+                        <div className="flex items-center justify-between gap-3 rounded-md border border-danger/40 bg-danger-tint px-4 py-3">
+                            <p className="text-xs text-ink1">
+                                {zh() ? '无法读取共享存储。' : 'Could not read the shared store.'}
+                            </p>
+                            <Button size="sm" onClick={() => void load()}>{zh() ? '重试' : 'Try again'}</Button>
                         </div>
-                        <p className="text-[11px] leading-relaxed text-ink3">
+                    ) : (
+                        <div className="flex h-40 items-center justify-center">
+                            <Spinner />
+                        </div>
+                    )
+                ) : state.home_is_container ? (
+                    // A build that cannot reach the real home has a packaging
+                    // problem, not a credential problem. Saying so here is the
+                    // difference between a five-minute fix and a week of "why
+                    // are all my keys missing".
+                    <Card className="flex flex-col gap-2 border-danger/40 p-4">
+                        <h4 className="text-sm font-semibold text-ink1">
+                            {zh() ? '此版本无法访问共享存储' : 'This build cannot reach the shared store'}
+                        </h4>
+                        <p className="text-xs leading-relaxed text-ink2">{state.detail}</p>
+                        <p className="text-xs leading-relaxed text-ink3">
                             {zh()
-                                ? '加密可防止磁盘泄露：被盗的笔记本、备份或同步的主目录。它无法阻止以你的身份运行的程序读取密钥。'
-                                : 'This protects the store at rest — a stolen laptop, a backup, a synced home folder. It does not stop code running as you from reading a key.'}
+                                ? '请在不启用 App Sandbox 的情况下发布，或使用 HIVE_HOME 指向真实存储启动。'
+                                : 'Ship this build without the App Sandbox, or launch it with HIVE_HOME pointing at the real store.'}
                         </p>
-                        {sealing.supported && !sealing.fully_sealed ? (
-                            <Button variant="primary" className="self-start" disabled={busy} onClick={seal}>
-                                {zh() ? '加密存储' : 'Encrypt the store'}
-                            </Button>
-                        ) : null}
-                        {!sealing.supported ? (
-                            <p className="text-[11px] text-ink3">{sealing.keystore || sealing.detail}</p>
-                        ) : null}
                     </Card>
-                </div>
+                ) : (
+                    <>
+                        <Card className="flex flex-col gap-2 p-4">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <Pill>{zh() ? `${stored} 个已保存` : `${stored} stored`}</Pill>
+                                <Pill>{zh() ? `工作区 ${state.workspace || 'main'}` : `workspace ${state.workspace || 'main'}`}</Pill>
+                                {(state.apps || []).map((app) => <Pill key={app}>{app}</Pill>)}
+                            </div>
+                            <p className="text-xs leading-relaxed text-ink2">
+                                {zh()
+                                    ? '这些密钥保存在本机的共享存储中，本机上每个 Hive 应用都能使用。在此粘贴一次即可，安装 HivemindOS 后会沿用同一存储。'
+                                    : 'These keys live in one store shared by every Hive app on this machine. Paste a key once and they all have it — and installing HivemindOS later adopts this same store rather than starting another.'}
+                            </p>
+                            <p className="font-mono text-[10px] text-ink3">{state.path}</p>
+                            {state.writes_to && state.writes_to !== state.path ? (
+                                <p className="text-[11px] text-ink3">
+                                    {zh() ? '新密钥将写入此工作区：' : 'New keys are written to this workspace: '}
+                                    <span className="font-mono">{state.writes_to}</span>
+                                </p>
+                            ) : null}
+                        </Card>
 
-                <Pending pending={access?.pending} busy={busy} onResolve={resolve} />
-
-                <div>
-                    <SectionLabel>{zh() ? '暂停询问' : 'Stop being asked'}</SectionLabel>
-                    <div className="mt-2">
-                        <Unlocks access={access} busy={busy} onUnlock={unlock} onLock={lock} />
-                    </div>
-                </div>
-
-                <div>
-                    <SectionLabel>{zh() ? '访问方式' : 'How each key is answered'}</SectionLabel>
-                    <div className="mt-2">
-                        <AccessModes access={access} keys={state.keys} busy={busy} onSetMode={setMode} />
-                    </div>
-                </div>
-
-                <div>
-                    <SectionLabel>{zh() ? '已链接的机器' : 'Linked machines'}</SectionLabel>
-                    <Card className="mt-2 flex flex-col gap-2 p-4">
-                        <LinkedMachines links={links} busy={busy} onRevoke={revoke} />
-                    </Card>
-                </div>
-
-                <div>
-                    <SectionLabel>{zh() ? '读取代理' : 'Read broker'}</SectionLabel>
-                    <Card className="mt-2 flex flex-col gap-2 p-4">
-                        <Broker broker={broker} />
-                    </Card>
-                </div>
-
-                <div>
-                    <SectionLabel>{zh() ? '访问记录' : 'Access record'}</SectionLabel>
-                    <Card className="mt-2 flex flex-col gap-2 p-4">
-                        {ledger?.available ? (
-                            <>
-                                <div className="flex items-center justify-between gap-3">
-                                    <p className="text-xs text-ink2">{ledger.detail}</p>
-                                    <StatusPill
-                                        ok={Boolean(ledger.intact)}
-                                        label={ledger.intact ? (zh() ? '未被篡改' : 'Unaltered') : (zh() ? '已被更改' : 'Altered')}
+                        <div>
+                            <SectionLabel>{zh() ? '此工作室使用的密钥' : 'Keys this studio uses'}</SectionLabel>
+                            <div className="mt-2 grid gap-2 md:grid-cols-2">
+                                {(state.settable || []).map((row) => (
+                                    <CredentialRow
+                                        key={row.key}
+                                        row={row}
+                                        value={drafts[row.key]}
+                                        busy={busy}
+                                        onChange={(key, value) => setDrafts((current) => ({ ...current, [key]: value }))}
+                                        onSave={save}
                                     />
+                                ))}
+                            </div>
+                            {notice ? <p className="mt-2 text-xs text-ink2">{notice}</p> : null}
+                        </div>
+
+                        <div>
+                            <SectionLabel>{zh() ? '静态加密' : 'Encryption at rest'}</SectionLabel>
+                            <Card className="mt-2 flex flex-col gap-2 p-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <p className="text-xs text-ink2">{sealing.detail}</p>
+                                    <Pill tone={sealing.fully_sealed ? 'ok' : 'warn'} dot>
+                                        {sealing.fully_sealed ? (zh() ? '已加密' : 'Encrypted') : (zh() ? '明文' : 'Plaintext')}
+                                    </Pill>
                                 </div>
-                                <div className="max-h-64 overflow-y-auto">
-                                    {(ledger.rows || []).slice().reverse().map((row) => (
-                                        <div
-                                            key={row.proofHash || `${row.at}-${row.keyCount}`}
-                                            className="flex items-baseline justify-between gap-3 border-b border-line/40 py-1.5 last:border-0"
-                                        >
-                                            <span className="truncate font-mono text-[11px] text-ink2">
-                                                {(row.keys || []).join(', ') || '—'}
-                                            </span>
-                                            <span className="shrink-0 text-[10px] text-ink3">
-                                                {row.app} · {relative(row.at)}
-                                            </span>
+                                <p className="text-[11px] leading-relaxed text-ink3">
+                                    {zh()
+                                        ? '加密可防止磁盘泄露：被盗的笔记本、备份或同步的主目录。它无法阻止以你的身份运行的程序读取密钥。'
+                                        : 'This protects the store at rest — a stolen laptop, a backup, a synced home folder. It does not stop code running as you from reading a key.'}
+                                </p>
+                                {sealing.supported && !sealing.fully_sealed ? (
+                                    <Button variant="primary" className="self-start" disabled={busy} onClick={seal}>
+                                        {zh() ? '加密存储' : 'Encrypt the store'}
+                                    </Button>
+                                ) : null}
+                                {!sealing.supported ? (
+                                    <p className="text-[11px] text-ink3">{sealing.keystore || sealing.detail}</p>
+                                ) : null}
+                            </Card>
+                        </div>
+
+                        <Pending pending={access?.pending} busy={busy} onResolve={resolve} />
+
+                        <div>
+                            <SectionLabel>{zh() ? '暂停询问' : 'Stop being asked'}</SectionLabel>
+                            <div className="mt-2">
+                                <Unlocks access={access} busy={busy} onUnlock={unlock} onLock={lock} />
+                            </div>
+                        </div>
+
+                        <div>
+                            <SectionLabel>{zh() ? '访问方式' : 'How each key is answered'}</SectionLabel>
+                            <div className="mt-2">
+                                <AccessModes access={access} keys={state.keys} busy={busy} onSetMode={setMode} />
+                            </div>
+                        </div>
+
+                        <div>
+                            <SectionLabel>{zh() ? '已链接的机器' : 'Linked machines'}</SectionLabel>
+                            <Card className="mt-2 flex flex-col gap-2 p-4">
+                                <LinkedMachines links={links} busy={busy} onRevoke={revoke} />
+                            </Card>
+                        </div>
+
+                        <div>
+                            <SectionLabel>{zh() ? '读取代理' : 'Read broker'}</SectionLabel>
+                            <Card className="mt-2 flex flex-col gap-2 p-4">
+                                <Broker broker={broker} />
+                            </Card>
+                        </div>
+
+                        <div>
+                            <SectionLabel>{zh() ? '访问记录' : 'Access record'}</SectionLabel>
+                            <Card className="mt-2 flex flex-col gap-2 p-4">
+                                {ledger?.available ? (
+                                    <>
+                                        <div className="flex items-center justify-between gap-3">
+                                            <p className="text-xs text-ink2">{ledger.detail}</p>
+                                            <Pill tone={ledger.intact ? 'ok' : 'danger'} dot>
+                                                {ledger.intact ? (zh() ? '未被篡改' : 'Unaltered') : (zh() ? '已被更改' : 'Altered')}
+                                            </Pill>
                                         </div>
-                                    ))}
-                                </div>
-                            </>
-                        ) : (
-                            <p className="text-xs text-ink3">{ledger?.detail || (zh() ? '未记录访问。' : 'No access record on this machine.')}</p>
-                        )}
-                    </Card>
-                </div>
+                                        <div className="max-h-64 overflow-y-auto">
+                                            {(ledger.rows || []).slice().reverse().map((row) => (
+                                                <div
+                                                    key={row.proofHash || `${row.at}-${row.keyCount}`}
+                                                    className="flex items-baseline justify-between gap-3 border-b border-line1 py-1.5 last:border-0"
+                                                >
+                                                    <span className="truncate font-mono text-[11px] text-ink2">
+                                                        {(row.keys || []).join(', ') || '—'}
+                                                    </span>
+                                                    <span className="shrink-0 text-[10px] text-ink3">
+                                                        {row.app} · {relative(row.at)}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </>
+                                ) : (
+                                    <p className="text-xs text-ink3">{ledger?.detail || (zh() ? '未记录访问。' : 'No access record on this machine.')}</p>
+                                )}
+                            </Card>
+                        </div>
+                    </>
+                )}
             </div>
         </div>
     );

@@ -1,7 +1,7 @@
 // Persistent hub layer. App.jsx mounts this ONCE after the first hub navigation
 // and never unmounts it — `visible` only toggles display, so the Canvas iframe
 // (and all decrypted media, owner-unlock handshakes, and the history bridge)
-// survives every page switch. All seven views stay mounted forever once this
+// survives every page switch. Every view stays mounted forever once this
 // layer exists; only their display is toggled, keyed off the active view.
 //
 // Contract with App.jsx: <HubLayer visible={isHub} view={'create'|'canvas'|…} />.
