@@ -14,6 +14,45 @@ export const isLocalAIAvailable = () => typeof window !== 'undefined' && !!windo
 // manager in hosted mode.
 export const isHostedLocalAI = () => isLocalAIAvailable() && !!window.localAI?.isHosted;
 
+// ── One readiness answer for every studio ─────────────────────────────────
+//
+// Image, Story and Sprite all used to decide "can this machine run anything?"
+// on their own, and all three got it wrong the same way: a bridge that did not
+// answer left the static boot catalog on screen with a live Generate button.
+// The catalog fetch now reports WHY it is empty, and one module-level copy of
+// that verdict is what `modelRunner.transportFor` reads, so the three studios
+// refuse a local row with the same sentence.
+//
+//   discovering  nobody has asked yet — assume nothing, block nothing
+//   ready        at least one installed model this machine can run
+//   empty        the bridge answered, and there is no model to run
+//   unreachable  the bridge did not answer, or the engine behind it is down
+export const LOCAL_CATALOG_STATUSES = Object.freeze(['discovering', 'ready', 'empty', 'unreachable']);
+
+let localCatalogStatus = 'discovering';
+
+/** The last verdict the catalog fetch reached. Synchronous on purpose: the
+ *  routing check (`transportFor`) runs during render and cannot await. */
+export const localCatalogStatusNow = () => (isLocalAIAvailable() ? localCatalogStatus : 'unreachable');
+
+/** Test seam and re-discovery reset — a "Check again" press starts over. */
+export const setLocalCatalogStatus = (status) => {
+    localCatalogStatus = LOCAL_CATALOG_STATUSES.includes(status) ? status : 'discovering';
+};
+
+// A model the bridge marked unrunnable is not inventory. `ready === false` is
+// the hosted bridge's answer (weights missing, or the lane is not answering);
+// `state === 'not-downloaded'` is the desktop build's.
+const isRunnableEntry = (model) => model?.state !== 'not-downloaded' && model?.ready !== false;
+
+function statusForModels(models) {
+    if (models.some(isRunnableEntry)) return 'ready';
+    // Nothing runnable AND every entry blames the engine: the models are
+    // installed, the thing that runs them is not up. That is not "empty".
+    if (models.length && models.every((model) => model?.readyReason === 'engine-offline')) return 'unreachable';
+    return 'empty';
+}
+
 class LocalInferenceClient {
     // ── sd.cpp APIs ───────────────────────────────────────────────────────
     async getBinaryStatus() {
@@ -65,16 +104,31 @@ class LocalInferenceClient {
     }
 
     // ── Unified model list (both providers merged) ────────────────────────
+    //
+    // Resolves `{ models, status }` — never rejects. A caller that only wants
+    // the rows reads `.models`; a caller that has to explain an empty picker
+    // reads `.status`. The two used to be the same value (an empty array), and
+    // "the engine is starting" was indistinguishable from "nothing installed".
     async listModels() {
-        if (!isLocalAIAvailable()) return [];
-        const [sdcpp, wan2gp] = await Promise.all([
-            window.localAI.listModels(),
-            window.localAI.wan2gp.listModels().catch(() => []),
-        ]);
-        return [
-            ...sdcpp.map(m => ({ ...m, provider: m.provider || 'sdcpp' })),
-            ...wan2gp,
+        if (!isLocalAIAvailable()) {
+            setLocalCatalogStatus('unreachable');
+            return { models: [], status: 'unreachable' };
+        }
+        let sdcpp;
+        try {
+            sdcpp = await window.localAI.listModels();
+        } catch (error) {
+            setLocalCatalogStatus('unreachable');
+            return { models: [], status: 'unreachable', error };
+        }
+        const wan2gp = await Promise.resolve(window.localAI.wan2gp?.listModels?.()).catch(() => []);
+        const models = [
+            ...(Array.isArray(sdcpp) ? sdcpp : []).map(m => ({ ...m, provider: m.provider || 'sdcpp' })),
+            ...(Array.isArray(wan2gp) ? wan2gp : []),
         ];
+        const status = statusForModels(models);
+        setLocalCatalogStatus(status);
+        return { models, status };
     }
 
     // baseModels: optional compatible-base list from the workflow catalog. Video

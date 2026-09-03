@@ -2119,7 +2119,21 @@ def build_control_app(
             # Both keys: the studio wrappers read ``detail``, the bridge shim
             # (hosted-local-ai.js) reads ``error`` — so the Models view used to
             # show a bare "HTTP 503" for this.
-            return JSONResponse({"detail": str(exc), "error": str(exc)}, status_code=503)
+            #
+            # ``message`` is the sentence a person is shown, and ``remedy``
+            # says which repair belongs beside it. "The local inference bridge
+            # is unavailable" is accurate and means nothing to the owner of a
+            # studio that has simply not finished starting.
+            return JSONResponse(
+                {
+                    "message": "Your local engine isn't running",
+                    "remedy": "local-engine",
+                    "provider": "local",
+                    "detail": str(exc),
+                    "error": str(exc),
+                },
+                status_code=503,
+            )
         return Response(content=content, status_code=status, media_type=content_type.split(";", 1)[0])
 
     # --- posting a creation to Civitai -------------------------------------

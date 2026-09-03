@@ -24,9 +24,10 @@ import {
   i2iModels, getAspectRatiosForI2IModel, getResolutionsForI2IModel, getQualityFieldForI2IModel,
   getMaxImagesForI2IModel,
 } from '../lib/models.js';
-import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
+import { localAI, isHostedLocalAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { LOCAL_MODEL_CATALOG, getLocalModelById } from '../lib/localModels.js';
 import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';
+import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../lib/promptUtils.js';
@@ -187,7 +188,13 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     : (initialResolutions[0] || '');
 
   // Local inference state — only image-capable models surface here.
-  const localImageModels = LOCAL_MODEL_CATALOG.filter((m) => m.type !== 'video');
+  //
+  // The static catalog is the DESKTOP build's inventory. A hosted bridge serves
+  // registry workflows and rejects those ids with "Unknown local image
+  // workflow", so seeding a hosted picker from it offered models that could not
+  // run anywhere — and left Generate enabled while the engine was still down.
+  // Hosted studios wait for discovery instead, and say why while they wait.
+  const localImageModels = isHostedLocalAI() ? [] : LOCAL_MODEL_CATALOG.filter((m) => m.type !== 'video');
   // No saved preference yet: a hosted studio with local models boots on the
   // Local source (same default as the Video studio) instead of opening the cloud
   // key modal on the first Generate. A saved choice always wins.
@@ -223,6 +230,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     ugcVariantIndex: null,
     ugcRoomIndex: null,
     localImageModels,
+    // Why the local menu looks the way it does: 'discovering' | 'ready' |
+    // 'empty' | 'unreachable'. Read by the Model section and by the Generate
+    // button, so a menu that cannot run anything never sits under a live press.
+    localCatalogStatus: isLocalAIAvailable() ? 'discovering' : 'unreachable',
     useLocalModel,
     // Rented source mode: local mechanically (lane rules route by model
     // server-side); filters the menu to models an attached machine serves.
@@ -428,11 +439,87 @@ export function ImageStudio({
     persistImagePreferences();
     bump();
   };
+
+  // With nothing chosen, the pick is the workflow the registry flags `featured`,
+  // and otherwise the cheapest one to run. Index 0 used to decide it, which is
+  // whatever order the catalog happened to be written in.
+  const preferredLocalModel = (list) => list.find((model) => model.featured)
+    || [...list].sort((a, b) => (
+      (Number.isFinite(Number(a.defaultSteps)) ? Number(a.defaultSteps) : Number.MAX_SAFE_INTEGER)
+      - (Number.isFinite(Number(b.defaultSteps)) ? Number(b.defaultSteps) : Number.MAX_SAFE_INTEGER)
+    ))[0]
+    || null;
+
   const ensureCompatibleLocalModel = () => {
     const compatible = compatibleLocalModels();
-    const selected = compatible.find((model) => model.id === s.selectedLocalModel) || compatible[0] || null;
+    const selected = compatible.find((model) => model.id === s.selectedLocalModel) || preferredLocalModel(compatible);
     s.selectedLocalModel = selected?.id || null;
     return selected;
+  };
+
+  /**
+   * Ask the bridge what this machine can run, and record WHY when the answer is
+   * nothing. Re-runnable: the mount runs it, the hub's refresh broadcast runs
+   * it, and the Model section's "Check again" runs it.
+   */
+  const discoverLocalCatalog = async () => {
+    try {
+      await runLocalCatalogDiscovery();
+    } catch (error) {
+      // Applying a discovered model's settings must never leave the studio
+      // stuck on "discovering" with no way back.
+      console.warn('[Local] Unable to discover runtime image workflows:', error);
+      s.localCatalogStatus = 'unreachable';
+      bump();
+    }
+  };
+
+  const runLocalCatalogDiscovery = async () => {
+    s.localCatalogStatus = 'discovering';
+    bump();
+    const { models, status } = await localAI.listModels();
+    s.localCatalogStatus = status;
+    const discovered = models.filter((model) => (
+      model?.type !== 'video' && model?.state !== 'not-downloaded' && model?.ready !== false
+    ));
+    if (discovered.length === 0) {
+      // A hosted bridge that answered with nothing is the truth about this
+      // machine; keeping the desktop catalog here is what used to leave a menu
+      // of unrunnable ids under a live Generate button.
+      if (isHostedLocalAI()) s.localImageModels = [];
+      bump();
+      return;
+    }
+    s.localImageModels = discovered;
+    const localModel = ensureCompatibleLocalModel();
+    if (!localModel) { bump(); return; }
+    // A duplicated tab arrives with a fully resolved configuration. Re-applying
+    // the boot defaults below would quietly reset its aspect ratio and tuning to
+    // the model's, which is exactly what "duplicate" must not do. It does need
+    // one refresh though: its LoRA panel loaded against the STATIC catalog, so
+    // its header names the stock workflow until the discovered one lands.
+    if (s.bootSource === 'clone') {
+      if (s.loraOpen) void loadLorasForCurrentModel();
+      bump();
+      return;
+    }
+    const savedRuntimeMode = s.persistedImagePreferences?.localRuntimeMode;
+    s.localRuntimeMode = localModel.runtimeModes?.includes(savedRuntimeMode)
+      ? savedRuntimeMode
+      : (localModel.defaultRuntimeMode || 'one-off');
+    if (s.useLocalModel) {
+      if (!s.persistedImagePreferences) applyLocalModelDefaults(localModel);
+      s.selectedAr = localModel.aspectRatios?.[0] || s.selectedAr;
+      // The catalog just landed — the model's saved tuning (cfg, steps,
+      // AR, couple setup) wins over these boot defaults.
+      applyStoredModelSettings(`local:${localModel.id}`, null);
+      s.maxImages = s.imageMode ? (localModel.maxReferenceImages || 1) : 1;
+      updatePromptHelperVisibility();
+      if (s.loraOpen) void loadLorasForCurrentModel();
+    }
+    // Re-evaluate image support and couple capability for the selected model
+    // (the boot-time pass may have run before discovery) — derived in render.
+    bump();
   };
   const currentModelSupportsImage = () => {
     if (!s.useLocalModel) return apiModelSupportsImage(s.selectedModel);
@@ -2203,44 +2290,7 @@ export function ImageStudio({
     })();
 
     // --- Runtime discovery: replace the boot catalog, re-apply saved tuning ---
-    localAI.listModels().then((models) => {
-      const discovered = (Array.isArray(models) ? models : []).filter((model) => (
-        model?.type !== 'video' && model?.state !== 'not-downloaded' && model?.ready !== false
-      ));
-      if (discovered.length === 0) return;
-      s.localImageModels = discovered;
-      const localModel = ensureCompatibleLocalModel();
-      if (!localModel) return;
-      // A duplicated tab arrives with a fully resolved configuration. Re-applying
-      // the boot defaults below would quietly reset its aspect ratio and tuning to
-      // the model's, which is exactly what "duplicate" must not do. It does need
-      // one refresh though: its LoRA panel loaded against the STATIC catalog, so
-      // its header names the stock workflow until the discovered one lands.
-      if (s.bootSource === 'clone') {
-        if (s.loraOpen) void loadLorasForCurrentModel();
-        bump();
-        return;
-      }
-      const savedRuntimeMode = s.persistedImagePreferences?.localRuntimeMode;
-      s.localRuntimeMode = localModel.runtimeModes?.includes(savedRuntimeMode)
-        ? savedRuntimeMode
-        : (localModel.defaultRuntimeMode || 'one-off');
-      if (s.useLocalModel) {
-        if (!s.persistedImagePreferences) applyLocalModelDefaults(localModel);
-        s.selectedAr = localModel.aspectRatios?.[0] || s.selectedAr;
-        // The catalog just landed — the model's saved tuning (cfg, steps,
-        // AR, couple setup) wins over these boot defaults.
-        applyStoredModelSettings(`local:${localModel.id}`, null);
-        s.maxImages = s.imageMode ? (localModel.maxReferenceImages || 1) : 1;
-        updatePromptHelperVisibility();
-        if (s.loraOpen) void loadLorasForCurrentModel();
-      }
-      // Re-evaluate image support and couple capability for the selected model
-      // (the boot-time pass may have run before discovery) — derived in render.
-      bump();
-    }).catch((error) => {
-      console.warn('[Local] Unable to discover runtime image workflows:', error);
-    });
+    void discoverLocalCatalog();
 
     // A duplicate keeps the LoRA panel open on the same selection — load its
     // catalog, which the boot path above only does for the persisted tab.
@@ -2282,7 +2332,12 @@ export function ImageStudio({
       }
     });
 
-    return undefined;
+    // The hub broadcasts this when a model download lands or the stack comes
+    // back. Without it the boot answer — including "the engine is starting" —
+    // stood for the lifetime of the tab.
+    const onHubRefresh = () => { void discoverLocalCatalog(); };
+    window.addEventListener('hivemind-hub-refresh', onHubRefresh);
+    return () => window.removeEventListener('hivemind-hub-refresh', onHubRefresh);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2457,6 +2512,20 @@ export function ImageStudio({
   // Rented selected with nothing to run on: every setting below is moot,
   // so the panel collapses to the Source block and its rent/provisioning CTA.
   const rentedBlocked = Boolean(s.rentedOnly && !s.rentedMachines?.length);
+  // The same rule for the Local source: an engine that is not answering, or a
+  // machine with nothing installed, cannot run a press. Discovery in flight is
+  // not a block — it resolves in milliseconds and greying the button out on
+  // every mount would be its own bug.
+  const localBlocked = Boolean(
+    s.useLocalModel && !s.rentedOnly
+    && s.localCatalogStatus !== 'ready' && s.localCatalogStatus !== 'discovering',
+  );
+  const localBlockedReason = localBlocked
+    ? (s.localCatalogStatus === 'empty'
+      ? (zh() ? '这台机器上尚未安装图像模型——打开“模型”安装一个，或改用云端。' : 'No image model is installed on this machine yet — open Models to install one, or switch the source to Cloud.')
+      : (zh() ? '本地引擎正在启动——它响应后即可生成，或改用云端。' : 'The local engine is starting — generate as soon as it answers, or switch the source to Cloud.'))
+    : '';
+  const generateBlocked = rentedBlocked || localBlocked;
   // Edit workflows (requires.image) take their ASPECT from the reference on the
   // server, so the aspect-ratio preset would be a lie while a reference is
   // attached — replace it with the truth. The size is still the caller's to set:
@@ -2526,13 +2595,25 @@ export function ImageStudio({
         <>
       <div className="flex flex-col gap-2">
         <SectionLabel>{zh() ? '模型' : 'Model'}</SectionLabel>
-        <ModelMenu
-          engine={s}
-          modelLabel={modelLabel}
-          hasRefs={refCount > 0}
-          onSelectLocal={selectLocalModel}
-          onSelectApi={selectApiModel}
-        />
+        {/* A menu of models that cannot run is worse than no menu: it reads as
+            a working studio right up to the press. When the local source has
+            nothing to offer, the section says why and carries the one action
+            that changes it. */}
+        {s.useLocalModel && !s.localImageModels.length && s.localCatalogStatus !== 'ready' ? (
+          <LocalCatalogNotice
+            status={s.localCatalogStatus}
+            onCheckAgain={() => { void discoverLocalCatalog(); }}
+            onSwitchToCloud={() => setSource(false)}
+          />
+        ) : (
+          <ModelMenu
+            engine={s}
+            modelLabel={modelLabel}
+            hasRefs={refCount > 0}
+            onSelectLocal={selectLocalModel}
+            onSelectApi={selectApiModel}
+          />
+        )}
       </div>
 
       <div className="flex flex-col gap-3">
@@ -3191,7 +3272,7 @@ export function ImageStudio({
             onKeyDown={(e) => {
               if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                 e.preventDefault();
-                if (!s.generating && !rentedBlocked) generate();
+                if (!s.generating && !generateBlocked) generate();
               }
             }}
             className="max-h-[150px] min-h-[40px] w-full resize-none overflow-y-auto border-none bg-transparent px-1 pt-1 text-[15px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 md:max-h-[250px]"
@@ -3342,11 +3423,11 @@ export function ImageStudio({
             variant="primary"
             size="lg"
             loading={s.generating}
-            disabled={rentedBlocked}
+            disabled={generateBlocked}
             onClick={generate}
             title={rentedBlocked
               ? 'Rent a machine (or switch the source to Local) to generate.'
-              : t('image.generateTooltip')}
+              : (localBlockedReason || t('image.generateTooltip'))}
             className="min-w-[130px]"
           >
             {generateLabel}
@@ -3381,7 +3462,7 @@ export function ImageStudio({
                 <div className="mt-1 break-words font-mono text-xs text-danger/90">{s.generateError}</div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <Button size="sm" variant="neutral" icon="refresh" disabled={s.generating || rentedBlocked} onClick={generate}>
+                <Button size="sm" variant="neutral" icon="refresh" disabled={s.generating || generateBlocked} onClick={generate}>
                   {zh() ? '重试' : 'Try again'}
                 </Button>
                 <IconButton icon="x" label={zh() ? '关闭' : 'Dismiss'} size="sm" onClick={() => { s.generateError = ''; bump(); }} />

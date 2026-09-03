@@ -19,7 +19,17 @@
       },
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    if (!res.ok) {
+      // A shaped failure carries the sentence a person is shown and the repair
+      // that belongs beside it; `error` is the older, jargon-carrying key and
+      // stays as the fallback. Never "HTTP 503" on its own.
+      const failure = new Error(data.message || data.error || `HTTP ${res.status}`);
+      if (data.remedy) failure.remedy = data.remedy;
+      if (data.provider) failure.provider = data.provider;
+      if (data.detail) failure.detail = data.detail;
+      failure.status = res.status;
+      throw failure;
+    }
     return data;
   }
 

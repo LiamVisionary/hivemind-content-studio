@@ -439,8 +439,11 @@ export function LocalModelManager() {
   const refreshModels = useCallback(async () => {
     setListError(null);
     try {
-      const list = await localAI.listModels();
+      const { models: list, status } = await localAI.listModels();
       setModels(list);
+      // The catalog fetch reports why it is empty instead of rejecting, so an
+      // engine that is not answering still has to reach the banner.
+      if (status === 'unreachable') setListError(t('localModels.engineNotAnswering'));
     } catch (err) {
       setListError(err.message);
       setModels([]);

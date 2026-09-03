@@ -29,6 +29,7 @@ def test_runtime_snapshot_is_safe_and_reports_one_native_surface_with_internal_e
     answered = {
         "http://127.0.0.1:8787/healthz",
         "http://127.0.0.1:8188/system_stats",
+        "http://127.0.0.1:8794/health",
     }
 
     snapshot = unified_runtime_snapshot(environ={}, probe=lambda url: url in answered)
@@ -45,7 +46,10 @@ def test_runtime_snapshot_is_safe_and_reports_one_native_surface_with_internal_e
     assert next(item for item in snapshot["engines"] if item["id"] == "comfyui")["status"] == "online"
     assert next(item for item in snapshot["engines"] if item["id"] == "flux-2-swift-mlx")["status"] == "offline"
     assert next(item for item in snapshot["engines"] if item["id"] == "z-image-swift")["status"] == "managed"
-    assert snapshot["summary"] == {"online": 3, "offline": 1, "managed": 1, "misconfigured": 0, "total": 5}
+    # Everything the studio calls "local" reaches its models through the 8794
+    # bridge, so its health is part of the answer to "is local up?".
+    assert next(item for item in snapshot["engines"] if item["id"] == "open-generative-ai-bridge")["status"] == "online"
+    assert snapshot["summary"] == {"online": 4, "offline": 1, "managed": 1, "misconfigured": 0, "total": 6}
     serialized = __import__("json").dumps(snapshot).lower()
     assert "token" not in serialized
     assert "/users/" not in serialized

@@ -54,11 +54,15 @@ export function ModelsView({ active }) {
       // A dead workflow catalog used to be swallowed into an empty Models tab
       // ("No matching models"); it is reported in the banner like the library.
       let modelsError = '';
-      const [localModels, installed] = await Promise.all([
-        localAI.listModels().catch((err) => { modelsError = err?.message || 'Could not read the local workflow catalog.'; return []; }),
+      const [localCatalog, installed] = await Promise.all([
+        localAI.listModels().catch((err) => { modelsError = err?.message || 'Could not read the local workflow catalog.'; return { models: [], status: 'unreachable' }; }),
         localAI.listLibrary(),
       ]);
-      setModels(Array.isArray(localModels) ? localModels : []);
+      // The catalog fetch reports an unreachable engine instead of rejecting.
+      if (!modelsError && localCatalog?.status === 'unreachable') {
+        modelsError = zh() ? '本地引擎正在启动——尚未响应。' : 'The local engine is starting — it has not answered yet.';
+      }
+      setModels(Array.isArray(localCatalog?.models) ? localCatalog.models : []);
       setLibrary(installed);
       if (modelsError) setError(`Workflow catalog: ${modelsError}`);
     } catch (err) {

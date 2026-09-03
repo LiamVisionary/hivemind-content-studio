@@ -1470,6 +1470,33 @@ def test_simple_plan_forwards_attachment_image_data_to_the_brain(tmp_path: Path,
     assert seen["attachments"][0]["data"] == "data:image/jpeg;base64,aGk="
 
 
+def test_opengen_bridge_down_answers_with_a_sentence_and_a_remedy(tmp_path: Path, monkeypatch) -> None:
+    """A studio whose bridge is not up must be told what is wrong in words it can
+    show. "The local inference bridge is unavailable" is accurate and means
+    nothing to the owner of a studio that has simply not finished starting, so
+    the shape carries the sentence, the remedy the UI attaches an action to, and
+    the raw text underneath."""
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    def refuse(request, timeout=0):  # noqa: ARG001
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("hivemind_content_studio.control_api.urllib.request.urlopen", refuse)
+
+    response = client.get("/local-ai/models")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["message"] == "Your local engine isn't running"
+    assert body["remedy"] == "local-engine"
+    assert body["provider"] == "local"
+    # The jargon stays reachable for a log line; it is not the headline.
+    assert "bridge" in body["detail"]
+    # `error` is the older key the bridge shim reads — dropping it would put a
+    # bare "HTTP 503" back in the Models view.
+    assert body["error"] == body["detail"]
+
+
 def test_opengen_bridge_proxy_forwards_the_query_string(tmp_path: Path, monkeypatch) -> None:
     """LoRA lookups pass ?baseModels=… for workflows the bridge cannot resolve on
     its own. Dropping the query turned those into "Unknown local workflow"."""

@@ -210,7 +210,7 @@ export function CastStage({
   onAddCharacter, onRemoveCharacter, onDrawSheet, onDrawPlate, onChooseLocation,
   draft, onCancel, onSuggestPlaces, draftHint, draftLabel,
   sheetChoices, sheetModel, onSheetModel, plateChoices, plateModel, onPlateModel,
-  readinessFor, onFixReadiness, fixing,
+  readinessFor, onFixReadiness, fixing, localNotice = null,
 }) {
   const location = story.location;
   const moves = motionElements(location);
@@ -235,6 +235,8 @@ export function CastStage({
       />
 
       <Disclosure label="Drawn with" hint={`· ${sheetModel?.label || 'no model picked'}`} tone="card">
+        {/* Why this machine offers nothing, and the one press that changes it. */}
+        {localNotice}
         <ModelFitPicker
           label="Character sheets"
           rows={sheetChoices}
