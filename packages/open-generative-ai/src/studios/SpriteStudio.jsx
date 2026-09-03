@@ -25,7 +25,7 @@ import { useMediaSrc } from '../hooks/hooks.js';
 import { defaultPick, EVIDENCE_LABELS, fetchCapabilityMatrix, rankModels, RATING_LABELS, serverRows } from '../lib/capabilityMatrix.js';
 import { isHivemindStudioEnabled, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
 import { isLocalAIAvailable, localAI } from '../lib/localInferenceClient.js';
-import { needsBrowserKey, runImage, runVideo, studioRow, transportFor } from '../lib/modelRunner.js';
+import { needsBrowserKey, runImage, runVideo, transportFor } from '../lib/modelRunner.js';
 import { LOCAL_MODEL_CATALOG } from '../lib/localModels.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { registerPromptInserter } from '../app/promptTarget.js';
@@ -41,6 +41,7 @@ import { AuthModal } from '../dialogs/AuthModal.jsx';
 
 import { extractKeyFrames } from './sprite/spriteFrames.js';
 import { matteFrames } from './sprite/spriteMatte.js';
+import { animationChoices, animationRow, SPRITE_CLIP_TRANSPORTS } from './sprite/spriteRouting.js';
 import {
   matteSubjectFrom, spriteAnimationPrompt, spriteImagePrompt,
   SPRITE_ACTIONS, SPRITE_BACKGROUNDS, SPRITE_EXAMPLE, SPRITE_STYLES,
@@ -237,9 +238,21 @@ export function SpriteStudio({ active = true } = {}) {
 
   const videoChoices = useMemo(() => {
     if (!matrix) return [];
-    return rankModels(matrix, 'sprite_animation', serverRows(matrix, 'sprite_animation')
-      .map((row) => ({ ...row, id: row.model, label: row.model_label, providerLabel: row.provider_label, source: 'cloud' })));
+    // Rated by the matrix, then marked with whether THIS stage can reach the
+    // row — see spriteRouting.js. A cloud row the stage cannot send the sprite
+    // to is shown with its reason, not offered as a job that fails locally.
+    return animationChoices(rankModels(matrix, 'sprite_animation', serverRows(matrix, 'sprite_animation')
+      .map((row) => ({ ...row, id: row.model, label: row.model_label, providerLabel: row.provider_label, source: 'cloud' }))));
   }, [matrix]);
+
+  // The row's own reason, on the row. The image picker keeps its readiness
+  // where the credential lives; the animation picker only has to say which
+  // rows this stage cannot send the sprite to.
+  const animationReadiness = useCallback((row) => (
+    row.available === false && row.unavailableReason
+      ? { state: 'unroutable', label: 'Cannot run here', detail: row.unavailableReason, action: null, blocks: true }
+      : null
+  ), []);
 
   useEffect(() => { if (!imageModel && imageChoices.length) setImageModel(defaultPick(imageChoices)); }, [imageChoices, imageModel]);
   useEffect(() => { if (!videoModel && videoChoices.length) setVideoModel(defaultPick(videoChoices)); }, [videoChoices, videoModel]);
@@ -302,15 +315,22 @@ export function SpriteStudio({ active = true } = {}) {
     setAnimating(true);
     setAnimationProgress({ progress: null });
     try {
+      // The row is the PICK — its provider, not a Media Studio row built from
+      // its id. That rewrite is how "Seedance 2.0 · Higgsfield" used to reach
+      // the local lane as an unknown workflow. `extra` declares the one
+      // transport this stage built a request for, so anything else is refused
+      // before it costs a request.
       const result = await runVideo({
-        row: studioRow(videoModel.id),
+        row: animationRow(videoModel),
         shared: {
           prompt: animationPrompt,
-          image: spriteUrl,
           duration: seconds,
           aspect_ratio: SPRITE_ASPECT,
-          onProgress: (update) => setAnimationProgress(update),
         },
+        extra: Object.fromEntries(SPRITE_CLIP_TRANSPORTS.map((transport) => [transport, {
+          image: spriteUrl,
+          onProgress: (update) => setAnimationProgress(update),
+        }])),
         signal: controller.signal,
       });
       if (!result?.url) throw new Error('No clip came back.');
@@ -586,7 +606,7 @@ export function SpriteStudio({ active = true } = {}) {
             </div>
           </details>
 
-          <ModelFitPicker label="Animation model" rows={videoChoices} value={videoModel} onChange={setVideoModel} />
+          <ModelFitPicker label="Animation model" rows={videoChoices} value={videoModel} onChange={setVideoModel} readinessFor={animationReadiness} />
 
           <div className="flex items-center gap-2">
             <Button icon="film" onClick={animate} disabled={animating || !spriteUrl} loading={animating}>

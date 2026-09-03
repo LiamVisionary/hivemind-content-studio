@@ -127,6 +127,35 @@ export function transportFor(row) {
   return { ...known, runnable: true, reason: '' };
 }
 
+/** The providers whose clips the Media Studio LANE serves: a `workflow_id`
+ *  there is a workflow the lane's registry knows. Every other `studio`
+ *  provider (Higgsfield, xAI, OpenAI, HivemindOS hosted) reaches the studio
+ *  server through the still endpoint only, and posting its model id to the
+ *  lane as a workflow is the mis-route this set exists to refuse. */
+const STUDIO_LANE_PROVIDERS = new Set(['media-studio-mcp', 'comfyui']);
+
+/**
+ * How this row would run as a CLIP, without running it.
+ *
+ * Same shape as `transportFor`. The difference is the `studio` transport:
+ * for a still it is `/api/media-studio/image`, which dispatches on provider;
+ * for a clip it is the Media Studio lane, which only knows its own workflows.
+ * A row whose provider the lane does not serve is unroutable here, and says
+ * which rows are — the picker shows that rather than a failed local job.
+ */
+export function clipRouteFor(row) {
+  const route = transportFor(row);
+  if (route.transport !== 'studio') return route;
+  const provider = String(row?.provider || '').trim();
+  if (STUDIO_LANE_PROVIDERS.has(provider)) return route;
+  return {
+    transport: 'none',
+    label: route.label,
+    runnable: false,
+    reason: `${route.label} clips are not wired into this studio yet — pick a model on this machine’s Media Studio.`,
+  };
+}
+
 // Where MUAPI's key lives on THIS machine. `null` until asked.
 //
 // It used to live only in the browser, which is why a user whose HivemindOS
@@ -167,7 +196,9 @@ export function needsBrowserKey(row) {
  */
 export function resolveRun({ row, kind = 'image', shared = {}, extra = null }) {
   if (!row) throw new Error('Pick a model first.');
-  const route = transportFor(row);
+  // A clip and a still reach the studio server by different doors, and only
+  // one of them dispatches on provider — see clipRouteFor.
+  const route = kind === 'clip' ? clipRouteFor(row) : transportFor(row);
   if (!route.runnable) throw new Error(route.reason || `${route.label} cannot run here.`);
   if (extra && !Object.prototype.hasOwnProperty.call(extra, route.transport)) {
     // The caller built a payload for somewhere else. Sending the shared half
@@ -277,6 +308,8 @@ export async function runVideo({ row, shared = {}, extra = null, signal = null }
   // The lane names its workflow `workflow_id`; `model` there is the studio's
   // `hivemind-media:<id>` form and a raw id in it decodes to nothing, which
   // lands the job on the DEFAULT lane while the picker shows the one you chose.
+  // Only a lane provider reaches here: resolveRun refused the rest above, so a
+  // Higgsfield model id can no longer arrive as an unknown workflow.
   const result = await generateHivemindVideo({ signal, ...payload, workflow_id: row.id });
   return { ...result, provider: row.provider || 'media-studio-mcp', model: row.id };
 }
