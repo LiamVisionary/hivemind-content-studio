@@ -22,7 +22,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
-import { muapiRow, runImage } from '../lib/modelRunner.js';
+import { muapiRow, needsBrowserKey, runImage } from '../lib/modelRunner.js';
 import { buildNanoBananaPrompt, CAMERA_MAP, LENS_MAP } from '../lib/promptUtils.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { imageDownloadName } from '../lib/downloadNames.js';
@@ -245,8 +245,9 @@ export function CinemaStudio({ active = true } = {}) {
     }
     if (s.generating) return;
 
-    const apiKey = localStorage.getItem('muapi_key');
-    if (!apiKey) {
+    // Only when NEITHER this machine's shared store nor this browser has the
+    // key. A machine that already holds MUAPI_API_KEY runs straight through.
+    if (needsBrowserKey(muapiRow(CINEMA_MODEL))) {
       authRetryRef.current = () => generate();
       s.authOpen = true;
       bump();

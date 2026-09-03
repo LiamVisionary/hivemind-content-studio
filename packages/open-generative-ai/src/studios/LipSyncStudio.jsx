@@ -1,8 +1,8 @@
 // Lip Sync Studio — React redesign of the retired vanilla studio.
 // Pairs a portrait image OR a source video with an audio track and produces a
-// lipsynced video via muapi.processLipSync. Audio is upload-only (no TTS in the
-// original). Model catalog + resolution live in the left panel; the input slots,
-// prompt and Generate live in the docked composer.
+// lipsynced video through runVideo's processLipSync method. Audio is upload-only
+// (no TTS in the original). Model catalog + resolution live in the left panel;
+// the input slots, prompt and Generate live in the docked composer.
 //
 // Port rules honored here:
 // - src/lib/** consumed unchanged. processLipSync payload rules preserved exactly:
@@ -32,6 +32,7 @@ import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
 import { muapi } from '../lib/muapi.js';
+import { muapiRow, needsBrowserKey, runVideo } from '../lib/modelRunner.js';
 import { lipsyncModels, imageLipSyncModels, videoLipSyncModels, getResolutionsForLipSyncModel } from '../lib/models.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
@@ -39,7 +40,7 @@ import { videoDownloadName } from '../lib/downloadNames.js';
 import { formatElapsed } from '../lib/genProgress.js';
 import { loadStudioGenerationHistory, saveStudioGenerationHistory } from '../lib/hivemindStudio.js';
 import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
-import { toastMuapiError } from './lipsync/muapiErrorToast.jsx';
+import { toastMuapiError, toastMuapiKeyNeeded } from './lipsync/muapiErrorToast.jsx';
 import { getLang, t } from '../lib/i18n.js';
 
 import { useMediaSrc } from '../hooks/hooks.js';
@@ -350,8 +351,7 @@ export function LipSyncStudio({ active = true } = {}) {
   };
 
   const uploadTo = async (file, { setUploading, setUrl, setName, retry, failLabel }) => {
-    const apiKey = localStorage.getItem('muapi_key');
-    if (!apiKey) {
+    if (needsBrowserKey(muapiRow(s.selectedModel))) {
       authRetryRef.current = retry;
       s.authOpen = true;
       bump();
@@ -459,8 +459,9 @@ export function LipSyncStudio({ active = true } = {}) {
     if (s.inputMode === 'video' && !s.uploadedVideoUrl) { toast.error(t('lipsync.noVideoAlert')); return; }
     if (s.generating) return;
 
-    const apiKey = localStorage.getItem('muapi_key');
-    if (!apiKey) {
+    // The shared store counts as having the key; only a machine with neither
+    // store nor browser copy is asked for one.
+    if (needsBrowserKey(muapiRow(s.selectedModel))) {
       authRetryRef.current = () => generate();
       s.authOpen = true;
       bump();
@@ -514,7 +515,13 @@ export function LipSyncStudio({ active = true } = {}) {
 
       if (model?.hasSeed) lipsyncParams.seed = -1;
 
-      const res = await muapi.processLipSync(lipsyncParams);
+      // Through the one dispatcher, like every other studio: the row decides the
+      // transport and `method` names the MUAPI call, so this run gets the same
+      // pre-press readiness refusal a T2V or a still already gets.
+      const res = await runVideo({
+        row: muapiRow(s.selectedModel),
+        extra: { muapi: { ...lipsyncParams, method: 'processLipSync' } },
+      });
 
       if (res && res.url) {
         if (capturedRequestId) removePendingJob(capturedRequestId);
@@ -556,16 +563,28 @@ export function LipSyncStudio({ active = true } = {}) {
     // queueMicrotask(updateUIForMode({ preserveSelection: true }))).
     applyMode({ preserveSelection: true });
 
-    (async () => {
+    // Resume the jobs this studio had in flight when the page went away.
+    // Named rather than an IIFE so the "Add key" toast can run it again the
+    // moment a key is saved, instead of asking for a reload.
+    const resumePendingJobs = async () => {
       const pending = getPendingJobs('lipsync');
       if (!pending.length) return;
-      const apiKey = localStorage.getItem('muapi_key');
-      if (!apiKey) {
-        // Can't poll without a key; the jobs stay queued for the next visit —
-        // but say so, or "nothing happened" is all the user sees.
-        toast(zh()
-          ? `有 ${pending.length} 个未完成的唇语同步在等待 MUAPI 密钥 — 在设置中填写后即可恢复。`
-          : `${pending.length} pending lip sync ${pending.length === 1 ? 'job is' : 'jobs are'} waiting for your MUAPI key — add it in Settings to resume.`);
+      if (needsBrowserKey(muapiRow(s.selectedModel))) {
+        // Can't poll without a key anywhere — but the jobs stay queued (nothing
+        // is dropped), and the toast carries the button that fixes it rather
+        // than naming a page to go and find.
+        toastMuapiKeyNeeded(
+          zh()
+            ? `有 ${pending.length} 个未完成的唇语同步在等待 MUAPI 密钥。`
+            : `${pending.length} pending lip sync ${pending.length === 1 ? 'job is' : 'jobs are'} waiting for a MUAPI key.`,
+          {
+            onAddKey: () => {
+              authRetryRef.current = () => { void resumePendingJobs(); };
+              s.authOpen = true;
+              bump();
+            },
+          },
+        );
         return;
       }
       s.resumeRemaining = pending.length;
@@ -574,20 +593,34 @@ export function LipSyncStudio({ active = true } = {}) {
         const elapsedAttempts = Math.floor((Date.now() - job.submittedAt) / job.interval);
         const attemptsLeft = Math.max(1, job.maxAttempts - elapsedAttempts);
         try {
-          const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, job.interval);
+          // No key argument: the client resolves its own route, and on a
+          // machine that holds the key this browser has none to pass.
+          const result = await muapi.pollForResult(job.requestId, '', attemptsLeft, job.interval);
           const url = result.outputs?.[0] || result.url || result.output?.url;
           if (url) addToHistory({ id: job.requestId, url, ...job.historyMeta, timestamp: new Date().toISOString() });
           else toast.error(zh() ? '一个未完成的唇语同步没有返回视频。' : 'A pending lip sync finished without a video.');
+          removePendingJob(job.requestId);
         } catch (e) {
           console.warn('[LipSyncStudio] Pending job failed:', job.requestId, e.message);
-          toastMuapiError(e, { prefix: zh() ? '无法恢复未完成的唇语同步（可能已过期）' : "Couldn't recover a pending lip sync — it may have expired" });
+          const described = toastMuapiError(e, {
+            prefix: zh() ? '无法恢复未完成的唇语同步（可能已过期）' : "Couldn't recover a pending lip sync — it may have expired",
+            onAddKey: () => {
+              authRetryRef.current = () => { void resumePendingJobs(); };
+              s.authOpen = true;
+              bump();
+            },
+          });
+          // A key the provider refused is not a dead job: keep it queued so the
+          // resume can run again once the key is fixed. Anything else really is
+          // over, and holding it would retry the same failure forever.
+          if (!described.keyRejected) removePendingJob(job.requestId);
         } finally {
-          removePendingJob(job.requestId);
           s.resumeRemaining -= 1;
           bump();
         }
       });
-    })();
+    };
+    void resumePendingJobs();
 
     return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -687,7 +720,7 @@ export function LipSyncStudio({ active = true } = {}) {
                 values={s.uploadedImageUrl ? [s.uploadedImageUrl] : []}
                 onChange={(urls) => { s.uploadedImageUrl = urls[0] || null; bump(); }}
                 uploadFn={(file) => muapi.uploadFile(file)}
-                requireApiKey={() => true}
+                requireApiKey={() => needsBrowserKey(muapiRow(s.selectedModel))}
                 maxImages={1}
                 accept="image/*"
                 label={t('lipsync.portraitImage')}

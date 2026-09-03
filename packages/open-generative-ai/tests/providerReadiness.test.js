@@ -195,3 +195,63 @@ test('the missing-key message names the shared environment, not just this browse
   assert.match(r.detail, /MUAPI_API_KEY/);
   setMuapiKeyOnServer(null);
 });
+
+/* ---------------- the answer is seeded once, for every studio ---------------- */
+
+// Until this ran at boot, only the studio that happened to ask knew where the
+// key lived: Story asked, so Story was right, and Image / Video / Lip sync /
+// Cinema / Sprite all demanded a browser key on a machine that had one.
+
+test('asking this machine once makes every row truthful, without a browser key', async () => {
+  const { refreshMuapiKeyLocation, readinessFor } = await load();
+  const { needsBrowserKey, muapiRow, setMuapiKeyOnServer } = await import('../src/lib/modelRunner.js');
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, server_key: true }) });
+
+  assert.equal(await refreshMuapiKeyLocation(), true);
+
+  // Any row, in any studio — the gate never reads localStorage again.
+  assert.equal(needsBrowserKey(muapiRow('flux-2-pro')), false);
+  assert.equal(needsBrowserKey(muapiRow('kling-video-v2.5')), false);
+  assert.equal(readinessFor(muapiRow('flux-2-pro'), { oauth: {} }).state, 'ready');
+  setMuapiKeyOnServer(null);
+});
+
+test('a machine with no key still asks, and a status we cannot read is not a pass', async () => {
+  const { refreshMuapiKeyLocation, readinessFor } = await load();
+  const { needsBrowserKey, muapiRow, setMuapiKeyOnServer } = await import('../src/lib/modelRunner.js');
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, server_key: false }) });
+  assert.equal(await refreshMuapiKeyLocation(), false);
+  assert.equal(needsBrowserKey(muapiRow('flux-2-pro')), true);
+  assert.equal(readinessFor(muapiRow('flux-2-pro'), { oauth: {} }).action.kind, 'muapi-key');
+
+  // An unreachable studio server is "no server key", not "assume one" — the
+  // dialog is offered rather than a request spent on a call that cannot work.
+  globalThis.fetch = async () => { throw new Error('offline'); };
+  assert.equal(await refreshMuapiKeyLocation(), false);
+  assert.equal(needsBrowserKey(muapiRow('flux-2-pro')), true);
+  setMuapiKeyOnServer(null);
+});
+
+test('the keyless gate for uploads and resumes answers the same as a row', async () => {
+  // Uploads and resumed polls have no model row, so they ask muapiKeyMissing().
+  // If the two ever disagreed, one surface would gate and the other would not.
+  const { muapiKeyMissing, needsBrowserKey, muapiRow, setMuapiKeyOnServer } = await import('../src/lib/modelRunner.js');
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+
+  setMuapiKeyOnServer(true);
+  assert.equal(muapiKeyMissing(), false);
+  assert.equal(muapiKeyMissing(), needsBrowserKey(muapiRow('flux-2-pro')));
+
+  setMuapiKeyOnServer(false);
+  assert.equal(muapiKeyMissing(), true);
+  assert.equal(muapiKeyMissing(), needsBrowserKey(muapiRow('flux-2-pro')));
+
+  globalThis.localStorage = { getItem: () => 'a-key', setItem: () => {} };
+  assert.equal(muapiKeyMissing(), false);
+
+  globalThis.localStorage = { getItem: () => null, setItem: () => {} };
+  setMuapiKeyOnServer(null);
+});

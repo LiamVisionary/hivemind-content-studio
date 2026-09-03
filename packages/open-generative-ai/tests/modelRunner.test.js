@@ -135,7 +135,9 @@ test('no studio dispatches a model itself — every one of them goes through her
   const offenders = [];
   for (const name of files) {
     const source = await readFile(new URL(name, dir), 'utf8');
-    if (/muapi\.generate(Image|Video|I2I)\(/.test(source)) offenders.push(`${name}: calls muapi.generate* directly`);
+    // Every generating call, not the three the first version happened to list:
+    // processV2V, generateI2V and processLipSync all slipped past that one.
+    if (/muapi\.(generate\w*|process\w*)\(/.test(source)) offenders.push(`${name}: calls muapi.generate*/process* directly`);
     if (/\blocalAI\.generate\(/.test(source)) offenders.push(`${name}: calls localAI.generate directly`);
     if (/\bgenerateHivemindVideo\(/.test(source)) offenders.push(`${name}: calls the Media Studio lane directly`);
   }
@@ -194,6 +196,37 @@ test('a clip routes to the Media Studio lane, not to the image endpoint', async 
   // The lane is a job with progress, a cancellable id and a machine to run on.
   // It is the same `studio` transport, and runVideo picks the lane for it.
   assert.equal(transportFor(studioRow('minimax-h3')).transport, 'studio');
+});
+
+test('a clip NAMES its MUAPI call instead of making it, so V2V, I2V and lip sync are covered too', async () => {
+  const { runVideo, muapiRow } = await load();
+  const { muapi } = await import('../src/lib/muapi.js');
+  const seen = [];
+  for (const name of ['generateVideo', 'generateI2V', 'processV2V', 'processLipSync']) {
+    muapi[name] = async (params) => { seen.push([name, params]); return { url: `blob:${name}` }; };
+  }
+
+  await runVideo({ row: muapiRow('seedance-v2.0-t2v'), extra: { muapi: { prompt: 'a pier' } } });
+  await runVideo({ row: muapiRow('kling-i2v'), extra: { muapi: { image_url: 'u', method: 'generateI2V' } } });
+  await runVideo({ row: muapiRow('kling-v2v'), extra: { muapi: { video_url: 'u', method: 'processV2V' } } });
+  await runVideo({ row: muapiRow('kling-lipsync'), extra: { muapi: { audio_url: 'u', method: 'processLipSync' } } });
+
+  assert.deepEqual(seen.map(([name]) => name), ['generateVideo', 'generateI2V', 'processV2V', 'processLipSync']);
+  // `method` is routing, not payload — MUAPI would 400 on an unknown field.
+  for (const [, params] of seen) assert.equal(params.method, undefined);
+  // And the row is still the last word on which model is billed.
+  assert.equal(seen[1][1].model, 'kling-i2v');
+
+  for (const name of ['generateVideo', 'generateI2V', 'processV2V', 'processLipSync']) delete muapi[name];
+});
+
+test('a method the client does not have is refused in words, not a TypeError', async () => {
+  const { runVideo, muapiRow } = await load();
+
+  await assert.rejects(
+    () => runVideo({ row: muapiRow('x'), extra: { muapi: { method: 'generateHologram' } } }),
+    /no .generateHologram. call/,
+  );
 });
 
 test('every studio that generates imports what it calls', async () => {

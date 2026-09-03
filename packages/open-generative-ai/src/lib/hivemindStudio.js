@@ -32,8 +32,20 @@ export function isHivemindStudioEnabled() {
     return window.__HIVEMIND_STUDIO__ === 1 || qs().get('hivemindStudio') === '1';
 }
 
+// Whether this machine holds MUAPI_API_KEY, as last reported by /api/muapi/status
+// (modelRunner.setMuapiKeyOnServer). The browser copy of the key is only stale
+// once that is true; scrubbing it earlier would break the direct route on a
+// machine that has nothing else.
+let muapiKeyOnServer = false;
+export function markMuapiKeyOnServer(present) {
+    muapiKeyOnServer = Boolean(present);
+}
+
 function scrubLegacyPersistentCreativeState() {
     if (!isHivemindStudioEnabled()) return;
+    // The key itself lived here until 2026-09-03; it now lives in the machine's
+    // shared store (lib/muapiKey.js migrates it) and the proxy never reads this.
+    if (muapiKeyOnServer) { try { localStorage.removeItem('muapi_key'); } catch {} }
     try { localStorage.removeItem('muapi_history'); } catch {}
     try { localStorage.removeItem('video_history'); } catch {}
     // Cinema / Lip sync wrote prompts + result URLs here in the clear until 2026-08-24.

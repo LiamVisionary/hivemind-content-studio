@@ -42,6 +42,7 @@ import {
   uploadFileToHivemindStudio,
 } from '../lib/hivemindStudio.js';
 import { muapi } from '../lib/muapi.js';
+import { muapiKeyMissing } from '../lib/modelRunner.js';
 import {
   generateThumbnail,
   getUploadHistory,
@@ -306,7 +307,7 @@ export function UploadPicker({
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
-    if (needsKey() && !localStorage.getItem('muapi_key')) {
+    if (needsKey() && muapiKeyMissing()) {
       // Abort and gate behind AuthModal — the files are retained and processed
       // once the key is saved (retry continuation).
       pendingFilesRef.current = files;

@@ -12,6 +12,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { toast, Toaster } from 'react-hot-toast';
 import { ExploreDock } from '../bridges/ExploreDock.jsx';
 import { MEDIA_DOWNLOAD_BLOCKED_EVENT } from '../lib/downloadMedia.js';
+import { seedMuapiKeyLocation } from '../lib/muapiKey.js';
 import { getPendingJobs } from '../lib/pendingJobs.js';
 import { OutputRestoreDropZone } from './OutputRestoreDropZone.jsx';
 import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
@@ -163,6 +164,21 @@ export function App() {
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, [navigate]);
+
+  // Does this machine hold the MUAPI key? Asked ONCE here, for every studio:
+  // each gate reads the answer (modelRunner.needsBrowserKey), so a machine that
+  // already has the key never opens the key dialog — in Image, Video, Lip sync,
+  // Cinema or Sprite, whichever is visited first. A key an older build left in
+  // this browser is moved into the shared store on the way.
+  useEffect(() => {
+    let alive = true;
+    void seedMuapiKeyLocation().then(({ migrated }) => {
+      if (alive && migrated) {
+        toast.success('Your MUAPI key now lives in this machine’s shared store, where every Hive app can use it.');
+      }
+    });
+    return () => { alive = false; };
+  }, []);
 
   // A generation outlives the page. Its job id is in sessionStorage and the backend
   // keeps rendering, but only the studio that owns it can put the progress back —

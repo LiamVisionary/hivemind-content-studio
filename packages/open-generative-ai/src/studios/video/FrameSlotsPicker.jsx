@@ -27,6 +27,7 @@ import {
   uploadFileToHivemindStudio,
 } from '../../lib/hivemindStudio.js';
 import { muapi } from '../../lib/muapi.js';
+import { muapiKeyMissing } from '../../lib/modelRunner.js';
 import {
   generateThumbnail,
   getUploadHistory,
@@ -124,7 +125,7 @@ export function FrameSlotsPicker({
 
   const handleFile = (file) => {
     if (!file || disabled) return;
-    if (needsKey() && !localStorage.getItem('muapi_key')) {
+    if (needsKey() && muapiKeyMissing()) {
       pendingFileRef.current = file;
       if (fileInputRef.current) fileInputRef.current.value = '';
       setAuthOpen(true);

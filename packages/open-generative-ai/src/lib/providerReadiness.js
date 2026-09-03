@@ -16,7 +16,7 @@
 // there? is the provider up?) are asked by every studio, and four copies would
 // drift the way the dispatch did.
 import { flattenApiDetail } from './muapiErrors.js';
-import { muapiKeyIsOnServer, setMuapiKeyOnServer, transportFor } from './modelRunner.js';
+import { needsBrowserKey, setMuapiKeyOnServer, transportFor } from './modelRunner.js';
 
 /** Which OAuth connection a provider's credential is, when it is a grant
  *  rather than a key. Mirrors image_router.Route.oauth on the server. */
@@ -119,18 +119,17 @@ export function readinessFor(row, { oauth = null } = {}) {
   if (route.transport === 'muapi') {
     // The key this machine already holds counts. Asking for one that HivemindOS
     // has had all along is the same failure as any other avoidable prompt.
-    if (muapiKeyIsOnServer()) return { state: 'ready', label: '', detail: '', action: null, blocks: false };
-    let has = false;
-    try { has = Boolean(localStorage.getItem('muapi_key')); } catch { has = false; }
-    return has
-      ? { state: 'ready', label: '', detail: '', action: null, blocks: false }
-      : {
+    return needsBrowserKey(row)
+      ? {
         state: 'browser-key',
         label: 'No API key',
-        detail: 'Set MUAPI_API_KEY in your shared Hive environment, or save a key in this browser.',
+        // The dialog the action opens stores it as MUAPI_API_KEY on this machine
+        // — not an env var to go and set, and not a browser-only copy.
+        detail: 'This machine has no MUAPI key yet. Add one and it is kept as MUAPI_API_KEY in the shared store, for every Hive app here.',
         action: { kind: 'muapi-key', label: 'Add key' },
         blocks: true,
-      };
+      }
+      : { state: 'ready', label: '', detail: '', action: null, blocks: false };
   }
 
   const connection = PROVIDER_OAUTH[provider];

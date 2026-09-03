@@ -32,15 +32,20 @@ test('muapiErrorStatus reads the status muapi.js puts in the message', async () 
     assert.equal(muapiErrorStatus(new Error('Generation timed out after polling.')), 0);
 });
 
-test('describeMuapiError: a rejected or missing key points at Settings', async () => {
+test('describeMuapiError: a rejected or missing key names the fix, not a page', async () => {
+    // The toast carries the "Add key" button (studios/lipsync/muapiErrorToast.jsx),
+    // so the sentence must not send anyone to Settings to look for it — and on a
+    // machine that holds the key there is nothing in Settings to find.
     const { describeMuapiError } = await modPromise;
     const rejected = describeMuapiError(new Error('API Request Failed: 401 Unauthorized - {"detail":"Invalid API key"}'));
     assert.equal(rejected.keyRejected, true);
-    assert.match(rejected.message, /MUAPI key rejected — open Settings/);
+    assert.match(rejected.message, /MUAPI key rejected/);
+    assert.doesNotMatch(rejected.message, /Settings/);
     assert.equal(describeMuapiError(new Error('API Request Failed: 403 Forbidden - ')).keyRejected, true);
-    const missing = describeMuapiError(new Error('API Key missing. Please set it in Settings.'));
+    const missing = describeMuapiError(new Error('API Key missing. Add your MUAPI key to continue.'));
     assert.equal(missing.keyRejected, true);
     assert.match(missing.message, /MUAPI key missing/);
+    assert.doesNotMatch(missing.message, /Settings/);
 });
 
 test('describeMuapiError: a 4xx carries what the server said, a 5xx names the status', async () => {

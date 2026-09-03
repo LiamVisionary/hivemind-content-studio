@@ -19,7 +19,7 @@ import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
 import { muapi } from '../lib/muapi.js';
-import { localRow, muapiRow, runVideo, studioRow } from '../lib/modelRunner.js';
+import { localRow, muapiKeyMissing, muapiRow, runVideo, studioRow } from '../lib/modelRunner.js';
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { fitShotTimeline } from '../lib/shotTimeline.js';
 import { isWan2gpModelId } from '../lib/localModels.js';
@@ -897,7 +897,7 @@ export function VideoStudio({
   // batch, then the weave runs once.
   const attachFilesForMember = async (key, files) => {
     if (!files.length) return;
-    if (frameRequiresApiKey() && !localStorage.getItem('muapi_key')) {
+    if (frameRequiresApiKey() && muapiKeyMissing()) {
       s.authRetry = () => { void attachFilesForMember(key, files); };
       s.authOpen = true;
       bump();
@@ -1409,7 +1409,7 @@ export function VideoStudio({
     // upload so declining costs nothing.
     const cost = sourceVideoSwitchCost({ setup: s.setup, target: useHivemind ? preferredHive : null });
     if (cost && !(await confirmSourceVideoSwitch(cost))) return;
-    if (!useHivemind && !localStorage.getItem('muapi_key')) {
+    if (!useHivemind && muapiKeyMissing()) {
       s.authRetry = () => videoFileInputRef.current?.click();
       s.authOpen = true;
       bump();
@@ -2300,8 +2300,8 @@ export function VideoStudio({
 
     const isLocal = isWan2gpLocal || isHivemindLocal;
     if (!isLocal) {
-      const apiKey = localStorage.getItem('muapi_key');
-      if (!apiKey) {
+      // The shared store counts: a machine holding MUAPI_API_KEY is never asked.
+      if (muapiKeyMissing()) {
         s.authRetry = () => generate();
         s.authOpen = true;
         bump();
@@ -2555,7 +2555,13 @@ export function VideoStudio({
         const v2vParams = { model: setup.modelId, video_url: setup.videoUrl, onRequestId, signal: runSignal };
         if (model?.imageField && setup.imageUrl) v2vParams.image_url = setup.imageUrl;
         if (model?.hasPrompt && prompt) v2vParams.prompt = prompt;
-        const res = settled(await muapi.processV2V(v2vParams));
+        // Through the one dispatcher: `method` names the MUAPI call so a V2V
+        // gets the same readiness refusal a T2V already gets.
+        const res = settled(await runVideo({
+          row: muapiRow(setup.modelId),
+          extra: { muapi: { ...v2vParams, method: 'processV2V' } },
+          signal: runSignal,
+        }));
         if (res && res.url) {
           if (capturedRequestId) removePendingJob(capturedRequestId);
           const genId = res.id || capturedRequestId || Date.now().toString();
@@ -2586,7 +2592,11 @@ export function VideoStudio({
         if (setup.quality) i2vParams.quality = setup.quality;
         if (setup.mode) i2vParams.mode = setup.mode;
         if (setup.effectName) i2vParams.name = setup.effectName;
-        const res = settled(await muapi.generateI2V(i2vParams));
+        const res = settled(await runVideo({
+          row: muapiRow(setup.modelId),
+          extra: { muapi: { ...i2vParams, method: 'generateI2V' } },
+          signal: runSignal,
+        }));
         if (res && res.url) {
           if (capturedRequestId) removePendingJob(capturedRequestId);
           const genId = res.id || capturedRequestId || Date.now().toString();
@@ -2832,12 +2842,12 @@ export function VideoStudio({
   // the page was gone are deducted, so a job doesn't win a fresh full budget every
   // time the studio reloads.
   const resumeCloudVideoJob = async (job, { signal = null } = {}) => {
-    const apiKey = localStorage.getItem('muapi_key');
-    if (!apiKey) throw new Error('Cloud generation cannot resume without an API key');
+    if (muapiKeyMissing()) throw new Error('Cloud generation cannot resume without an API key');
     const interval = Number(job.interval) || 2000;
     const spent = Math.floor((Date.now() - (Number(job.submittedAt) || Date.now())) / interval);
     const attemptsLeft = Math.max(1, (Number(job.maxAttempts) || 900) - spent);
-    const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, interval, { signal });
+    // No key argument: the client resolves its own route (proxied or direct).
+    const result = await muapi.pollForResult(job.requestId, '', attemptsLeft, interval, { signal });
     return { id: job.requestId, url: result.outputs?.[0] || result.url || result.output?.url };
   };
 
@@ -2934,7 +2944,7 @@ export function VideoStudio({
       // A cloud job can only be polled with the muapi key. Without one, leave it in
       // the registry untouched for a session that has it, rather than claiming it
       // and discarding it.
-      }).filter((job) => job.kind === 'hivemind-local' || localStorage.getItem('muapi_key'));
+      }).filter((job) => job.kind === 'hivemind-local' || !muapiKeyMissing());
       if (!claimed.length) return;
       const mine = (job) => Number(job?.tabId) === Number(tabIdRef.current)
         && Number.isSafeInteger(Number(tabIdRef.current));
@@ -4061,7 +4071,7 @@ export function VideoStudio({
     if (!files.length) return;
     // Same gate the pickers use, with the same retry continuation: the files
     // are attached once a key is saved.
-    if (frameRequiresApiKey() && !localStorage.getItem('muapi_key')) {
+    if (frameRequiresApiKey() && muapiKeyMissing()) {
       s.authRetry = () => { void handleComposerFiles(files); };
       s.authOpen = true;
       bump();
