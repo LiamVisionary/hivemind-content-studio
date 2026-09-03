@@ -202,6 +202,26 @@ _MINIMAX_MODELS = [
 # time conditioning a pruned base (ours) lacks, which is the whole reason we
 # previously shipped drbaph's AdaLN-stripped conversion as a workaround for
 # ComfyUI's plain LoraLoaderModelOnly. (url, models/ subdir, filename, GB)
+# SeedVR2 restoration. Public on HuggingFace, so the box pulls them directly
+# rather than round-tripping ~9GB through our bucket. Fetched at provisioning
+# because the node downloads a missing model on FIRST USE — and the first chunk
+# of a paid render is the worst possible moment to start an 8.5GB download.
+_SEEDVR2_PUBLIC_FILES = [
+    (
+        "https://huggingface.co/AInVFX/SeedVR2_comfyUI/resolve/main/"
+        "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors",
+        "SEEDVR2",
+        "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors",
+        8.5,
+    ),
+    (
+        "https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/ema_vae_fp16.safetensors",
+        "SEEDVR2",
+        "ema_vae_fp16.safetensors",
+        0.5,
+    ),
+]
+
 _MINIMAX_PUBLIC_FILES = [
     (
         "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/resolve/main/"
@@ -222,6 +242,19 @@ _MINIMAX_PUBLIC_FILES = [
     # deliberate: one rented box now serves both studio pages (the tier's
     # studio_pages carries video AND image), so a box that could not run a
     # still would be a box the studio has to refuse work to.
+    # SAM3.1, for head replacement's SAM3 masking branch. comfy-core's own
+    # SAM3_VideoTrack reads it through CheckpointLoaderSimple, so it lands in
+    # checkpoints/. Public, Meta's SAM License, pulled straight from HuggingFace
+    # rather than through R2. 1.6GB against the ~23GB this tier already carries,
+    # and the manual-mask branch never loads it — but a box that could not track
+    # a subject would be a box the studio has to refuse work to.
+    (
+        "https://huggingface.co/Comfy-Org/sam3.1/resolve/main/"
+        "checkpoints/sam3.1_multiplex_fp16.safetensors",
+        "checkpoints",
+        "sam3.1_multiplex_fp16.safetensors",
+        1.63,
+    ),
     (
         "https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/main/"
         "minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
@@ -254,9 +287,31 @@ _MINIMAX_PUBLIC_FILES = [
 # h3_silu_temb_grid.safetensors, the silu(t_emb) grid the loader needs.
 _H3_TURBO_NODE_COMMIT = "55fee864dd7b2976b1c4ce3c3d5f7968f181409f"
 # H3 support is newer than any vastai/comfy release image; the Spectrum node
-# is contract-tested against this ComfyUI commit (2026-08-03, native MiniMax
-# H3 + packed-latent sampler API). Same pin as provisioning/comfyui-hivemind.sh.
-_H3_COMFY_COMMIT = "e377e263049f9338b4d12a3dd417b36ae62948ff"
+# was contract-tested against 2026-08-03's e377e263 (native MiniMax H3 +
+# packed-latent sampler API). Same pin as provisioning/comfyui-hivemind.sh.
+# Bumped 2026-08-30 to the squash-merge of Comfy-Org/ComfyUI#15808 (kijai,
+# 2026-08-22, one file: comfy/text_encoders/minimax.py). H3's special tokens
+# — <d> 151669, </d> 151670, <|cutoff|> 151671, the lyrics/caption pairs —
+# were declared in tokenizer_config.json but missing from the live vocab, so
+# each one split into junk subtokens. Measured on a rented 5090 (2026-08-30):
+# <d> is one token 151669 with the fix and two ([90707, 29]) without, and </d>
+# one against three — and pre-fix the ">" merges with the "[" of the language
+# tag, so the damage crosses into "[English]" rather than staying in the tag.
+# What that does NOT show: five 4s renders at seed 42 all transcribed VERBATIM
+# (faster-whisper large-v3, similarity 1.000) — plain t2v with and without the
+# fix, audio-reference mode with and without it, and audio-reference with the
+# clip attached but NEVER bound in the prompt, which is the community's
+# reported trigger. The split tokenization did not produce gibberish in any
+# case we could construct, so take this as removing a known-wrong tokenization,
+# NOT as a cure for a failure this stack was measured to have. Untested: long
+# or multi-speaker dialogue, non-English, and noisy/long reference clips.
+# Pinned AT the fix: 112 commits of churn is already a risk against a graph
+# tuned on e377e263, and nothing later buys us anything.
+# This is a FLOOR, not an exact pin — onstart only checks out when it is not
+# already an ancestor of the image's HEAD, so a box whose image shipped a
+# newer ComfyUI silently had the fix while an older one was dragged back to
+# Aug 3. That is why the gibberish came and went from box to box.
+_H3_COMFY_COMMIT = "924743af083c151296cc16f925aeab113b6484e8"
 # The custom nodes were cloned at HEAD until 2026-08-07, when upstream Spectrum
 # dc6e1b3 flipped bootstrap_first_forecast's default to true — every H3 job on a
 # box provisioned after that commit died in validate() against our tuned
@@ -268,8 +323,9 @@ _H3_COMFY_COMMIT = "e377e263049f9338b4d12a3dd417b36ae62948ff"
 # add audio_blend_weight + default offline_smoothing_replay after upstream
 # validated that a single pass at video=0.5/audio=0 "reproduced degraded speech
 # and stuttering" — H3 output is joint video+audio, so that is our failure mode.
-# Its README pins the SAME minimum ComfyUI commit we already run (e377e263), so
-# this needs no ComfyUI bump. Every new input is set explicitly in the graph.
+# Its README's minimum ComfyUI commit is e377e263, which _H3_COMFY_COMMIT is a
+# descendant of, so the 2026-08-30 tokenizer bump does not disturb it. Every
+# new input is set explicitly in the graph.
 _H3_SPECTRUM_COMMIT = "9395bf98fc60a04c5f588de7b2bb33516a0b622f"
 _H3_KJNODES_COMMIT = "35e5956193769d18a13136cdedb73a36a05c73e6"
 # Scene chaining (studio "Continue scene"): MiniMaxH3MotionContext feeds the
@@ -278,6 +334,28 @@ _H3_KJNODES_COMMIT = "35e5956193769d18a13136cdedb73a36a05c73e6"
 # latent picture path. Patches apply on first node execution only, so plain H3
 # jobs on the same box are untouched.
 _H3_MOTION_CONTEXT_COMMIT = "c140ae99b8c38f782ebd8564c267b42aacade6a4"
+
+# Head replacement (studio "Replace head", workflow minimax-h3-inpaint). Two
+# packs, both pinned like everything else here, and both installed as separate
+# ComfyUI custom nodes rather than vendored — we call them, we do not link them.
+#
+# NKD Basic Tools (MIT) carries the node the whole feature turns on: NKDAVLatent
+# encodes the source clip into H3's JOINT audio+video latent and puts the mask on
+# it as a noise_mask, which is what lets only the masked pixels be denoised while
+# the soundtrack is held. Holding the audio is not a saving, it is the mechanism:
+# the model sees the original speech while it paints the face, so the new head
+# lip-syncs without a separate pass. NKDMaskOps comes with it and is what turns a
+# painted region into a latent-grid mask.
+_H3_NKD_BASIC_TOOLS_COMMIT = "290b8557b26a05ef14abdb9e11f96a490777fcd7"
+# MaskVidExperiments (GPL-3.0) plans the moving window around the subject and
+# pastes the result back without a seam. The model samples that WINDOW, not the
+# frame, which is what makes head replacement affordable: a 0.8MP crop of a 1080p
+# clip is a quarter of the rows.
+_H3_MASKVID_COMMIT = "d98cc899c1fac718acf81cde1735bf57281097cf"
+# SeedVR2 video restoration. Pinned because its node inputs are a contract the
+# gateway builds graphs against (packages/media-gateway/video_restore.py), and
+# because the TensorRT node patches one of its internal methods by name.
+_SEEDVR2_COMMIT = "4490bd1f482e026674543386bb2a4d176da245b9"
 
 # Krea2's text encoder node. NOT a ComfyUI core node and not part of INT8-Fast:
 # it is a separate pack, and without it every Krea2 graph the studio compiles is
@@ -471,15 +549,21 @@ TIERS: dict[str, dict[str, Any]] = {
         # The eros checkpoint alone is 27.2GB; below 32GB it spills to system
         # RAM mid-sample instead of running.
         "min_vram_gb": 32,
-        "disk_gb": 160,
+        # +12 over the LTX set for the SeedVR2 restoration weights (~9GB) and
+        # the engine cache a TensorRT build writes beside them.
+        "disk_gb": 172,
         "models": _IMAGE_MODELS + _VIDEO_MODELS,
+        "public_models": _SEEDVR2_PUBLIC_FILES,
         "needs_int8_fast": True,
         "expected": "eros+DMD ~16s per 4s clip @768×512, video+audio · images included",
         "reference_job": "4s clip @768×512, video + audio",
         # 'ltx23-eros' matches no graph content (server-side no-op) but lets
         # the UI's normalized matcher recognize the ltx23-eros-v14-comfy model id.
-        "lane_needles": ["krea2_turbo_convrot", "waianima", "ltx2310eros", "ltx-2.3-22b", "ltx23-eros"],
-        "studio_pages": ["image", "video"],
+        # 'seedvr2' matches the restore graph's own model filenames
+        # (seedvr2_ema_*.safetensors), which is how a restoration routes to a
+        # box rented for video rather than falling back to the local lane.
+        "lane_needles": ["krea2_turbo_convrot", "waianima", "ltx2310eros", "ltx-2.3-22b", "ltx23-eros", "seedvr2"],
+        "studio_pages": ["image", "video", "restore"],
         "lora_base_models": ["Krea 2", "Anima", "LTXV"],
     },
     "minimax": {
@@ -519,6 +603,9 @@ TIERS: dict[str, dict[str, Any]] = {
         "expected": "5s 960×544 video+audio ~40s warm on a 5090 (Spectrum, 15 steps)",
         "reference_job": "5s clip @960×544, video + audio",
         "public_models": _MINIMAX_PUBLIC_FILES,
+        # No "seedvr2" and no "restore": this tier does not carry the restorer.
+        # See tier_installs_seedvr2_trt for why restoration lives on the video
+        # tier — briefly, this onstart has no room for a second model stack.
         "lane_needles": ["minimax_h3"],
         "studio_pages": ["video", "image"],
         # Civitai's base-model category for H3 add-on LoRAs (style/character/
@@ -946,6 +1033,113 @@ def _privacy_node_install_lines() -> list[str]:
     ]
 
 
+SEEDVR2_TRT_NODE_SOURCE = (
+    Path(__file__).resolve().parents[2]
+    / "packages/comfyui-custom-nodes/hivemind-seedvr2-trt"
+)
+SEEDVR2_TRT_NODE_FILES = ("__init__.py", "trt_vae.py", "rank_patch.py", "trt_engine.py")
+
+
+def _seedvr2_trt_node_archive() -> bytes:
+    """The TensorRT node pack as one tar.gz, for a box to fetch at boot.
+
+    NOT inlined in the onstart the way hivemind_privacy is. Vast caps the whole
+    onstart at VAST_ONSTART_LIMIT and this pack is ~13.5KB even gzipped and
+    base64'd — it would eat most of the budget on its own and push the video
+    tiers straight past the cap, which Vast rejects with a generic "Invalid
+    args" 400. Published like the weights manifest instead: the onstart carries
+    one presigned URL, and the same daily sweep deletes it.
+    """
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    # mtime=0 so the same source always produces the same bytes — an archive
+    # that differs on every rent is a diff nobody can read.
+    with tarfile.open(fileobj=buffer, mode="w:gz", compresslevel=9) as archive:
+        for name in SEEDVR2_TRT_NODE_FILES:
+            body = SEEDVR2_TRT_NODE_SOURCE.joinpath(name).read_bytes()
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            info.mtime = 0
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(body))
+    return buffer.getvalue()
+
+
+# Where the node archive lands among the weights, so it rides the manifest.
+SEEDVR2_TRT_ARCHIVE_DEST = "Other/hivemind-seedvr2-trt.tar.gz"
+
+
+def tier_installs_seedvr2_trt(tier: str) -> bool:
+    """Which tiers carry the restorer and its TensorRT accelerator.
+
+    One question, not two: a tier either serves the Restore studio — the node
+    pack, the ~9GB of weights and the accelerator — or it does not. Splitting
+    them is how a box came to advertise restoration with no restorer on it.
+
+    Which is why only the VIDEO tier does. Not a capability limit: the minimax
+    tier's Blackwell 32GB+ boxes would be the best restore hardware we rent. It
+    is an onstart budget. Vast caps provisioning at VAST_ONSTART_LIMIT and,
+    measured 2026-08-31, the minimax onstart had 2089 characters to spare
+    against the 2000 the size guard pins — the restorer's clone and pin alone
+    are ~350 of them. A second model stack does not fit, and quietly spending
+    the last of a shared budget is not a trade worth making silently.
+
+    To change it: slim the minimax onstart — its largest single item is the
+    inlined privacy node (~4.1KB packed), which could ride the weights manifest
+    the way the TensorRT archive now does — then add "restore" to that tier's
+    studio_pages and "seedvr2" to its lane_needles. The test suite pins all
+    three together, so they cannot drift apart again.
+    """
+    return "restore" in (TIERS[tier].get("studio_pages") or [])
+
+
+def _seedvr2_trt_install_lines(tier: str) -> list[str]:
+    """Unpack the TensorRT VAE node and install its runtime. Nothing is fatal.
+
+    The ARCHIVE arrives through the weights manifest rather than through a URL
+    of its own — measured 2026-08-31, a second presigned URL costs ~965 chars of
+    onstart and the minimax tier had 2089 to spare, which would have taken it
+    under the headroom the size guard pins. The manifest already carries one URL
+    for everything a box downloads; this is one more row in it.
+
+    Runs BEFORE ComfyUI launches, because custom nodes are scanned once at
+    startup, and AFTER dlwait, because the archive is one of the files dlwait
+    waits for.
+
+    torch-tensorrt is best effort. A box that restores at 1.0x is a working box;
+    a box that refuses to boot because an optional accelerator would not install
+    is a wasted rent.
+    """
+    if not tier_installs_seedvr2_trt(tier):
+        return []
+    target = "/workspace/ComfyUI/custom_nodes/hivemind-seedvr2-trt"
+    return [
+        # `|| rm -rf` rather than an on-box syntax check: a half-extracted node
+        # breaks ComfyUI's whole custom-node scan, and tar already fails on a
+        # damaged archive. That the archive's members PARSE is proved in the
+        # repo, before one is ever published (test_gpu_rentals_api.py).
+        f'mkdir -p {target} && tar -xzf "$M/{SEEDVR2_TRT_ARCHIVE_DEST}" -C {target} || rm -rf {target}',
+        # tensorrt-rtx, NOT torch-tensorrt. The node builds engines by handing
+        # an ONNX graph to TensorRT's own parser; it never uses PyTorch's
+        # compiler, which is what failed three different ways on rented 5090s
+        # (see the history in the node's trt_vae.py).
+        #
+        # Installed with a torch constraint anyway. Measured 2026-08-31: a bare
+        # `pip install torch-tensorrt` upgraded torch 2.10.0+cu130 -> 2.13.0,
+        # stranded torchvision, and ComfyUI died on `operator torchvision::nms
+        # does not exist` — the box then hung forever in the launch wait below,
+        # billing. `|| true` did not help and could not: pip SUCCEEDED; the
+        # environment broke. Any pip install into this shared venv can move
+        # torch, so every one of them is constrained.
+        'V=$(/venv/main/bin/python -c "import torch;print(torch.__version__)")',
+        'printf "torch==%s\\n" "$V" > /tmp/torch-pin.txt',
+        '/venv/main/bin/pip install -q -c /tmp/torch-pin.txt tensorrt-rtx onnx || '
+        '/venv/main/bin/pip install -q -c /tmp/torch-pin.txt tensorrt onnx || true',
+    ]
+
+
 RENTAL_SSH_PUBKEY = RENTAL_SSH_KEY.with_suffix(".pub")
 
 
@@ -1184,6 +1378,20 @@ def _rental_manifest(tier: str) -> tuple[str, int]:
         rows.append((_presign_r2_get(object_key), f"{subdir}/{object_key.rsplit('/', 1)[-1]}"))
     for url, subdir, filename, _size_gb in spec.get("public_models") or []:
         rows.append((url, f"{subdir}/{filename}"))
+    if tier_installs_seedvr2_trt(tier):
+        # Not a weight, but a file the box must have before ComfyUI starts, and
+        # the manifest is the one channel that costs the onstart nothing per
+        # file. Counted in the beacon total like everything else it downloads,
+        # because it IS something it downloads.
+        rows.append((
+            _publish_rental_object(
+                _seedvr2_trt_node_archive(),
+                suffix=".tar.gz",
+                content_type="application/gzip",
+                label="TensorRT node pack",
+            ),
+            SEEDVR2_TRT_ARCHIVE_DEST,
+        ))
     for url, dest in rows:
         if "\t" in url or "\t" in dest or "\n" in url or "\n" in dest:
             raise GpuRentalError(f"weight entry is not manifest-safe: {dest}", status_code=500)
@@ -1224,26 +1432,30 @@ def _prune_rental_manifests(now: float | None = None) -> list[str]:
     return removed
 
 
-def _publish_rental_manifest(text: str) -> str:
-    """PUT the manifest to the private bucket; return a presigned GET for it.
+def _publish_rental_object(data: bytes, *, suffix: str, content_type: str, label: str) -> str:
+    """PUT one boot-time payload to the private bucket; return a presigned GET.
 
-    Raises GpuRentalError when the bucket refuses — a box that cannot learn
-    its file list is a box that bills for nothing, so renting stops here.
+    Raises GpuRentalError when the bucket refuses — a box that cannot fetch what
+    it was rented to run is a box that bills for nothing, so renting stops here.
+
+    Tracked in the same manifest state as everything else published for a boot,
+    so the same sweep deletes it: a payload lives as long as the presigns inside
+    it and is litter afterwards.
     """
     _prune_rental_manifests()
-    key = f"{RENTAL_MANIFEST_PREFIX}{datetime.now(timezone.utc):%Y%m%d}/{uuid.uuid4().hex}.tsv"
+    key = f"{RENTAL_MANIFEST_PREFIX}{datetime.now(timezone.utc):%Y%m%d}/{uuid.uuid4().hex}{suffix}"
     try:
         response = requests.put(
             _presign_r2("PUT", key),
-            data=text.encode("utf-8"),
-            headers={"Content-Type": "text/tab-separated-values"},
+            data=data,
+            headers={"Content-Type": content_type},
             timeout=_REQUEST_TIMEOUT,
         )
     except requests.RequestException as exc:
-        raise GpuRentalError(f"could not publish the weights manifest to R2: {exc}", status_code=503) from exc
+        raise GpuRentalError(f"could not publish the {label} to R2: {exc}", status_code=503) from exc
     if response.status_code >= 400:
         raise GpuRentalError(
-            f"could not publish the weights manifest to R2: HTTP {response.status_code} {response.text[:120]}",
+            f"could not publish the {label} to R2: HTTP {response.status_code} {response.text[:120]}",
             status_code=503,
         )
     state = _read_manifest_state()
@@ -1251,6 +1463,16 @@ def _publish_rental_manifest(text: str) -> str:
     MEDIA_STATE_ROOT.mkdir(parents=True, exist_ok=True)
     _manifest_state_path().write_text(json.dumps(state, indent=1))
     return _presign_r2_get(key)
+
+
+def _publish_rental_manifest(text: str) -> str:
+    """PUT the manifest to the private bucket; return a presigned GET for it."""
+    return _publish_rental_object(
+        text.encode("utf-8"),
+        suffix=".tsv",
+        content_type="text/tab-separated-values",
+        label="weights manifest",
+    )
 
 
 def _onstart_script(tier: str) -> str:
@@ -1365,25 +1587,26 @@ def _onstart_script(tier: str) -> str:
             "pin() { git -C \"$1\" fetch -q --depth 1 origin \"$2\" && "
             "git -C \"$1\" checkout -q \"$2\" || "
             "{ beacon error 0 \"custom node pin $2 unavailable\"; exit 1; }; }",
+            "CN=/workspace/ComfyUI/custom_nodes",
             "git clone -q --depth 1 https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3 "
-            "/workspace/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3 || true",
-            "pin /workspace/ComfyUI/custom_nodes/ComfyUI-Spectrum-MiniMax-H3 "
+            "$CN/ComfyUI-Spectrum-MiniMax-H3 || true",
+            "pin $CN/ComfyUI-Spectrum-MiniMax-H3 "
             f"{_H3_SPECTRUM_COMMIT}",
             # The registered minimax-h3 graph patches SageAttention via KJNodes
             # (~1.8x measured on H3 sampling).
             "git clone -q --depth 1 https://github.com/kijai/ComfyUI-KJNodes "
-            "/workspace/ComfyUI/custom_nodes/comfyui-kjnodes || true",
-            f"pin /workspace/ComfyUI/custom_nodes/comfyui-kjnodes {_H3_KJNODES_COMMIT}",
+            "$CN/comfyui-kjnodes || true",
+            f"pin $CN/comfyui-kjnodes {_H3_KJNODES_COMMIT}",
             # The turbo LoRA cannot be applied by ComfyUI's plain loader: this
             # node re-injects the time conditioning our PRUNED base lacks, and
             # ships the silu(t_emb) grid it needs.
             "git clone -q --depth 1 https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo "
-            "/workspace/ComfyUI/custom_nodes/ComfyUI-MiniMax-H3-Turbo || true",
-            f"pin /workspace/ComfyUI/custom_nodes/ComfyUI-MiniMax-H3-Turbo {_H3_TURBO_NODE_COMMIT}",
+            "$CN/ComfyUI-MiniMax-H3-Turbo || true",
+            f"pin $CN/ComfyUI-MiniMax-H3-Turbo {_H3_TURBO_NODE_COMMIT}",
             # Scene chaining: the studio's chained graphs graft this node pack in.
             "git clone -q --depth 1 https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context "
-            "/workspace/ComfyUI/custom_nodes/ComfyUI-H3-Motion-Context || true",
-            f"pin /workspace/ComfyUI/custom_nodes/ComfyUI-H3-Motion-Context {_H3_MOTION_CONTEXT_COMMIT}",
+            "$CN/ComfyUI-H3-Motion-Context || true",
+            f"pin $CN/ComfyUI-H3-Motion-Context {_H3_MOTION_CONTEXT_COMMIT}",
             # Sol-Attn, which every H3 graph carries at tau 1.3 BY DEFAULT since
             # 2026-08-11 — so a box without it rejects every H3 job outright
             # ("Node 'Sol-Attn (tau 0 = off)' not found", HTTP 400 from the
@@ -1391,18 +1614,34 @@ def _onstart_script(tier: str) -> str:
             # It was pinned into the standalone provisioning script and never
             # into this onstart, which is the one API-rented boxes actually run.
             "git clone -q --depth 1 https://github.com/kijai/ComfyUI-SolAttn_triton "
-            "/workspace/ComfyUI/custom_nodes/ComfyUI-SolAttn_triton || true",
-            f"pin /workspace/ComfyUI/custom_nodes/ComfyUI-SolAttn_triton {_H3_SOLATTN_COMMIT}",
+            "$CN/ComfyUI-SolAttn_triton || true",
+            f"pin $CN/ComfyUI-SolAttn_triton {_H3_SOLATTN_COMMIT}",
             # Fast high-res (two-pass latent upscale). Off by default in the
             # graph, so a box without it would still serve every ordinary job —
             # but the node has no dependencies beyond torch/einops, and a lane
             # that cannot honour the toggle is worse than 200KB of source.
             "git clone -q --depth 1 https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler "
-            "/workspace/ComfyUI/custom_nodes/Comfyui_Minimax_h3_latent_Upscaler || true",
-            "pin /workspace/ComfyUI/custom_nodes/Comfyui_Minimax_h3_latent_Upscaler "
+            "$CN/Comfyui_Minimax_h3_latent_Upscaler || true",
+            "pin $CN/Comfyui_Minimax_h3_latent_Upscaler "
             f"{_H3_LATENT_UPSCALER_COMMIT}",
-            "[ -f /workspace/ComfyUI/custom_nodes/comfyui-kjnodes/requirements.txt ] && "
-            "/venv/main/bin/pip install -q -r /workspace/ComfyUI/custom_nodes/comfyui-kjnodes/requirements.txt",
+            # Head replacement. Both are small pure-python packs; a box without
+            # them serves every other H3 job unchanged but refuses the inpaint
+            # graph outright ("Node 'NKDAVLatent' not found", HTTP 400 from the
+            # prompt endpoint), which is the failure mode the Sol-Attn pin was
+            # added here to stop repeating.
+            #
+            # np <url> <dir> <sha> — clone, pin, install its requirements if it
+            # has any. Written as a function because Vast caps this whole script
+            # at VAST_ONSTART_LIMIT and spelling the custom_nodes path out four
+            # more times cost more of that budget than the helper does.
+            'np() { git clone -q --depth 1 "$1" $CN/"$2" || true; pin $CN/"$2" "$3"; '
+            '[ -f $CN/"$2"/requirements.txt ] && '
+            '/venv/main/bin/pip install -q -r $CN/"$2"/requirements.txt || true; }',
+            "np https://github.com/Nekodificador/ComfyUI-NKD-Basic-Tools "
+            f"ComfyUI-NKD-Basic-Tools {_H3_NKD_BASIC_TOOLS_COMMIT}",
+            f"np https://github.com/drozbay/MaskVidExperiments MaskVidExperiments {_H3_MASKVID_COMMIT}",
+            "[ -f $CN/comfyui-kjnodes/requirements.txt ] && "
+            "/venv/main/bin/pip install -q -r $CN/comfyui-kjnodes/requirements.txt",
             "/venv/main/bin/pip install -q sageattention",
             # H3 Studio, stripped. The upstream pack registers SIXTEEN routes on
             # ComfyUI's PromptServer, which has no authentication — among them
@@ -1417,8 +1656,8 @@ def _onstart_script(tier: str) -> str:
             # patch prompt/reference/PNG integrity, not the UI.
             "git clone -q --depth 1 --branch " + _H3_STUDIO_TAG + " "
             "https://github.com/thaakeno/ComfyUI-MiniMax-H3-Studio "
-            "/workspace/ComfyUI/custom_nodes/ComfyUI-MiniMax-H3-Studio || true",
-            "H3S=/workspace/ComfyUI/custom_nodes/ComfyUI-MiniMax-H3-Studio",
+            "$CN/ComfyUI-MiniMax-H3-Studio || true",
+            "H3S=$CN/ComfyUI-MiniMax-H3-Studio",
             "sed -i -E '/^register_[a-z_]*routes\\(\\)$/d' $H3S/h3studio/extension.py",
             "sed -i -E '/register_fast_history_restore_route/d' $H3S/__init__.py",
             "sed -i -E '/^WEB_DIRECTORY/d' $H3S/__init__.py",
@@ -1432,6 +1671,16 @@ def _onstart_script(tier: str) -> str:
             "{ beacon error 0 \"H3 Studio route strip failed\"; exit 1; } || true",
             "[ -f $H3S/requirements.txt ] && "
             "/venv/main/bin/pip install -q -r $H3S/requirements.txt || true",
+        ]
+    if tier_installs_seedvr2_trt(tier):
+        # The restorer itself. Pinned: its graph inputs are a contract the
+        # gateway builds against (packages/media-gateway/video_restore.py), and
+        # its VAE decode is what the TensorRT node patches.
+        svr = "/workspace/ComfyUI/custom_nodes/seedvr2_videoupscaler"
+        lines += [
+            f"git clone -q --depth 1 https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler {svr} || true",
+            f"git -C {svr} checkout -q {_SEEDVR2_COMMIT} || true",
+            f"[ -f {svr}/requirements.txt ] && /venv/main/bin/pip install -q -r {svr}/requirements.txt || true",
         ]
     lines.append('beacon downloading 0 "Fetching the weights manifest"')
     # Set BEFORE the fetchers fork: a background job inherits the variables
@@ -1455,6 +1704,9 @@ def _onstart_script(tier: str) -> str:
         # exits the box through the beacon with the reason (see the library).
         'dlwait "$DL_DEADLINE" "${FILES[@]}"',
         "wait",
+        # After the downloads (the archive is one of them), before the launch
+        # (custom nodes are scanned once, at startup).
+        *_seedvr2_trt_install_lines(tier),
         f'beacon starting-comfy {total} "Launching ComfyUI"',
         ". /venv/main/bin/activate",
         "cd /workspace/ComfyUI",

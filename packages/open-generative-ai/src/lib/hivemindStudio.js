@@ -131,6 +131,21 @@ export function referenceWorkflowForHivemindModel(id) {
         && String(entry.workflowFamily || '').toLowerCase() === family) || null;
 }
 
+// The head-replacement sibling for a model: the workflow in the same registry
+// family that rewrites an existing clip through a mask (minimax-h3-inpaint for
+// the H3 tiers). Null when the family has no inpaint lane, which is what keeps
+// the clip thumbnail a plain preview there instead of a door to a dialog whose
+// Apply nothing would honour.
+export function inpaintWorkflowForHivemindModel(id) {
+    const model = getHivemindVideoModelById(id);
+    if (!model) return null;
+    if (model.supportsHeadReplacement) return model;
+    const family = String(model.workflowFamily || '').toLowerCase();
+    if (!family) return null;
+    return hiveVideoModels.find((entry) => entry.supportsHeadReplacement
+        && String(entry.workflowFamily || '').toLowerCase() === family) || null;
+}
+
 export function mapHivemindWorkflowModels(catalog) {
     const provider = workflowProvider(catalog);
     if (!provider?.models?.length) return [];
@@ -148,6 +163,12 @@ export function mapHivemindWorkflowModels(catalog) {
                 // optional last_frame, so a workflow declaring end_image_* can
                 // end on a supplied frame (FL2VA), or start from one (L2VA).
                 supportsEndFrame: accepts.includes('end_image_base64') || accepts.includes('end_image_path'),
+                // A start-image (frame zero) input. The timeline's Auto-continue
+                // reads this on families without motion context: the next clip
+                // opens on the previous clip's LAST frame, grabbed client-side,
+                // so each segment stays its own file (the LTX extend graph
+                // appends to the same file, which a segment strip cannot hold).
+                supportsStartFrame: accepts.includes('image_base64') || accepts.includes('image_path'),
                 // Scene chaining (MiniMax H3 Motion Context): a finished clip
                 // can seed the next shot's opening frames + room tone. Distinct
                 // from supportsVideoInput on purpose — video_* means the LTX
@@ -157,6 +178,12 @@ export function mapHivemindWorkflowModels(catalog) {
                 // (up to 9, order-preserving) instead of a start frame. Distinct
                 // from ingredient_images, which LTX stitches into one sheet.
                 supportsReferenceImages: accepts.includes('reference_images'),
+                // Head replacement: the workflow rewrites an EXISTING clip
+                // through a mask instead of generating one. source_video_* is
+                // deliberately its own field family — video_* means the LTX
+                // extend/head-swap lane, and reference_videos are conditioning.
+                supportsHeadReplacement: accepts.includes('source_video_base64')
+                    || accepts.includes('source_video_path'),
                 // Spectrum forecasting is a per-workflow capability: the registry
                 // lists it in `accepts` only for graphs that carry the node, so
                 // the toggle appears exactly where it does something.
@@ -552,6 +579,16 @@ export async function generateHivemindVideo(params) {
     const motionContextSource = params.motionContext || params.motion_context_url;
     const motionContextBase64 = params.motion_context_base64
         || await mediaSourceToDataUrl(motionContextSource, 'video');
+    // Head replacement: the clip being REWRITTEN, plus the painted region that
+    // says which pixels may change. The clip is normally a sealed reference
+    // already attached in the references panel, so it decrypts in-browser and
+    // re-sends inline like every other reference — the server holds no key to
+    // stage a path. The mask never was sealed: the canvas in the inpaint dialog
+    // just drew it, so it arrives as a data URL and goes up as one.
+    const inpaintSourceBase64 = params.source_video_base64
+        || await mediaSourceToDataUrl(params.inpaintSource, 'video');
+    const inpaintMaskBase64 = params.mask_image_base64
+        || await mediaSourceToDataUrl(params.inpaintMask, 'image');
     const ingredientImages = await ingredientImagesToRequest(params.ingredientImages);
     // MiniMax H3 Reference mode: discrete pictures, order-preserving (<Picture N>
     // is the Nth entry). Sealed refs decrypt in-browser and re-send inline, same
@@ -641,6 +678,17 @@ export async function generateHivemindVideo(params) {
         ...(videoBase64 ? { video_base64: videoBase64 } : {}),
         ...(imageBase64 ? { image_base64: imageBase64 } : {}),
         ...(motionContextBase64 ? { motion_context_base64: motionContextBase64 } : {}),
+        ...(inpaintSourceBase64 ? { source_video_base64: inpaintSourceBase64 } : {}),
+        ...(inpaintMaskBase64 ? { mask_image_base64: inpaintMaskBase64 } : {}),
+        // A tracked mask CLIP, when one was produced. Already base64 — it never
+        // was a sealed reference, it came back from the masking service.
+        ...(params.inpaintMaskVideo ? { mask_video_base64: String(params.inpaintMaskVideo) } : {}),
+        ...(params.maskSource === 'manual' || params.maskSource === 'sam3'
+            ? { mask_source: params.maskSource }
+            : {}),
+        // Only the dials the dialog actually changed. An unset dial is left out
+        // so the workflow's own default stays the one place it is written down.
+        ...(params.inpaint && Object.keys(params.inpaint).length ? { inpaint: params.inpaint } : {}),
         ...(params.video_mode ? { video_mode: params.video_mode } : {}),
         ...(middleBase64 ? { middle_image_base64: middleBase64 } : {}),
         ...(endBase64 ? { end_image_base64: endBase64 } : {}),

@@ -49,7 +49,8 @@ MODEL_LIST = {
         {"id": "hivemindos/swarm-sovereign-scout", "display_name": "Swarm Sovereign Scout",
          "metadata": {"group": "HivemindOS", "badge": "Free", "tier": "free", "subtitle": "Free daily allowance"}},
         {"id": "hivemindos/custom:openai/gpt-5.6-luna", "display_name": "OpenAI: GPT-5.6 Luna",
-         "metadata": {"group": "Gateway", "badge": "Wallet", "tier": "paid", "subtitle": "$0.52 in · $3.12 out /1M"}},
+         "metadata": {"group": "Gateway", "badge": "Wallet", "tier": "paid", "subtitle": "$0.52 in · $3.12 out /1M",
+                      "promptCreditsPerMTok": 260, "completionCreditsPerMTok": 1560}},
     ],
 }
 CREDITS = {"ok": True, "configured": True, "balanceCredits": 1200, "balanceLabel": "1,200 credits"}
@@ -112,6 +113,16 @@ def test_the_cloud_producer_works_with_no_hivemindos_app_installed(no_app) -> No
     # Priced exactly as the app prints it: the same model must not appear to
     # cost two different things in two of HivemindOS's own products.
     assert luna["subtitle"] == "$0.52 in · $3.12 out /1M"
+    # And priced in CREDITS per million tokens, numerically, at the app's own
+    # 500 credits per retail dollar — so the picker can say what one draft
+    # costs ("≈ 5 credits") instead of handing the owner a per-token rate.
+    assert luna["promptCreditsPerMTok"] == 260
+    assert luna["completionCreditsPerMTok"] == 1560
+    # The free model rides the allowance, not credits — no rate, but its answer
+    # cap is on the row, because eight concepts do not fit in it.
+    free = next(model for model in models if model["id"] == hivemindos_models.FREE_MODEL_ID)
+    assert free["promptCreditsPerMTok"] is None
+    assert free["maxOutputTokens"] == hivemindos_models.FREE_MODEL_MAX_TOKENS
     # The house tiers are NOT invented here: their GPU-first routing lives in the
     # app, and offering them without it would promise something this cannot do.
     assert "hivemindos/auto" not in ids
@@ -276,6 +287,18 @@ def test_without_the_app_a_paid_model_spends_the_owners_hivemindos_account(no_ap
     # The gateway is asked for ITS id, not ours.
     assert call["body"]["model"] == "openai/gpt-5.6-luna"
 
+    # A credit-backed completion without an idempotency key is refused by the
+    # gateway as "This app version cannot safely retry a paid request" — the
+    # sentence Liam hit drafting 8 directions. Each press is its own key (the
+    # gateway caps them at 200 chars); a repeated key would replay a receipt.
+    engine.chat(model_id=hivemindos_models.DEFAULT_MODEL_ID, messages=[{"role": "user", "content": "again"}])
+    keys = [
+        next(v for k, v in c["headers"].items() if k.lower() == "idempotency-key")
+        for c in seen
+    ]
+    assert len(keys) == 2 and keys[0] != keys[1]
+    assert all(k.startswith("content-studio-chat-") and len(k) <= 200 for k in keys)
+
 
 def test_the_account_key_is_encrypted_on_disk_and_never_stored_in_the_clear(no_app) -> None:
     key = "hmos_credit_" + "a" * 30
@@ -352,6 +375,13 @@ def test_the_catalog_normalizes_cloud_rows_into_picker_rows(linked) -> None:
     assert luna["name"] == "OpenAI: GPT-5.6 Luna"
     assert luna["group"] == "Gateway"
     assert luna["tier"] == "paid"
+    # The app's own credit rates ride through untouched — its number is the
+    # number this picker shows.
+    assert luna["promptCreditsPerMTok"] == 260
+    assert luna["completionCreditsPerMTok"] == 1560
+    assert models[1]["tier"] == "free"
+    assert models[1]["maxOutputTokens"] == hivemindos_models.FREE_MODEL_MAX_TOKENS
+    assert models[0]["promptCreditsPerMTok"] is None
     # Every row says which source it came from, because that is what decides the
     # engine, the bill and the privacy sentence beside it.
     assert {model["source"] for model in models} == {"hivemindos"}
@@ -740,3 +770,27 @@ def test_only_the_link_callback_was_added_to_the_sign_in_gate(tmp_path, monkeypa
         "/api/accounts/webauthn/authenticate",
         "/api/hivemindos/models/link-callback",
     }
+
+
+def test_an_app_run_from_source_is_found_on_the_dev_port(monkeypatch) -> None:
+    """The dev build serves on 5021 (tauri.conf.json devUrl), the packaged app on
+    5020. Probing 5020 alone reported "direct" with the app open in front of the
+    owner — while the OAuth helper, which tries both, reached it fine."""
+    monkeypatch.delenv("HIVEMINDOS_URL", raising=False)
+    monkeypatch.setattr(hivemindos_models, "_dashboard_token", lambda: "device-token")
+    monkeypatch.setattr(hivemindos_models, "_app_probe", (0.0, False, ""))
+    assert hivemindos_models.candidate_urls() == ("http://127.0.0.1:5020", "http://127.0.0.1:5021")
+
+    dev_only = lambda host, port: port == 5021  # noqa: E731
+    assert hivemindos_models.app_is_running(connector=dev_only) is True
+    # An explicit connector is a test's business and never cached; the real
+    # probe remembers the address that answered so every app call goes there.
+    hivemindos_models._app_probe = (hivemindos_models.time.monotonic(), True, "http://127.0.0.1:5021")
+    assert hivemindos_models.base_url() == "http://127.0.0.1:5021"
+    assert hivemindos_models.resolve_route(connector=lambda *_: False) == hivemindos_models.ROUTE_DIRECT
+
+    # A configured address is the only one tried — never a guess beside it.
+    monkeypatch.setenv("HIVEMINDOS_URL", "http://127.0.0.1:5999")
+    assert hivemindos_models.candidate_urls() == ("http://127.0.0.1:5999",)
+    hivemindos_models._app_probe = (0.0, False, "")
+    assert hivemindos_models.base_url() == "http://127.0.0.1:5999"

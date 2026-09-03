@@ -67,8 +67,15 @@ test('video workflow discovery recovers after an owner-session startup race', as
             compatibleBaseModels: ['LTXV'],
             supportsIngredientImages: true,
             supportsEndFrame: false,
+            // A start-image input (frame zero) — what the timeline's
+            // Auto-continue seeds with the previous clip's last frame on
+            // families without motion context.
+            supportsStartFrame: true,
             supportsMotionContext: false,
             supportsReferenceImages: false,
+            // Head replacement rewrites an existing clip through a mask; an
+            // LTX ingredients workflow takes no source_video_*, so false.
+            supportsHeadReplacement: false,
             // Every accepts-driven capability is derived HERE and read verbatim
             // downstream; the studio must not re-test `accepts` for itself.
             supportsSpectrum: false,

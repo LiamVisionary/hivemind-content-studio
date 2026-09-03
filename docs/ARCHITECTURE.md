@@ -59,7 +59,7 @@ Manifest schema v2 assigns every artifact a stable id, SHA-256, byte size, MIME 
 | `auto_clipper` | long-form ingestion, clipping, clip-specific rights data, monetization matches | global publisher implementation |
 | `skills/shared` | Shared Brain agent playbooks and provider operating knowledge | executable business logic |
 | `skills/vendor/clueso-ai` | pinned upstream Clueso workflows, audit provenance, and namespaced policy adapters | provider selection, approvals, credentials, or publishing authority |
-| `packages/media-gateway` | local media gateway, ComfyUI proxy, model manager, Media Studio MCP, native-sidecar routing | canonical content runs, approvals, publishing, or metrics |
+| `packages/media-gateway` | local media gateway, ComfyUI proxy, model manager, Media Studio MCP, native-sidecar routing, SeedVR2 restoration projects | canonical content runs, approvals, publishing, or metrics |
 | `packages/open-generative-ai` | embedded Explore UI, model catalog, local inference, desktop IPC bridge | canonical run state, approvals, or publishing |
 | `packages/comfyui-mobile` | embedded Canvas workflow editor, queue, output browser, and model manager | canonical run state or direct publishing |
 | `engines/flux-2-swift-mlx` and `engines/z-image-swift` | native Apple Silicon generation engines | browser shell, orchestration, approval, or distribution |
@@ -67,14 +67,49 @@ Manifest schema v2 assigns every artifact a stable id, SHA-256, byte size, MIME 
 
 ## Unified all-in-one Studio
 
-The browser exposes one shell with Create, Edit, Animate, Workflow, Explore,
-Canvas, Models, Runs, History, Telemetry, and Providers. Creation modes share
+The browser exposes one shell with Create, Edit, Animate, Restore, Workflow,
+Explore, Canvas, Models, Runs, History, Telemetry, and Providers. Creation modes share
 the composer, model router, reference-image intake, durable run, artifact
 library, prompt history, approval gates, and telemetry. Explore and Canvas are
 full-height embedded package surfaces; they do not own a second canonical run
 store. The desktop shell forwards only the allowlisted OpenGen local-inference
 IPC methods to the Explore frame. Browser mode reaches the same local engine
 through the loopback OpenGen bridge without exposing the gateway token.
+
+### Restoration is a project, not a generation
+
+The Restore studio (SeedVR2 video restoration and upscaling) is the one surface
+whose unit of work is longer than a request. A render is a sequence of chunks,
+each a separate ComfyUI submit, and the chunk loop lives in the media gateway
+rather than the browser: every finished chunk is written to
+`<gateway state>/restore/<id>/` and recorded in its manifest before the next one
+starts, so a stop, a crash or a closed tab costs the chunk in flight and nothing
+else. The studio is a view onto that project — it polls, stops and resumes.
+
+There are THREE places a render can run, and what separates them is one
+question: who may read a finished chunk. On a LOCAL lane the gateway can read
+the restored frames, so it assembles and finishes them itself and seals only the
+master. On a RENTED lane every output is sealed to the owner's vault as it is
+harvested and the gateway holds no readable copy, so each chunk is trimmed to
+its body inside the graph, and the join happens in the browser (the existing
+`clipJoiner` packet-copy concat) before the joined clip comes back for its
+finishing pass. That is also why a rented render hard-cuts its chunk seams while
+a local one can cross-dissolve them. On the HOSTED lane a serverless GPU returns
+the chunk as ordinary bytes, so from the gateway's side it behaves exactly like
+a local one — dissolve, assembly and re-finish all unchanged.
+
+The hosted lane is the studio's only pay-per-use rail, and the two consequences
+worth knowing here are structural. Its container builds its graph from
+`packages/media-gateway/video_restore.py` itself — copied into the image, not
+reimplemented — so the paid rail cannot drift into different pixels than the
+free one. And the owner's credit token, which only the control API can read, is
+attached to the start request and held in the gateway's memory for that render
+alone: it is removed from `options` before the project manifest is written,
+because `options` goes to disk verbatim.
+
+Finishing — sharpening, flat-detail softening, grain, reframe — is decided at
+assembly time from the saved chunks, so changing it costs one ffmpeg pass rather
+than another hour of diffusion. See `docs/RESTORE_STUDIO.md`.
 
 ### Faceless visuals come from the same routes as the studios
 

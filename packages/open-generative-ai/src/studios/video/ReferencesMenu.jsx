@@ -22,6 +22,7 @@
 //     onChange={{ images, audios, videos }}           // one setter per kind
 //     persona={{ id, name } | null}                   // the loaded Hive Persona ID
 //     onPersonaChange={(next|null) => void}
+//     onOpenClip={(index) => void}                  // head replacement, from a clip's thumbnail
 //     uploadFn={async (file) => url | { url }}
 //     requireApiKey={() => boolean}
 //   />
@@ -142,7 +143,7 @@ function RowSwitch({ on, disabled = false, title, onClick, children }) {
 
 function ReferenceRow({
   kind, index, item, label, posterUrl, onPosterCaptured, onRemove, onToggleAudio, onToggleMotion, onToggleCompact,
-  compactLocked = false, onPrep, role = '', onRole,
+  compactLocked = false, onPrep, onOpen, role = '', onRole,
 }) {
   const meta = KIND_META[kind];
   const url = typeof item === 'string' ? item : item?.url;
@@ -167,7 +168,14 @@ function ReferenceRow({
   return (
     <div className="flex flex-col gap-1 rounded-md border border-line1 bg-bg2 p-1 pr-1.5">
       <div className="flex items-center gap-2">
-        <div className="h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3">
+        {/* A motion clip's thumbnail is the door to head replacement: click it
+            and the clip opens with scrubbing and the mask editor over it. The
+            other kinds have nothing to open, so their tile stays a plain
+            preview rather than a button that does nothing. */}
+        <div className={cx(
+          'group/thumb relative h-9 w-9 shrink-0 overflow-hidden rounded border border-line1 bg-bg3',
+          onOpen ? 'cursor-pointer' : '',
+        )}>
           {kind === 'images' || kind === 'scene' || kind === 'videos' ? (
             <ReferenceThumb
               url={url}
@@ -179,6 +187,19 @@ function ReferenceRow({
             />
           ) : null}
           {kind === 'audios' ? <AudioRowPreview url={url} /> : null}
+          {onOpen ? (
+            <button
+              type="button"
+              onClick={onOpen}
+              title={zh()
+                ? '打开该片段：拖动播放并遮罩要替换的头部'
+                : 'Open this clip — scrub it and mask the head to replace'}
+              aria-label={zh() ? '打开并遮罩该片段' : 'Open and mask this clip'}
+              className="absolute inset-0 grid place-items-center bg-bg0/70 text-ink1 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/thumb:opacity-100"
+            >
+              <Icon name="expand" size={13} />
+            </button>
+          ) : null}
         </div>
         <span className="min-w-0 flex-1">
           {/* A picture attached from the saved list carries no filename, so the
@@ -300,7 +321,7 @@ function ReferenceRow({
 }
 
 export function ReferenceSection({
-  kind, items, limit, labels, onAdd, onRemove, onToggleAudio, onToggleMotion, onToggleCompact, compactLocked = false,
+  kind, items, limit, labels, onAdd, onRemove, onToggleAudio, onToggleMotion, onToggleCompact, onOpen, compactLocked = false,
   busy, recent, onPickRecent, dropTarget, posters = {}, onPosterCaptured, onPrep,
   // Character pictures and scene pictures share ONE row of slots (they are one
   // <Picture N> sequence), so both sections count against the same total.
@@ -351,6 +372,7 @@ export function ReferenceSection({
           onToggleMotion={() => onToggleMotion?.(index)}
           onToggleCompact={() => onToggleCompact?.(index)}
           compactLocked={compactLocked}
+          onOpen={kind === 'videos' && onOpen ? () => onOpen(index) : null}
           onPrep={onPrep ? () => onPrep(index) : null}
           role={roles[typeof item === 'string' ? item : item?.url] || ''}
           onRole={onRole ? (next) => onRole(typeof item === 'string' ? item : item?.url, next) : null}
@@ -431,6 +453,10 @@ export function ReferencesMenu({
   // whoever is in these rows, plus the scaffold (a placeholder shot and a
   // dialogue line to fill in). The panel never edits the prompt itself.
   onWeave = null,
+  // Open an attached motion clip for head replacement — scrubbing, the mask
+  // editor, and the framing dials. Null on a workflow family that has no
+  // inpaint graph, which is what keeps the thumbnail a plain tile there.
+  onOpenClip = null,
   // What the run is set to produce, so the panel can say when the clip is
   // longer than the prompt accounts for.
   durationSeconds = 0,
@@ -842,6 +868,10 @@ export function ReferencesMenu({
               // (the info line below says exactly that), and identity needs
               // pixels — so the compact switch is held off rather than offered.
               compactLocked={kind === 'videos' && referenceVideoCompactLocked({ images: orderedImages })}
+              // Head replacement's one door: the motion clip's own thumbnail.
+              // Only offered when the studio supplied a handler, so a workflow
+              // family with no inpaint graph shows a plain preview tile.
+              onOpen={kind === 'videos' ? onOpenClip : null}
               onPrep={kind === 'videos' ? (index) => setPrepIndex(index) : null}
             />
           ))}

@@ -96,11 +96,29 @@ FREE_MODEL_NAME = "Swarm Sovereign Scout"
 # because a short answer is already handled: the producer salvages what finished.
 FREE_MODEL_MAX_TOKENS = 1024
 
+# What a HivemindOS credit is worth, mirrored from the app's own
+# `HIVEMINDOS_CREDITS_PER_RETAIL_USD`. The gateway quotes retail USD per token
+# (its markup already applied); the app turns that into credits per million
+# tokens with this one number, and the studio must use the same one or a model
+# would appear to cost two different things in two HivemindOS products.
+CREDITS_PER_USD = 500
+
+
+def credits_per_mtok(usd_per_token: Any) -> float | None:
+    """A gateway price (USD per token) as credits per million tokens."""
+    try:
+        usd = float(usd_per_token)
+    except (TypeError, ValueError):
+        return None
+    if usd < 0:
+        return None
+    return round(usd * 1_000_000 * CREDITS_PER_USD, 4)
+
 # How long a "is the app running?" probe is trusted. Long enough that a page of
 # picker interactions does not re-probe on every row, short enough that starting
 # the app is noticed without a restart of this studio.
 _APP_PROBE_TTL_SECONDS = 30.0
-_app_probe: tuple[float, bool] = (0.0, False)
+_app_probe: tuple[float, bool, str] = (0.0, False, "")
 
 
 class HivemindosModelsError(RuntimeError):
@@ -116,12 +134,31 @@ class HivemindosModelsError(RuntimeError):
         self.detail = detail
 
 
+# The dev build of the app (`tauri.conf.json` devUrl) serves on 5021; the
+# packaged app reserves 5020. On a machine running the app from source the
+# only HivemindOS answering is the dev one, and a studio that probes 5020 alone
+# reports "direct" with the app open in front of the owner — while the OAuth
+# helper, which already tried both, reached it fine.
+DEV_APP_URL = "http://127.0.0.1:5021"
+
+
+def candidate_urls() -> tuple[str, ...]:
+    """Where the app could be, in the order to try: a configured address alone,
+    else the packaged port then the dev port."""
+    configured = os.environ.get("HIVEMINDOS_URL", "").strip().rstrip("/")
+    candidates = [configured] if configured else [DEFAULT_HIVEMINDOS_URL, DEV_APP_URL]
+    for value in candidates:
+        if not value.startswith(("http://127.0.0.1:", "http://localhost:", "https://")):
+            raise ValueError("HIVEMINDOS_URL must use local HTTP or HTTPS")
+    return tuple(candidates)
+
+
 def base_url() -> str:
-    """Where the HivemindOS app would be, if it is running."""
-    base = os.environ.get("HIVEMINDOS_URL", DEFAULT_HIVEMINDOS_URL).strip().rstrip("/")
-    if not base.startswith(("http://127.0.0.1:", "http://localhost:", "https://")):
-        raise ValueError("HIVEMINDOS_URL must use local HTTP or HTTPS")
-    return base
+    """Where the HivemindOS app is: the candidate that answered the last probe,
+    else the first one to try."""
+    candidates = candidate_urls()
+    _stamp, answered, found = _app_probe
+    return found if answered and found in candidates else candidates[0]
 
 
 def gateway_url() -> str:
@@ -160,20 +197,25 @@ def app_is_running(*, connector: Callable[[str, int], bool] | None = None) -> bo
     if not _dashboard_token():
         return False
     now = time.monotonic()
-    stamped, answered = _app_probe
+    stamped, answered, _found = _app_probe
     if connector is None and now - stamped < _APP_PROBE_TTL_SECONDS:
         return answered
     try:
-        parsed = urllib.parse.urlparse(base_url())
+        candidates = candidate_urls()
     except ValueError:
         return False
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
     probe = connector or _connects
-    answered = probe(host, port)
+    found = ""
+    for candidate in candidates:
+        parsed = urllib.parse.urlparse(candidate)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if probe(host, port):
+            found = candidate
+            break
     if connector is None:
-        _app_probe = (now, answered)
-    return answered
+        _app_probe = (now, bool(found), found)
+    return bool(found)
 
 
 def _connects(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -426,8 +468,9 @@ def merge_accounts(tokens: list[str], *, opener: Callable[..., Any] = urllib.req
 
 
 def _credit_label(balance: Any) -> str:
+    # The gateway keeps fractions ("999.385"); a balance is read at a glance.
     if isinstance(balance, (int, float)):
-        return f"{balance:,} credits"
+        return f"{round(balance):,} credits"
     return "Unknown"
 
 
@@ -568,11 +611,35 @@ def _price_line(prompt_usd: Any, completion_usd: Any) -> str:
     return f"{prompt} in · {completion} out /1M"
 
 
-def _row(model_id: str, name: str, subtitle: str, group: str, badge: str, tier: str) -> dict[str, Any]:
+def _row(
+    model_id: str, name: str, subtitle: str, group: str, badge: str, tier: str, *,
+    prompt_credits: float | None = None, completion_credits: float | None = None,
+    max_output_tokens: int | None = None,
+) -> dict[str, Any]:
+    """One picker row.
+
+    The two rates are credits per MILLION tokens, numeric, so the browser can
+    say what one press will cost ("≈ 5 credits per draft") instead of leaving
+    the owner to multiply a per-token price by an answer size they cannot see.
+    `maxOutputTokens` is the free tier's cap, stated on the row because a draft
+    of eight concepts does not fit in it and the owner should learn that before
+    the press, not from six concepts arriving.
+    """
     return {
         "id": model_id, "name": name, "subtitle": subtitle, "group": group,
         "badge": badge, "tier": tier, "provider": PROVIDER, "source": PROVIDER,
+        "promptCreditsPerMTok": prompt_credits,
+        "completionCreditsPerMTok": completion_credits,
+        "maxOutputTokens": max_output_tokens,
     }
+
+
+def _metadata_rate(meta: dict[str, Any], key: str) -> float | None:
+    try:
+        value = float(meta.get(key))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def _app_catalog(*, opener: Callable[..., Any] = urllib.request.urlopen) -> list[dict[str, Any]]:
@@ -586,9 +653,16 @@ def _app_catalog(*, opener: Callable[..., Any] = urllib.request.urlopen) -> list
         if not model_id:
             continue
         meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        tier = str(meta.get("tier") or "paid")
         models.append(_row(
             model_id, str(row.get("display_name") or model_id), str(meta.get("subtitle") or ""),
-            str(meta.get("group") or "HivemindOS"), str(meta.get("badge") or ""), str(meta.get("tier") or "paid"),
+            str(meta.get("group") or "HivemindOS"), str(meta.get("badge") or ""), tier,
+            # The app already prices its rows in credits per million tokens
+            # (`promptCreditsPerMTok`); passed through rather than recomputed so
+            # the number here is the number the app shows.
+            prompt_credits=_metadata_rate(meta, "promptCreditsPerMTok"),
+            completion_credits=_metadata_rate(meta, "completionCreditsPerMTok"),
+            max_output_tokens=FREE_MODEL_MAX_TOKENS if tier == "free" else None,
         ))
     return models
 
@@ -609,7 +683,7 @@ def _gateway_catalog(*, opener: Callable[..., Any] = urllib.request.urlopen) -> 
     rows = (payload.get("data") or payload.get("models")) if isinstance(payload, dict) else None
     models = [_row(
         FREE_MODEL_ID, FREE_MODEL_NAME, "Free daily allowance · Scout 12B",
-        "HivemindOS", "Free", "free",
+        "HivemindOS", "Free", "free", max_output_tokens=FREE_MODEL_MAX_TOKENS,
     )]
     pricing_key = ("prompt", "completion")
     for row in rows or []:
@@ -624,6 +698,8 @@ def _gateway_catalog(*, opener: Callable[..., Any] = urllib.request.urlopen) -> 
             str(row.get("display_name") or row.get("name") or upstream),
             _price_line(pricing.get(pricing_key[0]), pricing.get(pricing_key[1])) or "HivemindOS credits",
             "Gateway", "Wallet", "paid",
+            prompt_credits=credits_per_mtok(pricing.get(pricing_key[0])),
+            completion_credits=credits_per_mtok(pricing.get(pricing_key[1])),
         ))
     return models
 
@@ -886,7 +962,18 @@ class HivemindosRuntime:
             payload = _gateway_request(
                 f"/api/paid-agents/{gateway_slug()}/chat/completions",
                 method="POST", body={**body, "model": upstream_model(model_id)},
-                headers={"X-HivemindOS-Credit-Token": token},
+                headers={
+                    "X-HivemindOS-Credit-Token": token,
+                    # Since 2026-08-25 the gateway refuses a credit-backed
+                    # completion without one ("This app version cannot safely
+                    # retry a paid request. Update HivemindOS…" — its words
+                    # for the desktop app, which mints its own when a caller
+                    # sends none; on the direct route WE are the app). A fresh
+                    # key per press: a receipt is replayed for the same key
+                    # rather than charged twice, and every press here is a new
+                    # ask, never a resend.
+                    "Idempotency-Key": f"content-studio-chat-{uuid.uuid4()}",
+                },
                 timeout=timeout, opener=self._opener,
             )
         choices = payload.get("choices") if isinstance(payload, dict) else None

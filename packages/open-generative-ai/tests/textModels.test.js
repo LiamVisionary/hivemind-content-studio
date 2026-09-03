@@ -23,9 +23,9 @@ const CATALOG = {
   models: [
     { id: 'qwen3-30b', name: 'Qwen3 30B', source: 'local', fit: 'loaded', estimatedLoadBytes: 20e9 },
     { id: 'hivemindos/auto', name: 'Auto', source: 'hivemindos', group: 'HivemindOS', tier: 'paid', subtitle: 'Best available' },
-    { id: 'hivemindos/swarm-sovereign-scout', name: 'Swarm Sovereign Scout', source: 'hivemindos', group: 'HivemindOS', tier: 'free', subtitle: 'Free daily allowance' },
-    { id: 'hivemindos/custom:openai/gpt-5.6-luna', name: 'OpenAI: GPT-5.6 Luna', source: 'hivemindos', group: 'Gateway', tier: 'paid', subtitle: '$0.52 in · $3.12 out /1M' },
-    { id: 'hivemindos/custom:anthropic/claude-opus-4.8', name: 'Anthropic: Claude Opus 4.8', source: 'hivemindos', group: 'Gateway', tier: 'paid', subtitle: '$5 in · $25 out /1M' },
+    { id: 'hivemindos/swarm-sovereign-scout', name: 'Swarm Sovereign Scout', source: 'hivemindos', group: 'HivemindOS', tier: 'free', subtitle: 'Free daily allowance · Scout 12B', maxOutputTokens: 1024 },
+    { id: 'hivemindos/custom:openai/gpt-5.6-luna', name: 'OpenAI: GPT-5.6 Luna', source: 'hivemindos', group: 'Gateway', tier: 'paid', subtitle: '$0.52 in · $3.12 out /1M', promptCreditsPerMTok: 260, completionCreditsPerMTok: 1560 },
+    { id: 'hivemindos/custom:anthropic/claude-opus-4.8', name: 'Anthropic: Claude Opus 4.8', source: 'hivemindos', group: 'Gateway', tier: 'paid', subtitle: '$5 in · $25 out /1M', promptCreditsPerMTok: 2500, completionCreditsPerMTok: 12500 },
   ],
   defaultModelId: 'qwen3-30b',
 };
@@ -33,11 +33,14 @@ const CATALOG = {
 test('a model lands on the tab that matches the decision it is', async () => {
   const { tabOf } = await load();
 
-  // Three genuinely different choices: this machine, the house tiers, and the
-  // named models. Folding the last two together buries the tiers in hundreds.
+  // Three genuinely different bills: this machine, HivemindOS credits, and the
+  // owner's own accounts. The house tiers and the named models HivemindOS
+  // routes are ONE bill and one privacy answer — splitting them across two
+  // tabs was the mess: nobody knows which of two places GPT was filed under.
   assert.equal(tabOf(CATALOG.models[0]), 'local');
   assert.equal(tabOf(CATALOG.models[1]), 'hivemindos');
-  assert.equal(tabOf(CATALOG.models[3]), 'cloud');
+  assert.equal(tabOf(CATALOG.models[3]), 'hivemindos');
+  assert.equal(tabOf({ source: 'accounts', provider: 'openai' }), 'accounts');
 });
 
 test('the recommended model is on the HivemindOS tab, not buried in the cloud list', async () => {
@@ -52,16 +55,16 @@ test('the recommended model is on the HivemindOS tab, not buried in the cloud li
   assert.ok(rows.some((row) => row.id === 'hivemindos/auto'));
 });
 
-test('the cloud tab is searched by the name a person would type', async () => {
+test('the HivemindOS section is searched by the name a person would type', async () => {
   const { modelsForTab } = await load();
 
   assert.deepEqual(
-    modelsForTab(CATALOG, 'cloud', 'claude').map((row) => row.id),
+    modelsForTab(CATALOG, 'hivemindos', 'claude').map((row) => row.id),
     ['hivemindos/custom:anthropic/claude-opus-4.8'],
   );
   // The id is searchable too — it is what a shared link or a docs page names.
-  assert.equal(modelsForTab(CATALOG, 'cloud', 'gpt-5.6-luna').length, 1);
-  assert.equal(modelsForTab(CATALOG, 'cloud', 'nothing like this').length, 0);
+  assert.equal(modelsForTab(CATALOG, 'hivemindos', 'gpt-5.6-luna').length, 1);
+  assert.equal(modelsForTab(CATALOG, 'hivemindos', 'nothing like this').length, 0);
 });
 
 test('the owner’s last choice outlives a reload, and a fresh install starts where the server says', async () => {
@@ -93,14 +96,17 @@ test('a row says what it costs, in the terms that source charges in', async () =
 
   assert.equal(statusLine(rowFor(CATALOG, 'qwen3-30b')), 'Loaded');
   assert.equal(statusLine(rowFor(CATALOG, 'hivemindos/custom:openai/gpt-5.6-luna')), '$0.52 in · $3.12 out /1M');
-  assert.equal(statusLine(rowFor(CATALOG, 'hivemindos/swarm-sovereign-scout')), 'Free daily allowance');
+  assert.equal(statusLine(rowFor(CATALOG, 'hivemindos/swarm-sovereign-scout')), 'Free daily allowance · Scout 12B');
 });
 
 test('the collapsed bar says where the producer runs without opening the picker', async () => {
   const { summaryLine, rowFor } = await load();
 
-  assert.match(summaryLine(rowFor(CATALOG, 'qwen3-30b')), /on this machine/);
+  assert.match(summaryLine(rowFor(CATALOG, 'qwen3-30b')), /this machine · Free · private/);
   assert.match(summaryLine(rowFor(CATALOG, 'hivemindos/auto')), /HivemindOS/);
+  // The price rides on the bar too: what a draft costs is the other half of
+  // "who writes for you".
+  assert.match(summaryLine(rowFor(CATALOG, 'hivemindos/custom:openai/gpt-5.6-luna')), /≈ 4 credits per draft$/);
   assert.equal(summaryLine(null), 'no model chosen');
 });
 
@@ -171,23 +177,26 @@ test('there is one HivemindOS balance, and the studio never claims a second one'
   assert.equal(routeOf({ sources: {} }), DIRECT_ROUTE);
 });
 
-test('the HivemindOS tab never tells someone to install an app to use it', async () => {
-  const { TABS } = await load();
+test('the HivemindOS section never tells someone to install an app to use it', async () => {
+  const { SECTIONS, TABS } = await load();
 
-  const tab = TABS.find((entry) => entry.id === 'hivemindos');
-  assert.match(tab.blurb, /No install needed/i);
+  const section = SECTIONS.find((entry) => entry.id === 'hivemindos');
+  assert.doesNotMatch(section.blurb, /install|app/i);
+  // One balance, said as one thing.
+  assert.match(section.blurb, /One balance/);
+  assert.equal(TABS, SECTIONS);
+  assert.deepEqual(SECTIONS.map((entry) => entry.id), ['local', 'hivemindos', 'accounts']);
 });
 
-test('the tab badge counts what the tab lists', async () => {
+test('the section badge counts what the section lists', async () => {
   const { tabCounts, modelsForTab } = await load();
 
   const counts = tabCounts(CATALOG);
-  for (const id of ['local', 'hivemindos', 'cloud']) {
+  for (const id of ['local', 'hivemindos', 'accounts']) {
     assert.equal(counts[id], modelsForTab(CATALOG, id).length, `${id} badge disagrees with its list`);
   }
-  // The HivemindOS tab shows its own rows plus the pinned recommendation, so a
-  // badge counting only membership reads one under what is on screen.
-  assert.equal(counts.hivemindos, 3);
+  assert.equal(counts.hivemindos, 4);
+  assert.equal(counts.accounts, 0);
 });
 
 test('a key found on this machine is shown as that, not adopted silently', async () => {
@@ -361,5 +370,99 @@ test('what the owner keeps choosing outranks what the world hosts most', async (
     assert.deepEqual(modelsForAccount(payload, 'openai').map((r) => r.name), ['b', 'a']);
   } finally {
     delete globalThis.window;
+  }
+});
+
+// --------------------------------------------------------------------------
+// what one press costs
+// --------------------------------------------------------------------------
+
+test('every row says what one draft costs, in the terms that bill charges in', async () => {
+  const { costLine, creditsPerCall, usdPerCall, rowFor, DRAFT_USAGE, PROMPT_USAGE } = await load();
+
+  // Local: nothing, and the privacy fact that is the reason to choose it.
+  assert.equal(costLine(rowFor(CATALOG, 'qwen3-30b')), 'Free · private');
+  // The free model: free, and the cap that a draft of eight concepts will hit.
+  assert.equal(costLine(rowFor(CATALOG, 'hivemindos/swarm-sovereign-scout')), 'Free · answers up to 1,024 tokens');
+  assert.equal(creditsPerCall(rowFor(CATALOG, 'hivemindos/swarm-sovereign-scout')), null);
+  // Paid HivemindOS rows: credits for THIS press, from the catalog's own rates
+  // (500 credits per retail dollar) and a measured draft size — 1,000 in,
+  // 2,500 out. Luna: 0.26 + 3.9. Opus: 2.5 + 31.25.
+  assert.equal(costLine(rowFor(CATALOG, 'hivemindos/custom:openai/gpt-5.6-luna')), '≈ 4 credits per draft');
+  assert.equal(costLine(rowFor(CATALOG, 'hivemindos/custom:anthropic/claude-opus-4.8')), '≈ 34 credits per draft');
+  assert.equal(Math.round(creditsPerCall(rowFor(CATALOG, 'hivemindos/custom:anthropic/claude-opus-4.8')) * 100), 3375);
+  // A bound is already approximate: "< 1 credit", never "≈ < 1 credit".
+  const cheap = { source: 'hivemindos', tier: 'paid', promptCreditsPerMTok: 50, completionCreditsPerMTok: 150 };
+  assert.equal(costLine(cheap), '< 1 credit per draft');
+  // A shorter press is a smaller number, same rates.
+  assert.equal(costLine(rowFor(CATALOG, 'hivemindos/custom:openai/gpt-5.6-luna'), PROMPT_USAGE), '≈ 1 credit per prompt');
+  // A paid row the catalog did not price says whose money it is, never a made-up number.
+  assert.equal(costLine(rowFor(CATALOG, 'hivemindos/auto')), 'HivemindOS credits');
+  // The owner's own account: dollars, on that account.
+  const openai = { id: 'account:openai/gpt-5', name: 'gpt-5', source: 'accounts', provider: 'openai', group: 'OpenAI', promptUsdPerMTok: 1.25, completionUsdPerMTok: 10 };
+  assert.equal(costLine(openai, DRAFT_USAGE), '≈ $0.03 per draft');
+  assert.equal(usdPerCall(openai, DRAFT_USAGE), 0.00125 + 0.025);
+  assert.equal(costLine({ ...openai, promptUsdPerMTok: null }), 'billed to your own account');
+  assert.equal(costLine(null), '');
+});
+
+test('the rate behind an estimate is there to check, without being printed on every row', async () => {
+  const { rateLine, detailLine, rowFor } = await load();
+
+  assert.equal(rateLine(rowFor(CATALOG, 'hivemindos/custom:openai/gpt-5.6-luna')), '260 in · 1,560 out credits per 1M tokens');
+  assert.equal(rateLine({ source: 'accounts', promptUsdPerMTok: 1.25, completionUsdPerMTok: 10 }), '$1.25 in · $10 out per 1M tokens');
+  assert.equal(rateLine(rowFor(CATALOG, 'qwen3-30b')), '');
+  // The line under the name carries what DIFFERS and is not already the cost:
+  // the per-million rate that used to sit there is now the tooltip.
+  assert.equal(detailLine(rowFor(CATALOG, 'hivemindos/custom:openai/gpt-5.6-luna')), '');
+  assert.equal(detailLine(rowFor(CATALOG, 'hivemindos/swarm-sovereign-scout')), 'Scout 12B');
+  assert.equal(detailLine(rowFor(CATALOG, 'hivemindos/auto')), 'Best available');
+  assert.equal(detailLine(rowFor(CATALOG, 'qwen3-30b')), 'Loaded');
+  assert.equal(detailLine({ source: 'accounts', subtitle: '$3 in · $15 out /1M · 1.0M context' }), '1.0M context');
+});
+
+test('the unfiltered list leads each section with what it is wanted for, and says what it holds back', async () => {
+  const { featuredRows, modelsForTab } = await load();
+
+  const many = {
+    ...CATALOG,
+    models: [
+      ...CATALOG.models,
+      ...Array.from({ length: 20 }, (_, i) => ({
+        id: `hivemindos/custom:vendor/model-${i}`, name: `Model ${i}`, source: 'hivemindos', group: 'Gateway', tier: 'paid',
+      })),
+    ],
+  };
+  const { rows, hidden } = featuredRows(many, 'hivemindos', 6);
+  // The default first, then the free model, then the house tiers — before any
+  // of twenty named models nobody asked about.
+  assert.deepEqual(rows.slice(0, 3).map((row) => row.id),
+    ['hivemindos/custom:openai/gpt-5.6-luna', 'hivemindos/swarm-sovereign-scout', 'hivemindos/auto']);
+  assert.equal(rows.length, 6);
+  assert.equal(hidden, modelsForTab(many, 'hivemindos').length - 6);
+  // A section with less than the cap shows all of it and hides nothing.
+  assert.deepEqual(featuredRows(CATALOG, 'local', 6), { rows: [CATALOG.models[0]], hidden: 0 });
+});
+
+test('the recommended model is first and the free model second wherever HivemindOS is listed', async () => {
+  const { modelsForTab } = await load();
+
+  assert.deepEqual(modelsForTab(CATALOG, 'hivemindos').slice(0, 2).map((row) => row.id),
+    ['hivemindos/custom:openai/gpt-5.6-luna', 'hivemindos/swarm-sovereign-scout']);
+});
+
+test('clicking a row records the choice with a function the picker actually imports', async () => {
+  // The picker called rememberModelUse() without importing it, so every click
+  // threw a ReferenceError before onPick ran — no row could be chosen at all,
+  // and the free model was simply the first one the owner tried.
+  const picker = fs.readFileSync(new URL('../src/components/ModelSourcePicker.jsx', import.meta.url), 'utf8');
+  const imported = picker.match(/import \{([^}]+)\} from '\.\.\/lib\/textModels\.js'/)[1];
+  for (const name of ['rememberModelUse', 'costLine', 'featuredRows', 'SECTIONS']) {
+    assert.match(imported, new RegExp(`\\b${name}\\b`), `${name} is used but not imported`);
+  }
+  // And the whole picker imports nothing the module does not export.
+  const exported = fs.readFileSync(new URL('../src/lib/textModels.js', import.meta.url), 'utf8');
+  for (const name of imported.split(',').map((part) => part.trim()).filter(Boolean)) {
+    assert.match(exported, new RegExp(`export (?:const|function) ${name}\\b`), `${name} is imported but not exported`);
   }
 });

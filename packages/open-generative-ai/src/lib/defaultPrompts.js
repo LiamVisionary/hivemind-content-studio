@@ -41,6 +41,10 @@ import { isLtxFamilyModel, isMinimaxFamilyModel } from './videoTasks.js';
 // changes how the prompt is written, not just how long it runs.
 import { renderGenderTokens } from './personaId.js';
 import { renderSubjectTemplate } from './subjectTemplate.js';
+// The animation and motion-design shelf — 75 prompts that are variants of seven
+// ideas, kept in their own module because they are a body of CONTENT rather
+// than more of this file's per-model rewrites of one scene.
+import { ANIMATION_STARTERS } from './animationStarters.js';
 
 export const PROMPT_FAMILIES = Object.freeze({
   'seedance-2.5': 'Seedance 2.5',
@@ -376,38 +380,198 @@ none`;
 const VERSUS_FIGHT_H3 = `subject_definitions:
 <Subject 1> is the fighter shown in <Picture 1>: [DESCRIBE FIGHTER 1 FROM YOUR OWN PICTURE — face, skin, hair, build, wardrobe, footwear]. <Subject 1> fights from the left of frame and never speaks.
 <Subject 2> is the fighter shown in <Picture 2>: [DESCRIBE FIGHTER 2 FROM YOUR OWN PICTURE — face, skin, hair, build, wardrobe, footwear]. <Subject 2> fights from the right of frame and never speaks.
-Both fighters are rendered as photoreal live-action, real human skin texture and hair, shot on camera — not illustrated, not stylised, not a game engine render.
+Both fighters are photoreal live-action, real skin texture and hair shot on camera — not illustrated, not stylised, not a game-engine render.
 <Subject 3> is the fighting arena shown in <Picture 3>: [DESCRIBE THE ARENA FROM YOUR OWN PICTURE — architecture and materials, what stands at its edges, the light sources and their direction, the colour palette, the air and weather in it]. It is the only location the fight happens in.
-<Subject 4> is an off-screen arcade announcer, never seen and heard only: a deep, resonant, energetic male voice with the clipped attack of a fighting-game callout. <Subject 4> speaks as S1 and is the only voice in the clip.
+<Subject 4> is an off-screen arcade announcer, never seen: a deep, resonant, energetic male voice with the clipped attack of a fighting-game callout. <Subject 4> speaks as S1 and is the only voice in the clip.
 
 summary:
-A cinematic live-action arcade fighting-game match in one continuous fifteen-second stretch: a versus card introduces <Subject 1> and <Subject 2>, the picture wipes through into <Subject 3>, a health-bar HUD drops in, the announcer counts the match in, and the two fight a real exchange in the arena. <Picture 1> and <Picture 2> drive who the fighters are and <Picture 3> drives where they fight; every pose, angle and action is new.
+A cinematic live-action arcade fighting-game match in one continuous fifteen-second stretch: a versus card introduces <Subject 1> and <Subject 2>, the picture wipes through into <Subject 3>, a health-bar HUD drops in, the announcer counts the match in, and the two fight a real exchange in the arena.
 
 retention_analysis:
 <Subject 1>: fully_preserved — the same face, hair, build and wardrobe in every shot and at every distance, unchanged by the versus card, the arena light or the motion blur.
 <Subject 2>: fully_preserved — the same face, hair, build and wardrobe in every shot and at every distance.
 <Subject 3>: fully_preserved — the arena's architecture, materials, edges, light sources, colour palette and atmosphere stay as the picture shows them for every frame after the wipe.
-<Picture 1>: fully_preserved — <Subject 1>'s face, hair and wardrobe carry into the clip; its own background, framing and pose do not.
-<Picture 2>: fully_preserved — <Subject 2>'s face, hair and wardrobe carry into the clip; its own background, framing and pose do not.
+<Picture 1>: fully_preserved — <Subject 1>'s face, hair and wardrobe carry into the clip; its background, framing and pose do not.
+<Picture 2>: fully_preserved — <Subject 2>'s face, hair and wardrobe carry into the clip; its background, framing and pose do not.
 <Picture 3>: fully_preserved — the environment carries into the clip as the place the fight happens, and the camera is free to shoot it from angles the picture never shows.
 
 detailed_description:
-Cinematic live-action photoreal footage throughout, shot on camera with real depth of field, real motion blur on fast limbs, real skin texture and real fabric movement. The fighting-game graphics — the versus card, the word plates and the health-bar HUD — are clean overlays composited ON TOP of the photographic image, never signage or structures built into the set.
-[Shot 1] A symmetrical versus card: <Subject 1> stands in the left half of the frame turned toward the centre and <Subject 2> stands in the right half turned toward the centre, both head to toe against a dark graphic backdrop with hard rim light down their near edges. Each holds a controlled aggressive stance, chest rising and falling, eyes locked across the gap on the other. The camera pushes in slowly and steadily along the centre line. A large glowing "VS" sits exactly between them and flares in sharp bursts that throw light across both fighters.
-[Shot 2] At 00:03.000, a fast directional wipe crosses the frame on a white impact flash and the versus card is gone: a wide establishing shot of <Subject 3>, the whole arena readable from edge to edge with its own depth, haze and light. <Subject 1> stands on the left of the arena and <Subject 2> on the right, a clear fighting distance apart, both settling into convincing ready stances on the arena floor.
-[Shot 3] At 00:05.000, the HUD drops in along the top of the frame: a horizontal health bar above <Subject 1> on the left and a matching one above <Subject 2> on the right, both full. The fighters hold their marks while the camera tracks laterally between them at a steady walking pace, holding the symmetry. A large centred "READY" plate lands between them. <Subject 4> (S1) says: <d>[English] Ready!</d> Both fighters tense and shift their weight forward onto the front foot.
+Cinematic live-action photoreal footage throughout, with real depth of field, real motion blur on fast limbs and real fabric movement. The fighting-game graphics — the versus card, the word plates and the health-bar HUD — are clean overlays composited ON TOP of the photographic image, never signage or structures built into the set.
+[Shot 1] A symmetrical versus card: <Subject 1> stands in the left half of the frame and <Subject 2> in the right, both turned toward the centre, head to toe against a dark graphic backdrop with hard rim light down their near edges. Each holds a controlled aggressive stance, chest rising and falling, eyes locked on the other. The camera pushes in slowly along the centre line. A large glowing "VS" sits between them and flares in sharp bursts that throw light across both fighters.
+[Shot 2] At 00:03.000, a fast directional wipe crosses the frame on a white impact flash and the versus card is gone: a wide establishing shot of <Subject 3>, the arena readable edge to edge with its own depth, haze and light. <Subject 1> stands on the left of the arena and <Subject 2> on the right, a clear fighting distance apart, both settling into ready stances on the arena floor.
+[Shot 3] At 00:05.000, the HUD drops in along the top of the frame: a full horizontal health bar above <Subject 1> on the left and a matching one above <Subject 2> on the right. The fighters hold their marks while the camera tracks laterally between them at a walking pace, holding the symmetry. A large centred "READY" plate lands between them. <Subject 4> (S1) says: <d>[English] Ready!</d> Both fighters tense and shift their weight onto the front foot.
 [Shot 4] At 00:07.000, the "READY" plate snaps into a larger "FIGHT" plate on one hard graphic hit, the camera shakes briefly and both fighters break from their marks and charge for the centre. <Subject 4> (S1) says: <d>[English] Fight!</d>
-[Shot 5] At 00:07.700, a low-angle tracking shot runs with them as the distance closes. <Subject 1> throws the first attack at <Subject 2>'s head and chest. <Subject 2> blocks it clean on a raised forearm and the force visibly travels through the blocking arm and shoulder, driving <Subject 2> back half a step.
-[Shot 6] At 00:09.000, a fast three-quarter close shot. <Subject 2> turns the blocked arm over and counters immediately; <Subject 1> leans and steps off the line so the strike passes through empty air, then pivots straight back to face <Subject 2>. The camera arcs a long way around the pair, fast, keeping both faces and both full bodies readable.
-[Shot 7] At 00:10.500, the exchange accelerates into a compact combination: <Subject 1> attacks in a rapid run of punches and kicks while <Subject 2> blocks, parries and gives ground across the arena floor. Every strike that connects rebounds instantly back to guard rather than resting on the other fighter, and every one changes the spacing between them. The camera cuts precisely on the impacts, alternating wide, medium and close.
-[Shot 8] At 00:12.500, <Subject 2> takes the momentum and lands a heavy counter that drives <Subject 1> back several steps, the fist snapping back to guard on the frame of contact. The camera tracks <Subject 1> back fast, then swings around to hold both fighters in profile. <Subject 1>'s health bar drops by a short visible amount.
-[Shot 9] At 00:14.000, both fighters re-engage at once and rush the centre. The camera pushes hard toward the collision point as their attacks meet in the middle of the frame; a fraction of a second of slow motion holds the contact, then normal speed resumes. The clip ends with both still standing in <Subject 3>, facing each other in stance, shoulders heaving, the HUD still on screen.
+[Shot 5] At 00:07.700, a low-angle tracking shot runs with them as the distance closes. <Subject 1> throws the first attack at <Subject 2>'s head and chest. <Subject 2> blocks it clean on a raised forearm and the force travels visibly through arm and shoulder, driving <Subject 2> back half a step.
+[Shot 6] At 00:09.000, a fast three-quarter close shot. <Subject 2> turns the blocked arm over and counters immediately; <Subject 1> leans and steps off the line so the strike passes through empty air, then pivots straight back to face <Subject 2>. The camera arcs fast around the pair, keeping both faces and both full bodies readable.
+[Shot 7] At 00:10.500, the exchange accelerates into a compact combination: <Subject 1> attacks in a rapid run of punches and kicks while <Subject 2> blocks, parries and gives ground across the arena floor. Every strike that connects rebounds instantly back to guard rather than resting on the other fighter, and every one changes the spacing. The camera cuts on the impacts, alternating wide, medium and close.
+[Shot 8] At 00:12.500, <Subject 2> takes the momentum and lands a heavy counter that drives <Subject 1> back several steps, the fist snapping back to guard on the frame of contact. The camera tracks <Subject 1> back fast, then swings around to hold both fighters in profile. <Subject 1>'s health bar drops visibly.
+[Shot 9] At 00:14.000, both fighters re-engage at once and rush the centre. The camera pushes hard toward the collision point as their attacks meet in mid-frame; a fraction of a second of slow motion holds the contact, then normal speed resumes. The clip ends with both still standing in <Subject 3>, facing each other in stance, shoulders heaving, the HUD still on screen.
 
 overall_soundscape:
-The arena tone of <Subject 3> under everything — the ambience the place implies and the hum of its own light sources. Sharp electronic impacts and a rising synthetic sweep across the versus card and the wipe, and a hard graphic hit as each HUD element lands. Footsteps and skidding on the arena floor, fabric snapping on fast limbs, the dull slap of a blocked strike and the deeper crack of one that lands, a low whoosh where an attack misses, and a short concussive thump under the camera shake.
+The arena tone of <Subject 3> under everything — its own ambience and the hum of its light sources. Sharp electronic impacts and a rising synthetic sweep across the versus card and the wipe, and a hard graphic hit as each HUD element lands. Footsteps and skidding on the arena floor, fabric snapping on fast limbs, the dull slap of a blocked strike and the deeper crack of one that lands, a low whoosh where an attack misses, and a short concussive thump under the camera shake.
 
 non_diegetic_music:
-A high-energy cinematic fighting-game score: deep percussion and tense electronic pulses under the versus card, building fast through the count-in, then breaking into driving drums, aggressive bass, electronic percussion and dramatic orchestral accents on the call to fight. It holds a fast tempo across the combat and intensifies into the final exchange.`;
+A high-energy cinematic fighting-game score: deep percussion and tense electronic pulses under the versus card, building through the count-in, then breaking into driving drums, aggressive bass and dramatic orchestral accents on the call to fight. It holds a fast tempo across the combat and intensifies into the final exchange.`;
+
+// A painting tutorial: a blank canvas builds into the picture you attached.
+//
+// Liam's brief (2026-08-30) arrived as loose prose ending in "use #Image1", and
+// three things the six-section format does not let you leave implicit had to be
+// decided in the conversion.
+//
+// The attached picture is the clip's LAST frame, not its first. Every other
+// picture-driven starter here uses <Picture 1> as an identity source that is
+// true from frame zero; this one is the opposite — the picture is false until
+// the final seconds. So it keeps a preserved marker, because the last frame
+// really does have to match it exactly, and the direction of travel is stated
+// in subject_definitions AND retention_analysis. Say it in only one of them and
+// reference mode does what it is trained to do: open on the finished painting.
+//
+// "All the layers in one pass" is one continuous locked take, so the stages are
+// timed beats under a single [Shot 1] rather than [Shot N] cuts — the shape the
+// fight starter uses. A cut between layers is a licence for the composition to
+// move between them, which is exactly what a build-up cannot survive.
+//
+// Nothing here was bought with a failed take yet, so the additive rule is
+// stated defensively rather than from a burn: a timelapse fails by REVERSING —
+// marks that appear and then vanish, a canvas that blanks and starts again —
+// and a model told only "show the layers" is free to show them in any order.
+const PAINTING_PROCESS_H3 = `subject_definitions:
+<Subject 1> is the finished painting shown in <Picture 1>: [DESCRIBE THE FINISHED PAINTING IN YOUR OWN PICTURE — what it depicts and where each element sits in the frame, its medium and support, its palette, the direction and colour of the light in it, and how hard or soft its edges and brushwork are]. <Subject 1> is the END state of this clip: it is what the canvas arrives at in the last seconds, it is never what the clip opens on, and it stays a painting throughout — never a photograph of the scene it depicts.
+<Subject 2> is the artist's working hand: a bare hand and forearm holding first a thin charcoal pencil and then a loaded brush, entering from the lower right of frame and withdrawing between passes. Only the hand and forearm are ever in shot — no face, no head, no body, no second person — and <Subject 2> has no picture reference, so the hand is defined by this text alone.
+<Subject 3> is the support and the room: a rectangular primed canvas on a wooden easel, square to the camera and filling almost the whole frame, its weave and slightly uneven priming catching the light, in a plain daylit studio. The canvas edges hold the same position in frame for the entire clip.
+
+summary:
+A studio tutorial timelapse in one continuous locked-off take: a blank canvas becomes <Subject 1> in visible layers — a geometric block-in, then the drawing, then flat colour, then the rendering — each pass laid over the one before with nothing erased and nothing restarted, ending on the finished painting matched exactly to <Picture 1>. About fifteen seconds, no cuts and no camera move.
+
+retention_analysis:
+<Subject 1>: fully_preserved — the composition, drawing, proportions, palette, values, edge quality and brush character of the final frame match <Picture 1> exactly.
+<Picture 1>: fully_preserved as the clip's FINAL state — the artwork it shows is what the canvas builds toward and lands on in the last seconds, and every earlier stage is an earlier state of that same picture, registered to the same composition. It is not the opening frame, and no stage before the end shows it complete.
+<Subject 2>: attribute_transfer — the hand, the tools it holds and the way it works come from the text above, with no picture identity source.
+<Subject 3>: attribute_transfer — the canvas, the easel and the studio come from the text above; <Picture 1> supplies the artwork on the canvas and nothing about the room around it.
+
+detailed_description:
+Photoreal live-action footage from a single locked-off camera on a tripod, square on to <Subject 3> and slightly above it, the canvas filling almost the whole frame with a hand of margin on every side. The framing never changes: no pan, no push in, no reframe, no cut, and no change of light — the light is even, soft and unchanging from the upper left, so the only thing in the picture that changes is the painting. Every pass is laid OVER the one before: marks that appear stay on the canvas until a later layer covers them, nothing is erased, wiped, painted out, undone or restarted, the canvas never goes blank a second time, and the picture never jumps to a different image. Time is compressed the way a timelapse compresses it — marks arrive in fast confident bursts and the hand jumps between positions — but the picture only ever moves toward <Subject 1>.
+[Shot 1] The canvas is completely blank: bare white priming, its weave and the brush marks in it visible in the raking light, nothing drawn on it at all. <Subject 2> enters from the lower right holding a thin charcoal pencil and makes the first light mark near the centre.
+At 00:02.000, the construction layer arrives fast: thin grey lines lay the whole picture in as plain geometric solids — rectangles, boxes, cylinders, cones and ellipses — with a horizon line and the main axes through them. Each solid sits at the exact position, size and angle its corresponding element occupies in <Picture 1>, so the composition of the finished painting is fixed here and does not shift again for the rest of the clip. Nothing is a detail yet: no features, no texture, no colour.
+At 00:05.000, the drawing layer goes over the geometry: contours are drawn on top of the solids and resolve them into the real forms of <Subject 1>, the smaller shapes and features are drawn in, and proportions are corrected with firmer lines. The construction lines stay faintly visible underneath instead of being erased.
+At 00:08.000, the pencil is replaced by a loaded brush and flat colour goes down over the drawing: broad areas of local colour, one mass at a time, in the exact palette of <Picture 1>, edges left rough and the drawing still showing through the thin paint. The canvas fills in patch by patch rather than being covered in one sweep.
+At 00:10.500, the rendering layer: values and modelling are built up over the flat colour — shadows, half-tones and highlights — edges are tightened where <Picture 1> is sharp and softened where it is soft, texture and the last small accents go in, and the picture resolves pass by pass into <Subject 1>.
+At 00:13.000, <Subject 2> sets the final accent, lifts the brush away and withdraws out of frame at the lower right. The camera holds on the finished painting, now identical to <Picture 1> in composition, drawing, colour, value and edge, and the image stays completely still until the clip ends.
+
+overall_soundscape:
+A quiet studio: low room tone under everything, and the sounds of the work itself in sync with the marks — the dry scratch and tap of a charcoal pencil on primed canvas, the soft drag of a loaded brush across the weave, bristles worked out on a palette, a brush handle knocking the rim of a water jar, the wooden creak of the easel as it takes pressure. The sounds are as compressed as the picture, arriving in short bursts and dropping back to room tone between passes. Nobody speaks: there is no narration, no commentary and no voice of any kind, and no breath, sigh or other vocal sound anywhere in the clip.
+
+non_diegetic_music:
+N/A`;
+
+// Eight outfits, eight editorial layouts and one face, in a single 15s take.
+// Liam's fashion-MV brief (2026-08-30), rewritten into reference mode's six
+// sections. The brief arrived with its two reference images described in a
+// preamble ("use reference image 1 only for composition, reference image 2 as
+// the character identity"), which is a note to a human — the format has exactly
+// one place that instruction survives, and it is retention_analysis.
+//
+// That split is the whole starter. The model's picture is fully_preserved: the
+// same face has to come back through eight wardrobe changes, and losing it is
+// the failure this prompt is most exposed to. The layout board is
+// attribute_transfer, because it is attached for how a frame is composed, not
+// for what is in it — marking it preserved freezes ONE collage across the whole
+// clip, which is the single thing the brief forbids.
+//
+// Three more things the brief left implicit that the format does not. Its
+// "Avoid" list is a negative prompt and H3 has none, so each item is written as
+// something the clip HAS (real pores and fine texture rather than "no plastic
+// skin") or bound to the thing it modifies. Beat synchronisation has nowhere to
+// live except non_diegetic_music, so the track is described with the accent
+// interval every change lands on. And the on-screen wording is deliberately
+// short and sparse: H3 renders a few large words cleanly and turns a wall of
+// small print into garbled letterforms, so the collage is built from headline
+// type and marks rather than readable body text.
+const FASHION_LOOKBOOK_H3 = `subject_definitions:
+<Subject 1> is the fashion model shown in <Picture 2>: [DESCRIBE THE MODEL FROM YOUR OWN PICTURE — face shape, skin, eye colour, hair colour, length and styling, and build]. <Subject 1> is the only person in the clip and never speaks.
+<Subject 1> is rendered as photoreal live-action: real skin with visible pores, fine texture and small natural imperfections, real hair with loose strands that move with weight, real fabric — never smoothed, retouched, beauty-filtered or stylised.
+<Picture 1> is a layout board rather than a place or a person. Nobody and nothing shown inside it appears in the clip.
+
+summary:
+A fifteen-second 16:9 fashion outfit-change music video titled FRAME SHIFT: <Subject 1> stands centred inside an editorial magazine collage wall that rebuilds on every musical accent, changing outfit, pose and layout roughly every one and a half seconds, ending on a held magazine-cover hero frame.
+
+retention_analysis:
+<Subject 1>: fully_preserved — the same face, facial proportions, eye colour, hair colour and hairstyle in every shot, at every distance and under every lighting change. The outfit changes on every accent; the person wearing it does not, and no shot reshapes the body.
+<Picture 1>: attribute_transfer — only its layout logic carries: how the frame is composed, and how type is stacked, cropped and set against the subject. Its exact arrangement is NOT reproduced, and no look repeats another's placement.
+<Picture 2>: fully_preserved — <Subject 1>'s face, hair and colouring carry into the clip; its own background, framing, pose and wardrobe do not.
+
+detailed_description:
+Premium Korean fashion-campaign photography crossed with international magazine editorial and Y2K graphic design, shot on a long lens with shallow depth of field, real motion blur and real fabric behaviour. The palette is black, white and deep red, with a little grey and aged-paper tone. Behind <Subject 1> is an editorial magazine collage wall, not a plain studio backdrop: oversized headline type, barcodes, numbers, coordinates, grids, crosshairs, crop and registration marks, scan lines, halftone dots, paper folds, scratches, print grain and hard red, black and white graphic blocks. <Subject 1> stands in front of it and crops part of the headline the way a cover photograph does. The wording stays sparse — a handful of large clean English words per look, big enough to read, never paragraphs of small print — and this editorial typography is the only text in frame. Every look rebuilds the wall into a NEW composition, type running left, right, top, bottom, vertical, rotated, tilted or stretched, and no two looks put the same words in the same place. <Subject 1> stays close to the centre of frame throughout, and the camera only pushes in, pulls back or shifts its angle slightly, never whipping, orbiting or shaking. Every outfit change is instantaneous, a single-frame switch on the accent, with no dissolve and no undressing.
+[Shot 1] LOOK 01. A pure white studio. <Subject 1> stands centred in a medium shot in a light grey-green semi-transparent layered fashion top, chin dipped slightly, then lifts the eyes to camera. The camera is locked. On the first hard accent the white expands into the magazine collage wall in a single frame, and an oversized headline reading FRAME SHIFT lands behind <Subject 1> with a barcode, numbers, grid lines, scan marks and a red graphic block.
+[Shot 2] At 00:01.500, a fast smooth push in to a facial close-up. <Subject 1> turns the head gently, the hair swinging with real weight and settling, then holds direct eye contact, calm and confident. The wall behind is black and white, layered type under fine print grain.
+[Shot 3] At 00:03.000, LOOK 02. The outfit switches on the accent to a new high-fashion look, the framing returns to a centred medium shot and <Subject 1> drops into a strong editorial pose. The wall reorganises completely into a new headline, barcode, numbering and irregular graphic blocks, all in new positions.
+[Shot 4] At 00:04.500, LOOK 03. Another outfit. <Subject 1> takes one confident step forward and stops. The black-and-white design hardens, deep red accents come in, and the type slides horizontally and vertically around <Subject 1> on the beat.
+[Shot 5] At 00:06.000, LOOK 04. New styling. <Subject 1> makes a gentle half-turn and the hair follows with realistic inertia. The wall switches to an aggressive red-and-white layout of oversized type, coordinates, crosshair graphics and scan lines.
+[Shot 6] At 00:07.500, LOOK 05. A sport-inspired outfit. <Subject 1> leans slightly forward with relaxed confidence, shot from a subtly lower angle. Large type slides fast across the wall on the beat.
+[Shot 7] At 00:09.000, LOOK 06. Another outfit. <Subject 1> drops into a stylish crouching pose while the camera pushes in a short distance. The collage rearranges into a different composition of layered text, hard borders, barcodes and print texture.
+[Shot 8] At 00:10.500, LOOK 07. <Subject 1> rises back to standing and the camera pulls back to a medium frame. A bold high-contrast outfit. The wall simplifies into clean black-and-white editorial design: one oversized headline, a strong graphic hierarchy.
+[Shot 9] At 00:12.000, LOOK 08. A sharp tailored fashion suit. <Subject 1> walks toward camera at an even confident pace. The wall turns red and black, and type, numbers, scanning graphics and vertical layout elements animate faster, each landing on an accent.
+[Shot 10] At 00:13.500, the hero frame. <Subject 1> arrives dead centre in a minimal black outfit, stops, settles into a strong relaxed stance with the arms crossed and holds a confident direct gaze into the lens. The camera comes to a complete stop. The collage thins out until only a few premium editorial marks remain, and the picture holds as a magazine cover and freezes on the final accent.
+
+overall_soundscape:
+A tight studio room tone with no reverb tail: fabric snapping and rustling on each change of pose, shoes stepping and pivoting on a hard floor, and the faint hum of studio lights. Nobody speaks anywhere in the clip.
+
+non_diegetic_music:
+A driving Y2K fashion-campaign track: hard programmed drums, a heavy syncopated bassline and bright synthetic stabs at a fast tempo, with a clear accent every one and a half seconds. Every outfit change, pose change and layout rebuild lands exactly on one of those accents, and the last accent hits on the freeze frame.`;
+
+// A five-cut 90s cel-anime skate sequence driven by FOUR reference pictures —
+// the community's "H3 multishot" recipe (girl / skateboard / alley / Walkman),
+// rewritten from its ComfyUI-workflow prose into reference mode's six sections.
+// The original addressed its attachments as "Image 1..4" with preserve-this
+// notes bolted on in front; here each picture is claimed by a subject and the
+// preserve notes become retention markers, which is the only place they bind.
+// The environment is a <Subject> exactly like the girl is — the original's
+// loudest constraint ("the houses must stay 2D and hand-painted, not 3D") is
+// written as what the background IS, stated in the definition AND held per
+// shot, following the fight starter's precedent for style constraints (NOT 3D,
+// NOT CGI bound to the thing they modify). The 15 fps hand-drawn feel lives in
+// detailed_description as held frames and animation on twos, because "15fps"
+// alone reads as a technical setting H3 has no knob for. The Walkman music the
+// girl nods to is the soundtrack itself, so it lives in non_diegetic_music —
+// the classic anime treatment — while the soundscape stays physical sound.
+//
+// This is also the first starter that sets the studio up for itself
+// (`timeline: true`): loading it sets the 15s duration and opens the timeline
+// view, so the finished clip lands as shot 1 and "+" with Auto-continue chains
+// the sequence onward.
+const ANIME_SKATE_MULTISHOT_H3 = `subject_definitions:
+<Subject 1> is the girl shown in <Picture 1>: [DESCRIBE THE GIRL FROM YOUR OWN PICTURE — face, hair colour and style, outfit and its colours, build]. Her exact character design — face, hair, outfit, proportions and overall look — stays identical in every shot, and she wears no accessories beyond the headphones and Walkman. She never speaks.
+<Subject 2> is the skateboard shown in <Picture 2>: the same deck shape, colours and graphics in every shot. She rides it for the whole sequence.
+<Subject 3> is the steep downhill Japanese alley neighbourhood shown in <Picture 3>: a narrow residential lane of low houses, garden walls, potted plants, utility poles and overhead wires dropping away downhill. It is painted 2D anime background art in every frame — flat hand-painted cels with visible brushwork and painted depth, the way classic anime background art suggests distance — NOT 3D models, NOT CGI, NOT a game-engine or volumetric look.
+<Subject 4> is the Walkman and headphones shown in <Picture 4>: she wears the headphones on her head in every shot, and the Walkman rides clipped at her hip with its wire swinging as she moves.
+
+summary:
+A fifteen-second multi-shot 1990s hand-drawn anime sequence: <Subject 1> skateboards fast down <Subject 3> on <Subject 2>, wearing <Subject 4> and listening to music, told in five cuts — a rear tracking shot, a close-up of the Walkman's spinning cassette, a profile tracking shot as she nods to the music, a close-up of her push cycle, and a ground-level fisheye finish as she jumps over the camera.
+
+retention_analysis:
+<Subject 1>: fully_preserved — the same face, hair, outfit and proportions in every shot and at every distance, with no redesign.
+<Subject 2>: fully_preserved — the skateboard's deck, colours and graphics stay as the picture shows them.
+<Subject 3>: fully_preserved — the alley's architecture, palette and hand-painted background character hold through every shot and camera angle.
+<Subject 4>: fully_preserved — the Walkman and headphone design stays as the picture shows it, worn the same way throughout.
+<Picture 1>: fully_preserved — the girl's design carries into the clip; the picture's own background, framing and pose do not.
+<Picture 2>: fully_preserved — the skateboard carries into the clip as the board she rides.
+<Picture 3>: fully_preserved — the neighbourhood carries into the clip as the place she skates, and the camera is free to shoot it from angles the picture never shows.
+<Picture 4>: fully_preserved — the Walkman and headphones carry into the clip as the ones she wears.
+
+detailed_description:
+Authentic 1990s hand-drawn TV anime throughout: traditional cel animation with visible linework, flat cel shading, painted backgrounds with brush and stroke texture, and a subtle analog softness over the whole image. The animation is timed like 90s TV anime at roughly fifteen drawings per second — animated on twos with controlled in-betweens and natural held frames, so fast motion reads as crisp held poses, never as jittery morphing between drawings. The houses and environment stay flat hand-painted 2D background art with painted depth in every single shot. No photorealism, no modern glossy digital rendering, nobody speaks, and no text, captions or subtitles appear anywhere in frame.
+[Shot 1] A rear tracking shot from behind and low: <Subject 1> skates fast downhill through <Subject 3>, the camera following behind her at hip height. She rides confidently and smoothly, her hair and oversized clothing streaming in the wind, the headphones on her head and the Walkman visible at her hip. The alley walls and poles rush past on both sides with a strong sense of speed.
+[Shot 2] At 00:03.000, a close-up on <Subject 4> at her hip while she keeps skating: the Walkman fills the frame with part of her side torso and arm, and the cassette reels visibly turn inside the Walkman's little window. The headphone wire sways with her motion while the street streaks past behind in painted motion-blur strokes.
+[Shot 3] At 00:06.000, a medium profile tracking shot level with her: she rides with the wind pressing across her face and pushing her hair backward, nodding her head subtly to the music, her expression relaxed, immersed and unbothered. The background streaks past in painted speed strokes yet still reads as the same hand-painted 2D neighbourhood.
+[Shot 4] At 00:09.000, a close-up on her feet and <Subject 2>: her right foot stays planted on the deck while her left foot comes down to the road, pushes backward against the pavement in one clean stroke, then lifts back onto the board. The wheels spin fast, and asphalt and road markings streak beneath with drawn motion blur.
+[Shot 5] At 00:12.000, a ground-level fisheye shot looking up from the road surface: the skateboard rushes toward the camera and <Subject 1> pops the board and jumps clean over the lens, her body, pants, hair and headphone wire reacting naturally as she passes overhead in one readable motion — a fast, stylish, dynamic anime finish before she rolls away downhill.
+
+overall_soundscape:
+Urethane wheels rolling and clattering over seams in the asphalt, wind rush building with the downhill speed, the deck creaking under a weight shift, one hard clack as the tail pops for the jump and the wheels slapping back onto the road. Around it the quiet of a residential hill — distant cicadas, a far-off crow, wind moving the overhead wires. Nobody speaks anywhere in the clip.
+
+non_diegetic_music:
+The track she is listening to, carrying the whole sequence like an anime opening: a warm lo-fi 1990s Japanese city-pop instrumental with a steady drum groove, a round bassline and bright synth chords, slightly tape-saturated as if playing from her cassette, holding one energy from the first shot through the jump.`;
 
 export const DEFAULT_PROMPTS = Object.freeze([
   Object.freeze({
@@ -582,6 +746,58 @@ export const DEFAULT_PROMPTS = Object.freeze([
     })],
   }),
   Object.freeze({
+    id: 'painting-process-h3',
+    idea: 'painting-process',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-reference',
+    name: 'How this painting was made',
+    summary: 'Blank canvas to the finished picture in one unbroken build-up',
+    requires: 'one picture of the finished painting, attached as a reference picture',
+    note: 'Reference mode: attach ONE picture of the finished artwork in References — that is <Picture 1>. It is the clip’s LAST frame rather than its first, and that is the line to keep if you rewrite this: the subject definition and the retention line both say so, and dropping either one makes H3 open on the finished painting and hold it. Fill in the [DESCRIBE …] bracket from your own picture. The beats are timed to 15.0s exactly, so if you change the duration, move the At MM:SS.mmm stamps with it. For a hands-off timelapse delete <Subject 2> and its retention line; for a music bed, replace the non_diegetic_music N/A with the one you want.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 15,
+      prompt: PAINTING_PROCESS_H3,
+    })],
+  }),
+  Object.freeze({
+    id: 'fashion-lookbook-h3',
+    idea: 'fashion-lookbook',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-reference',
+    name: 'Outfit-change fashion MV',
+    summary: 'Eight looks and eight magazine layouts in one 15s take',
+    requires: 'a photo of the model, and a layout board to compose from, attached as reference pictures',
+    note: 'Reference mode: attach the two pictures IN THIS ORDER — the layout board first, the model second — which is what makes them <Picture 1> and <Picture 2>. They do different jobs and retention_analysis is where that is written: the model is fully_preserved and the board is attribute_transfer, so its composition carries and its exact collage does not. With only a photo of the model, attach it alone, delete the <Picture 1> lines and renumber <Picture 2> to <Picture 1>. Set duration to 15s and the aspect ratio to 16:9, and fill in the [DESCRIBE …] bracket from your own picture. The looks are timed to 15.0s exactly, so if you add or cut one, move the At MM:SS.mmm stamps with it. Swap FRAME SHIFT for your own title, and keep the on-screen wording short — H3 renders a few large words cleanly and garbles a wall of small print.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 15,
+      prompt: FASHION_LOOKBOOK_H3,
+    })],
+  }),
+  Object.freeze({
+    id: 'anime-skate-multishot-h3',
+    idea: 'anime-skate-multishot',
+    section: 'video',
+    family: 'minimax',
+    format: 'h3-reference',
+    name: 'Multi-shot anime skate sequence',
+    summary: 'Five-cut 90s cel-anime downhill run from four reference pictures',
+    requires: 'four reference pictures, attached in order: the girl, the skateboard, the alley, the Walkman',
+    // The studio sets itself up when this loads: 15s duration and the timeline
+    // view, so the finished clip lands as shot 1 of a sequence.
+    timeline: true,
+    note: 'Reference mode: attach the four pictures IN THIS ORDER — girl, skateboard, alley background, Walkman with headphones — which is what makes them <Picture 1> to <Picture 4>. Loading this sets the duration to 15s and opens the timeline, so the finished clip lands as shot 1; press + with Auto-continue on to chain the next 15 seconds of the run. Fill in the [DESCRIBE …] bracket from your own picture. The cuts are timed to 15.0s exactly, so if you add or drop one, move the At MM:SS.mmm stamps to match.',
+    parts: [Object.freeze({
+      label: 'Whole clip',
+      durationSeconds: 15,
+      prompt: ANIME_SKATE_MULTISHOT_H3,
+    })],
+  }),
+  ...ANIMATION_STARTERS,
+  Object.freeze({
     id: 'korean-home-video-ltx',
     idea: 'korean-home-video',
     section: 'video',
@@ -639,9 +855,31 @@ export function promptFamilyOf(source) {
   return /^seedance-/.test(id) ? 'seedance' : '';
 }
 
-/** How long the whole idea runs once every part has been generated. */
+/**
+ * How long the idea runs.
+ *
+ * Parts ADD UP — they are one clip split at the model's ceiling, and the story
+ * is not told until every one of them has been generated. Variants do NOT: they
+ * are the same length of story in interchangeable treatments, and you load
+ * exactly one. So a collection's length is a variant's length, not their sum.
+ */
 export function defaultPromptTotalSeconds(entry) {
+  if (entry?.variants?.length) {
+    return Math.max(...entry.variants.map((variant) => Number(variant.durationSeconds) || 0));
+  }
   return (entry?.parts || []).reduce((total, part) => total + (Number(part.durationSeconds) || 0), 0);
+}
+
+/**
+ * Every prompt an entry can load, whether it splits into parts or lists
+ * variants — for the checks that care about the TEXT and not about which axis
+ * an entry uses. `label` is the part label or the variant name.
+ */
+export function defaultPromptSlots(entry) {
+  if (entry?.variants?.length) {
+    return entry.variants.map((variant) => ({ ...variant, label: variant.name }));
+  }
+  return entry?.parts || [];
 }
 
 /**
@@ -675,36 +913,43 @@ export function defaultPromptsFor(section, source, { gender: override = undefine
 export function renderDefaultPrompt(entry, gender = '') {
   if (!entry) return entry;
   const render = (text) => (text ? renderGenderTokens(text, gender) : text);
+  // The prompt itself also carries the stand-in tokens: which words are the
+  // person the starter was written about, so that attaching a reference later
+  // can put the real subject in their place (subjectTemplate.js). The rendered
+  // text is plain; the record rides beside it. Variants go through exactly the
+  // same pass as parts — a starter that renders differently depending on which
+  // axis it was filed under is a starter with two behaviours.
+  const loadable = (slot) => {
+    const rendered = renderSubjectTemplate(slot.prompt || '', { gender });
+    return {
+      ...slot,
+      prompt: rendered.text,
+      standIns: rendered.standIns,
+      note: render(slot.note),
+    };
+  };
   return {
     ...entry,
     note: render(entry.note),
     requires: render(entry.requires),
-    parts: (entry.parts || []).map((part) => {
-      // The prompt itself also carries the stand-in tokens: which words are
-      // the person the starter was written about, so that attaching a
-      // reference later can put the real subject in their place
-      // (subjectTemplate.js). The rendered text is plain; the record rides
-      // beside it.
-      const rendered = renderSubjectTemplate(part.prompt || '', { gender });
-      return {
-        ...part,
-        prompt: rendered.text,
-        standIns: rendered.standIns,
-        note: render(part.note),
-      };
-    }),
+    ...(entry.variants ? { variants: entry.variants.map(loadable) } : {}),
+    parts: (entry.parts || []).map(loadable),
   };
 }
 
 /** "Seedance 2.5 · 30s · Candid early-2000s camcorder day" for the menu row. */
 export function describeDefaultPrompt(entry) {
   const parts = entry?.parts?.length || 0;
+  const variants = entry?.variants?.length || 0;
   const seconds = defaultPromptTotalSeconds(entry);
-  return [
-    PROMPT_FAMILIES[entry.family] || entry.family,
-    parts > 1 ? `${seconds}s in ${parts} parts` : `${seconds}s`,
-    entry.summary,
-  ].filter(Boolean).join(' · ');
+  // Three shapes, and the middle segment is the only place the menu says which
+  // one a row is: a length, a length split into parts you generate in turn, or
+  // a length offered in treatments you pick between.
+  const length = variants
+    ? `${seconds}s · ${variants} variants`
+    : (parts > 1 ? `${seconds}s in ${parts} parts` : `${seconds}s`);
+  return [PROMPT_FAMILIES[entry.family] || entry.family, length, entry.summary]
+    .filter(Boolean).join(' · ');
 }
 
 /** "Part 2 · Beats 4-6 · 15s" for a part button. */

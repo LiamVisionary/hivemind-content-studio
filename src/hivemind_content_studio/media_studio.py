@@ -261,6 +261,17 @@ def start_video(
     # default, keeps the node's own canvas).
     reference_audios: list[str | Path] | None = None,
     reference_videos: list[dict[str, Any]] | None = None,
+    # Head replacement (workflow minimax-h3-inpaint). The clip BEING INPAINTED,
+    # which is neither a source video (that means "extend this shot") nor a
+    # reference (that is conditioning): its pixels outside the mask, and its
+    # whole soundtrack, are what the result is made of. `mask_image_path` is the
+    # hand-painted region, white where the head is replaced; with
+    # mask_source="sam3" it is unused and the subject is tracked instead.
+    source_video_path: str | Path | None = None,
+    mask_image_path: str | Path | None = None,
+    mask_video_path: str | Path | None = None,
+    mask_source: str = "",
+    inpaint_options: dict[str, Any] | None = None,
     duration_seconds: float = 4,
     aspect_ratio: str = "",
     resolution: str = "",
@@ -344,6 +355,21 @@ def start_video(
     for index, reference in enumerate(video_references, start=1):
         if not reference["video_path"].is_file():
             raise FileNotFoundError(f"Motion clip {index} could not be read")
+    inpaint_source = Path(source_video_path).expanduser().resolve() if source_video_path else None
+    inpaint_mask = Path(mask_image_path).expanduser().resolve() if mask_image_path else None
+    inpaint_mask_video = Path(mask_video_path).expanduser().resolve() if mask_video_path else None
+    if inpaint_source is not None and not inpaint_source.is_file():
+        raise FileNotFoundError("The clip being inpainted could not be read")
+    if inpaint_mask is not None and not inpaint_mask.is_file():
+        raise FileNotFoundError("The painted mask could not be read")
+    if inpaint_mask_video is not None and not inpaint_mask_video.is_file():
+        raise FileNotFoundError("The tracked mask clip could not be read")
+    # Two different jobs that both attach a clip, and running them together is
+    # not a combination — it is a request with no answer.
+    if inpaint_source is not None and video is not None:
+        raise ValueError(
+            "Head replacement rewrites an existing clip and cannot be combined with a source video"
+        )
     if video is not None and not video.is_file():
         raise FileNotFoundError("The source video could not be read")
     if motion_context is not None and not motion_context.is_file():
@@ -379,6 +405,13 @@ def start_video(
         uploaded_motion_context_name = _upload_video(descriptor, motion_context) if motion_context is not None else ""
         if uploaded_motion_context_name:
             uploaded_names.append(uploaded_motion_context_name)
+        uploaded_inpaint_source = _upload_video(descriptor, inpaint_source) if inpaint_source is not None else ""
+        if uploaded_inpaint_source:
+            uploaded_names.append(uploaded_inpaint_source)
+        uploaded_inpaint_mask = _upload_image(descriptor, inpaint_mask) if inpaint_mask is not None else ""
+        uploaded_inpaint_mask_video = _upload_video(descriptor, inpaint_mask_video) if inpaint_mask_video is not None else ""
+        if uploaded_inpaint_mask_video:
+            uploaded_names.append(uploaded_inpaint_mask_video)
         uploaded_image_name = _upload_image(descriptor, image) if image is not None else ""
         if uploaded_image_name:
             uploaded_names.append(uploaded_image_name)
@@ -436,6 +469,14 @@ def start_video(
             **({"reference_audios": [{"audio_path": name} for name in reference_audio_names]}
                if reference_audio_names else {}),
             **({"reference_videos": reference_video_entries} if reference_video_entries else {}),
+            **({"source_video_path": uploaded_inpaint_source} if uploaded_inpaint_source else {}),
+            **({"mask_image_path": uploaded_inpaint_mask} if uploaded_inpaint_mask else {}),
+            **({"mask_video_path": uploaded_inpaint_mask_video} if uploaded_inpaint_mask_video else {}),
+            **({"mask_source": mask_source.strip().lower()}
+               if mask_source.strip().lower() in {"manual", "sam3", "sequence"} else {}),
+            # The mask and crop dials, forwarded only where the caller set one so
+            # the workflow's own defaults stay in charge of everything else.
+            **_inpaint_arguments(inpaint_options),
             # Forward a concrete seed so each run differs; a missing/-1 seed makes the
             # runner fall back to its FIXED default (42), which is why "every video
             # looked the same". Callers send a fresh random seed for random mode.
@@ -764,6 +805,17 @@ def generate_video(
     reference_images: list[str | Path] | None = None,
     reference_audios: list[str | Path] | None = None,
     reference_videos: list[dict[str, Any]] | None = None,
+    # Head replacement (workflow minimax-h3-inpaint). The clip BEING INPAINTED,
+    # which is neither a source video (that means "extend this shot") nor a
+    # reference (that is conditioning): its pixels outside the mask, and its
+    # whole soundtrack, are what the result is made of. `mask_image_path` is the
+    # hand-painted region, white where the head is replaced; with
+    # mask_source="sam3" it is unused and the subject is tracked instead.
+    source_video_path: str | Path | None = None,
+    mask_image_path: str | Path | None = None,
+    mask_video_path: str | Path | None = None,
+    mask_source: str = "",
+    inpaint_options: dict[str, Any] | None = None,
     duration_seconds: float = 4,
     aspect_ratio: str = "",
     resolution: str = "",
@@ -799,6 +851,11 @@ def generate_video(
         reference_images=reference_images,
         reference_audios=reference_audios,
         reference_videos=reference_videos,
+        source_video_path=source_video_path,
+        mask_image_path=mask_image_path,
+        mask_video_path=mask_video_path,
+        mask_source=mask_source,
+        inpaint_options=inpaint_options,
         duration_seconds=duration_seconds,
         aspect_ratio=aspect_ratio,
         resolution=resolution,
@@ -1095,6 +1152,66 @@ def _reachable(url: str, token: str) -> bool:
         return exc.code < 500 and exc.code not in {401, 403}
     except OSError:
         return False
+
+
+# The head-replacement dials, as a whitelist with the range each one means.
+#
+# A whitelist rather than a passthrough because this dict arrives from the
+# browser: an unknown key would reach the MCP as an unknown argument and be
+# refused there, where the message is redacted and reads as a generic failure.
+# Clamped rather than rejected for the same reason a slider has ends — every
+# value in range is a legal choice, and the workflow's own default covers the
+# ones nobody set, which is why an unset dial is OMITTED rather than defaulted
+# here (two places holding the same default is one place to forget).
+_INPAINT_NUMERIC_DIALS: dict[str, tuple[type, float, float]] = {
+    "sam3_detection_threshold": (float, 0.05, 0.95),
+    "sam3_max_objects": (int, 0, 64),
+    "sam3_detect_interval": (int, 1, 64),
+    "mask_expand": (int, -512, 512),
+    "mask_feather": (int, 0, 256),
+    "mask_despeckle": (int, 0, 256),
+    "mask_temporal_expand": (int, 0, 64),
+    # 0 means "no crop, the whole frame"; below 1 would be a window smaller than
+    # the subject, which the node refuses. Checked, not clamped, so the refusal
+    # can say what the number means.
+    "crop_scale": (float, 0, 4),
+    "crop_megapixels": (float, 0.1, 2),
+    "paste_expand": (int, -512, 512),
+    "paste_feather": (int, 0, 256),
+    "paste_edge_feather": (int, 0, 256),
+}
+_INPAINT_CROP_MODES = ("combined", "tracked", "zoomed")
+
+
+def _inpaint_arguments(options: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(options, dict):
+        return {}
+    arguments: dict[str, Any] = {}
+    for key, (kind, low, high) in _INPAINT_NUMERIC_DIALS.items():
+        if options.get(key) is None:
+            continue
+        try:
+            value = kind(options[key])
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a number") from None
+        if key == "crop_scale" and 0 < value < 1:
+            raise ValueError(
+                "crop_scale is a multiple of the subject's own extent: 0 for the whole frame, "
+                "or 1.0-4.0 to crop around it"
+            )
+        arguments[key] = max(low, min(high, value))
+    prompt = str(options.get("sam3_prompt") or "").strip()
+    if prompt:
+        arguments["sam3_prompt"] = prompt[:200]
+    indices = str(options.get("sam3_object_indices") or "").strip()
+    if indices:
+        arguments["sam3_object_indices"] = indices[:100]
+    crop_mode = str(options.get("crop_mode") or "").strip().lower()
+    if crop_mode:
+        if crop_mode not in _INPAINT_CROP_MODES:
+            raise ValueError(f"crop_mode must be one of {', '.join(_INPAINT_CROP_MODES)}")
+        arguments["crop_mode"] = crop_mode
+    return arguments
 
 
 def _upload_image(descriptor: MediaStudioDescriptor, image: Path) -> str:

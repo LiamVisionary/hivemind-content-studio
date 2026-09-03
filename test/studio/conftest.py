@@ -6,10 +6,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import passbook
 import pytest
 
 from hivemind_content_studio import (
     gpu_rentals, hivemindos_models, mtplx_server, private_access, provider_models,
+    shared_env,
 )
 
 
@@ -45,6 +47,46 @@ def _restore_process_env():
     for key, value in snapshot.items():
         if os.environ.get(key) != value:
             os.environ[key] = value
+
+
+@pytest.fixture(autouse=True)
+def _no_test_stamps_the_machines_access_ledger():
+    """Keep the suite out of the machine's real credential record.
+
+    `passbook.set_recorder()` is process-global, so monkeypatch cannot undo it.
+    `build_control_app()` arms it through `enable_access_stamps()`, and
+    test_gpu_rentals_api's `test_account_state_reports_burn_and_runway` calls
+    `monkeypatch.undo()` — which drops every patch it has, the autouse redirect
+    that keeps this suite off the real store included — and then builds an app.
+    From that test onwards the machine's REAL hash-chained ledger was armed for
+    the rest of the run, and since the redirect points every later read at a
+    store that does not exist, each one came back empty and was stamped as a
+    DENIED read by this app: 45 rows per run, 37 of them for the same key.
+
+    In `passbook access` that is indistinguishable from the studio polling for
+    a credential it has no grant for, in bursts, as pytest walks the files —
+    and it was diagnosed as exactly that. Cleared before and after each test,
+    so none inherits an armed recorder and none leaves one behind; a test that
+    wants stamping arms it itself. Same reason `_restore_process_env` exists:
+    process-global state that monkeypatch does not know it changed.
+    """
+    passbook.set_recorder(None)
+    yield
+    passbook.set_recorder(None)
+
+
+@pytest.fixture(autouse=True)
+def _forget_credential_refusals(monkeypatch) -> None:
+    """Each test starts with `request_credential`'s refusal memory empty.
+
+    The backoff is process state on purpose — in the studio a refusal answered
+    from memory is the fix for a status poll hammering the machine's access
+    ledger. Across tests it is ordering poison: the sealed-store test feeds the
+    memory for HIVEMINDOS_DASHBOARD_DEVICE_TOKEN, and the unsealed-store test
+    that runs seconds later gets the remembered refusal instead of its own
+    store's value.
+    """
+    monkeypatch.setattr(shared_env, "_refused", {})
 
 
 @pytest.fixture(autouse=True)
@@ -266,25 +308,70 @@ def _no_ssh_probes_from_tests(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def rental_manifest(monkeypatch):
-    """Generating a rental onstart publishes the weights manifest to R2. No
-    test may do that over the network; every test gets a recorder instead.
-    Request this fixture by name to read what would have been published:
-    `rental_manifest["text"]` is the tab-separated manifest, `["url"]` the
-    presigned GET the onstart carries. Tests of the publisher itself call the
-    real function through `rental_manifest["real_publish"]`."""
+def _no_r2_publishes_from_tests(monkeypatch):
+    """Generating a rental onstart PUTs to the private bucket. No test may.
+
+    Every boot-time payload — the weights manifest, the TensorRT node pack —
+    goes through `_publish_rental_object`, so blocking it there covers all of
+    them, including the next one. Recorded rather than refused: a dozen tests
+    legitimately generate an onstart and none of them care where the payload
+    went, so making them all opt in would be ceremony. What matters is that the
+    bytes stop here.
+
+    Before this existed the onstart-size tests wrote a real manifest to R2 on
+    every CI run, because the opt-in `rental_manifest` fixture only covered the
+    tests that asked for it.
+    """
     from hivemind_content_studio import gpu_rentals
 
-    recorded = {"text": None, "url": "https://r2.example/rental-manifests/test.tsv?X-Amz-Signature=m",
-                "real_publish": gpu_rentals._publish_rental_manifest, "calls": 0}
+    recorded = {"objects": [], "real_publish": gpu_rentals._publish_rental_object}
 
-    def fake_publish(text: str) -> str:
-        recorded["text"] = text
-        recorded["calls"] += 1
-        return recorded["url"]
+    def fake_publish(data, *, suffix, content_type, label):
+        recorded["objects"].append({"data": data, "suffix": suffix, "label": label})
+        return f"https://r2.example/rental-manifests/test{suffix}?X-Amz-Signature=m"
 
-    monkeypatch.setattr(gpu_rentals, "_publish_rental_manifest", fake_publish)
+    monkeypatch.setattr(gpu_rentals, "_publish_rental_object", fake_publish)
     return recorded
+
+
+@pytest.fixture
+def rental_manifest(_no_r2_publishes_from_tests):
+    """What the onstart would have published for the weights manifest.
+
+    `rental_manifest["text"]` is the tab-separated manifest and `["url"]` the
+    presigned GET the onstart carries. A view over the autouse recorder above,
+    so requesting it changes nothing about isolation — it only reads."""
+    recorded = _no_r2_publishes_from_tests
+
+    class _Manifest:
+        url = "https://r2.example/rental-manifests/test.tsv?X-Amz-Signature=m"
+
+        def _rows(self):
+            return [item for item in recorded["objects"] if item["suffix"] == ".tsv"]
+
+        def __getitem__(self, key):
+            if key == "text":
+                rows = self._rows()
+                return rows[-1]["data"].decode("utf-8") if rows else None
+            if key == "url":
+                return self.url
+            if key == "calls":
+                return len(self._rows())
+            if key == "real_publish":
+                # The real MANIFEST publisher, for the tests that exercise the
+                # transport itself: it goes through the real object publisher
+                # (which those tests fake at requests.put), not the recorder.
+                def publish(text):
+                    return recorded["real_publish"](
+                        text.encode("utf-8"),
+                        suffix=".tsv",
+                        content_type="text/tab-separated-values",
+                        label="weights manifest",
+                    )
+                return publish
+            raise KeyError(key)
+
+    return _Manifest()
 
 
 def pytest_configure(config):

@@ -6314,3 +6314,30 @@ class RowObservationTests(unittest.TestCase):
         for missing in (b'{"prompt":{}}', b'{"prompt":{},"packed_rows":"lots"}',
                         b'{"prompt":{},"packed_rows":0}', b'not json'):
             self.assertIsNone(self.app._packed_rows_from_comfy_prompt_body(missing))
+
+
+
+class TheHostedLaneIsNotAComfyLane(unittest.TestCase):
+    """`run_on: "cloud"` must reach the resolver, not the ComfyUI pin check.
+
+    Measured on the first end-to-end run of the hosted lane: the start route
+    asked `comfy_lane_for_pin` about every pin before the resolver saw it, the
+    hosted lane is not in COMFY_LANES because it has no machine, and the only
+    paid-per-render lane in the studio answered 409 to every start. The quote
+    a moment earlier had worked, which is what made it look like a billing
+    problem rather than a routing one.
+    """
+
+    def test_the_cloud_pin_is_never_refused_as_stale(self):
+        app = load_app()
+        self.assertIsNone(app.restore_pin_error({"run_on": "cloud"}))
+
+    def test_an_empty_pin_is_fine_and_a_stale_one_is_still_refused(self):
+        app = load_app()
+        self.assertIsNone(app.restore_pin_error({}))
+        self.assertIsNone(app.restore_pin_error({"run_on": ""}))
+        # A rental id no lane is attached under is exactly the stale pin the
+        # check exists for.
+        error = app.restore_pin_error({"run_on": "rental00000000"})
+        self.assertIsInstance(error, str)
+        self.assertTrue(error)

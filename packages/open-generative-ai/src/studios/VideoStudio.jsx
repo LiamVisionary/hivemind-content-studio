@@ -53,6 +53,13 @@ import { downloadMedia } from '../lib/downloadMedia.js';
 import { collectChainClips, missingChainParent } from '../lib/chainLineage.js';
 import { chainKey, chainTimelineModel } from '../lib/chainTimeline.js';
 import { ChainTimeline } from './video/ChainTimeline.jsx';
+import { TIMELINE_SEGMENT_DRAG_TYPE, TimelineStrip } from './video/TimelineStrip.jsx';
+import {
+  addTimelineSegment, captureIntoTimeline, filledTimelineSegments, fillTimelineSegment,
+  insertTimelineSegment, loadTimelineState, moveTimelineSegment, newTimelineSegment,
+  openTimeline, removeTimelineSegment, saveTimelineState, timelineCanCombine,
+  timelineCombineKey, timelineContinuationPlan, timelineDropPlan,
+} from '../lib/videoTimeline.js';
 import { ShotBuilderChip, ShotBuilderDialog, blankTimeline } from './video/ShotBuilder.jsx';
 import { PromptCheckMenu } from './video/PromptCheckMenu.jsx';
 import { armChainPrompt } from '../lib/chainPrompt.js';
@@ -79,6 +86,7 @@ import {
   pollHivemindVideoJob,
   previewHivemindIngredientSheet,
   referenceWorkflowForHivemindModel,
+  inpaintWorkflowForHivemindModel,
   selectableHivemindModelId,
   saveStudioGenerationHistory,
   uploadFileToHivemindStudio,
@@ -101,6 +109,7 @@ import { StudioLayout } from '../ui/kit.jsx';
 import { UploadPicker } from './UploadPicker.jsx';
 import { FrameSlotsPicker } from './video/FrameSlotsPicker.jsx';
 import { ReferencesMenu } from './video/ReferencesMenu.jsx';
+import { VideoInpaintDialog } from '../dialogs/VideoInpaintDialog.jsx';
 import {
   composerFrameHint, composerReferenceHint, describeReferenceAttachment, describeReferenceRejection,
 } from './video/referenceKinds.js';
@@ -316,6 +325,8 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // which is the LoRA downloader.
     civitaiPost: null,
     promptHelperOpen: false,
+    // Head replacement: which attached motion clip has its dialog open.
+    inpaintOpenIndex: null,
     resumeRemaining: 0,
     deleteTarget: null,
     // A pending "attach this clip?" question: { lines, resolve } while the
@@ -337,6 +348,29 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // Shot sets already stored as an output, so rebuilding the same episode
     // does not file a second copy of it.
     chainSavedKeys: [],
+    // The MANUAL timeline (lib/videoTimeline.js): the strip of segment cards
+    // the Timeline button opens. Segments + toggles survive a reload per tab
+    // (sessionStorage, hydrated in a mount effect); the built cut is an object
+    // URL and is rebuilt instead of persisted. Not in VIDEO_TAB_FIELDS on
+    // purpose — like the strip, it is run state a duplicated tab starts without.
+    timelineOn: false,
+    timelineSegments: [],
+    timelineSelectedId: '',
+    timelineExtend: false,
+    timelineShowCombined: false,
+    timelineCombined: null,
+    timelineBuilding: false,
+    timelineBuildError: '',
+    timelineBuildTimer: null,
+    // Cut keys already stored as an output (localAI.saveEpisode), so viewing
+    // or exporting the same cut twice does not file two copies.
+    timelineSavedKeys: [],
+    timelineDeleteTarget: null,
+    timelineReplaceTarget: null,
+    // What Auto-continue armed, so turning it off disarms only what IT did —
+    // never a chain or start frame the user set by hand.
+    timelineArmedChainUrl: '',
+    timelineSeededFrame: '',
     // Who is in the shot. Held HERE rather than inside the Cast menu because a
     // prompt loaded from the library has to be recast on its way into the
     // composer, and a menu that only remembers its members while it is open
@@ -1241,9 +1275,17 @@ export function VideoStudio({
   };
 
   const onReferenceVideosChange = (items) => {
+    const videos = (Array.isArray(items) ? items : []).filter((item) => item?.url);
     s.setup = withDurationThatFits({
       ...s.setup,
-      referenceVideos: (Array.isArray(items) ? items : []).filter((item) => item?.url),
+      referenceVideos: videos,
+      // Head replacement is armed AGAINST one of these clips. Detaching that
+      // clip disarms it: the alternative is a run pointed at footage no longer
+      // in the panel, which would either fail at the gateway or — worse —
+      // quietly rewrite a clip the user thought they had removed.
+      inpaint: s.setup.inpaint && !videos.some((item) => item.url === s.setup.inpaint.url)
+        ? null
+        : s.setup.inpaint,
     });
     afterRowsChanged();
   };
@@ -1305,6 +1347,20 @@ export function VideoStudio({
       // Changed by the cast, not merely re-timed.
       announceWeave(zh() ? '已把演员表织入提示词' : 'Cast woven into the prompt', before);
     }
+  };
+
+  // A starter that opts into setting the studio up for itself (the multi-shot
+  // timeline sequences do): the slot's own length is applied when this model
+  // offers it, and the timeline view opens so the finished clip lands as shot
+  // 1 — the two steps its note would otherwise ask the user to do by hand.
+  const applyStarterSetup = ({ timeline = false, durationSeconds = 0 } = {}) => {
+    if (!timeline) return;
+    const wanted = Number(durationSeconds);
+    if (wanted > 0 && Number(s.setup.duration) !== wanted
+        && durationsFor(s.setup, s.setup.modelId).map(Number).includes(wanted)) {
+      commit({ ...s.setup, duration: wanted });
+    }
+    if (!s.timelineOn) openTimelineView();
   };
 
   // LTX 2.3 first/middle/end keyframes (Hivemind local). Kept separate from the
@@ -1751,6 +1807,9 @@ export function VideoStudio({
       s.progressReal = 1;
       stopGenerationProgress();
       void playCompletionPing();
+      // The manual timeline captures every finished generation: into the
+      // selected slot when it is empty, as a new segment after it otherwise.
+      if (s.timelineOn) captureTimelineResult(url, model);
     }
     bump();
   };
@@ -2202,6 +2261,514 @@ export function VideoStudio({
     commit({ ...s.setup, motionContextUrl: null, motionContextIndex: null });
   };
 
+  /* ---------------- manual timeline (lib/videoTimeline.js) ---------------- */
+
+  const timelineCutLabel = () => (zh() ? '时间线合成片' : 'Timeline cut');
+
+  const persistTimeline = () => saveTimelineState(tabIdRef.current, {
+    on: s.timelineOn,
+    segments: s.timelineSegments,
+    selectedId: s.timelineSelectedId,
+    extend: s.timelineExtend,
+    showCombined: s.timelineShowCombined,
+  });
+
+  const afterTimelineChange = () => {
+    persistTimeline();
+    scheduleTimelineBuild();
+    bump();
+  };
+
+  // The model label a dropped clip lands with: the strip knows it, and the
+  // sealed context knows it for clips restored from History.
+  const clipModelFor = (url) => s.generationHistory.find((entry) => entry.url === url
+      || (Array.isArray(entry.aliasUrls) && entry.aliasUrls.includes(url)))?.model
+    || s.contextStore.recall(url)?.model
+    || '';
+
+  // The card's hover title: the clip's own prompt where it is recallable and
+  // not private, else the model it was made with.
+  const timelinePromptFor = (seg) => {
+    const entry = s.generationHistory.find((item) => item.url === seg.url);
+    if (entry?.prompt && !entry.prompt_private) return entry.prompt;
+    return s.contextStore.recall(seg.url)?.prompt || seg.model || '';
+  };
+
+  const openTimelineView = () => {
+    if (s.timelineOn) return;
+    s.timelineOn = true;
+    // First open seeds shot 1 from what is on screen — the timeline "starts
+    // with the existing shot"; with an empty canvas it opens on an empty slot.
+    if (!s.timelineSegments.length) {
+      const opened = openTimeline(s.resultUrl || '', s.resultModel || '');
+      s.timelineSegments = opened.segments;
+      s.timelineSelectedId = opened.selectedId;
+    }
+    afterTimelineChange();
+  };
+
+  const closeTimelineView = () => {
+    if (!s.timelineOn) return;
+    s.timelineOn = false;
+    s.timelineShowCombined = false;
+    disarmTimelineContinuation();
+    persistTimeline();
+    bump();
+  };
+
+  const timelineSelect = (seg) => {
+    s.timelineSelectedId = seg.id;
+    s.timelineShowCombined = false;
+    persistTimeline();
+    if (seg.url) {
+      showVideoInCanvas(seg.url, seg.model || clipModelFor(seg.url), { anchorChain: false, userInitiated: true });
+      return;
+    }
+    // An empty slot is "write the next shot": clear the player, arm the
+    // continuation if Auto-continue is on, and put the caret in the composer.
+    s.resultUrl = null;
+    s.resultModel = null;
+    armTimelineContinuation();
+    bump();
+    focusPrompt();
+  };
+
+  const timelineAdd = () => {
+    const next = addTimelineSegment(s.timelineSegments);
+    s.timelineSegments = next.segments;
+    s.timelineSelectedId = next.selectedId;
+    s.timelineShowCombined = false;
+    s.resultUrl = null;
+    s.resultModel = null;
+    armTimelineContinuation();
+    afterTimelineChange();
+    focusPrompt();
+  };
+
+  // A finished generation lands in the strip: into the selected slot when it
+  // is empty, as a new segment right after it otherwise (never a silent
+  // replacement). Called from showVideoInCanvas on the fromGeneration path.
+  const captureTimelineResult = (url, model) => {
+    const captured = captureIntoTimeline(s.timelineSegments, s.timelineSelectedId, { url, model });
+    s.timelineSegments = captured.segments;
+    s.timelineSelectedId = captured.selectedId;
+    // The fresh clip is what plays now, not a stale full cut.
+    s.timelineShowCombined = false;
+    persistTimeline();
+    scheduleTimelineBuild();
+  };
+
+  /* ---- Auto-continue: the next shot picks up from the previous clip ---- */
+
+  // The mechanism is a property of the MODEL: H3 chains through Motion Context
+  // (pinned tail, room tone carries), everything else with a start-image input
+  // opens on the previous clip's last frame, grabbed on this device.
+  const timelineExtendModeFor = (entry) => (entry?.supportsMotionContext ? 'chain'
+    : (entry?.supportsStartFrame ? 'frame' : ''));
+
+  const seedStartFrameFromClip = async (url) => {
+    try {
+      const src = await resolveMediaSrc(url);
+      const blob = await (await fetch(src)).blob();
+      // Dynamic import on purpose: clipPrep carries mediabunny, which should
+      // not weigh down the studio chunk until a frame is actually grabbed.
+      const { grabFrame, probeClip } = await import('../lib/clipPrep.js');
+      const probed = await probeClip(blob);
+      const frame = await grabFrame(blob, Math.max(0, (Number(probed?.duration) || 0) - 0.05));
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('could not read the grabbed frame'));
+        reader.readAsDataURL(frame.blob);
+      });
+      // Never clobber a start frame the user picked by hand — only replace the
+      // one this feature seeded.
+      if (s.setup.imageUrl && s.setup.imageUrl !== s.timelineSeededFrame) return;
+      s.timelineSeededFrame = dataUrl;
+      commit({ ...s.setup, imageUrl: dataUrl });
+    } catch (error) {
+      toast.error(zh()
+        ? `无法提取上一段的最后一帧：${error?.message || ''}`
+        : `Could not grab the previous clip's last frame: ${error?.message || 'unknown error'}`);
+    }
+  };
+
+  const armTimelineContinuation = () => {
+    if (!s.timelineOn || !s.timelineExtend) return;
+    const entry = currentModel(s.setup, s.catalogs);
+    const plan = timelineContinuationPlan(entry, s.timelineSegments, s.timelineSelectedId);
+    if (!plan) return;
+    if (plan.mode === 'chain') {
+      if (s.setup.motionContextUrl === plan.fromUrl) return;
+      // Same shape as continueSceneFrom: the chain replaces the frames, and
+      // the visible continuity scaffold keeps the prompt describing ONE scene.
+      commit({
+        ...s.setup,
+        imageUrl: null,
+        videoUrl: null,
+        videoName: null,
+        motionContextUrl: plan.fromUrl,
+        motionContextIndex: plan.fromIndex + 1,
+        prompt: armChainPrompt(s.setup.prompt),
+      });
+      s.timelineArmedChainUrl = plan.fromUrl;
+      return;
+    }
+    void seedStartFrameFromClip(plan.fromUrl);
+  };
+
+  const disarmTimelineContinuation = () => {
+    let next = s.setup;
+    let changed = false;
+    if (s.timelineArmedChainUrl && s.setup.motionContextUrl === s.timelineArmedChainUrl) {
+      next = { ...next, motionContextUrl: null, motionContextIndex: null };
+      changed = true;
+    }
+    if (s.timelineSeededFrame && s.setup.imageUrl === s.timelineSeededFrame) {
+      next = { ...next, imageUrl: null };
+      changed = true;
+    }
+    s.timelineArmedChainUrl = '';
+    s.timelineSeededFrame = '';
+    if (changed) commit(next);
+  };
+
+  const timelineToggleExtend = () => {
+    s.timelineExtend = !s.timelineExtend;
+    if (s.timelineExtend) armTimelineContinuation();
+    else disarmTimelineContinuation();
+    persistTimeline();
+    bump();
+  };
+
+  /* ---- the full cut: built quietly after every change ---- */
+
+  const scheduleTimelineBuild = () => {
+    if (s.timelineBuildTimer) clearTimeout(s.timelineBuildTimer);
+    s.timelineBuildTimer = setTimeout(() => {
+      s.timelineBuildTimer = null;
+      void buildTimelineCut();
+    }, 450);
+  };
+
+  const dropTimelineCombined = () => {
+    if (s.timelineCombined?.url) URL.revokeObjectURL(s.timelineCombined.url);
+    s.timelineCombined = null;
+  };
+
+  // Joins the filled segments losslessly on this device (clipJoiner — the
+  // clips are E2E-sealed at rest and only this side holds the key), silently:
+  // this runs after every edit so the Full-cut toggle is always ready. Unlike
+  // the chain's build there are no toasts — the only visible signs are the
+  // spinner on the toggle and the note when clips cannot be joined.
+  const buildTimelineCut = async () => {
+    if (!s.timelineOn) return;
+    const urls = filledTimelineSegments(s.timelineSegments).map((seg) => seg.url);
+    const key = urls.join(' ');
+    if (urls.length < 2) {
+      dropTimelineCombined();
+      s.timelineBuildError = '';
+      bump();
+      return;
+    }
+    if (s.timelineBuilding || (s.timelineCombined?.key === key && !s.timelineBuildError)) return;
+    s.timelineBuilding = true;
+    s.timelineBuildError = '';
+    bump();
+    try {
+      const { joinClips } = await import('../lib/clipJoiner.js');
+      const blobs = [];
+      for (const url of urls) {
+        const src = await resolveMediaSrc(url);
+        blobs.push(await (await fetch(src)).blob());
+      }
+      const joined = await joinClips(blobs);
+      const old = s.timelineCombined;
+      s.timelineCombined = {
+        url: URL.createObjectURL(joined.blob),
+        seconds: joined.seconds,
+        audioJoined: joined.audioJoined,
+        key,
+      };
+      // Swap before revoking: the player may be holding the old URL.
+      if (s.timelineShowCombined) {
+        showVideoInCanvas(s.timelineCombined.url, timelineCutLabel(), { anchorChain: false });
+        void saveTimelineCutIfNeeded();
+      }
+      if (old?.url) URL.revokeObjectURL(old.url);
+    } catch (error) {
+      s.timelineBuildError = error?.message || (zh() ? '拼接失败' : 'join failed');
+      dropTimelineCombined();
+      if (s.timelineShowCombined) s.timelineShowCombined = false;
+    } finally {
+      s.timelineBuilding = false;
+      bump();
+      // The strip changed while this build ran — build again for the new set.
+      if (s.timelineOn && timelineCombineKey(s.timelineSegments) !== key) scheduleTimelineBuild();
+    }
+  };
+
+  const timelineToggleCombined = (view) => {
+    if (!view) {
+      s.timelineShowCombined = false;
+      persistTimeline();
+      const seg = s.timelineSegments.find((item) => item.id === s.timelineSelectedId);
+      if (seg?.url) {
+        showVideoInCanvas(seg.url, seg.model || clipModelFor(seg.url), { anchorChain: false, userInitiated: true });
+      } else {
+        s.resultUrl = null;
+        s.resultModel = null;
+        bump();
+      }
+      return;
+    }
+    if (!timelineCanCombine(s.timelineSegments)) {
+      toast(zh() ? '至少需要两段片段才能合成完整片。' : 'Add a second clip and the full cut builds itself.');
+      return;
+    }
+    if (s.timelineBuildError) return; // the note under the header says why
+    s.timelineShowCombined = true;
+    persistTimeline();
+    if (s.timelineCombined?.url && s.timelineCombined.key === timelineCombineKey(s.timelineSegments)) {
+      showVideoInCanvas(s.timelineCombined.url, timelineCutLabel(), { anchorChain: false, userInitiated: true });
+      void saveTimelineCutIfNeeded();
+      return;
+    }
+    // Remembered intent: the build in flight (or scheduled here) swaps the
+    // cut in the moment it lands.
+    scheduleTimelineBuild();
+    bump();
+  };
+
+  // The cut an object URL alone would lose with the tab: stored ONCE per shot
+  // set as a real output — sealed like any clip, so it lands in History and
+  // survives — the first time the user actually views or exports it. Building
+  // is automatic and frequent; filing every intermediate build is not wanted.
+  const saveTimelineCutIfNeeded = async () => {
+    const cut = s.timelineCombined;
+    if (!cut?.url || !isLocalAIAvailable() || s.timelineSavedKeys.includes(cut.key)) return;
+    s.timelineSavedKeys = [...s.timelineSavedKeys, cut.key];
+    try {
+      const blob = await (await fetch(cut.url)).blob();
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error('could not read the joined cut'));
+        reader.readAsDataURL(blob);
+      });
+      const saved = await localAI.saveEpisode({
+        video_base64: dataUrl,
+        shots: filledTimelineSegments(s.timelineSegments).length,
+      });
+      if (saved?.url) {
+        addToHistory({
+          id: `timeline-${Date.now()}`,
+          url: saved.url,
+          model: timelineCutLabel(),
+          timestamp: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // Best-effort: the cut is on screen and exportable either way. Let a
+      // later view retry.
+      s.timelineSavedKeys = s.timelineSavedKeys.filter((value) => value !== cut.key);
+    }
+  };
+
+  const exportTimelineCut = async () => {
+    const cut = s.timelineCombined;
+    if (!cut?.url) return;
+    await downloadFile(cut.url, videoDownloadName(timelineCutLabel(), `cut-${filledTimelineSegments(s.timelineSegments).length}`));
+    void saveTimelineCutIfNeeded();
+  };
+
+  /* ---- removing a segment (and, if asked, the clip on disk) ---- */
+
+  const timelineRemoveRequest = (seg) => {
+    // An empty slot holds nothing — no confirm for removing a placeholder.
+    if (!seg.url) {
+      const next = removeTimelineSegment(s.timelineSegments, seg.id, s.timelineSelectedId);
+      s.timelineSegments = next.segments;
+      s.timelineSelectedId = next.selectedId;
+      afterTimelineChange();
+      return;
+    }
+    s.timelineDeleteTarget = { segment: seg, deleteDisk: false, row: null, resolvingRow: true };
+    bump();
+    // Resolve whether this clip has a deletable file on this device — a cloud
+    // result has nothing local, and the toggle must not promise a deletion
+    // that cannot happen.
+    void (async () => {
+      let row = null;
+      try {
+        const hub = await import('../hub/hubData.js');
+        await hub.ensureCanvasHistoryLoaded();
+        row = hub.findCanvasOutputForUrl(seg.url, basenameOf(seg.url));
+      } catch { /* no History reachable — the toggle stays off */ }
+      if (s.timelineDeleteTarget?.segment?.id !== seg.id) return;
+      s.timelineDeleteTarget = { ...s.timelineDeleteTarget, row, resolvingRow: false };
+      bump();
+    })();
+  };
+
+  const confirmTimelineRemove = async () => {
+    const target = s.timelineDeleteTarget;
+    if (!target) return;
+    s.timelineDeleteTarget = null;
+    const { segment } = target;
+    const next = removeTimelineSegment(s.timelineSegments, segment.id, s.timelineSelectedId);
+    s.timelineSegments = next.segments;
+    s.timelineSelectedId = next.selectedId;
+    if (s.resultUrl === segment.url) {
+      s.resultUrl = null;
+      s.resultModel = null;
+    }
+    afterTimelineChange();
+    if (!target.deleteDisk || !target.row?.historyId) return;
+    // Deleting the file: through the same route History uses —
+    // delete_output_everywhere removes the file, every sidecar and cache, and
+    // the History row (hubData toasts the outcome itself).
+    try {
+      const hub = await import('../hub/hubData.js');
+      const deleted = await hub.deleteCanvasOutput(target.row.historyId);
+      if (!deleted) return;
+      s.generationHistory = s.generationHistory.filter((entry) => entry.url !== segment.url
+        && !(Array.isArray(entry.aliasUrls) && entry.aliasUrls.includes(segment.url)));
+      saveStudioGenerationHistory('video_history', s.generationHistory, 30);
+      if (s.setup.motionContextUrl === segment.url) clearMotionContext();
+      bump();
+    } catch (error) {
+      toast.error(error?.message || (zh() ? '删除文件失败' : 'Could not delete the file'));
+    }
+  };
+
+  /* ---- drops: clips in, cards reordered ---- */
+
+  const applyTimelinePlan = (plan, clip) => {
+    if (!plan) return;
+    if (plan.action === 'move') {
+      s.timelineSegments = moveTimelineSegment(s.timelineSegments, plan.id, plan.index);
+      s.timelineSelectedId = plan.id;
+      s.timelineShowCombined = false;
+      afterTimelineChange();
+      return;
+    }
+    if (plan.action === 'replace') {
+      // Replacing a clip the user placed loses work — ask first.
+      s.timelineReplaceTarget = { id: plan.id, clip };
+      bump();
+      return;
+    }
+    let landedId = '';
+    if (plan.action === 'fill') {
+      s.timelineSegments = fillTimelineSegment(s.timelineSegments, plan.id, clip);
+      landedId = plan.id;
+    } else if (plan.action === 'insert' || plan.action === 'append') {
+      const seg = newTimelineSegment(clip.url, clip.model);
+      s.timelineSegments = insertTimelineSegment(
+        s.timelineSegments,
+        plan.action === 'append' ? s.timelineSegments.length : plan.index,
+        seg,
+      );
+      landedId = seg.id;
+    }
+    if (!landedId) return;
+    s.timelineSelectedId = landedId;
+    s.timelineShowCombined = false;
+    afterTimelineChange();
+    if (clip?.url) showVideoInCanvas(clip.url, clip.model, { anchorChain: false, userInitiated: true });
+  };
+
+  const confirmTimelineReplace = () => {
+    const target = s.timelineReplaceTarget;
+    if (!target) return;
+    s.timelineReplaceTarget = null;
+    s.timelineSegments = fillTimelineSegment(s.timelineSegments, target.id, target.clip);
+    s.timelineSelectedId = target.id;
+    s.timelineShowCombined = false;
+    afterTimelineChange();
+    showVideoInCanvas(target.clip.url, target.clip.model, { anchorChain: false, userInitiated: true });
+  };
+
+  // OS files dropped on the strip: uploaded like any reference clip, then
+  // landed through the same plan a dragged output takes. The first file gets
+  // the drop's own position; the rest follow it in order.
+  const timelineAttachFiles = async (target, files) => {
+    if (!isHivemindStudioEnabled()) {
+      toast.error(zh() ? '需要连接 Media Studio 才能上传片段。' : 'Uploading clips needs the connected Media Studio.');
+      return;
+    }
+    const loadingId = toast.loading(zh()
+      ? `正在上传 ${files.length} 段片段…`
+      : `Uploading ${files.length} clip${files.length === 1 ? '' : 's'}…`);
+    try {
+      let landTarget = target;
+      for (const file of files) {
+        // eslint-disable-next-line no-await-in-loop
+        const upload = await uploadFileToHivemindStudio(file);
+        const clip = { url: upload.url, model: '' };
+        const plan = timelineDropPlan(s.timelineSegments, landTarget, { kind: 'clip', ...clip });
+        applyTimelinePlan(plan, clip);
+        // Follow-on files insert directly after wherever the last one landed.
+        landTarget = { id: s.timelineSelectedId, region: 'after' };
+      }
+      toast.success(zh() ? '片段已加入时间线。' : 'Clips added to the timeline.', { id: loadingId });
+    } catch (error) {
+      toast.error(`${zh() ? '上传失败' : 'Upload failed'}: ${error?.message || ''}`, { id: loadingId });
+    }
+  };
+
+  const timelineHandleDrop = (target, dataTransfer) => {
+    let segPayload = null;
+    try {
+      const raw = dataTransfer.getData(TIMELINE_SEGMENT_DRAG_TYPE);
+      segPayload = raw ? JSON.parse(raw) : null;
+    } catch { segPayload = null; }
+    if (segPayload?.id) {
+      applyTimelinePlan(timelineDropPlan(s.timelineSegments, target, { kind: 'segment', id: segPayload.id }), null);
+      return;
+    }
+    const output = droppedOutputPayload(dataTransfer);
+    if (output?.url) {
+      const mediaType = String(output.mediaType || '').toLowerCase();
+      if (!mediaType.startsWith('video/') && output.section !== 'video') {
+        toast.error(zh() ? '时间线只接受视频片段。' : 'The timeline takes video clips only.');
+        return;
+      }
+      const clip = { url: output.url, model: clipModelFor(output.url) };
+      applyTimelinePlan(timelineDropPlan(s.timelineSegments, target, { kind: 'clip', ...clip }), clip);
+      return;
+    }
+    const dropped = Array.from(dataTransfer.files || []);
+    const videos = dropped.filter((file) => String(file.type).startsWith('video/'));
+    if (videos.length) {
+      void timelineAttachFiles(target, videos);
+      return;
+    }
+    if (dropped.length) toast.error(zh() ? '时间线只接受视频文件。' : 'The timeline takes video files only.');
+  };
+
+  // Timeline segments + toggles survive a reload, per tab. The built cut is an
+  // object URL and died with the last session, so the view resets to Shot and
+  // the quiet build recreates it.
+  useEffect(() => {
+    const saved = loadTimelineState(tabIdRef.current);
+    if (saved) {
+      s.timelineOn = saved.on;
+      s.timelineSegments = saved.segments;
+      s.timelineSelectedId = saved.selectedId;
+      s.timelineExtend = saved.extend;
+      s.timelineShowCombined = false;
+      bump();
+      if (saved.on) scheduleTimelineBuild();
+    }
+    return () => {
+      if (s.timelineBuildTimer) clearTimeout(s.timelineBuildTimer);
+      dropTimelineCombined();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /* ---------------- generation ---------------- */
 
   const generateNow = async () => {
@@ -2425,6 +2992,34 @@ export function VideoStudio({
           // reference workflow; each video carries its own soundtrack flag.
           localParams.referenceAudios = (setup.referenceAudios || []).filter((item) => item?.url);
           localParams.referenceVideos = (setup.referenceVideos || []).filter((item) => item?.url);
+        }
+        // Head replacement takes precedence over the reference lane it is built
+        // on. The same pictures say WHO, but the run rewrites an attached clip
+        // instead of generating one, so it routes to the inpaint graph and
+        // carries the clip and the mask with it.
+        if (setup.inpaint?.url && setup.inpaint.maskSource) {
+          const inpaintTarget = inpaintWorkflowForHivemindModel(setup.modelId);
+          if (inpaintTarget) {
+            localParams.workflow_id = inpaintTarget.workflowId;
+            localParams.referenceImages = (setup.referenceImageUrls || []).filter(Boolean);
+            localParams.inpaintSource = setup.inpaint.url;
+            localParams.maskSource = setup.inpaint.maskSource;
+            // SAM3 tracks inside the graph; a painted mask is only sent when it
+            // IS the mask, because sending one alongside SAM3 would be ignored.
+            if (setup.inpaint.maskSource === 'manual') localParams.inpaintMask = setup.inpaint.maskDataUrl;
+            if (setup.inpaint.maskSource === 'sequence') localParams.inpaintMaskVideo = setup.inpaint.maskVideoBase64;
+            localParams.inpaint = setup.inpaint.dials || {};
+            // The clip decides the length. duration_seconds is only a trim cap
+            // here, and the dialog already snapped it to H3's frame lattice.
+            if (Number(setup.inpaint.seconds) > 0) localParams.duration = Number(setup.inpaint.seconds);
+            // The inpaint graph has no motion or voice reference slots, and the
+            // gateway REFUSES a run carrying references it has no slots for
+            // rather than dropping them. It is also the right semantics: the
+            // movement and the voice both come from the clip being rewritten.
+            // The dialog says so before Apply, so this is not a silent drop.
+            localParams.referenceVideos = [];
+            localParams.referenceAudios = [];
+          }
         }
         // LTX 2.3 first/middle/end keyframes only apply to image-driven runs.
         if (videoRequestPlan(setup).showFrameSlots) {
@@ -3276,6 +3871,13 @@ export function VideoStudio({
   // run there and replace the start/end frames (the reference graph has none).
   const referenceEntry = isHivemindVideoModelId(s.setup.modelId)
     ? referenceWorkflowForHivemindModel(s.setup.modelId)
+    : null;
+  // The family's head-replacement lane, if it has one. Only its EXISTENCE is
+  // read here — the run is routed to it by s.setup.inpaint being armed, not by
+  // the model picker, because head replacement is a thing you do to an attached
+  // clip rather than a tier you select.
+  const inpaintEntry = isHivemindVideoModelId(s.setup.modelId)
+    ? inpaintWorkflowForHivemindModel(s.setup.modelId)
     : null;
   const refsArmed = videoRequestPlan(s.setup).sendReferenceImages;
   useEffect(() => {
@@ -4328,6 +4930,10 @@ export function VideoStudio({
                 uploadFn={uploadFnForFrame}
                 requireApiKey={frameRequiresApiKey}
                 openRequest={s.referencesOpenRequest || 0}
+                // Head replacement's one door. Offered only on a family whose
+                // registry actually carries an inpaint graph, so the thumbnail
+                // never opens a dialog whose Apply the run would ignore.
+                onOpenClip={inpaintEntry ? (index) => { s.inpaintOpenIndex = index; bump(); } : null}
               />
             ) : null}
 
@@ -4392,8 +4998,9 @@ export function VideoStudio({
                 renderGender={castRenderGender(s.cast) || s.setup.persona?.gender || ''}
                 standIns={liveStandIns(s.setup.prompt, s.standIns)}
                 capture={() => captureGenerationContext(s.setup.prompt)}
-                onLoadPrompt={({ prompt, standIns }) => {
+                onLoadPrompt={({ prompt, standIns, timeline, durationSeconds }) => {
                   loadPromptText(prompt, { standIns: standIns || [] });
+                  applyStarterSetup({ timeline, durationSeconds });
                   focusPrompt();
                 }}
                 onLoadContext={(context) => restoreGenerationContext(context)}
@@ -4579,7 +5186,9 @@ export function VideoStudio({
                 unmuted={Boolean(s.resultUnmuted)}
                 // H3 renders audio with every clip; other lanes are silent
                 // unless a join carried sound through.
-                hasAudio={/minimax/.test(String(s.resultModel || '')) || (s.chainCombined?.url === s.resultUrl && Boolean(s.chainCombined?.audioJoined))}
+                hasAudio={/minimax/.test(String(s.resultModel || ''))
+                  || (s.chainCombined?.url === s.resultUrl && Boolean(s.chainCombined?.audioJoined))
+                  || (s.timelineCombined?.url === s.resultUrl && Boolean(s.timelineCombined?.audioJoined))}
               />
               <div className="flex flex-wrap items-center justify-center gap-2">
                 <Button variant="neutral" icon="chevronLeft" onClick={backToSetup}>{t('video.backToSetup')}</Button>
@@ -4669,9 +5278,62 @@ export function VideoStudio({
             </div>
           ) : null}
 
+          {/* The manual timeline: segment cards under the player. One button
+              opens it; everything else — auto-insert, the quiet full-cut
+              build, drops, Auto-continue — hangs off lib/videoTimeline.js. */}
+          {(() => {
+            if (!s.timelineOn) {
+              return (
+                <div className="flex justify-end">
+                  <ChipButton
+                    icon="layers"
+                    value={zh() ? '时间线' : 'Timeline'}
+                    chevron={false}
+                    onClick={openTimelineView}
+                    title={zh()
+                      ? '把多段片段排成一条时间线：逐段生成、拖放片段、预览完整合成片'
+                      : 'Arrange clips into a sequence: generate shot by shot, drag clips in, preview the full cut'}
+                  />
+                </div>
+              );
+            }
+            const modelEntry = currentModel(s.setup, s.catalogs);
+            const extendMode = timelineExtendModeFor(modelEntry);
+            const selectedSeg = s.timelineSegments.find((seg) => seg.id === s.timelineSelectedId);
+            return (
+              <TimelineStrip
+                zh={zh()}
+                segments={s.timelineSegments}
+                selectedId={s.timelineSelectedId}
+                pendingSegmentId={s.generating && selectedSeg && !selectedSeg.url ? selectedSeg.id : ''}
+                extendAvailable={Boolean(extendMode)}
+                extendMode={extendMode}
+                extendOn={s.timelineExtend}
+                onToggleExtend={timelineToggleExtend}
+                canCombine={timelineCanCombine(s.timelineSegments)}
+                showCombined={s.timelineShowCombined}
+                combined={s.timelineCombined}
+                building={s.timelineBuilding}
+                buildError={s.timelineBuildError}
+                onToggleCombined={timelineToggleCombined}
+                onExportCombined={() => void exportTimelineCut()}
+                onSelect={timelineSelect}
+                onAdd={timelineAdd}
+                onRemove={timelineRemoveRequest}
+                onClose={closeTimelineView}
+                onDrop={timelineHandleDrop}
+                promptFor={timelinePromptFor}
+              />
+            );
+          })()}
+
           {/* The episode, above its shots: chaining produces one clip per shot,
               so without this the finished cut was only ever a downloaded file. */}
           {(() => {
+            // The manual timeline supersedes the derived chain strip while it
+            // is open — two rows of near-identical cards would fight over the
+            // same clicks.
+            if (s.timelineOn) return null;
             const anchor = s.generationHistory.find((entry) => entry.url === s.chainAnchor);
             const timeline = anchor
               ? chainTimelineModel(anchor, s.generationHistory, {
@@ -4851,6 +5513,49 @@ export function VideoStudio({
       {/* targetModel is the workflow id, not the picker id: the helper chooses its
           guidance from it, and 10Eros 1.3/1.4 want a different prompt shape than
           the 1.2-era lanes. */}
+      {/* Head replacement. Opened from an attached motion clip's own thumbnail;
+          Apply arms s.setup.inpaint, which is the ONE thing that routes the run
+          to the inpaint graph. Removing the clip disarms it (below), so a run
+          can never be pointed at a clip that is no longer attached. */}
+      {s.inpaintOpenIndex != null && (s.setup.referenceVideos || [])[s.inpaintOpenIndex]?.url ? (
+        <VideoInpaintDialog
+          open
+          sourceUrl={s.setup.referenceVideos[s.inpaintOpenIndex].url}
+          sourceName={s.setup.referenceVideos[s.inpaintOpenIndex].name || ''}
+          referenceCount={(s.setup.referenceImageUrls || []).filter(Boolean).length}
+          // What head replacement will NOT send, so the dialog can say so before
+          // Apply rather than the run quietly dropping them.
+          otherReferences={{
+            motion: (s.setup.referenceVideos || []).filter((item, index) => item?.url && index !== s.inpaintOpenIndex).length,
+            voice: (s.setup.referenceAudios || []).filter((item) => item?.url).length,
+          }}
+          initial={s.setup.inpaint?.url === s.setup.referenceVideos[s.inpaintOpenIndex].url
+            ? s.setup.inpaint.settings
+            : null}
+          onClose={() => { s.inpaintOpenIndex = null; bump(); }}
+          onApply={(result) => {
+            const clip = s.setup.referenceVideos[s.inpaintOpenIndex];
+            s.setup = {
+              ...s.setup,
+              inpaint: {
+                url: clip.url,
+                name: clip.name || '',
+                maskSource: result.maskSource,
+                maskDataUrl: result.maskDataUrl,
+                // A hosted run produced a mask CLIP: one frame per source
+                // frame, already tracked, so the lane needs no SAM3 of its own.
+                maskVideoBase64: result.maskVideoBase64 || '',
+                seconds: result.seconds,
+                dials: result.dials,
+                settings: result.settings,
+              },
+            };
+            s.inpaintOpenIndex = null;
+            updateComposerDraft({ prompt: s.setup.prompt });
+            bump();
+          }}
+        />
+      ) : null}
       <PromptHelperDialog
         open={Boolean(s.promptHelperOpen)}
         onClose={() => { s.promptHelperOpen = false; bump(); }}
@@ -4919,6 +5624,73 @@ export function VideoStudio({
         title={zh() ? '删除视频' : 'Delete video'}
         body={zh() ? '从本次会话的列表中移除这个视频（它仍保留在历史记录中心）。' : 'Remove this video from this session\'s strip. It stays in the History hub.'}
         confirmLabel={zh() ? '删除' : 'Delete'}
+      />
+
+      {/* Removing a timeline segment: the segment always goes; the FILE goes
+          only when the toggle inside says so — and the toggle is only offered
+          once a deletable file was actually found on this device. */}
+      <ConfirmModal
+        open={Boolean(s.timelineDeleteTarget)}
+        onClose={() => { s.timelineDeleteTarget = null; bump(); }}
+        onConfirm={() => void confirmTimelineRemove()}
+        title={zh() ? '移除这一段？' : 'Remove this segment?'}
+        body={(
+          <div className="flex flex-col gap-3">
+            <p className="text-[13px] leading-relaxed text-ink2">
+              {zh()
+                ? '把这一段从时间线中移除。片段本身仍保留在会话列表和历史记录中心。'
+                : 'The segment comes off the timeline. The clip itself stays in the session strip and the History hub.'}
+            </p>
+            <label className={cx(
+              'flex items-start gap-2.5',
+              !s.timelineDeleteTarget?.row && 'cursor-default opacity-60',
+            )}
+            >
+              <Toggle
+                checked={Boolean(s.timelineDeleteTarget?.deleteDisk)}
+                disabled={!s.timelineDeleteTarget?.row}
+                onChange={(value) => {
+                  if (!s.timelineDeleteTarget) return;
+                  s.timelineDeleteTarget = { ...s.timelineDeleteTarget, deleteDisk: value };
+                  bump();
+                }}
+                label={zh() ? '同时删除视频文件' : 'Also delete the video?'}
+              />
+              <span className="flex flex-col gap-0.5">
+                <span className="text-[13px] text-ink1">{zh() ? '同时删除视频文件' : 'Also delete the video?'}</span>
+                <span className={cx('text-[11px]', s.timelineDeleteTarget?.deleteDisk ? 'text-danger' : 'text-ink3')}>
+                  {s.timelineDeleteTarget?.resolvingRow
+                    ? (zh() ? '正在检查本机文件…' : 'Checking for the file on this device…')
+                    : s.timelineDeleteTarget?.row
+                      ? (zh()
+                        ? '将从本机和历史记录中永久删除该文件，无法恢复。'
+                        : 'Permanently deletes the file from this device, along with its History row. This cannot be undone.')
+                      : (zh()
+                        ? '本机上没有这个片段的文件可删（云端结果，或已被删除）。'
+                        : 'No file to delete on this device — a cloud result, or one already gone.')}
+                </span>
+              </span>
+            </label>
+          </div>
+        )}
+        confirmLabel={s.timelineDeleteTarget?.deleteDisk
+          ? (zh() ? '移除并删除文件' : 'Remove and delete file')
+          : (zh() ? '移除' : 'Remove')}
+      />
+
+      {/* A drop onto a filled card replaces its clip — said out loud first,
+          because the clip being replaced was placed there on purpose. */}
+      <ConfirmModal
+        open={Boolean(s.timelineReplaceTarget)}
+        tone="primary"
+        onClose={() => { s.timelineReplaceTarget = null; bump(); }}
+        onConfirm={confirmTimelineReplace}
+        title={zh() ? '替换这一段？' : 'Replace this clip?'}
+        body={zh()
+          ? '拖入的片段将取代这一段现有的片段。被替换的片段仍保留在会话列表和历史记录中。'
+          : 'The dropped clip takes this segment\'s place. The clip it replaces stays in the strip and in History.'}
+        confirmLabel={zh() ? '替换' : 'Replace'}
+        cancelLabel={zh() ? '保留原片段' : 'Keep the current clip'}
       />
 
       {/* Attaching a source clip costs a model switch and/or the attached

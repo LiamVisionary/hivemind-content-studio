@@ -701,8 +701,9 @@ test('the cast lives in the studio, so a loaded prompt can be recast on the way 
     // Every prompt from the library goes through the weave, with the starter's
     // stand-ins, and it changes the PROMPT only — loading a prompt is not a
     // request to reshuffle attachments (the rows the cast occupies are the
-    // rows it already had).
-    assert.match(studio, /onLoadPrompt=\{\(\{ prompt, standIns \}\) => \{\s*loadPromptText\(prompt, \{ standIns: standIns \|\| \[\] \}\);/);
+    // rows it already had). A starter's opt-in setup (timeline, duration)
+    // rides beside the prompt and is applied separately, after the weave.
+    assert.match(studio, /onLoadPrompt=\{\(\{ prompt, standIns, timeline, durationSeconds \}\) => \{\s*loadPromptText\(prompt, \{ standIns: standIns \|\| \[\] \}\);/);
     const loader = /const loadPromptText = \(text, \{ standIns = \[\] \} = \{\}\) => \{[\s\S]*?\n  \};/.exec(studio);
     assert.ok(loader, 'the loader exists');
     assert.match(loader[0], /acceptPrompt\(text, \{ standIns \}\)/);

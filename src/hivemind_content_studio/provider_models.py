@@ -580,6 +580,21 @@ def _price_line(pricing: Any) -> str:
     return f"{prompt} in · {completion} out /1M" if prompt and completion else ""
 
 
+def _usd_per_mtok(pricing: Any) -> tuple[float | None, float | None]:
+    """The same quote as numbers — dollars per million tokens — so the picker
+    can price one press ("≈ $0.02 per draft") rather than print a rate the
+    owner has to multiply by an answer size they cannot see."""
+    if not isinstance(pricing, dict):
+        return None, None
+    def per_million(value: Any) -> float | None:
+        try:
+            usd = float(value) * 1_000_000
+        except (TypeError, ValueError):
+            return None
+        return round(usd, 6) if usd >= 0 else None
+    return per_million(pricing.get("prompt")), per_million(pricing.get("completion"))
+
+
 # A model id that is one dated snapshot of another: `gpt-5-2025-08-07` beside
 # `gpt-5`, `claude-sonnet-4-20250514` beside `claude-sonnet-4`. Purely
 # structural — no model name appears here, so it keeps working for models that
@@ -909,7 +924,10 @@ def _row(provider: Provider, source: dict[str, Any], popular: dict[str, int]) ->
     """
     upstream = str(source["id"])
     display = str(source.get("name") or source.get("display_name") or "").strip()
-    price = _price_line(source.get("pricing")) or _price_line(_venice_pricing(source))
+    # OpenRouter-shaped `pricing` when the provider quotes one, else Venice's.
+    pricing = source.get("pricing") if _price_line(source.get("pricing")) else _venice_pricing(source)
+    price = _price_line(pricing)
+    prompt_usd, completion_usd = _usd_per_mtok(pricing)
     context = _context_line(source.get("context_length")
                             or (source.get("top_provider") or {}).get("context_length"))
     return {
@@ -917,6 +935,9 @@ def _row(provider: Provider, source: dict[str, Any], popular: dict[str, int]) ->
         "name": display or upstream,
         "modelId": upstream,
         "subtitle": " · ".join(part for part in (price, context) if part),
+        # Dollars per million tokens, numeric, for the per-press estimate.
+        "promptUsdPerMTok": prompt_usd,
+        "completionUsdPerMTok": completion_usd,
         "group": provider.label,
         "badge": "Sign-in" if provider.kind == "oauth" else "Your key",
         "tier": "account",

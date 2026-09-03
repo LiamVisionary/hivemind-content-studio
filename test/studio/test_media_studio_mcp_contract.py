@@ -3253,3 +3253,196 @@ def test_a_run_that_finished_is_the_only_thing_that_raises_a_ceiling(tmp_path):
                                  expect_refusal=True, lane_resolution=_LANE_ON_A_32GB_CARD)
     assert "the limit here is 76,000 on lane 'rental48' (a 32 GB card)" in reply
     assert "running out of memory at" not in reply
+
+
+# ── MiniMax H3 head replacement (inpainting) ────────────────────────────────
+#
+# The graph ships with BOTH mask branches wired and the MCP prunes one, so a
+# capture is the only thing that proves which survived. Everything here is
+# asserted against the posted graph rather than the registry, because the
+# registry says what should happen and the graph says what does.
+
+def _inpaint_source(tmp_path, *, frames=60, with_audio=True, size="128x96"):
+    return _tiny_video_data_url(tmp_path, with_audio=with_audio, size=size, frames=frames)
+
+
+def test_h3_inpaint_manual_mask_prunes_sam3_and_keeps_the_painted_branch(tmp_path):
+    """Manual masking must not drag SAM3's 3.4GB checkpoint onto the lane.
+
+    The painted mask is one still, so it is conformed to the footage and
+    repeated to its frame count — the subject crop refuses a mask whose batch
+    or dimensions disagree with the frames, which is what those two nodes are
+    for.
+    """
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "manual",
+        "mask_image_base64": _TINY_PNG,
+    })
+
+    classes = [n["class_type"] for n in graph.values()]
+    assert "CheckpointLoaderSimple" not in classes, "the SAM3 checkpoint must be pruned for a painted mask"
+    assert "SAM3_VideoTrack" not in classes and "SAM3_TrackToMask" not in classes
+    assert "RepeatImageBatch" in classes and "ImageToMask" in classes
+
+    crop = next(n for n in graph.values() if n["class_type"] == "MVEx_SubjectCrop")
+    mask_feed = crop["inputs"]["masks"]
+    assert isinstance(mask_feed, list), "the crop must read a linked mask, not a literal"
+    assert graph[str(mask_feed[0])]["class_type"] == "ImageToMask"
+
+    # The repeat count and the conform size are read off the footage, so neither
+    # the MCP nor the browser has to know the clip's dimensions.
+    repeat = next(n for n in graph.values() if n["class_type"] == "RepeatImageBatch")
+    assert isinstance(repeat["inputs"]["amount"], list)
+
+
+def test_h3_inpaint_sam3_mask_prunes_the_painted_branch_and_carries_its_dials(tmp_path):
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "sam3",
+        "sam3_prompt": "the man's head",
+        "sam3_detection_threshold": 0.35,
+        "sam3_max_objects": 2,
+        "sam3_detect_interval": 3,
+    })
+
+    classes = [n["class_type"] for n in graph.values()]
+    assert "RepeatImageBatch" not in classes, "the painted-mask branch must be pruned for SAM3"
+    track = next(n for n in graph.values() if n["class_type"] == "SAM3_VideoTrack")
+    assert track["inputs"]["detection_threshold"] == 0.35
+    assert track["inputs"]["max_objects"] == 2
+    assert track["inputs"]["detect_interval"] == 3
+    text = next(n for n in graph.values() if n["class_type"] == "CLIPTextEncode")
+    assert text["inputs"]["text"] == "the man's head"
+
+    crop = next(n for n in graph.values() if n["class_type"] == "MVEx_SubjectCrop")
+    assert graph[str(crop["inputs"]["masks"][0])]["class_type"] == "SAM3_TrackToMask"
+
+
+def test_h3_inpaint_canvas_and_length_stay_linked_to_the_crop(tmp_path):
+    """width, height and length are decided at runtime by the mask, so they must
+    reach the conditioner as LINKS. A scalar written over any of them silently
+    detaches the model's canvas from the footage it is painting into."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_image_base64": _TINY_PNG,
+        # Deliberately supplied: they must trim the SOURCE, never the canvas.
+        "duration_seconds": 2,
+    })
+    node = next(n for n in graph.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+    for key in ("width", "height", "length"):
+        assert isinstance(node["inputs"][key], list), f"{key} must stay linked to the crop"
+
+
+def test_h3_inpaint_holds_the_soundtrack_so_the_new_head_lip_syncs(tmp_path):
+    """The joint AV latent keeps the audio (audio_mode 'keep'), and the muxed
+    output takes the SOURCE's soundtrack rather than a VAE round trip of it."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_image_base64": _TINY_PNG,
+    })
+    latent = next(n for n in graph.values() if n["class_type"] == "NKDAVLatent")
+    assert latent["inputs"]["audio_mode"] == "keep"
+    assert isinstance(latent["inputs"]["latent_mask"], list)
+    components = next(k for k, n in graph.items() if n["class_type"] == "GetVideoComponents")
+    assert latent["inputs"]["audio"] == [components, 1]
+    create = next(n for n in graph.values() if n["class_type"] == "CreateVideo")
+    assert create["inputs"]["audio"] == [components, 1]
+
+
+def test_h3_inpaint_trims_the_source_down_onto_the_frame_lattice(tmp_path):
+    """A 60-frame clip is 2.5s, and 5s was asked for. The trim is capped by the
+    footage that exists and then snapped DOWN to 17n+5 — 60 becomes 56, never 73,
+    because padding up would invent footage to inpaint over."""
+    _graph, reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path, frames=60),
+        "mask_image_base64": _TINY_PNG,
+        "duration_seconds": 5,
+    }, with_reply=True)
+    settings = _mcp_tool_result(reply)["workflow"]["settings"]
+    assert settings["frames"] == 56, settings
+    # And the REPORTED length is the measurement, not the 5s that was asked for.
+    assert settings["durationSeconds"] == pytest.approx(56 / 24, abs=0.01), settings
+    assert settings["inpaint"]["maskSource"] == "manual"
+
+
+def test_h3_inpaint_refuses_a_run_with_no_source_clip(tmp_path):
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "mask_image_base64": _TINY_PNG,
+    }, expect_refusal=True)
+    assert "needs the clip being inpainted" in reply
+
+
+def test_h3_inpaint_refuses_manual_masking_with_no_painted_mask(tmp_path):
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "manual",
+    }, expect_refusal=True)
+    assert "manual masking needs the painted mask" in reply
+
+
+def test_h3_inpaint_refuses_a_clip_shorter_than_the_shortest_lattice_point(tmp_path):
+    """Under 5 frames there is no legal length at all, and the refusal has to
+    say so in seconds — the caller trimmed a clip, not a frame count."""
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path, frames=3),
+        "mask_image_base64": _TINY_PNG,
+    }, expect_refusal=True)
+    assert "frame lattice" in reply and "of footage is needed" in reply
+
+
+def test_h3_inpaint_still_requires_a_picture_of_the_new_head(tmp_path):
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "replace the head",
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_image_base64": _TINY_PNG,
+    }, expect_refusal=True)
+    assert "requires at least one reference picture" in reply
+
+
+def test_h3_inpaint_mask_sequence_prunes_both_other_branches(tmp_path):
+    """A mask CLIP — what the hosted SAM3 service returns, and what a lane with
+    no SAM3 checkpoint needs. It must arrive as its own LoadVideo, conformed to
+    the footage, with neither the painted still nor the on-lane tracker left in
+    the graph."""
+    graph = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "sequence",
+        "mask_video_base64": _inpaint_source(tmp_path, with_audio=False),
+    })
+    classes = [n["class_type"] for n in graph.values()]
+    assert "SAM3_VideoTrack" not in classes and "CheckpointLoaderSimple" not in classes
+    assert "RepeatImageBatch" not in classes, "the painted-still branch must be pruned"
+    # Two clips in, and they are different files: the footage and its mask.
+    loaders = [n["inputs"]["file"] for n in graph.values() if n["class_type"] == "LoadVideo"]
+    assert len(loaders) == 2 and len(set(loaders)) == 2, loaders
+    crop = next(n for n in graph.values() if n["class_type"] == "MVEx_SubjectCrop")
+    assert graph[str(crop["inputs"]["masks"][0])]["class_type"] == "ImageToMask"
+
+
+def test_h3_inpaint_mask_sequence_without_a_clip_is_refused(tmp_path):
+    reply = _capture_video_graph(tmp_path, "minimax-h3-inpaint", {
+        "prompt": "<Subject 1> is the character in <Picture 1>.",
+        "reference_images": [{"image_base64": _TINY_PNG}],
+        "source_video_base64": _inpaint_source(tmp_path),
+        "mask_source": "sequence",
+    }, expect_refusal=True)
+    assert "needs the mask clip" in reply

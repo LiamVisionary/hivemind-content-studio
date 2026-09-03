@@ -172,6 +172,21 @@ export function peekResolvedMediaSrc(url) {
     return blobCache.get(url) ?? null;
 }
 
+// Hand the cache bytes the caller already holds in the clear, for a URL that
+// will serve them sealed. A generation that was just promoted to a reference
+// has its pixels in this tab RIGHT NOW; fetching the new URL only to decrypt the
+// same image again is wasted work at best — and, when the vault key is not in
+// this tab, it is a broken <img> pointed at ciphertext while the picture that
+// produced it sits in memory. Only data: and blob: sources are accepted: they
+// are the two shapes that are provably plaintext.
+export function primeResolvedMedia(url, src) {
+    if (!url || typeof url !== 'string') return false;
+    if (typeof src !== 'string' || !/^(data|blob):/i.test(src)) return false;
+    blobCache.set(url, src);
+    noteSealFailure(url, null);
+    return true;
+}
+
 export function revokeResolvedMedia(url) {
     const blobUrl = blobCache.get(url);
     if (blobUrl) {

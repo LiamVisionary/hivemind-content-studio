@@ -33,9 +33,23 @@ execute run -> inspect next_actions -> route intent -> request/consume approval
 
 Every run exposes status, current step, bounded retries, budget/spend, immutable artifact metadata, provider/job evidence, and precise next actions. Agents ask for capabilities such as `generate_keyframes` or `animate_scenes`; the router selects a ready provider under the run's privacy, allowlist, and budget policy. Paid work uses an HMAC-signed, exact-scope, one-time operator receipt. Run-associated generation attempts also emit local privacy-safe telemetry: success/failure, provider/model, media kind, duration, artifact count, and charged amount. Prompts, media, credentials, provider payloads, and raw error messages are excluded. Arbitrary shell commands and operator approval decisions are not exposed over MCP.
 
-The browser opens as one **Hivemind Content Studio** with Create, Edit, Animate, Workflow, Explore, Canvas, and Models. Create, Edit, and Animate share one HivemindOS-style composer, up to 30 ordered reference images, the same model router, prompt history, and durable runs. Workflow reveals the detailed brief-first production form. Explore embeds the complete Open Generative AI catalog and local-inference UI; Canvas embeds the complete ComfyUI Mobile workflow editor; Models is a native manager for the local workflows, the installed weights on disk, and Civitai installs. Image and video routes default to Automatic but can be pinned to a provider/model. Prompt Helper is on by default; Walk-through makes the brain ask questions and wait for confirmation before creating the run. The browser receives only safe model/capability metadata. HivemindOS keeps API keys and OAuth tokens server-side.
+The browser opens as one **Hivemind Content Studio** with Create, Edit, Animate, Restore, Workflow, Explore, Canvas, and Models. Create, Edit, and Animate share one HivemindOS-style composer, up to 30 ordered reference images, the same model router, prompt history, and durable runs. Workflow reveals the detailed brief-first production form. Explore embeds the complete Open Generative AI catalog and local-inference UI; Canvas embeds the complete ComfyUI Mobile workflow editor; Models is a native manager for the local workflows, the installed weights on disk, and Civitai installs. Image and video routes default to Automatic but can be pinned to a provider/model. Prompt Helper is on by default; Walk-through makes the brain ask questions and wait for confirmation before creating the run. The browser receives only safe model/capability metadata. HivemindOS keeps API keys and OAuth tokens server-side.
 
 The Workflow mode exposes all seven lanes, scene direction, provider overrides, voice and captions, distribution, faceless-video controls, privacy, budget, and protected operator actions with progressive disclosure. Every mode creates the same canonical manifest and SQLite-backed durable run.
+
+**Restore** is local video restoration and upscaling with SeedVR2 — a free, open
+alternative to the commercial restoration tools. Load a clip, render a
+two-second test, compare it against the original frame by frame with a wipe or
+side by side, then commit to the whole film. Long renders are cut into chunks
+and every finished chunk is a checkpoint, so an interruption resumes where it
+stopped rather than at frame zero; sharpening, grain, flat-detail softening and
+reframing are applied afterwards from the saved chunks, so changing your mind
+costs one pass rather than another render. It runs three places: free on your
+own ComfyUI, on an attached rented GPU at that machine's hourly rate, or on a
+hosted serverless GPU charged per render in the credits you already have —
+nothing rented, nothing running between renders, and the price quoted and shown
+on the button before anything is sent. The panel says which is which and what
+follows from each. See [docs/RESTORE_STUDIO.md](docs/RESTORE_STUDIO.md).
 
 ### Unified monorepo application
 

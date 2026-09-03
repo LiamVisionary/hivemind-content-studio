@@ -61,7 +61,7 @@ export function ProducerBar({
           )}
         >
           <Icon name="persona" size={14} />
-          <span className="max-w-[220px] truncate">{summaryLine(producer)}</span>
+          <span className="max-w-[320px] truncate">{summaryLine(producer)}</span>
           <Icon name="chevronDown" size={13} />
         </button>
 
@@ -69,7 +69,7 @@ export function ProducerBar({
           <div
             role="dialog"
             aria-label="Who writes for you"
-            className="hive-scale-in absolute right-0 top-[calc(100%+8px)] z-40 flex w-[min(440px,92vw)] flex-col gap-2 rounded-lg border border-line1 bg-bg1 p-3 shadow-overlay"
+            className="hive-scale-in absolute right-0 top-[calc(100%+8px)] z-40 flex w-[min(540px,92vw)] flex-col gap-2 rounded-lg border border-line1 bg-bg1 p-3 shadow-overlay"
           >
             <div className="flex items-center gap-2">
               <span className="text-[12px] font-semibold text-ink1">Who writes for you</span>

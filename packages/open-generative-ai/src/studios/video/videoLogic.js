@@ -507,6 +507,11 @@ export function buildInitialSetup(c) {
     referenceImageUrls: [],
     referenceAudios: [],
     referenceVideos: [],
+    // Head replacement, armed from a motion clip's own thumbnail: which attached
+    // clip is being rewritten, the painted mask, and the dials the dialog
+    // changed. Null means an ordinary generation — this is the ONE flag that
+    // routes the run to the inpaint graph, so clearing it is how you go back.
+    inpaint: null,
     // The Hive Persona ID those references were loaded from (or last saved as):
     // { id, name }, or null when they are not a named character. It is a LABEL
     // for the three lists above, never a source of media in its own right.

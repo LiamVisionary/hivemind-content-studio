@@ -24,6 +24,7 @@ import passbook_stamp
 import pytest
 
 from hivemind_content_studio import shared_env
+from hivemind_content_studio.shared_env import enable_access_stamps
 
 GRANTED_KEY = "PB_BROKER_TEST_GRANTED"
 WITHHELD_KEY = "PB_BROKER_TEST_WITHHELD"
@@ -134,6 +135,36 @@ def test_the_suite_redirect_still_keeps_the_studio_off_a_real_store(tmp_path, mo
     monkeypatch.setenv("HIVE_ENV_FILES", str(tmp_path / "no-such.env"))
 
     assert shared_env.request_credential(GRANTED_KEY) == ""
+
+
+def test_a_redirected_process_never_stamps_the_machines_real_ledger(tmp_path, monkeypatch):
+    """A test run must not write to the machine's own access record.
+
+    `enable_access_stamps()` installs a PROCESS-GLOBAL recorder, and
+    `build_control_app()` calls it — so one `TestClient(build_control_app(...))`
+    used to arm the real ledger for the rest of the pytest process. Every read
+    after that was redirected by the suite to a store that does not exist, came
+    back empty, and was stamped into the machine's real record as a DENIED read
+    by this app: 45 rows per run, 37 of them for the same key. On the machine
+    that is indistinguishable from an app hammering PassBook for a credential
+    it has no grant for, which is what it was mistaken for.
+    """
+    monkeypatch.setenv("HIVE_ENV_FILES", str(tmp_path / "no-such.env"))
+    passbook.set_recorder(None)
+
+    assert enable_access_stamps() is False, "a redirected process armed the machine's ledger"
+
+    shared_env.request_credential(GRANTED_KEY, reason="must leave no trace")
+
+    assert passbook._RECORDER is None, "the redirected read had a recorder to write to"
+
+
+def test_a_real_machine_process_still_stamps_its_reads(brokered_machine):
+    """The guard above must not switch the ledger off on a real machine."""
+    passbook.set_recorder(None)
+
+    assert enable_access_stamps() is True
+    assert passbook._RECORDER is not None
 
 
 def test_no_two_routes_claim_the_same_path_and_method():

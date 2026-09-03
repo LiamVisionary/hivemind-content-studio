@@ -328,6 +328,38 @@ fetch "${R2_BASE_URL}/text_encoders/qwen35_4b.safetensors" \
       "text_encoders/qwen35_4b.safetensors"
 fetch "${R2_BASE_URL}/vae/qwen_image_vae.safetensors" "vae/qwen_image_vae.safetensors"
 
+# SeedVR2 video restoration — both video tiers.
+#
+# Restoration is not a tier of its own: it is a 7B diffusion restorer that runs
+# on the same 32GB+ boxes the video tiers already rent, and a box rented to
+# generate a clip can restore one without a second machine. So the node and its
+# weights ride along with either video tier rather than gating a third.
+#
+# TensorRT VAE acceleration is NOT installed by this script. It lives in this
+# repository (packages/comfyui-custom-nodes/hivemind-seedvr2-trt) rather than in
+# a public git repo, so it ships through the studio's own provisioning, which
+# publishes it alongside the weights manifest (gpu_rentals._onstart_script). A
+# box booted from this template restores correctly on PyTorch; one rented
+# through the studio gets the accelerator too. See docs/RESTORE_STUDIO.md.
+if [[ "${RENTAL_TIER:-image}" == "video" || "${RENTAL_TIER:-image}" == "minimax-video" ]]; then
+    # Pinned: the node moves fast and its graph inputs are a contract the
+    # gateway builds against (packages/media-gateway/video_restore.py).
+    seedvr2_dir="${COMFYUI_DIR}/custom_nodes/seedvr2_videoupscaler"
+    if [[ ! -d "$seedvr2_dir" ]]; then
+        git clone -q https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git "$seedvr2_dir"
+        git -C "$seedvr2_dir" checkout -q 4490bd1f482e026674543386bb2a4d176da245b9 ||             echo "seedvr2: pinned commit unavailable, staying on the cloned default branch"
+    fi
+    [[ -f "$seedvr2_dir/requirements.txt" ]] && pip install -q -r "$seedvr2_dir/requirements.txt"
+
+    # The node downloads a missing model on first use. Fetched here instead:
+    # the first chunk of a paid render is the worst possible moment to start an
+    # 8.5GB download, and the box is billing the whole time it waits.
+    fetch "https://huggingface.co/AInVFX/SeedVR2_comfyUI/resolve/main/seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors" \
+          "SEEDVR2/seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors"
+    fetch "https://huggingface.co/numz/SeedVR2_comfyUI/resolve/main/ema_vae_fp16.safetensors" \
+          "SEEDVR2/ema_vae_fp16.safetensors"
+fi
+
 # ltx23-eros-video tier (32GB+ VRAM instances only — gate on tier env)
 if [[ "${RENTAL_TIER:-image}" == "video" ]]; then
     fetch "${R2_BASE_URL}/checkpoints/ltx-2.3-22b-dev-fp8.safetensors" \
@@ -364,7 +396,14 @@ if [[ "${RENTAL_TIER:-image}" == "minimax-video" ]]; then
         # back from pinned RAM).
         export COMFYUI_ARGS="${COMFYUI_ARGS} --vram-headroom 12"
     fi
-    H3_COMFY_COMMIT="e377e263049f9338b4d12a3dd417b36ae62948ff"
+    # Comfy-Org/ComfyUI#15808 (kijai, 2026-08-22): H3's special tokens — <d>,
+    # </d>, <|cutoff|>, the lyrics/caption pairs — were declared in
+    # tokenizer_config.json but missing from the live vocab, so each split into
+    # junk subtokens. We tag every spoken line <d>, so a pre-fix box produced
+    # gibberish dialogue. A FLOOR, not an exact pin: the ancestor test below
+    # leaves a newer image alone, which is why the gibberish was per-box.
+    # Same value as _H3_COMFY_COMMIT in src/hivemind_content_studio/gpu_rentals.py.
+    H3_COMFY_COMMIT="924743af083c151296cc16f925aeab113b6484e8"
     if ! git -C "$COMFYUI_DIR" merge-base --is-ancestor "$H3_COMFY_COMMIT" HEAD 2>/dev/null; then
         git -C "$COMFYUI_DIR" fetch --depth 200 origin master
         git -C "$COMFYUI_DIR" checkout "$H3_COMFY_COMMIT"

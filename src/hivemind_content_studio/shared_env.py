@@ -24,6 +24,7 @@ Two rules that matter more than the code:
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,20 @@ DEFAULT_HIVE_ENV_FILES = (Path("~/.hivemindos/.env"),)
 
 # The marker PassBook writes in place of an encrypted value.
 _SEALED = "hive-sealed:"
+
+# How long a refusal is trusted before the broker is asked about that key
+# again. The studio's status polls come back around every few seconds, and a
+# poll asks about every provider — so a key this app is not granted used to be
+# re-asked in bursts, thousands of DENIED rows an hour in the machine's access
+# ledger, all reporting the same unchanged fact. The fact does change — the
+# owner grants the key, or signs the vault in — so the memory expires: quickly
+# at first, then doubling to a five-minute ceiling, and the first answered ask
+# clears it. Refusals only; a granted read is never cached, so a value the
+# owner rotates is picked up on the very next ask.
+_REFUSAL_BACKOFF_START_SECONDS = 30.0
+_REFUSAL_BACKOFF_CAP_SECONDS = 300.0
+# name -> (monotonic deadline to stay quiet until, the wait that set it)
+_refused: dict[str, tuple[float, float]] = {}
 
 
 def parse_env_file(env_file: str | Path) -> dict[str, str]:
@@ -190,7 +205,10 @@ def request_credential(name: str, *, reason: str = "") -> str:
     Everything in the studio that needs a provider key comes through here, so
     the process asks for what it needs rather than inheriting the whole store,
     and every read leaves a receipt naming the key (never the value). When a
-    broker is running, this is also the call that goes through it.
+    broker is running, this is also the call that goes through it. A key the
+    machine refuses is not asked about again until its backoff window expires
+    (`_REFUSAL_BACKOFF_START_SECONDS`), so a status poll that comes around
+    every few seconds costs one ledger row per window, not one per poll.
     """
     import os
 
@@ -201,6 +219,14 @@ def request_credential(name: str, *, reason: str = "") -> str:
     # keeps a developer's real credentials out of a test run. Left on always, it
     # would quietly read past a workspace and past the broker both.
     redirected = configured_hive_env_files() if os.environ.get("HIVE_ENV_FILES") else None
+    # A recent refusal answers without asking again. Only for the machine
+    # store: a redirected process reads files it named itself — no broker, no
+    # ledger, nothing to protect — and the test suite depends on every call
+    # being answered fresh.
+    if redirected is None:
+        held = _refused.get(name)
+        if held is not None and time.monotonic() < held[0]:
+            return ""
     granted = passbook.request(
         [name], app=APP_ID, reason=reason,
         workspace_id=passbook.workspace(),
@@ -213,7 +239,16 @@ def request_credential(name: str, *, reason: str = "") -> str:
     # it. That makes the poisoning contagious: filtering it at one call site
     # does not stop the next one. It ends here instead, at the door every
     # credential read in the studio goes through.
-    return "" if str(value).startswith(_SEALED) else value
+    usable = "" if str(value).startswith(_SEALED) else value
+    if redirected is None:
+        if usable:
+            _refused.pop(name, None)
+        else:
+            held = _refused.get(name)
+            wait = (_REFUSAL_BACKOFF_START_SECONDS if held is None
+                    else min(_REFUSAL_BACKOFF_CAP_SECONDS, held[1] * 2))
+            _refused[name] = (time.monotonic() + wait, wait)
+    return usable
 
 
 def enable_access_stamps(*, actor_did: str = "") -> bool:
@@ -223,7 +258,22 @@ def enable_access_stamps(*, actor_did: str = "") -> bool:
     cannot be edited or removed without breaking every row after it, and
     GitLawb's verifier reads it. Optional: a machine without the companion
     module simply keeps no ledger.
+
+    Not from a redirected process. `HIVE_ENV_FILES` is how a test run, a
+    sandbox or a second instance says it was pointed away from the machine
+    store — `join_hive_env()` already refuses to register one — and the
+    recorder is process-global, so arming it there stamped reads that never
+    touched the machine's credentials. The suite redirects every read to a
+    path that does not exist, so each one came back empty and was written to
+    the machine's REAL ledger as a DENIED read by this app: one `pytest` run
+    left 45 of them, 37 for the same key, which reads in `passbook access`
+    exactly like an app polling for a credential it is not granted. The
+    machine's audit trail is for what the machine's store actually served.
     """
+    import os
+
+    if os.environ.get("HIVE_ENV_FILES"):
+        return False
     try:
         import passbook_stamp
     except ImportError:

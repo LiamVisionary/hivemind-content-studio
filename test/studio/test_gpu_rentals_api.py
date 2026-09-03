@@ -869,6 +869,180 @@ def test_the_realistic_presign_is_the_real_length() -> None:
     assert abs(len(_realistic_presign("vae/minimax_h3_video_vae_fp16.safetensors")) - 405) <= 12
 
 
+def test_the_shipped_tensorrt_node_archive_is_valid_python(tmp_path: Path) -> None:
+    """Every file in the archive parses, checked HERE rather than on the box.
+
+    A half-written or syntactically broken custom node does not fail politely —
+    it breaks ComfyUI's whole custom-node scan, and the box then comes up
+    without the privacy layer either. The on-box install therefore does no
+    syntax check (it costs onstart budget nobody has); this is that check, run
+    before an archive can ever be published.
+    """
+    import ast
+    import io
+    import tarfile
+
+    data = gpu_rentals._seedvr2_trt_node_archive()
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        names = archive.getnames()
+        assert sorted(names) == sorted(gpu_rentals.SEEDVR2_TRT_NODE_FILES)
+        for name in names:
+            source = archive.extractfile(name).read().decode("utf-8")
+            ast.parse(source)  # raises, with the line, if it would break a box
+    # The node has to register itself or the graph's TensorRT node is unknown.
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        init = archive.extractfile("__init__.py").read().decode("utf-8")
+    assert "HivemindSeedVR2TensorRT" in init
+    assert "NODE_CLASS_MAPPINGS" in init
+
+
+def test_the_node_archive_is_byte_identical_for_identical_source() -> None:
+    # Rebuilt on every rent. An archive that differed each time would be a diff
+    # nobody can read and a cache nobody can trust.
+    assert gpu_rentals._seedvr2_trt_node_archive() == gpu_rentals._seedvr2_trt_node_archive()
+
+
+def test_a_restore_tier_installs_the_restorer_and_its_weights(monkeypatch, rental_manifest) -> None:
+    """A tier that claims `restore` must actually be able to.
+
+    Found 2026-08-31 the hard way: the TensorRT accelerator was provisioned onto
+    the video tier while the pack it accelerates was not, so a box would have
+    advertised the Restore studio and had no SeedVR2 nodes at all. The weights
+    ride the manifest for the same reason as everything else — the node
+    downloads a missing model on FIRST USE, and the first chunk of a paid render
+    is the worst moment to start an 8.5GB download."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
+    script = gpu_rentals._onstart_script("video")
+    assert "ComfyUI-SeedVR2_VideoUpscaler" in script
+    assert gpu_rentals._SEEDVR2_COMMIT in script, "pinned: the graph is built against its inputs"
+    text = rental_manifest["text"]
+    assert "SEEDVR2/seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors" in text
+    assert "SEEDVR2/ema_vae_fp16.safetensors" in text
+    # …and every tier that says it restores gets them, so the claim cannot
+    # drift from the provisioning.
+    for tier, spec in gpu_rentals.TIERS.items():
+        if "restore" in (spec.get("studio_pages") or []):
+            assert gpu_rentals._onstart_script(tier).count("ComfyUI-SeedVR2_VideoUpscaler") == 1, tier
+
+
+def test_the_tensorrt_node_rides_the_manifest_rather_than_the_onstart(monkeypatch, rental_manifest) -> None:
+    """Measured 2026-08-31: a presigned URL of its own cost ~965 characters of
+    onstart, and the minimax tier had 2089 to spare. The archive is a manifest
+    row instead, so it costs the onstart one short extract line."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
+    script = gpu_rentals._onstart_script("video")
+    assert gpu_rentals.SEEDVR2_TRT_ARCHIVE_DEST in rental_manifest["text"]
+    assert gpu_rentals.SEEDVR2_TRT_ARCHIVE_DEST in script
+    # …and the extract happens after the downloads and before ComfyUI starts,
+    # because custom nodes are scanned once, at startup.
+    assert script.index("dlwait") < script.index("hivemind-seedvr2-trt")
+    assert script.index("hivemind-seedvr2-trt") < script.index("setsid nohup python main.py")
+
+
+def test_a_tier_that_cannot_restore_ships_no_tensorrt_node(monkeypatch, rental_manifest) -> None:
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
+    script = gpu_rentals._onstart_script("image")
+    assert "hivemind-seedvr2-trt" not in script
+    assert gpu_rentals.SEEDVR2_TRT_ARCHIVE_DEST not in (rental_manifest["text"] or "")
+
+
+def test_a_tier_that_advertises_restore_carries_all_three_pieces(monkeypatch) -> None:
+    """studio_pages, lane_needles and the provisioning must agree.
+
+    They came apart once already: the accelerator was provisioned onto a tier
+    whose restorer was not, and a second tier advertised the Restore studio with
+    neither. Pinned together so a future edit to any one of them fails here."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
+    for tier, spec in gpu_rentals.TIERS.items():
+        advertises = "restore" in (spec.get("studio_pages") or [])
+        assert gpu_rentals.tier_installs_seedvr2_trt(tier) == advertises, tier
+        assert ("seedvr2" in spec["lane_needles"]) == advertises, (
+            f"{tier}: a lane needle that routes restorations to a box without the restorer"
+        )
+        script = gpu_rentals._onstart_script(tier)
+        assert ("ComfyUI-SeedVR2_VideoUpscaler" in script) == advertises, tier
+
+
+def test_the_minimax_tier_is_excluded_for_onstart_budget_not_capability(monkeypatch) -> None:
+    """A Blackwell box would be the BEST restore hardware we rent and still does
+    not get it, because its onstart has no room. Pinned so that the day somebody
+    slims that onstart, this reads as the thing to reconsider — rather than
+    looking like minimax cannot restore, which is false."""
+    monkeypatch.setattr(gpu_rentals, "_presign_r2_get", _realistic_presign)
+    monkeypatch.setattr(gpu_rentals, "rental_public_key", lambda: "ssh-ed25519 AAAATESTKEY x")
+    assert gpu_rentals.tier_installs_seedvr2_trt("video")
+    assert not gpu_rentals.tier_installs_seedvr2_trt("minimax")
+    headroom = gpu_rentals.VAST_ONSTART_LIMIT - len(gpu_rentals._onstart_script("minimax"))
+    assert headroom < 2500, (
+        "the minimax onstart has room now — reconsider whether it should restore"
+    )
+
+
+def test_a_damaged_node_archive_never_fails_a_boot(monkeypatch) -> None:
+    """A box that restores at 1.0x is a working box. A box that refuses to boot
+    because an optional accelerator would not unpack is a wasted rent — and a
+    HALF-unpacked custom node is worse than none, because it breaks ComfyUI's
+    whole node scan and takes the privacy layer down with it."""
+    lines = gpu_rentals._seedvr2_trt_install_lines("video")
+    extract = next(line for line in lines if "tar -xzf" in line)
+    assert "|| rm -rf" in extract
+
+
+def test_installing_the_accelerator_can_never_move_torch(monkeypatch) -> None:
+    """MEASURED 2026-08-31 on a rented 5090, and it cost a box.
+
+    A bare `pip install torch-tensorrt` resolved to 2.13.0, upgraded torch from
+    the image's 2.10.0+cu130, and left torchvision pinned to the old one.
+    ComfyUI then died on `operator torchvision::nms does not exist` and the
+    onstart hung forever in its launch wait — billing the whole time.
+
+    `|| true` did not help, and could not: pip SUCCEEDED. So the guard is a
+    constraint file, and it applies to EVERY pip install into that shared venv,
+    not just the one that happened to bite."""
+    lines = gpu_rentals._seedvr2_trt_install_lines("video")
+    installs = [line for line in lines if "pip install" in line]
+    assert installs, "the accelerator has to be installed somehow"
+    for line in installs:
+        assert "-c /tmp/torch-pin.txt" in line, line
+    assert any("torch-pin.txt" in line and "printf" in line for line in lines), (
+        "the constraint file has to be written from the INSTALLED torch version"
+    )
+    assert installs[-1].rstrip().endswith("|| true"), "a failed install must never fail the boot"
+
+
+def test_the_box_gets_tensorrt_itself_not_pytorchs_compiler(monkeypatch) -> None:
+    """The node builds engines from ONNX with TensorRT's own parser.
+
+    torch-tensorrt is deliberately NOT installed: its compiler failed three
+    separate ways on this decoder (data-dependent guard, rank-10 tensor, then a
+    CUDA illegal memory access), and it is not on the path this pack takes."""
+    lines = gpu_rentals._seedvr2_trt_install_lines("video")
+    joined = " ".join(lines)
+    assert "tensorrt-rtx" in joined
+    assert "torch-tensorrt" not in joined
+    # onnx too: the export has to be able to write the graph.
+    assert "onnx" in joined
+
+
+def test_the_rank_safe_rewrite_ships_with_the_node(monkeypatch) -> None:
+    """TensorRT refuses this decoder until its causal padding stops building
+    10-dimensional intermediates, so the rewrite is not optional cargo — a box
+    that got the node without it would install an accelerator that then refuses
+    to accelerate."""
+    import io
+    import tarfile
+    for required in ("rank_patch.py", "trt_engine.py"):
+        assert required in gpu_rentals.SEEDVR2_TRT_NODE_FILES, required
+    with tarfile.open(fileobj=io.BytesIO(gpu_rentals._seedvr2_trt_node_archive())) as archive:
+        names = archive.getnames()
+        for required in ("rank_patch.py", "trt_engine.py"):
+            assert required in names, required
+
+
 @pytest.mark.parametrize("tier", ["image", "video", "minimax"])
 def test_every_tier_onstart_keeps_headroom_under_vasts_limit(tier: str, monkeypatch) -> None:
     """Vast rejects an onstart over 16KB with an error that names nothing, and
@@ -1152,8 +1326,25 @@ def test_h3_custom_nodes_are_pinned_not_cloned_at_head(tmp_path: Path, monkeypat
         ("comfyui-kjnodes", gpu_rentals._H3_KJNODES_COMMIT),
     ):
         assert len(commit) == 40, "pin a full sha — abbreviations are not fetchable by name"
-        assert f"pin /workspace/ComfyUI/custom_nodes/{directory} {commit}" in script
+        assert f"pin $CN/{directory} {commit}" in script
     assert 'checkout -q "$2" || { beacon error 0 "custom node pin $2 unavailable"; exit 1; }' in script
+    # The clones above address custom_nodes through $CN, which buys back enough of
+    # Vast's 16KB onstart budget to fit the head-replacement packs. A shorthand is
+    # only safe while it is defined, and defined BEFORE the first clone uses it —
+    # an unset $CN under `set -u` would abort provisioning, and without set -u it
+    # would silently clone into /.
+    assert "\nCN=/workspace/ComfyUI/custom_nodes\n" in script
+    assert script.index("CN=/workspace/ComfyUI/custom_nodes") < script.index("git clone")
+    # Head replacement's own two packs, pinned the same way.
+    for directory, commit in (
+        ("ComfyUI-NKD-Basic-Tools", gpu_rentals._H3_NKD_BASIC_TOOLS_COMMIT),
+        ("MaskVidExperiments", gpu_rentals._H3_MASKVID_COMMIT),
+    ):
+        assert len(commit) == 40, "pin a full sha — abbreviations are not fetchable by name"
+        assert f"{directory} {commit}" in script
+    # np clones, pins and installs requirements in one step; a pack that grows a
+    # requirements.txt upstream must not be silently skipped.
+    assert 'np() {' in script and 'requirements.txt' in script
 
 
 def test_destroy_refuses_foreign_labels(tmp_path: Path, monkeypatch) -> None:
@@ -1581,6 +1772,8 @@ def test_switching_between_attached_machines_touches_nothing_remote(tmp_path: Pa
     assert body["attached"] is True and body["lane"] == "rental7"
     # The H3 lane serves both pages: minimax-h3-image runs on the same rented box,
     # matched by the same lane_needles as the video graphs.
+    # An H3 box, and only that: restoration lives on the video tier, whose
+    # onstart has room for the restorer (see tier_installs_seedvr2_trt).
     assert body["studio_pages"] == ["video", "image"]
     registry = tmp_path / "media-state/rental-lanes.json"
     assert list(json.loads(registry.read_text())) == ["vast:7", "vast:8"], "the selected machine leads"
@@ -2326,7 +2519,10 @@ def test_minimax_tier_ships_the_turbo_lora(tmp_path: Path, monkeypatch, rental_m
     # high-res lane landed: a 0.69GB neural upscaler for H3's own latent, which
     # has to be on disk BEFORE ComfyUI starts because its node builds the
     # model_name combo by scanning that directory at schema time.
-    assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(66.7, abs=0.2)
+    # 66.7 -> 68.3 when head replacement landed: SAM3.1 (1.63GB) for its SAM3
+    # masking branch. The manual-mask branch never loads it, but a box that could
+    # not track a subject is a box the studio has to refuse work to.
+    assert gpu_rentals.tier_download_gb("minimax") == pytest.approx(68.3, abs=0.2)
     assert "\tlatent_upscale_models/minimax_h3_latent_upscaler_3d_bf16.safetensors\n" in manifest
     assert "Comfyui_Minimax_h3_latent_Upscaler" in script
 
@@ -2390,8 +2586,11 @@ def test_rental_lora_add_provisions_matching_tiers(tmp_path: Path, monkeypatch, 
 
     script = gpu_rentals._onstart_script("video")
     assert f"https://r2.example/user-loras/{rel}?sig=x\tloras/{rel}\n" in rental_manifest["text"]
-    # 11 curated video files + this one, in the same beacon accounting.
-    assert '"total":12' in script
+    # 11 curated video files + this LoRA + the two SeedVR2 restoration weights +
+    # the TensorRT node archive, all in the same beacon accounting. The archive
+    # is not a weight, but it IS a file the box downloads before it can start,
+    # so counting it is what makes the progress bar match reality.
+    assert '"total":15' in script
     gpu_rentals._onstart_script("image")
     assert rel not in rental_manifest["text"]
 

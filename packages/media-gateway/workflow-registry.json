@@ -1273,6 +1273,323 @@
       "routing_only": true
     },
     {
+      "id": "minimax-h3-inpaint",
+      "media_type": "video",
+      "title": "MiniMax H3 Head Replacement",
+      "beta": true,
+      "family": "minimax",
+      "builder": "comfy-api",
+      "description": "Head replacement in an existing clip, by inpainting. A region of the source footage is masked and ONLY that region is denoised: the rest of every frame, and the entire soundtrack, are held exactly as shot. Identity for the new head comes from reference pictures, the same <Picture N> slots and the same rewrite grammar as MiniMax H3 Reference.\n\nWhy the audio is held rather than regenerated: H3 denoises picture and sound JOINTLY in one pass, so a kept audio latent is still VISIBLE to the model while it paints the face. The new head therefore lip-syncs to the original speech without a separate lip-sync stage. Setting the audio to regenerate would resample the voice and break that.\n\nTWO WAYS TO SAY WHICH PIXELS: mask_source 'manual' takes one painted PNG, white where the head should be replaced -- it is conformed to the footage and repeated across every frame, so a STATIC region is legal and is usually the right answer. A static region is not a compromise: the mask is a permission area, not a stencil, and a generous one lets the model place a differently-shaped head naturally where a tight per-frame silhouette would force the new head into the old head's outline. It must cover the head's whole travel through the clip, which is the one thing the studio's scrub-through check is for. mask_source 'sequence' takes a mask CLIP through mask_video_* \u2014 one white-on-black frame per source frame, tracked somewhere else (the hosted SAM3 service, or any tool that writes one), which is how a lane with no SAM3 checkpoint still gets a tracked mask. mask_source 'sam3' instead tracks the subject with comfy-core's native SAM3 video tracker (checkpoints/sam3.1_multiplex_fp16.safetensors), which is worth its ~3.4GB load and its per-frame compute when the shot moves far enough that a static box would swallow most of the frame.\n\nEither way the mask is only the beginning: mask_expand grows it (30px by default -- the donor workflow's own value, and deliberately far wider than any silhouette), and the subject crop then cuts a window around it at crop_scale and resamples that window to crop_megapixels. The model runs on the CROP, not the frame, which is what makes this affordable: a 0.8MP crop of a 1080p clip is a quarter of the rows. crop_mode 'combined' plans one static window around the subject's whole travel; 'tracked' holds a constant-size window that moves only when the subject would leave it; 'zoomed' also follows the subject's size. The result is feathered back into the untouched frames.\n\nTRAP: width, height and length are NOT settable. They are read off the crop at runtime (GetImageSize on the cropped batch) because the crop's size is decided by the mask, which the caller cannot know in advance. duration_seconds and frames instead TRIM the source clip, and the trim is snapped down to H3's 17n+5 frame grid at 24 fps before staging -- an unsnapped length is rejected by the model, not silently rounded.\n\nBeyond an ordinary H3 lane this needs two pinned node packs: Nekodificador/ComfyUI-NKD-Basic-Tools (MIT) for the masked joint AV latent and the mask ops, and drozbay/MaskVidExperiments (GPL-3.0) for the subject crop and uncrop. Both are installed as separate ComfyUI custom nodes, not vendored. See packages/gpu-rentals provisioning.",
+      "api_workflow": "workflows/minimax-h3-inpaint.api.json",
+      "default": false,
+      "supports_loras": true,
+      "compatible_base_models": [
+        "MiniMax H3"
+      ],
+      "lora_injection": {
+        "class_type": "LoraLoaderModelOnly",
+        "targets": [
+          {
+            "node": "31",
+            "input": "model"
+          }
+        ],
+        "name_input": "lora_name",
+        "strength_input": "strength_model"
+      },
+      "frame_grid": {
+        "modulus": 17,
+        "offset": 5
+      },
+      "motion_reference_budget": {
+        "max_packed_rows": 76000,
+        "vram_headroom_gb": 12,
+        "max_packed_rows_without_vram_headroom": 76000,
+        "max_packed_rows_by_vram_gb": {
+          "32": 76000,
+          "96": 161000
+        },
+        "measured": "2026-08-23 RECALIBRATED DOWN, and the rule changed with it: a budget is now the largest run PROVEN to complete on that card, never a midpoint between a success and a failure. The previous 85,000 was exactly that midpoint \u2014 76,600 rows had run clean (48.5s a step, torch 23.34GiB) and 95,092 had thrashed and died, so 85,000 was interpolated between them and shipped as if measured. On 2026-08-23 a job priced at ~80,400 counted rows (80,890 including text) died on a 32GB 5090 inside that band: 'Currently allocated 24.75 GiB, Requested 4.32 GiB, Device limit 31.36 GiB', in the MLP of block 0 (comfy_kitchen quantization.py:1051, fc1 = ffn*2 = 28,672 wide at bf16 = 57,344 bytes a row; 4.32GiB / 57,344 = 80,890). Every duration the picker offered between ~77k and 85k rows was therefore a coin flip, which is why the same OOM kept arriving. 32GB is now 76,000 (the proven-clean 76,600, rounded down). 96GB is now 161,000 for the same reason: the ONLY thing proven on a PRO 6000 is that the ~161k-row as-sent job ran (134s a step, 64.5GB of 95GB by nvidia-smi, job 185f117f 2026-08-22); 240,000 was another interpolation and would have reproduced this failure on the bigger card. Raise either number only on a clean reference-mode run AT that size \u2014 normal step times, no thrash \u2014 and never above it. UNIT + arithmetic unchanged: packed rows of the whole DiT sequence, priced by packedSequenceRows() in media-studio-mcp.mjs and mirrored by _h3_packed_rows() in media_studio.py; output video+audio latents, each motion clip at the node's adapt_canvas() of its STAGED dims plus its soundtrack when use_audio, each picture at most the output's rows per latent frame, each voice clip 2 x round(s x 40); text is not counted, which is why a counted figure runs a few hundred rows under the allocator's. ANCHORS on a 32GB 5090, reference mode: 34k clean (15.1s/step, 14.91GiB); 66,900 clean (42.0s/step, 22.97GiB); 76,600 clean (48.5s/step, 23.34GiB, job 69a108a5) <- the budget; 80,890 OOM (2026-08-23); 95,092 thrash then OOM (73s/step, b2f76185); 97,710 OOM (2026-08-22); 142,366/155,006 OOM three times (34a722c2, b9f5b32d at --vram-headroom 12, 103f6173 at 20 - the flag is inert for this). A PLAIN text-to-video carries no references and is not priced here at all: 90,658 rows (15s @1216x704) ran at 27.16GiB, which is ABOVE this budget and is not a contradiction - reference mode pays for the reference encode on the same card. Read torch's own peak or the OOM summary, never nvidia-smi under cudaMallocAsync, and always probe with workflow_id minimax-h3-reference."
+      },
+      "requires": {
+        "prompt": true,
+        "image": false,
+        "source_video": true
+      },
+      "accepts": [
+        "prompt",
+        "source_video_path",
+        "source_video_base64",
+        "source_video_url",
+        "mask_source",
+        "mask_image_path",
+        "mask_image_base64",
+        "mask_image_url",
+        "mask_video_path",
+        "mask_video_base64",
+        "mask_video_url",
+        "sam3_prompt",
+        "sam3_detection_threshold",
+        "sam3_max_objects",
+        "sam3_detect_interval",
+        "sam3_object_indices",
+        "mask_expand",
+        "mask_feather",
+        "mask_despeckle",
+        "mask_temporal_expand",
+        "crop_mode",
+        "crop_scale",
+        "crop_megapixels",
+        "paste_expand",
+        "paste_feather",
+        "paste_edge_feather",
+        "reference_images",
+        "ref_image_size",
+        "duration_seconds",
+        "frames",
+        "frame_rate",
+        "seed",
+        "steps",
+        "spectrum",
+        "easycache",
+        "solattn_tau",
+        "interpolate",
+        "loras"
+      ],
+      "reference_image_slots": [
+        {
+          "node": "120",
+          "input": "image"
+        },
+        {
+          "node": "121",
+          "input": "image"
+        },
+        {
+          "node": "122",
+          "input": "image"
+        },
+        {
+          "node": "123",
+          "input": "image"
+        },
+        {
+          "node": "124",
+          "input": "image"
+        },
+        {
+          "node": "125",
+          "input": "image"
+        },
+        {
+          "node": "126",
+          "input": "image"
+        },
+        {
+          "node": "127",
+          "input": "image"
+        },
+        {
+          "node": "128",
+          "input": "image"
+        }
+      ],
+      "mask_sources": {
+        "manual": {
+          "from": [
+            "153",
+            0
+          ],
+          "prune": [
+            "154",
+            "155",
+            "156",
+            "157",
+            "168",
+            "169",
+            "170",
+            "171"
+          ]
+        },
+        "sam3": {
+          "from": [
+            "157",
+            0
+          ],
+          "prune": [
+            "152",
+            "153",
+            "166",
+            "167",
+            "168",
+            "169",
+            "170",
+            "171"
+          ]
+        },
+        "sequence": {
+          "from": [
+            "171",
+            0
+          ],
+          "prune": [
+            "152",
+            "153",
+            "154",
+            "155",
+            "156",
+            "157",
+            "166",
+            "167"
+          ]
+        }
+      },
+      "mask_input": {
+        "node": "159",
+        "input": "masks"
+      },
+      "crop_mode_input": {
+        "node": "159",
+        "input": "mode"
+      },
+      "defaults": {
+        "frame_rate": 24,
+        "duration_seconds": 5,
+        "seed": -1,
+        "steps": 15,
+        "spectrum": true,
+        "easycache": 0,
+        "solattn_tau": 0,
+        "interpolate": 1,
+        "mask_source": "manual",
+        "sam3_prompt": "head",
+        "sam3_detection_threshold": 0.5,
+        "sam3_max_objects": 1,
+        "sam3_detect_interval": 1,
+        "sam3_object_indices": "",
+        "mask_expand": 30,
+        "mask_feather": 0,
+        "mask_despeckle": 2,
+        "mask_temporal_expand": 1,
+        "crop_mode": "tracked",
+        "crop_scale": 1.75,
+        "crop_megapixels": 0.8,
+        "paste_expand": 10,
+        "paste_feather": 20,
+        "paste_edge_feather": 16,
+        "ref_image_size": "match",
+        "width": 896,
+        "height": 896
+      },
+      "slots": {
+        "prompt": {
+          "node": "104",
+          "input": "prompt"
+        },
+        "ref_image_size": {
+          "node": "104",
+          "input": "ref_image_size"
+        },
+        "source_video_path": {
+          "node": "150",
+          "input": "file"
+        },
+        "mask_image_path": {
+          "node": "152",
+          "input": "image"
+        },
+        "sam3_prompt": {
+          "node": "155",
+          "input": "text"
+        },
+        "sam3_detection_threshold": {
+          "node": "156",
+          "input": "detection_threshold"
+        },
+        "sam3_max_objects": {
+          "node": "156",
+          "input": "max_objects"
+        },
+        "sam3_detect_interval": {
+          "node": "156",
+          "input": "detect_interval"
+        },
+        "sam3_object_indices": {
+          "node": "157",
+          "input": "object_indices"
+        },
+        "mask_expand": {
+          "node": "162",
+          "input": "expand"
+        },
+        "mask_feather": {
+          "node": "162",
+          "input": "feather"
+        },
+        "mask_despeckle": {
+          "node": "162",
+          "input": "despeckle"
+        },
+        "mask_temporal_expand": {
+          "node": "162",
+          "input": "temporal_expand"
+        },
+        "crop_megapixels": {
+          "node": "159",
+          "input": "upscale_megapixels"
+        },
+        "paste_expand": {
+          "node": "164",
+          "input": "expand"
+        },
+        "paste_feather": {
+          "node": "164",
+          "input": "feather"
+        },
+        "paste_edge_feather": {
+          "node": "163",
+          "input": "feather"
+        },
+        "seed": {
+          "node": "15",
+          "input": "noise_seed"
+        },
+        "steps": {
+          "node": "9",
+          "input": "steps"
+        },
+        "spectrum": {
+          "node": "30",
+          "input": "enabled"
+        },
+        "easycache": {
+          "node": "32",
+          "input": "reuse_threshold"
+        },
+        "solattn_tau": {
+          "node": "33",
+          "input": "tau"
+        },
+        "interpolate": {
+          "node": "35",
+          "input": "multiplier"
+        },
+        "frame_rate": {
+          "node": "91",
+          "input": "fps"
+        },
+        "mask_video_path": {
+          "node": "168",
+          "input": "file"
+        }
+      },
+      "prompt_contract": {
+        "guidance": "Head replacement uses the same reference grammar as MiniMax H3 Reference, narrowed to one job. Bind the new identity to the pictures in subject_definitions (\"<Subject 1> is the character represented in <Picture 1>\"), tag it fully_preserved in retention_analysis so the face carries, and describe the SHOT rather than the action -- the action is already in the footage and is being preserved by the mask. Do not write dialogue: the soundtrack is held, so speech comes from the source clip and the model is matching lips to it. Do not describe the body, the background or the camera move for the same reason.",
+        "default": "<Subject 1> is the character represented in <Picture 1>. The video is a close up face of <Subject 1>."
+      },
+      "routing_only": true
+    },
+    {
       "id": "minimax-h3",
       "media_type": "video",
       "title": "MiniMax H3",

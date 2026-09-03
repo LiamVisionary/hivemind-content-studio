@@ -53,8 +53,8 @@ from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brai
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
 from .lanes import LANE_MATRIX
 from . import (
-    comfy_lanes, hivemindos_models, image_router, local_llm, media_posters, muapi_proxy,
-    prompt_profiles, provider_models, story_producer, text_models,
+    comfy_lanes, hivemindos_models, hivemindos_sam3, image_router, local_llm, media_posters,
+    muapi_proxy, prompt_profiles, provider_models, story_producer, text_models, video_restore,
 )
 from .manifest import load_manifest, write_manifest
 from .machine_privacy import machine_operation_receipt, machine_run_receipt
@@ -496,6 +496,10 @@ class _StagedVideoInputs:
     reference_images: list[Path] = field(default_factory=list)
     reference_audios: list[Path] = field(default_factory=list)
     reference_videos: list[dict[str, Any]] = field(default_factory=list)
+    # Head replacement: the clip being rewritten, and the painted mask.
+    inpaint_source: Path | None = None
+    inpaint_mask: Path | None = None
+    inpaint_mask_video: Path | None = None
     # Anything staging changed about the request on the owner's behalf (a
     # shortened note), so the response can say so instead of cutting silently.
     warnings: list[str] = field(default_factory=list)
@@ -505,6 +509,7 @@ class _StagedVideoInputs:
             source
             for source in [
                 self.image, self.middle, self.end, self.video, self.motion_context,
+                self.inpaint_source, self.inpaint_mask, self.inpaint_mask_video,
                 *(item["image_path"] for item in self.ingredient_images),
                 *self.reference_images,
                 *self.reference_audios,
@@ -535,6 +540,31 @@ class MediaStudioReferenceVideoBody(BaseModel):
     canvas: Literal["full", "compact"] = "full"
 
 
+class MediaStudioInpaintBody(BaseModel):
+    """The head-replacement dials. Every one is optional and an unset dial keeps
+    the workflow's own default — the studio does not restate them, so there is
+    one place to change a default rather than two that can drift."""
+
+    sam3_prompt: str = Field(default="", max_length=200)
+    sam3_detection_threshold: float | None = Field(default=None, ge=0.05, le=0.95)
+    sam3_max_objects: int | None = Field(default=None, ge=0, le=64)
+    sam3_detect_interval: int | None = Field(default=None, ge=1, le=64)
+    sam3_object_indices: str = Field(default="", max_length=100)
+    mask_expand: int | None = Field(default=None, ge=-512, le=512)
+    mask_feather: int | None = Field(default=None, ge=0, le=256)
+    mask_despeckle: int | None = Field(default=None, ge=0, le=256)
+    mask_temporal_expand: int | None = Field(default=None, ge=0, le=64)
+    crop_mode: Literal["", "combined", "tracked", "zoomed"] = ""
+    # 0 is "no crop, the whole frame". Between 0 and 1 would be a window smaller
+    # than the subject; media_studio refuses it there, where the message can
+    # explain what the number means.
+    crop_scale: float | None = Field(default=None, ge=0, le=4)
+    crop_megapixels: float | None = Field(default=None, ge=0.1, le=2)
+    paste_expand: int | None = Field(default=None, ge=-512, le=512)
+    paste_feather: int | None = Field(default=None, ge=0, le=256)
+    paste_edge_feather: int | None = Field(default=None, ge=0, le=256)
+
+
 class MediaStudioVideoBody(BaseModel):
     prompt: str = Field(default="", max_length=_MAX_PROMPT_CHARS)
     workflow_id: str = Field(default="", max_length=256)
@@ -560,6 +590,19 @@ class MediaStudioVideoBody(BaseModel):
     video_reference: str | None = None
     # Scene chaining (MiniMax H3): the PREVIOUS clip, decrypted in-browser and
     # sent inline; its last ~22 frames + audio tail seed the new shot.
+    # Head replacement (MiniMax H3 inpainting): the clip being REWRITTEN, and
+    # the painted region that says which pixels may change. Neither is a source
+    # video (that means "extend this shot") nor a reference (that is
+    # conditioning) — this clip's own pixels and soundtrack are the result.
+    source_video_base64: str | None = None
+    source_video_reference: str | None = None
+    mask_image_base64: str | None = None
+    # A tracked mask CLIP — one white-on-black frame per source frame. What
+    # the hosted masking service returns, and how a lane with no SAM3
+    # checkpoint still gets a tracked mask.
+    mask_video_base64: str | None = None
+    mask_source: Literal["", "manual", "sam3", "sequence"] = ""
+    inpaint: "MediaStudioInpaintBody | None" = None
     motion_context_base64: str | None = None
     video_mode: Literal["extend"] = "extend"
     # THE task. Decided once in the studio (src/lib/videoTasks.js) and forwarded
@@ -595,6 +638,45 @@ class MediaStudioVideoBody(BaseModel):
     # (MiniMax H3's refinement setting). None keeps the workflow default.
     steps: int | None = Field(default=None, ge=1, le=100)
     loras: list[MediaStudioLoraBody] = []
+
+
+class HostedSam3QuoteBody(BaseModel):
+    """What one hosted mask would cost. Measured by the browser, which has
+    already decoded the clip — the price is quoted from these three numbers."""
+
+    frames: int = Field(default=121, ge=1, le=400)
+    width: int = Field(default=1280, ge=16, le=8192)
+    height: int = Field(default=720, ge=16, le=8192)
+
+
+class HostedSam3MaskBody(HostedSam3QuoteBody):
+    # The clip to track, decrypted in-browser and sent inline like every other
+    # reference. This is the one masking path where footage leaves the machine,
+    # which the dialog says beside the button rather than in a policy.
+    video_base64: str
+    prompt: str = Field(default="head", max_length=200)
+    detection_threshold: float = Field(default=0.5, ge=0.05, le=0.95)
+    max_objects: int = Field(default=1, ge=0, le=64)
+    detect_interval: int = Field(default=1, ge=1, le=64)
+    # What the owner approved on the dialog's own price line. The client sends
+    # back the figure it SHOWED, so a price that moved between the quote and the
+    # submit is refused rather than silently charged.
+    maximum_debit_usd: float = Field(default=0.5, gt=0, le=2)
+
+
+class RestorePlanBody(BaseModel):
+    """What the browser measured off the file it is holding.
+
+    Bounded rather than trusted: these numbers only ever come from a local
+    <video> element, but they decide how many chunks the gateway will plan, and
+    a nonsense frame count should be a 422 rather than a ten-thousand-chunk
+    project."""
+
+    frames: int = Field(ge=1, le=10_000_000)
+    fps: float = Field(default=24.0, gt=0, le=480)
+    width: int = Field(ge=16, le=16384)
+    height: int = Field(ge=16, le=16384)
+    options: dict[str, Any] = Field(default_factory=dict)
 
 
 class MediaStudioIngredientPreviewBody(BaseModel):
@@ -3070,8 +3152,11 @@ def build_control_app(
         reference_images: list[Path] = []
         reference_audios: list[Path] = []
         reference_videos: list[dict[str, Any]] = []
+        inpaint_source: Path | None = None
+        inpaint_mask: Path | None = None
+        inpaint_mask_video: Path | None = None
         warnings: list[str] = []
-        has_private_reference = body.image_reference or body.video_reference or any(
+        has_private_reference = body.image_reference or body.video_reference or body.source_video_reference or any(
             item.image_reference for item in [*body.ingredient_images, *body.reference_images]
         ) or any(item.audio_reference for item in body.reference_audios) or any(
             item.video_reference for item in body.reference_videos
@@ -3152,6 +3237,24 @@ def build_control_app(
                     raise ValueError("A motion-context clip seeds a new shot and cannot be combined with a source video")
                 motion_context = _write_inline_video(
                     body.motion_context_base64, media_studio_input_root, label="The previous shot's clip")
+            # Head replacement. The clip usually arrives as a sealed reference
+            # (it is already attached in the references panel), so both routes
+            # exist; the mask is always inline, because the browser just painted it.
+            if body.source_video_reference:
+                inpaint_source = stage_media_studio_reference(body.source_video_reference)
+            elif body.source_video_base64:
+                inpaint_source = _write_inline_video(
+                    body.source_video_base64, media_studio_input_root, label="The clip being inpainted")
+            if inpaint_source is not None and video is not None:
+                raise ValueError(
+                    "Head replacement rewrites an existing clip and cannot be combined with a source video"
+                )
+            if body.mask_image_base64:
+                inpaint_mask = _write_inline_image(
+                    body.mask_image_base64, media_studio_input_root, label="The painted mask")
+            if body.mask_video_base64:
+                inpaint_mask_video = _write_inline_video(
+                    body.mask_video_base64, media_studio_input_root, label="The tracked mask clip")
             if body.image_base64:
                 image = _write_inline_image(body.image_base64, media_studio_input_root, label="The start image")
             elif body.image_reference:
@@ -3182,6 +3285,9 @@ def build_control_app(
             reference_images=reference_images,
             reference_audios=reference_audios,
             reference_videos=reference_videos,
+            inpaint_source=inpaint_source,
+            inpaint_mask=inpaint_mask,
+            inpaint_mask_video=inpaint_mask_video,
             warnings=warnings,
         )
 
@@ -3383,6 +3489,11 @@ def build_control_app(
                 reference_images=staged.reference_images,
                 reference_audios=staged.reference_audios,
                 reference_videos=staged.reference_videos,
+                source_video_path=staged.inpaint_source,
+                mask_image_path=staged.inpaint_mask,
+                mask_video_path=staged.inpaint_mask_video,
+                mask_source=body.mask_source,
+                inpaint_options=body.inpaint.model_dump() if body.inpaint else None,
                 duration_seconds=body.duration_seconds,
                 aspect_ratio=body.aspect_ratio,
                 resolution=body.resolution,
@@ -3488,6 +3599,11 @@ def build_control_app(
                 reference_images=staged.reference_images,
                 reference_audios=staged.reference_audios,
                 reference_videos=staged.reference_videos,
+                source_video_path=staged.inpaint_source,
+                mask_image_path=staged.inpaint_mask,
+                mask_video_path=staged.inpaint_mask_video,
+                mask_source=body.mask_source,
+                inpaint_options=body.inpaint.model_dump() if body.inpaint else None,
                 duration_seconds=body.duration_seconds,
                 aspect_ratio=body.aspect_ratio,
                 resolution=body.resolution,
@@ -3648,6 +3764,224 @@ def build_control_app(
             content, media_type = fetch_canvas_media(name)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from None
+        return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, no-store"})
+
+    @app.get("/api/media-studio/sam3", dependencies=[Depends(require_owner)])
+    async def hosted_sam3_status() -> dict[str, Any]:
+        """Whether hosted masking is reachable, switched on, and paid for.
+
+        Asked when the inpaint dialog opens, so it can offer the hosted route or
+        say which of the three things is missing. Never raises: an unreachable
+        service must not take the dialog down with it."""
+        return {"ok": True, **await asyncio.to_thread(hivemindos_sam3.status)}
+
+    @app.post("/api/media-studio/sam3/quote", dependencies=[Depends(require_owner)])
+    async def hosted_sam3_quote(body: HostedSam3QuoteBody) -> dict[str, Any]:
+        """The price, before a single frame is uploaded."""
+        try:
+            quote = await asyncio.to_thread(
+                hivemindos_sam3.quote, frames=body.frames, width=body.width, height=body.height,
+            )
+        except hivemindos_models.HivemindosModelsError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        return {"ok": True, "quote": quote}
+
+    @app.post("/api/media-studio/sam3/mask", dependencies=[Depends(require_owner)])
+    async def hosted_sam3_mask(body: HostedSam3MaskBody) -> dict[str, Any]:
+        """Track the subject through the clip and hand back the mask clip.
+
+        Returns the mask as BYTES rather than a URL: the graph loads bytes, and a
+        URL would make the render lane fetch from a third party mid-job."""
+        staged: Path | None = None
+        try:
+            staged = _write_inline_video(
+                body.video_base64, media_studio_input_root, label="The clip to mask")
+            result = await asyncio.to_thread(
+                hivemindos_sam3.mask_video,
+                video=staged,
+                frames=body.frames,
+                width=body.width,
+                height=body.height,
+                prompt=body.prompt,
+                detection_threshold=body.detection_threshold,
+                max_objects=body.max_objects,
+                detect_interval=body.detect_interval,
+                maximum_debit_usd=body.maximum_debit_usd,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except hivemindos_models.HivemindosModelsError as exc:
+            # The remedy rides along so the studio can put the ACTION next to the
+            # sentence — a "top up" message with nothing to press is a dead end.
+            raise HTTPException(
+                status_code=402 if exc.remedy == "top-up" else 502,
+                detail={"error": str(exc), "remedy": exc.remedy},
+            ) from None
+        finally:
+            # The footage was uploaded for one purpose and is not ours to keep.
+            if staged is not None:
+                with contextlib.suppress(OSError):
+                    staged.unlink()
+        return {
+            "ok": True,
+            "mask_video_base64": result["mask_base64"],
+            "charged_usd": result.get("charged_usd"),
+        }
+
+    # --- Video restoration (SeedVR2) -----------------------------------------
+    #
+    # A straight proxy onto the media gateway's restore routes, path for path,
+    # so the studio has one set of URLs whether it is talking to a local render
+    # or a rented one. Every decision — the chunk plan, which machine, resume,
+    # assembly — belongs to the gateway; what belongs here is the owner gate and
+    # the gateway token, which must never reach the browser.
+
+    def _restore_error(exc: video_restore.RestoreError) -> HTTPException:
+        return HTTPException(
+            status_code=exc.status_code,
+            detail={"error": str(exc), **({"remedy": exc.remedy} if exc.remedy else {})},
+        )
+
+    @app.get("/api/restore/capabilities", dependencies=[Depends(require_owner)])
+    async def restore_capabilities() -> dict[str, Any]:
+        """Which machines can restore, and which of them costs money.
+
+        Never raises. The Restore studio opens on this, and a gateway that is
+        down should show "no machine can restore right now" rather than an
+        empty screen with a stack trace behind it."""
+        try:
+            payload = await asyncio.to_thread(video_restore.client().request, "/api/restore/capabilities")
+        except video_restore.RestoreError as exc:
+            return {"ok": False, "lanes": [], "any": False, "error": str(exc), "remedy": exc.remedy}
+        # The gateway can see whether the hosted service is switched on. It
+        # cannot see whether this owner has an account to spend on it — that
+        # token lives here, encrypted, and never goes over to the gateway except
+        # on a start request that asks for the hosted lane. So the answer is
+        # completed on the way past, rather than leaving the studio to offer a
+        # lane whose only failure mode is a 401 three seconds later.
+        connected = bool(await asyncio.to_thread(hivemindos_models.credit_token))
+        for lane in payload.get("lanes") or []:
+            if lane.get("lane") == "cloud":
+                lane["connected"] = connected
+                if not connected and lane.get("available"):
+                    lane["available"] = False
+                    lane["reason"] = "connect your HivemindOS account to restore on the hosted service"
+                    lane["remedy"] = "connect"
+        return {"ok": True, **payload}
+
+    @app.post("/api/restore/plan", dependencies=[Depends(require_owner)])
+    async def restore_plan(body: RestorePlanBody) -> dict[str, Any]:
+        """The plan the gateway WOULD run, before anything is uploaded."""
+        try:
+            return await asyncio.to_thread(
+                video_restore.client().request, "/api/restore/plan",
+                method="POST",
+                body={
+                    "frames": body.frames, "fps": body.fps,
+                    "width": body.width, "height": body.height,
+                    "options": body.options or {},
+                },
+            )
+        except video_restore.RestoreError as exc:
+            raise _restore_error(exc) from None
+
+    @app.post("/api/restore", dependencies=[Depends(require_owner)])
+    async def start_restore(body: dict[str, Any]) -> dict[str, Any]:
+        """Start a restoration, or resume one.
+
+        The body is passed through rather than re-modelled: the gateway
+        validates and clamps every dial already, and a second schema here would
+        be a second place for the defaults to drift."""
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="A restore request object is required")
+        if str(body.get("run_on") or "") == "cloud":
+            # The one thing the gateway cannot get for itself. It runs the chunk
+            # loop, so it is the side that has to hold the token while a render
+            # is in flight; it keeps it in memory for that render only and never
+            # writes it to the project. If there is no account connected, say so
+            # HERE — before a chunk is cut and uploaded to a service that will
+            # refuse it.
+            token = await asyncio.to_thread(hivemindos_models.credit_token)
+            if not token:
+                raise HTTPException(status_code=402, detail={
+                    "error": "Connect your HivemindOS account to restore on the hosted service.",
+                    "remedy": "connect",
+                })
+            body = {**body, "credit_token": token}
+        try:
+            return await asyncio.to_thread(
+                video_restore.client().request, "/api/restore",
+                method="POST", body=body, timeout=video_restore.UPLOAD_TIMEOUT_SECONDS,
+            )
+        except video_restore.RestoreError as exc:
+            raise _restore_error(exc) from None
+
+    @app.post("/api/restore/finish", dependencies=[Depends(require_owner)])
+    async def finish_restore(body: dict[str, Any]) -> dict[str, Any]:
+        """Re-finish from the saved chunks, or from a clip the studio joined."""
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="A finish request object is required")
+        try:
+            return await asyncio.to_thread(
+                video_restore.client().request, "/api/restore/finish",
+                method="POST", body=body, timeout=video_restore.UPLOAD_TIMEOUT_SECONDS,
+            )
+        except video_restore.RestoreError as exc:
+            raise _restore_error(exc) from None
+
+    @app.get("/api/restore/projects", dependencies=[Depends(require_owner)])
+    async def restore_projects() -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(video_restore.client().request, "/api/restore/projects")
+        except video_restore.RestoreError as exc:
+            return {"ok": False, "projects": [], "error": str(exc), "remedy": exc.remedy}
+
+    @app.get("/api/restore/project/{project_id}", dependencies=[Depends(require_owner)])
+    async def restore_project(project_id: str) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                video_restore.client().request,
+                f"/api/restore/project/{urllib.parse.quote(project_id)}",
+            )
+        except video_restore.RestoreError as exc:
+            raise _restore_error(exc) from None
+
+    @app.post("/api/restore/cancel/{project_id}", dependencies=[Depends(require_owner)])
+    async def cancel_restore(project_id: str) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                video_restore.client().request,
+                f"/api/restore/cancel/{urllib.parse.quote(project_id)}", method="POST",
+            )
+        except video_restore.RestoreError as exc:
+            raise _restore_error(exc) from None
+
+    @app.post("/api/restore/delete/{project_id}", dependencies=[Depends(require_owner)])
+    async def delete_restore(project_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        # confirm=true is required by the gateway too; forwarded rather than
+        # assumed, so a mis-wired client cannot delete a project by accident.
+        try:
+            return await asyncio.to_thread(
+                video_restore.client().request,
+                f"/api/restore/delete/{urllib.parse.quote(project_id)}",
+                method="POST", body={"confirm": bool((body or {}).get("confirm"))},
+            )
+        except video_restore.RestoreError as exc:
+            raise _restore_error(exc) from None
+
+    @app.get("/api/restore/source/{project_id}", response_class=Response, dependencies=[Depends(require_owner)])
+    async def restore_source(project_id: str) -> Response:
+        """The original clip, for the compare view of a REOPENED project.
+
+        The browser holds the file it first picked; a project opened days later
+        has to get the original from somewhere, and this is the only copy."""
+        try:
+            content, media_type = await asyncio.to_thread(
+                video_restore.client().media,
+                f"/api/restore/source/{urllib.parse.quote(project_id)}",
+            )
+        except video_restore.RestoreError as exc:
+            raise _restore_error(exc) from None
         return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, no-store"})
 
     @app.post("/api/media-studio/ingredients/preview", dependencies=[Depends(require_owner)])

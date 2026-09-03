@@ -1776,6 +1776,78 @@ function normalizeReferenceVideo(stagedName, { keepAudio = false, maxSeconds = R
   return outputName;
 }
 
+// ── Head replacement: the clip being inpainted ──────────────────────────────
+//
+// H3's picture lattice, and the only frame rate this graph stages to. A
+// reference clip is conditioning that gets trimmed to fit; THIS clip is the
+// output's own footage, so its frame count IS the sampled length — node 104
+// reads width, height and length straight off the cropped batch, because the
+// crop's size is decided by the mask and no caller can know it in advance.
+const INPAINT_SOURCE_FPS = 24;
+const INPAINT_CROP_MODES = ['combined', 'tracked', 'zoomed'];
+
+// Resolve source_video_* the way motion_context_* is resolved: its own arg
+// names, so it can never be confused with video_* (which means "extend or
+// head-swap this footage" to LTX and flips behaviour across the stack).
+async function inpaintClipFromArgs(args = {}, prefix) {
+  const params = args.params && typeof args.params === 'object' ? args.params : {};
+  const staged = await stageInlineVideoFromArgs({
+    video_base64: args[`${prefix}_base64`] ?? params[`${prefix}_base64`],
+    video_url: args[`${prefix}_url`] ?? params[`${prefix}_url`],
+  });
+  if (staged) return staged;
+  const path = args[`${prefix}_path`] ?? params[`${prefix}_path`];
+  const value = String(path ?? '').trim();
+  if (!value) return undefined;
+  return isAbsolute(value) ? stageLtxVideo(value) : value;
+}
+
+// Stage that clip to exactly the frames the model will sample.
+//
+// The trim snaps DOWN onto the lattice (gridFrameCountAtMost), never up: a
+// length off the grid is refused by the model rather than rounded, and padding
+// up to the next point would invent footage to inpaint over.
+//
+// The soundtrack is not optional here even when the source is silent. The
+// masked joint AV latent HOLDS the audio while the model paints the face —
+// that is what makes the new head lip-sync to the original speech — and
+// NKDAVLatent cannot encode a stream that does not exist, so a silent source is
+// given real silence rather than being allowed to fail at the VAE. A slightly
+// short track is safe: the node refits the audio latent to the frame count.
+function stageInpaintSourceVideo(stagedName, { frames, silent = false } = {}) {
+  const source = resolve(comfyInputDir, stagedName);
+  const count = Math.max(1, Math.round(Number(frames) || 0));
+  // A MASK clip carries no sound and must not be given any: silence would still
+  // cost an audio stream the graph never reads.
+  const hasAudio = !silent && stagedVideoHasAudio(stagedName);
+  mkdirSync(comfyInputDir, { recursive: true });
+  const outputName = `mcp_inpaint_${silent ? 'mask' : 'src'}_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}.mp4`;
+  const result = spawnSync(process.env.FFMPEG || 'ffmpeg', [
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-i', source,
+    ...(silent || hasAudio ? [] : ['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100']),
+    '-map', '0:v:0',
+    ...(silent ? [] : ['-map', hasAudio ? '0:a:0' : '1:a:0']),
+    '-vf', `fps=${INPAINT_SOURCE_FPS}`,
+    '-frames:v', String(count),
+    '-t', String(count / INPAINT_SOURCE_FPS),
+    // A mask is a hard edge, and h264 at crf 16 rings around one. crf 0 keeps
+    // it exact for the cost of a file nobody keeps.
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', silent ? '0' : '16', '-pix_fmt', 'yuv420p',
+    ...(silent ? ['-an'] : ['-c:a', 'aac', '-b:a', '160k']),
+    join(comfyInputDir, outputName),
+  ], { encoding: 'utf8', timeout: 600000 });
+  if (result.error?.code === 'ENOENT') {
+    throw new Error('ffmpeg is required to stage the clip being inpainted but was not found');
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `the clip being inpainted could not be staged: ${String(result.stderr || '').trim().slice(0, 300)}`,
+    );
+  }
+  return outputName;
+}
+
 async function stageInlineImageFromArgs(args = {}) {
   const params = args.params && typeof args.params === 'object' ? args.params : {};
   const imageBase64 = args.image_base64 ?? params.image_base64;
@@ -3696,6 +3768,167 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
       && !settings.referenceImageNames?.length && !settings.referenceVideoNames?.length) {
     throw new Error(`workflow ${workflow.id} requires at least one reference picture or reference video`);
   }
+  // ── Head replacement: the source clip, the mask branch, the crop plan ──────
+  //
+  // Graph SURGERY, not slot filling, which is why it does not ride the named
+  // slot writes above: both mask branches ship wired in the file and exactly
+  // one may survive, and the crop plan is a nested widget dict rather than a
+  // scalar. Runs after the reference pass so "you need a picture of the new
+  // head" is reported before anything here is staged.
+  if (workflow.mask_sources && workflow.mask_input) {
+    const rawSource = await inpaintClipFromArgs(args, 'source_video');
+    if (rawSource === undefined) {
+      throw new Error(
+        `workflow ${workflow.id} needs the clip being inpainted (source_video_path, source_video_url or source_video_base64)`,
+      );
+    }
+    const sourceSeconds = stagedMediaDuration(rawSource);
+    if (sourceSeconds === null) {
+      throw new Error('the clip being inpainted could not be read — is it a video file?');
+    }
+    // How much of the clip to process. frames wins over duration_seconds, and
+    // either is capped by the footage that actually exists: asking for 10s of a
+    // 4s clip inpaints 4s rather than failing or freezing the tail.
+    const askedFrames = args.frames ?? args.params?.frames;
+    const wantedFrames = askedFrames !== undefined && askedFrames !== null && askedFrames !== ''
+      ? Math.round(Number(askedFrames))
+      : Math.round(positiveFloat(
+          args.duration_seconds ?? args.params?.duration_seconds,
+          defaults.duration_seconds || 5,
+          { min: 1 / INPAINT_SOURCE_FPS, max: 30 },
+        ) * INPAINT_SOURCE_FPS);
+    const availableFrames = Math.floor(sourceSeconds * INPAINT_SOURCE_FPS);
+    // Checked against the FOOTAGE, before any snapping: gridFrameCountAtMost
+    // floors at the lattice's own lowest point, so a 3-frame clip came back as
+    // a legal 5 and was then staged as if those two frames existed.
+    const shortestClip = normalizedGridFrameCount(workflow, 1);
+    const inpaintFrames = gridFrameCountAtMost(
+      workflow,
+      Math.max(1, Math.min(wantedFrames, availableFrames)),
+    );
+    if (!Number.isFinite(inpaintFrames) || availableFrames < shortestClip) {
+      throw new Error(
+        `the clip being inpainted is ${sourceSeconds.toFixed(2)}s, and MiniMax H3 samples only on a `
+        + `${workflow.frame_grid.modulus}n+${workflow.frame_grid.offset} frame lattice — `
+        + `at least ${(shortestClip / INPAINT_SOURCE_FPS).toFixed(2)}s of footage is needed`,
+      );
+    }
+    settings.inpaintSourceName = stageInpaintSourceVideo(rawSource, { frames: inpaintFrames });
+    setMappedApiInput(promptGraph, slots.source_video_path, settings.inpaintSourceName);
+
+    // Which branch feeds the subject crop. The loser is pruned, so the graph
+    // that reaches the lane holds one mask path and cannot load a 3.4GB SAM3
+    // checkpoint for a run that hand-painted its mask.
+    const maskSource = String(argOrDefault(args, defaults, 'mask_source') || 'manual').trim().toLowerCase();
+    const branch = workflow.mask_sources[maskSource];
+    if (!branch) {
+      throw new Error(
+        `workflow ${workflow.id} takes mask_source ${Object.keys(workflow.mask_sources).join(' or ')}; received ${maskSource || '(empty)'}`,
+      );
+    }
+    if (maskSource === 'manual') {
+      const painted = await imageSourceFromPrefixedArgs(args, 'mask');
+      if (painted === undefined) {
+        throw new Error(
+          'manual masking needs the painted mask (mask_image_path, mask_image_url or mask_image_base64) — white where the head is replaced',
+        );
+      }
+      setMappedApiInput(promptGraph, slots.mask_image_path, stageLtxErosImage(painted));
+    } else if (maskSource === 'sequence') {
+      const maskClip = await inpaintClipFromArgs(args, 'mask_video');
+      if (maskClip === undefined) {
+        throw new Error(
+          'mask_source "sequence" needs the mask clip (mask_video_path, mask_video_url or mask_video_base64) — one white-on-black frame per source frame',
+        );
+      }
+      // Staged to the SAME frame count as the footage: the subject crop refuses
+      // a mask batch that disagrees with the frames, and a mask one frame short
+      // (which h264 does) would fail there instead of here.
+      settings.inpaintMaskName = stageInpaintSourceVideo(maskClip, { frames: inpaintFrames, silent: true });
+      setMappedApiInput(promptGraph, slots.mask_video_path, settings.inpaintMaskName);
+    } else {
+      setMappedApiInput(promptGraph, slots.sam3_prompt, argOrDefault(args, defaults, 'sam3_prompt'));
+      setMappedApiInput(promptGraph, slots.sam3_object_indices, String(argOrDefault(args, defaults, 'sam3_object_indices') ?? ''));
+      setApiInput(promptGraph, normalizeSlot(slots.sam3_detection_threshold).node, 'detection_threshold',
+        positiveFloat(argOrDefault(args, defaults, 'sam3_detection_threshold'), 0.5, { min: 0.05, max: 0.95 }));
+      setApiInput(promptGraph, normalizeSlot(slots.sam3_max_objects).node, 'max_objects',
+        Math.max(0, Math.round(Number(argOrDefault(args, defaults, 'sam3_max_objects')) || 1)));
+      setApiInput(promptGraph, normalizeSlot(slots.sam3_detect_interval).node, 'detect_interval',
+        Math.max(1, Math.round(Number(argOrDefault(args, defaults, 'sam3_detect_interval')) || 1)));
+    }
+    const maskInput = normalizeSlot(workflow.mask_input);
+    setApiInput(promptGraph, maskInput.node, maskInput.input, [...branch.from]);
+    for (const dead of branch.prune || []) pruneApiNode(promptGraph, dead);
+
+    // Mask shaping. expand is the load-bearing one and it is deliberately large:
+    // the mask is a permission area, not a stencil, and a tight silhouette forces
+    // the new head into the old head's outline.
+    setApiInput(promptGraph, normalizeSlot(slots.mask_expand).node, 'expand',
+      Math.round(Number(argOrDefault(args, defaults, 'mask_expand')) || 0));
+    setApiInput(promptGraph, normalizeSlot(slots.mask_feather).node, 'feather',
+      Math.max(0, Math.round(Number(argOrDefault(args, defaults, 'mask_feather')) || 0)));
+    setApiInput(promptGraph, normalizeSlot(slots.mask_despeckle).node, 'despeckle',
+      Math.max(0, Math.round(Number(argOrDefault(args, defaults, 'mask_despeckle')) || 0)));
+    setApiInput(promptGraph, normalizeSlot(slots.mask_temporal_expand).node, 'temporal_expand',
+      Math.max(0, Math.round(Number(argOrDefault(args, defaults, 'mask_temporal_expand')) || 0)));
+    setApiInput(promptGraph, normalizeSlot(slots.paste_expand).node, 'expand',
+      Math.round(Number(argOrDefault(args, defaults, 'paste_expand')) || 0));
+    setApiInput(promptGraph, normalizeSlot(slots.paste_feather).node, 'feather',
+      Math.max(0, Math.round(Number(argOrDefault(args, defaults, 'paste_feather')) || 0)));
+    setApiInput(promptGraph, normalizeSlot(slots.paste_edge_feather).node, 'feather',
+      Math.max(0, Math.round(Number(argOrDefault(args, defaults, 'paste_edge_feather')) || 0)));
+
+    // The crop plan is rebuilt rather than poked: each mode carries a different
+    // set of dials, and a key left behind from another mode is not ignored by
+    // the node, it is read.
+    const cropMode = String(argOrDefault(args, defaults, 'crop_mode') || 'tracked').trim().toLowerCase();
+    if (!INPAINT_CROP_MODES.includes(cropMode)) {
+      throw new Error(
+        `workflow ${workflow.id} takes crop_mode ${INPAINT_CROP_MODES.join(', ')}; received ${cropMode}`,
+      );
+    }
+    // 0 means "no crop, whole frame". Between 0 and 1 is not a smaller crop, it
+    // is a crop smaller than the subject, which the node refuses — so it is
+    // refused here, where the message can say what the number means.
+    const cropScale = Number(argOrDefault(args, defaults, 'crop_scale'));
+    if (!Number.isFinite(cropScale) || cropScale < 0 || (cropScale > 0 && cropScale < 1) || cropScale > 4) {
+      throw new Error(
+        `crop_scale is a multiple of the subject's own extent: 0 for the whole frame, or 1.0-4.0 to crop around it; received ${argOrDefault(args, defaults, 'crop_scale')}`,
+      );
+    }
+    const cropMegapixels = positiveFloat(argOrDefault(args, defaults, 'crop_megapixels'), 0.8, { min: 0.1, max: 2 });
+    const cropPlan = { mode: cropMode, crop_scale: cropScale, aspect_ratio: 0.0 };
+    if (cropMode !== 'combined') {
+      cropPlan.padding = 'firm';
+      cropPlan.prefer = 'stillness';
+      cropPlan.seamless_loop = false;
+    }
+    setApiInput(promptGraph, normalizeSlot(workflow.crop_mode_input).node, normalizeSlot(workflow.crop_mode_input).input, cropPlan);
+    setApiInput(promptGraph, normalizeSlot(slots.crop_megapixels).node, 'upscale_megapixels', cropMegapixels);
+
+    // What the VRAM check is priced on. The real canvas is decided at runtime by
+    // the mask, and it cannot be known here — but its AREA can: the crop is
+    // resampled to crop_megapixels whatever shape it lands in, and the row
+    // budget only ever counts area x frames. A square of that area is therefore
+    // an exact stand-in for the check and a lie for anything else, which is why
+    // it is written into settings and never into the graph.
+    const budgetSide = Math.round(Math.sqrt(cropMegapixels * 1e6) / 32) * 32;
+    settings.width = budgetSide;
+    settings.height = budgetSide;
+    settings.frames = inpaintFrames;
+    settings.durationSeconds = Number((inpaintFrames / INPAINT_SOURCE_FPS).toFixed(3));
+    settings.inpaint = {
+      sourceName: settings.inpaintSourceName,
+      sourceSeconds: Number(sourceSeconds.toFixed(2)),
+      frames: inpaintFrames,
+      seconds: settings.durationSeconds,
+      maskSource,
+      cropMode,
+      cropScale,
+      cropMegapixels,
+      budgetCanvas: `${budgetSide}x${budgetSide}`,
+    };
+  }
   // The prompt has to name every reference by the label the model will give it,
   // and the numbering is NOT simply "one counter per argument list": the node
   // presents pictures, then each video (its own soundtrack claiming an <Audio N>
@@ -3824,6 +4057,15 @@ async function buildComfyApiPromptBody(args = {}, workflow) {
     defaults.duration_seconds || 4,
     { min: 1 / 24, max: 30 },
   );
+  // For head replacement the length is not a request, it is a measurement: the
+  // staged clip holds exactly these frames and the graph reads its own canvas
+  // off them. Re-imposed here because the duration maths just above answers to
+  // duration_seconds, which on this workflow is only ever a TRIM cap — leaving
+  // it to win reported a 5s run for a 2.3s clip.
+  if (settings.inpaint) {
+    settings.frames = settings.inpaint.frames;
+    settings.durationSeconds = settings.inpaint.seconds;
+  }
   const explicitFrames = args.frames ?? args.params?.frames;
   const explicitDuration = args.duration_seconds ?? args.params?.duration_seconds;
   if (slots.frames && explicitFrames === undefined && explicitDuration !== undefined) {
@@ -4622,6 +4864,32 @@ function buildServer() {
       motion_context_path: z.string().optional().describe('MiniMax H3 scene chaining: path or existing Comfy input filename of the PREVIOUS clip. Its last 22 frames (and audio tail) seed this generation so motion and room tone continue across the cut; the re-rendered context head is trimmed off the delivered clip. The new clip renders on the context clip\'s canvas, Spectrum is forced off, and the start frame is replaced by the chain (end_image_* still works).'),
       motion_context_base64: z.string().optional().describe('Inline motion-context clip as raw base64 or data:video/...;base64,... data URL. Wins over motion_context_path.'),
       motion_context_url: z.string().optional().describe('Optional HTTP(S) motion-context clip fetched by Media Studio. Ignored when motion_context_base64 is supplied.'),
+      source_video_path: z.string().optional().describe('MiniMax H3 head replacement: path or existing Comfy input filename of the clip BEING INPAINTED. Distinct from video_path (which means "extend this shot" to LTX) and from reference_videos (which are conditioning). This clip IS the output: its pixels outside the mask, and its whole soundtrack, are delivered untouched. It is resampled to 24 fps and trimmed DOWN to the nearest 17n+5 frame count, capped by duration_seconds or frames.'),
+      source_video_base64: z.string().optional().describe('Inline clip to inpaint, raw base64 or data:video/...;base64,... data URL. Wins over source_video_path.'),
+      source_video_url: z.string().optional().describe('Optional HTTP(S) clip to inpaint, fetched by Media Studio. Ignored when source_video_base64 is supplied.'),
+      mask_source: z.enum(['manual', 'sam3', 'sequence']).optional().describe('Where the mask comes from. "manual" (default) takes one painted still through mask_image_*, conformed to the footage and repeated across every frame — a STATIC region, which is usually right: the mask is a permission area, not a stencil, and a generous one lets the model place a differently-shaped head naturally where a tight per-frame silhouette would force it into the old head\'s outline. It must cover the head\'s whole travel through the clip. "sam3" instead tracks the subject with comfy-core\'s native SAM3 video tracker, which costs a ~3.4GB checkpoint load plus per-frame compute and is worth it when the shot moves far enough that a static box would swallow most of the frame.'),
+      mask_image_path: z.string().optional().describe('Manual masking: path or Comfy input filename of the painted mask — WHITE where the head is replaced, black elsewhere. Any size; it is rescaled to the footage.'),
+      mask_image_base64: z.string().optional().describe('Inline painted mask, raw base64 or data:image/...;base64,... data URL. Wins over mask_image_path.'),
+      mask_image_url: z.string().optional().describe('Optional HTTP(S) painted mask fetched by Media Studio. Ignored when mask_image_base64 is supplied.'),
+      mask_video_path: z.string().optional().describe('mask_source "sequence": path or Comfy input filename of a mask CLIP — one white-on-black frame per source frame, tracked somewhere else. This is what the hosted SAM3 service returns, and how a lane with no SAM3 checkpoint still gets a tracked mask. Resampled to 24 fps and trimmed to the same frame count as the footage.'),
+      mask_video_base64: z.string().optional().describe('Inline mask clip, raw base64 or data:video/...;base64,... data URL. Wins over mask_video_path.'),
+      mask_video_url: z.string().optional().describe('Optional HTTP(S) mask clip fetched by Media Studio. Ignored when mask_video_base64 is supplied.'),
+      sam3_prompt: z.string().max(200).optional().describe('SAM3 masking: what to track, in words. Default "head".'),
+      sam3_detection_threshold: z.number().min(0.05).max(0.95).optional().describe('SAM3 masking: score floor for text-prompted detection (default 0.5). Lower finds more and starts returning scenery.'),
+      sam3_max_objects: z.number().int().min(0).max(64).optional().describe('SAM3 masking: how many tracked objects to keep (default 1 — the one head). 0 means the internal cap of 64, which for head replacement means replacing every head in the shot.'),
+      sam3_detect_interval: z.number().int().min(1).max(64).optional().describe('SAM3 masking: run detection every N frames (default 1). Higher is cheaper and slower to notice a subject entering.'),
+      sam3_object_indices: z.string().max(100).optional().describe('SAM3 masking: comma-separated indices of the tracked objects to mask (e.g. "0,2"). Empty means all of them.'),
+      mask_expand: z.number().int().min(-512).max(512).optional().describe('Grow the mask by this many pixels before it is used (default 30). Deliberately large — see mask_source.'),
+      mask_feather: z.number().int().min(0).max(256).optional().describe('Soften the mask edge, in pixels (default 0; the paste-back does its own feathering).'),
+      mask_despeckle: z.number().int().min(0).max(256).optional().describe('Drop mask specks smaller than this (default 2). Mostly for SAM3.'),
+      mask_temporal_expand: z.number().int().min(0).max(64).optional().describe('Grow the mask across TIME by this many frames (default 1), so a latent that straddles a frame boundary is fully covered.'),
+      crop_mode: z.enum(['combined', 'tracked', 'zoomed']).optional().describe('How the window around the subject is planned. "combined" is one static window around the subject\'s whole travel. "tracked" (default) holds a constant-size window that moves only when the subject would leave it. "zoomed" also follows the subject\'s size. The model samples the WINDOW, not the frame, which is what makes this affordable.'),
+      crop_scale: z.number().min(0).max(4).optional().describe('Window size as a multiple of the subject\'s own extent (default 1.75). 0 means no crop — sample the whole frame. Between 0 and 1 is refused: it would be a window smaller than the subject.'),
+      crop_megapixels: z.number().min(0.1).max(2).optional().describe('The window is resampled to this many megapixels before sampling (default 0.8). This, times the frame count, is what the card\'s row budget is spent on.'),
+      paste_expand: z.number().int().min(-512).max(512).optional().describe('Grow the mask again for the paste-back only (default 10).'),
+      paste_feather: z.number().int().min(0).max(256).optional().describe('Soften the paste-back mask, in pixels (default 20).'),
+      paste_edge_feather: z.number().int().min(0).max(256).optional().describe('Feather on the window\'s own border where it meets the untouched frame (default 16).'),
+      ref_image_size: z.enum(['match', 'max']).optional().describe('How reference pictures are staged for the conditioner (default "match").'),
       middle_image_path: z.string().optional(),
       middle_image_base64: z.string().optional(),
       middle_image_url: z.string().optional(),

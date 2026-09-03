@@ -11,6 +11,16 @@
 // now — each is a finished prompt in that model's own format, so the ones for
 // other models are hidden rather than listed. They are not vault data, so they
 // show even while the vault is locked.
+//
+// A starter row takes one of three shapes, and which one it takes is a property
+// of the starter, not a display choice:
+//   - one prompt          → the row IS the button.
+//   - split into parts    → the row labels a clip generated in several runs, and
+//                           each part gets its own button, in order.
+//   - a collection        → the row opens into variants of one idea, of which
+//                           you load exactly one. Collapsed by default and one
+//                           at a time: the animation shelf alone is 74 prompts,
+//                           and expanded they would bury every other starter.
 import { useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useSavedLibrary } from '../hooks/hooks.js';
@@ -18,6 +28,7 @@ import { LIBRARIES, deleteLibraryEntry, saveLibraryEntry } from '../lib/savedLib
 import { defaultPromptsFor, describeDefaultPrompt, describeDefaultPromptPart } from '../lib/defaultPrompts.js';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
+import { Icon } from '../ui/icons.jsx';
 import { LibraryDeleteButton, LibraryStateNote, SaveNameModal } from '../ui/SavedLibrary.jsx';
 import { Button, TextInput } from '../ui/kit.jsx';
 
@@ -79,6 +90,9 @@ export function SavedPromptsMenu({
   // says replacing that library is what they want.
   const [confirmReplace, setConfirmReplace] = useState(null);
   const [query, setQuery] = useState('');
+  // Which starter collection is open. One at a time — a second open list turns
+  // the popover into a wall, which is the thing collections exist to prevent.
+  const [openStarter, setOpenStarter] = useState('');
   // The menu's close(), captured from the render prop so a delete can shut the
   // menu AFTER the confirm — not before it, which left a cancel with the menu gone.
   const closeMenuRef = useRef(null);
@@ -133,14 +147,27 @@ export function SavedPromptsMenu({
   // The toast carries the part's own instruction (arm the chain, press Extend)
   // because that step happens BEFORE the pasted prompt makes sense, and the
   // hover title it came from is gone the moment the menu closes.
-  const loadStarter = (entry, part, index = 0) => {
-    onLoadPrompt({ prompt: part.prompt, negativePrompt, standIns: part.standIns || [] });
-    const name = entry.parts.length > 1
-      ? `${entry.name} — part ${index + 1}`
-      : entry.name;
-    // The part's own step where there is one (arm the chain, press Extend),
+  // `slot` is whichever prompt was clicked: the whole starter, one part of a
+  // split one, or one variant of a collection. They load identically — what
+  // differs is only what the toast can call it.
+  const loadStarter = (entry, slot, index = 0) => {
+    onLoadPrompt({
+      prompt: slot.prompt,
+      negativePrompt,
+      standIns: slot.standIns || [],
+      // A starter can opt into setting the studio up for itself (the timeline
+      // sequences do): the flag and the slot's own length ride along, and the
+      // studio decides what actually applies to the selected model. Loaders
+      // that don't know these fields ignore them.
+      timeline: entry.timeline === true,
+      durationSeconds: Number(slot.durationSeconds) || 0,
+    });
+    let name = entry.name;
+    if (entry.variants?.length) name = `${entry.name} — ${slot.name}`;
+    else if (entry.parts.length > 1) name = `${entry.name} — part ${index + 1}`;
+    // The slot's own step where there is one (arm the chain, press Extend),
     // otherwise the entry's (attach the reference clip, fill in the brackets).
-    const step = part.note || entry.note;
+    const step = slot.note || entry.note;
     if (step) toast.success(`Loaded “${name}”. ${step}`, { duration: 10000 });
     else toast.success(`Loaded “${name}”.`);
   };
@@ -286,22 +313,36 @@ export function SavedPromptsMenu({
                 <div className="max-h-72 overflow-y-auto">
                   {starters.map((entry) => {
                     const split = entry.parts.length > 1;
-                    // A single-part starter is the row itself. A split one keeps
-                    // the row as a label and gives each part its own button —
-                    // the parts are generated in separate runs, so there is no
-                    // "load the whole thing" to offer.
+                    const variants = entry.variants || [];
+                    const open = openStarter === entry.id;
+                    // A single-prompt starter is the row itself. A split one
+                    // keeps the row as a label and gives each part its own
+                    // button — the parts are generated in separate runs, so
+                    // there is no "load the whole thing" to offer. A collection
+                    // makes the row a disclosure: it has no prompt of its own,
+                    // only the variants underneath it.
                     const Row = split ? 'div' : 'button';
                     return (
                       <div key={entry.id} className="rounded-md px-1 py-0.5">
                         <Row
                           {...(split ? {} : {
                             type: 'button',
-                            onClick: () => { loadStarter(entry, entry.parts[0]); close(); },
-                            title: entry.note || 'Replace the prompt text with this starter',
+                            onClick: variants.length
+                              ? () => setOpenStarter(open ? '' : entry.id)
+                              : () => { loadStarter(entry, entry.parts[0]); close(); },
+                            title: variants.length
+                              ? `${variants.length} variants — ${open ? 'hide them' : 'pick one'}`
+                              : (entry.note || 'Replace the prompt text with this starter'),
+                            'aria-expanded': variants.length ? open : undefined,
                           })}
                           className={`flex w-full flex-col items-start rounded-md px-1.5 py-1 text-left transition-colors ${split ? '' : 'hover:bg-bg2'}`}
                         >
-                          <span className="truncate text-[13px] font-medium text-ink1">{entry.name}</span>
+                          <span className="flex w-full items-center gap-1">
+                            <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink1">{entry.name}</span>
+                            {variants.length ? (
+                              <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} className="shrink-0 text-ink3" />
+                            ) : null}
+                          </span>
                           <span className="truncate text-[10px] text-ink3">{describeDefaultPrompt(entry)}</span>
                           {/* Media the prompt cannot run without — pasting one of
                               these into an empty composer and pressing Generate
@@ -322,6 +363,26 @@ export function SavedPromptsMenu({
                               >
                                 {describeDefaultPromptPart(part, index)}
                               </Button>
+                            ))}
+                          </div>
+                        ) : null}
+                        {/* The variants scroll inside their own box rather than
+                            inside the starter list: twenty of them would
+                            otherwise push every other starter out of reach, and
+                            the row you opened would scroll away with them. */}
+                        {open && variants.length ? (
+                          <div className="mb-1 ml-1.5 mt-1 max-h-52 overflow-y-auto border-l border-line1 pl-2">
+                            {variants.map((variant) => (
+                              <button
+                                key={variant.id}
+                                type="button"
+                                onClick={() => { loadStarter(entry, variant); close(); }}
+                                title={[entry.note, variant.note].filter(Boolean).join('\n\n')}
+                                className="flex w-full flex-col items-start rounded-md px-1.5 py-1 text-left transition-colors hover:bg-bg2"
+                              >
+                                <span className="w-full truncate text-[12px] text-ink1">{variant.name}</span>
+                                <span className="w-full truncate text-[10px] text-ink3">{variant.summary}</span>
+                              </button>
                             ))}
                           </div>
                         ) : null}

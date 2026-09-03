@@ -113,3 +113,23 @@ test('E2E media: locked vault fails open AND flags the URL as vault-locked', asy
     assert.equal(media.isMediaVaultLocked('/api/canvas/history/other/media'), false, 'only verified envelopes are flagged');
     assert.equal(bodyCancelled, true, 'the undecryptable envelope body is not downloaded');
 });
+
+test('E2E media: bytes already in hand are shown without fetching them sealed', async () => {
+    stubStudioBrowser();
+    // Any fetch here is the bug: the picture was just generated in this tab.
+    global.fetch = async (url) => { throw new Error(`should not fetch ${url}`); };
+    const media = await import(`../src/lib/e2eMedia.js?case=${Date.now()}-primed`);
+    const url = '/api/media-studio/references/reference-abc.png';
+    const picture = 'data:image/png;base64,iVBORw0KGgo=';
+
+    assert.equal(media.primeResolvedMedia(url, picture), true);
+    assert.equal(media.peekResolvedMediaSrc(url), picture);
+    assert.equal(await media.resolveMediaSrc(url), picture);
+    // A priming never records a seal failure, and it clears one already there:
+    // the card must not keep saying "locked" over a picture it can show.
+    assert.equal(media.mediaSealFailure(url), null);
+    // Only provably plaintext shapes are accepted — an envelope URL primed as
+    // its own "resolved" form would be the broken image all over again.
+    assert.equal(media.primeResolvedMedia('/api/media-studio/references/other.png', '/api/media-studio/references/other.png'), false);
+    assert.equal(media.peekResolvedMediaSrc('/api/media-studio/references/other.png'), null);
+});

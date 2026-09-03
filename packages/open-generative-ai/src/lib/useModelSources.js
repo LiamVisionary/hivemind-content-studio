@@ -17,9 +17,15 @@ import {
 } from './localProducer.js';
 import { startOAuthLogin } from './providerReadiness.js';
 
-export function useModelSources({ enabled = true } = {}) {
+/**
+ * `onOpen`, when the caller keeps the picker in a popover: a repair that
+ * switches sections ("Connect an account", "Add key") also has to bring the
+ * picker into view, or the button appears to do nothing.
+ */
+export function useModelSources({ enabled = true, onOpen = null } = {}) {
   const [catalog, setCatalog] = useState(null);
   const [tab, setTab] = useState('');
+  const show = useCallback((section) => { setTab(section); onOpen?.(true); }, [onOpen]);
   const [query, setQuery] = useState('');
   const [account, setAccount] = useState('');
   const [keyField, setKeyField] = useState('');
@@ -95,8 +101,8 @@ export function useModelSources({ enabled = true } = {}) {
 
   const runRemedy = useCallback(async (remedy) => {
     const action = typeof remedy === 'string' ? remedy : String(remedy?.action || '');
-    if (action === 'accounts') { setTab(ACCOUNTS); return; }
-    if (action === 'key') { setTab(ACCOUNTS); setKeyField(String(remedy?.key || '')); return; }
+    if (action === 'accounts') { show(ACCOUNTS); return; }
+    if (action === 'key') { show(ACCOUNTS); setKeyField(String(remedy?.key || '')); return; }
     if (action === 'oauth') {
       try {
         window.open(await startOAuthLogin(String(remedy?.provider || '')), '_blank', 'noopener,noreferrer');
@@ -112,7 +118,7 @@ export function useModelSources({ enabled = true } = {}) {
       return;
     }
     if (action === 'refresh') { void refresh(); return; }
-    if (action === 'connect') { setTab(HIVEMINDOS); return; }
+    if (action === 'connect') { show(HIVEMINDOS); return; }
     if (action === 'top-up') {
       // With the app running, credits belong there — buying a second balance
       // here would split the one the machine already shares.
@@ -135,7 +141,7 @@ export function useModelSources({ enabled = true } = {}) {
     const url = sourceState(catalog, HIVEMINDOS).url;
     if (!url) { toast('HivemindOS is not installed on this machine yet.', { icon: '🐝' }); return; }
     window.open(url, '_blank', 'noopener,noreferrer');
-  }, [catalog, refresh]);
+  }, [catalog, refresh, show]);
 
   /** Everything ModelSourcePicker takes, ready to spread. */
   const pickerProps = {

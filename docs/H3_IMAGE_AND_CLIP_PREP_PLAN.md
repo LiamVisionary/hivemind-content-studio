@@ -315,7 +315,8 @@ alpha.
 
 - [x] Security audit of both ComfyUI donors
 - [x] Phase 1 — Clip Prep (trim, crop, compress, frame grab, storyboard)
-- [ ] Phase 1 remainder — GIF export, auto scene-cut detection, multi-clip timeline
+- [x] Multi-clip timeline — landed 2026-08-30 as the Video Studio's Timeline view (`src/lib/videoTimeline.js` + `src/studios/video/TimelineStrip.jsx`): explicit segment cards, auto-insert of finished generations, drag/drop add·replace·insert·reorder, per-segment delete (optionally with the file), a quiet client-side full-cut build on `clipJoiner`, and an Auto-continue toggle (H3 motion-context chain / last-frame seed via `grabFrame` elsewhere)
+- [ ] Phase 1 remainder — GIF export, auto scene-cut detection
 - [ ] Phase 2 — `minimax-h3-image` lane
 
 ### Phase 1 as landed (2026-08-18)

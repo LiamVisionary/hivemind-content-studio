@@ -31,7 +31,7 @@ import {
 import { flattenApiDetail } from '../lib/muapiErrors.js';
 import { ModelSourcePicker } from '../components/ModelSourcePicker.jsx';
 import { useModelSources } from '../lib/useModelSources.js';
-import { LOCAL, needsLoad, rowFor, startingModelId, statusLine, tabOf } from '../lib/textModels.js';
+import { LOCAL, needsLoad, PROMPT_USAGE, rowFor, startingModelId, statusLine, tabOf } from '../lib/textModels.js';
 import { referenceToLocalImageInput } from '../lib/hivemindStudio.js';
 import { videoContactSheet } from '../lib/contactSheet.js';
 import { characterNoteLines, charactersMentionedIn } from '../lib/h3Characters.js';
@@ -519,9 +519,12 @@ export function PromptHelperDialog({
                     </div>
                     <ModelSourcePicker
                         {...sources.pickerProps}
-                        tab={pickerTab}
                         selectedId={selected}
                         onPick={choose}
+                        // One media prompt per press: less out than a Story
+                        // draft, so the estimate beside each paid row is
+                        // sized for THIS dialog's ask.
+                        usage={PROMPT_USAGE}
                         // Unload stays ON the row it acts on. A model holding
                         // 20 GB is the reason this dialog has a memory UX at
                         // all, and moving that control away from the model it

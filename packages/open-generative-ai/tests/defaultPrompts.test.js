@@ -10,7 +10,7 @@ const SEEDANCE_MODEL = { modelId: 'seedance-v2.0-t2v' };
 const SEEDANCE_25_MODEL = { modelId: 'seedance-2.5-text-to-video' };
 
 test('every starter is fully described and targets a known family', async () => {
-    const { DEFAULT_PROMPTS, PROMPT_FAMILIES } = await import('../src/lib/defaultPrompts.js');
+    const { DEFAULT_PROMPTS, PROMPT_FAMILIES, defaultPromptSlots } = await import('../src/lib/defaultPrompts.js');
     assert.ok(DEFAULT_PROMPTS.length >= 4);
     for (const entry of DEFAULT_PROMPTS) {
         assert.ok(entry.id && entry.name && entry.summary, `${entry.id} labelled`);
@@ -20,15 +20,59 @@ test('every starter is fully described and targets a known family', async () => 
         // one would silently skip every check a starter has.
         assert.ok(['prose', 'paragraph', 'h3-fields', 'h3-reference'].includes(entry.format),
             `${entry.id} declares a known format`);
-        assert.ok(entry.parts.length >= 1, `${entry.id} has at least one part`);
-        for (const part of entry.parts) {
-            assert.ok(part.label, `${entry.id} part labelled`);
-            assert.ok(part.durationSeconds > 0, `${entry.id}/${part.label} declares its length`);
-            assert.ok(part.prompt.trim().length > 200, `${entry.id}/${part.label} carries a real prompt`);
+        // An entry uses ONE axis: parts (a clip split along time) or variants
+        // (one idea in treatments you pick between). Both at once would leave
+        // the menu with no answer to what a click on the row means.
+        assert.ok(!(entry.parts?.length && entry.variants?.length),
+            `${entry.id} splits into parts or lists variants, not both`);
+        const slots = defaultPromptSlots(entry);
+        assert.ok(slots.length >= 1, `${entry.id} offers at least one prompt`);
+        for (const slot of slots) {
+            assert.ok(slot.label, `${entry.id} slot labelled`);
+            assert.ok(slot.durationSeconds > 0, `${entry.id}/${slot.label} declares its length`);
+            assert.ok(slot.prompt.trim().length > 200, `${entry.id}/${slot.label} carries a real prompt`);
         }
     }
     // Ids are how the menu keys rows; a duplicate would silently drop one.
     assert.equal(new Set(DEFAULT_PROMPTS.map((entry) => entry.id)).size, DEFAULT_PROMPTS.length);
+    // Variant ids key the rows inside an opened collection, and the loaded
+    // prompt is looked up by them, so they collide within a collection the same
+    // way entry ids collide across the menu.
+    for (const entry of DEFAULT_PROMPTS.filter((item) => item.variants?.length)) {
+        const ids = entry.variants.map((variant) => variant.id);
+        assert.equal(new Set(ids).size, ids.length, `${entry.id} variant ids are unique`);
+        for (const variant of entry.variants) {
+            assert.ok(variant.id && variant.name && variant.summary, `${entry.id}/${variant.id} labelled`);
+        }
+    }
+});
+
+test('variants are alternatives, so a collection runs one variant long', async () => {
+    const { DEFAULT_PROMPTS, defaultPromptTotalSeconds, describeDefaultPrompt } = await import('../src/lib/defaultPrompts.js');
+    const collections = DEFAULT_PROMPTS.filter((entry) => entry.variants?.length);
+    assert.ok(collections.length, 'the shipped library has collections');
+    for (const entry of collections) {
+        // Summing them would advertise a 90-second clip that nobody can
+        // generate: you load ONE variant and the rest are the ones you did not
+        // pick. Every variant in a collection therefore runs the same length,
+        // which is the length the row states.
+        const lengths = new Set(entry.variants.map((variant) => variant.durationSeconds));
+        assert.equal(lengths.size, 1, `${entry.id} variants all run the same length (${[...lengths]})`);
+        assert.equal(defaultPromptTotalSeconds(entry), entry.variants[0].durationSeconds);
+        assert.match(describeDefaultPrompt(entry), new RegExp(`· ${entry.variants.length} variants ·`));
+    }
+    // The animation shelf ships as six ideas rather than 74 rows, and the
+    // archer pair is the reason a collection is not just "everything similar":
+    // the eleven weak-reference styles share ONE attachment, and the anchored
+    // one needs a different attachment, so it stays a row of its own.
+    const shelf = collections.filter((entry) => entry.id.endsWith('-h3'));
+    assert.ok(shelf.length >= 5, 'the animation collections ship');
+    const anchored = DEFAULT_PROMPTS.find((entry) => entry.id === 'archer-anchor-h3');
+    const styles = DEFAULT_PROMPTS.find((entry) => entry.id === 'archer-styles-h3');
+    assert.ok(anchored && styles, 'both archer entries ship');
+    assert.equal(anchored.idea, styles.idea, 'they are the same idea');
+    assert.notEqual(anchored.requires, styles.requires, 'and they need different attachments');
+    assert.ok(!anchored.variants, 'the anchored one is a row, not a variant of the others');
 });
 
 test('only the starters written for the selected model are listed', async () => {
@@ -66,7 +110,7 @@ test('only the starters written for the selected model are listed', async () => 
 });
 
 test('an idea is split at each model\'s own ceiling, and every variant adds back up', async () => {
-    const { DEFAULT_PROMPTS, defaultPromptTotalSeconds } = await import('../src/lib/defaultPrompts.js');
+    const { DEFAULT_PROMPTS, defaultPromptTotalSeconds, defaultPromptSlots } = await import('../src/lib/defaultPrompts.js');
     // What the studio will actually offer as a duration, per family: H3 goes to
     // 15s and other local workflows to 10s (hivemindStudio.js), Seedance 2.0 caps
     // its enum at 15, and only Seedance 2.5 reaches 30.
@@ -84,12 +128,14 @@ test('an idea is split at each model\'s own ceiling, and every variant adds back
         const lengths = new Set(variants.map(defaultPromptTotalSeconds));
         assert.equal(lengths.size, 1, `${idea} runs the same length on every model (${[...lengths]})`);
         for (const entry of variants) {
-            for (const part of entry.parts) {
-                assert.ok(part.durationSeconds <= CEILING[entry.family],
-                    `${entry.id} keeps every part inside the ${entry.family} ceiling`);
+            // The ceiling binds whatever you can load, so a variant is measured
+            // against it exactly like a part.
+            for (const slot of defaultPromptSlots(entry)) {
+                assert.ok(slot.durationSeconds <= CEILING[entry.family],
+                    `${entry.id} keeps every prompt inside the ${entry.family} ceiling`);
             }
             // Every part after the first is a continuation, and says how to reach it.
-            entry.parts.forEach((part, index) => {
+            (entry.parts || []).forEach((part, index) => {
                 if (index === 0) return;
                 assert.ok(part.continuation, `${entry.id} part ${index + 1} is marked a continuation`);
                 assert.ok(part.note, `${entry.id} part ${index + 1} says how to arm it`);
@@ -126,13 +172,19 @@ test('continuations re-describe the scene instead of assuming it', async () => {
 });
 
 test('H3 starters obey the trained three-field format', async () => {
-    const { DEFAULT_PROMPTS } = await import('../src/lib/defaultPrompts.js');
+    const { DEFAULT_PROMPTS, defaultPromptSlots } = await import('../src/lib/defaultPrompts.js');
+    // The one thing allowed above the first field: the keyframe anchor sentence
+    // quoted verbatim in prompt_profiles._MINIMAX_H3_I2VA, which is what pins an
+    // attached start frame as frame zero. It is a trained-on form, and
+    // detect_prompt_format() still reads what follows it as three-field.
+    const ANCHOR = /^For the target video, at (0\.00 seconds into the target video, <Picture 1> \(from \[Shot 1\]\)|the final frame of the target video, <Picture 1>) is fully referenced\.\n\n/;
     const h3 = DEFAULT_PROMPTS.filter((entry) => entry.format === 'h3-fields');
     assert.ok(h3.length);
     for (const entry of h3) {
-        for (const { prompt, label } of entry.parts) {
+        for (const { prompt, label } of defaultPromptSlots(entry)) {
             const where = `${entry.id}/${label}`;
-            assert.match(prompt, /^integrated_multimodal_description: /, `${where} opens on the first field`);
+            const body = prompt.replace(ANCHOR, '');
+            assert.match(body, /^integrated_multimodal_description: /, `${where} opens on the first field`);
             assert.match(prompt, /\n\noverall_soundscape: /, `${where} carries the soundscape field`);
             assert.match(prompt, /\n\nnon_diegetic_music: /, `${where} carries the music field`);
             assert.match(prompt, /\[Shot 1\] /, `${where} opens shot 1 without a timestamp`);
@@ -151,8 +203,24 @@ test('H3 starters obey the trained three-field format', async () => {
     }
 });
 
+test('a shipped H3 starter fits inside H3\'s own character ceiling', async () => {
+    const { DEFAULT_PROMPTS, defaultPromptSlots } = await import('../src/lib/defaultPrompts.js');
+    const { H3_PROMPT_LIMITS } = await import('../src/lib/h3PromptCheck.js');
+    // A starter past 7000 characters is not a long starter, it is one the studio's
+    // own Prompt Check reports an error on the moment it loads, and one H3 truncates
+    // rather than renders. Two shipped at 7102 and 7252 before this test existed.
+    // Measured on the RAW text: the [DESCRIBE …] brackets are filled in by hand
+    // afterwards, so whatever headroom is left here is the author's budget.
+    for (const entry of DEFAULT_PROMPTS.filter((item) => item.family === 'minimax')) {
+        for (const slot of defaultPromptSlots(entry)) {
+            assert.ok(slot.prompt.length <= H3_PROMPT_LIMITS.chars,
+                `${entry.id}/${slot.label} fits H3's ${H3_PROMPT_LIMITS.chars}-character ceiling (${slot.prompt.length})`);
+        }
+    }
+});
+
 test('H3 reference starters obey the six-section format and label media from 1', async () => {
-    const { DEFAULT_PROMPTS } = await import('../src/lib/defaultPrompts.js');
+    const { DEFAULT_PROMPTS, defaultPromptSlots } = await import('../src/lib/defaultPrompts.js');
     const SECTIONS = ['subject_definitions:', 'summary:', 'retention_analysis:',
         'detailed_description:', 'overall_soundscape:', 'non_diegetic_music:'];
     const refs = DEFAULT_PROMPTS.filter((entry) => entry.format === 'h3-reference');
@@ -161,7 +229,7 @@ test('H3 reference starters obey the six-section format and label media from 1',
         // Reference mode needs media attached; a starter that does not say so
         // generates a reaction shot with nothing on the screen.
         assert.ok(entry.requires, `${entry.id} names the media it needs`);
-        for (const { prompt, label } of entry.parts) {
+        for (const { prompt, label } of defaultPromptSlots(entry)) {
             const where = `${entry.id}/${label}`;
             let cursor = -1;
             for (const section of SECTIONS) {
@@ -209,7 +277,7 @@ test('a chained H3 part holds through the pinned tail before it moves or speaks'
     // frames. A shot change or a spoken line inside that window reads as a jump
     // cut and lands the words early (prompt_profiles.continuation_opens_on_speech).
     for (const entry of DEFAULT_PROMPTS.filter((e) => e.family === 'minimax')) {
-        for (const part of entry.parts.filter((p) => p.continuation)) {
+        for (const part of (entry.parts || []).filter((p) => p.continuation)) {
             const stamps = [...part.prompt.matchAll(/At (\d{2}):(\d{2})\.(\d{3})/g)]
                 .map((m) => ({ at: Number(m[1]) * 60 + Number(m[2]) + Number(m[3]) / 1000, index: m.index }));
             assert.ok(stamps.length, `${entry.id}/${part.label} has timed shots`);
@@ -224,11 +292,11 @@ test('a chained H3 part holds through the pinned tail before it moves or speaks'
 });
 
 test('no part describes a beat past the end of itself', async () => {
-    const { DEFAULT_PROMPTS } = await import('../src/lib/defaultPrompts.js');
+    const { DEFAULT_PROMPTS, defaultPromptSlots } = await import('../src/lib/defaultPrompts.js');
     // Same rule prompt_profiles.timeline_overruns enforces on generated prompts:
     // a shot stamped at or past the duration is a beat that never renders.
     for (const entry of DEFAULT_PROMPTS) {
-        for (const part of entry.parts) {
+        for (const part of defaultPromptSlots(entry)) {
             for (const stamp of part.prompt.matchAll(/At (\d{1,2}):(\d{2})\.(\d{3})/g)) {
                 const at = Number(stamp[1]) * 60 + Number(stamp[2]) + Number(stamp[3]) / 1000;
                 assert.ok(at <= part.durationSeconds - 1,
@@ -423,15 +491,18 @@ test('the subject starters are rendered for the loaded persona\'s gender', async
 
     // Every starter renders clean for every gender — no token survives, and the
     // ones with no tokens are byte-identical to their raw text.
+    // Variants go through the same render as parts, so they carry the same
+    // guarantee: no token survives, and a prompt with no tokens comes back byte
+    // for byte as it was written.
+    const promptsOf = (entry) => [...(entry.parts || []), ...(entry.variants || [])].map((slot) => slot.prompt);
     for (const entry of DEFAULT_PROMPTS) {
         for (const gender of ['', 'female', 'male', 'nonbinary']) {
             const rendered = renderDefaultPrompt(entry, gender);
-            for (const part of rendered.parts) {
-                assert.doesNotMatch(part.prompt, /\{(woman|her|them|hers|herself|she)\}/i, `${entry.id}/${gender} renders clean`);
+            for (const prompt of promptsOf(rendered)) {
+                assert.doesNotMatch(prompt, /\{(woman|her|them|hers|herself|she)\}/i, `${entry.id}/${gender} renders clean`);
             }
-            if (!/\{(woman|her|them|hers|herself|she)\}/i.test(entry.parts.map((part) => part.prompt).join('\n'))) {
-                assert.deepEqual(rendered.parts.map((part) => part.prompt), entry.parts.map((part) => part.prompt),
-                    `${entry.id} has no tokens and is untouched`);
+            if (!/\{(woman|her|them|hers|herself|she)\}/i.test(promptsOf(entry).join('\n'))) {
+                assert.deepEqual(promptsOf(rendered), promptsOf(entry), `${entry.id} has no tokens and is untouched`);
             }
         }
     }
@@ -472,4 +543,46 @@ test('a male or non-binary persona is not handed the starter woman\'s hairstyle,
     const his = defaultPromptsFor('video', { ...H3_MODEL, persona: { id: 'p', name: 'Marco', gender: 'male' } })
         .find((entry) => entry.id === 'korean-home-video-h3');
     assert.match(his.parts[0].prompt, /A Korean man in his early twenties/);
+});
+
+// The multishot skate starter is the one whose environment constraint ("2D
+// hand-painted, not 3D") the community recipe treats as its most fragile rule,
+// and the first starter that sets the studio up for itself. Both are one
+// "tidy" away from silently disappearing.
+test('the multishot skate starter keeps its four pictures, its 2D rule and its setup flag', async () => {
+    const { DEFAULT_PROMPTS } = await import('../src/lib/defaultPrompts.js');
+    const entry = DEFAULT_PROMPTS.find((item) => item.id === 'anime-skate-multishot-h3');
+    assert.ok(entry, 'the multishot skate starter ships');
+    assert.equal(entry.family, 'minimax');
+    assert.equal(entry.format, 'h3-reference');
+    // Loading it sets the studio up: 15s and the timeline view (the menu
+    // passes the flag through onLoadPrompt; the studio applies it).
+    assert.equal(entry.timeline, true, 'it opts into studio setup');
+    assert.equal(entry.parts[0].durationSeconds, 15);
+    const prompt = entry.parts[0].prompt;
+
+    // Each of the four attachments is claimed by a subject, in attach order —
+    // the girl, the board, the alley, the Walkman — and every one carries a
+    // preserved-family marker so it survives the shot changes.
+    for (const n of [1, 2, 3, 4]) {
+        assert.match(prompt, new RegExp(`<Subject ${n}> is the .*<Picture ${n}>`), `subject ${n} claims picture ${n}`);
+        assert.match(prompt, new RegExp(`<Picture ${n}>: fully_preserved`), `picture ${n} carries a marker`);
+        assert.match(prompt, new RegExp(`<Subject ${n}>: fully_preserved`), `subject ${n} carries a marker`);
+    }
+    // The environment rule is bound to the environment subject, stated as what
+    // the background IS — the fight starter's precedent for style constraints.
+    assert.match(prompt, /painted 2D anime background art/);
+    assert.match(prompt, /NOT 3D models, NOT CGI/);
+    // The 15 fps feel is written as animation language, not a settings knob.
+    assert.match(prompt, /animated on twos/);
+    assert.match(prompt, /held frames/);
+    // Five cuts, the first unstamped, the rest timed inside the 15s.
+    const stamps = [...prompt.matchAll(/At (\d{2}):(\d{2})\.(\d{3})/g)]
+        .map((m) => Number(m[1]) * 60 + Number(m[2]) + Number(m[3]) / 1000);
+    assert.equal((prompt.match(/\[Shot \d\]/g) || []).length, 5, 'five shots');
+    assert.deepEqual(stamps, [3, 6, 9, 12], 'cuts land every three seconds');
+    // Silent sequence: no dialogue tag anywhere, and the music the girl nods
+    // to lives in non_diegetic_music, not as an unbound voice in a beat.
+    assert.doesNotMatch(prompt, /<d>/);
+    assert.match(prompt.split('non_diegetic_music:\n')[1], /listening to/);
 });

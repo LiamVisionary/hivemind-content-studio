@@ -18,6 +18,7 @@ COMFY="${COMFY_DIR:-$HOME/comfy/ComfyUI}"
 APP="$STUDIO_ROOT/packages/media-gateway"
 MOBILE="$STUDIO_ROOT/packages/comfyui-mobile"
 KREA2_IDENTITY_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-krea2-identity"
+SEEDVR2_TRT_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-seedvr2-trt"
 OPEN_GEN="$STUDIO_ROOT/packages/open-generative-ai"
 CONTENT_STUDIO="$STUDIO_ROOT"
 CLOUDFLARED="$HOME/.local/bin/cloudflared"
@@ -237,6 +238,17 @@ start_children() {
     ln -sfn "$KREA2_IDENTITY_NODE" "$COMFY/custom_nodes/hivemind-krea2-identity"
   else
     log "cannot install Krea2 identity adapter: custom node path is not a symlink"
+    return 1
+  fi
+  # SeedVR2 TensorRT VAE. Inert on Apple silicon (it reports "no CUDA device"
+  # and the decode runs on PyTorch), and installed anyway for two reasons: a
+  # local NVIDIA machine gets the same acceleration the rented boxes get, and a
+  # lane that HAS the node can say why it is not using it instead of looking
+  # like a box that is merely missing something.
+  if [ -L "$COMFY/custom_nodes/hivemind-seedvr2-trt" ] || [ ! -e "$COMFY/custom_nodes/hivemind-seedvr2-trt" ]; then
+    ln -sfn "$SEEDVR2_TRT_NODE" "$COMFY/custom_nodes/hivemind-seedvr2-trt"
+  else
+    log "cannot install SeedVR2 TensorRT adapter: custom node path is not a symlink"
     return 1
   fi
   COMFY_PRIVATE_VIEW_TOKEN="$("$COMFY/.venv/bin/python" - <<'PY'

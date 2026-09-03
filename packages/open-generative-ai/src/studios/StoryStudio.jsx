@@ -39,13 +39,11 @@ import { toast } from 'react-hot-toast';
 import { registerPromptInserter, loadStudioSetup } from '../app/promptTarget.js';
 import { defaultPick, fetchCapabilityMatrix, rankModels, serverRows } from '../lib/capabilityMatrix.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
-import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
+import { primeResolvedMedia } from '../lib/e2eMedia.js';
+import { isHivemindStudioEnabled, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
 import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { LOCAL_MODEL_CATALOG } from '../lib/localModels.js';
-import {
-  askProducer, connectHivemindosAccount, hivemindosLinkState, requestHivemindosLink,
-  saveProviderKey, startCreditTopUp, textModelCatalog,
-} from '../lib/localProducer.js';
+import { askProducer } from '../lib/localProducer.js';
 import { needsBrowserKey, runImage, transportFor } from '../lib/modelRunner.js';
 import {
   fetchOAuthStatus, readinessFor, readinessFromError, refreshMuapiKeyLocation, startOAuthLogin,
@@ -53,10 +51,8 @@ import {
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { canvasMismatch } from './story/sheetLayout.js';
 import { lastUsedModelId, rememberModelId, sortModels } from '../lib/promptHelperRuntime.js';
-import {
-  ACCOUNTS, APP_ROUTE, HIVEMINDOS, LINK_POLL_MS, LINK_WAIT_MS, LOCAL,
-  remedyFor, routeOf, rowFor, sourceState, startingModelId, tabOf,
-} from '../lib/textModels.js';
+import { DRAFT_USAGE, LOCAL, remedyFor, rowFor, sourceState, startingModelId } from '../lib/textModels.js';
+import { useModelSources } from '../lib/useModelSources.js';
 import { Button, StudioLayout } from '../ui/kit.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 
@@ -131,22 +127,14 @@ export function StoryStudio({ active = true } = {}) {
 
   // The producer — one model for the whole session rather than one per stage.
   // Which model is thinking is a session decision, not a stage decision.
-  const [runtime, setRuntime] = useState(null);
   const [producerId, setProducerId] = useState('');
   const [producerOpen, setProducerOpen] = useState(false);
-  // Which tab the picker is on, and what is typed in its search box. The tab
-  // follows the CHOSEN model when the picker opens, so it lands where the
-  // current answer came from rather than always on the first tab.
-  const [producerTab, setProducerTab] = useState('');
-  const [producerQuery, setProducerQuery] = useState('');
-  // Which of the owner's provider accounts the model list is narrowed to, and
-  // the key field a "not connected" account opened. Both are picker state, not
-  // session state: which account a model belongs to is carried by its id.
-  const [producerAccount, setProducerAccount] = useState('');
-  const [keyField, setKeyField] = useState('');
-  const [savingKey, setSavingKey] = useState(false);
-  const [connecting, setConnecting] = useState(false);
-  const [linking, setLinking] = useState(false);
+  // The catalog, the picker's own state (section, search, account, key field)
+  // and every repair a source can offer come from the same hook the prompt
+  // helper uses, so the two pickers cannot drift. A repair that switches
+  // sections also opens the popover, or its button appears to do nothing.
+  const sources = useModelSources({ onOpen: setProducerOpen });
+  const { catalog: runtime, refresh: refreshRuntime, runRemedy } = sources;
   // Two pieces of state, because they answer different questions. `busy` is
   // WHICH ask is running and lives for the whole call; `thinking` is what it is
   // doing right now and is overwritten several times by askProducer's onStatus.
@@ -206,186 +194,22 @@ export function StoryStudio({ active = true } = {}) {
 
   // One catalog for every engine. A machine with no local weights on it used to
   // have no producer at all; HivemindOS's models answer for it now, on the same
-  // credits as the HivemindOS app itself.
-  const refreshRuntime = useCallback(async () => {
-    try {
-      const payload = await textModelCatalog();
-      setRuntime(payload);
-      setProducerId((current) => current || startingModelId(payload, lastUsedModelId()));
-    } catch {
-      setRuntime({ models: [], sources: {} });
-    }
-  }, []);
-
-  useEffect(() => { void refreshRuntime(); }, [refreshRuntime]);
+  // credits as the HivemindOS app itself. The first catalog decides where to
+  // start; a later refresh never overrides a choice already made.
+  useEffect(() => {
+    if (!runtime) return;
+    setProducerId((current) => current || startingModelId(runtime, lastUsedModelId()));
+  }, [runtime]);
 
   // Local rows keep their loaded-first order; the cloud list is already ordered
   // by HivemindOS (its own tiers first, then the gateway's catalog).
   const localProducerModels = useMemo(() => sortModels(sourceState(runtime, LOCAL).models), [runtime]);
   const producer = rowFor(runtime, producerId);
-  const producerTabOpen = producerTab || (producer ? tabOf(producer) : LOCAL);
   // What askProducer needs to know about THIS machine, in the shape it already
   // reads, so a cloud catalog does not send it looking for a local id.
   const localSnapshot = useMemo(() => ({ models: localProducerModels }), [localProducerModels]);
 
   const cancelProducer = useCallback(() => abortRef.current?.abort(), []);
-
-  /**
-   * Connect the owner's HivemindOS account, once.
-   *
-   * The key never comes back to the browser after this: the server verifies it
-   * against the gateway, stores it encrypted on the machine, and from then on
-   * the studio only ever sees the balance.
-   */
-  const connectAccount = useCallback(async (token) => {
-    setConnecting(true);
-    try {
-      const result = await connectHivemindosAccount(token);
-      await refreshRuntime();
-      toast.success(result?.label ? `Connected — ${result.label}.` : 'HivemindOS account connected.');
-    } catch (error) {
-      toast.error(error?.message || 'That key was not accepted.');
-    } finally {
-      setConnecting(false);
-    }
-  }, [refreshRuntime]);
-
-  /**
-   * Ask the HivemindOS app on this machine to hand its balance over.
-   *
-   * A custom-scheme link that nothing handles fails silently — the browser does
-   * not error, no window appears, there is nothing to catch. So this treats
-   * silence as an answer: poll while the owner is over in the app, and after the
-   * budget say what happened and leave the paste path open. A button that waits
-   * forever is the same failure as a button that does nothing.
-   */
-  const linkThroughApp = useCallback(async () => {
-    setLinking(true);
-    try {
-      const { url, nonce } = await requestHivemindosLink();
-      window.location.href = url;
-      const deadline = Date.now() + LINK_WAIT_MS;
-      while (Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, LINK_POLL_MS));
-        const { state } = await hivemindosLinkState(nonce).catch(() => ({ state: 'pending' }));
-        if (state === 'linked') {
-          await refreshRuntime();
-          toast.success('Linked to your HivemindOS balance.');
-          return;
-        }
-        if (state === 'expired') break;
-      }
-      toast(
-        'HivemindOS did not answer. Open it and try again, or paste an account key below.',
-        { icon: '🐝', duration: 10000 },
-      );
-    } catch (error) {
-      toast.error(error?.message || 'Could not ask HivemindOS to link.');
-    } finally {
-      setLinking(false);
-    }
-  }, [refreshRuntime]);
-
-  /**
-   * Save one provider key into the machine's shared credential store.
-   *
-   * The value goes to the server and is never held in this browser. The catalog
-   * is re-read straight after, because an account that is connected but still
-   * shows "not connected" until a reload is indistinguishable from one that
-   * failed to connect.
-   */
-  const saveKey = useCallback(async (name, value) => {
-    setSavingKey(true);
-    try {
-      await saveProviderKey(name, value);
-      setKeyField('');
-      await refreshRuntime();
-      toast.success(`${name} saved. Its models are on the Your accounts tab.`);
-    } catch (error) {
-      toast.error(error?.message || 'That key could not be saved.');
-    } finally {
-      setSavingKey(false);
-    }
-  }, [refreshRuntime]);
-
-  /**
-   * The repair a source offered, performed.
-   *
-   * Every state this picker can be in that stops a press is paired with one of
-   * these, so the owner is never told what is wrong without being shown where
-   * to fix it — the project's rule since the OAuth error that had nothing to
-   * press.
-   */
-  const runRemedy = useCallback(async (remedy) => {
-    // Called both with a bare action (the older call sites) and with the whole
-    // remedy, because a provider account's repair has to name WHICH account.
-    const action = typeof remedy === 'string' ? remedy : String(remedy?.action || '');
-    if (action === 'accounts') {
-      setProducerOpen(true);
-      setProducerTab(ACCOUNTS);
-      return;
-    }
-    if (action === 'key') {
-      setProducerOpen(true);
-      setProducerTab(ACCOUNTS);
-      setKeyField(String(remedy?.key || ''));
-      return;
-    }
-    if (action === 'oauth') {
-      // The same sign-in the Providers view runs — one flow per account on this
-      // machine, so signing in here signs in for HivemindOS too.
-      try {
-        const url = await startOAuthLogin(String(remedy?.provider || ''));
-        window.open(url, '_blank', 'noopener,noreferrer');
-        toast('Finish the sign-in in the tab that opened, then press Try again.', { icon: '🔑', duration: 10000 });
-      } catch (error) {
-        toast.error(
-          error?.instruction ? `${error.message} ${error.instruction}` : (error?.message || 'Could not start the sign-in.'),
-        );
-      }
-      return;
-    }
-    if (action === 'models') {
-      window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'models' } }));
-      return;
-    }
-    if (action === 'refresh') { void refreshRuntime(); return; }
-    if (action === 'connect') {
-      // The form is already on the tab; this only makes sure it is the tab in
-      // view, because a button that appears to do nothing is worse than no
-      // button at all.
-      setProducerOpen(true);
-      setProducerTab(HIVEMINDOS);
-      return;
-    }
-    if (action === 'top-up') {
-      // Two different acts behind one button. With the HivemindOS app running,
-      // credits belong there — buying a second balance here would split the one
-      // the machine already shares. Without it, "install HivemindOS first" is
-      // not an answer, so the studio opens the checkout itself.
-      if (routeOf(runtime) === APP_ROUTE) {
-        const url = sourceState(runtime, HIVEMINDOS).url;
-        if (url) window.open(url, '_blank', 'noopener,noreferrer');
-        toast('Add credits in HivemindOS — this studio spends the same balance.', { icon: '🐝', duration: 8000 });
-        return;
-      }
-      try {
-        const { checkoutUrl } = await startCreditTopUp();
-        if (!checkoutUrl) throw new Error('HivemindOS did not return a checkout page.');
-        window.open(checkoutUrl, '_blank', 'noopener,noreferrer');
-        toast('Finish the checkout in the tab that opened, then press Try again.', { icon: '💳', duration: 10000 });
-      } catch (error) {
-        toast.error(error?.message || 'Could not open the HivemindOS checkout.');
-      }
-      return;
-    }
-    const url = sourceState(runtime, HIVEMINDOS).url;
-    if (!url) {
-      toast('HivemindOS is not installed on this machine yet.', { icon: '🐝' });
-      return;
-    }
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }, [runtime, refreshRuntime]);
 
   /**
    * A producer failure, shown with its repair when it named one.
@@ -710,7 +534,15 @@ export function StoryStudio({ active = true } = {}) {
     setDrawing(key);
     try {
       const result = await runImage({ row: model, shared: { prompt, aspect_ratio: aspect, seed: -1 } });
-      const reference = await promoteOutputToReference(result.url, { kind: 'image', name }).catch(() => '');
+      // Read the picture ONCE, in the clear, and keep it: it is what the
+      // reference upload sends, and it is what the card shows. The reference
+      // comes back sealed to the owner vault, and displaying it by fetching
+      // and decrypting the new URL depends on the vault key being in this
+      // tab — when it was not, the sheet that had just been drawn rendered as
+      // a broken image over ciphertext. The bytes were here the whole time.
+      const dataUrl = await mediaSourceToDataUrl(result.url, 'image').catch(() => '');
+      const reference = await promoteOutputToReference(result.url, { kind: 'image', name, dataUrl }).catch(() => '');
+      if (reference && dataUrl) primeResolvedMedia(reference, dataUrl);
       const url = reference || result.url;
       const drawn = result.url;
       // And check what actually came back. A provider that ignores the ratio
@@ -1254,24 +1086,11 @@ export function StoryStudio({ active = true } = {}) {
         onCancel={cancelProducer}
         warning={matrixError}
         picker={{
-          catalog: runtime,
+          ...sources.pickerProps,
           selectedId: producerId,
-          tab: producerTabOpen,
-          onTab: setProducerTab,
-          query: producerQuery,
-          onQuery: setProducerQuery,
           onPick: (id) => { setProducerId(id); rememberModelId(id); },
-          onRemedy: runRemedy,
-          account: producerAccount,
-          onAccount: setProducerAccount,
-          keyField,
-          onKeySave: saveKey,
-          onKeyCancel: () => setKeyField(''),
-          savingKey,
-          onConnect: connectAccount,
-          connecting,
-          onLink: linkThroughApp,
-          linking,
+          // What one press costs, per row: a Story draft is the press here.
+          usage: DRAFT_USAGE,
         }}
       />
 

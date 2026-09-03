@@ -39,11 +39,14 @@ function referenceFileName(source, type) {
  * dropped on the composer, …) as a reference and records it in the upload
  * history.
  * @param {string} source in-app media URL (sealed or plain)
- * @param {{name?: string, kind?: 'image'|'video'|'audio'}} options
+ * @param {{name?: string, kind?: 'image'|'video'|'audio', dataUrl?: string}} options
+ *   `dataUrl`: the source already read in the clear, when the caller holds it
+ *   — a sealed output is then decrypted once, not once here and once again to
+ *   show it.
  * @returns {Promise<string>} the persistent reference URL to hand to a picker.
  */
-export async function promoteOutputToReference(source, { name, kind = 'image' } = {}) {
-  const dataUrl = await mediaSourceToDataUrl(source, kind);
+export async function promoteOutputToReference(source, { name, kind = 'image', dataUrl: given = '' } = {}) {
+  const dataUrl = given || await mediaSourceToDataUrl(source, kind);
   if (!dataUrl) throw new Error(`Could not read the generated ${kind}.`);
   const blob = dataUrlToBlob(dataUrl);
   const file = new File([blob], name || referenceFileName(source, blob.type), { type: blob.type || 'image/png' });

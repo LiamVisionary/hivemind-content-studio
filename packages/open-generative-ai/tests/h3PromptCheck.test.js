@@ -80,6 +80,24 @@ test('shot markers that skip a number are caught', async () => {
     assert.equal(find(result, 'shot-number').found, 3);
 });
 
+// The keyframe anchor sentence names the shot a pinned picture belongs to, and
+// prompt_profiles._MINIMAX_H3_I2VA tells the helper to emit it verbatim above
+// the fields. Read as a header it made every image-to-video prompt report a
+// numbering skip and a first shot with no cut — two errors on a form the studio
+// writes itself, on the prompt that was correct.
+test('the keyframe anchor cites a shot without opening one', async () => {
+    const { checkH3Prompt, shotMarkers } = await load();
+    const anchor = 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.';
+    const text = `${anchor}\n\nintegrated_multimodal_description: [Shot 1] She runs.\n[Shot 2] At 00:03.000, she stops.\n\noverall_soundscape: Footfalls.\n\nnon_diegetic_music: N/A`;
+    assert.deepEqual(shotMarkers(text).map((shot) => shot.number), [1, 2]);
+    const result = checkH3Prompt({ prompt: text, durationSeconds: 10 });
+    assert.equal(find(result, 'shot-number'), undefined);
+    assert.equal(find(result, 'shot-no-cut'), undefined);
+    // Only that one construction is excused: a marker is otherwise a header
+    // wherever it sits, because the shipped prompts open shots mid-paragraph.
+    assert.deepEqual(shotMarkers('x [Shot 1] a. Then [Shot 2] At 00:04.500, b').map((s) => s.number), [1, 2]);
+});
+
 test('a shot with no cut stamp is a warning, because H3 has to guess', async () => {
     const { checkH3Prompt } = await load();
     const result = checkH3Prompt({ prompt: '[Shot 1] Open.\n[Shot 2] A close-up.', durationSeconds: 10 });

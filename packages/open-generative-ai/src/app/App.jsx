@@ -35,6 +35,7 @@ const STUDIO_LOADERS = {
   story: () => import('../studios/StoryStudio.jsx').then((m) => m.StoryStudio),
   cinema: () => import('../studios/CinemaStudio.jsx').then((m) => m.CinemaStudio),
   lipsync: () => import('../studios/LipSyncStudio.jsx').then((m) => m.LipSyncStudio),
+  restore: () => import('../studios/RestoreStudio.jsx').then((m) => m.RestoreStudio),
   'mcp-cli': () => import('../studios/McpCliStudio.jsx').then((m) => m.McpCliStudio),
 };
 

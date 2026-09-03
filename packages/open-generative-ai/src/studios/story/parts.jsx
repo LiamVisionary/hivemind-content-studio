@@ -10,17 +10,61 @@
 // doing, rows of writable fields, and a disclosure holding the fields you only
 // open when you disagree with what was written. Saying that once is what keeps
 // the four stages looking like one studio.
+import { useEffect, useState } from 'react';
+
 import { Icon } from '../../ui/icons.jsx';
 import { Button, ProgressBar, Spinner, TextArea, TextInput, cx } from '../../ui/kit.jsx';
-import { useMediaSrc } from '../../hooks/hooks.js';
+import { useMediaSealFailure, useMediaSrc } from '../../hooks/hooks.js';
+import { VaultLockedTile } from '../../hub/components/MediaThumb.jsx';
 import { producerIsRunning } from './state.js';
 
-/** A drawn reference. The caller owns the shape — the same box holds the empty
- *  slot before it is drawn, so the row must not move when it arrives. */
+/**
+ * A drawn reference. The caller owns the shape — the same box holds the empty
+ * slot before it is drawn, so the row must not move when it arrives.
+ *
+ * A sheet is a reference sealed to the owner vault, and the resolver is
+ * fail-open: with no key in this tab it hands back the envelope URL, and a bare
+ * <img> pointed at ciphertext is a broken picture with alt text in it — which
+ * is what a freshly drawn sheet looked like. Three states the box can be in
+ * are therefore said as states, each with what to do: the vault is locked
+ * (unlock it), the bytes are sealed for another key (redraw), or the file is
+ * gone (redraw).
+ */
 export function Plate({ url, alt, className = '' }) {
   const src = useMediaSrc(url);
+  const sealFailure = useMediaSealFailure(url);
+  const [failed, setFailed] = useState('');
+  useEffect(() => { setFailed(''); }, [src]);
+  // The shared tile fills whatever holds it; the slot's box is what holds it,
+  // so the box owns the shape and the tile only fills it.
+  if (sealFailure) {
+    return (
+      <span className={cx('block overflow-hidden border border-line1', className)}>
+        <VaultLockedTile reason={sealFailure} />
+      </span>
+    );
+  }
+  if (failed === src && src) {
+    return (
+      <span
+        title="The picture behind this slot could not be loaded. Redraw it."
+        className={cx('flex flex-col items-center justify-center gap-1 border border-dashed border-line2 bg-bg3 px-2 text-center text-ink3', className)}
+      >
+        <Icon name="warning" size={16} />
+        <b className="text-[11px] font-semibold">Missing</b>
+        <small className="text-[10px] leading-tight">Redraw it</small>
+      </span>
+    );
+  }
   if (!src) return null;
-  return <img src={src} alt={alt} className={cx('border border-line1', className)} />;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      onError={() => setFailed(src)}
+      className={cx('border border-line1', className)}
+    />
+  );
 }
 
 /** The title and the sentence that says what the stage is FOR. */

@@ -173,6 +173,9 @@ def test_openrouters_per_token_price_is_shown_per_million(connected) -> None:
         {"id": "x/y", "pricing": {"prompt": "0.0000004", "completion": "0.0000016"}},
     ]}}))
     assert state["models"][0]["subtitle"] == "$0.4 in · $1.6 out /1M"
+    # And as numbers, so the picker can price one press on this account.
+    assert state["models"][0]["promptUsdPerMTok"] == 0.4
+    assert state["models"][0]["completionUsdPerMTok"] == 1.6
 
 
 def test_the_rows_are_ordered_so_the_first_forty_are_the_same_forty_twice_running(connected) -> None:

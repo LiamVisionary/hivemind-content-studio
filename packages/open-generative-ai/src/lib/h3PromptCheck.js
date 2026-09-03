@@ -102,6 +102,14 @@ export function shotMarkers(prompt) {
   const text = String(prompt || '');
   const out = [];
   for (const match of text.matchAll(/\[Shot\s+(\d+)\]([^[]*)/gi)) {
+    // The keyframe anchor sentence back-REFERENCES a shot rather than opening
+    // one: "…<Picture 1> (from [Shot 1]) is fully referenced." Counting it made
+    // every image-to-video prompt — the form prompt_profiles._MINIMAX_H3_I2VA
+    // tells the helper to emit verbatim — report that its shot numbering skips
+    // and that its first shot has no cut. Only this one construction is
+    // excused; a marker is otherwise a header wherever it sits, because the
+    // shipped prompts legitimately open shots mid-paragraph.
+    if (/\(from\s+$/i.test(text.slice(0, match.index))) continue;
     const stamp = /At\s+(\d{1,2}):(\d{2})\.(\d{1,3})/i.exec(match[2] || '');
     out.push({
       number: Number(match[1]),
