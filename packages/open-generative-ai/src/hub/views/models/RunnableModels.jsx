@@ -118,7 +118,7 @@ export function RunnableModels({ models, loading }) {
               ? undefined
               : type === 'video' && !counts.video
                 ? 'Video models come from the studio catalog and run in the Video studio — open it to see what is installed.'
-                : 'Workflow JSON dropped into ComfyUI/workflows/auto/ shows up here as a local model.'}
+                : 'Nothing installed yet. Add one from the Models page — or, if you build your own, drop a ComfyUI workflow in the auto folder.'}
           />
         )}
       </div>

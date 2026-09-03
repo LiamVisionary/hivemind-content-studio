@@ -37,7 +37,6 @@ const STUDIO_LOADERS = {
   cinema: () => import('../studios/CinemaStudio.jsx').then((m) => m.CinemaStudio),
   lipsync: () => import('../studios/LipSyncStudio.jsx').then((m) => m.LipSyncStudio),
   restore: () => import('../studios/RestoreStudio.jsx').then((m) => m.RestoreStudio),
-  'mcp-cli': () => import('../studios/McpCliStudio.jsx').then((m) => m.McpCliStudio),
 };
 
 const SettingsModalLazy = lazy(() => import('../dialogs/SettingsModal.jsx').then((m) => ({ default: m.SettingsModal })));
@@ -245,7 +244,7 @@ export function App() {
           const visible = p === page && !isHub;
           return (
             <div key={p} className={visible ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-              <ErrorBoundary label={p === 'mcp-cli' ? 'The Agents & API page' : `The ${p} studio`}>
+              <ErrorBoundary label={`The ${p} studio`}>
                 {TABBED_STUDIOS.has(p)
                   ? <StudioTabs Studio={Comp} studioType={p} active={visible} />
                   : <Comp active={visible} />}

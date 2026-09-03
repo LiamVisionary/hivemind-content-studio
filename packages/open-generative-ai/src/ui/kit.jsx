@@ -404,6 +404,19 @@ export function SectionLabel({ children, className = '' }) {
 
 // Whether a collapsible section was left open. A boolean about panel chrome —
 // no prompt or media data — so plain localStorage is safe here.
+// Force a section open from outside it — a deep link that lands on a page inside
+// a collapsed group has to show where you are. Writes the same key the header
+// does, so the group then stays open the way your own click would have left it.
+// True when it actually changed something (the caller re-mounts on that).
+export function openSection(storageKey) {
+  if (!storageKey) return false;
+  try {
+    if (window.localStorage?.getItem(`hive.section.${storageKey}`) === '1') return false;
+    window.localStorage?.setItem(`hive.section.${storageKey}`, '1');
+    return true;
+  } catch { return false; }
+}
+
 const readSectionOpen = (storageKey, fallback) => {
   if (!storageKey) return fallback;
   try {

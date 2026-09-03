@@ -524,6 +524,22 @@ export function SpriteStudio({ active = true } = {}) {
           </Card>
         ) : null}
 
+        {/* What this page needs before stage 2 and stage 4 can run, said once at
+            the top rather than discovered four minutes into the pipeline. */}
+        <Card className="flex flex-wrap items-center justify-between gap-3 p-3">
+          <p className="min-w-[240px] flex-1 text-[13px] leading-relaxed text-ink2">
+            Animation needs a rented GPU, and the cut-out runs SAM3 on this computer — its
+            first cut-out downloads a 3.45&nbsp;GB checkpoint. Everything else is local.
+          </p>
+          <Button
+            size="sm"
+            icon="cpu"
+            onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'machines' } }))}
+          >
+            Rent a GPU
+          </Button>
+        </Card>
+
         {/* ── 1. Sprite ─────────────────────────────────────────────── */}
         <Card className="flex flex-col gap-3 p-4">
           <StageHeader index={0} stage={STAGES[0]} done={Boolean(spriteUrl)}>

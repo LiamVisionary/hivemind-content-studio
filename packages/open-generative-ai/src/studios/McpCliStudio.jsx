@@ -73,13 +73,15 @@ function SectionCard({ kicker, title, meta, children }) {
   );
 }
 
-export function McpCliStudio() {
+export function McpCliStudio({ active = true }) {
   const mcpUrl = useMemo(() => mcpBaseUrl(), []);
   const reach = useMemo(() => endpointReach(), []);
   const addCommand = `claude mcp add --transport http hivemind-media ${mcpUrl}`;
 
+  // Rendered by the hub layer, which keeps every page mounted and toggles
+  // display — so this one hides itself when it is not the open page.
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div className={active ? 'min-h-0 flex-1 overflow-y-auto' : 'hidden'}>
       <div className="mx-auto w-full max-w-3xl px-5 py-6">
         {/* Slim intro row — workspace-first, no hero */}
         <div className="mb-5 flex flex-wrap items-center gap-2.5">
@@ -91,8 +93,8 @@ export function McpCliStudio() {
         </div>
         <p className="mb-6 max-w-2xl text-[13px] leading-relaxed text-ink2">
           {zh()
-            ? '这个工作室能做的一切 — 图像、视频、电影、唇语同步、持久运行 — 都可以通过内置的媒体 MCP 服务器和本地 REST API 提供给智能体。同一个引擎，同一份历史，同一条隐私边界。'
-            : 'Everything this studio does — image, video, cinema, lip sync, durable runs — is also available to agents through the built-in media MCP server and the local REST API. Same engine, same history, same privacy boundary.'}
+            ? '智能体可以通过内置的媒体 MCP 服务器驱动图像与视频生成、工作流、LoRA、模型管理和作业历史，持久运行则通过本地 REST API。同一个引擎，同一份历史，同一条隐私边界。'
+            : 'Agents can drive image and video generation, workflows, LoRAs, model management and job history through the built-in media MCP server, and durable runs through the local REST API. Same engine, same history, same privacy boundary.'}
         </p>
 
         <div className="flex flex-col gap-4">

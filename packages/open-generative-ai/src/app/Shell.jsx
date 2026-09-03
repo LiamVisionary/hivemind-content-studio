@@ -1,5 +1,6 @@
-// App chrome: labeled sidebar (≥lg), slim topbar, mobile tab strip.
-import { useEffect, useState } from 'react';
+// App chrome: tiered sidebar (≥lg, an icon rail under 1280px), slim topbar, and
+// a mobile chip strip that keeps the folded tiers behind one More menu.
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { useLang, useOwnerSession } from '../hooks/hooks.js';
 import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
 import { getLang, t } from '../lib/i18n.js';
@@ -7,10 +8,11 @@ import { getLang, t } from '../lib/i18n.js';
 const zhUi = () => getLang() === 'zh-CN';
 import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
-import { Button, IconButton, cx } from '../ui/kit.jsx';
+import { Button, CollapsibleSection, IconButton, cx, openSection } from '../ui/kit.jsx';
 import { getExploreDock, subscribeExploreDock, toggleExploreDock } from './exploreDockStore.js';
+import { getNavBadges, subscribeNavBadges } from './navBadges.js';
 import { APP_NAME, NAV_ITEMS, NAV_SECTIONS } from './navConfig.jsx';
-import { Menu } from '../ui/Menu.jsx';
+import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { STUDIO_RESTART_COMMAND, apiOfflineSentence, apiStatusLabel, pingApiStatus, useApiStatus } from './statusStore.js';
 
 // Topbar trigger for the Hivemind prompt library (explore dock). Only in studio
@@ -189,78 +191,221 @@ function RefreshButton({ zh }) {
   );
 }
 
-// The mobile strip holds 13 chips in ~375px; landing on a System page used to
-// leave the highlighted chip off-screen with no hint that the strip scrolls.
+// The strip holds the Create and Produce chips — about ten in ~375px — and the
+// folded tiers ride in the More menu beside them. Landing on a page whose chip
+// is off-screen used to leave no hint that the strip scrolls.
 function scrollActiveChipIntoView(node) {
   if (!node || typeof node.scrollIntoView !== 'function') return;
   try { node.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch { /* older engines */ }
 }
 
-function NavEntry({ item, active, onNavigate }) {
+/* ------------------------------------------------------------------ */
+/* Sidebar tiers                                                      */
+/* ------------------------------------------------------------------ */
+
+// Under 1280px a 216px labelled sidebar plus a 320px params panel leaves no
+// canvas, so the sidebar starts as an icon rail there. The chevron in the footer
+// overrides that in either direction and the choice is remembered.
+const RAIL_QUERY = '(max-width: 1279px)';
+const RAIL_KEY = 'studio.sidebarCollapsed';
+
+function readRailPreference() {
+  try {
+    const stored = window.localStorage?.getItem(RAIL_KEY);
+    return stored === null || stored === undefined ? null : stored === '1';
+  } catch { return null; }
+}
+
+function useSidebarRail() {
+  const [narrow, setNarrow] = useState(() => {
+    try { return Boolean(window.matchMedia?.(RAIL_QUERY)?.matches); } catch { return false; }
+  });
+  const [preference, setPreference] = useState(readRailPreference);
+  useEffect(() => {
+    let query = null;
+    try { query = window.matchMedia?.(RAIL_QUERY) || null; } catch { query = null; }
+    if (!query?.addEventListener) return undefined;
+    const onChange = (event) => setNarrow(Boolean(event.matches));
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  const setCollapsed = (next) => {
+    setPreference(next);
+    try { window.localStorage?.setItem(RAIL_KEY, next ? '1' : '0'); } catch { /* quota */ }
+  };
+  return [preference === null ? narrow : preference, setCollapsed];
+}
+
+const readNavBadges = () => getNavBadges();
+const useNavBadges = () => useSyncExternalStore(subscribeNavBadges, readNavBadges, readNavBadges);
+
+function NavEntry({ item, active, collapsed, count = 0, onNavigate }) {
+  const label = item.label();
   return (
     <button
       type="button"
       onClick={() => onNavigate(item.page)}
       aria-current={active ? 'page' : undefined}
+      title={collapsed ? label : undefined}
+      aria-label={collapsed ? label : undefined}
       className={cx(
-        'group relative flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-[13px] font-medium transition-colors duration-150',
+        'group relative flex h-9 w-full items-center rounded-md text-[13px] font-medium transition-colors duration-150',
+        collapsed ? 'justify-center px-0' : 'gap-2.5 px-2.5',
         active ? 'bg-honey-tint text-ink1' : 'text-ink2 hover:bg-bg2 hover:text-ink1',
       )}
     >
       <span
         className={cx(
-          'absolute left-[-10px] top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-honey transition-opacity duration-150',
+          'absolute top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-honey transition-opacity duration-150',
+          collapsed ? 'left-0' : 'left-[-10px]',
           active ? 'opacity-100' : 'opacity-0',
         )}
       />
       <Icon name={item.icon} size={16} className={active ? 'text-honey' : 'text-ink3 group-hover:text-ink2'} />
-      <span className="truncate">{item.label()}</span>
+      {collapsed ? null : <span className="truncate">{label}</span>}
+      {count > 0 ? (
+        collapsed
+          ? <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-honey" />
+          : <span className="ml-auto shrink-0 rounded-full bg-honey-tint px-1.5 font-mono text-[10px] font-semibold text-honey">{count}</span>
+      ) : null}
     </button>
+  );
+}
+
+// One disclosure convention: a collapsible group is a kit CollapsibleSection with
+// its closed-state hint, and the rail draws every group flat because a fold whose
+// title you cannot read is a trap.
+function NavGroup({ group, page, collapsed, hint, countFor, onNavigate }) {
+  const holdsActive = group.items.some((item) => item.page === page);
+  const [reveal, setReveal] = useState(0);
+  useEffect(() => {
+    if (!holdsActive || !group.collapsible) return;
+    if (openSection(group.storageKey)) setReveal((n) => n + 1);
+  }, [holdsActive, group.collapsible, group.storageKey, page]);
+
+  const entries = group.items.map((item) => (
+    <NavEntry
+      key={item.page}
+      item={item}
+      active={item.page === page}
+      collapsed={collapsed}
+      count={countFor(item)}
+      onNavigate={onNavigate}
+    />
+  ));
+
+  if (collapsed) return <div className="flex flex-col gap-0.5">{entries}</div>;
+  if (!group.collapsible) {
+    return (
+      <div className="flex flex-col gap-0.5">
+        <div className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-ink3">{group.label()}</div>
+        {entries}
+      </div>
+    );
+  }
+  return (
+    <CollapsibleSection
+      key={reveal}
+      title={group.label()}
+      hint={hint}
+      defaultOpen={group.defaultOpen}
+      storageKey={group.storageKey}
+      className="px-2.5"
+    >
+      <div className="-mx-2.5 -mt-2 flex flex-col gap-0.5">{entries}</div>
+    </CollapsibleSection>
   );
 }
 
 export function Shell({ page, onNavigate, onOpenSettings, children }) {
   const { zh, toggle, lang } = useLang();
   const activeItem = NAV_ITEMS.find((i) => i.page === page);
+  const [railed, setRailed] = useSidebarRail();
+  const badges = useNavBadges();
 
   useEffect(() => {
     if (activeItem) document.title = `${activeItem.label()} — ${APP_NAME}`;
   }, [activeItem]);
 
+  // Two numbers, each on the group it belongs to: an approval an agent is waiting
+  // on hints the closed Advanced header open, and a production still running is
+  // counted on the Productions row itself.
+  const advancedHint = badges.passbookPending > 0
+    ? (zh
+      ? `${badges.passbookPending} 个请求等待批准`
+      : `${badges.passbookPending} request${badges.passbookPending > 1 ? 's' : ''} waiting on you`)
+    : '';
+  const countFor = (item) => (item.page === 'runs' ? badges.runningProductions : 0);
+
+  // Create and Produce ride the strip; Labs and Advanced ride the More menu.
+  const stripItems = NAV_SECTIONS.filter((s) => !s.collapsible).flatMap((s) => s.items);
+  const moreGroups = [
+    ...NAV_SECTIONS.flatMap((s) => (s.labs ? [s.labs] : [])),
+    ...NAV_SECTIONS.filter((s) => s.collapsible),
+  ];
+  const moreItem = moreGroups.flatMap((g) => g.items).find((item) => item.page === page);
+
   return (
     <div className="flex h-full w-full">
-      {/* ---- Sidebar (≥ lg) ---- */}
+      {/* ---- Sidebar (≥ lg; icon rail when collapsed) ---- */}
       <aside
-        className="hidden w-[var(--sidebar-w)] shrink-0 flex-col border-r border-line1 bg-bg1 lg:flex"
+        className={cx(
+          'hidden shrink-0 flex-col border-r border-line1 bg-bg1 lg:flex',
+          railed ? 'w-[var(--sidebar-w-rail)]' : 'w-[var(--sidebar-w)]',
+        )}
         aria-label="Studio navigation"
       >
         <button
           type="button"
           onClick={() => onNavigate('image')}
-          className="mx-3 mb-1 mt-3 flex items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-bg2"
+          className={cx(
+            'mb-1 mt-3 flex items-center rounded-md py-2 text-left transition-colors hover:bg-bg2',
+            railed ? 'mx-2 justify-center px-0' : 'mx-3 gap-2.5 px-2',
+          )}
           title={APP_NAME}
         >
           <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-honey-tint text-honey">
             <Icon name="logo" size={20} />
           </span>
-          <span className="min-w-0">
-            <span className="block truncate text-[13px] font-semibold leading-tight text-ink1">Hivemind</span>
-            <span className="block truncate text-[11px] leading-tight text-ink3">Content Studio</span>
-          </span>
+          {railed ? null : (
+            <span className="min-w-0">
+              <span className="block truncate text-[13px] font-semibold leading-tight text-ink1">Hivemind</span>
+              <span className="block truncate text-[11px] leading-tight text-ink3">Content Studio</span>
+            </span>
+          )}
         </button>
-        <nav className="flex flex-1 flex-col gap-4 overflow-y-auto px-3 py-2">
-          {NAV_SECTIONS.map((section, i) => (
-            <div key={i} className="flex flex-col gap-0.5">
-              <div className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-ink3">
-                {section.label()}
-              </div>
-              {section.items.map((item) => (
-                <NavEntry key={item.page} item={item} active={item.page === page} onNavigate={onNavigate} />
-              ))}
+        <nav className={cx('flex flex-1 flex-col overflow-y-auto py-2', railed ? 'gap-3 px-2' : 'gap-4 px-3')}>
+          {NAV_SECTIONS.map((section) => (
+            <div key={section.id} className={cx('flex flex-col', railed ? 'gap-3' : 'gap-4')}>
+              <NavGroup
+                group={section}
+                page={page}
+                collapsed={railed}
+                hint={section.id === 'advanced' ? advancedHint : ''}
+                countFor={countFor}
+                onNavigate={onNavigate}
+              />
+              {section.labs ? (
+                <NavGroup
+                  group={section.labs}
+                  page={page}
+                  collapsed={railed}
+                  hint=""
+                  countFor={countFor}
+                  onNavigate={onNavigate}
+                />
+              ) : null}
             </div>
           ))}
         </nav>
-        <div className="flex items-center gap-1 border-t border-line1 p-3">
+        <div className={cx('flex items-center gap-1 border-t border-line1 p-3', railed && 'flex-wrap justify-center')}>
+          <IconButton
+            icon={railed ? 'chevronRight' : 'chevronLeft'}
+            label={railed
+              ? (zh ? '展开侧边栏' : 'Widen the sidebar')
+              : (zh ? '收起为图标栏' : 'Collapse to icons')}
+            onClick={() => setRailed(!railed)}
+          />
           <IconButton icon="settings" label={`${t('nav.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
           <button
             type="button"
@@ -307,7 +452,7 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
           className="hive-edge-fade flex h-11 w-full shrink-0 items-center gap-1 overflow-x-auto border-b border-line1 bg-bg1 px-3 lg:hidden"
           aria-label="Studio navigation"
         >
-          {NAV_ITEMS.map((item) => {
+          {stripItems.map((item) => {
             const on = item.page === page;
             return (
               <button
@@ -326,6 +471,43 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
               </button>
             );
           })}
+          {/* Labs and Advanced, one press away instead of eighteen chips wide. */}
+          <span className="shrink-0" ref={moreItem ? scrollActiveChipIntoView : undefined}>
+            <Menu
+              align="end"
+              width="w-56"
+              trigger={(open, togglePanel) => (
+                <ChipButton
+                  icon="more"
+                  value={moreItem ? moreItem.label() : (zh ? '更多' : 'More')}
+                  active={open || Boolean(moreItem)}
+                  onClick={togglePanel}
+                  aria-haspopup="menu"
+                  aria-expanded={open}
+                />
+              )}
+            >
+              {(close) => (
+                <>
+                  {moreGroups.map((group) => (
+                    <div key={group.id}>
+                      <MenuHeading>{group.label()}</MenuHeading>
+                      {group.items.map((item) => (
+                        <MenuItem
+                          key={item.page}
+                          icon={item.icon}
+                          selected={item.page === page}
+                          onClick={() => { onNavigate(item.page); close(); }}
+                        >
+                          {item.label()}
+                        </MenuItem>
+                      ))}
+                    </div>
+                  ))}
+                </>
+              )}
+            </Menu>
+          </span>
         </nav>
 
         <main id="content-area" className="relative flex min-h-0 w-full flex-1 flex-col overflow-hidden bg-bg0">

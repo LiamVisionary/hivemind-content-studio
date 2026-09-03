@@ -25,6 +25,9 @@ import { TelemetryView } from './views/TelemetryView.jsx';
 import { GpuMachinesView } from './views/GpuMachinesView.jsx';
 import { ProvidersView } from './views/ProvidersView.jsx';
 import { PassBookView } from './views/PassBookView.jsx';
+// Agents & API is a static docs page with no state or fetches of its own; it
+// rides the hub layer rather than the studio mount registry.
+import { McpCliStudio } from '../studios/McpCliStudio.jsx';
 
 export function HubLayer({ visible, view }) {
   const rootRef = useRef(null);
@@ -69,6 +72,7 @@ export function HubLayer({ visible, view }) {
       <ErrorBoundary label="Providers" hidden={current !== 'providers'}><ProvidersView active={current === 'providers'} /></ErrorBoundary>
       <ErrorBoundary label="PassBook" hidden={current !== 'passbook'}><PassBookView active={current === 'passbook'} /></ErrorBoundary>
       <ErrorBoundary label="Machines" hidden={current !== 'machines'}><GpuMachinesView active={current === 'machines'} /></ErrorBoundary>
+      <ErrorBoundary label="Agents &amp; API" hidden={current !== 'agents'}><McpCliStudio active={current === 'agents'} /></ErrorBoundary>
     </div>
   );
 }
