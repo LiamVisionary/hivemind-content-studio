@@ -125,7 +125,7 @@ export function RestoreCompare({
               <figcaption className="absolute left-2 top-2 rounded bg-scrim px-2 py-0.5 text-[11px] text-ink1">{originalLabel}</figcaption>
             </figure>
             <figure className="relative m-0 flex min-h-0 items-center justify-center bg-bg0">
-              <video ref={restoredRef} src={restoredUrl} controls playsInline className="max-h-full max-w-full" />
+              <video ref={restoredRef} src={restoredUrl} controls controlsList="nodownload" playsInline className="max-h-full max-w-full" />
               <figcaption className="absolute left-2 top-2 rounded bg-scrim px-2 py-0.5 text-[11px] text-ink1">{restoredLabel}</figcaption>
             </figure>
           </div>
@@ -155,6 +155,7 @@ export function RestoreCompare({
                 ref={restoredRef}
                 src={restoredUrl}
                 controls={mode !== 'wipe'}
+                controlsList="nodownload"
                 playsInline
                 className="absolute inset-0 h-full w-full object-contain"
               />
