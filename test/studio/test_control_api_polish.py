@@ -22,7 +22,11 @@ from fastapi.testclient import TestClient
 from hivemind_content_studio import gpu_rentals
 from hivemind_content_studio.accounts import ACCOUNT_COOKIE, AccountAccess, SESSION_SECONDS
 from hivemind_content_studio.approval_ledger import ApprovalLedger
-from hivemind_content_studio.control_api import build_control_app
+from hivemind_content_studio.control_api import (
+    PROXY_SECRET_ENV,
+    PROXY_SECRET_HEADER,
+    build_control_app,
+)
 from hivemind_content_studio.media_studio import sanitize_error_detail
 from hivemind_content_studio.orchestrator import ContentOrchestrator
 from hivemind_content_studio.private_access import OwnerAccess, PrivateFieldCipher
@@ -288,19 +292,91 @@ def test_a_signed_out_rename_is_401_like_its_sibling_delete(tmp_path: Path, monk
 
 def test_the_throttle_keys_on_the_forwarded_browser_and_speaks_in_minutes(tmp_path: Path, monkeypatch) -> None:
     """Behind the tailnet proxy every browser shares one socket address: five
-    wrong passwords from ANY device locked the owner tile for everyone."""
+    wrong passwords from ANY device locked the owner tile for everyone.
+
+    The forwarded address is believed only from the proxy that carries the
+    stack's shared secret — otherwise the caller chooses its own bucket, which
+    is the same thing as having no throttle at all.
+    """
+    monkeypatch.setenv(PROXY_SECRET_ENV, "test-proxy-secret")
     client = _client(tmp_path, monkeypatch, unlock=False)
+    proxy = {PROXY_SECRET_HEADER: "test-proxy-secret"}
     for _ in range(5):
         assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "wrong"},
-                           headers={"x-forwarded-for": "100.64.0.7, 10.0.0.1"}).status_code == 401
+                           headers={"x-forwarded-for": "100.64.0.7, 10.0.0.1", **proxy}).status_code == 401
     blocked = client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
-                          headers={"x-forwarded-for": "100.64.0.7, 10.0.0.1"})
+                          headers={"x-forwarded-for": "100.64.0.7, 10.0.0.1", **proxy})
     assert blocked.status_code == 429
     assert blocked.json()["detail"] == "Too many attempts. Try again in 10 minutes."
     # A different browser behind the same proxy is not locked out.
     other = client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
-                        headers={"x-forwarded-for": "100.64.0.8"})
+                        headers={"x-forwarded-for": "100.64.0.8", **proxy})
     assert other.status_code == 200
+
+
+def test_a_forwarded_address_from_an_unproven_caller_is_not_believed(tmp_path: Path, monkeypatch) -> None:
+    """Without the proxy secret the header is just something anyone can write,
+    and the five-attempt lock must key on the socket address instead."""
+    monkeypatch.setenv(PROXY_SECRET_ENV, "test-proxy-secret")
+    client = _client(tmp_path, monkeypatch, unlock=False)
+    for attempt in range(5):
+        assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "wrong"},
+                           headers={"x-forwarded-for": f"100.64.0.{attempt}"}).status_code == 401
+    rotated = client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
+                          headers={"x-forwarded-for": "100.64.0.99"})
+    assert rotated.status_code == 429
+
+
+def test_rotating_the_forwarded_address_still_locks_the_workspace(tmp_path: Path, monkeypatch) -> None:
+    """The per-address key can be moved by whoever is asking; the per-workspace
+    one cannot. Twenty wrong passwords from twenty invented addresses — the
+    shape a rebinding page brute-forces with — and the workspace stops
+    answering."""
+    monkeypatch.setenv(PROXY_SECRET_ENV, "test-proxy-secret")
+    client = _client(tmp_path, monkeypatch, unlock=False)
+    proxy = {PROXY_SECRET_HEADER: "test-proxy-secret"}
+    for attempt in range(20):
+        assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "wrong"},
+                           headers={"x-forwarded-for": f"100.64.1.{attempt}", **proxy}).status_code == 401
+    for attempt in range(20, 25):
+        refused = client.post("/api/accounts/unlock", json={"account_id": 1, "password": "wrong"},
+                              headers={"x-forwarded-for": f"100.64.1.{attempt}", **proxy})
+        assert refused.status_code == 429
+    # Even with the right password, and even from an address that never failed.
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
+                       headers={"x-forwarded-for": "100.64.2.1", **proxy}).status_code == 429
+
+
+def test_a_page_on_another_site_cannot_reach_the_studio(tmp_path: Path, monkeypatch) -> None:
+    """Two doors, both shut. A name this studio does not answer to is refused
+    before the sign-in routes see it (that is DNS rebinding), and an unsafe
+    method whose Origin belongs to another site is refused whatever the cookie
+    says (that is a cross-site POST)."""
+    client = _client(tmp_path, monkeypatch, unlock=False)
+    rebound = client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
+                          headers={"host": "evil.example"})
+    assert rebound.status_code == 400
+    cross_site = client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
+                             headers={"origin": "https://evil.example"})
+    assert cross_site.status_code == 400
+    assert "another site" in cross_site.json()["detail"]
+    # The studio's own page, on the address it is served from, is untouched.
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
+                       headers={"origin": "http://127.0.0.1:8765"}).status_code == 200
+
+
+def test_the_tailnet_origin_is_recognised_through_the_proxy(tmp_path: Path, monkeypatch) -> None:
+    """Over the tailnet the browser's Origin is the ts.net name while Host has
+    already been rewritten to 127.0.0.1, so the only thing that can vouch for
+    it is the proxy — and only the proxy."""
+    monkeypatch.setenv(PROXY_SECRET_ENV, "test-proxy-secret")
+    client = _client(tmp_path, monkeypatch, unlock=False)
+    tailnet = {"origin": "https://studio.tailnet.example:8789",
+               "x-forwarded-host": "studio.tailnet.example:8789"}
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
+                       headers={**tailnet, PROXY_SECRET_HEADER: "test-proxy-secret"}).status_code == 200
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
+                       headers=tailnet).status_code == 400
 
 
 def test_hashed_assets_are_cacheable_and_everything_else_is_not(tmp_path: Path, monkeypatch) -> None:

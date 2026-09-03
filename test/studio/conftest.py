@@ -50,6 +50,39 @@ def _restore_process_env():
 
 
 @pytest.fixture(autouse=True)
+def _test_client_calls_from_loopback():
+    """Every TestClient speaks to the studio at 127.0.0.1, not "testserver".
+
+    The app refuses a Host header it does not answer to — that check is the
+    whole defence against a page that rebinds its own DNS name to 127.0.0.1 —
+    and httpx's default base_url puts `Host: testserver` on every request, so
+    without this the entire suite would 400. Patched here rather than in
+    twenty-odd files so the default is the truth (a browser reaches this studio
+    on loopback); a test that wants a different name still passes its own
+    `headers={"host": ...}`, which is exactly how the refusal is tested.
+
+    Restored by hand rather than through monkeypatch, for the same reason
+    `_no_test_stamps_the_machines_access_ledger` exists: test_gpu_rentals_api's
+    `test_account_state_reports_burn_and_runway` calls `monkeypatch.undo()`,
+    which would drop this along with its own patches and leave every client
+    built afterwards calling itself "testserver" again.
+    """
+    from starlette.testclient import TestClient
+
+    original = TestClient.__init__
+
+    def from_loopback(self, app, *args, **kwargs):
+        kwargs.setdefault("base_url", "http://127.0.0.1:8765")
+        return original(self, app, *args, **kwargs)
+
+    TestClient.__init__ = from_loopback
+    try:
+        yield
+    finally:
+        TestClient.__init__ = original
+
+
+@pytest.fixture(autouse=True)
 def _no_test_stamps_the_machines_access_ledger():
     """Keep the suite out of the machine's real credential record.
 

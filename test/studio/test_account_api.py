@@ -18,7 +18,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hivemind_content_studio.accounts import ACCOUNT_COOKIE, AccountStore
-from hivemind_content_studio.control_api import build_control_app
+from hivemind_content_studio.control_api import (
+    PROXY_SECRET_ENV,
+    PROXY_SECRET_HEADER,
+    build_control_app,
+)
 from hivemind_content_studio.orchestrator import ContentOrchestrator
 from hivemind_content_studio.private_access import OwnerAccess, PrivateFieldCipher
 from hivemind_content_studio.run_store import RunStore
@@ -29,6 +33,10 @@ OWNER_PASSWORD = "owner-passphrase"
 @pytest.fixture()
 def client(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setenv("CONTENT_STUDIO_RUNS_DIR", str(tmp_path / "runs"))
+    # The studio reads x-forwarded-* only from a caller carrying this secret, so
+    # the tailnet-shaped tests below can present it and every other test is
+    # treated as the ordinary browser on loopback that it is.
+    monkeypatch.setenv(PROXY_SECRET_ENV, "test-proxy-secret")
     cipher = PrivateFieldCipher.from_secret(b"test-private-state-secret")
     app = build_control_app(
         orchestrator=ContentOrchestrator(RunStore(tmp_path / "state.sqlite3")),
@@ -392,7 +400,7 @@ def test_registration_options_are_bound_to_the_signed_in_workspace(client):
     second = _add_workspace(client, "Second", "second-pass")
     _sign_in(client, second, "second-pass")
     options = client.post("/api/accounts/webauthn/register/options").json()["publicKey"]
-    assert options["rp"]["id"] == "testserver"
+    assert options["rp"]["id"] == "127.0.0.1"
     assert options["user"]["displayName"] == "Second"
     # The user handle is a digest of the account id, never the name in clear.
     expected = hashlib.sha256(f"hivemind-account-{second}".encode("utf-8")).digest()[:16]
@@ -405,11 +413,19 @@ def test_the_relying_party_follows_the_browsers_host_through_the_proxy(client):
     'The relying party ID is not a registrable domain suffix of, nor equal to
     the current domain.'"""
     _sign_in(client, 1, OWNER_PASSWORD)
-    response = client.post("/api/accounts/webauthn/register/options", headers={
+    proxied = {
         "x-forwarded-host": "studio.tailnet.example:8789",
         "x-forwarded-proto": "https",
-    })
+        PROXY_SECRET_HEADER: "test-proxy-secret",
+    }
+    response = client.post("/api/accounts/webauthn/register/options", headers=proxied)
     assert response.json()["publicKey"]["rp"]["id"] == "studio.tailnet.example"
+    # And a caller that merely CLAIMS to be the proxy names no relying party: a
+    # passkey must never be asked to sign for a domain of someone else's choosing.
+    unproved = client.post("/api/accounts/webauthn/register/options",
+                           headers={key: value for key, value in proxied.items()
+                                    if key != PROXY_SECRET_HEADER})
+    assert unproved.json()["publicKey"]["rp"]["id"] == "127.0.0.1"
 
 
 def test_the_gate_asks_for_registration_options_with_a_post(client):
@@ -429,7 +445,7 @@ def test_a_sign_in_challenge_is_offered_without_a_session(client):
     response = client.post("/api/accounts/webauthn/authenticate/options", json={"account_id": 1})
     assert response.status_code == 200
     options = response.json()["publicKey"]
-    assert options["challenge"] and options["rpId"] == "testserver"
+    assert options["challenge"] and options["rpId"] == "127.0.0.1"
     # A workspace that does not exist is not a probe oracle for challenges.
     assert client.post("/api/accounts/webauthn/authenticate/options",
                        json={"account_id": 9999}).status_code == 404
@@ -480,6 +496,49 @@ def test_gpu_rentals_follow_any_signed_in_workspace(client, monkeypatch):
     _sign_in(client, second, "second-pass")
     reached = client.get("/api/gpu-rentals")
     assert reached.status_code not in (401, 403)
+
+
+def test_only_the_owner_workspace_may_rewrite_the_machines_credentials(client):
+    """The other side of the rentals rule above.
+
+    Renting is studio work and every invited workspace does it. The shared
+    credential store is not: it is read by every Hive app on this Mac, so a
+    collaborator replacing OPENAI_API_KEY there breaks software they have never
+    heard of. Sealing the store and revoking a machine link are the same
+    machine-wide switch. Seeing WHICH keys exist stays open — that is how a
+    collaborator says what is missing — and no route ever returns a value.
+    """
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, second, "second-pass")
+
+    replaced = client.post("/api/passbook", json={
+        "values": {"OPENAI_API_KEY": "sk-not-the-owners"}, "overwrite": True})
+    assert replaced.status_code == 403
+    assert "owner" in replaced.json()["detail"]["message"].lower()
+    assert replaced.json()["detail"]["remedy"]
+
+    assert client.post("/api/passbook/seal").status_code == 403
+    assert client.post("/api/passbook/links/revoke", json={"did": "did:key:zSomeMachine"}).status_code == 403
+    assert client.post("/api/passbook/policy/lock").status_code == 403
+    # Reading is not a machine-wide write, so it is not refused.
+    assert client.get("/api/passbook").status_code != 403
+
+
+def test_only_the_owner_workspace_may_spend_the_owners_credit(client):
+    """`/api/hivemindos/models/*` writes reach the owner's balance: connecting
+    swaps whose account the studio bills, and a top-up charges their card."""
+    second = _add_workspace(client, "Second", "second-pass")
+    _sign_in(client, second, "second-pass")
+
+    assert client.post("/api/hivemindos/models/connect", json={"token": "not-mine"}).status_code == 403
+    assert client.post("/api/hivemindos/models/merge-credits", json={"tokens": ["a"]}).status_code == 403
+    assert client.post("/api/hivemindos/models/top-up", json={"amountUsd": 10.0}).status_code == 403
+
+    # The owner is not held by the same gate — it refuses for its own reasons
+    # (the conftest points HivemindOS at a port nothing serves), never 403.
+    client.post("/api/accounts/sign-out")
+    _sign_in(client, 1, OWNER_PASSWORD)
+    assert client.post("/api/hivemindos/models/connect", json={"token": "owner-token"}).status_code != 403
 
 
 # ── first run ────────────────────────────────────────────────────────────────

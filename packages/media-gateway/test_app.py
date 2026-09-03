@@ -168,6 +168,42 @@ class ZImageAppTests(unittest.TestCase):
                         app.encrypt_outputs([output])
             self.assertFalse(output.exists())
 
+    def test_no_response_offers_a_wildcard_origin(self):
+        """8787 answered every origin with `*`, so any page that had ever seen
+        the capability token could spend it cross-origin from a browser. Only
+        pages served from this machine are echoed now."""
+        app = load_app()
+
+        def headers_for(origin):
+            handler = object.__new__(app.Handler)
+            handler.headers = {'Origin': origin} if origin else {}
+            sent = []
+            handler.send_header = lambda key, value: sent.append((key, value))
+            handler.cors_headers()
+            return sent
+
+        for origin in (None, 'https://evil.example', 'http://not-loopback.test'):
+            sent = headers_for(origin)
+            self.assertNotIn('Access-Control-Allow-Origin', dict(sent))
+            self.assertNotIn('*', [value for _, value in sent])
+            self.assertEqual(dict(sent)['Referrer-Policy'], 'no-referrer')
+            self.assertEqual(dict(sent)['Vary'], 'Origin')
+
+        echoed = dict(headers_for('http://127.0.0.1:8788'))
+        self.assertEqual(echoed['Access-Control-Allow-Origin'], 'http://127.0.0.1:8788')
+        self.assertEqual(dict(headers_for('http://localhost:8788'))['Access-Control-Allow-Origin'],
+                         'http://localhost:8788')
+
+    def test_history_urls_carry_no_capability_token(self):
+        """A saved /api/history response used to be a permanent key to the whole
+        library: the token was in every image URL."""
+        app = load_app()
+        record = app.public_record({
+            'id': 'job-1', 'status': 'success', 'outputs': ['/private/out/a b.png'],
+        })
+        self.assertEqual(record['image_urls'], ['/image/a_b.png'])
+        self.assertNotIn('token', json.dumps(record).lower())
+
     def test_access_log_redacts_query_credentials(self):
         app = load_app()
         handler = object.__new__(app.Handler)
