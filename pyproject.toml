@@ -70,6 +70,10 @@ auto-clipper-mcp = "auto_clipper.mcp_server:main"
 dev = [
     "coverage==7.15.1",
     "pytest==9.1.1",
+    # A per-test deadline. Thirteen studio test files open real sockets and
+    # threads; without this a hung one holds the whole CI job to its 30-minute
+    # timeout and never says which test hung.
+    "pytest-timeout==2.4.0",
     "ruff==0.15.21",
 ]
 
@@ -83,13 +87,28 @@ dev = [
 # 因此与 app 服务层、服务启动入口和面向 Agent 用户发布的 Skill 脚本一起
 # 纳入统计，避免覆盖率只反映局部模块。
 branch = true
-source = ["app", "cli", "webui", "main", "docs/skill"]
+# The product's own code is the point of the gate: src/hivemind_content_studio
+# is the control plane every studio talks to, and src/auto_clipper the clipping
+# engine. Without them the percentage below described the embedded
+# MoneyPrinterTurbo faceless engine and could stay green while the app it gates
+# had no coverage at all.
+source = [
+    "app",
+    "cli",
+    "webui",
+    "main",
+    "docs/skill",
+    "src/hivemind_content_studio",
+    "src/auto_clipper",
+]
 
 [tool.coverage.report]
-# Python 3.11 和 3.13 完整测试的实测分支覆盖率均超过 70.4%。以 70%
-# 作为稳定底线，可以固化失败状态、异步发布恢复和 Redis 原子更新测试，
-# 同时为不同 Python 版本与操作系统的少量分支差异保留余量。
-fail_under = 70
+# A ratchet, not a fiction. Measured at 74.41% branch coverage over the full
+# `pytest test` run on 2026-09-03, with src/hivemind_content_studio and
+# src/auto_clipper now inside `source` above; the floor sits two points under
+# that to leave room for the branches that differ between Python versions and
+# between macOS and the Linux runner. Raise it when the measurement rises.
+fail_under = 72
 show_missing = true
 skip_covered = true
 
@@ -120,3 +139,31 @@ merged_at = "2026-08-16"
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
+# packages/media-gateway/vendor carries a vendored MLX port with its own test
+# tree that imports `mlx` and `rife_mlx`; collecting it turns
+# `pytest packages/media-gateway` into five import errors before a single
+# gateway test runs. The rest of the list is pytest's own default.
+norecursedirs = [
+    "vendor",
+    "node_modules",
+    "*.egg",
+    ".*",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "venv",
+    "{arch}",
+]
+# `slow` is registered here rather than in test/studio/conftest.py because
+# test/services carries a slow test too and is collected first — the studio
+# conftest has not been loaded yet when that module is imported, and an
+# unregistered mark warns.
+markers = [
+    "slow: test spawns a real subprocess, socket server or ffmpeg run and is measured in seconds rather than milliseconds (`-m 'not slow'` skips them)",
+]
+# A per-test deadline (pytest-timeout). Thirteen studio test files open real
+# sockets and threads; the slowest test on record takes 11.5s, so 120s only ever
+# fires on a hang — and then it names the test instead of letting the CI job run
+# out its 30 minutes saying nothing.
+timeout = 120

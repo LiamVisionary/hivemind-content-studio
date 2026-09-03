@@ -7,7 +7,7 @@
     "build:mobile": "npm --prefix packages/comfyui-mobile run build",
     "build:gateway": "npm --prefix packages/media-gateway run build",
     "build:embedded": "npm run build:open-gen && npm run build:mobile && npm run build:gateway",
-    "test:open-gen": "npm --prefix packages/open-generative-ai test --if-present",
+    "test:open-gen": "npm --prefix packages/open-generative-ai test",
     "test:mobile": "npm --prefix packages/comfyui-mobile test",
     "test:gateway": "npm --prefix packages/media-gateway test",
     "test:embedded": "npm run test:open-gen && npm run test:mobile && npm run test:gateway",

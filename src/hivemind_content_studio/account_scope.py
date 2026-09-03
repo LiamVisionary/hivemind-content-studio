@@ -36,6 +36,7 @@ That is the difference between this and the donor's profiles, which are a
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sqlite3
@@ -175,16 +176,39 @@ class AccountWorkspaces:
         return store
 
     def forget(self, account_id: int) -> None:
-        """Drop cached handles, so a deleted workspace holds no open files."""
+        """Drop cached handles, so a deleted workspace holds no open files.
+
+        Each store is closed rather than merely dropped: SQLite in WAL mode
+        keeps `-wal`/`-shm` sidecars beside the database until its last
+        connection goes, and a caller that deletes the directory next would be
+        racing SQLite for those files.
+        """
         with self._lock:
             for cache in (self._vaults, self._prompt_history, self._studio_state, self._canvas_history):
-                cache.pop(int(account_id), None)
+                store = cache.pop(int(account_id), None)
+                if store is None:
+                    continue
+                # Bookkeeping must never be the reason a workspace cannot be
+                # deleted; the rmtree below removes the files either way.
+                with contextlib.suppress(sqlite3.Error, OSError):
+                    store.close()
 
     def destroy(self, account_id: int) -> None:
         """Delete a workspace's entire subtree. Irreversible by design: the
         vault goes with it, so nothing left behind would be readable anyway."""
         self.forget(account_id)
         root = AccountPaths.under(self.state_dir, account_id).root
+        for _ in range(3):
+            if not root.is_dir():
+                return
+            try:
+                shutil.rmtree(root)
+            except FileNotFoundError:
+                # A sidecar SQLite dropped between the walk and the unlink. The
+                # file is gone, which is what was asked for — check the subtree
+                # rather than reporting a failure that already succeeded.
+                continue
+            return
         if root.is_dir():
             shutil.rmtree(root)
 

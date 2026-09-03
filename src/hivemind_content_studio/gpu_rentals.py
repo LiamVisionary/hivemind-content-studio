@@ -32,6 +32,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid

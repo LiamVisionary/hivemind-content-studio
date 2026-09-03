@@ -26,7 +26,9 @@ const candidates = [
 ].filter(Boolean);
 
 function canImportDependencies(python) {
-    const probe = spawnSync(python, ['-c', 'import cryptography, PIL'], { stdio: 'ignore' });
+    // pytest joins the list because this runner collects every test_*.py here,
+    // and `unittest` names only the one file it is handed.
+    const probe = spawnSync(python, ['-c', 'import cryptography, PIL, pytest'], { stdio: 'ignore' });
     return probe.status === 0;
 }
 
@@ -34,7 +36,7 @@ const usable = candidates.find((python) => (python === 'python3' || existsSync(p
 
 if (!usable) {
     console.error(
-        'No Python interpreter here can import the gateway test dependencies (cryptography, pillow).\n'
+        'No Python interpreter here can import the gateway test dependencies (cryptography, pillow, pytest).\n'
         + `Tried: ${candidates.join(', ')}\n`
         + `Fix: create the repository venv (uv sync) at ${join(repoRoot, '.venv')}, `
         + 'or point MEDIA_GATEWAY_PYTHON at an interpreter that has them.',
@@ -43,5 +45,9 @@ if (!usable) {
 }
 
 console.log(`media-gateway tests · interpreter: ${usable}`);
-const result = spawnSync(usable, ['-m', 'unittest', 'test_app.py'], { cwd: gateway, stdio: 'inherit' });
+// Every test_*.py in this directory, not just test_app.py: the suite grew
+// test_e2e_media, test_episode, test_smart_mask and nine more, and naming one
+// file meant `npm test` reported green while twelve suites never ran. `vendor`
+// is excluded by norecursedirs in the repository's pyproject.
+const result = spawnSync(usable, ['-m', 'pytest', '-q', '.'], { cwd: gateway, stdio: 'inherit' });
 process.exit(result.status ?? 1);

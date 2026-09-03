@@ -29,6 +29,10 @@ import pytest
 
 from hivemind_content_studio import gpu_rentals
 
+# Seconds, not milliseconds: these run the real download bash against a real
+# loopback HTTP server that misbehaves on purpose.
+pytestmark = pytest.mark.slow
+
 BLOB = random.Random(20260822).randbytes(3 * 1024 * 1024 + 12_345)
 SHA = hashlib.sha256(BLOB).hexdigest()
 CONNS = gpu_rentals.DOWNLOAD_CONNECTIONS

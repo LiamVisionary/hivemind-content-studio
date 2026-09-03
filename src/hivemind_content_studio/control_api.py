@@ -1311,7 +1311,6 @@ def build_control_app(
         # str(exc): an exception message can carry a path or a prompt.
         return JSONResponse({"detail": UNEXPECTED_ERROR_DETAIL}, status_code=500)
 
-    unlock_failures: dict[str, deque[float]] = defaultdict(deque)
     repository_root = Path(__file__).resolve().parents[2]
     open_gen_dist = repository_root / "packages/open-generative-ai/dist"
     # Staging for external tools (ComfyUI reads plaintext from here and the

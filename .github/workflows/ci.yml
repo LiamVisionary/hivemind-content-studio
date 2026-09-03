@@ -7,6 +7,42 @@ on:
       - main
 
 jobs:
+  # Lint is its own job, and a real gate.
+  #
+  # It used to be a step inside the 3.11 test job, which meant one undefined
+  # name in a test file (F821, 2026-08-28) stopped that job before pytest ran:
+  # the unit tests did not execute on 3.11 for three pushes and nobody could
+  # tell from the red X. Split out, a lint failure says "lint failed" and the
+  # tests still report. It also answers in under a minute rather than after the
+  # npm ci / vite build / ffmpeg chain below.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.11
+
+      # `src` is the product: the control plane every studio talks to and the
+      # clipping engine. Linting only the inherited faceless engine is how an
+      # undefined `sys` sat in the Machines route's never-crash handler.
+      - name: Lint Python sources
+        run: uv run --no-sync ruff check app cli.py main.py webui test src
+
   tests:
     name: Python ${{ matrix.python-version }} tests
     runs-on: ubuntu-latest
@@ -81,16 +117,18 @@ jobs:
           npm --prefix packages/open-generative-ai run vite:build
 
       - name: Compile Python sources
-        run: uv run --no-sync python -m compileall app cli.py main.py webui test
-
-      - name: Lint Python sources
-        if: matrix.python-version == '3.11'
-        run: uv run --no-sync ruff check app cli.py main.py webui test
+        run: uv run --no-sync python -m compileall app cli.py main.py webui test src
 
       - name: Run unit tests with coverage
         # pytest 兼容现有 unittest.TestCase，同时会收集仓库中的 pytest 风格
         # 测试，避免测试文件已存在但 CI 没有真正执行。
         run: uv run --no-sync python -X utf8 -m coverage run -m pytest -q test
+
+      # The gateway's own suite: pyproject's `testpaths = ["test"]` excludes it,
+      # so thirteen test files covering sealed media, the model manager and the
+      # ComfyUI graph builders never ran anywhere but a developer's laptop.
+      - name: Run media gateway tests
+        run: uv run --no-sync python -X utf8 -m pytest -q packages/media-gateway
 
       - name: Report test coverage
         run: uv run --no-sync python -m coverage report
@@ -104,6 +142,54 @@ jobs:
           name: coverage-python-${{ matrix.python-version }}
           path: coverage.xml
           retention-days: 7
+
+  # The other half of the product. These suites carry the studios' logic, the
+  # Canvas editor and the client end of the E2E vault, and none of them had ever
+  # run in CI: a ReferenceError in ModelSourcePicker shipped for a week, and the
+  # mobile vault-decrypt suite was dead for another.
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install studio dependencies
+        run: npm ci
+        working-directory: packages/open-generative-ai
+
+      # Seconds, and it catches the whole missing-import class that no test in
+      # this package can: none of them mounts a component.
+      - name: Lint the studio frontend
+        run: npm run lint
+        working-directory: packages/open-generative-ai
+
+      - name: Run studio tests
+        run: npm test
+        working-directory: packages/open-generative-ai
+
+      - name: Install Canvas dependencies
+        run: npm ci
+        working-directory: packages/comfyui-mobile
+
+      # The E2E media suite seals with the repository venv's Python, which this
+      # job does not have; it skips itself and says so rather than failing.
+      - name: Run Canvas tests
+        run: npm test
+        working-directory: packages/comfyui-mobile
+
+      # `npm run build:mobile` runs `tsc -b` first, so a type error here is a
+      # release that cannot be built.
+      - name: Type-check the Canvas app
+        run: npx tsc --noEmit -p tsconfig.app.json
+        working-directory: packages/comfyui-mobile
 
   windows-smoke:
     name: Windows smoke tests
@@ -128,7 +214,7 @@ jobs:
         run: uv sync --frozen --python 3.11
 
       - name: Compile Python sources
-        run: uv run --no-sync python -m compileall app cli.py main.py webui test
+        run: uv run --no-sync python -m compileall app cli.py main.py webui test src
 
       - name: Run core service smoke tests
         run: >-

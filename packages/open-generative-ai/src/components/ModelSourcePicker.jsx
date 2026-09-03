@@ -13,7 +13,7 @@ import { useState } from 'react';
 import {
   ACCOUNTS, accountConnected, accountsLine, accountsOf, creditsHome, creditsLine,
   HIVEMINDOS, hiddenVariants, LOCAL, localHeadroom, modelsForAccount, modelsForTab,
-  recommendedId, remedyFor, sourceIdForTab, sourceState, statusLine,
+  recommendedId, remedyFor, rememberModelUse, sourceIdForTab, sourceState, statusLine,
   TABS, tabCounts,
 } from '../lib/textModels.js';
 import { Button, Pill, TextInput, cx } from '../ui/kit.jsx';

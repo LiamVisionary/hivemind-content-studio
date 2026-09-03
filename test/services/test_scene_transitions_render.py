@@ -21,9 +21,11 @@ import pytest
 
 pytest.importorskip("PIL", reason="frame measurement needs Pillow")
 pytest.importorskip("numpy", reason="frame measurement needs numpy")
-pytestmark = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None, reason="rendering needs ffmpeg"
-)
+# Seconds, not milliseconds: this renders two real clips through ffmpeg twice.
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="rendering needs ffmpeg"),
+]
 
 
 def _ffmpeg(*args: str) -> None:

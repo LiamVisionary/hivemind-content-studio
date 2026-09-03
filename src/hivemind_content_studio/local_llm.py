@@ -249,7 +249,7 @@ def _read_gguf_metadata(path: Path) -> dict[str, Any]:
                         out[key] = text
                 elif value_type == _GGUF_ARRAY:
                     position = handle.tell()
-                    element_type = struct.unpack("<I", handle.read(4))[0]
+                    handle.read(4)  # element type; _skip_gguf_value re-reads it
                     count = struct.unpack("<Q", handle.read(8))[0]
                     handle.seek(position)
                     have_arch = "general.architecture" in out
