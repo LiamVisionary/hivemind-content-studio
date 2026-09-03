@@ -148,7 +148,10 @@ const getVersion = () => version;
 
 // Components call useHub() and read hubState fields; any notifyHub() re-renders.
 export function useHub() {
-  useSyncExternalStore(subscribeHub, getVersion);
+  // The third argument is the server snapshot: the same version, so a
+  // react-dom/server render (tests/hubViewsSmoke.test.js) sees the store
+  // instead of throwing. Browser hydration never happens here.
+  useSyncExternalStore(subscribeHub, getVersion, getVersion);
   return hubState;
 }
 
@@ -777,7 +780,7 @@ export function generationProgressPct(card) {
 /* Navigation (hubApp.js:781-800)                                     */
 /* ------------------------------------------------------------------ */
 
-export const HUB_VIEWS = ['create', 'canvas', 'inspo', 'models', 'runs', 'history', 'telemetry', 'providers', 'machines'];
+export const HUB_VIEWS = ['create', 'canvas', 'inspo', 'models', 'runs', 'history', 'telemetry', 'providers', 'passbook', 'machines'];
 // View name → AppShell page id ('create' renders on the 'planner' page).
 const hubPageForView = (view) => (view === 'create' ? 'planner' : view);
 
