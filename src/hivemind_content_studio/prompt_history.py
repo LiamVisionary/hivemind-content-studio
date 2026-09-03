@@ -18,6 +18,17 @@ from .private_access import (
     is_vault_sealed_text,
     seal_text_to_vault,
 )
+from .sqlite_migrations import migrate
+
+
+def _add_late_columns(connection: sqlite3.Connection) -> None:
+    """Columns added after the table shipped. Column-probed because files that
+    predate the version stamp may already carry one of them."""
+    columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(prompts)").fetchall()}
+    if "composer_json" not in columns:
+        connection.execute("ALTER TABLE prompts ADD COLUMN composer_json TEXT NOT NULL DEFAULT '{}'")
+    if "prompt_digest" not in columns:
+        connection.execute("ALTER TABLE prompts ADD COLUMN prompt_digest TEXT NOT NULL DEFAULT ''")
 
 
 def _now() -> str:
@@ -103,11 +114,7 @@ class PromptHistoryStore:
                 CREATE INDEX IF NOT EXISTS idx_prompts_updated ON prompts(updated_at DESC);
                 """
             )
-            columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(prompts)").fetchall()}
-            if "composer_json" not in columns:
-                connection.execute("ALTER TABLE prompts ADD COLUMN composer_json TEXT NOT NULL DEFAULT '{}'")
-            if "prompt_digest" not in columns:
-                connection.execute("ALTER TABLE prompts ADD COLUMN prompt_digest TEXT NOT NULL DEFAULT ''")
+            migrate(connection, [_add_late_columns])
             connection.execute("CREATE INDEX IF NOT EXISTS idx_prompts_digest ON prompts(prompt_digest)")
 
     def _migrate_private_fields(self) -> None:

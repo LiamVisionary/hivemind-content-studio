@@ -8,6 +8,13 @@ SCRIPT_PATH="$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.ar
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 STUDIO_ROOT="${HIVEMIND_STUDIO_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
 MEDIA_STATE_ROOT="${HIVEMIND_MEDIA_STATE_DIR:-$HOME/.hivemindos/media-studio}"
+# The interpreter is part of the artifact. `python3` on PATH is whatever
+# Homebrew last upgraded to (3.14 removed `cgi` and took the gateway down on
+# 2026-07-26); the project venv is the one pyproject pins and the one that has
+# cryptography and Pillow. Falls back only so a checkout without a venv still
+# starts the parts that do not need it.
+STUDIO_PYTHON="$STUDIO_ROOT/.venv/bin/python"
+[ -x "$STUDIO_PYTHON" ] || STUDIO_PYTHON="python3"
 
 LABEL="com.liam.zimage-stack"
 OLD_CF_LABEL="com.liam.zimage-cloudflared"
@@ -74,7 +81,7 @@ with_credentials() {
 
 load_hardware_profile() {
   if [ -f "$APP/hardware_profile.py" ]; then
-    eval "$(python3 "$APP/hardware_profile.py" --shell 2>/dev/null)" || true
+    eval "$("$STUDIO_PYTHON" "$APP/hardware_profile.py" --shell 2>/dev/null)" || true
   fi
   ZIMG_ACCELERATOR_PROFILE="${ZIMG_ACCELERATOR_PROFILE:-cpu}"
   ZIMG_IS_APPLE_SILICON="${ZIMG_IS_APPLE_SILICON:-0}"
@@ -490,7 +497,7 @@ PY
 	  COMFY_REMOTE_LANES="${RENTAL_COMFY_REMOTE_LANES:-}" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
-  with_credentials z-image-api python3 app.py \
+  with_credentials z-image-api "$STUDIO_PYTHON" app.py \
     >> "$PRIV/z-image-api.log" 2>&1 &
   pid="$!"
   children+=("$pid")
@@ -546,7 +553,10 @@ PY
   children+=("$pid")
   log "Hivemind Content Studio child pid=$pid url=http://127.0.0.1:$CONTENT_STUDIO_PORT"
 
-  if ! wait_http "http://127.0.0.1:$CONTENT_STUDIO_PORT/api/runtime" 60; then
+  # /readyz, not /api/runtime: the latter probes three engines, so "the API is
+  # up" and "the engines are up" used to be one answer. /readyz turns true only
+  # once the accounts bootstrap and the catalog warm have both run.
+  if ! wait_http "http://127.0.0.1:$CONTENT_STUDIO_PORT/readyz" 60; then
     log "Hivemind Content Studio did not become healthy in time"
     return 1
   fi

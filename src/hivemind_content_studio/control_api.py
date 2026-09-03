@@ -36,7 +36,9 @@ from pydantic import BaseModel, Field
 
 import yaml
 
+from . import __version__
 from .approval_config import load_approval_ledger
+from .config import DataFormatTooNew, ensure_data_format
 from .agent_runtime import attach_script
 from .approval_ledger import ApprovalLedger
 from .asset_store import AssetStore
@@ -150,6 +152,10 @@ class AccountLocked(Exception):
 
 ACCOUNT_LOCKED_DETAIL = "Sign in to a workspace"
 UNEXPECTED_ERROR_DETAIL = "The studio server hit an unexpected error. Check the control API log."
+# How long a stop waits for a video finisher to seal its download before giving
+# up on it. Long enough for a seal, short enough that launchd's own SIGKILL
+# timer never fires.
+SHUTDOWN_FINISHER_SECONDS = 20.0
 
 
 def _validation_sentence(errors: list[Any]) -> str:
@@ -1193,7 +1199,10 @@ def _write_inline_audio(value: str, destination_dir: Path, *, label: str = "") -
 
 
 def _machine_route_allowed(path: str, method: str) -> bool:
-    if path in {"/api/owner/session", "/api/owner/lock", "/healthz"}:
+    # /readyz joins /healthz: the shell that launched this process polls it
+    # before anyone has signed in, and it says nothing an unlocked studio does
+    # not already say on /healthz.
+    if path in {"/api/owner/session", "/api/owner/lock", "/healthz", "/readyz"}:
         return True
     if method == "GET" and path in {
         "/api/catalog",
@@ -1285,6 +1294,9 @@ def build_control_app(
     configure_private_cipher(cipher)
     access = owner_access or OwnerAccess.from_runtime(cipher)
     state_dir = Path(runs.store.path).parent
+    # Refuse a folder a NEWER build wrote before opening a single store out of
+    # it. DataFormatTooNew carries the sentence; nothing below it runs.
+    ensure_data_format(state_dir)
 
     # ── accounts ──────────────────────────────────────────────────────────────
     # Every account's data lives in its own subtree with its own zero-knowledge
@@ -1362,6 +1374,16 @@ def build_control_app(
     except Exception as exc:  # startup must survive a partial legacy layout
         print(f"[content-studio] run privacy migration warning: {exc}", file=sys.stderr)
 
+    # The boot contract, in two flags. `ready` only turns on once the accounts
+    # bootstrap above and the catalog warm hook have both run, so a shell that
+    # polls /readyz never opens the studio onto an empty model list.
+    boot_state: dict[str, Any] = {"ready": False}
+    # Every long-lived background thread this app starts checks this instead of
+    # `while True`, so SIGTERM ends them rather than the interpreter killing
+    # them mid-loop. Set once, never cleared: an app that shut down stays down.
+    shutting_down = threading.Event()
+    app_version = __version__
+
     @contextlib.asynccontextmanager
     async def _lifespan(application: FastAPI):
         # Startup work registers on app.state.startup_hooks (here and in
@@ -1369,10 +1391,47 @@ def build_control_app(
         # which was the source of ~900 warnings per test run.
         for hook in list(getattr(application.state, "startup_hooks", []) or []):
             hook()
-        yield
+        boot_state["ready"] = True
+        try:
+            yield
+        finally:
+            # The shutdown half. Anything that holds plaintext or a child
+            # process gets a bounded chance to finish; nothing here may raise,
+            # or uvicorn reports a crash on a clean stop.
+            boot_state["ready"] = False
+            shutting_down.set()
+            pending = [task for task in media_studio_finishers if not task.done()]
+            if pending:
+                # Bounded: a gateway that has stopped answering must not hold
+                # the app open. Whatever has not sealed by then is handled by
+                # the finisher's own cleanup on the next boot.
+                done, unfinished = await asyncio.wait(pending, timeout=SHUTDOWN_FINISHER_SECONDS)
+                for task in unfinished:
+                    task.cancel()
+                if unfinished:
+                    print(
+                        f"[content-studio] {len(unfinished)} video finisher(s) did not settle in "
+                        f"{SHUTDOWN_FINISHER_SECONDS:.0f}s",
+                        file=sys.stderr,
+                    )
+            for hook in reversed(list(getattr(application.state, "shutdown_hooks", []) or [])):
+                try:
+                    hook()
+                except Exception as exc:  # a stuck reaper must not block the rest
+                    print(f"[content-studio] shutdown hook failed: {type(exc).__name__}", file=sys.stderr)
+            with contextlib.suppress(Exception):
+                # The llama-server is a child process; atexit alone leaves it
+                # holding the GPU when the parent is killed from launchd.
+                started = local_llm.runtime_if_started()
+                if started is not None:
+                    started.unload_all()
 
-    app = FastAPI(title="Hivemind Content Studio", version="0.2.0", lifespan=_lifespan)
+    app = FastAPI(title="Hivemind Content Studio", version=app_version, lifespan=_lifespan)
     app.state.startup_hooks = []
+    app.state.shutdown_hooks = []
+    # gpu_rentals and the catalog refresher read this off app.state so they do
+    # not need a reference to the closure.
+    app.state.shutting_down = shutting_down
 
     @app.exception_handler(AccountLocked)
     async def _account_locked(request: Request, exc: AccountLocked) -> JSONResponse:
@@ -1397,13 +1456,21 @@ def build_control_app(
         return JSONResponse({"detail": UNEXPECTED_ERROR_DETAIL}, status_code=500)
 
     repository_root = Path(__file__).resolve().parents[2]
-    open_gen_dist = repository_root / "packages/open-generative-ai/dist"
+    # A packaged build has no checkout to point at, so the shell hands these
+    # over; the checkout paths stay the fallback so a dev machine needs nothing.
+    open_gen_dist = Path(
+        os.environ.get("CONTENT_STUDIO_FRONTEND_DIST")
+        or repository_root / "packages/open-generative-ai/dist"
+    ).expanduser()
     # Staging for external tools (ComfyUI reads plaintext from here and the
     # sweeper removes it). Deliberately NOT per-account: nothing durable lives
     # here, and the files are named by mkstemp rather than being addressable.
     media_studio_input_root = Path(runs.store.path).parent / "uploads" / "media-studio"
     generation_timings = GenerationTimings(Path(runs.store.path).parent / "generation-timings.jsonl")
-    ingredients_sheet_compositor = repository_root / "packages/media-gateway/bin/compose-ingredients-sheet.py"
+    ingredients_sheet_compositor = Path(
+        os.environ.get("CONTENT_STUDIO_INGREDIENTS_COMPOSITOR")
+        or repository_root / "packages/media-gateway/bin/compose-ingredients-sheet.py"
+    ).expanduser()
     # The unified studio frontend (packages/open-generative-ai, Vite build) is
     # the ONLY UI this server ships. /open-gen stays mounted for older links
     # and the desktop shell; /assets serves the same build's hashed bundles.
@@ -1697,7 +1764,27 @@ def build_control_app(
 
     @app.get("/healthz")
     def healthz() -> dict:
-        return {"ok": True, "service": "hivemind-content-studio", "owner_lock": True}
+        # Unauthenticated and proxied to the tailnet, so it stays minimal: is
+        # the process up, has it finished booting, and which build is it. What
+        # the engines are doing is /api/runtime's job.
+        return {
+            "ok": True,
+            "ready": bool(boot_state["ready"]),
+            "version": app_version,
+            "service": "hivemind-content-studio",
+            "owner_lock": True,
+        }
+
+    @app.get("/readyz")
+    def readyz(response: Response) -> dict:
+        """True only once the accounts bootstrap and the catalog warm have run.
+
+        The shell polls this instead of /healthz so it never opens the studio
+        onto a model list that is still being built.
+        """
+        ready = bool(boot_state["ready"]) and bool(boot_state.get("catalog_warm"))
+        response.status_code = 200 if ready else 503
+        return {"ok": ready, "ready": ready, "version": app_version}
 
     # ── accounts: the sign-in gate ────────────────────────────────────────────
 
@@ -2011,9 +2098,15 @@ def build_control_app(
                     "Expires": "0",
                 },
             )
+        # Consumer copy: whoever sees this installed an app, not a checkout, so
+        # it names what to do rather than a build command they do not have. The
+        # developer's version of this fix is in the server log, not on screen.
         return HTMLResponse(
-            "<h1>Hivemind Content Studio</h1><p>The frontend build is missing. "
-            "Run <code>npm --prefix packages/open-generative-ai run vite:build</code>.</p>",
+            "<h1>Hivemind Content Studio</h1>"
+            "<p>The studio interface is missing from this copy of the app.</p>"
+            "<p>Reinstall Hivemind Content Studio to restore it. Your workspaces, "
+            "history and settings stay where they are.</p>"
+            '<p><a href="/">Try again</a></p>',
             status_code=503,
         )
 
@@ -2341,7 +2434,7 @@ def build_control_app(
             simple_catalog_refreshing.clear()
 
     def _kick_simple_catalog_refresh() -> None:
-        if simple_catalog_refreshing.is_set():
+        if simple_catalog_refreshing.is_set() or shutting_down.is_set():
             return
         simple_catalog_refreshing.set()
         threading.Thread(target=_refresh_simple_catalog, name="simple-catalog-refresh", daemon=True).start()
@@ -2369,8 +2462,11 @@ def build_control_app(
 
     def _warm_simple_catalog() -> None:
         # Build the catalog once at boot so even the first studio open after a
-        # stack restart gets an instant model list.
+        # stack restart gets an instant model list. Readiness is stamped here
+        # rather than when the background build lands: a provider that never
+        # answers must not hold /readyz false forever.
         _kick_simple_catalog_refresh()
+        boot_state["catalog_warm"] = True
 
     app.state.startup_hooks.append(_warm_simple_catalog)
 
@@ -3065,7 +3161,9 @@ def build_control_app(
 
     @app.get("/api/runtime")
     def runtime() -> dict:
-        return unified_runtime_snapshot()
+        # The build number rides along so a bug report names one: this is the
+        # route the supervisor and the shell already poll.
+        return {**unified_runtime_snapshot(), "version": app_version}
 
     @app.post("/api/runs", status_code=201, dependencies=[Depends(require_owner_or_control)])
     def create_run(body: StudioRunDraft, request: Request) -> dict:
@@ -3562,6 +3660,10 @@ def build_control_app(
     # browser polls the job route. If the studio restarts mid-run the registry
     # entry is lost but the gateway job still completes into History.
     media_studio_video_jobs: dict[str, dict[str, Any]] = {}
+    # In-flight finishers, awaited on shutdown. A finisher killed between the
+    # download and the seal leaves a plaintext mp4 in the outputs root, which is
+    # the one thing this app must never do — so a stop waits for them.
+    media_studio_finishers: set[asyncio.Task] = set()
 
     def _prune_media_studio_video_jobs() -> None:
         cutoff = time.time() - 6 * 3600
@@ -3694,7 +3796,9 @@ def build_control_app(
             # requester that started it.
             "requester_pub": _requester_pub(request),
         }
-        asyncio.get_running_loop().create_task(_finish_media_studio_video_job(job_id))
+        finisher = asyncio.get_running_loop().create_task(_finish_media_studio_video_job(job_id))
+        media_studio_finishers.add(finisher)
+        finisher.add_done_callback(media_studio_finishers.discard)
         return {
             "ok": True,
             "job_id": job_id,
@@ -4913,8 +5017,19 @@ def main() -> None:
     import uvicorn
 
     host = os.environ.get("CONTENT_STUDIO_CONTROL_HOST", "127.0.0.1")
+    # 8765 stays the preferred, stable port. A shell that has to fall back
+    # because a foreign process holds it passes the replacement in here rather
+    # than killing whatever is listening.
     port = int(os.environ.get("CONTENT_STUDIO_CONTROL_PORT", "8765"))
-    uvicorn.run(build_control_app(), host=host, port=port)
+    try:
+        app = build_control_app()
+    except DataFormatTooNew as exc:
+        # One sentence and a distinct exit code, not a traceback: the launcher
+        # renders this and offers Retry, and there is nothing to retry into
+        # until the person acts on it.
+        print(f"[content-studio] {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(3) from None
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":

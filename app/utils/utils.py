@@ -12,6 +12,7 @@ from uuid import uuid4
 from loguru import logger
 
 from app.models import const
+from hivemind_content_studio.config import app_dirs
 
 
 def get_response(status: int, data: Any = None, message: str = ""):
@@ -90,7 +91,10 @@ def root_dir():
 
 
 def storage_dir(sub_dir: str = "", create: bool = False):
-    d = os.path.join(root_dir(), "storage")
+    # Task output, not source: it goes to the resolved data dir so a read-only
+    # install tree still works. resource_dir() below stays in the tree because
+    # those files ship with the code and are only ever read.
+    d = os.path.join(str(app_dirs().data_dir), "storage")
     if sub_dir:
         d = os.path.join(d, sub_dir)
     if create and not os.path.exists(d):

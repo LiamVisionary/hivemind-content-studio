@@ -11,10 +11,16 @@ import toml
 from loguru import logger
 
 from app import __version__
+from hivemind_content_studio.config import app_dirs
 from hivemind_content_studio.shared_env import load_shared_hive_env
 
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-config_file = f"{root_dir}/config.toml"
+# config.toml is WRITTEN (save_config below), so it belongs in the resolved
+# config dir rather than the install tree — a signed bundle is read-only. In a
+# git checkout app_dirs() still resolves to <repo>/data, so a developer machine
+# keeps a single file and nothing moves.
+_config_dir = app_dirs().config_dir
+config_file = str(_config_dir / "config.toml")
 _CONTAINER_CGROUP_MARKERS = ("docker", "containerd", "kubepods", "libpod", "podman")
 _DOCKER_HOST_GATEWAY_NAME = "host.docker.internal"
 _config_save_lock = threading.RLock()
@@ -620,8 +626,15 @@ def load_config():
         shutil.rmtree(config_file)
 
     if not os.path.isfile(config_file):
+        os.makedirs(os.path.dirname(config_file), exist_ok=True)
+        legacy_file = f"{root_dir}/config.toml"
         example_file = f"{root_dir}/config.example.toml"
-        if os.path.isfile(example_file):
+        if os.path.isfile(legacy_file):
+            # One-time adoption of the pre-app_dirs location, so an existing
+            # checkout does not silently start from the example again.
+            shutil.move(legacy_file, config_file)
+            logger.info("moved config.toml into the studio config dir")
+        elif os.path.isfile(example_file):
             shutil.copyfile(example_file, config_file)
             logger.info("copy config.example.toml to config.toml")
 

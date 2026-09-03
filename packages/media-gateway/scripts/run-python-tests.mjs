@@ -25,6 +25,27 @@ const candidates = [
     'python3',
 ].filter(Boolean);
 
+// pyproject's requires-python, duplicated here because this runner is the gate
+// that keeps the suite and the service on the same interpreter. The service
+// enforces the same range in app.py's startup_self_check.
+const SUPPORTED_PYTHON = { min: [3, 11], belowMax: [3, 13] };
+
+function pythonVersion(python) {
+    const probe = spawnSync(python, ['-c', 'import sys; print("%d %d" % sys.version_info[:2])'], { encoding: 'utf8' });
+    if (probe.status !== 0) return null;
+    const parts = String(probe.stdout || '').trim().split(/\s+/).map(Number);
+    return parts.length === 2 && parts.every(Number.isFinite) ? parts : null;
+}
+
+function withinPin(version) {
+    if (!version) return false;
+    const [major, minor] = version;
+    const [minMajor, minMinor] = SUPPORTED_PYTHON.min;
+    const [maxMajor, maxMinor] = SUPPORTED_PYTHON.belowMax;
+    if (major !== minMajor || major !== maxMajor) return false;
+    return minor >= minMinor && minor < maxMinor;
+}
+
 function canImportDependencies(python) {
     // pytest joins the list because this runner collects every test_*.py here,
     // and `unittest` names only the one file it is handed.
@@ -32,12 +53,28 @@ function canImportDependencies(python) {
     return probe.status === 0;
 }
 
-const usable = candidates.find((python) => (python === 'python3' || existsSync(python)) && canImportDependencies(python));
+// Refuse an interpreter outside the pin even when it can import everything.
+// A green suite on 3.14 while the service runs on 3.11 (or the reverse) is
+// exactly the divergence that took the studio down on 2026-07-26.
+const usable = candidates.find(
+    (python) => (python === 'python3' || existsSync(python))
+        && withinPin(pythonVersion(python))
+        && canImportDependencies(python),
+);
 
 if (!usable) {
+    const tried = candidates
+        .map((python) => {
+            const version = pythonVersion(python);
+            return `${python}${version ? ` (${version[0]}.${version[1]})` : ' (not found)'}`;
+        })
+        .join(', ');
+    const [minMajor, minMinor] = SUPPORTED_PYTHON.min;
+    const [maxMajor, maxMinor] = SUPPORTED_PYTHON.belowMax;
     console.error(
-        'No Python interpreter here can import the gateway test dependencies (cryptography, pillow, pytest).\n'
-        + `Tried: ${candidates.join(', ')}\n`
+        `No interpreter here is inside the pinned Python range (>=${minMajor}.${minMinor},<${maxMajor}.${maxMinor}) `
+        + 'with the gateway test dependencies (cryptography, pillow, pytest).\n'
+        + `Tried: ${tried}\n`
         + `Fix: create the repository venv (uv sync) at ${join(repoRoot, '.venv')}, `
         + 'or point MEDIA_GATEWAY_PYTHON at an interpreter that has them.',
     );

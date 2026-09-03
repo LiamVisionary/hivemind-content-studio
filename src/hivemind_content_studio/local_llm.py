@@ -1161,3 +1161,13 @@ def runtime() -> LocalLlmRuntime:
 
             _RUNTIME = LocalLlmRuntime(state_path=load_config().data_dir / "local-llm-memory.json")
         return _RUNTIME
+
+
+def runtime_if_started() -> LocalLlmRuntime | None:
+    """The runtime only if something already asked for one.
+
+    Shutdown uses this: `runtime()` would CREATE a runtime (and read state off
+    disk) on the way out of a process that never loaded a model.
+    """
+    with _RUNTIME_LOCK:
+        return _RUNTIME

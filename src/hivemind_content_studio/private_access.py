@@ -37,6 +37,65 @@ E2E_MEDIA_SUFFIX = ".e2e"
 RUN_MEDIA_SCOPE = "run-media"
 
 
+def _keychain_secret(service: str, *, create: bool = False) -> bytes:
+    """The macOS Keychain item for `service`, or b"" when this machine has none.
+
+    Never raises: a missing `security` binary is what every non-Darwin host
+    looks like, and that is a fallback condition, not a crash.
+    """
+    account = getpass.getuser()
+    try:
+        result = subprocess.run(
+            ["/usr/bin/security", "find-generic-password", "-s", service, "-a", account, "-w"],
+            check=False, capture_output=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return b""
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    if not create:
+        return b""
+    created = base64.urlsafe_b64encode(os.urandom(48))
+    try:
+        add = subprocess.run(
+            ["/usr/bin/security", "add-generic-password", "-U", "-s", service, "-a", account,
+             "-w", created.decode("ascii")],
+            check=False, capture_output=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return b""
+    return created if add.returncode == 0 else b""
+
+
+def private_key_file(service: str = "zimage-output-encryption") -> Path:
+    from .config import app_dirs  # local: config imports this module's siblings
+
+    return app_dirs().data_dir / "secure" / f"{service}.key"
+
+
+def _key_file_secret(service: str, *, create: bool) -> bytes:
+    """The 0600 key file this machine falls back to when there is no keychain."""
+    path = private_key_file(service)
+    try:
+        if path.is_file():
+            return path.read_bytes().strip()
+        if not create:
+            return b""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        created = base64.urlsafe_b64encode(os.urandom(48))
+        # Written through a private temp name so a concurrent reader never sees
+        # a half-written key, and mode 0600 from the moment it exists.
+        descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(created)
+        return created
+    except FileExistsError:
+        return path.read_bytes().strip()
+    except OSError:
+        return b""
+
+
 class PrivateFieldCipher:
     """AES-GCM fields whose key is derived from a Keychain-held secret."""
 
@@ -52,23 +111,18 @@ class PrivateFieldCipher:
 
     @classmethod
     def from_keychain(cls, *, service: str = "zimage-output-encryption", create: bool = True) -> "PrivateFieldCipher":
-        account = getpass.getuser()
-        command = ["/usr/bin/security", "find-generic-password", "-s", service, "-a", account, "-w"]
-        try:
-            result = subprocess.run(command, check=False, capture_output=True, timeout=10)
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise RuntimeError("macOS Keychain is unavailable for private studio state") from exc
-        secret = result.stdout.strip() if result.returncode == 0 else b""
+        # Order matters, and it is about not losing readable state rather than
+        # about preference. An EXISTING key file beats creating a keychain
+        # entry: a machine that once fell back to a file must keep using that
+        # file, or the day the keychain starts answering again every field
+        # written since becomes undecryptable. A machine with a working
+        # keychain never reaches the file at all.
+        secret = _keychain_secret(service) or _key_file_secret(service, create=False)
         if not secret and create:
-            created = base64.urlsafe_b64encode(os.urandom(48))
-            add = subprocess.run(
-                ["/usr/bin/security", "add-generic-password", "-U", "-s", service, "-a", account, "-w", created.decode("ascii")],
-                check=False,
-                capture_output=True,
-                timeout=10,
-            )
-            if add.returncode == 0:
-                secret = created
+            # Linux, Windows, a locked keychain, no `security` binary: boot on a
+            # 0600 key file under the data dir instead of exiting with a
+            # traceback before uvicorn ever starts.
+            secret = _keychain_secret(service, create=True) or _key_file_secret(service, create=True)
         if not secret:
             raise RuntimeError("Private studio encryption key is unavailable")
         return cls.from_secret(secret)

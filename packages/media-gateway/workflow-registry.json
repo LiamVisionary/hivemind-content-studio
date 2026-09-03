@@ -202,8 +202,8 @@
       "compatible_base_models": [
         "LTXV"
       ],
-      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-regular-anchor/ltx23-regular-anchor.user-image-api.json",
-      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Regular FP8 Mobile.json",
+      "api_workflow": "comfy:workflows/civitai/ltx23-regular-anchor/ltx23-regular-anchor.user-image-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 Regular FP8 Mobile.json",
       "default": true,
       "native_mlx": {
         "enabled": true,
@@ -342,8 +342,8 @@
       "compatible_base_models": [
         "LTXV"
       ],
-      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-transition-lora/ltx23-transition-lora.user-image-api.json",
-      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Transition LoRA Mobile.json",
+      "api_workflow": "comfy:workflows/civitai/ltx23-transition-lora/ltx23-transition-lora.user-image-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 Transition LoRA Mobile.json",
       "default": false,
       "native_mlx": {
         "enabled": true,
@@ -504,8 +504,8 @@
       "compatible_base_models": [
         "LTXV"
       ],
-      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-better-motion-lora/ltx23-better-motion-lora.user-image-api.json",
-      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 Better Motion LoRA Mobile.json",
+      "api_workflow": "comfy:workflows/civitai/ltx23-better-motion-lora/ltx23-better-motion-lora.user-image-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 Better Motion LoRA Mobile.json",
       "default": false,
       "native_mlx": {
         "enabled": true,
@@ -652,8 +652,8 @@
       "compatible_base_models": [
         "LTXV"
       ],
-      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/civitai/ltx23-ic-dual-character-lora/ltx23-ic-dual-character-lora.user-image-api.json",
-      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 IC Dual Character LoRA Mobile.json",
+      "api_workflow": "comfy:workflows/civitai/ltx23-ic-dual-character-lora/ltx23-ic-dual-character-lora.user-image-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 IC Dual Character LoRA Mobile.json",
       "default": false,
       "native_mlx": {
         "enabled": true,
@@ -802,8 +802,8 @@
       "compatible_base_models": [
         "LTXV"
       ],
-      "api_workflow": "/Users/liam/comfy/ComfyUI/workflows/huggingface/ltx23-ic-ingredients-lora/ltx23-ic-ingredients-lora.user-reference-api.json",
-      "mobile_workflow": "/Users/liam/comfy/ComfyUI/user/default/workflows/LTX 2.3 IC LoRA Ingredients Mobile.json",
+      "api_workflow": "comfy:workflows/huggingface/ltx23-ic-ingredients-lora/ltx23-ic-ingredients-lora.user-reference-api.json",
+      "mobile_workflow": "comfy:user/default/workflows/LTX 2.3 IC LoRA Ingredients Mobile.json",
       "default": false,
       "benchmark_seconds": 270.75,
       "native_mlx": {
