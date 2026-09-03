@@ -200,7 +200,11 @@ def test_an_unexpected_exception_is_json_without_the_exception_text(tmp_path: Pa
     response = client.get("/api/runtime")
     assert response.status_code == 500
     assert response.headers["content-type"].startswith("application/json")
-    assert response.json() == {"detail": "The studio server hit an unexpected error. Check the control API log."}
+    payload = response.json()
+    # The sentence no longer points at a file the app did not write; the
+    # incident id does the pointing, and test_observability pins the log side.
+    assert payload["detail"] == "Something went wrong. Copy the details and send them with your report."
+    assert payload["incident"]
     assert "private.txt" not in response.text
 
 

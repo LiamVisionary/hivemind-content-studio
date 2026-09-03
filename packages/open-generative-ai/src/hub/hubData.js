@@ -6,6 +6,7 @@
 // from hubApp.js — when in doubt, that file is the contract.
 import { useSyncExternalStore } from 'react';
 import { toast } from 'react-hot-toast';
+import { toastFailure } from '../lib/failureToast.js';
 import { setApiStatus as setApiStatusStore } from '../app/statusStore.js';
 import { decryptMedia } from '../lib/e2eVault.js';
 import { loadStudioSetup } from '../app/promptTarget.js';
@@ -279,7 +280,20 @@ export async function api(path, options = {}) {
   const payload = contentType.includes('json') ? await response.json() : await response.text();
   if (!response.ok) {
     const detail = typeof payload === 'object' ? payload.detail : payload;
-    throw new Error(Array.isArray(detail) ? detail.map((item) => item.msg).join(' · ') : detail || `Request failed (${response.status})`);
+    const sentence = Array.isArray(detail)
+      ? detail.map((item) => item.msg).join(' · ')
+      : (typeof detail === 'string' ? detail : detail?.message) || `Request failed (${response.status})`;
+    const error = new Error(sentence);
+    // The server answers a 500 with an incident id that also appears in its
+    // log, and refusals like PassBook's with `{message, remedy}` — both were
+    // lost here, because only `detail` was read and an object detail became
+    // the string "[object Object]". Carrying them on the error is what lets a
+    // failure offer the action that repairs it instead of a dead sentence.
+    error.status = response.status;
+    error.detail = detail;
+    error.remedy = (typeof detail === 'object' && !Array.isArray(detail) ? detail?.remedy : '') || '';
+    error.incident = (typeof payload === 'object' ? payload?.incident : '') || '';
+    throw error;
   }
   return payload;
 }
@@ -611,7 +625,7 @@ export async function createSimpleRun(plan) {
     return true;
   } catch (error) {
     replaceThreadItem(loading.id, { kind: 'runError', message: error.message });
-    toast.error(error.message);
+    toastFailure(error);
     return false;
   } finally {
     setSimpleBusy(false);
@@ -665,7 +679,7 @@ export async function submitSimplePrompt() {
     if (plan.mode === 'brief') await createSimpleRun(plan);
   } catch (error) {
     pushThread({ kind: 'assistant', error: true, message: error.message });
-    toast.error(error.message);
+    toastFailure(error);
   } finally {
     setSimpleBusy(false);
   }
@@ -983,7 +997,7 @@ export async function loadPrompts({ quiet = false, force = false } = {}) {
     hubState.canvasPage = page;
     hubState.canvasHasMore = hasMore;
   } catch (error) {
-    if (!quiet) toast.error(error.message);
+    if (!quiet) toastFailure(error);
   } finally {
     // An explicit load owns canvasLoading, so its flip back must publish even
     // when the data came back identical (filter change, manual refresh).
@@ -1020,7 +1034,7 @@ export async function loadMoreCanvasHistory() {
     hubState.canvasFormats = [...new Set([...hubState.canvasFormats, ...(payload.filters?.formats || [])])].sort();
     hubState.canvasModels = [...new Set([...hubState.canvasModels, ...(payload.filters?.models || [])])].sort((left, right) => left.localeCompare(right));
   } catch (error) {
-    toast.error(error.message);
+    toastFailure(error);
   } finally {
     hubState.canvasLoading = false;
   }
@@ -1059,7 +1073,7 @@ export async function loadGenerationTelemetry({ quiet = false } = {}) {
     if (changed) notifyHub();
     return changed;
   } catch (error) {
-    if (!quiet) toast.error(error.message);
+    if (!quiet) toastFailure(error);
     return false;
   }
 }
@@ -1370,7 +1384,7 @@ export async function loadCanvasOutputInStudio(historyId) {
     window.dispatchEvent(new CustomEvent('navigate', { detail: { page: section } }));
     toast(isVideo ? 'Loaded the exact settings into the Video studio.' : 'Loaded the exact settings into the Image studio.');
   } catch (error) {
-    toast.error(error.message);
+    toastFailure(error);
   }
 }
 
@@ -1384,7 +1398,7 @@ export async function loadCanvasOutputInCanvas(historyId) {
     notifyHub();
     toast('Loaded the exact encrypted workflow and generated output in Canvas.');
   } catch (error) {
-    toast.error(error.message);
+    toastFailure(error);
   }
 }
 
@@ -1419,7 +1433,7 @@ export async function copyCanvasPrompt(historyId) {
     if (!setup?.primaryPrompt) throw new Error('This output has no recoverable prompt.');
     await copyText(setup.primaryPrompt);
   } catch (error) {
-    toast.error(error.message);
+    toastFailure(error);
   }
 }
 
@@ -1440,7 +1454,7 @@ export async function deleteCanvasOutput(historyId) {
     toast('Output and its local traces were permanently deleted.');
     return true;
   } catch (error) {
-    toast.error(error.message);
+    toastFailure(error);
     return false;
   }
 }
@@ -1470,7 +1484,7 @@ export async function setPromptFavorite(promptId, favorite) {
     const index = hubState.prompts.findIndex((entry) => entry.prompt_id === promptId);
     if (index >= 0) hubState.prompts[index] = await decryptPromptEntry(payload.prompt);
     notifyHub();
-  } catch (error) { toast.error(error.message); }
+  } catch (error) { toastFailure(error); }
 }
 
 // Returns false on failure so the confirm modal stays open (same contract as
@@ -1482,7 +1496,7 @@ export async function deletePrompt(promptId) {
     notifyHub();
     return true;
   } catch (error) {
-    toast.error(error.message);
+    toastFailure(error);
     return false;
   }
 }
@@ -1738,7 +1752,7 @@ export async function createWorkflowRun() {
     navigateHub('runs');
     return run;
   } catch (error) {
-    toast.error(error.message);
+    toastFailure(error);
     return null;
   }
 }
@@ -1838,7 +1852,7 @@ export async function runAction(action, runId, stepId) {
     hubState.selectedRunId = run.run_id;
     notifyHub();
     toast(`${titleCase(action)} completed.`);
-  } catch (error) { toast.error(error.message); }
+  } catch (error) { toastFailure(error); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1889,7 +1903,7 @@ export async function startOAuth(provider) {
     else toast.error('The sign-in tab was blocked. Use the link on the card to open it.');
     return { url: result.authorize_url, opened };
   } catch (error) {
-    toast.error(error.message);
+    toastFailure(error);
     return null;
   }
 }
@@ -1937,7 +1951,7 @@ export async function refreshAll({ quiet = false } = {}) {
     return true;
   } catch (error) {
     setApiOnline(false);
-    if (!quiet) toast.error(error.message);
+    if (!quiet) toastFailure(error);
     return false;
   }
 }

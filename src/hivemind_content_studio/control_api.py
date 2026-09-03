@@ -8,6 +8,7 @@ import binascii
 import contextlib
 import hmac
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -24,6 +25,7 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
 from contextvars import ContextVar
+from html import escape
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -132,11 +134,23 @@ from .shared_env import (
     sealing_status,
     set_hive_env_values,
 )
+from .observability import (
+    access_route,
+    configure_logging,
+    frame_list,
+    diagnostics_bundle,
+    record_access,
+    record_incident,
+    remedy_text,
+)
 from .studio_drafts import StudioRunDraft
 from .studio_state import StudioStateStore
 from .vault_store import VaultStore
 from .template_catalog import template_report
 from .unified_runtime import unified_runtime_snapshot
+
+
+log = logging.getLogger("hivemind.studio.control")
 
 
 class AccountLocked(Exception):
@@ -149,7 +163,14 @@ class AccountLocked(Exception):
 
 
 ACCOUNT_LOCKED_DETAIL = "Sign in to a workspace"
-UNEXPECTED_ERROR_DETAIL = "The studio server hit an unexpected error. Check the control API log."
+
+
+def unexpected_error_detail() -> str:
+    """The 500 sentence. Was "Check the control API log", which named a file
+    the app did not write, in a directory the stack marked hidden, and emptied
+    on the restart a person tries first. What replaces it is an incident id in
+    the same reply and a Copy details action beside it."""
+    return remedy_text("unexpected")
 
 
 def _validation_sentence(errors: list[Any]) -> str:
@@ -1393,8 +1414,17 @@ def build_control_app(
     @app.exception_handler(Exception)
     async def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         # JSON, not Starlette's plain-text "Internal Server Error", and never
-        # str(exc): an exception message can carry a path or a prompt.
-        return JSONResponse({"detail": UNEXPECTED_ERROR_DETAIL}, status_code=500)
+        # str(exc): an exception message can carry a path or a prompt. The
+        # incident id is the ONE thing that crosses from the log to the person,
+        # so support can look up a failure the toast could not describe.
+        incident = record_incident(
+            exc,
+            method=request.method,
+            route=access_route(request.url.path, request.scope.get("path_params")),
+        )
+        return JSONResponse(
+            {"detail": unexpected_error_detail(), "incident": incident}, status_code=500
+        )
 
     repository_root = Path(__file__).resolve().parents[2]
     open_gen_dist = repository_root / "packages/open-generative-ai/dist"
@@ -1425,7 +1455,7 @@ def build_control_app(
         the history entry is the correct outcome — far better than writing one
         person's prompt into whichever library happened to be first.
         """
-        with contextlib.suppress(Exception):
+        try:
             prompt_history().record(
                 prompt=(draft.concept or "").strip() or user_prompt or draft.title,
                 user_prompt=user_prompt,
@@ -1435,6 +1465,11 @@ def build_control_app(
                 run_id=run_id,
                 composer=composer,
             )
+        except Exception as exc:  # noqa: BLE001 — history never fails a run
+            # Silent until now, and "my prompts stopped being saved" is a real
+            # support call. The prompt itself is never written here — only why
+            # the store refused it.
+            log.warning("prompt history not recorded for %s: %s", source, sanitize_error_detail(str(exc)))
 
     def execute_draft(body: StudioRunDraft) -> dict:
         draft_root = Path(runs.store.path).parent / "ui-drafts"
@@ -1545,6 +1580,11 @@ def build_control_app(
 
     @app.middleware("http")
     async def enforce_account_boundary(request: Request, call_next):
+        # Captured before the router runs: url.path is the ORIGINAL path even
+        # after a mount rewrites scope["path"], and it has no query string —
+        # which is why uvicorn's own access log (every URL, verbatim, tokens
+        # and all) is turned off in main() in favour of this one line.
+        request_path = request.url.path
         session_cookie = request.cookies.get(ACCOUNT_COOKIE)
         signed_in = account_access.account_id(session_cookie)
         # A cookie for a workspace that has since been deleted proves nothing.
@@ -1595,6 +1635,9 @@ def build_control_app(
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        # Route template and status, never the path's leaves: the media routes
+        # end in the owner's own filenames.
+        record_access(request.method, request_path, response.status_code, request.scope.get("path_params"))
         return response
 
     def require_control(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
@@ -1606,7 +1649,13 @@ def build_control_app(
             # lecture (and not a 503 about an unconfigured token).
             raise AccountLocked()
         if len(configured_control_token) < 12:
-            raise HTTPException(status_code=503, detail="Operator mutations are disabled until CONTENT_STUDIO_CONTROL_TOKEN is configured")
+            # A build with no operator token configured. Nothing the person at
+            # the browser can do about an environment variable, and the name of
+            # it means nothing to them — so this is the same sign-in answer the
+            # middleware gives everywhere else, with the variable named in the
+            # log instead of the toast.
+            log.warning("operator mutation refused: no control token configured")
+            raise AccountLocked()
         if not hmac.compare_digest(supplied, configured_control_token):
             raise HTTPException(status_code=401, detail="Valid operator bearer token required")
 
@@ -2011,9 +2060,12 @@ def build_control_app(
                     "Expires": "0",
                 },
             )
+        # The build command is a correct instruction for whoever built this and
+        # a dead end for whoever installed it; remedy_text keeps the developer
+        # sentence behind CONTENT_STUDIO_DEV=1.
+        log.error("frontend build missing at %s", open_gen_dist.name)
         return HTMLResponse(
-            "<h1>Hivemind Content Studio</h1><p>The frontend build is missing. "
-            "Run <code>npm --prefix packages/open-generative-ai run vite:build</code>.</p>",
+            f"<h1>Hivemind Content Studio</h1><p>{escape(remedy_text('dist-missing'))}</p>",
             status_code=503,
         )
 
@@ -2331,11 +2383,14 @@ def build_control_app(
         try:
             payload = _build_simple_catalog()
             simple_catalog_cache.update(payload=payload, at=time.time())
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — a stale catalog beats no studio
             # Keep serving the previous catalog, but stamp the attempt: a build
             # that keeps throwing would otherwise leave a degraded payload
             # permanently past its short TTL, and rebuild inside every single
-            # request instead of backing off.
+            # request instead of backing off. Stamped AND logged: a catalog
+            # stuck on the previous answer is what "the studio shows the wrong
+            # controls for this model" looks like from the outside.
+            log.warning("catalog refresh failed: %s", sanitize_error_detail(str(exc)))
             simple_catalog_cache["at"] = time.time()
         finally:
             simple_catalog_refreshing.clear()
@@ -3067,6 +3122,26 @@ def build_control_app(
     def runtime() -> dict:
         return unified_runtime_snapshot()
 
+    @app.get("/api/diagnostics/bundle", dependencies=[Depends(require_owner)])
+    def diagnostics_zip() -> Response:
+        """One file the owner can attach to a report, by hand.
+
+        Nothing leaves the machine on its own — this is an owner-run,
+        local-first app, and a button that transmitted a log would be data
+        leaving without being asked for. The log tail, the runtime snapshot
+        and the health answer, with private paths reduced to basenames.
+        """
+        health: dict[str, Any] = {"ok": True, "service": "hivemind-content-studio", "owner_lock": True}
+        try:
+            snapshot: Any = unified_runtime_snapshot()
+        except Exception as exc:  # noqa: BLE001 — a bundle is worth more than its runtime page
+            snapshot = {"error": sanitize_error_detail(str(exc)) or "runtime snapshot unavailable"}
+        return Response(
+            content=diagnostics_bundle(snapshot, health),
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="studio-diagnostics.zip"'},
+        )
+
     @app.post("/api/runs", status_code=201, dependencies=[Depends(require_owner_or_control)])
     def create_run(body: StudioRunDraft, request: Request) -> dict:
         try:
@@ -3616,7 +3691,16 @@ def build_control_app(
                 # native-LTX or local-Comfy failure used to arrive as 4 KB of
                 # runner output with absolute paths (and, via argv echoes,
                 # possibly the prompt) — against the privacy boundary.
-                entry.update(status="error", detail=sanitize_error_detail(str(exc)) or "Media generation failed")
+                detail = sanitize_error_detail(str(exc)) or "Media generation failed"
+                # The toast keeps one sentence; the log keeps the frame list, so
+                # a lane that fails the same way every time is diagnosable.
+                log.error(
+                    "video job %s failed: %s | %s",
+                    job_id,
+                    detail,
+                    frame_list(exc),
+                )
+                entry.update(status="error", detail=detail)
 
     @app.post("/api/media-studio/video/start", dependencies=[Depends(require_owner_or_control)])
     async def start_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
@@ -4786,9 +4870,12 @@ def build_control_app(
         """
         result = seal_store()
         if not result.get("ok"):
+            # The store's own sentence names a Python package and an
+            # environment variable; it belongs in the log, not the panel.
+            log.warning("passbook seal refused: %s", sanitize_error_detail(result.get("detail") or ""))
             raise HTTPException(status_code=409, detail={
-                "message": result.get("detail") or "The store could not be sealed.",
-                "remedy": "Install the `cryptography` package, or set HIVE_ENV_KEY on this machine.",
+                "message": remedy_text("passbook-seal"),
+                "remedy": "open-passbook",
             })
         return {"ok": True, **result}
 
@@ -4815,9 +4902,10 @@ def build_control_app(
         try:
             written = set_hive_env_values(body.values, overwrite=body.overwrite)
         except ContainerisedHomeError as exc:
+            log.warning("passbook write refused: %s", sanitize_error_detail(str(exc)))
             raise HTTPException(status_code=409, detail={
-                "message": str(exc),
-                "remedy": "Ship this build unsandboxed, or launch it with HIVE_HOME set.",
+                "message": remedy_text("passbook-write"),
+                "remedy": "open-passbook",
             }) from None
         # The new keys have to reach THIS process too, or the provider the owner
         # just configured stays unavailable until a restart.
@@ -4914,7 +5002,12 @@ def main() -> None:
 
     host = os.environ.get("CONTENT_STUDIO_CONTROL_HOST", "127.0.0.1")
     port = int(os.environ.get("CONTENT_STUDIO_CONTROL_PORT", "8765"))
-    uvicorn.run(build_control_app(), host=host, port=port)
+    target = configure_logging()
+    if target is not None:
+        log.info("control API listening on %s:%s (log %s)", host, port, target.name)
+    # uvicorn's access log writes the full URL, query string included; the
+    # boundary middleware writes a redacted line instead.
+    uvicorn.run(build_control_app(), host=host, port=port, access_log=False)
 
 
 if __name__ == "__main__":
