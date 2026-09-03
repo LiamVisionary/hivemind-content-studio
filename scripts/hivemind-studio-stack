@@ -263,6 +263,17 @@ import secrets
 print(secrets.token_urlsafe(32))
 PY
   )"
+  # What the tailnet HTTPS proxy shows the control API to prove it is the
+  # proxy. The studio believes x-forwarded-proto/host/for only from a request
+  # carrying this — those headers decide the session cookie's `secure` flag,
+  # the WebAuthn relying-party id and which bucket a failed password counts
+  # against, and any caller can write them. Minted per run and given to both
+  # ends here, so the two can never drift apart.
+  CONTENT_STUDIO_PROXY_SECRET="$("$COMFY/.venv/bin/python" - <<'PY'
+import secrets
+print(secrets.token_urlsafe(32))
+PY
+  )"
 
 	  kill_port "$COMFY_DEFAULT_PORT"
 	  kill_port "$COMFY_LTX_PORT"
@@ -567,6 +578,7 @@ PY
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
 	  COMFY_LANES="$comfy_lanes" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
+  CONTENT_STUDIO_PROXY_SECRET="$CONTENT_STUDIO_PROXY_SECRET" \
   with_credentials hivemind-content-studio uv run content-studio-api \
     >> "$PRIV/hivemind-content-studio.log" 2>&1 &
   pid="$!"
@@ -622,7 +634,7 @@ PY
 
   if [ -n "$ts_ip" ] && [ -f "$TAILSCALE_HTTPS_PROXY" ] && ensure_tls_cert "$ts_ip"; then
     cd "$APP" || return 1
-    TAILSCALE_IP="$ts_ip" TAILSCALE_HTTPS_PORT="$TAILSCALE_HTTPS_PORT" ZIMAGE_TLS_CERT="$TLS_CERT" ZIMAGE_TLS_KEY="$TLS_KEY" ZIMAGE_TARGET="http://127.0.0.1:8788" HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" MEDIA_STUDIO_MCP_TARGET="http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT" \
+    TAILSCALE_IP="$ts_ip" TAILSCALE_HTTPS_PORT="$TAILSCALE_HTTPS_PORT" ZIMAGE_TLS_CERT="$TLS_CERT" ZIMAGE_TLS_KEY="$TLS_KEY" ZIMAGE_TARGET="http://127.0.0.1:8788" HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" MEDIA_STUDIO_MCP_TARGET="http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT" CONTENT_STUDIO_PROXY_SECRET="$CONTENT_STUDIO_PROXY_SECRET" \
       node "$TAILSCALE_HTTPS_PROXY" >> "$PRIV/z-image-tailscale-https-proxy.log" 2>&1 &
     pid="$!"
     children+=("$pid")

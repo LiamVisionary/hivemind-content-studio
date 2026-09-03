@@ -489,7 +489,30 @@ function slimCivitaiItem(item) {
   };
 }
 
+// The bridge has no session of its own: whoever reaches it can start local
+// generations and pay for Civitai downloads on the owner's key. A page on any
+// other site can point its own DNS name at 127.0.0.1 and reach this port, and
+// the browser will then treat it as same-origin — the Host header is the one
+// thing still carrying the attacker's name, so it is the one thing checked.
+// The studio proxies here as 127.0.0.1:8794 and passes.
+const LOOPBACK_NAMES = new Set(['127.0.0.1', 'localhost', '::1']);
+
+function fromLoopback(req) {
+  const authority = String(req.headers.host || '').trim();
+  if (!authority) return false;
+  try {
+    return LOOPBACK_NAMES.has(new URL(`http://${authority}`).hostname.replace(/^\[|\]$/g, '').toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 async function handleLocalAi(req, res, pathname, query = new URLSearchParams()) {
+  if (!fromLoopback(req)) {
+    return sendJson(res, 400, {
+      error: 'This bridge only answers on this machine. Open the studio at http://127.0.0.1:8765.',
+    });
+  }
   if (pathname === '/local-ai/binary-status') {
     return sendJson(res, 200, { exists: true, hosted: true, dataDir: LOCAL_AI_DIR, modelsDir: path.join(LOCAL_AI_DIR, 'models'), zimage: ZIMAGE_URL });
   }

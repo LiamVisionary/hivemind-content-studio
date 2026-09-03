@@ -35,6 +35,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import yaml
 
@@ -1223,6 +1224,40 @@ def _write_inline_audio(value: str, destination_dir: Path, *, label: str = "") -
     )
 
 
+# The only names this studio answers to. A page on any other origin can point
+# its own DNS name at 127.0.0.1 and reach this port; the browser then treats it
+# as same-origin and the request looks local in every way but one — the Host
+# header still carries the attacker's name. That is the whole check.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+_LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# Header the tailnet HTTPS proxy presents to prove it is the proxy. Without it
+# x-forwarded-proto/host/for are just headers any caller can write, and three
+# things were derived from them: the session cookie's `secure` flag, the
+# WebAuthn relying-party id, and the login throttle's key. Generated per stack
+# run and handed to both ends by scripts/hivemind-studio-stack.
+PROXY_SECRET_ENV = "CONTENT_STUDIO_PROXY_SECRET"
+PROXY_SECRET_HEADER = "x-studio-proxy-secret"
+
+
+def _host_name(value: str) -> str:
+    """The bare name in a Host header, an Origin, or a bare authority.
+
+    No port, no brackets, lower-cased — so "[::1]:8765", "https://LOCALHOST:8789"
+    and "127.0.0.1" all reduce to something comparable.
+    """
+    candidate = value.strip()
+    if not candidate:
+        return ""
+    if "://" not in candidate:
+        candidate = "//" + candidate
+    try:
+        return (urllib.parse.urlsplit(candidate).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 def _machine_route_allowed(path: str, method: str) -> bool:
     if path in {"/api/owner/session", "/api/owner/lock", "/healthz"}:
         return True
@@ -1343,6 +1378,15 @@ def build_control_app(
     )
     account_access = AccountAccess(signing_secret=cipher.derive("account-session-v1"))
     login_throttle = LoginThrottle()
+    # The per-address key above can be moved by whoever is asking — a page that
+    # rotates x-forwarded-for gets a fresh bucket on every try, and the
+    # five-attempt lock never fires for the one caller it most needs to stop.
+    # This second key names the WORKSPACE, which no header can change: twenty
+    # failures in fifteen minutes and that workspace stops answering for
+    # fifteen, whoever is asking. Looser than the per-address limit on purpose,
+    # so a household sharing one proxy is not locked out by someone else's
+    # typo, and tight enough that a password cannot be guessed at speed.
+    account_login_throttle = LoginThrottle(max_attempts=20, window_seconds=900.0, block_seconds=900.0)
     # Set per request by the middleware below; never defaulted.
     current_account: ContextVar[Account | None] = ContextVar("current_account", default=None)
 
@@ -1567,8 +1611,50 @@ def build_control_app(
             for token in (configured_control_token, configured_operator_token)
         )
 
+    configured_proxy_secret = (os.environ.get(PROXY_SECRET_ENV) or "").strip()
+
+    def _from_proxy(request: Request, header: str) -> str:
+        """The first hop of an x-forwarded-* header — but only from the proxy.
+
+        The tailnet HTTPS proxy rewrites Host to 127.0.0.1 and puts the address
+        bar's name, scheme and client address in x-forwarded-*. Three answers
+        were derived from those: whether the session cookie is `secure`, which
+        relying-party id a passkey is bound to, and which bucket a failed
+        password counts against. Any caller can write those headers, so any
+        caller could choose its own throttle bucket. Now they count only when
+        the request also carries the secret the stack hands the proxy — and
+        with no secret configured there is no proxy to believe, so the studio
+        reads what it can see itself.
+        """
+        if not configured_proxy_secret:
+            return ""
+        supplied = request.headers.get(PROXY_SECRET_HEADER, "")
+        if not hmac.compare_digest(supplied, configured_proxy_secret):
+            return ""
+        return request.headers.get(header, "").split(",", 1)[0].strip()
+
+    def _same_site_origin(request: Request) -> bool:
+        """Is this write coming from a page the studio actually serves?
+
+        A browser sends Origin on every unsafe request. Loopback is the studio
+        opened on this machine; the proxy's forwarded host is the studio opened
+        over the tailnet, which arrives here with Host already rewritten to
+        127.0.0.1 and so cannot be recognised any other way. Anything else is a
+        page on somebody else's site talking to this port.
+        """
+        origin = request.headers.get("origin", "").strip()
+        if not origin:
+            # Not a browser fetch: agents, the MCP and curl send no Origin, and
+            # a same-origin top-level navigation does not either.
+            return True
+        name = _host_name(origin)
+        if name in _LOOPBACK_NAMES:
+            return True
+        forwarded_host = _host_name(_from_proxy(request, "x-forwarded-host"))
+        return bool(forwarded_host) and name == forwarded_host
+
     def _set_session_cookie(response: Response, request: Request, account: Account) -> None:
-        forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        forwarded = _from_proxy(request, "x-forwarded-proto").lower()
         response.set_cookie(
             ACCOUNT_COOKIE,
             account_access.issue(account.id),
@@ -1595,6 +1681,19 @@ def build_control_app(
         # which is why uvicorn's own access log (every URL, verbatim, tokens
         # and all) is turned off in main() in favour of this one line.
         request_path = request.url.path
+        if request.method not in _SAFE_METHODS and not _same_site_origin(request):
+            # Refused before the cookie is even read: a page on another site
+            # that has rebound its DNS to 127.0.0.1 sends the session cookie
+            # with its POST like any same-origin script would, so the cookie
+            # proves nothing here. The Origin header is the browser's own
+            # account of who asked, and it is the one thing the page cannot
+            # forge.
+            return JSONResponse(
+                {"detail": "This request came from another site. Open the studio at "
+                           "http://127.0.0.1:8765 or at its tailnet address.",
+                 "privacy": "cross-site-blocked"},
+                status_code=400,
+            )
         session_cookie = request.cookies.get(ACCOUNT_COOKIE)
         signed_in = account_access.account_id(session_cookie)
         # A cookie for a workspace that has since been deleted proves nothing.
@@ -1650,6 +1749,17 @@ def build_control_app(
         record_access(request.method, request_path, response.status_code, request.scope.get("path_params"))
         return response
 
+    # Added last, so it wraps the account gate above and answers first: a
+    # request for a name this studio does not answer to never reaches the
+    # sign-in routes at all. Starlette compares the name up to the first colon,
+    # so every port passes and no entry needs one — and a BRACKETED literal
+    # (`[::1]:8765`) is refused by the same rule, which is right for a studio
+    # that binds 127.0.0.1 and never answers on ::1. Safe behind the tailnet
+    # proxy, which rewrites Host to 127.0.0.1:8765 before forwarding
+    # (packages/media-gateway/tailscale-https-proxy.js) and carries the address
+    # bar's name in x-forwarded-host instead.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(_LOOPBACK_HOSTS), www_redirect=False)
+
     def require_control(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
         supplied = authorization.removeprefix("Bearer ").strip() if authorization else ""
         if not supplied and getattr(request.state, "account", None) is None:
@@ -1680,6 +1790,30 @@ def build_control_app(
         what the scoped resolvers above answer."""
         if getattr(request.state, "account", None) is None:
             raise HTTPException(status_code=401, detail="Sign in to a workspace")
+
+    def require_owner_account(request: Request) -> None:
+        """The OWNER workspace, not merely a signed-in one.
+
+        Deliberate (2026-09-03), and the counterpart to the rentals decision
+        below. `require_owner` means "some account", which is right for the
+        studio's own work: a workspace exists because the owner approved it,
+        and that approval carries generating, renting and publishing. It is
+        wrong for the two things that reach PAST the studio — the machine's
+        shared credential store, which every Hive app on this Mac reads, and
+        the owner's HivemindOS balance, which is money. Overwriting
+        OPENAI_API_KEY there breaks apps a collaborator has never heard of, and
+        a top-up spends the owner's card. Reading stays open on
+        `require_owner`: a collaborator may see WHICH keys are configured (never
+        a value) so they can say what is missing. Writing is the owner's.
+        """
+        account = getattr(request.state, "account", None)
+        if account is None:
+            raise HTTPException(status_code=401, detail="Sign in to a workspace")
+        if not account.is_owner:
+            raise HTTPException(status_code=403, detail={
+                "message": "Only the owner's workspace can change this machine's credentials and credit.",
+                "remedy": "Sign in to the owner workspace, or ask its owner to make the change.",
+            })
 
     # GPU rentals are open to EVERY signed-in workspace, not just the owner.
     # Deliberate (2026-08-21): a workspace only exists because the owner
@@ -1771,11 +1905,13 @@ def build_control_app(
         return int(remaining) if remaining is not None else SESSION_SECONDS
 
     def _relying_party(request: Request) -> RelyingParty:
-        forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        forwarded = _from_proxy(request, "x-forwarded-proto").lower()
         # Behind the tailnet proxy the Host header is the upstream target, not
         # the name in the browser's address bar — and the RP id must match what
         # the browser sees, or every passkey ceremony is refused client-side.
-        forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+        # Only the proxy may say so: a caller that could name its own relying
+        # party could ask a passkey to sign for a domain of its choosing.
+        forwarded_host = _from_proxy(request, "x-forwarded-host")
         return RelyingParty.for_request(
             host=forwarded_host or request.headers.get("host", ""),
             scheme=forwarded or request.url.scheme,
@@ -1785,10 +1921,14 @@ def build_control_app(
         # Behind the tailnet / Hivemind Link proxy every browser shares the
         # proxy's address, so five wrong passwords from ANY device locked the
         # owner tile for everyone. The first hop of x-forwarded-for is the
-        # browser; the socket address is the fallback.
-        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+        # browser — believed only from the proxy itself, or it is the attacker
+        # choosing which bucket to spend. The socket address is the fallback.
+        forwarded = _from_proxy(request, "x-forwarded-for")
         address = forwarded or (request.client.host if request.client else "unknown")
         return f"{address[:64]}:{account_id if account_id is not None else 'any'}"
+
+    def _account_throttle_key(account_id: int | None) -> str:
+        return f"account:{account_id if account_id is not None else 'any'}"
 
     def _retry_wording(seconds: float) -> str:
         whole = max(1, int(seconds) + 1)
@@ -1797,14 +1937,23 @@ def build_control_app(
             return f"{minutes} minute{'s' if minutes != 1 else ''}"
         return f"{whole} second{'s' if whole != 1 else ''}"
 
-    def _guard_throttle(key: str) -> None:
-        wait = login_throttle.retry_after(key)
+    def _guard_throttle(key: str, account_id: int | None = None) -> None:
+        wait = max(login_throttle.retry_after(key),
+                   account_login_throttle.retry_after(_account_throttle_key(account_id)))
         if wait > 0:
             raise HTTPException(
                 status_code=429,
                 detail=f"Too many attempts. Try again in {_retry_wording(wait)}.",
                 headers={"Retry-After": str(int(wait) + 1)},
             )
+
+    def _login_failed(key: str, account_id: int | None = None) -> None:
+        login_throttle.fail(key)
+        account_login_throttle.fail(_account_throttle_key(account_id))
+
+    def _login_succeeded(key: str, account_id: int | None = None) -> None:
+        login_throttle.success(key)
+        account_login_throttle.success(_account_throttle_key(account_id))
 
     @app.get("/api/accounts")
     def list_accounts(request: Request) -> dict:
@@ -1842,9 +1991,9 @@ def build_control_app(
         if client not in {"127.0.0.1", "::1", "localhost"}:
             raise HTTPException(status_code=403, detail="Set up the studio from the machine it runs on")
         key = _throttle_key(request, owner_account.id)
-        _guard_throttle(key)
+        _guard_throttle(key, owner_account.id)
         if not _setup_required():
-            login_throttle.fail(key)
+            _login_failed(key, owner_account.id)
             raise HTTPException(status_code=409, detail="This studio is already set up")
         # Name first: it can fail validation, and a failure must leave the row
         # exactly as unclaimed as it found it.
@@ -1853,7 +2002,7 @@ def build_control_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         account_store.set_password(owner_account.id, body.password)
-        login_throttle.success(key)
+        _login_succeeded(key, owner_account.id)
         account = account_store.get(owner_account.id)
         assert account is not None
         return _sign_in(
@@ -1865,15 +2014,15 @@ def build_control_app(
     @app.post("/api/accounts/unlock")
     def unlock_account(body: AccountUnlockBody, request: Request) -> JSONResponse:
         key = _throttle_key(request, body.account_id)
-        _guard_throttle(key)
+        _guard_throttle(key, body.account_id)
         account = account_store.get(body.account_id)
         stored = account_store.password_hash(body.account_id) if account else None
         if account is None or not verify_password(stored, body.password):
-            login_throttle.fail(key)
+            _login_failed(key, body.account_id)
             # One message for both cases: which workspaces have which passwords
             # is not something a failed attempt should teach anyone.
             raise HTTPException(status_code=401, detail="Wrong password")
-        login_throttle.success(key)
+        _login_succeeded(key, body.account_id)
         # An owner still carrying the legacy SHA-256 digest is upgraded to
         # scrypt the moment they prove they know the password.
         if is_legacy_password_hash(stored):
@@ -2010,12 +2159,12 @@ def build_control_app(
                 authenticator_data=body.authenticator_data, signature=body.signature,
             )
         except WebAuthnError as exc:
-            login_throttle.fail(key)
+            _login_failed(key)
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         account = account_store.get(account_id)
         if account is None:
             raise HTTPException(status_code=401, detail="That passkey's workspace no longer exists")
-        login_throttle.success(key)
+        _login_succeeded(key)
         return _sign_in(
             JSONResponse({"ok": True, "account": account.public(),
                           "expires_in_seconds": account_access.session_seconds}),
@@ -2450,7 +2599,7 @@ def build_control_app(
     def prompt_helper_runtime() -> dict:
         return {"ok": True, **local_llm.runtime().snapshot()}
 
-    @app.post("/api/hivemindos/models/connect", dependencies=[Depends(require_owner)])
+    @app.post("/api/hivemindos/models/connect", dependencies=[Depends(require_owner_account)])
     def hivemindos_models_connect(body: HivemindosConnectBody) -> dict:
         """Point this studio at the owner's HivemindOS account.
 
@@ -2473,8 +2622,7 @@ def build_control_app(
         on the same computer, so a studio opened over the tailnet or a Hivemind
         Link proxy has to be told that plainly rather than handed a link that
         would resolve on the wrong machine."""
-        name = host.rsplit(":", 1)[0].strip("[]").lower()
-        return name in {"127.0.0.1", "::1", "localhost"}
+        return _host_name(host) in _LOOPBACK_NAMES
 
     @app.post("/api/hivemindos/models/link-request", dependencies=[Depends(require_owner)])
     def hivemindos_models_link_request(request: Request) -> dict:
@@ -2484,7 +2632,11 @@ def build_control_app(
         app answers the studio the owner is actually looking at rather than a
         port guessed here.
         """
-        host = (request.headers.get("host") or "").strip()
+        # Behind the tailnet proxy the Host header IS 127.0.0.1 — it was
+        # rewritten on the way in — so asking it alone would have offered a deep
+        # link to a browser on another machine. The forwarded name is the
+        # address bar's, and only the proxy may state it.
+        host = (_from_proxy(request, "x-forwarded-host") or request.headers.get("host") or "").strip()
         if not _loopback_host(host):
             raise HTTPException(status_code=400, detail={
                 "message": "Linking through the app only works when the studio is open on this machine.",
@@ -2517,7 +2669,7 @@ def build_control_app(
         """What the browser polls while the owner is over in the app."""
         return {"ok": True, "state": hivemindos_models.link_state(nonce)}
 
-    @app.post("/api/hivemindos/models/merge-credits", dependencies=[Depends(require_owner)])
+    @app.post("/api/hivemindos/models/merge-credits", dependencies=[Depends(require_owner_account)])
     def hivemindos_models_merge(body: HivemindosMergeBody) -> dict:
         """Fold a second HivemindOS balance into the connected one."""
         try:
@@ -2527,7 +2679,7 @@ def build_control_app(
                 "message": str(exc), "remedy": exc.remedy, "provider": "hivemindos",
             }) from exc
 
-    @app.post("/api/hivemindos/models/top-up", dependencies=[Depends(require_owner)])
+    @app.post("/api/hivemindos/models/top-up", dependencies=[Depends(require_owner_account)])
     def hivemindos_models_top_up(body: HivemindosTopUpBody) -> dict:
         """Start a card checkout for HivemindOS credits, for a studio with no app.
 
@@ -4914,7 +5066,7 @@ def build_control_app(
         """The rules, the open unlocks, and anything waiting on the owner."""
         return {"ok": True, **access_state()}
 
-    @app.post("/api/passbook/policy/mode", dependencies=[Depends(require_owner)])
+    @app.post("/api/passbook/policy/mode", dependencies=[Depends(require_owner_account)])
     def passbook_set_mode(body: PassBookModeBody) -> dict:
         result = set_access_mode(app=body.app, key=body.key, mode=body.mode, window=body.window)
         if not result.get("ok"):
@@ -4924,7 +5076,7 @@ def build_control_app(
             })
         return result
 
-    @app.post("/api/passbook/policy/unlock", dependencies=[Depends(require_owner)])
+    @app.post("/api/passbook/policy/unlock", dependencies=[Depends(require_owner_account)])
     def passbook_unlock(body: PassBookUnlockBody) -> dict:
         """Open access for a stated period, then let it shut by itself."""
         result = open_unlock(duration=body.duration, keys=body.keys,
@@ -4936,11 +5088,11 @@ def build_control_app(
             })
         return result
 
-    @app.post("/api/passbook/policy/lock", dependencies=[Depends(require_owner)])
+    @app.post("/api/passbook/policy/lock", dependencies=[Depends(require_owner_account)])
     def passbook_lock(body: PassBookRevokeBody | None = None) -> dict:
         return {"ok": True, **close_unlock("")}
 
-    @app.post("/api/passbook/policy/resolve", dependencies=[Depends(require_owner)])
+    @app.post("/api/passbook/policy/resolve", dependencies=[Depends(require_owner_account)])
     def passbook_resolve(body: PassBookResolveBody, request: Request) -> dict:
         """Approve or decline a waiting request, with a passkey when one exists.
 
@@ -5002,7 +5154,7 @@ def build_control_app(
         """
         return {"ok": True, **machine_links()}
 
-    @app.post("/api/passbook/links/revoke", dependencies=[Depends(require_owner)])
+    @app.post("/api/passbook/links/revoke", dependencies=[Depends(require_owner_account)])
     def passbook_revoke_link(body: PassBookRevokeBody) -> dict:
         """Stop lending to a machine, and say what must still be rotated.
 
@@ -5018,7 +5170,7 @@ def build_control_app(
             })
         return {"ok": True, **result}
 
-    @app.post("/api/passbook/seal", dependencies=[Depends(require_owner)])
+    @app.post("/api/passbook/seal", dependencies=[Depends(require_owner_account)])
     def passbook_seal_store() -> dict:
         """Encrypt every plaintext value in the shared store, in place.
 
@@ -5037,7 +5189,7 @@ def build_control_app(
             })
         return {"ok": True, **result}
 
-    @app.post("/api/passbook", dependencies=[Depends(require_owner)])
+    @app.post("/api/passbook", dependencies=[Depends(require_owner_account)])
     def passbook_set(body: PassBookBody) -> dict:
         """Add credentials to the machine's shared store.
 

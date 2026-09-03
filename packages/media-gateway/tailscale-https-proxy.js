@@ -20,10 +20,22 @@ const studioTarget = process.env.HIVEMIND_STUDIO_TARGET || 'http://127.0.0.1:876
 const mcpTarget = process.env.MEDIA_STUDIO_MCP_TARGET || 'http://127.0.0.1:8796';
 const cert = process.env.ZIMAGE_TLS_CERT;
 const key = process.env.ZIMAGE_TLS_KEY;
+const PROXY_SECRET_HEADER = 'x-studio-proxy-secret';
+const proxySecret = (process.env.CONTENT_STUDIO_PROXY_SECRET || '').trim();
 
 if (!listenHost || !cert || !key) {
   console.error('Required env: TAILSCALE_IP, ZIMAGE_TLS_CERT, ZIMAGE_TLS_KEY');
   process.exit(2);
+}
+
+if (!proxySecret) {
+  // Said once, plainly, with the repair: without it the studio cannot tell this
+  // proxy from any other caller, so it stops believing the forwarded host —
+  // passkeys bind to 127.0.0.1 and writes from the tailnet address are refused
+  // as cross-site.
+  console.warn('[tailscale-https-proxy] CONTENT_STUDIO_PROXY_SECRET is unset: the studio will not '
+    + 'trust this proxy, so passkeys and writes over the tailnet URL will fail. Start the stack with '
+    + '`hivemind-studio-stack restart`, which mints the secret for both ends.');
 }
 
 const proxy = httpProxy.createProxyServer({
@@ -184,6 +196,14 @@ const server = http2.createSecureServer({
   headers['x-forwarded-proto'] = 'https';
   const remote = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : '';
   headers['x-forwarded-for'] = remote;
+  // Those three headers decide the studio's cookie `secure` flag, the WebAuthn
+  // relying-party id and which bucket a failed password counts against — so
+  // they must come from the proxy and nowhere else. The stack generates this
+  // secret per run and hands it to both ends; without it the studio reads what
+  // it can see itself and the tailnet address stops being recognised as the
+  // browser's own origin. Never let a client's own copy survive the hop.
+  delete headers[PROXY_SECRET_HEADER];
+  if (proxySecret) headers[PROXY_SECRET_HEADER] = proxySecret;
 
   const upstreamReq = http.request({
     hostname: routeTargetUrl.hostname,

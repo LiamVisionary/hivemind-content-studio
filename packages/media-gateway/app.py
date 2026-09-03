@@ -2919,7 +2919,13 @@ def public_record(rec):
     # whatever a current or future queueing path chose to keep in memory.
     out = private_rec(rec)
     if out.get("outputs"):
-        out["image_urls"] = [f"/image/{safe_name(Path(p).name)}?token={TOKEN}" for p in out["outputs"]]
+        # Bare paths. This used to carry the capability token in every URL, so
+        # one saved /api/history response was a permanent key to the whole
+        # library — and the token rode along into browser history and Referer
+        # headers. Every real reader already authenticates its own fetch: the
+        # studio proxies and the MCP send Authorization, and the pages served
+        # from this origin have the cookie.
+        out["image_urls"] = [f"/image/{safe_name(Path(p).name)}" for p in out["outputs"]]
     options = out.get("options")
     if isinstance(options, dict):
         out["options"] = {
@@ -10599,7 +10605,7 @@ def render_job_page(rec):
     rid = h(r.get("id"))
     return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>Media Studio job {rid}</title><style>{CSS}</style></head><body>
 <div class="wrap">
-  <header class="top"><div class="brand"><div class="orb"></div><div><div class="eyebrow">Generation detail</div><h1>Media Studio</h1></div></div><a class="pill" href="/?token={TOKEN}">← Back to history</a></header>
+  <header class="top"><div class="brand"><div class="orb"></div><div><div class="eyebrow">Generation detail</div><h1>Media Studio</h1></div></div><a class="pill" href="/">← Back to history</a></header>
   <main class="hero">
     <section class="glass live"><div class="live-head"><h3>Job {rid}</h3>{status_chip(status)}</div><div class="preview">{img}</div><div class="jobmeta">{h(nice_time(r.get('finished_at') or r.get('created_at')))} · <code>{rid}</code></div></section>
     <section class="glass composer"><h2>{'Rendering…' if active else 'Result'}</h2><p class="sub">{h(r.get('prompt'))}</p>{err}</section>
@@ -12269,6 +12275,23 @@ def unequip_model(mid):
     return len(after) != len(before)
 
 
+_LOOPBACK_ORIGIN_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _is_loopback_origin(origin):
+    """Is this Origin a page served from this machine?
+
+    Only these get a CORS header back. Anything else — including a page that
+    has pointed its own DNS name at 127.0.0.1 — can still make the request, but
+    cannot read the answer.
+    """
+    try:
+        host = (urlparse(origin.strip()).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _LOOPBACK_ORIGIN_HOSTS
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ZImageEndpoint/1.1"
 
@@ -12281,6 +12304,11 @@ class Handler(BaseHTTPRequestHandler):
         # absolute asset/API URLs without ?token=. Once a user reaches an
         # authenticated wrapper page, persist that auth to a same-origin cookie so
         # iframe assets, /mobile/api/* calls, and /comfy/* proxy calls can load.
+        #
+        # Kept on purpose after the gateway stopped EMITTING ?token= (2026-09-03):
+        # this promotion is what the Canvas and mobile iframes still depend on,
+        # and it is now the only place a token in a URL turns into anything. The
+        # links and JSON this server hands out carry bare paths.
         return f"zimg_token={TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
 
     def authed(self, query=None):
@@ -12302,7 +12330,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", self.auth_cookie_header())
 
     def cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        """CORS, plus the referrer rule every response here needs.
+
+        The wildcard origin this used to send bought nothing: 8787 listens on
+        loopback and its real callers are server-to-server (the studio proxies,
+        the wrapper, the MCP), which do not consult CORS at all. What it did buy
+        was that any origin which ever learned the capability token could spend
+        it cross-origin from a browser. Loopback origins are echoed instead —
+        that is the embedded Canvas and mobile UI — with Vary so no cache hands
+        one origin's answer to another, and everything else gets no CORS header
+        and so cannot read the response.
+
+        Referrer-Policy is here rather than beside each Content-Type because
+        every responder below goes through this one method: the gateway's HTML
+        pages link out, and without it the Referer carried this origin (and,
+        until this change, a token in the query string) to wherever the owner
+        clicked.
+        """
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and _is_loopback_origin(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+        self.send_header("Vary", "Origin")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Token")
         self.send_header("Access-Control-Max-Age", "86400")
@@ -13755,7 +13805,7 @@ class Handler(BaseHTTPRequestHandler):
             start_studio_generation_thread(
                 'image', options, run_generation, (job_id, prompt, loras, options))
             if parsed.path == "/generate":
-                return self.send_text(f"<meta http-equiv='refresh' content='0; url=/job/{job_id}?token={TOKEN}'>Queued job {job_id}. Opening live status page...", 202)
+                return self.send_text(f"<meta http-equiv='refresh' content='0; url=/job/{job_id}'>Queued job {job_id}. Opening live status page...", 202)
             return self.send_json({"id": job_id, "status": "queued", "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
         except Exception as e:
             return self.send_json({"error": str(e)}, 500)

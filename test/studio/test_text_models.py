@@ -743,13 +743,26 @@ def test_the_callback_is_open_to_the_app_but_only_from_this_machine(tmp_path, mo
 def test_linking_through_the_app_is_refused_when_the_studio_is_not_on_this_machine(tmp_path, monkeypatch) -> None:
     """`hivemindos://` resolves on the computer the BROWSER is on. Offered from a
     studio opened over the tailnet it would ask the wrong machine, so it is not
-    offered at all."""
+    offered at all.
+
+    The tailnet proxy rewrites Host to 127.0.0.1 on the way in, so the name that
+    matters is the one it forwards — and it is believed only from the proxy."""
+    from hivemind_content_studio.control_api import PROXY_SECRET_ENV, PROXY_SECRET_HEADER
+
+    monkeypatch.setenv(PROXY_SECRET_ENV, "test-proxy-secret")
     client = _client(tmp_path, monkeypatch)
 
-    response = client.post("/api/hivemindos/models/link-request", headers={"host": "studio.tail1234.ts.net"})
+    response = client.post("/api/hivemindos/models/link-request", headers={
+        "x-forwarded-host": "studio.tail1234.ts.net",
+        PROXY_SECRET_HEADER: "test-proxy-secret",
+    })
 
     assert response.status_code == 400
     assert "this machine" in response.json()["detail"]["message"]
+    # And a Host this studio does not answer to never reaches the route at all.
+    rebound = client.post("/api/hivemindos/models/link-request",
+                          headers={"host": "studio.tail1234.ts.net"})
+    assert rebound.status_code == 400
 
 
 def test_only_the_link_callback_was_added_to_the_sign_in_gate(tmp_path, monkeypatch) -> None:
