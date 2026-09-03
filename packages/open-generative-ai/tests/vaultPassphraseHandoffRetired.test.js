@@ -174,3 +174,30 @@ test('a first run creates the vault, remembers the device, announces the key, an
     assert.equal(await session.ensureVaultReady(), true, 'reload unlocks from the device wrap');
     assert.equal(vault.isVaultUnlocked(), true);
 });
+
+test('a PRF unlock retires the passphrase the gate stashed alongside the secret', async () => {
+    const vault = await vaultPromise;
+    const session = await sessionPromise;
+    const { identity } = await vault.createVaultIdentity(PASSPHRASE);
+    // The passkey was enrolled on an earlier sign-in, so the PRF wrap already
+    // exists and this unlock never reaches the passphrase branch — which used
+    // to mean the stashed passphrase sat there for the full 24 h.
+    const secret = new Uint8Array(32).fill(7);
+    const enrolled = {
+        ...identity,
+        wrapped_mk_prf: JSON.stringify({ 'cred-9': await vault.wrapMasterKeyForPrf(identity, PASSPHRASE, secret) }),
+    };
+    signIn({ accountId: 3, prf: Buffer.from(secret).toString('base64url'), credentialId: 'cred-9' });
+    await reset(() => ({ body: { ok: true, exists: true, identity: enrolled } }));
+
+    assert.equal(await session.ensureVaultReady(), true);
+    assert.equal(answers.length, 0, 'nothing to enrol — the PRF wrap was already there');
+    assert.equal(storage.get(PASSPHRASE_KEY), undefined, 'the unused passphrase does not linger');
+    assert.deepEqual(hint(), { accountId: 3, credentialId: 'cred-9', prf: null });
+
+    // It bought a device wrap on the way out, so the reload — which no longer
+    // has the PRF secret either — still unlocks.
+    await reset(() => ({ body: { ok: true, exists: true, identity: enrolled } }));
+    assert.equal(await session.ensureVaultReady(), true);
+    assert.equal(vault.isVaultUnlocked(), true);
+});

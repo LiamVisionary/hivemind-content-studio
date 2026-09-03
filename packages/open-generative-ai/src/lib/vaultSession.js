@@ -147,7 +147,15 @@ function announceRecoveryKey(recoveryKey) {
  */
 async function unlockExisting(identity, hint, passphrase) {
     if (hint?.prf && hint.credentialId) {
-        if (await unlockWithPrf(identity, hint.credentialId, fromB64url(hint.prf))) return true;
+        if (await unlockWithPrf(identity, hint.credentialId, fromB64url(hint.prf))) {
+            // The PRF wrap did not need the passphrase — but on a password
+            // sign-in the gate stashed one anyway, and it would sit there for
+            // 24 h. Spend it on a device wrap instead, then retire it: after
+            // this the account id alone unlocks, so nothing is lost and an
+            // injected script has nothing to take.
+            if (passphrase) await finishPassphraseUnlock(identity, hint, passphrase);
+            return true;
+        }
     }
     if (hint?.accountId && await unlockWithDevice(identity, hint.accountId)) {
         // A device unlock has no passphrase, but it does put the master key
