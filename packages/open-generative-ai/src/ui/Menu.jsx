@@ -77,8 +77,21 @@ export function ChipButton({
  *   <MenuItem selected onClick={...}>…</MenuItem>
  * </Menu>
  */
-export function Menu({ trigger, children, align = 'start', up = false, width = 'w-64', panelClassName = '' }) {
-  const [open, setOpen] = useState(false);
+export function Menu({
+  trigger, children, align = 'start', up = false, width = 'w-64', panelClassName = '',
+  // Optional controlled mode: pass `open` (plus `onOpenChange`) when something
+  // OUTSIDE the trigger has to open this menu — a route that folded a retired
+  // page into it, say. Omit both and the menu keeps its own state as before.
+  open: openProp, onOpenChange,
+}) {
+  const [selfOpen, setSelfOpen] = useState(false);
+  const controlled = openProp !== undefined;
+  const open = controlled ? Boolean(openProp) : selfOpen;
+  const setOpen = (next) => {
+    const value = typeof next === 'function' ? next(open) : next;
+    if (!controlled) setSelfOpen(value);
+    onOpenChange?.(value);
+  };
   const ref = useDismissable(open, () => setOpen(false));
   const panelRef = useRef(null);
   const [side, setSide] = useState(align);

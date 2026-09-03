@@ -13,7 +13,6 @@ export const NAV_SECTIONS = [
       { page: 'story', icon: 'persona', label: () => (zh() ? '故事' : 'Story') },
       { page: 'lipsync', icon: 'mic', label: () => t('nav.lipsync') },
       { page: 'restore', icon: 'wand', label: () => (zh() ? '修复' : 'Restore') },
-      { page: 'cinema', icon: 'clapper', label: () => t('nav.cinema') },
       { page: 'canvas', icon: 'nodes', label: () => (zh() ? '画布' : 'Canvas') },
     ],
   },
@@ -43,7 +42,7 @@ export const NAV_ITEMS = NAV_SECTIONS.flatMap((s) => s.items);
 export const APP_NAME = 'Hivemind Content Studio';
 
 // Studio pages rebuild on every navigation; hub pages persist once mounted.
-export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'cinema', 'lipsync', 'restore', 'mcp-cli'];
+export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'lipsync', 'restore', 'mcp-cli'];
 export const HUB_PAGES = {
   planner: 'create',
   canvas: 'canvas',
@@ -57,6 +56,14 @@ export const HUB_PAGES = {
   passbook: 'passbook',
 };
 
+// Retired pages that still resolve. A page key is a wire contract — old links,
+// bookmarks and 'navigate' events keep arriving long after a tab folds into a
+// control — so the key survives as a redirect that also opens the control it
+// became. Cinema is now the Image composer's Camera menu.
+export const PAGE_ALIASES = {
+  cinema: { page: 'image', menu: 'camera' },
+};
+
 export function isKnownPage(page) {
-  return STUDIO_PAGES.includes(page) || Boolean(HUB_PAGES[page]);
+  return Boolean(PAGE_ALIASES[page]) || STUDIO_PAGES.includes(page) || Boolean(HUB_PAGES[page]);
 }

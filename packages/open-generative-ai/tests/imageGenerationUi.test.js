@@ -71,6 +71,8 @@ test('image preferences retain provider, dropdown, advanced, and per-model LoRA 
         rentedMachineId: '',
         sampler: '',
         scheduler: '',
+        // The Camera menu's rig — normalized to its defaults when none was saved.
+        cameraRig: { camera: 'Modular 8K Digital', lens: 'Creative Tilt Lens', focal: 35, aperture: 'f/1.4' },
         modelSettings: {},
         loraSelections: {
             'krea2-turbo': [{
@@ -118,6 +120,7 @@ test('image preferences reject missing models and recover safe defaults', async 
         rentedMachineId: '',
         sampler: '',
         scheduler: '',
+        cameraRig: { camera: 'Modular 8K Digital', lens: 'Creative Tilt Lens', focal: 35, aperture: 'f/1.4' },
         modelSettings: {},
         loraSelections: {},
     });

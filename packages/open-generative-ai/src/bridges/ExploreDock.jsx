@@ -35,7 +35,7 @@ import { SectionLabel, cx } from '../ui/kit.jsx';
 const LIST_LIMIT = 8;
 // The pages whose studio registers a prompt inserter while it is on screen
 // (registerPromptInserter in each studio's `active` effect).
-const PROMPT_PAGES = new Set(['image', 'video', 'cinema', 'lipsync']);
+const PROMPT_PAGES = new Set(['image', 'video', 'lipsync']);
 
 const zh = () => getLang() === 'zh-CN';
 

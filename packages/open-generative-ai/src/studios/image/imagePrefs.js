@@ -3,6 +3,8 @@
 // Tests import normalizeImagePreferences from HERE, so what they exercise is
 // what the studio runs.
 
+import { normalizeCameraRig } from '../../lib/cameraRig.js';
+
 export const IMAGE_PREFERENCES_KEY = 'image_generation_preferences';
 export const STYLE_PRESETS = ['None', 'Photorealistic', 'Anime', 'Cinematic', 'Oil Painting', 'Watercolor', 'Digital Art', 'Concept Art', 'Cyberpunk'];
 
@@ -126,6 +128,9 @@ export function normalizeImagePreferences(value) {
         characterSheetMode: Boolean(value.characterSheetMode),
         characterSheetPreset: ['turnaround', 'standard', 'full'].includes(value.characterSheetPreset) ? value.characterSheetPreset : 'turnaround',
         regionMode: Boolean(value.regionMode),
+        // The Camera menu's rig, bounded to the option banks by its own
+        // normalizer — a corrupt blob can only ever restore a valid rig.
+        cameraRig: normalizeCameraRig(value.cameraRig),
         modelSettings,
         loraSelections,
     };
