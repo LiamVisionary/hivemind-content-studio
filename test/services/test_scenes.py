@@ -13,6 +13,8 @@ budget and leave the ending playing over whatever was left.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.models.schema import MaterialInfo, SceneConfig, VideoParams

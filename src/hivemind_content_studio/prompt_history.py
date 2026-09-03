@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import uuid
@@ -65,6 +66,19 @@ class PromptHistoryStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
+
+    def close(self) -> None:
+        """Checkpoint the WAL and let SQLite drop its sidecars.
+
+        A caller that deletes this database's directory (account_scope.destroy)
+        otherwise races SQLite for the `-wal` file: the walk lists it, SQLite
+        removes it when the last connection goes, and the unlink then fails with
+        FileNotFoundError on a workspace that was in fact deleted.
+        """
+        if not self.path.exists():
+            return
+        with contextlib.closing(self._connect()) as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def _initialize(self) -> None:
         with self._connect() as connection:

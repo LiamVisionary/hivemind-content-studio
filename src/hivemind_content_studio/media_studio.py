@@ -21,13 +21,13 @@ from PIL import Image
 from .config import load_config
 from .mcp_http import PROTOCOL_VERSION, McpHttpClient
 from .publishing import encode_multipart
+from .qa import qa_video
 
 # How long to wait for the MCP to hand back a queued video job. Sized against
 # the two slow stretches inside that call - staging references on the target
 # lane, then ComfyUI accepting the prompt once its executor frees up - and kept
 # under the 190s Hivemind Link proxy leg so a phone gets the answer too.
 _VIDEO_START_TIMEOUT_SECONDS = 180.0
-from .qa import qa_video
 
 
 _VIDEO_ASPECT_DIMENSIONS = {
@@ -1262,7 +1262,9 @@ def _video_dimensions(image: Path, tier: str = "standard") -> tuple[int, int]:
     # half resolution, so a 32-aligned request such as 928 is silently floored
     # to 896 by the runtime after the job is recorded. Snapping to 64 keeps the
     # requested size equal to what actually renders.
-    snap = lambda value: max(256, min(max_dim, round(value / 64) * 64))
+    def snap(value: float) -> int:
+        return max(256, min(max_dim, round(value / 64) * 64))
+
     return snap(target_width), snap(target_height)
 
 

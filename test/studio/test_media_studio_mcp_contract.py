@@ -21,6 +21,10 @@ ROOT = Path(__file__).resolve().parents[2]
 MCP_SOURCE = ROOT / "packages" / "media-gateway" / "bin" / "media-studio-mcp.mjs"
 WORKFLOW_REGISTRY = ROOT / "packages" / "media-gateway" / "workflow-registry.json"
 
+# Seconds, not milliseconds: every test here starts the real Node MCP over
+# HTTP and probes clips with ffprobe.
+pytestmark = pytest.mark.slow
+
 def _skip_without_local_workflow(workflow_id: str) -> None:
     """Skip when the graph this workflow renders from is not on this machine.
 

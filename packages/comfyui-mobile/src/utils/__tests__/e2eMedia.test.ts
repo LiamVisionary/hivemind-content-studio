@@ -7,13 +7,16 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Resolved from this file, not from where the checkout happens to live: an
 // absolute path here breaks the moment the repository is moved, which is
-// exactly what happened on 2026-08-26.
-const ROOT = fileURLToPath(new URL('../../../../../', import.meta.url));
-const PY = `${ROOT}.venv/bin/python`;
-const SEAL = `${ROOT}packages/media-gateway/media_seal.py`;
+// exactly what happened on 2026-08-26. Resolve it through path.dirname rather
+// than `new URL(relative, import.meta.url)` — Vite rewrites that literal into
+// an /@fs asset URL, and fileURLToPath then refuses the http scheme.
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../..');
+const PY = path.join(ROOT, '.venv/bin/python');
+const SEAL = path.join(ROOT, 'packages/media-gateway/media_seal.py');
 const PASSPHRASE = 'mobile-vault-pass';
 const PBKDF2_ITERATIONS = 600_000;
 
@@ -115,7 +118,12 @@ async function loadModules() {
   return { workflowEncryption, e2eMedia };
 }
 
-describe('mobile E2E media decrypt', () => {
+// The sealing half of this interop runs the repo's own Python (media_seal.py).
+// A checkout without .venv — a fresh CI runner — cannot seal, so the suite says
+// so by skipping instead of failing and taking the rest of the file with it.
+const canSeal = fs.existsSync(PY) && fs.existsSync(SEAL);
+
+describe.skipIf(!canSeal)('mobile E2E media decrypt', () => {
   it('decrypts a Python-sealed envelope after the WorkflowUnlockGate unlock', async () => {
     const vault = await buildVaultIdentity(PASSPHRASE);
     const plaintext = Buffer.from('sealed mobile canvas video bytes '.repeat(48));
