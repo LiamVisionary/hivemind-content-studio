@@ -1748,6 +1748,7 @@ export function VideoStudio({
     s.progressDisplay = 0;
     s.progressReal = 0;
     s.progressSteps = null;
+    s.progressOvertimeMin = null;
     s.progressEstimateSec = Number(estimateSeconds) || null;
     // Cleared per run, and re-set by the submit below (which happens after
     // this call): a count left over from the previous generation would
@@ -1772,10 +1773,14 @@ export function VideoStudio({
     if (s.generationTimer) clearInterval(s.generationTimer);
     s.generationTimer = null;
   };
-  const updateGenerationProgress = ({ status = '', progress = null, stage = '', estimateSeconds = null, step = null, stepTotal = null } = {}) => {
+  const updateGenerationProgress = ({ status = '', progress = null, stage = '', estimateSeconds = null, step = null, stepTotal = null, overtimeMinutes = null } = {}) => {
     const value = normalizeVideoGenerationProgress(progress);
     if (value != null) s.progressReal = value;
     if (Number(estimateSeconds) > 0) s.progressEstimateSec = Number(estimateSeconds);
+    // Well past the estimate but still alive on the server. Said out loud in
+    // the progress card, next to a Cancel that is already there — the poller
+    // no longer has a clock of its own to fail the run with.
+    if (Number(overtimeMinutes) > 0) s.progressOvertimeMin = Number(overtimeMinutes);
     // Sampler step counters, when the backend measures them. Sticky: the
     // counters stop arriving once sampling ends and the untracked tail
     // (decode, mux, fetch-back) begins, and blanking the label there would
@@ -3057,6 +3062,7 @@ export function VideoStudio({
             estimateSeconds: data.estimateSeconds,
             step: data.step,
             stepTotal: data.stepTotal,
+            overtimeMinutes: data.overtimeMinutes,
           });
         };
         // Mirror the started job to sessionStorage so a tab switch / reload can
@@ -3585,6 +3591,7 @@ export function VideoStudio({
                     estimateSeconds: data.estimateSeconds,
                     step: data.step,
                     stepTotal: data.stepTotal,
+                    overtimeMinutes: data.overtimeMinutes,
                   });
                 },
               })
@@ -5185,6 +5192,13 @@ export function VideoStudio({
                 <span>{progressStageLabel}{progressDetail ? ` · ${progressDetail}` : ''}</span>
                 <span>{t('video.progress.elapsed')} {progressElapsed}{progressEta ? ` · ${progressEta}` : ''}</span>
               </div>
+              {s.progressOvertimeMin ? (
+                <div className="text-[11px] text-ink3">
+                  {zh()
+                    ? `已渲染 ${s.progressOvertimeMin} 分钟，仍在进行 — 可以继续等待，或用上方的“取消”停止。`
+                    : `Still rendering after ${s.progressOvertimeMin} min — keep waiting, or use Cancel above to stop.`}
+                </div>
+              ) : null}
             </Card>
           ) : null}
 

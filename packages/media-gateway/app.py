@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import select
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -354,6 +355,16 @@ def parse_remote_comfy_lanes():
     return {re.sub(r"[^a-z0-9_-]", "", part.strip().lower()) for part in raw.split(',') if part.strip()}
 
 
+def gateway_version():
+    """The package version, for /health. A build with no readable package.json
+    reports "0" rather than failing the health check over a missing file."""
+    try:
+        return str(json.loads((BASE / "package.json").read_text(encoding="utf-8")).get("version") or "0")
+    except Exception:
+        return "0"
+
+
+GATEWAY_VERSION = gateway_version()
 COMFY_LANES = parse_comfy_lanes()
 COMFY_LANE_RULES = parse_comfy_lane_rules()
 COMFY_LANE_TOKENS = parse_comfy_lane_tokens()
@@ -504,18 +515,99 @@ def comfy_lane_liveness_error(lane, timeout=4.0):
     """
     if not comfy_lane_is_remote(lane):
         return None
-    try:
-        with urlopen(comfy_lane_request(lane, "/system_stats"), timeout=timeout) as response:
-            if response.status < 400:
-                return None
-            detail = f"answered HTTP {response.status}"
-    except Exception as exc:
-        detail = f"{exc.__class__.__name__}: {exc}"
+    detail = comfy_lane_probe_detail(lane, timeout)
+    if detail is None:
+        return None
     return (
         f"the machine behind lane '{lane}' is not answering ({detail}). Its tunnel has "
         f"dropped or the instance is gone - re-attach it in Machines, and detach it if the "
         f"rental has ended."
     )
+
+
+def comfy_lane_probe_detail(lane, timeout=4.0):
+    """One /system_stats knock at a lane, remote or not. None when it answers.
+
+    comfy_lane_liveness_error() above stays remote-only: probing the local lane
+    before every prompt would be a round trip on the hot path for the one lane
+    whose absence the submit itself reports immediately. /health is the other
+    case - it is asked precisely so the studio can say "Local ComfyUI is off"
+    BEFORE the user composes a prompt - so it probes every lane through here.
+    """
+    try:
+        with urlopen(comfy_lane_request(lane, "/system_stats"), timeout=timeout) as response:
+            if response.status < 400:
+                return None
+            return f"answered HTTP {response.status}"
+    except Exception as exc:
+        return f"{exc.__class__.__name__}: {exc}"
+
+
+_LANE_HEALTH_TTL_S = 5.0
+_lane_health_cache = {}
+_lane_health_lock = threading.Lock()
+
+
+def comfy_lane_health(lane, timeout=2.0):
+    """Is this lane there, right now — cached for five seconds.
+
+    /health is polled by the supervisor, the MCP status tool and the studio's
+    catalog liveness, so the probe is cached: a burst of callers costs one knock
+    per lane, and five seconds is short enough that a crashed ComfyUI is news
+    almost immediately.
+    """
+    now = time.monotonic()
+    with _lane_health_lock:
+        cached = _lane_health_cache.get(lane)
+        if cached and now - cached[0] < _LANE_HEALTH_TTL_S:
+            return dict(cached[1])
+    remote = comfy_lane_is_remote(lane)
+    detail = comfy_lane_probe_detail(lane, timeout)
+    entry = {"remote": remote, "alive": detail is None}
+    if detail is not None:
+        entry["error"] = (
+            f"the machine behind lane '{lane}' is not answering. Re-attach it in Machines, "
+            f"and detach it if the rental has ended."
+            if remote else
+            f"ComfyUI is not running on lane '{lane}'. Start it from Machines before generating."
+        )
+    with _lane_health_lock:
+        _lane_health_cache[lane] = (now, dict(entry))
+    return dict(entry)
+
+
+def comfy_lane_health_snapshot(timeout=1.5):
+    """Every lane's state, probed in parallel and bounded.
+
+    /health is the supervisor's readiness gate, so the endpoint must not take
+    one dead lane's timeout after another: probing serially with two dead
+    rentals attached would push the response past several seconds and make
+    readiness itself flap. One thread per lane, one join deadline for all.
+    """
+    lanes = sorted(COMFY_LANES)
+    results = {}
+    threads = []
+    for lane in lanes:
+        def probe(name=lane):
+            try:
+                results[name] = comfy_lane_health(name, timeout)
+            except Exception as exc:
+                results[name] = {"remote": comfy_lane_is_remote(name), "alive": False,
+                                 "error": f"lane '{name}' could not be checked ({exc.__class__.__name__})"}
+        thread = threading.Thread(target=probe, daemon=True)
+        thread.start()
+        threads.append(thread)
+    deadline = time.monotonic() + timeout + 0.5
+    for thread in threads:
+        thread.join(max(0.05, deadline - time.monotonic()))
+    return {
+        lane: results.get(lane, {
+            "remote": comfy_lane_is_remote(lane),
+            "alive": False,
+            "error": f"lane '{lane}' did not answer in time",
+        })
+        for lane in lanes
+    }
 
 
 # ---- Lane launch flags ------------------------------------------------------
@@ -1514,10 +1606,7 @@ def _persist_comfy_prompt_routes_locked():
     try:
         while len(_comfy_prompt_routes) > COMFY_PROMPT_ROUTES_MAX:
             _comfy_prompt_routes.pop(next(iter(_comfy_prompt_routes)))
-        COMFY_PROMPT_ROUTES_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = COMFY_PROMPT_ROUTES_FILE.with_name(f".{COMFY_PROMPT_ROUTES_FILE.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(_comfy_prompt_routes, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, COMFY_PROMPT_ROUTES_FILE)
+        write_json_atomic(COMFY_PROMPT_ROUTES_FILE, _comfy_prompt_routes)
     except Exception as exc:
         print(f"[comfy-routes] persist failed: {exc}", file=sys.stderr)
 
@@ -2289,6 +2378,33 @@ def record_studio_workflow_setup(filenames, graph, prompt_id=None, workflow_stem
         print(f"[workflow-index] studio setup record failed: {e}", file=sys.stderr)
 
 
+def write_json_atomic(path, payload, *, indent=None):
+    """Write a state file so a crash can never leave half of one behind.
+
+    The loaders here treat unparseable state as absent — load_download_jobs()
+    returns {} on a JSONDecodeError — so a truncated write is not a corrupt
+    file, it is a silently emptied queue. Same tmp+os.replace as the route
+    store has always used; every JSON state file gets it now.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=indent)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.replace(temporary, path)
+    except OSError:
+        # The previous file is still whole; take the half-written one with us
+        # rather than leaving it for a directory listing to trip over.
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _atomic_write_jsonl(path, records):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2781,8 +2897,10 @@ def load_download_jobs():
 
 
 def save_download_jobs_unlocked():
-    # Caller must hold download_jobs_lock.
-    DOWNLOAD_JOBS_FILE.write_text(json.dumps(download_jobs, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Caller must hold download_jobs_lock. Atomic: a crash between truncate and
+    # write used to empty the whole download queue, because the loader reads an
+    # unparseable file as "no jobs".
+    write_json_atomic(DOWNLOAD_JOBS_FILE, download_jobs, indent=2)
 
 
 def update_download_job(job_id, **fields):
@@ -9882,6 +10000,10 @@ def _run_native_ltx_subprocess(job_id, rec, cmd, *, cwd, env, timeout=2400):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,
+        # Its own process group, so shutdown can kill the whole render — the
+        # runner spawns workers of its own, and terminating only the parent
+        # leaves them holding the GPU.
+        start_new_session=True,
     )
     with jobs_lock:
         native_job_procs[job_id] = proc
@@ -12563,13 +12685,29 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
         if parsed.path in ["/healthz", "/health"]:
+            # `ok` is about THIS process; the lanes are reported separately.
+            # /health used to say ok:true while every ComfyUI was down, so the
+            # supervisor, the MCP status tool and the studio's catalog all
+            # believed the engine was there and the user found out on the first
+            # 502 — after composing a prompt. The lane URLs stay behind the
+            # token: an unauthenticated caller learns that a lane is degraded,
+            # not where a rented machine lives.
+            refresh_comfy_lanes()
+            authed = self.authed(qs)
+            lanes = {
+                lane: {**({"url": COMFY_LANES.get(lane) or ""} if authed else {}), **health}
+                for lane, health in comfy_lane_health_snapshot().items()
+            }
             return self.send_json({
                 "ok": True,
+                "version": GATEWAY_VERSION,
                 "comfy": str(COMFY),
                 "runner": RUNNER.exists(),
                 "ui": "v2",
                 "accelerator_profile": accelerator_profile(),
                 "native_mlx_ltx": supports_native_mlx_ltx_route(),
+                "lanes": lanes,
+                "degraded": [lane for lane, state in lanes.items() if not state.get("alive")],
             })
         if not self.authed(qs):
             return self.send_text("Unauthorized. Add ?token=... or Authorization: Bearer ***", 401, "text/plain")
@@ -13631,6 +13769,126 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"error": "not found"}, 404)
 
 
+JOB_INTERRUPTED_MESSAGE = "The studio restarted before this finished."
+
+
+def terminate_native_job_processes(timeout=3.0):
+    """Stop every native (MLX) render this process started — and its workers.
+
+    The children are started in their own session (start_new_session=True), so
+    the whole group goes at once. Killing only the parent leaves its workers
+    holding the GPU until they happen to notice a broken pipe, which is not a
+    guarantee worth shipping on a machine that is about to start a new render.
+    """
+    with jobs_lock:
+        running = [(job_id, proc) for job_id, proc in native_job_procs.items() if proc.poll() is None]
+    for _job_id, proc in running:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except OSError:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+    deadline = time.monotonic() + timeout
+    for _job_id, proc in running:
+        try:
+            proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except Exception:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except OSError:
+                pass
+    return [job_id for job_id, _proc in running]
+
+
+def _job_is_remote_in_flight(rec):
+    """A prompt on a rented lane outlives this process on purpose.
+
+    respawn_remote_comfy_watchers() re-arms its watcher on the next boot and
+    harvests the output then, so marking it interrupted would be a lie AND
+    would mask the live route record behind a terminal history entry.
+    """
+    route = comfy_prompt_route(rec.get("comfy_prompt_id"))
+    return bool(isinstance(route, dict) and route.get("remote") and route.get("status") == "submitted")
+
+
+def interrupt_in_flight_jobs():
+    """Say what happened to the jobs this process was running when it stopped.
+
+    Without this a restart left them in memory only: the poller asked for a job
+    the gateway had never heard of, and the studio guessed — telling the user
+    the clip would appear in History, which for a local render it never does.
+    The record goes to history because that is where find_job() looks after a
+    restart, so the next poll gets a true answer with a retry attached.
+    """
+    with jobs_lock:
+        candidates = [
+            rec for rec in jobs.values()
+            if isinstance(rec, dict) and rec.get("status") in {"queued", "running"}
+        ]
+    # The route lookup takes its own lock; asking for it while holding jobs_lock
+    # would nest two locks that nothing else nests.
+    local = [rec for rec in candidates if not _job_is_remote_in_flight(rec)]
+    interrupted = []
+    with jobs_lock:
+        for rec in local:
+            if rec.get("status") not in {"queued", "running"}:
+                continue  # finished between the two passes; leave it alone
+            rec["status"] = "interrupted"
+            rec["error"] = JOB_INTERRUPTED_MESSAGE
+            rec["finished_at"] = rec.get("finished_at") or now_iso()
+            interrupted.append(dict(rec))
+    for rec in interrupted:
+        try:
+            append_history(rec)
+        except Exception as exc:
+            print(f"[shutdown] could not record interrupted job {rec.get('id')}: {exc}", file=sys.stderr)
+    return interrupted
+
+
+def shutdown_gateway(server=None):
+    """The one ordering that matters on the way out.
+
+    The job records go first because they are the only step that must reach
+    disk: the stack sends SIGTERM and follows with SIGKILL about two seconds
+    later, and a killed process writes nothing. Terminating the children is a
+    signal plus a short reap, which fits in what is left. Safe to call twice.
+    """
+    interrupted = interrupt_in_flight_jobs()
+    stopped = terminate_native_job_processes(timeout=1.0)
+    if stopped or interrupted:
+        print(
+            f"[shutdown] stopped {len(stopped)} native render(s), "
+            f"marked {len(interrupted)} job(s) interrupted",
+            flush=True,
+        )
+    if server is not None:
+        # serve_forever() must not be stopped from inside its own thread.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+    return {"stopped": stopped, "interrupted": [rec.get("id") for rec in interrupted]}
+
+
+def install_shutdown_handlers(server):
+    stopping = threading.Event()
+
+    def handle(signum, _frame):
+        if stopping.is_set():
+            return
+        stopping.set()
+        print(f"[shutdown] signal {signum}: stopping", flush=True)
+        shutdown_gateway(server)
+
+    for name in ("SIGTERM", "SIGINT"):
+        with_signal = getattr(signal, name, None)
+        if with_signal is not None:
+            try:
+                signal.signal(with_signal, handle)
+            except (ValueError, OSError):
+                pass  # not the main thread (embedded/test import): nothing to install
+    return stopping
+
+
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -13669,7 +13927,13 @@ def main():
         if changed:
             save_download_jobs_unlocked()
     print(f"Media Studio endpoint listening on http://{HOST}:{PORT}", flush=True)
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    install_shutdown_handlers(server)
+    try:
+        server.serve_forever()
+    finally:
+        shutdown_gateway()
+        server.server_close()
 
 
 if __name__ == "__main__":

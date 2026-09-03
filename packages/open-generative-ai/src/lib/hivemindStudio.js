@@ -792,6 +792,16 @@ export async function cancelHivemindVideoJob(jobId) {
     }
 }
 
+// How long past its own estimate a render is allowed to run before the poller
+// says something. Not a deadline: the server owns the terminal states now (it
+// ends a job whose backend stopped answering), so passing this only earns a
+// "still rendering — keep waiting or Cancel" line. A wall-clock deadline here
+// used to fail renders that were fine: timers pause while a laptop sleeps but
+// Date.now() does not, so a lid closed for two hours woke to a timeout for a
+// clip the server was still tracking.
+const VIDEO_OVERTIME_MULTIPLE = 3;
+const VIDEO_OVERTIME_FLOOR_SECONDS = 30 * 60;
+
 // Poll an already-started Media Studio video job to completion. Shared by the
 // initial generation (above) and the mount-time resume path in VideoStudio, so a
 // generation survives the studio remounting mid-render. Resolves to the same
@@ -805,9 +815,12 @@ export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds 
         id: payload.job_id || payload.id || id,
         url: payload.url || payload.media_url || payload.output_url,
     });
-    const deadline = Date.now() + 90 * 60 * 1000;
-    let missing = 0;
-    while (Date.now() < deadline) {
+    const startedAt = Date.now();
+    // Three in a row, not one: a single failed poll is a blip, and the job on
+    // the other side survives blips.
+    let failures = 0;
+    let overtimeAnnounced = 0;
+    for (;;) {
         if (signal?.aborted) throw cancelled();
         // 2s poll: the bar is smoothed client-side between polls, so this only needs
         // to keep real progress / estimate / completion reasonably fresh. The wait
@@ -823,29 +836,62 @@ export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds 
         try {
             const response = await fetch(`/api/media-studio/video/job/${encodeURIComponent(id)}`, { credentials: 'same-origin', ...(signal ? { signal } : {}) });
             if (response.status === 404) {
-                // The studio API restarted and lost the job registry. The
-                // gateway job itself keeps running and lands in History.
-                missing += 1;
-                if (missing >= 3) throw new Error('The studio restarted mid-generation. The finished video will appear in the History tab.');
+                // Nobody has this job: not the registry, not the gateway, not
+                // its history. The server re-adopts a job that is still running
+                // before it ever answers 404, so this is the end of the road —
+                // and it must not promise a clip that may never arrive.
+                failures += 1;
+                if (failures >= 3) {
+                    throw Object.assign(
+                        new Error('The studio restarted and this render was lost. Generate again — anything that did finish is in the History tab.'),
+                        { retryable: true },
+                    );
+                }
                 continue;
             }
-            missing = 0;
+            if (!response.ok) {
+                // A 5xx used to fall straight through to the bare `continue`
+                // below and poll a broken server until the wall clock gave up.
+                failures += 1;
+                if (failures >= 3) {
+                    throw Object.assign(
+                        new Error('The studio stopped answering about this render. Generate again — anything that did finish is in the History tab.'),
+                        { retryable: true },
+                    );
+                }
+                continue;
+            }
+            failures = 0;
             payload = await response.json().catch(() => ({}));
         } catch (error) {
             if (signal?.aborted || error?.name === 'AbortError') throw cancelled();
-            if (missing >= 3) throw error;
+            if (error?.retryable || failures >= 3) throw error;
+            failures += 1;
             continue; // transient network blip — the job survives server-side
         }
         if (payload.status === 'error' || payload.ok === false) {
-            throw new Error(payload.detail || payload.error || 'Media Studio reported a failed generation');
+            throw Object.assign(
+                new Error(payload.detail || payload.error || 'Media Studio reported a failed generation'),
+                ...(payload.retryable ? [{ retryable: true }] : []),
+            );
         }
         if (payload.status === 'running') {
             estimate = Number(payload.estimate_seconds) || estimate;
+            const elapsed = Number(payload.elapsed_seconds) || (Date.now() - startedAt) / 1000;
+            // Past its own estimate by a wide margin: say so once a minute
+            // rather than calling a live render a failure.
+            const ceiling = Math.max((estimate || 0) * VIDEO_OVERTIME_MULTIPLE, VIDEO_OVERTIME_FLOOR_SECONDS);
+            const overtimeMinutes = elapsed > ceiling ? Math.floor(elapsed / 60) : 0;
+            if (overtimeMinutes > overtimeAnnounced) overtimeAnnounced = overtimeMinutes;
             if (typeof onProgress === 'function') {
                 onProgress({
                     progress: typeof payload.progress === 'number' ? payload.progress : null,
                     estimateSeconds: estimate,
                     elapsedSeconds: Number(payload.elapsed_seconds) || null,
+                    // Minutes so far, only once the run is well past its
+                    // estimate. The studio turns this into "still rendering —
+                    // keep waiting or Cancel", never an error.
+                    overtimeMinutes: overtimeAnnounced || null,
                     // Present only when the backend reports real sampler
                     // counters (a rented lane does); absent on paths where the
                     // bar is still a time estimate, so the label never implies
@@ -858,5 +904,4 @@ export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds 
         }
         if (payload.ok && (payload.url || payload.media_url || payload.output_url)) return done(payload);
     }
-    throw new Error('Media Studio generation timed out. If it finishes later, the video will appear in the History tab.');
 }
