@@ -10,6 +10,9 @@
 // API enforces all three; the UI is written so they are also obvious.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getLang } from '../../lib/i18n.js';
+import { MUAPI_CREDENTIAL } from '../../lib/muapiKey.js';
+import { muapi } from '../../lib/muapi.js';
+import { refreshMuapiKeyLocation } from '../../lib/providerReadiness.js';
 import { Button, Card, Field, Pill, SectionLabel, Spinner, TextInput } from '../../ui/kit.jsx';
 import { api } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
@@ -354,6 +357,12 @@ export function PassBookView({ active = true }) {
                 : result.updated?.length
                     ? (zh() ? `${key} 已替换。` : `${key} replaced.`)
                     : (zh() ? `${key} 已存在，未更改。` : `${key} was already stored; nothing changed.`));
+            if (key === MUAPI_CREDENTIAL) {
+                // The studios' client cached "no server key" at boot; forget it, or
+                // the next Generate still asks this browser for a key it no longer needs.
+                muapi.resetRoute();
+                void refreshMuapiKeyLocation();
+            }
             await load();
         } catch (error) {
             setNotice(error?.detail?.message || error?.message || (zh() ? '保存失败。' : 'Could not save that key.'));

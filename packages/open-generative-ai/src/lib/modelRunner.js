@@ -29,7 +29,7 @@
 // instead of being sent a payload shaped for somewhere else.
 import { isLocalAIAvailable, localAI } from './localInferenceClient.js';
 import { canvasPixels } from '../studios/story/sheetLayout.js';
-import { generateHivemindVideo, isHivemindStudioEnabled } from './hivemindStudio.js';
+import { generateHivemindVideo, isHivemindStudioEnabled, markMuapiKeyOnServer } from './hivemindStudio.js';
 import { flattenApiDetail } from './muapiErrors.js';
 import { muapi } from './muapi.js';
 
@@ -165,9 +165,14 @@ export function clipRouteFor(row) {
 // key?" has an answer that is no longer always yes.
 let muapiKeyOnServer = null;
 
-/** Told by the readiness fetch, which asks /api/muapi/status once. */
+/** Told by the readiness fetch, which asks /api/muapi/status once — seeded at
+ *  app boot (lib/muapiKey.js) so every studio has the answer, not just the one
+ *  that happened to ask. */
 export function setMuapiKeyOnServer(present) {
   muapiKeyOnServer = present === null ? null : Boolean(present);
+  // The legacy scrub lives with the other localStorage scrubs; it only has to
+  // know that the server holds the key before it may drop the browser copy.
+  markMuapiKeyOnServer(muapiKeyOnServer === true);
 }
 
 export function muapiKeyIsOnServer() {
@@ -181,10 +186,19 @@ export function browserCredentialFor(row) {
   return muapiKeyIsOnServer() ? '' : 'muapi';
 }
 
-/** True when the row cannot run for lack of a credential THIS browser holds. */
+/** True when the row cannot run for lack of a credential THIS browser holds.
+ *  The one place the browser copy is read for a gate: with the key on this
+ *  machine it is never consulted, which is what stops a configured machine
+ *  from asking for a key it already has. */
 export function needsBrowserKey(row) {
   if (browserCredentialFor(row) !== 'muapi') return false;
   try { return !localStorage.getItem('muapi_key'); } catch { return false; }
+}
+
+/** The same gate for a MUAPI call that has no model row — an upload, a resumed
+ *  poll. True when neither this machine nor this browser holds the key. */
+export function muapiKeyMissing() {
+  return needsBrowserKey(muapiRow(''));
 }
 
 /**
@@ -301,7 +315,17 @@ export async function runVideo({ row, shared = {}, extra = null, signal = null }
     return { ...result, provider: row.provider || 'local', model: row.id };
   }
   if (route.transport === 'muapi') {
-    const result = await muapi.generateVideo({ signal, ...payload, model: row.id });
+    // Same shape as runImage: a clip that starts from a frame, a source video
+    // or a voice track is a different MUAPI method, and the caller names it
+    // rather than calling it — so the readiness refusal above covers all of them.
+    const method = payload.method || 'generateVideo';
+    // A name the client does not have would otherwise surface as
+    // "muapi[method] is not a function" in a toast.
+    if (typeof muapi[method] !== 'function') {
+      throw new Error(`The studio has no “${method}” call for this clip.`);
+    }
+    const { method: _drop, ...params } = payload;
+    const result = await muapi[method]({ signal, ...params, model: row.id });
     if (!result?.url) throw new Error('No video URL returned.');
     return { ...result, provider: 'muapi', model: row.id };
   }

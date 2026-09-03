@@ -15,7 +15,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
-import { localRow, muapiRow, runImage } from '../lib/modelRunner.js';
+import { localRow, muapiRow, needsBrowserKey, runImage } from '../lib/modelRunner.js';
 // Still imported for the NON-generation calls — polling a resumed job and
 // uploading a reference. Generation goes through runImage().
 import { muapi } from '../lib/muapi.js';
@@ -1924,8 +1924,10 @@ export function ImageStudio({
     }
 
     // ── Remote API path ───────────────────────────────────────────────────
-    const apiKey = localStorage.getItem('muapi_key');
-    if (!apiKey) {
+    // The key this machine holds counts: needsBrowserKey is false when the
+    // shared store has MUAPI_API_KEY (seeded once at boot), so a configured
+    // machine never sees this dialog.
+    if (needsBrowserKey(muapiRow(s.selectedModel))) {
       authRetryRef.current = () => generate();
       s.authOpen = true;
       bump();
@@ -2101,7 +2103,10 @@ export function ImageStudio({
     // canvas; the primary tab additionally adopts the ownerless ones (a tab closed
     // mid-render, or a job saved before jobs carried a tab id) into history.
     (async () => {
-      const apiKey = localStorage.getItem('muapi_key');
+      // A cloud job is claimable whenever a key exists ANYWHERE this page can
+      // reach — this machine's shared store as much as this browser. The route
+      // resolves itself, so the poll below needs no key argument.
+      const cloudRunnable = !needsBrowserKey(muapiRow(s.selectedModel));
       // A local (hosted-bridge) job is polled through the bridge by id — no cloud
       // key involved. Only the hosted bridge can resume one; a job left behind by
       // another runtime would poll forever, so it is dropped instead of kept.
@@ -2113,7 +2118,7 @@ export function ImageStudio({
       });
       owned.filter((job) => isLocalJob(job) && !canResumeLocal).forEach((job) => removePendingJob(job.requestId));
       // Cloud jobs wait for a key (they remain for next time); local ones never needed one.
-      const claimed = owned.filter((job) => (isLocalJob(job) ? canResumeLocal : Boolean(apiKey)));
+      const claimed = owned.filter((job) => (isLocalJob(job) ? canResumeLocal : cloudRunnable));
       if (!claimed.length) return;
       const ownTab = Number.isSafeInteger(Number(tabIdRef.current)) ? Number(tabIdRef.current) : null;
       // The canvas shows one run, so restore this tab's newest job there and poll
@@ -2131,7 +2136,7 @@ export function ImageStudio({
         const interval = Number(job.interval) || 2000;
         const spent = Math.floor((Date.now() - (Number(job.submittedAt) || Date.now())) / interval);
         const attemptsLeft = Math.max(1, (Number(job.maxAttempts) || 60) - spent);
-        const result = await muapi.pollForResult(job.requestId, apiKey, attemptsLeft, interval);
+        const result = await muapi.pollForResult(job.requestId, '', attemptsLeft, interval);
         return result.outputs?.[0] || result.url || result.output?.url;
       };
 
@@ -3007,7 +3012,7 @@ export function ImageStudio({
       return;
     }
     // Same gate the picker uses, with the same retry continuation.
-    if (!s.useLocalModel && !localStorage.getItem('muapi_key')) {
+    if (!s.useLocalModel && needsBrowserKey(muapiRow(s.selectedModel))) {
       authRetryRef.current = () => { void handleComposerFiles(files); };
       s.authOpen = true;
       bump();

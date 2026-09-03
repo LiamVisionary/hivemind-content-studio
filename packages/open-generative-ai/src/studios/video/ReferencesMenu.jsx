@@ -61,6 +61,7 @@ import { peekResolvedMediaSrc, resolveMediaSrc, revokeResolvedMedia } from '../.
 import { captureImagePoster, captureVideoPoster } from '../../lib/mediaPoster.js';
 import { warmReferencePosters } from '../../lib/referencePosterWarmup.js';
 import { muapi } from '../../lib/muapi.js';
+import { muapiKeyMissing } from '../../lib/modelRunner.js';
 import { getUploadHistory } from '../../lib/uploadHistory.js';
 import { ChipButton, useDismissable } from '../../ui/Menu.jsx';
 import { Icon } from '../../ui/icons.jsx';
@@ -686,7 +687,7 @@ export function ReferencesMenu({
   };
 
   const openPicker = (kind) => {
-    if (needsKey() && !localStorage.getItem('muapi_key')) {
+    if (needsKey() && muapiKeyMissing()) {
       setAuthOpen(true);
       return;
     }
@@ -730,7 +731,7 @@ export function ReferencesMenu({
     setDragKinds([]);
     const files = Array.from(event.dataTransfer?.files || []);
     if (!files.length) return;
-    if (needsKey() && !localStorage.getItem('muapi_key')) {
+    if (needsKey() && muapiKeyMissing()) {
       setAuthOpen(true);
       return;
     }

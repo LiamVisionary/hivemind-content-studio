@@ -1,8 +1,17 @@
-// Muapi API-key entry modal (React port of the retired vanilla studio).
-// Contract preserved: trimmed key -> localStorage 'muapi_key', close, then onSaved
-// (the UploadPicker retry continuation). Empty submit aborts with inline feedback.
+// The one place a MUAPI key is entered.
+//
+// It used to write `localStorage.muapi_key` and nothing else, which put a
+// paid credential in the browser on a machine that already has a credential
+// store. It now hands the key to lib/muapiKey.js, which saves it as
+// MUAPI_API_KEY in this machine's shared store when the studio is there and
+// falls back to the browser only for the standalone build. Either way the
+// client's cached route is forgotten before `onSaved` runs, so the retry
+// continuation the caller passed (the picker's held files, a re-entered
+// generate) works on the very next call without a reload.
 import { useState } from 'react';
 import { t } from '../lib/i18n.js';
+import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
+import { storeMuapiKey } from '../lib/muapiKey.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, Field, TextInput } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
@@ -10,8 +19,10 @@ import { Modal } from '../ui/Modal.jsx';
 export function AuthModal({ onClose, onSaved }) {
   const [key, setKey] = useState('');
   const [invalid, setInvalid] = useState(false);
+  const [failure, setFailure] = useState('');
+  const [saving, setSaving] = useState(false);
 
-  const save = (event) => {
+  const save = async (event) => {
     event?.preventDefault?.();
     const trimmed = key.trim();
     if (!trimmed) {
@@ -20,10 +31,24 @@ export function AuthModal({ onClose, onSaved }) {
       setInvalid(true);
       return;
     }
-    localStorage.setItem('muapi_key', trimmed);
+    setSaving(true);
+    setFailure('');
+    try {
+      await storeMuapiKey(trimmed);
+    } catch (error) {
+      // The store refused this value for a reason the owner has to act on.
+      // Shown here, beside the field that caused it — never a page away.
+      setSaving(false);
+      setFailure(error?.detail?.message || error?.message || t('settings.invalidKey'));
+      return;
+    }
+    setSaving(false);
     onClose?.();
     onSaved?.();
   };
+
+  // Where the key will land, said BEFORE it is pasted rather than after.
+  const note = isHivemindStudioEnabled() ? t('auth.storedOnMachine') : t('auth.storedInBrowser');
 
   return (
     <Modal open onClose={onClose} title={t('auth.title')} size="md">
@@ -37,8 +62,8 @@ export function AuthModal({ onClose, onSaved }) {
 
         <Field
           label={t('auth.keyLabel')}
-          hint={invalid ? undefined : t('auth.keyNote')}
-          error={invalid ? t('settings.invalidKey') : undefined}
+          hint={invalid || failure ? undefined : `${t('auth.keyNote')} ${note}`}
+          error={failure || (invalid ? t('settings.invalidKey') : undefined)}
         >
           <TextInput
             type="password"
@@ -48,14 +73,15 @@ export function AuthModal({ onClose, onSaved }) {
             onChange={(e) => {
               setKey(e.target.value);
               if (invalid) setInvalid(false);
+              if (failure) setFailure('');
             }}
-            className={invalid ? 'border-danger/60' : ''}
+            className={invalid || failure ? 'border-danger/60' : ''}
           />
         </Field>
 
         <div className="flex flex-col gap-2">
-          <Button type="submit" variant="primary" size="lg" className="w-full">
-            {t('auth.initBtn')}
+          <Button type="submit" variant="primary" size="lg" className="w-full" disabled={saving}>
+            {saving ? t('auth.saving') : t('auth.initBtn')}
           </Button>
           {/* The icon says "opens muapi.ai in a new tab"; the label must not
               carry its own arrow as well (the zh string still ends in one). */}

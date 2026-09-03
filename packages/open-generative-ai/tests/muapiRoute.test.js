@@ -14,7 +14,7 @@ function harness({ serverKey = true, browserKey = 'browser-key' } = {}) {
   globalThis.window = { location: { search: '' } };
   globalThis.localStorage = { getItem: () => browserKey, setItem: () => {} };
   globalThis.fetch = async (url, init) => {
-    calls.push({ url: String(url), headers: init?.headers || {}, method: init?.method || 'GET' });
+    calls.push({ url: String(url), headers: init?.headers || {}, method: init?.method || 'GET', body: init?.body });
     if (String(url).includes('/api/muapi/status')) {
       return { ok: true, json: async () => ({ ok: true, server_key: serverKey }) };
     }
@@ -106,4 +106,113 @@ test('a resume that still has a stored key does not send it to our own server', 
   const poll = calls.find((c) => c.url.includes('predictions'));
   assert.match(poll.url, /^\/api\/muapi\//);
   assert.equal(poll.headers['x-api-key'], undefined);
+});
+
+/* ---------------- one door: where a pasted key goes ---------------- */
+
+// The dialog used to write localStorage and nothing else, so a machine with a
+// credential store still ended up with a paid key in its browser profile — and
+// the copy it kept was never the one the proxied route used.
+
+function storeHarness({ serverKey = false, browserKey = '', passbookStatus = 200 } = {}) {
+  const calls = [];
+  const writes = [];
+  const removals = [];
+  let stored = browserKey;
+  globalThis.window = { __HIVEMIND_STUDIO__: 1, location: { search: '' } };
+  globalThis.localStorage = {
+    getItem: () => stored,
+    setItem: (k, v) => { writes.push([k, v]); stored = v; },
+    removeItem: (k) => { removals.push(k); stored = ''; },
+  };
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method || 'GET', body: init?.body });
+    if (String(url).includes('/api/muapi/status')) {
+      return { ok: true, json: async () => ({ ok: true, server_key: serverKey }) };
+    }
+    if (String(url).includes('/api/passbook')) {
+      return passbookStatus === 200
+        ? { ok: true, status: 200, json: async () => ({ stored: ['MUAPI_API_KEY'] }) }
+        : { ok: false, status: passbookStatus, json: async () => ({ detail: { message: 'no store here' } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  return { calls, writes, removals };
+}
+
+test('a key pasted in the dialog is saved to this machine, never to this browser', async () => {
+  const { calls, writes } = storeHarness({ serverKey: false });
+  const { storeMuapiKey } = await import('../src/lib/muapiKey.js');
+  const { muapiKeyIsOnServer, setMuapiKeyOnServer, needsBrowserKey, muapiRow } = await import('../src/lib/modelRunner.js');
+
+  const result = await storeMuapiKey('sk-live-value');
+
+  assert.equal(result.where, 'machine');
+  const post = calls.find((c) => c.url === '/api/passbook');
+  assert.ok(post, 'the key never reached the shared store');
+  assert.deepEqual(JSON.parse(post.body), { values: { MUAPI_API_KEY: 'sk-live-value' } });
+  // The whole point: no second copy in the browser.
+  assert.deepEqual(writes, []);
+  // And the answer every gate reads flips without a round trip, so the next
+  // Generate runs instead of re-opening the dialog.
+  assert.equal(muapiKeyIsOnServer(), true);
+  assert.equal(needsBrowserKey(muapiRow('flux-2-pro')), false);
+  setMuapiKeyOnServer(null);
+});
+
+test('a store that cannot take the key keeps it in this browser rather than dead-ending', async () => {
+  const { writes } = storeHarness({ serverKey: false, passbookStatus: 501 });
+  const { storeMuapiKey } = await import('../src/lib/muapiKey.js');
+  const { setMuapiKeyOnServer } = await import('../src/lib/modelRunner.js');
+
+  // 501 is "this host holds no credentials" — a standalone build, not a refusal
+  // of this value. Falling back is what keeps the direct route usable.
+  const result = await storeMuapiKey('sk-live-value');
+
+  assert.equal(result.where, 'browser');
+  assert.deepEqual(writes, [['muapi_key', 'sk-live-value']]);
+  setMuapiKeyOnServer(null);
+});
+
+test('a value the store refused is reported, not silently written to the browser', async () => {
+  const { writes } = storeHarness({ serverKey: false, passbookStatus: 400 });
+  const { storeMuapiKey } = await import('../src/lib/muapiKey.js');
+  const { setMuapiKeyOnServer } = await import('../src/lib/modelRunner.js');
+
+  await assert.rejects(() => storeMuapiKey('sk-live-value'), /no store here/);
+  assert.deepEqual(writes, []);
+  setMuapiKeyOnServer(null);
+});
+
+test('a legacy browser key is moved into the machine store at boot, and said so', async () => {
+  const { calls, removals } = storeHarness({ serverKey: false, browserKey: 'old-browser-key' });
+  const { seedMuapiKeyLocation } = await import('../src/lib/muapiKey.js');
+  const { setMuapiKeyOnServer } = await import('../src/lib/modelRunner.js');
+
+  const result = await seedMuapiKeyLocation();
+
+  assert.equal(result.migrated, true);
+  assert.equal(result.onServer, true);
+  assert.deepEqual(
+    JSON.parse(calls.find((c) => c.url === '/api/passbook').body),
+    { values: { MUAPI_API_KEY: 'old-browser-key' } },
+  );
+  assert.ok(removals.includes('muapi_key'), 'the browser copy stayed behind');
+  setMuapiKeyOnServer(null);
+});
+
+test('a browser copy on a machine that already holds the key is simply dropped', async () => {
+  const { calls, removals } = storeHarness({ serverKey: true, browserKey: 'stale' });
+  const { seedMuapiKeyLocation } = await import('../src/lib/muapiKey.js');
+  const { setMuapiKeyOnServer } = await import('../src/lib/modelRunner.js');
+
+  const result = await seedMuapiKeyLocation();
+
+  assert.equal(result.onServer, true);
+  // Nothing to migrate — the machine has it. Re-posting would be a write with
+  // no purpose, and calling it a migration would be a lie.
+  assert.equal(result.migrated, false);
+  assert.equal(calls.filter((c) => c.url === '/api/passbook').length, 0);
+  assert.ok(removals.includes('muapi_key'));
+  setMuapiKeyOnServer(null);
 });

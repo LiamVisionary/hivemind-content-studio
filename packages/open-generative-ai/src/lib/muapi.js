@@ -18,7 +18,9 @@ export class MuapiClient {
 
     getKey() {
         const key = window.__MUAPI_KEY__ || localStorage.getItem('muapi_key');
-        if (!key) throw new Error('API Key missing. Please set it in Settings.');
+        // Read by lib/muapiErrors.js (`api key missing`), whose toast carries the
+        // "Add key" action — so this names that action, not a Settings page.
+        if (!key) throw new Error('API Key missing. Add your MUAPI key to continue.');
         return key;
     }
 

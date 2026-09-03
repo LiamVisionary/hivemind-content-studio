@@ -41,6 +41,9 @@ async function api(path, body, { signal = null } = {}) {
       error.remedy = String(structured.remedy || '');
       error.provider = String(structured.provider || '');
     }
+    // The status tells "this store cannot take a key here" (404/409/501) apart
+    // from "this value was refused" — one falls back, the other is shown.
+    error.status = response.status;
     throw error;
   }
   return payload;

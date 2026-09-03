@@ -50,17 +50,18 @@ function serverSaid(message) {
 }
 
 /**
- * → { status, message, keyRejected }. `keyRejected` means the fix is in
- * Settings (no key, or a 401/403 from MUAPI), and the toast offers to open it.
+ * → { status, message, keyRejected }. `keyRejected` means the fix is a key
+ * (none, or a 401/403 from MUAPI), and the toast carries the button that adds
+ * one — so the message names the fix without naming a page.
  */
 export function describeMuapiError(error) {
   const raw = String(error?.message || error || '').trim();
   const status = muapiErrorStatus(error);
   if (KEY_MISSING.test(raw)) {
-    return { status, message: 'MUAPI key missing — open Settings to add one', keyRejected: true };
+    return { status, message: 'MUAPI key missing — add one to continue', keyRejected: true };
   }
   if (status === 401 || status === 403) {
-    return { status, message: 'MUAPI key rejected — open Settings to check it', keyRejected: true };
+    return { status, message: 'MUAPI key rejected — check it and try again', keyRejected: true };
   }
   if (status >= 400 && status < 500) {
     const said = serverSaid(raw);
