@@ -135,6 +135,7 @@ import {
 } from '../lib/referenceDrop.js';
 import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
 import { LoraSection } from './image/LoraSection.jsx';
+import { FIRST_CLIP_STARTERS } from '../lib/animationStarters.js';
 import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
 import { IngredientsPanel } from './video/IngredientsPanel.jsx';
 
@@ -5500,12 +5501,33 @@ export function VideoStudio({
           ) : null}
 
           {!hasHistory && !s.generating && !s.resultUrl ? (
+            /* Three clips you could actually make, rather than a paragraph about
+               LTX ingredient references. A card loads its starter into the
+               composer and says what it still needs attaching. */
             <EmptyState
               icon="clapper"
               title={zh() ? '创建你的第一个视频' : 'Create your first video'}
               hint={zh()
-                ? '选择模型，添加提示词或起始帧，然后点击生成。本地 LTX 工作流支持配料参考和 LoRA。'
-                : 'Pick a model, add a prompt or start frame, and press Generate. Local LTX workflows add ingredient references and LoRAs.'}
+                ? '描述一个镜头，或放入一张起始图片，然后点击生成。你的第一段片子就落在这里。'
+                : 'Describe a shot or drop in a starting picture, then press Generate. Your first clip lands right here.'}
+              action={(
+                <div className="grid w-full max-w-2xl gap-2 sm:grid-cols-3">
+                  {FIRST_CLIP_STARTERS.map((starter) => (
+                    <button
+                      key={starter.id}
+                      type="button"
+                      onClick={() => { loadPromptText(starter.prompt); focusPrompt(); }}
+                      className="flex flex-col gap-1 rounded-lg border border-line1 bg-bg2 p-2.5 text-left transition-colors hover:border-honey/50 hover:bg-honey-tint"
+                    >
+                      <span className="text-[13px] font-semibold text-ink1">{starter.label}</span>
+                      <span className="text-[11px] leading-snug text-ink3">{starter.hint}</span>
+                      {starter.needs ? (
+                        <span className="text-[10px] leading-snug text-ink3">Needs {starter.needs}</span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              )}
               className="flex-1"
             />
           ) : null}

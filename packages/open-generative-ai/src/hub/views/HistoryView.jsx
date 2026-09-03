@@ -432,7 +432,7 @@ export function HistoryView({ active }) {
                   : (zh() ? '还没有输出' : 'No outputs yet')}
                 hint={filtering
                   ? (zh() ? '换一个词，或清空筛选。' : 'Try another word, or clear the filter.')
-                  : (zh() ? '去任一工作室生成一些内容，它会出现在这里。' : 'Generate something in a studio and it appears here.')}
+                  : (zh() ? '你做的每一样东西都会加密着、按顺序落在这里。' : 'Everything you make lands here, encrypted, in order.')}
               />
             )
           ) : null}

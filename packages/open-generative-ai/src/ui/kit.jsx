@@ -1,10 +1,15 @@
 // Hive primitive kit — the only building blocks components should use.
 // See DESIGN.md. All plain JSX, no external deps.
-import { createContext, useContext, useId, useLayoutEffect, useRef, useState } from 'react';
+import { Suspense, createContext, lazy, useContext, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { STUDIO_RESTART_COMMAND, apiOfflineSentence, pingApiStatus, useApiStatus } from '../app/statusStore.js';
 import { getLang } from '../lib/i18n.js';
+import { useSetupReadiness } from '../lib/setupReadiness.js';
 import { Icon } from './icons.jsx';
+
+// Loaded on demand, and only by the machines that need it: a static import
+// would make kit.jsx depend on components/, which imports kit.jsx back.
+const SetupState = lazy(() => import('../components/SetupState.jsx'));
 
 const FieldIdContext = createContext(undefined);
 
@@ -766,6 +771,12 @@ export function StudioLayout({
   panelWidth = 'w-[320px]',
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
+  // Nothing on this machine can run yet: the three doors go at the top of the
+  // canvas, ABOVE whatever the studio would otherwise say, because a studio's
+  // own empty state invites a press that cannot work. `ready === null` is "not
+  // measured yet" and renders nothing — a Setup screen that flashes in front of
+  // a working machine is its own bug.
+  const setup = useSetupReadiness();
   return (
     <div className="relative flex min-h-0 flex-1">
       {panel ? (
@@ -789,7 +800,14 @@ export function StudioLayout({
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
         <StudioOfflineBanner />
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+          {setup.ready === false ? (
+            <div className="p-4 pb-0 md:p-5 md:pb-0">
+              <Suspense fallback={null}><SetupState /></Suspense>
+            </div>
+          ) : null}
+          {children}
+        </div>
         {/* Below lg the panel lives in a sheet; its opener sits in its own row so it
             can never cover the composer (a floating button used to sit on the chips). */}
         {panel ? (

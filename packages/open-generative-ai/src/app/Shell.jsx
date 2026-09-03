@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react';
 import { useLang, useOwnerSession } from '../hooks/hooks.js';
 import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
 import { getLang, t } from '../lib/i18n.js';
+import { useSetupReadiness } from '../lib/setupReadiness.js';
+import { SetupDoors } from '../components/SetupState.jsx';
 
 const zhUi = () => getLang() === 'zh-CN';
 import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
@@ -167,6 +169,45 @@ function LockButton() {
   );
 }
 
+// While nothing on this machine can generate, the topbar carries the same three
+// doors the studio canvas offers — so the answer is reachable from whichever
+// page you happened to land on, and never from Settings. It disappears on its
+// own the moment a source is ready; there is no flag to set.
+function SetupPill() {
+  const setup = useSetupReadiness();
+  if (setup.ready !== false) return null;
+  return (
+    <Menu
+      align="end"
+      width="w-[320px]"
+      trigger={(open, toggle) => (
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          aria-haspopup="menu"
+          title={zhUi() ? '这台机器还没有可以生成的来源' : 'Nothing on this machine can generate yet'}
+          className="inline-flex h-7 items-center gap-1.5 rounded-full bg-honey-tint px-2.5 text-[11px] font-semibold text-honey transition-opacity hover:opacity-85"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-current" />
+          {zhUi() ? '去设置' : 'Set up'}
+        </button>
+      )}
+    >
+      {() => (
+        <div className="flex flex-col gap-2 p-2">
+          <p className="text-[12px] leading-relaxed text-ink2">
+            {zhUi()
+              ? '选一条来源，工作室就能开始生成。'
+              : 'Pick one source and the studio can start making things.'}
+          </p>
+          <SetupDoors compact />
+        </div>
+      )}
+    </Menu>
+  );
+}
+
 // Topbar refresh: re-reads the catalog, runs and history. The icon spins briefly
 // so the click is visibly acknowledged even on pages that refresh silently.
 function RefreshButton({ zh }) {
@@ -284,6 +325,7 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
             <span className="hidden truncate text-xs text-ink3 md:inline">{APP_NAME}</span>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <SetupPill />
             <ExploreDockButton />
             <ApiStatusPill />
             <RefreshButton zh={zh} />

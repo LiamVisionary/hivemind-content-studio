@@ -29,6 +29,7 @@ import {
   setSelectedLane, setSelectedRunId, setStudioMode, setWorkflow, STUDIO_MODES, submitSimplePrompt,
   TEMPLATE_CATEGORY_LABELS, titleCase, togglePlatform, updateScene, useHub,
 } from '../hubData.js';
+import { useModelSources } from '../../lib/useModelSources.js';
 import { GenerationCard } from '../components/GenerationCard.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 
@@ -519,6 +520,13 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
     el.style.height = `${Math.min(el.scrollHeight, window.innerWidth < 768 ? 150 : 250)}px`;
   });
 
+  // The catalog came back and advertised no brain. The old answer was a
+  // disabled chip with a tooltip and a composer that accepted a prompt it could
+  // not serve — a wall you only met after typing. Both fixes go here instead,
+  // and the composer stays away until one of them lands.
+  const noBrain = Boolean(s.simpleCatalog) && routePickerProviders('brain').length === 0;
+  const { pickerProps } = useModelSources({ enabled: noBrain });
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div ref={threadRef} className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
@@ -534,6 +542,35 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
                 : 'The Planner needs the studio on this machine. It retries on its own once the studio is running — or use the refresh button in the top bar.'}
               className="flex-1"
             />
+          ) : noBrain ? (
+            <EmptyState
+              icon="nodes"
+              title={zh() ? '还没有可以思考的大脑' : 'No brain to think with yet'}
+              hint={zh()
+                ? '规划器需要一个语言模型。连接 HivemindOS 用它的额度，或者用这台机器上的本地模型。'
+                : 'The Planner needs a language model. Connect HivemindOS to spend its credits, or run one on this machine.'}
+              action={(
+                <div className="flex flex-wrap justify-center gap-2">
+                  <Button
+                    variant="primary"
+                    icon="logo"
+                    loading={pickerProps.linking}
+                    onClick={() => { void pickerProps.onLink(); }}
+                  >
+                    {pickerProps.linking
+                      ? (zh() ? '等待 HivemindOS…' : 'Waiting for HivemindOS…')
+                      : (zh() ? '连接 HivemindOS' : 'Connect HivemindOS')}
+                  </Button>
+                  <Button
+                    icon="cpu"
+                    onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'models' } }))}
+                  >
+                    {zh() ? '使用本地模型' : 'Use a local model'}
+                  </Button>
+                </div>
+              )}
+              className="flex-1"
+            />
           ) : s.thread.length === 0 ? (
             <EmptyState icon="sparkles" title={mode.heading} hint={mode.copy} className="flex-1" />
           ) : (
@@ -542,7 +579,7 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
         </div>
       </div>
 
-      <div className="shrink-0 border-t border-line1 bg-bg1 p-3">
+      <div className={cx('shrink-0 border-t border-line1 bg-bg1 p-3', noBrain && 'hidden')}>
         <form
           className="mx-auto flex w-full max-w-3xl flex-col gap-2"
           onSubmit={(e) => { e.preventDefault(); void submitSimplePrompt(); }}

@@ -1246,3 +1246,53 @@ export const ANIMATION_STARTERS = Object.freeze([
     })],
   }),
 ]);
+
+/* ------------------------------------------------------------------ */
+/* The first clip                                                     */
+/* ------------------------------------------------------------------ */
+
+/** One entry from the shelf above, by its id, wherever it lives. */
+function shelfPrompt(id) {
+  for (const entry of ANIMATION_STARTERS) {
+    if (entry.id === id) return entry.parts[0] || null;
+    const variant = entry.variants.find((item) => item.id === id);
+    if (variant) return variant;
+  }
+  return null;
+}
+
+/**
+ * The three cards the Video studio's empty state offers.
+ *
+ * A first-run screen cannot offer "continue a scene" (there is nothing yet to
+ * continue) or a talking clip (no starter on the shelf is one), so these three
+ * are what the shelf actually holds, and each card says what it needs. They are
+ * selections rather than new prompts: the text is the shelf's, so a fix there is
+ * a fix here.
+ */
+export const FIRST_CLIP_STARTERS = Object.freeze([
+  Object.freeze({
+    id: 'first-from-a-photo',
+    label: 'Start from your photo',
+    hint: 'The picture you attach becomes frame zero and the clip runs on from it.',
+    needs: 'one picture, attached as a start frame',
+    durationSeconds: shelfPrompt('archer-anchor-h3')?.durationSeconds || 10,
+    prompt: shelfPrompt('archer-anchor-h3')?.prompt || '',
+  }),
+  Object.freeze({
+    id: 'first-product-shot',
+    label: 'Product shot',
+    hint: 'A locked-off turntable that lands exactly where it started.',
+    needs: '',
+    durationSeconds: shelfPrompt('loop-product-turntable')?.durationSeconds || 5,
+    prompt: shelfPrompt('loop-product-turntable')?.prompt || '',
+  }),
+  Object.freeze({
+    id: 'first-kinetic-title',
+    label: 'Kinetic title',
+    hint: 'Your words, animated — swap them in both places the prompt names them.',
+    needs: '',
+    durationSeconds: shelfPrompt('kinetic-make-it-move')?.durationSeconds || 5,
+    prompt: shelfPrompt('kinetic-make-it-move')?.prompt || '',
+  }),
+]);

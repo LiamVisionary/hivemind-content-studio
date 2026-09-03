@@ -809,7 +809,7 @@ export function LipSyncStudio({ active = true } = {}) {
             <EmptyState
               icon="mic"
               title={zh() ? '还没有唇语同步片段' : 'No lip sync clips yet'}
-              hint={zh() ? '选择模型，附加人像或视频以及一段音频，然后按生成。' : 'Pick a model, attach a portrait or video plus an audio track, then press Generate.'}
+              hint={zh() ? '给一张脸一句话——加一张人像和一段声音。' : 'Give a face something to say — add a portrait and a voice.'}
               className="flex-1"
             />
           ) : (

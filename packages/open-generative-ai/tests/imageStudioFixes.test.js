@@ -338,7 +338,10 @@ test('a failed generation leaves ONE callout — described, with its remedy — 
 test('the composer keeps the chips wrapping and Generate pinned in its own group', () => {
     const studio = read('src/studios/ImageStudio.jsx');
     assert.match(studio, /<div className="flex items-end gap-2">\s*<div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">/);
-    assert.match(studio, /<div className="ml-auto flex shrink-0 items-center gap-2">\s*<Button\s+variant="primary"/);
+    // The group now opens with the pre-press ETA readout — quiet, mono, and part
+    // of the same pinned group so it can never wrap into the chip flow.
+    assert.match(studio, /<div className="ml-auto flex shrink-0 items-center gap-2">[\s\S]{0,900}?<Button\s+variant="primary"/);
+    assert.match(studio, /\{pendingEtaSeconds > 0 \? \(/);
     // The app helper is "Refine" (as in Video) and no longer looks permanently armed.
     assert.match(studio, /label=\{zh\(\) \? '润色' : 'Refine'\}/);
     assert.doesNotMatch(studio, /className="border-honey\/40 text-honey"/);

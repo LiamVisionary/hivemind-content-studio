@@ -390,6 +390,28 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   return engine;
 }
 
+// Example prompts for the empty box — written as prompts rather than as advice,
+// because "describe the image you want" tells someone what to do and not what
+// one looks like. Four, rotating, so the box is never the same dare twice.
+const PLACEHOLDER_ROTATE_MS = 7000;
+const PROMPT_EXAMPLES_EN = Object.freeze([
+  'A fox in a rain jacket, film photo, golden hour…',
+  'A neon ramen stall in the rain, 35mm, shallow focus…',
+  'A paper boat on a puddle, macro, cold morning light…',
+  'A lighthouse keeper at the window, soft grey daylight…',
+]);
+const PROMPT_EXAMPLES_ZH = Object.freeze([
+  '穿雨衣的狐狸，胶片质感，黄昏光线…',
+  '雨夜的霓虹拉面摊，35mm，浅景深…',
+  '水洼上的纸船，微距，清冷的晨光…',
+  '窗边的灯塔守夜人，柔和的灰色天光…',
+]);
+
+// The starter tiles: five of the quick prompts, plus the one door that starts
+// from a picture instead of from words. Six, so the grid is 2x3 and every tile
+// is one press away from a picture.
+const STARTER_TILE_COUNT = 5;
+
 export function ImageStudio({
   active = true, tabActive = true, seed = null, apiRef = null, studioLane = '',
   tabId = 0, primary = null, openTabIds = null,
@@ -425,6 +447,14 @@ export function ImageStudio({
 
   const rootRef = useRef(null);
   const promptRef = useRef(null);
+  // Which example the empty prompt box is currently showing. "Describe the image
+  // you want to create" is an instruction; a first-time user is short of an
+  // example, not of instructions, so the box shows one and changes it.
+  const [placeholderIndex, setPlaceholderIndex] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setPlaceholderIndex((n) => n + 1), PLACEHOLDER_ROTATE_MS);
+    return () => clearInterval(timer);
+  }, []);
   const authRetryRef = useRef(null);
   const mountedOnceRef = useRef(false);
   const mountedRef = useRef(true);
@@ -2610,11 +2640,38 @@ export function ImageStudio({
   // swelled to 300px and reflowed the chip row.
   const generateLabel = s.generating ? t('common.generating') : t('common.generate');
 
+  const promptExamples = zh() ? PROMPT_EXAMPLES_ZH : PROMPT_EXAMPLES_EN;
   const promptPlaceholder = refCount > 1
     ? `${refCount} ${t('image.multiImageNote')}`
     : refCount > 0
       ? t('image.placeholderTransform')
-      : t('image.placeholder');
+      : promptExamples[placeholderIndex % promptExamples.length];
+
+  // What the next press will cost in seconds, BEFORE it is pressed. The same
+  // estimator the progress card uses (so the two never disagree), read from the
+  // current settings rather than from a run in flight — an ETA that only appears
+  // after you commit is not a thing you can decide with.
+  const pendingEtaSeconds = s.generating ? null : (() => {
+    const profile = currentTimingProfile();
+    return estimateGenerationSeconds(
+      profile.key,
+      profile.work,
+      s.useLocalModel ? DEFAULT_LOCAL_IMAGE_RATE_SEC : DEFAULT_API_IMAGE_ESTIMATE_SEC,
+    );
+  })();
+
+  /** A starter tile: fill the box and go, in one press. */
+  const runStarter = (prompt) => {
+    setPromptValue(prompt);
+    if (!s.generating && !generateBlocked) generate();
+  };
+
+  /** "Edit a photo" opens the composer's own reference picker rather than a
+   *  second uploader — one place attaches a picture, and it is the one whose
+   *  chips the user will see afterwards. */
+  const openReferencePicker = () => {
+    rootRef.current?.querySelector('[data-upload-picker] [data-upload-trigger]')?.click();
+  };
 
   // The helper chips are disabled on an empty box — the tooltip says why.
   const helperDisabledTitle = zh() ? '先在下方输入一个想法，再让助手润色' : 'Type an idea below first — the helper refines what is in the box';
@@ -3471,6 +3528,16 @@ export function ImageStudio({
 
         {/* The model reads out in the left panel — no duplicate badge here. */}
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          {/* What the press will cost, before the press. Quiet and mono so it
+              reads as a measurement rather than as a second label on the button. */}
+          {pendingEtaSeconds > 0 ? (
+            <span
+              className="hidden font-mono text-[11px] text-ink3 sm:inline"
+              title={zh() ? '基于这台机器上同类生成的用时' : 'From how long runs like this one have taken here'}
+            >
+              ~{formatElapsed(pendingEtaSeconds * 1000)}
+            </span>
+          ) : null}
           <Button
             variant="primary"
             size="lg"
@@ -3555,21 +3622,53 @@ export function ImageStudio({
           })() : null}
 
           {s.history.length === 0 && !s.generating ? (
+            /* Six things to press, not one thing to read. The old empty state's
+               only action was Open Library, which on a first run opens an empty
+               library — an invitation to the one room that is definitely bare.
+               A tile fills the box and generates in the same press. */
             <EmptyState
               icon="image"
               title={zh() ? '还没有图像' : 'Nothing here yet'}
               hint={zh()
-                ? '在下方输入提示词并点击生成。之前的作品都在作品库里。'
-                : 'Describe the image below and press Generate. Everything you have made before is in the Library.'}
+                ? '你的第一张图片就落在这里——在下方描述它。'
+                : 'Your first picture goes here — describe it below.'}
               action={(
-                <Button
-                  size="sm"
-                  variant="neutral"
-                  icon="history"
-                  onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'history' } }))}
-                >
-                  {zh() ? '打开作品库' : 'Open Library'}
-                </Button>
+                <div className="flex w-full max-w-xl flex-col gap-3">
+                  <div data-starter-tiles className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    {QUICK_PROMPTS.slice(0, STARTER_TILE_COUNT).map((q) => (
+                      <button
+                        key={q.label}
+                        type="button"
+                        disabled={generateBlocked}
+                        onClick={() => runStarter(q.prompt)}
+                        title={q.prompt}
+                        className="flex flex-col gap-1 rounded-lg border border-line1 bg-bg2 p-2.5 text-left transition-colors hover:border-honey/50 hover:bg-honey-tint disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <span className="text-[13px] font-semibold text-ink1">{q.label}</span>
+                        <span className="line-clamp-2 text-[11px] leading-snug text-ink3">{q.prompt}</span>
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={openReferencePicker}
+                      className="flex flex-col gap-1 rounded-lg border border-dashed border-line2 bg-bg2 p-2.5 text-left transition-colors hover:border-honey/50 hover:bg-honey-tint"
+                    >
+                      <span className="text-[13px] font-semibold text-ink1">
+                        {zh() ? '编辑一张照片' : 'Edit a photo'}
+                      </span>
+                      <span className="line-clamp-2 text-[11px] leading-snug text-ink3">
+                        {zh() ? '附加一张图片，然后说明要如何改。' : 'Attach a picture and say what to change.'}
+                      </span>
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    className="self-center text-[11px] text-ink3 underline-offset-2 hover:text-ink2 hover:underline"
+                    onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'history' } }))}
+                  >
+                    {zh() ? '打开作品库' : 'Open Library'}
+                  </button>
+                </div>
               )}
               className="flex-1"
             />

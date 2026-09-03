@@ -434,9 +434,12 @@ export function UploadPicker({
         );
       })}
 
-      {/* Trigger */}
+      {/* Trigger. Marked so a studio's empty state can offer "Edit a photo" and
+          land on THIS picker — one place attaches a reference, and it is the one
+          whose chips stay on screen afterwards. */}
       <button
         type="button"
+        data-upload-trigger=""
         disabled={disabled}
         title={triggerTitle}
         aria-label={triggerTitle}

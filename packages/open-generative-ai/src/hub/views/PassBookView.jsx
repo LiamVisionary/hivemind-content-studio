@@ -1,9 +1,12 @@
 // PassBook — the machine's shared credential store, and who reads it.
 //
-// This is the first-run screen for a machine that has no HivemindOS. The store
-// is shared with every other app that speaks PassBook, so a key pasted here
-// works in all of them; that is the whole reason it is a machine-level surface
-// and not a per-app setting.
+// This is the machine-level surface, not the first-run screen: a machine with no
+// source shows the Setup state inside the studio it is already looking at
+// (components/SetupState.jsx), and only arrives here when it wants the whole
+// store. The store is shared with every other app that speaks PassBook, so a key
+// pasted here works in all of them — which is why it is machine-level and not a
+// per-app setting. A "key not set" remedy elsewhere links straight to the row it
+// named (?page=passbook&key=NAME), rather than to this page in general.
 //
 // Three things it never does: show a value, offer a key this studio does not
 // use, or replace a key another app may be relying on without being asked. The
@@ -12,6 +15,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getLang } from '../../lib/i18n.js';
 import { MUAPI_CREDENTIAL } from '../../lib/muapiKey.js';
 import { muapi } from '../../lib/muapi.js';
+import {
+    PASSBOOK_FOCUS_EVENT, clearRequestedPassBookKey, requestedPassBookKey,
+} from '../../lib/passbookLink.js';
 import { refreshMuapiKeyLocation } from '../../lib/providerReadiness.js';
 import { Button, Card, Field, Pill, SectionLabel, Spinner, TextInput } from '../../ui/kit.jsx';
 import { api } from '../hubData.js';
@@ -29,9 +35,22 @@ function relative(iso) {
     return zh() ? `${Math.round(seconds / 86400)} 天前` : `${Math.round(seconds / 86400)}d ago`;
 }
 
-function CredentialRow({ row, value, onChange, onSave, busy }) {
+function CredentialRow({ row, value, onChange, onSave, busy, focus = false }) {
     const [editing, setEditing] = useState(false);
     const configured = row.configured;
+    const inputRef = useRef(null);
+    // Arrived here from a "key not set" remedy that named this key: open the
+    // field, put the row on screen and take the caret. A deep link that lands on
+    // a page of twelve rows and leaves the finding to you is the remedy hiding
+    // the fix it just named.
+    useEffect(() => {
+        if (!focus) return;
+        setEditing(true);
+        const node = inputRef.current;
+        if (!node) return;
+        try { node.scrollIntoView({ block: 'center' }); } catch { /* older engines */ }
+        node.focus();
+    }, [focus, editing]);
     // A configured key is never shown, only replaced — there is no read-back
     // path for a value anywhere in this product, including for its owner.
     return (
@@ -57,6 +76,7 @@ function CredentialRow({ row, value, onChange, onSave, busy }) {
                 <div className="flex items-end gap-2">
                     <Field className="flex-1" label={zh() ? '密钥' : 'Key'}>
                         <TextInput
+                            ref={inputRef}
                             type="password"
                             autoComplete="off"
                             spellCheck={false}
@@ -306,6 +326,16 @@ export function PassBookView({ active = true }) {
     // way back in instead of spinning forever.
     const [failed, setFailed] = useState(false);
     const loadedRef = useRef(false);
+    // The one key this page was opened for, from ?page=passbook&key=NAME or from
+    // a press made while PassBook was already the open page.
+    const [focusKey, setFocusKey] = useState(requestedPassBookKey);
+    useEffect(() => {
+        const onFocus = (event) => setFocusKey(String(event?.detail?.key || ''));
+        window.addEventListener(PASSBOOK_FOCUS_EVENT, onFocus);
+        return () => window.removeEventListener(PASSBOOK_FOCUS_EVENT, onFocus);
+    }, []);
+    // Honoured once: a later reload of the same URL should not steal the caret.
+    useEffect(() => { if (focusKey) clearRequestedPassBookKey(); }, [focusKey]);
 
     const load = useCallback(async () => {
         const [store, record, linked, brokered, rules] = await Promise.all([
@@ -520,6 +550,7 @@ export function PassBookView({ active = true }) {
                                         row={row}
                                         value={drafts[row.key]}
                                         busy={busy}
+                                        focus={Boolean(focusKey) && row.key === focusKey}
                                         onChange={(key, value) => setDrafts((current) => ({ ...current, [key]: value }))}
                                         onSave={save}
                                     />
