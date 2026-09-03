@@ -912,7 +912,7 @@ def _is_under(path, root):
 
 
 def output_encryption_password(create=True):
-    """Return the output encryption secret from macOS Keychain.
+    """Return the output encryption secret: macOS Keychain, else a 0600 key file.
 
     The secret is intentionally not stored in project files or logs. This is
     encryption-at-rest against filesystem browsing/copying; the running wrapper
@@ -936,19 +936,62 @@ def output_encryption_password(create=True):
             return _output_encryption_password
     except Exception:
         pass
+    # A machine that already fell back to a key file keeps using it. Reversing
+    # that order would mean the day the Keychain starts answering again, every
+    # output encrypted since becomes undecryptable.
+    from_file = _output_encryption_key_file_read()
+    if from_file:
+        _output_encryption_password = from_file
+        return from_file
     if not create:
         return None
     secret = base64.urlsafe_b64encode(os.urandom(48)).decode("ascii")
-    proc = subprocess.run(
-        ["/usr/bin/security", "add-generic-password", "-U", "-s", OUTPUT_ENCRYPTION_SERVICE, "-a", account, "-w", secret],
-        text=True,
-        capture_output=True,
-        timeout=10,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError("could not create output encryption key in macOS Keychain")
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/security", "add-generic-password", "-U", "-s", OUTPUT_ENCRYPTION_SERVICE, "-a", account, "-w", secret],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        stored = proc.returncode == 0
+    except Exception:
+        stored = False
+    if not stored:
+        # Linux, Windows, a locked keychain, no `security` binary: a 0600 key
+        # file under the gateway state dir, so the gateway starts instead of
+        # aborting before it ever listens.
+        secret = _output_encryption_key_file_write(secret)
+        if not secret:
+            raise RuntimeError("could not create the output encryption key")
     _output_encryption_password = secret
     return secret
+
+
+OUTPUT_ENCRYPTION_KEY_FILE = GATEWAY_STATE_DIR / "secure" / f"{OUTPUT_ENCRYPTION_SERVICE}.key"
+
+
+def _output_encryption_key_file_read():
+    try:
+        if OUTPUT_ENCRYPTION_KEY_FILE.is_file():
+            return OUTPUT_ENCRYPTION_KEY_FILE.read_text(encoding="ascii").strip() or None
+    except OSError:
+        pass
+    return None
+
+
+def _output_encryption_key_file_write(secret):
+    """Write the key 0600, or return the one that beat us to it."""
+    try:
+        OUTPUT_ENCRYPTION_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(OUTPUT_ENCRYPTION_KEY_FILE.parent, 0o700)
+        descriptor = os.open(str(OUTPUT_ENCRYPTION_KEY_FILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(secret)
+        return secret
+    except FileExistsError:
+        return _output_encryption_key_file_read()
+    except OSError:
+        return None
 
 
 def encrypted_path_for(path):
@@ -1073,11 +1116,12 @@ def agent_seal_recipient_for(job_id):
         return _agent_seal_jobs.get(str(job_id))
 
 
-# The gateway runs under the system python3 (no `cryptography`). Reading the
-# public key needs only sqlite, but sealing (RSA-OAEP + AES-GCM) shells out to a
-# python that has `cryptography` — the repo venv by default.
-E2E_SEAL_PYTHON = os.environ.get("ZIMG_E2E_PYTHON", str(Path(__file__).resolve().parents[2] / ".venv" / "bin" / "python"))
-E2E_SEAL_HELPER = str(Path(__file__).resolve().parent / "media_seal.py")
+# The gateway runs on the interpreter the stack pins (STUDIO_PYTHON), which is
+# the one pyproject describes and the one that has `cryptography` — so sealing
+# is an import, not a subprocess per output. The two remaining helpers below
+# that DO need a separate process (the sheet composer, the RIFE pipeline) run on
+# this same interpreter.
+SUBPROCESS_PYTHON = os.environ.get("ZIMG_E2E_PYTHON") or sys.executable
 
 
 def vault_public_key_spki():
@@ -1131,26 +1175,19 @@ def _seal_file_with_helper(spki, source, envelope, media_name):
     source = Path(source)
     envelope = Path(envelope)
     tmp = envelope.with_name(envelope.name + f".{os.getpid()}.tmp")
-    pub_tmp = envelope.with_name(envelope.name + f".{os.getpid()}.pub")
     try:
-        pub_tmp.write_text(spki, encoding="utf-8")
-        proc = subprocess.run(
-            [E2E_SEAL_PYTHON, E2E_SEAL_HELPER, "--pub", f"@{pub_tmp}", "--in", str(source), "--out", str(tmp)],
-            capture_output=True, text=True, timeout=300,
-        )
-        if proc.returncode != 0 or not tmp.exists():
-            raise RuntimeError(f"seal helper exited {proc.returncode}: {proc.stderr.strip()[:200]}")
-        sealed = json.loads(tmp.read_text(encoding="utf-8"))
+        import media_seal
+
+        sealed = media_seal.seal(source.read_bytes(), media_seal.load_public_key(spki))
         sealed["v"] = 1
         sealed["media_type"] = mimetypes.guess_type(media_name)[0] or "application/octet-stream"
         tmp.write_text(json.dumps(sealed), encoding="utf-8")
         os.replace(tmp, envelope)
     finally:
-        for leftover in (pub_tmp, tmp):
-            try:
-                leftover.unlink()
-            except FileNotFoundError:
-                pass
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def seal_output_to_e2e(path, agent_spki=None):
@@ -2246,32 +2283,21 @@ def seal_json_to_vault(obj):
     spki = vault_public_key_spki()
     if not spki:
         return None
-    stamp = uuid.uuid4().hex[:12]
-    tmp_in = GATEWAY_STATE_DIR / f".setup-{stamp}.json"
-    tmp_out = GATEWAY_STATE_DIR / f".setup-{stamp}.e2e"
-    tmp_pub = GATEWAY_STATE_DIR / f".setup-{stamp}.pub"
-    try:
-        tmp_in.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
-        tmp_pub.write_text(spki, encoding="utf-8")
-        proc = subprocess.run(
-            [E2E_SEAL_PYTHON, E2E_SEAL_HELPER, "--pub", f"@{tmp_pub}", "--in", str(tmp_in), "--out", str(tmp_out)],
-            capture_output=True, text=True, timeout=60,
-        )
-        if proc.returncode != 0 or not tmp_out.exists():
-            raise RuntimeError(f"seal helper exited {proc.returncode}: {proc.stderr.strip()[:200]}")
-        sealed = json.loads(tmp_out.read_text(encoding="utf-8"))
-        return {
-            "format": VAULT_SEALED_SETUP_FORMAT,
-            "v": 1,
-            "ciphertext": sealed["ciphertext"],
-            "wrapped_dek": sealed["wrapped_dek"],
-        }
-    finally:
-        for leftover in (tmp_in, tmp_out, tmp_pub):
-            try:
-                leftover.unlink()
-            except FileNotFoundError:
-                pass
+    # No temp files and no subprocess: the setup graph is small, and it used to
+    # be written to disk in PLAINTEXT for the helper to read before being
+    # sealed. In-process sealing closes that window entirely.
+    import media_seal
+
+    sealed = media_seal.seal(
+        json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+        media_seal.load_public_key(spki),
+    )
+    return {
+        "format": VAULT_SEALED_SETUP_FORMAT,
+        "v": 1,
+        "ciphertext": sealed["ciphertext"],
+        "wrapped_dek": sealed["wrapped_dek"],
+    }
 
 
 def _studio_setup_from_graph(graph):
@@ -4935,7 +4961,7 @@ def _compose_labeled_sheet(sheet_path, rows, cols, square, tiles, header_lines, 
     composer = Path(__file__).resolve().parent / "bin" / "compose-strength-hunt-sheet.py"
     try:
         proc = subprocess.run(
-            [E2E_SEAL_PYTHON, str(composer)],
+            [SUBPROCESS_PYTHON, str(composer)],
             input=json.dumps(manifest),
             text=True,
             capture_output=True,
@@ -5784,7 +5810,7 @@ def run_video_interpolation(job_id, video_path, options=None):
         t0 = time.monotonic()
         proc = subprocess.run(
             [
-                E2E_SEAL_PYTHON, "-m", "rife_mlx.pipeline_mlx",
+                SUBPROCESS_PYTHON, "-m", "rife_mlx.pipeline_mlx",
                 "-i", str(video_path),
                 "-o", str(output),
                 "--multi", str(factor),
@@ -13937,9 +13963,40 @@ def install_shutdown_handlers(server):
             except (ValueError, OSError):
                 pass  # not the main thread (embedded/test import): nothing to install
     return stopping
+SUPPORTED_PYTHON = ((3, 11), (3, 13))
+
+
+def startup_self_check():
+    """Refuse to start on an interpreter that cannot do the job.
+
+    The 2026-07-26 outage was this exact gap: the tests ran on the project venv
+    and the service ran on whatever `python3` Homebrew had last upgraded to, so
+    a stdlib removal took the whole studio down with a traceback nobody read.
+    One line naming the fix beats a stack trace in a log file.
+    """
+    problems = []
+    low, high = SUPPORTED_PYTHON
+    if not (low <= sys.version_info[:2] < high):
+        found = ".".join(str(part) for part in sys.version_info[:3])
+        problems.append(f"Python {found} is outside the supported {low[0]}.{low[1]}-{high[0]}.{high[1] - 1} range")
+    for module, package in (("cryptography", "cryptography"), ("PIL", "Pillow")):
+        try:
+            __import__(module)
+        except ImportError:
+            problems.append(f"{package} is not installed for this interpreter")
+    if problems:
+        print(
+            f"[media-gateway] cannot start: {'; '.join(problems)}. "
+            f"Run `uv sync` in the studio folder and start the stack again "
+            f"(interpreter: {sys.executable}).",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(2)
 
 
 def main():
+    startup_self_check()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     COMFY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     DEBUG_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

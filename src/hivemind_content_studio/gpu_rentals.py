@@ -4174,10 +4174,13 @@ REAPER_INTERVAL_SECONDS = 180
 REAPER_IDLE_INTERVAL_SECONDS = 900
 
 
-def _reaper_loop() -> None:
+def _reaper_loop(stopping: threading.Event | None = None) -> None:
+    # `stopping` is the app's shutdown event: waiting on it rather than
+    # sleeping means a stop ends the sweep between passes instead of the
+    # interpreter tearing the thread down mid-marketplace-call.
+    stopping = stopping or threading.Event()
     delay = REAPER_INTERVAL_SECONDS
-    while True:
-        time.sleep(delay)
+    while not stopping.wait(delay):
         try:
             managed = [i for i in _all_instances() if i.label.startswith(STUDIO_LABEL_PREFIX)]
             # Probe the beacon only for studio boxes: the phase this turns on
@@ -4251,10 +4254,13 @@ def register_gpu_rental_routes(app, require_owner) -> None:
                 except Exception:
                     pass  # no key, no network: the real request will report it
 
+        stopping = getattr(app.state, "shutting_down", None)
+        if not isinstance(stopping, threading.Event):
+            stopping = threading.Event()
         threading.Thread(target=_warm, name="gpu-rental-warm", daemon=True).start()
         if not RENTAL_AUTOREAP:
             return
-        threading.Thread(target=_reaper_loop, name="gpu-rental-reaper", daemon=True).start()
+        threading.Thread(target=_reaper_loop, args=(stopping,), name="gpu-rental-reaper", daemon=True).start()
 
     # The control app runs these from its lifespan handler; an app without
     # that list (another host embedding these routes) gets the event hook.

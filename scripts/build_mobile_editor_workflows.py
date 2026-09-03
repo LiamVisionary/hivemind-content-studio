@@ -10,12 +10,26 @@ definitions from a running ComfyUI's /object_info.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 REGISTRY = REPO / "packages" / "media-gateway" / "workflow-registry.json"
+COMFY_DIR = Path(os.environ.get("COMFY_DIR") or (Path.home() / "comfy" / "ComfyUI"))
+COMFY_PATH_PREFIX = "comfy:"
+
+
+def resolve_workflow_path(raw_path: str) -> Path:
+    """The same three shapes media-studio-mcp.mjs `resolveWorkflowFile` reads:
+    `comfy:<rel>` is relative to the ComfyUI install, a bare relative path is
+    relative to the gateway package, and an absolute path is used as given."""
+    text = str(raw_path or "")
+    if text.startswith(COMFY_PATH_PREFIX):
+        return COMFY_DIR / text[len(COMFY_PATH_PREFIX):]
+    path = Path(text).expanduser()
+    return path if path.is_absolute() else REPO / "packages" / "media-gateway" / path
 OBJECT_INFO_PORTS = (8188, 8198, 8199)
 WIDGET_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN"}
 
@@ -130,7 +144,7 @@ def main() -> None:
         mobile_path = workflow.get("mobile_workflow")
         if not api_path or not mobile_path:
             continue
-        api_file = Path(api_path).expanduser()
+        api_file = resolve_workflow_path(api_path)
         if not api_file.is_file():
             print(f"skip {workflow['id']}: api workflow missing at {api_file}", file=sys.stderr)
             continue
@@ -140,7 +154,7 @@ def main() -> None:
         if isinstance(workflow.get("native_mlx"), dict):
             extra["nativeMlxLtx"] = workflow["native_mlx"]
         editor = build_editor_graph(api_graph, object_info, extra)
-        destination = Path(mobile_path).expanduser()
+        destination = resolve_workflow_path(mobile_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(editor, indent=2, sort_keys=False) + "\n", encoding="utf-8")
         built += 1

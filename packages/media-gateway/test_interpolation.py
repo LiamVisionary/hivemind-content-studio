@@ -84,7 +84,7 @@ class InterpolationRouteTest(unittest.TestCase):
 
     def test_run_video_interpolation_real_rife_2x_with_audio(self):
         app = load_app()
-        venv_python = Path(app.E2E_SEAL_PYTHON)
+        venv_python = Path(app.SUBPROCESS_PYTHON)
         if not venv_python.is_file():
             self.skipTest("repo venv python unavailable")
         probe = subprocess.run(

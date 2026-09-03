@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .private_access import PrivateFieldCipher
+from .sqlite_migrations import migrate
 
 
 CANVAS_MEDIA_SUFFIXES = {
@@ -83,6 +84,19 @@ def _history_metadata(record: dict[str, Any], *, timestamp_source: str) -> dict[
     }
 
 
+def _add_late_columns(connection: sqlite3.Connection) -> None:
+    """Columns added after the table shipped. Column-probed rather than blindly
+    ALTERed: a v1 file from a build that predates the version stamp may already
+    carry one of them."""
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(canvas_history)")}
+    if "timestamp_source" not in columns:
+        connection.execute(
+            "ALTER TABLE canvas_history ADD COLUMN timestamp_source TEXT NOT NULL DEFAULT 'filesystem'"
+        )
+    if "provenance" not in columns:
+        connection.execute("ALTER TABLE canvas_history ADD COLUMN provenance TEXT")
+
+
 class CanvasHistoryStore:
     def __init__(self, path: str | Path, *, cipher: PrivateFieldCipher):
         self.path = Path(path).expanduser().resolve()
@@ -107,24 +121,13 @@ class CanvasHistoryStore:
                 CREATE INDEX IF NOT EXISTS idx_canvas_history_created ON canvas_history(created_at DESC);
                 """
             )
-            schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if schema_version < 1:
-                # This is a derived index. Rebuild v0 rows so same-named files
-                # in different private roots keep distinct opaque identities.
-                connection.execute("DELETE FROM canvas_history")
-                connection.execute("PRAGMA user_version = 1")
-            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(canvas_history)")}
-            if "timestamp_source" not in columns:
-                connection.execute(
-                    "ALTER TABLE canvas_history ADD COLUMN timestamp_source TEXT NOT NULL DEFAULT 'filesystem'"
-                )
-            if "provenance" not in columns:
-                connection.execute("ALTER TABLE canvas_history ADD COLUMN provenance TEXT")
-            if schema_version < 2:
-                connection.execute("PRAGMA user_version = 2")
-            if schema_version < 3:
-                self._purge_sealed_locator_rows(connection)
-                connection.execute("PRAGMA user_version = 3")
+            migrate(connection, [
+                # 1. This is a derived index. Rebuild v0 rows so same-named
+                #    files in different private roots keep distinct identities.
+                lambda db: db.execute("DELETE FROM canvas_history"),
+                _add_late_columns,
+                lambda db: self._purge_sealed_locator_rows(db),
+            ])
 
     def _purge_sealed_locator_rows(self, connection: sqlite3.Connection) -> None:
         """Drop rows indexed under a sealed physical path (….zenc/.e2e). Earlier

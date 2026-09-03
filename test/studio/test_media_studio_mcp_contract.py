@@ -25,24 +25,35 @@ WORKFLOW_REGISTRY = ROOT / "packages" / "media-gateway" / "workflow-registry.jso
 # HTTP and probes clips with ffprobe.
 pytestmark = pytest.mark.slow
 
+COMFY_DIR = Path(os.environ.get("COMFY_DIR") or (Path.home() / "comfy" / "ComfyUI"))
+COMFY_PATH_PREFIX = "comfy:"
+
+
+def _resolve_workflow_path(raw_path: str) -> Path:
+    """The same three shapes media-studio-mcp.mjs `resolveWorkflowFile` reads:
+    `comfy:<rel>` is relative to the ComfyUI install, a bare relative path is
+    relative to the gateway package, and an absolute path is used as given."""
+    text = str(raw_path or "")
+    if text.startswith(COMFY_PATH_PREFIX):
+        return COMFY_DIR / text[len(COMFY_PATH_PREFIX):]
+    path = Path(text)
+    return path if path.is_absolute() else ROOT / "packages" / "media-gateway" / path
+
+
 def _skip_without_local_workflow(workflow_id: str) -> None:
     """Skip when the graph this workflow renders from is not on this machine.
 
     These tests spawn the real MCP, which resolves the row's `api_workflow` and
-    posts the graph it finds there. Some rows point inside the operator's own
+    posts the graph it finds there. Some rows live inside the operator's own
     ComfyUI install, so on any other machine the MCP posts nothing and the test
     fails as an empty capture list — which says "the MCP is broken" when the
     truth is "that graph is not here".
     """
-    registry = json.loads(
-        (ROOT / "packages" / "media-gateway" / "workflow-registry.json").read_text(encoding="utf-8")
-    )
+    registry = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
     row = next((item for item in registry["workflows"] if item["id"] == workflow_id), None)
     if row is None:
         return
-    path = Path(row.get("api_workflow") or "")
-    if not path.is_absolute():
-        path = ROOT / "packages" / "media-gateway" / path
+    path = _resolve_workflow_path(row.get("api_workflow") or "")
     if not path.is_file():
         pytest.skip(f"{workflow_id}'s graph is not on this machine: {path}")
 
@@ -50,9 +61,7 @@ def _skip_without_local_workflow(workflow_id: str) -> None:
 def _file_or_skip(raw_path: str):
     """The JSON at `raw_path`, or skip — same rule as `_graph_or_skip`, for the
     files that are not a `{"prompt": …}` graph."""
-    path = Path(raw_path)
-    if not path.is_absolute():
-        path = ROOT / "packages" / "media-gateway" / path
+    path = _resolve_workflow_path(raw_path)
     if not path.is_file():
         pytest.skip(f"workflow file is not on this machine: {path}")
     return json.loads(path.read_text(encoding="utf-8"))
@@ -61,15 +70,12 @@ def _file_or_skip(raw_path: str):
 def _graph_or_skip(raw_path: str):
     """The workflow graph at `raw_path`, or skip.
 
-    Some registry rows point at absolute paths inside the operator's own ComfyUI
-    install, so these graphs exist on the machine that renders with them and
-    nowhere else — including CI, where they failed as FileNotFoundError against
-    /Users/liam/comfy/ComfyUI. Skipping names the missing file instead of
-    asserting the shape of something that is not there.
+    Some registry rows live inside the operator's own ComfyUI install, so these
+    graphs exist on the machine that renders with them and nowhere else —
+    including CI. Skipping names the missing file instead of asserting the
+    shape of something that is not there.
     """
-    graph_path = Path(raw_path)
-    if not graph_path.is_absolute():
-        graph_path = ROOT / "packages" / "media-gateway" / graph_path
+    graph_path = _resolve_workflow_path(raw_path)
     if not graph_path.is_file():
         pytest.skip(f"workflow graph is not on this machine: {graph_path}")
     return json.loads(graph_path.read_text(encoding="utf-8"))["prompt"]
@@ -1390,7 +1396,7 @@ def test_spectrum_toggle_reaches_the_graph(tmp_path, workflow_id, spectrum):
     registry_src = json.loads(WORKFLOW_REGISTRY.read_text(encoding="utf-8"))
     workflows = _resolved_registry_workflows(registry_src)
     workflow = next(item for item in workflows if item["id"] == workflow_id)
-    graph_path = ROOT / "packages" / "media-gateway" / workflow["api_workflow"]
+    graph_path = _resolve_workflow_path(workflow["api_workflow"])
 
     registry = tmp_path / "workflow-registry.json"
     entry = json.loads(json.dumps(workflow))
@@ -1512,7 +1518,7 @@ def _capture_video_graph(tmp_path, workflow_id, arguments, *, expect_refusal=Fal
     for wanted in (workflow_id, *extra_workflow_ids):
         workflow = next(item for item in resolved if item["id"] == wanted)
         entry = json.loads(json.dumps(workflow))
-        entry["api_workflow"] = str(ROOT / "packages" / "media-gateway" / workflow["api_workflow"])
+        entry["api_workflow"] = str(_resolve_workflow_path(workflow["api_workflow"]))
         entries.append(entry)
     registry = tmp_path / "workflow-registry.json"
     registry.write_text(json.dumps({"workflows": entries}), encoding="utf-8")

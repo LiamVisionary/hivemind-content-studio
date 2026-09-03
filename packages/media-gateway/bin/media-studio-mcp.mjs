@@ -447,6 +447,7 @@ function publicWorkflowDefaults(workflowId) {
 function publicWorkflow(workflow) {
   return {
     id: workflow.id,
+    ...workflowAvailability(workflow),
     media_type: workflow.media_type,
     title: workflow.title,
     description: workflow.description,
@@ -598,9 +599,30 @@ function runtimePublicStudioBase() {
   return '';
 }
 
+// The one place a registry workflow path becomes a real file. Three shapes:
+// `comfy:<rel>` is relative to the ComfyUI install (COMFY_DIR) — that is where
+// the LTX graphs and the mobile editor workflows live, and it is what the ten
+// absolute /Users/... entries became so the registry stops describing one
+// machine; a bare relative path is relative to this package (the graphs that
+// ship with it); an absolute path is used as given.
+const COMFY_PATH_PREFIX = 'comfy:';
+
 function resolveWorkflowFile(path) {
   if (!path) return '';
+  if (path.startsWith(COMFY_PATH_PREFIX)) return join(comfyDir, path.slice(COMFY_PATH_PREFIX.length));
   return isAbsolute(path) ? path : resolve(projectRoot, path);
+}
+
+// A workflow whose graph is not on this machine is listed as unavailable rather
+// than offered and then failing at run time with a path in the error.
+function workflowAvailability(workflow) {
+  const apiPath = resolveWorkflowFile(workflow.api_workflow || workflow.workflow || workflow.apiWorkflow);
+  if (!apiPath || existsSync(apiPath)) return { available: true };
+  return {
+    available: false,
+    unavailable_reason: 'Its workflow file is not installed on this machine.',
+    fix: `install workflow ${workflow.id}`,
+  };
 }
 
 function cloneJson(value) {
