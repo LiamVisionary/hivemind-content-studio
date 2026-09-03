@@ -13,7 +13,9 @@ export const STORY_STAGES = Object.freeze([
   { id: 'story', label: 'The story' },
   { id: 'cast', label: 'Cast & place' },
   { id: 'motion', label: 'What happens' },
-  { id: 'ship', label: 'Ship it' },
+  // The id is the persisted stage key and stays; the label is what this stage
+  // actually does, which is record a sign-off.
+  { id: 'ship', label: 'Sign-off' },
 ]);
 
 export function StageRail({ stages, stage, onStage, title, promise, locked, onNew, onExample }) {

@@ -32,6 +32,7 @@ import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
 import { muapi } from '../lib/muapi.js';
+import { adoptCloudOutput } from '../lib/cloudAdopt.js';
 import { muapiRow, needsBrowserKey, runVideo } from '../lib/modelRunner.js';
 import { lipsyncModels, imageLipSyncModels, videoLipSyncModels, getResolutionsForLipSyncModel } from '../lib/models.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
@@ -44,7 +45,8 @@ import { toastMuapiError, toastMuapiKeyNeeded } from './lipsync/muapiErrorToast.
 import { getLang, t } from '../lib/i18n.js';
 
 import { useMediaSrc } from '../hooks/hooks.js';
-import { registerPromptInserter } from '../app/promptTarget.js';
+import { registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
+import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { Icon } from '../ui/icons.jsx';
 import {
   Button, Card, EmptyState, IconButton, Pill, ProgressBar, SectionLabel, Segmented, Spinner, StudioLayout, cx,
@@ -247,6 +249,11 @@ function LipSyncViewer({ url, entry, generating, onClose, onNew, onRegenerate, o
           >
             {t('lipsync.regenerate')}
           </Button>
+          {/* The clip the studio could not keep exists here and on a provider
+              link that expires. Say it beside the button that saves it. */}
+          {entry?.saved === false ? (
+            <Pill tone="warn">{zh() ? '未保存 — 下载以保留' : 'Not saved — download to keep'}</Pill>
+          ) : null}
           <Button variant="primary" icon="download" onClick={onDownload}>{t('lipsync.download')}</Button>
         </>
       }
@@ -297,6 +304,20 @@ export function LipSyncStudio({ active = true } = {}) {
   const saveHistory = () => saveStudioGenerationHistory(LIPSYNC_HISTORY_KEY, s.history, LIPSYNC_HISTORY_LIMIT);
 
   const addToHistory = (entry) => {
+    // Seal what made this clip, keyed on the kept output — the same store the
+    // Image and Video studios write to, so a clip found in the Library a week
+    // later can still say which model and which prompt produced it. In studio
+    // mode this list is memory-only by design (a prompt never lands on disk in
+    // the clear); the vault is where the settings actually survive.
+    if (entry?.url && entry.saved !== false) {
+      void rememberGenerationSetup({
+        url: entry.url,
+        section: 'lipsync',
+        mediaType: 'video/*',
+        context: { model: entry.model || '', prompt: entry.prompt || '' },
+        downloadName: videoDownloadName(entry.model, entry.id),
+      });
+    }
     s.history.unshift(entry);
     s.history = s.history.slice(0, LIPSYNC_HISTORY_LIMIT);
     saveHistory();
@@ -526,8 +547,16 @@ export function LipSyncStudio({ active = true } = {}) {
       if (res && res.url) {
         if (capturedRequestId) removePendingJob(capturedRequestId);
         const genId = res.id || capturedRequestId || Date.now().toString();
-        addToHistory({ id: genId, url: res.url, prompt, model: s.selectedModel, timestamp: new Date().toISOString() });
-        s.viewerUrl = res.url;
+        // The kept copy, not the provider's link: three minutes of waiting used
+        // to survive exactly as long as this tab did, because a MUAPI URL is
+        // gone within the day and this studio's own list is memory-only in
+        // studio mode. The adopted output is sealed and lists in the Library.
+        const kept = res.savedUrl || res.url;
+        addToHistory({
+          id: genId, url: kept, prompt, model: s.selectedModel,
+          saved: Boolean(res.savedUrl), timestamp: new Date().toISOString(),
+        });
+        s.viewerUrl = kept;
       } else {
         throw new Error('No video URL returned by API');
       }
@@ -597,8 +626,18 @@ export function LipSyncStudio({ active = true } = {}) {
           // machine that holds the key this browser has none to pass.
           const result = await muapi.pollForResult(job.requestId, '', attemptsLeft, job.interval);
           const url = result.outputs?.[0] || result.url || result.output?.url;
-          if (url) addToHistory({ id: job.requestId, url, ...job.historyMeta, timestamp: new Date().toISOString() });
-          else toast.error(zh() ? '一个未完成的唇语同步没有返回视频。' : 'A pending lip sync finished without a video.');
+          if (url) {
+            // A clip recovered after a reload gets the same keeping a fresh one
+            // gets — otherwise the crash-safe resume hands back the one result
+            // that is still one relaunch from gone.
+            const savedUrl = await adoptCloudOutput(url, {
+              kind: 'video', model: job.historyMeta?.model || '', provider: 'muapi',
+            });
+            addToHistory({
+              id: job.requestId, url: savedUrl || url, ...job.historyMeta,
+              saved: Boolean(savedUrl), timestamp: new Date().toISOString(),
+            });
+          } else toast.error(zh() ? '一个未完成的唇语同步没有返回视频。' : 'A pending lip sync finished without a video.');
           removePendingJob(job.requestId);
         } catch (e) {
           console.warn('[LipSyncStudio] Pending job failed:', job.requestId, e.message);
@@ -632,7 +671,7 @@ export function LipSyncStudio({ active = true } = {}) {
   // it into a box that is not on screen.
   useEffect(() => {
     if (!active) return undefined;
-    return registerPromptInserter((text) => {
+    const offInsert = registerPromptInserter((text) => {
       if (!getCurrentModel()?.hasPrompt) {
         toast(zh() ? '当前模型没有提示词输入框 — 换一个带提示词的模型再插入。' : 'This lip sync model has no prompt field — pick one with a prompt to insert text.');
         return;
@@ -643,6 +682,22 @@ export function LipSyncStudio({ active = true } = {}) {
       bump();
       promptRef.current?.focus();
     });
+    // Dragging a kept clip back in, or "Load in Studio" from the Library. The
+    // inputs are files that were uploaded for THAT run and are not restorable —
+    // the model and the prompt are, and they are what the run is remembered by.
+    const offSetup = registerStudioSetupLoader('lipsync', (setup) => {
+      const context = setup?.format === 'studio-full-context' ? setup.context : null;
+      if (!context) return;
+      const model = lipsyncModels.find((entry) => entry.id === context.model);
+      if (model) {
+        s.inputMode = videoLipSyncModels.some((entry) => entry.id === model.id) ? 'video' : 'image';
+        s.selectedModel = model.id;
+        applyMode({ preserveSelection: true });
+      }
+      if (typeof context.prompt === 'string') s.prompt = context.prompt;
+      bump();
+    });
+    return () => { offInsert?.(); offSetup?.(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 

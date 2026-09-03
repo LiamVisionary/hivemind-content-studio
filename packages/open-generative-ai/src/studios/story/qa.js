@@ -103,7 +103,7 @@ export function shipVerdict(verdicts = {}) {
   if (blocking.length) {
     return {
       state: 'blocked',
-      headline: `${blocking.length} check${blocking.length === 1 ? '' : 's'} block${blocking.length === 1 ? 's' : ''} publishing.`,
+      headline: `${blocking.length} check${blocking.length === 1 ? '' : 's'} block${blocking.length === 1 ? 's' : ''} approval.`,
       detail: 'Repair the weakest layer only — changing everything at once tells you nothing about which change worked.',
       failed, untested,
     };
@@ -112,7 +112,7 @@ export function shipVerdict(verdicts = {}) {
     return {
       state: 'repair',
       headline: `${failed.length} soft failure${failed.length === 1 ? '' : 's'}.`,
-      detail: 'None of these breaks trust. Ship it, or spend one targeted repair — not a full regeneration.',
+      detail: 'None of these breaks trust. Approve it, or spend one targeted repair — not a full regeneration.',
       failed, untested,
     };
   }

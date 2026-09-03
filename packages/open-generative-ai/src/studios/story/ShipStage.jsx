@@ -1,5 +1,10 @@
 // Stage 4 — the gate: what has to be true before a clip is worth finishing.
 //
+// It records an APPROVAL and nothing else. It used to say "Ship it", which
+// promised the one thing it cannot do — nothing is posted, nothing is queued,
+// no artifact moves — while the product's real publishing path lives behind the
+// Planner's approval gate.
+//
 // The nine checks are in the order they are cheap to fix, and a failure names
 // ONE layer to change. That is the whole point of the stage: the instinct on a
 // bad take is to regenerate everything, which changes every variable at once
@@ -19,15 +24,18 @@ const TONE = {
 
 export function ShipStage({
   story, specs, busy, verdict, caption, segments, onFill, onUpdate, onVerdict, onCaption,
-  onShip, onFillCaption,
+  onApprove, onFillCaption,
 }) {
   const tone = TONE[verdict.state] || TONE.untested;
   const answered = QA_CHECKS.length - verdict.untested.length;
-  const shipped = story.qa.shipped || '';
+  // `qa.shipped` is the stored field's name and stays one — the timestamp
+  // written before this stage was honest about what it does. What it MEANS,
+  // and everything the owner reads, is approval.
+  const approved = story.qa.shipped || '';
 
   return (
     <div className="flex flex-col gap-5">
-      <StageHead title="Ship it">
+      <StageHead title="Approve">
         Watch the clip once and answer nine questions. A failure names the one layer to change —
         not a full regeneration.
       </StageHead>
@@ -41,21 +49,21 @@ export function ShipStage({
             {answered} of {QA_CHECKS.length} checked · {verdict.headline}
           </div>
           <p className="m-0 mt-0.5 text-[12px] leading-snug text-ink2">
-            {shipped
-              ? `Shipped ${new Date(shipped).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}. Every check stays editable — a re-cut re-opens it.`
+            {approved
+              ? `Approved ${new Date(approved).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}. Every check stays editable — a re-cut re-opens it.`
               : verdict.detail}
           </p>
         </div>
         <Button
-          variant={shipped ? 'neutral' : 'primary'}
+          variant={approved ? 'neutral' : 'primary'}
           className="ml-auto shrink-0"
-          onClick={onShip}
-          disabled={!shipped && verdict.state === 'blocked'}
+          onClick={onApprove}
+          disabled={!approved && verdict.state === 'blocked'}
           title={verdict.state === 'blocked'
             ? 'A blocking check has failed — repair it first.'
-            : 'Record that this production was approved and published.'}
+            : 'Record that this production passed its checks'}
         >
-          {shipped ? 'Shipped — undo' : 'Ship'}
+          {approved ? 'Approved — undo' : 'Approve'}
         </Button>
       </div>
 

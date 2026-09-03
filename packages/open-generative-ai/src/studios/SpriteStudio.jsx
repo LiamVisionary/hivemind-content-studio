@@ -23,6 +23,8 @@ import { toast } from 'react-hot-toast';
 
 import { useMediaSrc } from '../hooks/hooks.js';
 import { defaultPick, EVIDENCE_LABELS, fetchCapabilityMatrix, rankModels, RATING_LABELS, serverRows } from '../lib/capabilityMatrix.js';
+import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
+import { downloadMedia } from '../lib/downloadMedia.js';
 import { isHivemindStudioEnabled, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
 import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { needsBrowserKey, runImage, runVideo, transportFor } from '../lib/modelRunner.js';
@@ -66,17 +68,19 @@ function canvasToBlob(canvas) {
   return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
 }
 
-function saveBlob(blob, filename) {
+// The sheet and its atlas are made in this browser, so they arrive as blobs
+// rather than as URLs — but they still go out through the studio's ONE download
+// path (downloadMedia), so naming, the ciphertext refusal and the Safari
+// revoke-race fix have a single definition instead of a fourth copy here.
+async function saveBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  // Revoked on the next tick: revoking synchronously races the download in
-  // Safari and hands the user a zero-byte file.
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  try {
+    await downloadMedia(url, filename);
+  } finally {
+    // Revoked on the next tick: revoking synchronously races the download in
+    // Safari and hands the user a zero-byte file.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 }
 
 function StageHeader({ index, stage, done, children }) {
@@ -179,8 +183,61 @@ export function SpriteStudio({ active = true } = {}) {
   const abortRef = useRef(null);
   const frameStripRef = useRef(null);
   const sheetHostRef = useRef(null);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  /* ---------------- persistence ---------------- */
+
+  // A sprite pipeline is the longest job in the app: a rented-GPU animation and
+  // a matte that costs ~20 seconds a frame. Every stage used to be plain
+  // useState, so a reload — routine while a render runs elsewhere — threw the
+  // sprite, the clip and every dial away, even though the sprite is already a
+  // persistent reference and the clip is already an output. Only the studio
+  // forgot them. Same encrypted section the Story studio uses: in studio mode
+  // the whole object is ciphertext this browser alone can read.
+  //
+  // Frames and the sheet are deliberately NOT stored — both are regenerated
+  // from clipUrl in seconds, and a sheet is megabytes of canvas data.
+  useEffect(() => {
+    let alive = true;
+    hydrateComposerState().then(() => {
+      if (!alive) return;
+      const saved = getComposerSection('sprite');
+      const text = (value, fallback) => (typeof value === 'string' ? value : fallback);
+      const number = (value, fallback) => (Number.isFinite(value) ? value : fallback);
+      setSubject((current) => text(saved.subject, current));
+      setStyle((current) => text(saved.style, current));
+      setBackground((current) => text(saved.background, current));
+      setAction((current) => text(saved.action, current));
+      setCustomBeat((current) => text(saved.customBeat, current));
+      setCustomAction((current) => text(saved.customAction, current));
+      setSoundscape((current) => text(saved.soundscape, current));
+      setSeconds((current) => number(saved.seconds, current));
+      setFrameCount((current) => number(saved.frameCount, current));
+      setMatteSubject((current) => text(saved.matteSubject, current));
+      setColumns((current) => number(saved.columns, current));
+      setCellSize((current) => number(saved.cellSize, current));
+      setSheetFps((current) => number(saved.sheetFps, current));
+      setSpriteUrl((current) => text(saved.spriteUrl, current));
+      setClipUrl((current) => text(saved.clipUrl, current));
+      setHydrated(true);
+    }).catch(() => setHydrated(true));
+    return () => { alive = false; };
+  }, []);
+
+  // Only after hydration: an early write would persist the blank defaults over
+  // a pipeline that had not finished loading yet.
+  useEffect(() => {
+    if (!hydrated) return;
+    updateComposerSection('sprite', {
+      subject, style, background, action, customBeat, customAction, soundscape,
+      seconds, frameCount, matteSubject, columns, cellSize, sheetFps, spriteUrl, clipUrl,
+    });
+  }, [
+    hydrated, subject, style, background, action, customBeat, customAction, soundscape,
+    seconds, frameCount, matteSubject, columns, cellSize, sheetFps, spriteUrl, clipUrl,
+  ]);
 
   // The prompt-insert bridge (explore dock, prompt helper) targets the sprite
   // description while this studio is the visible one — the same contract every
@@ -332,7 +389,10 @@ export function SpriteStudio({ active = true } = {}) {
         signal: controller.signal,
       });
       if (!result?.url) throw new Error('No clip came back.');
-      setClipUrl(result.url);
+      // The kept copy when there is one: a cloud animation's own URL expires,
+      // and this studio now remembers the clip across a relaunch — a remembered
+      // dead link would be worse than forgetting it.
+      setClipUrl(result.savedUrl || result.url);
       setFrames([]);
       setSheet(null);
       if (!matteSubject) setMatteSubject(matteSubjectFrom(subject));
@@ -457,12 +517,12 @@ export function SpriteStudio({ active = true } = {}) {
   const downloadSheet = async () => {
     if (!sheet) return;
     const blob = await canvasToBlob(sheet.canvas);
-    if (blob) saveBlob(blob, `${sheet.atlas.name}-sheet.png`);
+    if (blob) await saveBlob(blob, `${sheet.atlas.name}-sheet.png`);
   };
 
-  const downloadAtlas = () => {
+  const downloadAtlas = async () => {
     if (!sheet) return;
-    saveBlob(new Blob([JSON.stringify(sheet.atlas, null, 2)], { type: 'application/json' }), `${sheet.atlas.name}-atlas.json`);
+    await saveBlob(new Blob([JSON.stringify(sheet.atlas, null, 2)], { type: 'application/json' }), `${sheet.atlas.name}-atlas.json`);
   };
 
   const chosenAction = SPRITE_ACTIONS.find((entry) => entry.id === action) || SPRITE_ACTIONS[0];

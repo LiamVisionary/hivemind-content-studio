@@ -872,13 +872,18 @@ export function StoryStudio({ active = true } = {}) {
   );
 
   /**
-   * Record that this production was approved — the one thing the gate can
+   * Record that this production passed its checks — the one thing this gate can
    * actually decide, and the half still worth having a month later.
    *
-   * Blocked while a blocking check has failed, because "ship it anyway" is not
-   * a decision this stage is willing to record silently.
+   * It is called Approve and not Ship because approving is all it does: nothing
+   * is posted, nothing is queued and no artifact moves. The product HAS a real
+   * approval-gated publishing path (publishing.py, the Planner surfaces), which
+   * is exactly why the button must not borrow its verb.
+   *
+   * Blocked while a blocking check has failed, because "approve it anyway" is
+   * not a decision this stage is willing to record silently.
    */
-  const ship = () => {
+  const approve = () => {
     if (story.qa.shipped) {
       update((current) => ({ ...current, qa: { ...current.qa, shipped: '' } }));
       return;
@@ -890,8 +895,8 @@ export function StoryStudio({ active = true } = {}) {
     update((current) => ({ ...current, qa: { ...current.qa, shipped: new Date().toISOString() } }));
     toast.success(
       verdict.untested.length
-        ? `Shipped with ${verdict.untested.length} check${verdict.untested.length === 1 ? '' : 's'} unrun. Finish in order: join, sound, caption, upscale.`
-        : 'Shipped. Finish in order: join the takes, balance the sound, write the caption, upscale last.',
+        ? `Approved with ${verdict.untested.length} check${verdict.untested.length === 1 ? '' : 's'} unrun. Finish in order: join, sound, caption, upscale.`
+        : 'Approved. Finish in order: join the takes, balance the sound, write the caption, upscale last.',
       { duration: 8000 },
     );
   };
@@ -1006,7 +1011,7 @@ export function StoryStudio({ active = true } = {}) {
       ...entry,
       done: verdict.state === 'ship',
       status: story.qa.shipped
-        ? 'Shipped'
+        ? 'Approved'
         : `${QA_CHECKS.length - verdict.untested.length} of ${QA_CHECKS.length} checked`,
     };
   }), [
@@ -1229,7 +1234,7 @@ export function StoryStudio({ active = true } = {}) {
             onUpdate={update}
             onVerdict={setVerdict}
             onCaption={setCaption}
-            onShip={ship}
+            onApprove={approve}
             onFillCaption={() => { void fillStage('ship'); }}
           />
         ) : null}

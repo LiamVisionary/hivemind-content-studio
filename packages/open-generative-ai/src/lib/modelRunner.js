@@ -28,6 +28,7 @@
 // resolves to a transport the caller built nothing for is refused, loudly,
 // instead of being sent a payload shaped for somewhere else.
 import { isLocalAIAvailable, localAI, localCatalogStatusNow } from './localInferenceClient.js';
+import { adoptCloudOutput } from './cloudAdopt.js';
 import { canvasPixels } from '../studios/story/sheetLayout.js';
 import { generateHivemindVideo, isHivemindStudioEnabled, markMuapiKeyOnServer } from './hivemindStudio.js';
 import { flattenApiDetail } from './muapiErrors.js';
@@ -322,7 +323,12 @@ export async function runImage({ row, shared = {}, extra = null, signal = null }
     const { method: _drop, ...params } = payload;
     const result = await muapi[method]({ signal, ...params, model: row.id });
     if (!result?.url) throw new Error('Nothing came back.');
-    return { ...result, provider: 'muapi', model: row.id };
+    // A MUAPI result is a link on someone else's CDN that expires. Keep a
+    // sealed copy here, so it is in the Library after a relaunch like every
+    // local render — `savedUrl` is that copy, and `url` stays the provider's
+    // because that is what a later call hands BACK to the provider.
+    const savedUrl = await adoptCloudOutput(result.url, { kind: 'image', model: row.id, provider: 'muapi' });
+    return { ...result, provider: 'muapi', model: row.id, savedUrl, saved: Boolean(savedUrl) };
   }
   return studioImage(payload, { row, signal });
 }
@@ -354,7 +360,11 @@ export async function runVideo({ row, shared = {}, extra = null, signal = null }
     const { method: _drop, ...params } = payload;
     const result = await muapi[method]({ signal, ...params, model: row.id });
     if (!result?.url) throw new Error('No video URL returned.');
-    return { ...result, provider: 'muapi', model: row.id };
+    // Same as a still: a clip that only exists on the provider's CDN is one
+    // relaunch from gone. Lip sync is the expensive case — three minutes of
+    // waiting that used to survive exactly as long as the tab did.
+    const savedUrl = await adoptCloudOutput(result.url, { kind: 'video', model: row.id, provider: 'muapi' });
+    return { ...result, provider: 'muapi', model: row.id, savedUrl, saved: Boolean(savedUrl) };
   }
   // The lane names its workflow `workflow_id`; `model` there is the studio's
   // `hivemind-media:<id>` form and a raw id in it decodes to nothing, which

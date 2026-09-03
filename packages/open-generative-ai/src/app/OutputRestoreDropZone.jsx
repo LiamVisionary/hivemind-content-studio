@@ -83,7 +83,11 @@ function restoreFullContext(section, context) {
     (Array.isArray(context.referenceImages) && context.referenceImages.length) ||
     (Array.isArray(context.ingredientImages) && context.ingredientImages.length) ||
     (Array.isArray(context.loras) && context.loras.length);
-  const where = section === 'video' ? (zh() ? '视频' : 'Video') : (zh() ? '图像' : 'Image');
+  // Named, not guessed: a lip sync restored into "the Image studio" sends the
+  // owner to a studio that has none of it.
+  const STUDIO_NAMES = { video: ['视频', 'Video'], lipsync: ['唇语同步', 'Lip Sync'], image: ['图像', 'Image'] };
+  const [zhName, enName] = STUDIO_NAMES[section] || STUDIO_NAMES.image;
+  const where = zh() ? zhName : enName;
   // Oversized inline references are not sealed (they would bloat the vault and cost
   // the settings of older generations), so say so rather than letting the user
   // generate with a silently smaller reference set than the run they restored.

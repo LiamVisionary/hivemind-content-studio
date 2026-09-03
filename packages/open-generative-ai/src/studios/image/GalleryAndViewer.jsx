@@ -2,10 +2,12 @@
 // Every media src is resolved through useMediaSrc (E2E decrypt, fail-open).
 import { useEffect, useRef } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
-import { t } from '../../lib/i18n.js';
+import { getLang, t } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Modal } from '../../ui/Modal.jsx';
-import { ActionButton, IconButton, cx } from '../../ui/kit.jsx';
+import { ActionButton, IconButton, Pill, cx } from '../../ui/kit.jsx';
+
+const zh = () => getLang() === 'zh-CN';
 
 // "Created" as a readable local date, not the raw ISO string.
 export function formatCreated(timestamp) {
@@ -182,6 +184,12 @@ export function ViewerModal({
               further: this one leaves the machine, and unencrypted. */}
           {onPostToCivitai ? (
             <ActionButton variant="neutral" icon="upload" label="Post to Civitai" onClick={onPostToCivitai} />
+          ) : null}
+          {/* A cloud result the studio could not keep exists on screen and on a
+              CDN link that expires — say so beside the button that saves it,
+              rather than letting the owner discover it after a relaunch. */}
+          {entry?.saved === false ? (
+            <Pill tone="warn">{zh() ? '未保存 — 下载以保留' : 'Not saved — download to keep'}</Pill>
           ) : null}
           <ActionButton variant="primary" icon="download" label={t('common.download')} onClick={onDownload} />
         </>
