@@ -12,7 +12,7 @@
 import { useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useMediaSrc } from '../../hooks/hooks.js';
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { downloadMedia } from '../../lib/downloadMedia.js';
 import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { Icon } from '../../ui/icons.jsx';
@@ -28,8 +28,6 @@ import { Lightbox } from '../components/Lightbox.jsx';
 import { RunCard } from '../components/RunCard.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
 import { toastFailure } from '../../ui/failureToast.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 const FILTERS = [
   { value: '', label: 'All' },

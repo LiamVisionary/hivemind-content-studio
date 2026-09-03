@@ -18,7 +18,7 @@
 //   studioLane — opaque per-app/per-tab id used only for local generation queues.
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import {
   addTab, closeTab, consumeSeed, insertTabAfter, loadTabState, saveTabState, selectTab,
   studioInstanceId, studioLaneId,
@@ -35,7 +35,6 @@ const MAX_TABS = 24;
 // the chip is the only sign a hidden tab has a run out.
 const BUSY_POLL_MS = 1500;
 
-const zh = () => getLang() === 'zh-CN';
 const TEXT = {
   tab: (n) => (zh() ? `标签 ${n}` : `Tab ${n}`),
   newTab: () => (zh() ? '新建标签（默认设置）' : 'New tab — default settings, empty prompt'),

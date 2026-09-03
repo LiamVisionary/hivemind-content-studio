@@ -10,14 +10,12 @@
 // another tab lands on its card by itself.
 import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { Button, Card, EmptyState, Field, Pill, SectionLabel, TextInput } from '../../ui/kit.jsx';
 import { api, providerLabel, refreshOAuth, startOAuth, useHub } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
 import { toastFailure } from '../../ui/failureToast.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 function OAuthCard({ card, link, checking, offline }) {
   const [busy, setBusy] = useState(false);

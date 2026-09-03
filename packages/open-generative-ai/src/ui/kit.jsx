@@ -3,7 +3,7 @@
 import { createContext, useContext, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { STUDIO_RESTART_COMMAND, apiOfflineSentence, pingApiStatus, useApiStatus } from '../app/statusStore.js';
-import { getLang } from '../lib/i18n.js';
+import { zh as zhUi } from '../lib/i18n.js';
 import { Icon } from './icons.jsx';
 
 const FieldIdContext = createContext(undefined);
@@ -735,7 +735,7 @@ function StudioOfflineBanner() {
   const status = useApiStatus();
   const [busy, setBusy] = useState(false);
   if (status.tone !== 'offline') return null;
-  const zh = getLang() === 'zh-CN';
+  const zh = zhUi();
   const retry = () => {
     setBusy(true);
     void pingApiStatus().finally(() => setBusy(false));

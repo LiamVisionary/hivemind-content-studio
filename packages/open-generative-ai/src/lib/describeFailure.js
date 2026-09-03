@@ -20,11 +20,9 @@
 //
 // Pure (no React, no toast, no fetch) like the rest of src/lib, so every branch
 // is testable in node.
-import { getLang } from './i18n.js';
+import { zh } from './i18n.js';
 import { describeMuapiError, flattenApiDetail } from './muapiErrors.js';
 import { remedyFor } from './textModels.js';
-
-const zh = () => getLang() === 'zh-CN';
 
 // The same test the media gateway uses on the lane's own stderr, so the two
 // ends agree on what "the card ran out" looks like.

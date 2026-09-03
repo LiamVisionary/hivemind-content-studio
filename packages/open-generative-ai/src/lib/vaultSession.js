@@ -293,6 +293,20 @@ export function ensureVaultReady() {
     return readyPromise;
 }
 
+/**
+ * Try the bootstrap again, now that this tab has a passphrase it did not have.
+ *
+ * ensureVaultReady caches "this vault cannot be unlocked here" for the whole
+ * page load — the right answer for a hundred sealed thumbnails asking the same
+ * question, and the wrong one the instant an in-app unlock lands. Only the
+ * cached verdict is dropped: resetVaultSession would also lock a vault that is
+ * already open.
+ */
+export function retryVaultBootstrap() {
+    readyPromise = null;
+    return ensureVaultReady();
+}
+
 export function resetVaultSession() {
     readyPromise = null;
     lockVault();
@@ -316,9 +330,20 @@ export function clearOwnerHandoff() {
 // gate: verify the password server-side, stash it per-tab, reload.
 export const VAULT_UNLOCK_REQUEST_EVENT = 'hivemind-vault-unlock-request';
 
+// Announced once the vault is actually open in this tab, so the surfaces that
+// drew a locked tile can resolve their media again instead of the whole app
+// reloading to find out. Lock still reloads: that one has to reset state.
+export const VAULT_UNLOCKED_EVENT = 'hivemind-vault-unlocked';
+
 export function requestVaultUnlock() {
     try {
         window.dispatchEvent(new Event(VAULT_UNLOCK_REQUEST_EVENT));
+    } catch { /* no window (tests) */ }
+}
+
+export function announceVaultUnlocked() {
+    try {
+        window.dispatchEvent(new Event(VAULT_UNLOCKED_EVENT));
     } catch { /* no window (tests) */ }
 }
 

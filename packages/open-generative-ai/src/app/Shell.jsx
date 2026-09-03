@@ -2,9 +2,7 @@
 import { useEffect, useState } from 'react';
 import { useLang, useOwnerSession } from '../hooks/hooks.js';
 import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
-import { getLang, t } from '../lib/i18n.js';
-
-const zhUi = () => getLang() === 'zh-CN';
+import { t, zh as zhUi } from '../lib/i18n.js';
 import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, IconButton, cx } from '../ui/kit.jsx';
@@ -220,7 +218,7 @@ function NavEntry({ item, active, onNavigate }) {
 }
 
 export function Shell({ page, onNavigate, onOpenSettings, children }) {
-  const { zh, toggle, lang } = useLang();
+  const { zh } = useLang();
   const activeItem = NAV_ITEMS.find((i) => i.page === page);
 
   useEffect(() => {
@@ -260,16 +258,11 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
             </div>
           ))}
         </nav>
+        {/* The language toggle stood here. This build ships one language
+            (LANGS_ENABLED in lib/i18n.js); the control returns with the key
+            table, in Settings only. */}
         <div className="flex items-center gap-1 border-t border-line1 p-3">
           <IconButton icon="settings" label={`${t('nav.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
-          <button
-            type="button"
-            onClick={toggle}
-            title={`${lang === 'zh-CN' ? t('web.switchToEn') : t('web.switchToZh')} (${zh ? '页面会刷新' : 'reloads the page'})`}
-            className="grid h-ctl-md w-[36px] place-items-center rounded-md text-[11px] font-bold text-ink2 transition-colors hover:bg-bg2 hover:text-ink1"
-          >
-            {lang === 'zh-CN' ? 'EN' : '中文'}
-          </button>
         </div>
       </aside>
 
@@ -291,14 +284,6 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
             <span className="lg:hidden">
               <IconButton icon="settings" label={`${t('nav.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
             </span>
-            <button
-              type="button"
-              onClick={toggle}
-              title={`${lang === 'zh-CN' ? t('web.switchToEn') : t('web.switchToZh')} (${zh ? '页面会刷新' : 'reloads the page'})`}
-              className="grid h-ctl-md w-[36px] place-items-center rounded-md text-[11px] font-bold text-ink2 transition-colors hover:bg-bg2 hover:text-ink1 lg:hidden"
-            >
-              {lang === 'zh-CN' ? 'EN' : '中文'}
-            </button>
           </div>
         </header>
 

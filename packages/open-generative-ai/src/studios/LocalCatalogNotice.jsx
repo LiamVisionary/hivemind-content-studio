@@ -8,9 +8,7 @@
 // not own the engine's lifecycle yet, and a button that cannot do what it says
 // is worse than no button.
 import { Button, EmptyState, Spinner, cx } from '../ui/kit.jsx';
-import { getLang } from '../lib/i18n.js';
-
-const zh = () => getLang() === 'zh-CN';
+import { zh } from '../lib/i18n.js';
 
 const openModels = () => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'models' } }));
 

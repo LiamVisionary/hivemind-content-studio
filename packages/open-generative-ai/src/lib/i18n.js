@@ -1,35 +1,61 @@
 const LANG_KEY = 'og_lang';
 
-/** Normalize legacy `zh` and browser locales to BCP-47 zh-CN. */
-export function normalizeLang(raw) {
+// The languages this build actually ships.
+//
+// zh-CN exists here as a half-translated dictionary: three studios, every
+// dialog and most of the hub are English literals, so a Chinese-locale user was
+// promised a translated app and got a bilingual one. Until the ~1,000 inline
+// ternaries move into this key table, one honest language beats two dishonest
+// ones — so the dictionary, the `zh()` branches and the stored choice all stay
+// where they are and THIS LIST is the switch. Add 'zh-CN' back and the app
+// speaks Chinese again, on whatever the person last chose.
+export const LANGS_ENABLED = ['en'];
+
+/** The BCP-47 tag `raw` names, whether or not this build ships it. */
+export function canonicalLang(raw) {
     if (!raw) return 'en';
     const lower = String(raw).toLowerCase();
     if (lower === 'zh' || lower.startsWith('zh-') || lower.startsWith('zh_')) return 'zh-CN';
     return lower === 'zh-cn' ? 'zh-CN' : 'en';
 }
 
+/** The language to RENDER for `raw`: its canonical tag, clamped to what ships. */
+export function normalizeLang(raw) {
+    const canonical = canonicalLang(raw);
+    return LANGS_ENABLED.includes(canonical) ? canonical : LANGS_ENABLED[0];
+}
+
+/** True when the interface is running in Chinese (never, while zh-CN is off). */
+export const zh = () => getLang() === 'zh-CN';
+
+// A stored choice is canonicalised (legacy `zh` → `zh-CN`) but never rewritten
+// to the shipping language: overwriting it would silently discard the language
+// the person picked, and re-enabling zh-CN would land them in English with no
+// way to tell it had ever been set.
+function rememberCanonical(raw) {
+    const canonical = canonicalLang(raw);
+    if (canonical !== raw) {
+        try { localStorage.setItem(LANG_KEY, canonical); } catch { /* storage unavailable */ }
+    }
+    return normalizeLang(canonical);
+}
+
 /** Detect browser locale on first visit; migrates stored `zh` → `zh-CN`. */
 export function initLocale() {
     if (typeof localStorage === 'undefined') return 'en';
     const stored = localStorage.getItem(LANG_KEY);
-    if (stored) {
-        const normalized = normalizeLang(stored);
-        if (normalized !== stored) localStorage.setItem(LANG_KEY, normalized);
-        return normalized;
-    }
+    if (stored) return rememberCanonical(stored);
     const detected = typeof navigator !== 'undefined' ? navigator.language : 'en';
-    const lang = normalizeLang(detected);
-    localStorage.setItem(LANG_KEY, lang);
-    return lang;
+    const canonical = canonicalLang(detected);
+    localStorage.setItem(LANG_KEY, canonical);
+    return normalizeLang(canonical);
 }
 
 export function getLang() {
     if (typeof localStorage === 'undefined') return 'en';
     const stored = localStorage.getItem(LANG_KEY);
     if (!stored) return initLocale();
-    const normalized = normalizeLang(stored);
-    if (normalized !== stored) localStorage.setItem(LANG_KEY, normalized);
-    return normalized;
+    return rememberCanonical(stored);
 }
 
 // The <html lang> attribute drives font fallback, hyphenation, spellcheck and
@@ -40,9 +66,14 @@ export function applyDocumentLang(lang = getLang()) {
     try { document.documentElement.lang = normalizeLang(lang) === 'zh-CN' ? 'zh-CN' : 'en'; } catch { /* non-critical */ }
 }
 
+// The CHOICE is stored (canonical), the RENDERED language is what ships — so
+// picking a language this build does not carry yet is recorded rather than
+// thrown away. Callers should pass { reload: false }: useLang() re-renders on
+// the 'og_lang_change' event, so nothing on screen has to be torn down.
 export function setLang(lang, { reload = true } = {}) {
-    const normalized = normalizeLang(lang);
-    localStorage.setItem(LANG_KEY, normalized);
+    const chosen = canonicalLang(lang);
+    const normalized = normalizeLang(chosen);
+    localStorage.setItem(LANG_KEY, chosen);
     applyDocumentLang(normalized);
     if (reload && typeof location !== 'undefined') {
         location.reload();
@@ -76,17 +107,14 @@ const translations = {
         'common.cancel': 'Cancel',
         'common.save': 'Save',
         'common.history': 'History',
-        'common.advanced': 'Advanced',
         'common.less': 'Less',
         'common.tools': 'Tools',
         'common.copy': 'Copy',
         'common.copied': 'Copied',
         'common.searchModels': 'Search models...',
         'common.retry': 'Retry',
-        'common.loading': 'Loading...',
         'common.noResults': 'No local models match',
         'common.regenerate': 'Regenerate',
-        'common.newItem': 'New',
         'common.backToSetup': 'Back to setup',
         'common.useInGenerator': 'Use in generator',
         'common.randomize': 'Randomize',
@@ -117,13 +145,10 @@ const translations = {
         'auth.createKey': 'Create or copy a MUAPI access key',
 
         // Image Studio
-        'image.title': 'Image Studio',
-        'image.subtitle': 'Transform images with AI — upscale, stylize, animate and more',
         'image.placeholder': 'Describe the image you want to create',
         'image.placeholderTransform': 'Describe how to transform this image (optional)',
         'image.generateTooltip': 'Generate AI image from prompt',
         'image.modelTooltip': 'Select AI generation model',
-        'image.arTooltip': 'Change aspect ratio',
         'image.multiImageNote': 'images selected — describe the transformation (optional)',
         'ar.square': 'Square',
         'ar.portrait': 'Portrait',
@@ -133,7 +158,6 @@ const translations = {
         'ar.cinema': 'Cinema',
         'ar.custom': 'Custom',
         'image.qualityTooltip': 'Set output quality',
-        'image.advancedTooltip': 'Show advanced options',
         'image.toolsTooltip': 'Quick starters & prompt enhancer',
         'image.local': 'Local',
         'image.rented': 'Rented',
@@ -161,16 +185,8 @@ const translations = {
         'image.height': 'Height',
         'image.widthPlaceholder': 'Auto',
         'image.heightPlaceholder': 'Auto',
-        'image.refStrength': 'Reference strength',
-        'image.refStrengthNote': 'How much to preserve the reference image characteristics',
-        'image.lora': 'LoRA Model (Optional)',
-        'image.loraPlaceholder': 'e.g., civitai:1642876@1864626',
-        'image.loraWeight': 'LoRA Weight:',
-        'image.loraNote': 'Enter a LoRA model ID from Civitai (format: civitai:id@version)',
 
         // Video Studio
-        'video.title': 'Video Studio',
-        'video.subtitle': 'Animate images into stunning AI videos with motion effects',
         'video.placeholder': 'Describe the video you want to create',
         'video.generateTooltip': 'Generate AI video',
         'video.history': 'History',
@@ -189,20 +205,12 @@ const translations = {
         'video.progress.elapsed': 'Elapsed',
         // Real sampler counters off the executing backend, not an estimate.
         'video.progress.step': (step, total) => `Step ${step} of ${total}`,
-        'video.pingWhenComplete': 'Ping when complete',
         'video.videoTools': 'Video tools',
 
         // Lip Sync Studio
-        'lipsync.title': 'Lip sync',
-        'lipsync.subtitle': 'Animate portraits or sync lips to audio with AI',
         'lipsync.input': 'Input',
         'lipsync.portraitImage': 'Portrait Image',
         'lipsync.video': 'Video',
-        'lipsync.noImage': 'No image',
-        'lipsync.noVideo': 'No video',
-        'lipsync.noAudio': 'No audio',
-        'lipsync.imageReady': 'Image ready',
-        'lipsync.videoReady': 'Video ready',
         'lipsync.promptPlaceholder': 'Optional: describe the talking style or motion...',
         'lipsync.regenerate': 'Regenerate',
         'lipsync.download': 'Download',
@@ -213,10 +221,7 @@ const translations = {
         'lipsync.noVideoAlert': 'Please upload a source video first.',
 
         // Cinema Studio
-        'cinema.tagline': 'Cinema Studio 2.0',
-        'cinema.headline': 'What would you shoot<br>with infinite budget?',
         'cinema.placeholder': 'Describe the scene — subject, action, light',
-        'cinema.builderTooltip': 'Quick camera builder',
         'cinema.cameraSettings': 'Open camera settings',
         'cinema.generateBtn': 'Generate',
         'cinema.shooting': 'Shooting…',
@@ -231,7 +236,6 @@ const translations = {
         'cinema.focal': 'Focal',
         'cinema.aperture': 'Aperture',
         'cinema.preview': 'Preview',
-        'cinema.useSetup': 'Use This Setup',
         'cinema.selectSettings': 'Select camera settings to see preview...',
         'cinema.generationFailed': 'Generation failed: ',
 
@@ -263,18 +267,11 @@ const translations = {
         'localModels.notConfigured': 'Not configured',
         'localModels.notConfiguredNote': 'Not configured (Wan2GP models will appear offline)',
         'localModels.probing': 'Probing...',
-        'localModels.errorLoading': 'Error loading models: ',
         'localModels.deleteConfirm': (name) => `Delete "${name}"? You'll need to re-download it to use it again.`,
 
         // Web shell
-        'web.settingsTitle': 'Settings — API key, local models, preferences',
-        'web.switchToEn': 'Switch to English',
-        'web.switchToZh': '切换为中文',
 
         // MCP & CLI page
-        'mcp.tagline': 'For developers & AI agents',
-        'mcp.title': 'MCP & CLI',
-        'mcp.quickStart': 'Quick start',
     },
     zh: {
         // Navigation
@@ -294,17 +291,14 @@ const translations = {
         'common.cancel': '取消',
         'common.save': '保存',
         'common.history': '历史记录',
-        'common.advanced': '高级',
         'common.less': '收起',
         'common.tools': '工具',
         'common.copy': '复制',
         'common.copied': '已复制！',
         'common.searchModels': '搜索模型...',
         'common.retry': '重试',
-        'common.loading': '加载中...',
         'common.noResults': '未找到本地模型',
         'common.regenerate': '重新生成',
-        'common.newItem': '新建',
         'common.backToSetup': '返回设置',
         'common.useInGenerator': '用于生成器',
         'common.randomize': '随机',
@@ -335,13 +329,10 @@ const translations = {
         'auth.createKey': '创建或复制 MUAPI 访问密钥',
 
         // Image Studio
-        'image.title': '图像工作室',
-        'image.subtitle': '用 AI 转换图像 — 超分辨率、风格化、动画等更多功能',
         'image.placeholder': '描述您想创建的图像',
         'image.placeholderTransform': '描述您想如何转换此图像（可选）',
         'image.generateTooltip': '根据提示词生成 AI 图像',
         'image.modelTooltip': '选择 AI 生成模型',
-        'image.arTooltip': '更改宽高比',
         'image.multiImageNote': '张图片已选择——描述要做的变化（可选）',
         'ar.square': '方形',
         'ar.portrait': '竖版',
@@ -351,7 +342,6 @@ const translations = {
         'ar.cinema': '影院宽幅',
         'ar.custom': '自定义',
         'image.qualityTooltip': '设置输出质量',
-        'image.advancedTooltip': '显示高级选项',
         'image.toolsTooltip': '快速启动器与提示词增强器',
         'image.local': '本地',
         'image.rented': '租用',
@@ -379,16 +369,8 @@ const translations = {
         'image.height': '高度',
         'image.widthPlaceholder': '自动',
         'image.heightPlaceholder': '自动',
-        'image.refStrength': '参考强度',
-        'image.refStrengthNote': '保留参考图像特征的程度',
-        'image.lora': 'LoRA 模型（可选）',
-        'image.loraPlaceholder': '例如：civitai:1642876@1864626',
-        'image.loraWeight': 'LoRA 权重：',
-        'image.loraNote': '输入来自 Civitai 的 LoRA 模型 ID（格式：civitai:id@version）',
 
         // Video Studio
-        'video.title': '视频工作室',
-        'video.subtitle': '用 AI 将图像动态化为精彩视频，配合运动效果',
         'video.placeholder': '描述您想创建的视频',
         'video.generateTooltip': '生成 AI 视频',
         'video.history': '历史记录',
@@ -406,20 +388,12 @@ const translations = {
         'video.progress.inProgress': '进行中',
         'video.progress.elapsed': '已用时间',
         'video.progress.step': (step, total) => `第 ${step} / ${total} 步`,
-        'video.pingWhenComplete': '完成时提示音',
         'video.videoTools': '视频工具',
 
         // Lip Sync Studio
-        'lipsync.title': '唇语同步',
-        'lipsync.subtitle': '用 AI 为人像制作动画或将音频与唇语同步',
         'lipsync.input': '输入',
         'lipsync.portraitImage': '人像图',
         'lipsync.video': '视频',
-        'lipsync.noImage': '无图像',
-        'lipsync.noVideo': '无视频',
-        'lipsync.noAudio': '无音频',
-        'lipsync.imageReady': '图像已就绪',
-        'lipsync.videoReady': '视频已就绪',
         'lipsync.promptPlaceholder': '可选：描述说话风格或动作...',
         'lipsync.regenerate': '重新生成',
         'lipsync.download': '下载',
@@ -430,10 +404,7 @@ const translations = {
         'lipsync.noVideoAlert': '请先上传源视频。',
 
         // Cinema Studio
-        'cinema.tagline': '电影工作室 2.0',
-        'cinema.headline': '如果预算无限，<br>你会拍什么？',
         'cinema.placeholder': '描述场景——主体、动作、光线',
-        'cinema.builderTooltip': '快速摄像机设置',
         'cinema.cameraSettings': '打开摄像机设置',
         'cinema.generateBtn': '生成',
         'cinema.shooting': '拍摄中…',
@@ -448,7 +419,6 @@ const translations = {
         'cinema.focal': '焦距',
         'cinema.aperture': '光圈',
         'cinema.preview': '预览',
-        'cinema.useSetup': '使用此设置',
         'cinema.selectSettings': '选择摄像机设置以查看预览...',
         'cinema.generationFailed': '生成失败：',
 
@@ -480,18 +450,11 @@ const translations = {
         'localModels.notConfigured': '未配置',
         'localModels.notConfiguredNote': '未配置（Wan2GP 模型将显示为离线）',
         'localModels.probing': '探测中...',
-        'localModels.errorLoading': '加载模型时出错：',
         'localModels.deleteConfirm': (name) => `删除"${name}"？您需要重新下载才能再次使用。`,
 
         // Web shell
-        'web.settingsTitle': '设置 — API 密钥、本地模型、偏好',
-        'web.switchToEn': 'Switch to English',
-        'web.switchToZh': '切换为中文',
 
         // MCP & CLI page
-        'mcp.tagline': '面向开发者与 AI 智能体',
-        'mcp.title': 'MCP & CLI',
-        'mcp.quickStart': '快速开始',
     },
 };
 

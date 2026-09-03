@@ -5,6 +5,7 @@
 // this session (blob cache) skips the theater entirely — that cache-skip is the
 // whole point of peeking first. resolveMediaSrc is fail-open for legacy media.
 import { useEffect, useRef, useState } from 'react';
+import { useVaultUnlockNonce } from '../../hooks/hooks.js';
 import { mediaSealFailure, peekResolvedMediaSrc, resolveMediaSrc } from '../../lib/e2eMedia.js';
 import { requestVaultUnlock } from '../../lib/vaultSession.js';
 import { Icon } from '../../ui/icons.jsx';
@@ -65,6 +66,9 @@ export function MediaThumb({ url, alt = 'Private output', className = '', imgCla
   const [src, setSrc] = useState(() => (url ? peekResolvedMediaSrc(url) : null));
   // Bumped by the failed tile's click so the resolve effect runs again.
   const [retry, setRetry] = useState(0);
+  // …and by an in-app unlock, which is the same "try again" for a tile that was
+  // drawn locked. It is why unlocking a second tab no longer reloads the page.
+  const unlocked = useVaultUnlockNonce();
   const revealTimer = useRef(null);
 
   useEffect(() => {
@@ -93,7 +97,7 @@ export function MediaThumb({ url, alt = 'Private output', className = '', imgCla
       alive = false;
       if (revealTimer.current) clearTimeout(revealTimer.current);
     };
-  }, [url, retry]);
+  }, [url, retry, unlocked]);
 
   const revealed = state === 'unlocked' || state === 'unlocking';
 

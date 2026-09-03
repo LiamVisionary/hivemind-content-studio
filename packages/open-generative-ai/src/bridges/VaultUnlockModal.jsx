@@ -3,17 +3,23 @@
 // missing), leaving the E2E vault locked: sealed media can't decrypt and shows
 // "vault locked" tiles. Any of those affordances dispatches
 // VAULT_UNLOCK_REQUEST_EVENT; this modal re-runs the gate's own flow — verify
-// the password at /api/accounts/unlock, stash it per-tab, reload so every module
-// (vault, hub passphrase snapshot, tool surfaces) bootstraps with the key.
+// the password at /api/accounts/unlock, stash it per-tab, bootstrap the vault.
+//
+// It does NOT reload. The shell keeps every studio mounted so navigation never
+// costs a composer, and a reload here threw exactly that away to answer a
+// question the running page can answer itself: retry the bootstrap, forget the
+// stale "sealed" verdicts, and tell the surfaces holding a locked tile to
+// resolve again. The reload survives only as the fallback for a bootstrap that
+// did not take (a passkey-only vault, a wrap this tab cannot reach), where a
+// fresh boot really is the repair.
 import { useCallback, useState } from 'react';
 import { useWindowEvent } from '../hooks/hooks.js';
-import { getLang } from '../lib/i18n.js';
-import { unlockOwnerSession, VAULT_UNLOCK_REQUEST_EVENT } from '../lib/vaultSession.js';
+import { clearMediaSealFailures } from '../lib/e2eMedia.js';
+import { zh } from '../lib/i18n.js';
+import { announceVaultUnlocked, retryVaultBootstrap, unlockOwnerSession, VAULT_UNLOCK_REQUEST_EVENT } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, Field, TextInput } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 export function VaultUnlockModal() {
   const [open, setOpen] = useState(false);
@@ -37,9 +43,25 @@ export function VaultUnlockModal() {
     setError('');
     const result = await unlockOwnerSession(password);
     if (result.ok) {
-      // Reload with the passphrase stashed — the same handoff the lock screen
-      // does — so the vault and every sealed tile come back decrypted.
-      window.location.reload();
+      // The passphrase is stashed exactly as the lock screen leaves it; now
+      // spend it here instead of on a reload.
+      const ready = await retryVaultBootstrap();
+      if (!ready) {
+        // The password was right and the vault still did not open in this tab.
+        // A full boot re-runs the gate's own handoff, which is the one path
+        // left — better than leaving the person looking at locked tiles.
+        window.location.reload();
+        return;
+      }
+      clearMediaSealFailures();
+      announceVaultUnlocked();
+      // Reset inline rather than through close(): that guard reads `busy` from
+      // this render's closure, which is still true here, and the modal would
+      // stay open over an unlocked vault.
+      setBusy(false);
+      setPassword('');
+      setError('');
+      setOpen(false);
       return;
     }
     setBusy(false);
@@ -66,7 +88,7 @@ export function VaultUnlockModal() {
         <Field
           label={zh() ? '工作室密码' : 'Studio password'}
           error={error}
-          hint={zh() ? '解锁后此标签页会重新加载。' : 'This tab reloads after unlocking.'}
+          hint={zh() ? '解锁后，此标签页中已加密的内容会直接显示。' : 'Sealed media in this tab opens as soon as you unlock — nothing you have open is lost.'}
         >
           <TextInput
             type="password"

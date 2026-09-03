@@ -35,7 +35,7 @@ import {
   CINEMA_RESOLUTIONS,
   normalizeCinemaPreferences,
 } from '../lib/studioPreferences.js';
-import { getLang, t } from '../lib/i18n.js';
+import { t, zh } from '../lib/i18n.js';
 
 import { useMediaSrc } from '../hooks/hooks.js';
 import { registerPromptInserter } from '../app/promptTarget.js';
@@ -52,8 +52,6 @@ import { AuthModal } from '../dialogs/AuthModal.jsx';
 const CINEMA_HISTORY_KEY = 'cinema_history';
 const CINEMA_HISTORY_LIMIT = 50;
 const CINEMA_MODEL = 'nano-banana-pro';
-
-const zh = () => getLang() === 'zh-CN';
 
 function createEngine() {
   let persisted = null;

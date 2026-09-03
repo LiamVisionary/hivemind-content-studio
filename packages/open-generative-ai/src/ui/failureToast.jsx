@@ -13,9 +13,7 @@ import { toast } from 'react-hot-toast';
 
 import { describeFailure } from '../lib/describeFailure.js';
 import { runFailureRemedy } from '../lib/failureRemedy.js';
-import { getLang } from '../lib/i18n.js';
-
-const zh = () => getLang() === 'zh-CN';
+import { zh } from '../lib/i18n.js';
 
 /**
  * `operation` names what was being attempted ("Reference upload"), so a generic

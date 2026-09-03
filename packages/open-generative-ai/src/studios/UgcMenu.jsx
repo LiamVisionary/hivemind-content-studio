@@ -10,12 +10,10 @@
 //
 // UI pattern follows CameraMotionMenu (ChipButton + Menu popover); the cast bank
 // and the block composers live in src/lib/ugcMode.js.
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import { ugcClock, ugcTimeline, ugcVariantAt } from '../lib/ugcMode.js';
 import { ChipButton, Menu } from '../ui/Menu.jsx';
 import { cx } from '../ui/kit.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 function CastRow({ label, children }) {
   return (

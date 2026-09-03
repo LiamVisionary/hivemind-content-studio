@@ -3,8 +3,7 @@
 // stores the key + closes; Cancel/X/backdrop/Escape close WITHOUT saving; the
 // Local Models tab exists only when isLocalAIAvailable() and its panel stays
 // MOUNTED across tab switches so in-flight downloads keep their progress
-// subscriptions (old persistent-node behavior). Adds a Language section (the
-// sidebar toggle's setting, surfaced here).
+// subscriptions (old persistent-node behavior).
 //
 // What changed: the key field is no longer a second door onto localStorage. It
 // writes through lib/muapiKey.js like every other entry point, and when this
@@ -13,11 +12,11 @@
 import { useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useLang } from '../hooks/hooks.js';
-import { getLang, setLang, t } from '../lib/i18n.js';
+import { t } from '../lib/i18n.js';
 import { isHostedLocalAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { muapiKeyIsOnServer } from '../lib/modelRunner.js';
 import { browserMuapiKey, forgetBrowserMuapiKey, storeMuapiKey } from '../lib/muapiKey.js';
-import { Button, Divider, Field, SectionLabel, Segmented, Tabs, TextInput } from '../ui/kit.jsx';
+import { Button, Field, SectionLabel, Tabs, TextInput } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
 import { LocalModelManager } from './LocalModelManager.jsx';
 
@@ -135,26 +134,12 @@ export function SettingsModal({ onClose }) {
           </Field>
         )}
 
-        <Divider />
-
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <SectionLabel>{zh ? '语言' : 'Language'}</SectionLabel>
-            <p className="mt-1 text-xs text-ink3">
-              {zh ? '切换界面语言（页面将重新加载）。' : 'Switch the interface language (the page reloads).'}
-            </p>
-          </div>
-          <Segmented
-            options={[
-              { value: 'en', label: 'English' },
-              { value: 'zh-CN', label: '中文' },
-            ]}
-            value={getLang() === 'zh-CN' ? 'zh-CN' : 'en'}
-            onChange={(lang) => {
-              if (lang !== getLang()) setLang(lang); // keeps its page-reload behavior
-            }}
-          />
-        </div>
+        {/* Language lived here. This build ships one language — LANGS_ENABLED in
+            lib/i18n.js — because zh-CN covered the toolbars and left three
+            studios, every dialog and most of the hub in English. The control
+            comes back with the key table that makes the translation whole, and
+            the stored choice is kept meanwhile, so it returns on the language
+            the person last picked. */}
       </form>
 
       {/* Local models — mounted once per modal open, hidden (not unmounted) on tab

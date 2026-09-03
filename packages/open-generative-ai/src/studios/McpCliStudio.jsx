@@ -5,11 +5,9 @@
 // on 8796) and the byte-identical `claude mcp add` command string.
 import { useMemo, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { Card, IconButton, Pill, SectionLabel } from '../ui/kit.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 function mcpBaseUrl() {
   // Behind the Tailscale HTTPS proxy (8789) /mcp is same-origin; otherwise

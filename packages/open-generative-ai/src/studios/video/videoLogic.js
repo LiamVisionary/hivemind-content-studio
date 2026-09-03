@@ -38,9 +38,11 @@ import { personaIdentity } from '../../lib/personaId.js';
 import { routingLeaderFor } from '../../lib/rentedMachines.js';
 import { isSoundOnlyReference, referenceVideoCanvas } from '../../lib/h3References.js';
 import { H3_RESTYLE_PRESETS, restylePhrase } from '../../lib/h3RestylePresets.js';
-import { getLang, t } from '../../lib/i18n.js';
+import { t, zh } from '../../lib/i18n.js';
 
-export const zh = () => getLang() === 'zh-CN';
+// One home for the language predicate (lib/i18n.js). Re-exported here because a
+// dozen video panels import `zh` from this module; the binding is the same one.
+export { zh };
 
 // Persisted settings, advanced-input reading, and the pure geometry/format
 // helpers now live in lib/videoPreferences.js so the node:test suite can reach

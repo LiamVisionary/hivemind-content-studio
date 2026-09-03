@@ -14,7 +14,8 @@ import { registerMediaDownloadName } from '../../lib/e2eMedia.js';
 import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { downloadMedia } from '../../lib/downloadMedia.js';
 import { basenameOf } from '../../lib/generationSetupStore.js';
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
+import { requestVaultUnlock } from '../../lib/vaultSession.js';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { Menu, MenuItem } from '../../ui/Menu.jsx';
@@ -23,13 +24,11 @@ import {
   canvasEntryModelLabel, copyCanvasPrompt, copyText, deleteCanvasOutput, deletePrompt,
   inspectCanvasHistoryEntry, insertPromptIntoComposer, loadCanvasOutputInCanvas,
   loadCanvasOutputInStudio, loadMoreCanvasHistory, loadRunIntoSimpleComposer, setCanvasFilters,
-  setHistoryFilter, setHistoryQuery, setPromptFavorite, titleCase, useHub,
+  setHistoryFilter, setHistoryQuery, setPromptFavorite, titleCase, useHub, SEALED_PROMPT_TEXT,
 } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { Lightbox } from '../components/Lightbox.jsx';
 import { MediaThumb, VaultLockedTile } from '../components/MediaThumb.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 const FILTERS = () => [
   { value: '', label: zh() ? '全部' : 'All' },
@@ -225,6 +224,9 @@ const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
 });
 
 const PromptCard = memo(function PromptCard({ entry, onDelete }) {
+  // The prompt is sealed to a vault this tab has not opened. Saying so is half
+  // the job — the other half is the way out, in the card itself.
+  const sealed = entry.prompt === SEALED_PROMPT_TEXT;
   const meta = [
     titleCase(entry.lane || ''),
     entry.title,
@@ -247,12 +249,33 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
         >
           <Icon name="star" size={16} />
         </button>
-        <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink1">{entry.prompt}</p>
+        {sealed ? (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            <Icon name="lock" size={14} className="shrink-0 text-honey" />
+            <p className="min-w-0 text-[13px] leading-relaxed text-ink2">
+              {zh() ? '这条提示词已加密 — 解锁保险库即可查看。' : 'Sealed prompt — unlock your vault to read it.'}
+            </p>
+            <button
+              type="button"
+              onClick={requestVaultUnlock}
+              className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-honey/50 bg-honey-tint px-2.5 text-[11px] font-semibold text-honey transition-colors hover:border-honey"
+            >
+              <Icon name="unlock" size={13} />
+              {zh() ? '解锁' : 'Unlock'}
+            </button>
+          </div>
+        ) : (
+          <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink1">{entry.prompt}</p>
+        )}
         <HistoryMenu
           items={[
-            // Lands in the Planner composer (not a studio) — say so.
-            { label: zh() ? '在规划器中使用' : 'Use in Planner', icon: 'sparkles', onClick: usePrompt },
-            { label: zh() ? '复制提示词' : 'Copy prompt', icon: 'copy', onClick: () => copyText(entry.prompt) },
+            // Using or copying a sealed prompt would hand over the placeholder
+            // sentence, not the prompt — so those doors stay shut until it opens.
+            ...(sealed ? [] : [
+              // Lands in the Planner composer (not a studio) — say so.
+              { label: zh() ? '在规划器中使用' : 'Use in Planner', icon: 'sparkles', onClick: usePrompt },
+              { label: zh() ? '复制提示词' : 'Copy prompt', icon: 'copy', onClick: () => copyText(entry.prompt) },
+            ]),
             { label: zh() ? '删除' : 'Delete', icon: 'trash', danger: true, onClick: () => onDelete(entry) },
           ]}
         />

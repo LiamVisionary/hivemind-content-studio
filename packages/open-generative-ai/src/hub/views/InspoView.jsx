@@ -22,7 +22,7 @@ import {
   DEFAULT_INSPO_FILTERS, INSPO_KINDS, INSPO_PERIODS, INSPO_SORTS,
   inspoCredits, inspoSearchParams, inspoSection, inspoSettings, inspoToStudioSetup, mergeInspoResults,
 } from '../../lib/civitaiInspo.js';
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { localAI } from '../../lib/localInferenceClient.js';
 import { formatCount } from '../../lib/modelLibrary.js';
 import { Icon } from '../../ui/icons.jsx';
@@ -30,7 +30,6 @@ import { Modal } from '../../ui/Modal.jsx';
 import { Button, EmptyState, NativeSelect, Segmented, Spinner, TextInput, cx } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 
-const zh = () => getLang() === 'zh-CN';
 const FILTER_STORAGE = 'inspo_filters_v1';
 
 function readSaved() {
