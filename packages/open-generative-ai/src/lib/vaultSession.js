@@ -5,6 +5,8 @@
 // and cannot derive the vault key from the hash). This module reads that secret,
 // gets-or-creates the vault identity, and unlocks it — all client-side. On first
 // creation it emits the one-time recovery key for a UI banner to display.
+// Once this browser holds a device wrap the passphrase is removed again, so
+// the handoff lives for one bootstrap rather than 24 h.
 
 import { isHivemindStudioEnabled } from './hivemindStudio.js';
 import {
@@ -98,6 +100,34 @@ async function fetchIdentity() {
     return response.json();
 }
 
+/**
+ * Retire the sign-in secrets once this browser can unlock without them.
+ *
+ * The gate hands the passphrase (and a passkey's PRF secret) to the app through
+ * sessionStorage, where any script in the origin can read them for 24 h. The
+ * device wrap makes that unnecessary the moment it exists: unlockWithDevice
+ * needs only the account id. So the passphrase goes, and the hint is rewritten
+ * to its identifiers — accountId for the device wrap, credentialId so a later
+ * PRF enrolment still knows which passkey it was — with no secret and no
+ * expiry (identifiers do not lapse; see readVaultHint). A second tab on the
+ * same browser still unlocks: it reads the same hint and the same IndexedDB.
+ *
+ * Only ever called AFTER the wrap is confirmed written. Removing the passphrase
+ * before that would leave the next reload with nothing to unlock from.
+ */
+function retireSignInSecrets(hint) {
+    try {
+        sessionStorage.removeItem(PASSPHRASE_KEY);
+        if (hint?.accountId) {
+            sessionStorage.setItem(VAULT_HINT_KEY, JSON.stringify({
+                accountId: hint.accountId,
+                credentialId: hint.credentialId || null,
+                prf: null,
+            }));
+        }
+    } catch { /* storage unavailable */ }
+}
+
 function announceRecoveryKey(recoveryKey) {
     // The recovery key is shown exactly once — the server never has it, so if the
     // owner loses both it and the passphrase the content is unrecoverable.
@@ -117,7 +147,15 @@ function announceRecoveryKey(recoveryKey) {
  */
 async function unlockExisting(identity, hint, passphrase) {
     if (hint?.prf && hint.credentialId) {
-        if (await unlockWithPrf(identity, hint.credentialId, fromB64url(hint.prf))) return true;
+        if (await unlockWithPrf(identity, hint.credentialId, fromB64url(hint.prf))) {
+            // The PRF wrap did not need the passphrase — but on a password
+            // sign-in the gate stashed one anyway, and it would sit there for
+            // 24 h. Spend it on a device wrap instead, then retire it: after
+            // this the account id alone unlocks, so nothing is lost and an
+            // injected script has nothing to take.
+            if (passphrase) await finishPassphraseUnlock(identity, hint, passphrase);
+            return true;
+        }
     }
     if (hint?.accountId && await unlockWithDevice(identity, hint.accountId)) {
         // A device unlock has no passphrase, but it does put the master key
@@ -126,23 +164,39 @@ async function unlockExisting(identity, hint, passphrase) {
         // every unlock takes the weaker path, PRF is never written, and the day
         // the wrap breaks there is nothing left but the password.
         await enrolPrfWrapFromDevice(identity, hint).catch(() => false);
+        // The wrap just proved itself; nothing in sessionStorage is needed now.
+        retireSignInSecrets(hint);
         return true;
     }
     if (passphrase && await unlockWithPassphrase(identity, passphrase)) {
-        // Having proved the passphrase, leave a device-wrapped copy behind so
-        // the NEXT sign-in on this browser can be a passkey with no password —
-        // which is the whole point of the passkey-first gate.
-        if (hint?.accountId) {
-            await rememberOnThisDevice(identity, passphrase, hint.accountId).catch(() => false);
-        }
-        // The gate can register a passkey and read its PRF secret, but it
-        // cannot wrap the master key — that code is here. Finish the enrolment
-        // now, while both the passphrase and the secret are in hand, so the
-        // user is never prompted for a second biometric later.
-        await enrolPrfWrap(identity, hint, passphrase).catch(() => false);
+        await finishPassphraseUnlock(identity, hint, passphrase);
         return true;
     }
     return false;
+}
+
+/**
+ * What a proven passphrase leaves behind, on the unlock and first-run paths
+ * alike: a device wrap, a PRF wrap where the gate handed over a secret, and —
+ * once the wrap is confirmed — no passphrase in sessionStorage.
+ */
+async function finishPassphraseUnlock(identity, hint, passphrase) {
+    // Having proved the passphrase, leave a device-wrapped copy behind so the
+    // NEXT sign-in on this browser can be a passkey with no password — which
+    // is the whole point of the passkey-first gate.
+    let remembered = false;
+    if (hint?.accountId) {
+        remembered = await rememberOnThisDevice(identity, passphrase, hint.accountId).catch(() => false);
+    }
+    // The gate can register a passkey and read its PRF secret, but it cannot
+    // wrap the master key — that code is here. Finish the enrolment now, while
+    // both the passphrase and the secret are in hand, so the user is never
+    // prompted for a second biometric later.
+    await enrolPrfWrap(identity, hint, passphrase).catch(() => false);
+    // Without a wrap (no IndexedDB, or no account id in the hint) the
+    // passphrase is still the only way this tab can unlock after a reload, so
+    // it stays until there is one.
+    if (remembered === true) retireSignInSecrets(hint);
 }
 
 function prfWrapMissing(identity, credentialId) {
@@ -218,6 +272,7 @@ async function bootstrap() {
         return fresh.identity ? unlockWithPassphrase(fresh.identity, passphrase) : false;
     }
     if (!put.ok) { lockVault(); return false; }
+    await finishPassphraseUnlock(identity, hint, passphrase);
     announceRecoveryKey(recoveryKey);
     return true;
 }
