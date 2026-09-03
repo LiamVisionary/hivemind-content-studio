@@ -667,6 +667,29 @@ def check_video(job_id: str, *, requester_pub: str = "") -> dict[str, Any]:
     return state
 
 
+def video_job_record(job_id: str, *, requester_pub: str = "") -> dict[str, Any] | None:
+    """The gateway's own record for a job, or None when it knows nothing of it.
+
+    check_video() is deliberately optimistic — a status it cannot read defaults
+    to "running" — which is right while a job is in flight and wrong as an
+    answer to "is anything still working on this?". This is that second
+    question, and the gateway answers it honestly: /api/job/<id> serves the
+    live record, falls back to history (where an interrupted job is written at
+    shutdown), and synthesises a record for a prompt routed to a remote lane,
+    so an empty answer means no lane, no watcher and no history entry — nothing
+    is rendering it. Used to re-adopt a job after a studio restart, and to stop
+    polling a backend that has forgotten it.
+    """
+    descriptor = discover_media_studio()
+    if descriptor is None:
+        return None
+    try:
+        record = _private_json(descriptor, f"/api/job/{quote(job_id, safe='')}", requester_pub)
+    except (RuntimeError, OSError):
+        return None
+    return record if isinstance(record, dict) and record else None
+
+
 def finish_video(
     job_id: str,
     *,

@@ -70,6 +70,7 @@ from .media_studio import (
     generate_video as run_media_studio_video,
     start_video as run_media_studio_video_start,
     video_dimensions_for_request,
+    video_job_record as run_media_studio_video_record,
 )
 from .hivemindos_oauth import oauth_provider_status, start_oauth_login
 from .orchestrator import ContentOrchestrator
@@ -710,6 +711,15 @@ class SpriteMatteBody(BaseModel):
 # and resolution: ~4.5 puts a 4-second 16:9 standard clip (97 frames at 0.34MP)
 # near 150s, and the same clip at the high tier — 2.5x the pixels — near 375s.
 _DEFAULT_VIDEO_SECONDS_PER_WORK_UNIT = 4.5
+
+# When to stop believing a video job is still rendering. Deliberately generous:
+# the gateway is a single-threaded server that a large upload can block for a
+# while, and a false "it died" on a live render is worse than a slow true one.
+# Read at call time so a test can shorten them.
+_VIDEO_UNRESPONSIVE_CHECKS = 5
+_VIDEO_UNRESPONSIVE_SECONDS = 30.0
+_VIDEO_RECORD_PROBE_SECONDS = 10.0
+_VIDEO_BACKEND_GONE = "The video backend stopped responding"
 
 
 def _video_frame_megapixels(aspect_ratio: str, resolution: str) -> float:
@@ -3559,14 +3569,108 @@ def build_control_app(
     # Job-based variant: high-resolution runs take tens of minutes, far beyond
     # what one browser HTTP request survives. start returns a gateway job id
     # immediately; a background task finishes (download, QA, sealing) while the
-    # browser polls the job route. If the studio restarts mid-run the registry
-    # entry is lost but the gateway job still completes into History.
+    # browser polls the job route. The registry below is process memory, but a
+    # restart no longer strands the run: the claim ledger remembers whose job it
+    # is, the browser keeps presenting the device key the job was started with,
+    # and the gateway still holds the record — so the first poll after a restart
+    # re-adopts the job and re-arms the finisher (see _readopt_media_studio_video_job).
     media_studio_video_jobs: dict[str, dict[str, Any]] = {}
 
     def _prune_media_studio_video_jobs() -> None:
         cutoff = time.time() - 6 * 3600
         for key in [key for key, entry in media_studio_video_jobs.items() if entry.get("created", 0.0) < cutoff]:
             media_studio_video_jobs.pop(key, None)
+
+    def _readopt_media_studio_video_job(job_id: str, requester_pub: str) -> dict[str, Any] | None:
+        """Rebuild the registry entry for a job this workspace already started.
+
+        The registry dies with the process; the claim ledger and the gateway's
+        own record do not, and the browser re-presents the device key the job
+        was started with on every poll. That is everything the finisher needs,
+        so a poll that arrives after a restart re-arms it instead of reporting a
+        failure for a clip that is still rendering (or already rendered).
+
+        Returns the entry, or None when the job is not this workspace's to
+        adopt or the gateway knows nothing about it.
+        """
+        scope = current_account.get()
+        claimed = gateway_claims.account_for(GatewayOutputClaims.job_key(job_id))
+        if claimed is not None and (scope is None or claimed != scope.id):
+            return None  # another workspace's job; it is not ours to report on
+        entry: dict[str, Any] = {
+            "status": "running",
+            "created": time.time(),
+            "started": time.perf_counter(),
+            "last_progress_at": time.time(),
+            "readopted": True,
+            # The inputs were deleted from the gateway by the finisher that died
+            # with the old process, or will be by this one; either way this
+            # registry entry has no list of its own to clean up.
+            "uploaded_names": [],
+            "requester_pub": requester_pub,
+        }
+        media_studio_video_jobs[job_id] = entry
+        if claimed is None and scope is not None:
+            # An unclaimed job polled by a workspace is that workspace's: without
+            # this the finished clip files under the owner instead of them.
+            gateway_claims.claim_job(job_id, scope.id)
+        return entry
+
+    # A backend that has stopped answering has to be said out loud, not left to
+    # a bar parked at 98%. The thresholds live at module scope above.
+    def _video_silent_seconds(entry: dict[str, Any]) -> float:
+        return time.time() - float(entry.get("last_progress_at") or time.time())
+
+    async def _confirm_media_studio_video_backend(job_id: str, entry: dict[str, Any]) -> None:
+        """Once a job has gone quiet, ask the gateway whether anything still has it.
+
+        Throttled, and only ever reached after the silence window, so a healthy
+        render costs one extra call every ten seconds at most. An empty answer
+        is the honest signal: /api/job/<id> serves live jobs, history and remote
+        route records, so nothing there means no lane, no watcher, no record.
+        """
+        now = time.time()
+        if now - float(entry.get("record_probed_at") or 0.0) < _VIDEO_RECORD_PROBE_SECONDS:
+            return
+        entry["record_probed_at"] = now
+        record = await asyncio.to_thread(
+            run_media_studio_video_record, job_id,
+            requester_pub=str(entry.get("requester_pub") or ""),
+        )
+        entry["record_misses"] = 0 if record else int(entry.get("record_misses") or 0) + 1
+
+    def _video_backend_stopped_responding(entry: dict[str, Any]) -> bool:
+        """Has the thing that was rendering this job gone away?
+
+        Two independent symptoms, both needing the same silence window before
+        they count: the status check keeps raising (the gateway is unreachable),
+        or the gateway answers but no longer has a record of the job at all
+        (it restarted, or the lane it was routed to is gone). A local Comfy lane
+        that is still busy vetoes both — that is a render in progress whatever
+        the gateway is doing.
+        """
+        if _video_silent_seconds(entry) < _VIDEO_UNRESPONSIVE_SECONDS:
+            return False
+        gone = (
+            int(entry.get("check_failures") or 0) >= _VIDEO_UNRESPONSIVE_CHECKS
+            or int(entry.get("record_misses") or 0) >= 2
+        )
+        return bool(gone and not _video_lane_still_working(entry))
+
+    def _video_lane_still_working(entry: dict[str, Any]) -> bool:
+        """Is the local Comfy lane this job was sent to still holding work?
+
+        Only ever consulted as a veto. A lane that answers /queue with work in
+        flight is proof the render survived whatever the gateway is doing; a
+        lane that cannot be asked (a rented run, a native MLX run, a lane that
+        is genuinely gone) proves nothing and is not allowed to keep a dead job
+        alive.
+        """
+        lane = str(entry.get("run_on") or "").strip() or "default"
+        url = comfy_lanes.configured_lanes().get(lane)
+        if not url:
+            return False
+        return comfy_lanes._is_busy(url) is True
 
     async def _finish_media_studio_video_job(job_id: str) -> None:
         """Drive a running job to its terminal state. Kicked off as a background
@@ -3688,6 +3792,10 @@ def build_control_app(
             "workflow": workflow,
             "work_units": work_units,
             "estimate_seconds": estimate_seconds,
+            # When the backend last said anything at all, and which lane to ask
+            # about before declaring it dead.
+            "last_progress_at": time.time(),
+            "run_on": body.run_on.strip(),
             "uploaded_names": list(queued.get("uploaded_names") or []),
             # Held for the life of the job: the background finisher polls long
             # after this request is gone, and a keyed job only answers to the
@@ -3707,15 +3815,42 @@ def build_control_app(
     async def media_studio_video_job(job_id: str, request: Request) -> dict:
         entry = media_studio_video_jobs.get(job_id)
         if entry is None:
-            raise HTTPException(
-                status_code=404,
-                detail="Unknown media job. If the studio restarted mid-generation, the finished video still appears in History.",
+            # The registry is gone (the studio restarted) but the run may not be.
+            # Ask the gateway before calling this unknown.
+            requester_pub = _requester_pub(request)
+            record = await asyncio.to_thread(
+                run_media_studio_video_record, job_id, requester_pub=requester_pub,
             )
+            if record is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Unknown media job. If the studio restarted mid-generation, the finished video still appears in History.",
+                )
+            status = str(record.get("status") or "").strip().lower()
+            if status == "interrupted":
+                # Written by the gateway as it shut down: nothing is rendering
+                # this any more, and saying so with a retry is the whole fix.
+                return {
+                    "ok": False,
+                    "status": "error",
+                    "detail": "The studio restarted before this finished. Try again.",
+                    "retryable": True,
+                }
+            entry = _readopt_media_studio_video_job(job_id, requester_pub)
+            if entry is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Unknown media job. If the studio restarted mid-generation, the finished video still appears in History.",
+                )
+            # Re-arm the finisher the dead process was running: the download, QA,
+            # sealing and output claim all still have to happen.
+            asyncio.get_running_loop().create_task(_finish_media_studio_video_job(job_id))
         progress = None
         steps: dict[str, int] = {}
         if entry["status"] == "running":
             state = None
-            with contextlib.suppress(Exception):
+            check_raised = False
+            try:
                 # Progress for a keyed job is readable only by its requester —
                 # taken from the registry, not this request, so a poll from a
                 # second tab still reports the job it started.
@@ -3723,17 +3858,33 @@ def build_control_app(
                     run_media_studio_video_check, job_id,
                     requester_pub=str(entry.get("requester_pub") or ""),
                 )
+            except Exception:
+                check_raised = True
             if state:
+                entry["check_failures"] = 0
                 progress = state.get("progress")
                 if state.get("progress_total"):
                     steps = {
                         "progress_step": int(state.get("progress_step") or 0),
                         "progress_total": int(state["progress_total"]),
                     }
+                # Silence is measured from the last time the backend said
+                # something NEW: a check that keeps answering "running, no
+                # progress" is exactly what a dead lane looks like from here.
+                marker = (progress, steps.get("progress_step"))
+                if marker != entry.get("last_marker"):
+                    entry["last_marker"] = marker
+                    entry["last_progress_at"] = time.time()
                 # The background finisher normally lands the job; if its event
                 # loop was lost, adopt the finished (or failed) job right here.
                 if state.get("failed") or state.get("video_url"):
                     await _finish_media_studio_video_job(job_id)
+            elif check_raised:
+                entry["check_failures"] = int(entry.get("check_failures") or 0) + 1
+            if entry["status"] == "running" and _video_silent_seconds(entry) >= _VIDEO_UNRESPONSIVE_SECONDS:
+                await _confirm_media_studio_video_backend(job_id, entry)
+                if _video_backend_stopped_responding(entry):
+                    entry.update(status="error", detail=_VIDEO_BACKEND_GONE, retryable=True)
         if entry["status"] == "done":
             response = entry["response"]
             return response if bool(getattr(request.state, "is_owner", False)) else machine_operation_receipt(response)
@@ -3744,7 +3895,14 @@ def build_control_app(
                 sanitize_error_detail(entry.get("detail")) if bool(getattr(request.state, "is_owner", False))
                 else "Media generation failed"
             )
-            return {"ok": False, "status": entry["status"], "detail": detail or "Generation cancelled"}
+            return {
+                "ok": False,
+                "status": entry["status"],
+                "detail": detail or "Generation cancelled",
+                # A failure the studio may offer to run again, as opposed to one
+                # that would just fail the same way.
+                **({"retryable": True} if entry.get("retryable") else {}),
+            }
         elapsed_seconds = round(max(0.0, time.perf_counter() - float(entry.get("started") or time.perf_counter())), 1)
         return {
             "ok": True,
