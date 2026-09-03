@@ -266,7 +266,7 @@ export const providerLabel = (value) => ({
   'xai-imagine-api': 'xAI · Imagine API',
   'xai-imagine-oauth': 'xAI · Imagine OAuth',
   'hivemindos-hosted-media': 'HivemindOS · Hosted media',
-  'media-studio-mcp': 'HivemindOS · Media Studio MCP',
+  'media-studio-mcp': 'HivemindOS · this machine’s studio',
   'upload-post': 'Upload-Post',
 }[value] || value);
 
@@ -1916,7 +1916,9 @@ function setApiOnline(online) {
   // React topbar subscribes to the status store (the old #hub-api-status DOM
   // contract is gone); the hub store keeps the verdict so views can show an
   // offline/stale state of their own.
-  setApiStatusStore(online ? 'online' : 'offline', online ? 'Local API ready' : 'API unavailable');
+  // No label of its own: the store owns the wording, so the hub poll and the
+  // heartbeat can never disagree about what the same state is called.
+  setApiStatusStore(online ? 'online' : 'offline');
   const next = Boolean(online);
   if (hubState.apiOnline !== next) {
     hubState.apiOnline = next;

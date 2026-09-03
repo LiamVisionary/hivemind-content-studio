@@ -29,7 +29,7 @@ function OAuthCard({ card, link, checking, offline }) {
   // a dead API is said outright instead of checking forever.
   const detail = card.detail
     || (offline
-      ? (zh() ? '状态不可用 — 工作室 API 离线。' : 'Status unavailable — the studio API is offline.')
+      ? (zh() ? '状态不可用 — 工作室没有运行。' : 'Status unavailable — the studio is not running.')
       : checking
         ? (zh() ? '正在检查 HivemindOS 的 OAuth 会话…' : `Checking the HivemindOS ${card.label} OAuth session…`)
         : card.ready
@@ -170,7 +170,7 @@ export function ProvidersView({ active }) {
               <EmptyState
                 icon="plug"
                 title={zh() ? '没有可用的提供商' : 'No providers advertised'}
-                hint={zh() ? '工作室 API 可达后，提供商的就绪状态和路由会出现在这里。' : 'Provider readiness and routing appear once the studio API is reachable.'}
+                hint={zh() ? '工作室运行后，提供商的就绪状态和路由会出现在这里。' : 'Provider readiness and routing appear once the studio is running.'}
               />
             )}
           </section>

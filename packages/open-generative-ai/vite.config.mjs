@@ -33,6 +33,13 @@ export default defineConfig({
                 target: process.env.OPENGEN_API_PROXY || 'http://127.0.0.1:8765',
                 changeOrigin: true,
             },
+            // The status heartbeat. Without this the dev server would answer
+            // /healthz with index.html and the whole app would read "Ready"
+            // whatever the studio is actually doing.
+            '/healthz': {
+                target: process.env.OPENGEN_API_PROXY || 'http://127.0.0.1:8765',
+                changeOrigin: true,
+            },
             // Local-AI bridge straight to the loopback hosted-server (8794),
             // which is not owner-gated — local models and auto-detected
             // workflows work on the dev server with zero extra setup.

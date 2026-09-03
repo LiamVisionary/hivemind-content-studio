@@ -94,6 +94,7 @@ import {
 import { t, tf, aspectRatioName } from '../lib/i18n.js';
 
 import { registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
+import { useApiStatus } from '../app/statusStore.js';
 import { basenameOf, rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { useMediaPoster, useMediaSrc } from '../hooks/hooks.js';
@@ -415,6 +416,9 @@ export function VideoStudio({
   const [, setTick] = useState(0);
   const mountedRef = useRef(true);
   const bump = () => { if (mountedRef.current) setTick((n) => n + 1); };
+  // One shared verdict on whether the studio is up (topbar pill, canvas banner,
+  // this button) instead of each lane discovering it when a press fails.
+  const apiStatus = useApiStatus();
 
   // The primary tab adopts the composer draft and any pending generation no open
   // tab owns; new and duplicated tabs start clean. StudioTabs decides which tab
@@ -2700,7 +2704,7 @@ export function VideoStudio({
   // the drop's own position; the rest follow it in order.
   const timelineAttachFiles = async (target, files) => {
     if (!isHivemindStudioEnabled()) {
-      toast.error(zh() ? '需要连接 Media Studio 才能上传片段。' : 'Uploading clips needs the connected Media Studio.');
+      toast.error(zh() ? '上传片段需要工作室正在运行。' : 'Uploading clips needs the studio to be running.');
       return;
     }
     const loadingId = toast.loading(zh()
@@ -3122,7 +3126,7 @@ export function VideoStudio({
             };
           }
         } else {
-          throw new Error('No video URL returned by Hivemind Media Studio');
+          throw new Error('The studio finished without returning a video.');
         }
         return;
       }
@@ -4054,6 +4058,7 @@ export function VideoStudio({
   // Rented selected with nothing to run on: collapse the panel to the
   // Source block and its rent/provisioning CTA.
   const rentedBlocked = Boolean(s.setup.rentedOnly && !s.rentedMachines?.length);
+  const offlineBlocked = apiStatus.tone === 'offline';
 
   /* ---------------- panel ---------------- */
 
@@ -5102,9 +5107,11 @@ export function VideoStudio({
               variant="primary"
               size="lg"
               loading={s.generating}
-              disabled={rentedBlocked || (swapState.active && !swapState.ready)}
+              disabled={offlineBlocked || rentedBlocked || (swapState.active && !swapState.ready)}
               onClick={generate}
-              title={rentedBlocked
+              title={offlineBlocked
+                ? (zh() ? '工作室没有运行——重新启动后即可生成。' : 'The studio is not running — start it again to generate.')
+                : rentedBlocked
                 ? (zh() ? '请先租用机器（或把来源切回本地）再生成。' : 'Rent a machine (or switch the source to Local) to generate.')
                 : (swapState.active && !swapState.ready)
                   ? `${zh() ? '还需要：' : 'Still needed: '}${swapState.missing.join(zh() ? '、' : ' and ')}`

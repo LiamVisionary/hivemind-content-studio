@@ -240,7 +240,7 @@ export function mapHivemindWorkflowModels(catalog) {
         tier: workflow.tier || null,
         beta: Boolean(workflow.beta),
         name: workflow.label || workflow.id,
-        description: `${provider.label || 'Media Studio'} workflow`,
+        description: `${provider.label || 'Studio'} workflow`,
         type: 'video',
         family: 'hivemind-media-studio',
         // Registry family (ltx-2.3 / ltx / minimax): drives which controls
@@ -747,12 +747,12 @@ export async function generateHivemindVideo(params) {
         // Older studio API without the start route: single blocking request.
         const legacy = await postJson('/api/media-studio/video');
         if (!legacy.response.ok || legacy.data.ok === false) {
-            throw new Error(legacy.data.detail || legacy.data.error || `Media Studio generation failed with HTTP ${legacy.response.status}`);
+            throw new Error(legacy.data.detail || legacy.data.error || `The studio could not start that generation (HTTP ${legacy.response.status}).`);
         }
         return finished(legacy.data);
     }
     if (!start.response.ok || start.data.ok === false || !start.data.job_id) {
-        throw new Error(start.data.detail || start.data.error || `Media Studio generation failed with HTTP ${start.response.status}`);
+        throw new Error(start.data.detail || start.data.error || `The studio could not start that generation (HTTP ${start.response.status}).`);
     }
     // A server that already finished synchronously answers with the media URL.
     if (start.data.url || start.data.media_url || start.data.output_url) return finished(start.data);
@@ -871,7 +871,7 @@ export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds 
         }
         if (payload.status === 'error' || payload.ok === false) {
             throw Object.assign(
-                new Error(payload.detail || payload.error || 'Media Studio reported a failed generation'),
+                new Error(payload.detail || payload.error || 'The studio reported a failed generation.'),
                 ...(payload.retryable ? [{ retryable: true }] : []),
             );
         }

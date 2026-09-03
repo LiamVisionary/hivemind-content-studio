@@ -55,8 +55,8 @@ export const PROVIDER_TRANSPORTS = Object.freeze({
   'higgsfield-consumer': { transport: 'studio', label: 'Higgsfield' },
   'higgsfield-cloud': { transport: 'studio', label: 'Higgsfield Cloud' },
   'hivemindos-hosted-media': { transport: 'studio', label: 'HivemindOS hosted' },
-  'media-studio-mcp': { transport: 'studio', label: 'this machine’s Media Studio' },
-  comfyui: { transport: 'studio', label: 'this machine’s Media Studio' },
+  'media-studio-mcp': { transport: 'studio', label: 'this machine’s studio' },
+  comfyui: { transport: 'studio', label: 'this machine’s studio' },
   muapi: { transport: 'muapi', label: 'MUAPI' },
   // Browser-side catalogs the server has never heard of.
   sdcpp: { transport: 'local', label: 'this machine' },
@@ -179,7 +179,7 @@ export function clipRouteFor(row) {
     transport: 'none',
     label: route.label,
     runnable: false,
-    reason: `${route.label} clips are not wired into this studio yet — pick a model on this machine’s Media Studio.`,
+    reason: `${route.label} clips are not wired into this studio yet — pick a model that runs on this machine.`,
   };
 }
 

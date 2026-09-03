@@ -352,7 +352,7 @@ export function HistoryView({ active }) {
       <HubToolbar kicker={zh() ? '私有存档' : 'Private archive'} title={zh() ? '历史' : 'History'}>
         {refreshing ? <Spinner size={14} className="text-honey" /> : null}
         {s.apiOnline === false ? (
-          <Pill tone="warn" dot title={zh() ? '工作室 API 未响应上一次轮询' : 'The studio API did not answer the latest poll'}>
+          <Pill tone="warn" dot title={zh() ? '工作室未响应上一次轮询' : 'The studio did not answer the latest poll'}>
             {zh() ? '离线 · 显示上次读取' : 'Offline · showing the last reading'}
           </Pill>
         ) : null}
