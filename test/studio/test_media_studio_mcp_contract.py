@@ -913,7 +913,7 @@ def test_video_mcp_stages_inline_video_and_compiles_ltx_extension_graph(tmp_path
 
 
 def test_ltx_continuation_patches_are_installed_on_windows_and_cuda():
-    manifest_path = ROOT / "packages" / "unified-studio-launcher" / "manifests" / "civitai" / "ltx23-eros-anchor.json"
+    manifest_path = ROOT / "patches" / "ltx23-eros-anchor.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     patches = {item["file"]: item for item in manifest["patches"]}
     shared = {
@@ -923,7 +923,7 @@ def test_ltx_continuation_patches_are_installed_on_windows_and_cuda():
 
     assert shared <= patches.keys()
     assert all("platforms" not in patches[path] for path in shared)
-    overlap_patch = ROOT / "packages" / "unified-studio-launcher" / "patches" / "comfyui-ltxvideo" / "align-overlap-latent-device.patch"
+    overlap_patch = ROOT / "patches" / "comfyui-ltxvideo" / "align-overlap-latent-device.patch"
     overlap_text = overlap_patch.read_text(encoding="utf-8")
     assert "samples2 = samples2.to(samples1.device)" in overlap_text
     assert "dtype=torch.int64" in overlap_text

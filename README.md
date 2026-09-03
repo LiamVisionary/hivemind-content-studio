@@ -53,8 +53,6 @@ publishing, and metrics owner:
   agent, workflow, model-catalog, and local-inference UI used by Explore.
 - `engines/flux-2-swift-mlx` and `engines/z-image-swift` are native Apple Silicon engines
   behind the local gateway; users select capabilities and models, not sidecars.
-- `packages/unified-studio-launcher` retains the portable service-catalog,
-  workflow installers, tests, and launcher material from the former template.
 
 `GET /api/runtime` is an internal, secret-free diagnostic: one native Studio
 surface, bounded engine health, and donor/upstream provenance. It is not used to

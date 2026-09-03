@@ -1,14 +1,13 @@
 // Hivemind explore dock (React port of hivemindStudio.js installHivemindExploreDock).
 // Rendered once by App (singleton); returns null outside studio mode.
 //
+// The dock is the prompt library: saved Templates and Ingredients, inserted into
+// whichever studio composer is on screen. The generation-option switches and the
+// local-video-workflow select it used to carry were removed on 2026-09-03 — the
+// switches wrote a sessionStorage key nothing read, and the select duplicated the
+// Video studio's own model picker.
+//
 // Contracts preserved verbatim:
-// - sessionStorage 'hivemind.explore.videoSelection' = { provider: 'media-studio-mcp',
-//   model: workflowId, modelId } and 'hivemind.explore.options' =
-//   { promptHelper, passthrough, walkthrough } (same shapes as the module-private
-//   saveHivemindVideoSelection / saveHivemindStudioOptions writers)
-// - option mutual exclusivity: passthrough on -> promptHelper off, and vice versa
-// - workflow select: save selection, dispatch window 'navigate' {page:'video'},
-//   then AFTER setTimeout(0) dispatch 'hivemind-workflow-selected' {modelId}
 // - template/ingredient click inserts via insertIntoActivePrompt (promptTarget bridge)
 // - window 'message' (same-origin only): 'hivemind-owner-lock' -> clear private
 //   state + reset vault session + clear resolved media cache;
@@ -23,8 +22,6 @@ import { insertIntoActivePrompt } from '../app/promptTarget.js';
 import { clearResolvedMediaCache } from '../lib/e2eMedia.js';
 import {
   clearHivemindStudioPrivateState,
-  getHivemindStudioOptions,
-  getSavedHivemindVideoSelection,
   isHivemindStudioEnabled,
   loadHivemindStudioContext,
   loadStudioGenerationHistory,
@@ -32,10 +29,8 @@ import {
 import { resetVaultSession } from '../lib/vaultSession.js';
 import { getLang } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
-import { NativeSelect, SectionLabel, Toggle, cx } from '../ui/kit.jsx';
+import { SectionLabel, cx } from '../ui/kit.jsx';
 
-const OPTIONS_KEY = 'hivemind.explore.options';
-const VIDEO_SELECTION_KEY = 'hivemind.explore.videoSelection';
 // How many templates/ingredients the dock lists before pointing at History.
 const LIST_LIMIT = 8;
 // The pages whose studio registers a prompt inserter while it is on screen
@@ -43,24 +38,6 @@ const LIST_LIMIT = 8;
 const PROMPT_PAGES = new Set(['image', 'video', 'cinema', 'lipsync']);
 
 const zh = () => getLang() === 'zh-CN';
-
-const OPTION_ROWS = [
-  {
-    key: 'promptHelper',
-    label: () => (zh() ? '提示词助手' : 'Prompt helper'),
-    description: () => (zh() ? '生成前让工作室先润色你的提示词。' : 'Let the studio refine your prompt before generating.'),
-  },
-  {
-    key: 'passthrough',
-    label: () => (zh() ? '原样发送提示词' : 'Send prompt as written'),
-    description: () => (zh() ? '不做任何改写 — 会关闭提示词助手。' : 'No rewriting at all — turns the helper off.'),
-  },
-  {
-    key: 'walkthrough',
-    label: () => (zh() ? '先确认' : 'Ask first'),
-    description: () => (zh() ? '每次生成前逐项确认选项。' : 'Walk through the options before each generation.'),
-  },
-];
 
 function PromptItemButton({ label, text, onInsert }) {
   return (
@@ -132,10 +109,6 @@ function ExploreDockInner() {
   // (out of the way of each studio's docked composer / Generate button).
   const [open, setOpenState] = useState(getExploreDock);
   const [context, setContext] = useState({ catalog: null, prompts: [], videoModels: [] });
-  const [options, setOptions] = useState(getHivemindStudioOptions);
-  const [selectedModelId, setSelectedModelId] = useState(
-    () => getSavedHivemindVideoSelection()?.modelId || '',
-  );
   const [section, setSection] = useState(null); // 'templates' | 'ingredients' | null
 
   useEffect(() => subscribeExploreDock(setOpenState), []);
@@ -203,8 +176,6 @@ function ExploreDockInner() {
         clearHivemindStudioPrivateState();
         resetVaultSession();
         clearResolvedMediaCache();
-        setOptions(getHivemindStudioOptions());
-        setSelectedModelId('');
         return;
       }
       if (type === 'hivemind-explore-insert-prompt') insertIntoActivePrompt(event.data.text || '');
@@ -214,44 +185,11 @@ function ExploreDockInner() {
     return () => window.removeEventListener('message', onMessage);
   }, [refreshContext]);
 
-  // The old dock re-read context + saved selection every time it opened.
+  // The old dock re-read its context every time it opened.
   useEffect(() => {
     if (!open) return;
     void refreshContext();
-    setSelectedModelId(getSavedHivemindVideoSelection()?.modelId || '');
-    setOptions(getHivemindStudioOptions());
   }, [open, refreshContext]);
-
-  const setOption = (key, checked) => {
-    const current = { ...getHivemindStudioOptions(), [key]: Boolean(checked) };
-    // Mutual exclusivity — passthrough and the prompt helper cannot both be on.
-    if (key === 'passthrough' && checked) current.promptHelper = false;
-    if (key === 'promptHelper' && checked) current.passthrough = false;
-    try {
-      sessionStorage.setItem(OPTIONS_KEY, JSON.stringify(current));
-    } catch {
-      /* non-critical */
-    }
-    setOptions(current);
-  };
-
-  const selectWorkflow = (modelId) => {
-    setSelectedModelId(modelId);
-    const model = context.videoModels?.find((candidate) => candidate.id === modelId);
-    if (!model) return;
-    try {
-      sessionStorage.setItem(
-        VIDEO_SELECTION_KEY,
-        JSON.stringify({ provider: 'media-studio-mcp', model: model.workflowId, modelId: model.id }),
-      );
-    } catch {
-      /* non-critical */
-    }
-    window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'video' } }));
-    window.setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('hivemind-workflow-selected', { detail: { modelId: model.id } }));
-    }, 0);
-  };
 
   // Only a studio page has a prompt to insert into. On a hub page the legacy
   // fallback probed the DOM for ANY textarea, which could append a template into
@@ -281,7 +219,7 @@ function ExploreDockInner() {
           <div className="flex items-center justify-between gap-3 border-b border-line1 pb-2.5">
             <div>
               <SectionLabel className="text-honey">Hivemind</SectionLabel>
-              <div className="text-[13px] font-semibold text-ink1">{zh() ? '工作室工具' : 'Studio tools'}</div>
+              <div className="text-[13px] font-semibold text-ink1">{zh() ? '提示词库' : 'Prompt library'}</div>
             </div>
             <button
               type="button"
@@ -291,38 +229,6 @@ function ExploreDockInner() {
             >
               <Icon name="x" size={14} />
             </button>
-          </div>
-
-          <label className="flex flex-col gap-1.5">
-            <SectionLabel>{zh() ? '本地视频工作流' : 'Local video workflow'}</SectionLabel>
-            <NativeSelect value={selectedModelId} onChange={(e) => selectWorkflow(e.target.value)}>
-              <option value="">{zh() ? '生成时再选择' : 'Choose on generate'}</option>
-              {context.videoModels.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
-                </option>
-              ))}
-            </NativeSelect>
-          </label>
-
-          <div className="flex flex-col gap-1.5">
-            <SectionLabel>{zh() ? '生成选项' : 'Generation options'}</SectionLabel>
-            {OPTION_ROWS.map((row) => (
-              <div
-                key={row.key}
-                className="flex items-center justify-between gap-3 rounded-md border border-line1 bg-bg2/50 px-2.5 py-2"
-              >
-                <div className="min-w-0">
-                  <div className="text-xs font-medium text-ink1">{row.label()}</div>
-                  <div className="text-[11px] leading-snug text-ink3">{row.description()}</div>
-                </div>
-                <Toggle
-                  checked={Boolean(options[row.key])}
-                  onChange={(checked) => setOption(row.key, checked)}
-                  label={row.label()}
-                />
-              </div>
-            ))}
           </div>
 
           <DisclosureSection

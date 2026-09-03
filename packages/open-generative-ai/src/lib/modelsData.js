@@ -1,4 +1,5 @@
-// Auto-generated from models_dump.json
+// Hand-maintained MUAPI model catalog. Seeded from a provider dump, edited in
+// place since; this file is the source of truth, not any dump.
 export const t2iModels = [
   {
     "id": "nano-banana",
@@ -2703,7 +2704,7 @@ export const t2vModels = [
   },
   // ── Seedance 2.5 ──────────────────────────────────────────────────────────
   // Added by hand 2026-08-11 from the live MUAPI catalog (GET /api/v1/models
-  // and /api/v1/models/<name>), which is ahead of models_dump.json. Early-access
+  // and /api/v1/models/<name>), which was ahead of the seed dump. Early-access
   // preview build: up to 30 SECONDS in a single generation — the only cloud
   // model here that reaches the full 30 — at 480p or 720p. 1080p/4K exist as
   // separate upstream endpoints but the preview does not serve them, so they

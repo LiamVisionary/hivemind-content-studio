@@ -8,7 +8,6 @@ def test_repository_catalog_preserves_forks_upstreams_and_component_boundaries()
 
     assert [item["id"] for item in repositories] == [
         "hivemind-content-studio",
-        "unified-image-studio-template",
         "Open-Generative-AI",
         "comfyui-mobile-frontend",
         "hive-image-stack",
@@ -16,7 +15,6 @@ def test_repository_catalog_preserves_forks_upstreams_and_component_boundaries()
         "Z-Image.swift",
     ]
     assert next(item for item in repositories if item["id"] == "hivemind-content-studio")["integration"] == "native"
-    assert next(item for item in repositories if item["id"] == "unified-image-studio-template")["integration"] == "embedded"
     assert next(item for item in repositories if item["id"] == "Open-Generative-AI")["destination"] == "packages/open-generative-ai"
     assert next(item for item in repositories if item["id"] == "comfyui-mobile-frontend")["destination"] == "packages/comfyui-mobile"
     assert next(item for item in repositories if item["id"] == "hive-image-stack")["destination"] == "packages/media-gateway"

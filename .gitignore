@@ -53,3 +53,6 @@ htmlcov/
 # tree — and it carries its own venv and node_modules.
 vendor/
 .tmp-harness/
+
+# Ad-hoc "just in case" snapshots next to a live file. Git history is the rollback.
+*.rollback-*

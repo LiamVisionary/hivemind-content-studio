@@ -12,8 +12,8 @@ import { getExploreDock, subscribeExploreDock, toggleExploreDock } from './explo
 import { APP_NAME, NAV_ITEMS, NAV_SECTIONS } from './navConfig.jsx';
 import { getApiStatus, subscribeApiStatus } from './statusStore.js';
 
-// Topbar trigger for the Hivemind explore dock. Only in studio mode; the dock
-// panel itself is rendered once by App and anchors under this button.
+// Topbar trigger for the Hivemind prompt library (explore dock). Only in studio
+// mode; the panel itself is rendered once by App and anchors under this button.
 function ExploreDockButton() {
   const [open, setOpen] = useState(getExploreDock);
   useEffect(() => subscribeExploreDock(setOpen), []);
@@ -23,8 +23,8 @@ function ExploreDockButton() {
       type="button"
       data-explore-trigger
       onClick={toggleExploreDock}
-      title={zhUi() ? 'Hivemind 工具箱' : 'Hivemind studio tools'}
-      aria-label={zhUi() ? 'Hivemind 工具箱' : 'Hivemind studio tools'}
+      title={zhUi() ? 'Hivemind 提示词库' : 'Hivemind prompt library'}
+      aria-label={zhUi() ? 'Hivemind 提示词库' : 'Hivemind prompt library'}
       aria-pressed={open}
       className={cx(
         'inline-flex h-ctl-md items-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold transition-colors duration-150',

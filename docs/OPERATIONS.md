@@ -109,6 +109,43 @@ python3 scripts/bootstrap_unified_studio.py --install-links
 The installer archives the prior launcher under `~/.hivemindos/media-studio/archive/launchers/` and reports the exact restore path. It refuses to overwrite a real ComfyUI custom-node directory.
 Starting the unified LaunchAgent also boots out and disables the obsolete `com.liam.open-generative-ai-hosted` label so it cannot compete for port 8794. Its plist is left intact for rollback.
 
+## Workflow registry entries
+
+The media gateway reads `packages/media-gateway/workflow-registry.json`. A ComfyUI
+API-format entry is shaped like this — `api_workflow`/`mobile_workflow` are absolute
+paths, `accepts` declares the capability the studio exposes, and `slots` maps each
+accepted field onto a node input:
+
+```json
+{
+  "workflows": [
+    {
+      "id": "wan-example-i2v",
+      "media_type": "video",
+      "title": "Wan Example Image-to-Video",
+      "family": "wan",
+      "builder": "comfy-api",
+      "api_workflow": "/absolute/path/to/wan-image-to-video-api.json",
+      "mobile_workflow": "/absolute/path/to/wan-image-to-video-editor.json",
+      "default": false,
+      "requires": { "prompt": true, "image": true },
+      "accepts": ["prompt", "image_path", "width", "height", "frames", "seed", "steps", "cfg"],
+      "defaults": { "width": 720, "height": 1280, "frames": 81, "steps": 30, "cfg": 5, "seed": 42 },
+      "slots": {
+        "prompt": { "node": "6", "input": "text" },
+        "image_path": { "node": "4", "input": "image" },
+        "width": { "node": "10", "input": "width" },
+        "height": { "node": "10", "input": "height" },
+        "frames": { "node": "10", "input": "length" },
+        "seed": { "node": "12", "input": "seed" },
+        "steps": { "node": "12", "input": "steps" },
+        "cfg": { "node": "12", "input": "cfg" }
+      }
+    }
+  ]
+}
+```
+
 ## Donor checkout retirement gate
 
 Do not delete an old checkout until all of these are true:
