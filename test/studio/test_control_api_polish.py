@@ -55,7 +55,7 @@ def _app(tmp_path: Path, monkeypatch, **overrides):
 def _client(tmp_path: Path, monkeypatch, *, unlock: bool = True, raise_server_exceptions: bool = True, **overrides) -> TestClient:
     client = TestClient(_app(tmp_path, monkeypatch, **overrides), raise_server_exceptions=raise_server_exceptions)
     if unlock:
-        assert client.post("/api/owner/unlock", json={"password": OWNER_PASSWORD}).status_code == 200
+        assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD}).status_code == 200
     return client
 
 
@@ -291,14 +291,14 @@ def test_the_throttle_keys_on_the_forwarded_browser_and_speaks_in_minutes(tmp_pa
     wrong passwords from ANY device locked the owner tile for everyone."""
     client = _client(tmp_path, monkeypatch, unlock=False)
     for _ in range(5):
-        assert client.post("/api/owner/unlock", json={"password": "wrong"},
+        assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "wrong"},
                            headers={"x-forwarded-for": "100.64.0.7, 10.0.0.1"}).status_code == 401
-    blocked = client.post("/api/owner/unlock", json={"password": OWNER_PASSWORD},
+    blocked = client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
                           headers={"x-forwarded-for": "100.64.0.7, 10.0.0.1"})
     assert blocked.status_code == 429
     assert blocked.json()["detail"] == "Too many attempts. Try again in 10 minutes."
     # A different browser behind the same proxy is not locked out.
-    other = client.post("/api/owner/unlock", json={"password": OWNER_PASSWORD},
+    other = client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD},
                         headers={"x-forwarded-for": "100.64.0.8"})
     assert other.status_code == 200
 

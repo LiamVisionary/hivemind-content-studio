@@ -3,7 +3,7 @@
 // missing), leaving the E2E vault locked: sealed media can't decrypt and shows
 // "vault locked" tiles. Any of those affordances dispatches
 // VAULT_UNLOCK_REQUEST_EVENT; this modal re-runs the gate's own flow — verify
-// the password at /api/owner/unlock, stash it per-tab, reload so every module
+// the password at /api/accounts/unlock, stash it per-tab, reload so every module
 // (vault, hub passphrase snapshot, tool surfaces) bootstraps with the key.
 import { useCallback, useState } from 'react';
 import { useWindowEvent } from '../hooks/hooks.js';

@@ -323,19 +323,25 @@ export function requestVaultUnlock() {
 }
 
 /**
- * Verify `password` against the owner gate and, on success, stash it exactly
- * like the lock screen does (same key, same 24h expiry) so a reload bootstraps
+ * Verify `password` against the signed-in workspace and, on success, stash it
+ * exactly like the gate does (same key, same 24h expiry) so a reload bootstraps
  * the vault. Returns { ok, status } — status 429 means rate-limited, anything
- * else falsy-ok means a wrong password or an unreachable gate.
+ * else falsy-ok means a wrong password, a lapsed session, or an unreachable
+ * gate. The workspace is whichever one the session cookie names: the gate's
+ * unlock route needs an account id, and /api/owner/session is what knows it.
  */
 export async function unlockOwnerSession(password) {
     let response;
     try {
-        response = await fetch('/api/owner/unlock', {
+        const session = await fetch('/api/owner/session', { credentials: 'same-origin', cache: 'no-store' });
+        const current = session.ok ? await session.json().catch(() => null) : null;
+        const accountId = current?.unlocked ? current?.account?.id : null;
+        if (accountId == null) return { ok: false, status: session.ok ? 401 : session.status };
+        response = await fetch('/api/accounts/unlock', {
             method: 'POST',
             credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password }),
+            body: JSON.stringify({ account_id: accountId, password }),
         });
     } catch {
         return { ok: false, status: 0 };

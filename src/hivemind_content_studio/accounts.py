@@ -112,11 +112,13 @@ def hash_password(password: str, *, salt: bytes | None = None) -> str:
 def verify_password(stored: str | None, password: str) -> bool:
     """Constant-time check against a stored `scrypt$...` string.
 
-    A legacy 64-char SHA-256 hex digest is also accepted so the existing owner
-    password (private_access.OWNER_PASSWORD_HASH) keeps working through the
-    migration; those are upgraded to scrypt on the next successful sign-in.
+    An account with no hash at all (a fresh owner that has not been set up yet,
+    or a workspace created without a password) matches nothing, ever. A legacy
+    64-char SHA-256 hex digest is still accepted for stores that predate scrypt
+    and for the CONTENT_STUDIO_OWNER_PASSWORD_HASH seed; those are upgraded to
+    scrypt on the next successful sign-in.
     """
-    if not stored or not isinstance(password, str) or not password:
+    if stored is None or not stored or not isinstance(password, str) or not password:
         return False
     if re.fullmatch(r"[0-9a-f]{64}", stored):
         supplied = hashlib.sha256(password.encode("utf-8")).hexdigest()

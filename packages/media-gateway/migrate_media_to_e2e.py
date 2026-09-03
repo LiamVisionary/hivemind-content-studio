@@ -30,9 +30,9 @@ ENCRYPTION_ITER = 50000
 
 
 def keychain_password(service: str) -> str:
-    import os
+    import getpass
 
-    account = os.environ.get("USER") or "liam"
+    account = getpass.getuser()
     proc = subprocess.run(
         ["/usr/bin/security", "find-generic-password", "-s", service, "-a", account, "-w"],
         capture_output=True, text=True, timeout=10,

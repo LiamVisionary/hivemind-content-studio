@@ -101,7 +101,7 @@ def _client(tmp_path: Path, monkeypatch, *, unlock: bool = True) -> TestClient:
     )
     client = TestClient(app)
     if unlock:
-        response = client.post("/api/owner/unlock", json={"password": "test-owner-password"})
+        response = client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"})
         assert response.status_code == 200
     return client
 

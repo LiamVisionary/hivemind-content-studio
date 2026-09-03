@@ -197,7 +197,7 @@ def test_control_app_startup_migrates_legacy_runs_and_serves_decrypted_artifacts
         private_cipher=cipher,
     )
     client = TestClient(app)
-    assert client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"}).status_code == 200
 
     runs = client.get("/api/runs").json()["runs"]
     assert len(runs) == 1

@@ -88,11 +88,11 @@ def test_machine_routes_keep_telemetry_and_redacted_run_receipts_available(tmp_p
         assert forbidden not in serialized
 
 
-def test_owner_unlock_uses_same_password_and_24_hour_browser_session(tmp_path: Path, monkeypatch) -> None:
+def test_the_owner_workspace_unlocks_for_a_24_hour_browser_session(tmp_path: Path, monkeypatch) -> None:
     client, _ = _locked_client(tmp_path, monkeypatch)
 
-    assert client.post("/api/owner/unlock", json={"password": "wrong"}).status_code == 401
-    unlocked = client.post("/api/owner/unlock", json={"password": "owner-passphrase"})
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "wrong"}).status_code == 401
+    unlocked = client.post("/api/accounts/unlock", json={"account_id": 1, "password": "owner-passphrase"})
     assert unlocked.status_code == 200
     assert unlocked.json()["expires_in_seconds"] == 24 * 60 * 60
     assert "HttpOnly" in unlocked.headers["set-cookie"]
@@ -129,7 +129,7 @@ def test_canvas_history_import_is_owner_only_metadata_only_and_source_preserving
     client, _ = _locked_client(tmp_path, monkeypatch, canvas_records=records)
 
     assert client.get("/api/canvas/history").status_code == 401
-    assert client.post("/api/owner/unlock", json={"password": "owner-passphrase"}).status_code == 200
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "owner-passphrase"}).status_code == 200
 
     response = client.get("/api/canvas/history")
     assert response.status_code == 200
@@ -419,7 +419,7 @@ def test_owner_can_fetch_ciphertext_workflow_and_confirm_complete_canvas_purge(t
         canvas_workflow_fetcher=lambda _name: envelope,
         canvas_delete_fetcher=delete_output,
     )
-    assert client.post("/api/owner/unlock", json={"password": "owner-passphrase"}).status_code == 200
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "owner-passphrase"}).status_code == 200
     item = client.get("/api/canvas/history?page=1&page_size=10").json()["history"][0]
 
     workflow = client.get(f"/api/canvas/history/{item['history_id']}/workflow")

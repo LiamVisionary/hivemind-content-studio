@@ -582,7 +582,7 @@ def _client(tmp_path, monkeypatch):
         private_cipher=cipher,
     )
     client = TestClient(app)
-    assert client.post("/api/owner/unlock", json={"password": "pw"}).status_code == 200
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "pw"}).status_code == 200
     return client
 
 
@@ -765,6 +765,9 @@ def test_only_the_link_callback_was_added_to_the_sign_in_gate(tmp_path, monkeypa
 
     assert routes == {
         "/api/accounts",
+        # First run only: it is loopback-only, throttled, and answers 409 for
+        # good the moment the owner holds any credential (test_account_api.py).
+        "/api/accounts/setup",
         "/api/accounts/unlock",
         "/api/accounts/webauthn/authenticate/options",
         "/api/accounts/webauthn/authenticate",

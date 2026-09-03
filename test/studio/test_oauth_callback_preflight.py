@@ -160,7 +160,7 @@ def _client(tmp_path, monkeypatch):
         private_cipher=cipher,
     )
     client = TestClient(app)
-    assert client.post("/api/owner/unlock", json={"password": "pw"}).status_code == 200
+    assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": "pw"}).status_code == 200
     return client
 
 

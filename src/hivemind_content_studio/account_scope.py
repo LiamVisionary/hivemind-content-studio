@@ -390,10 +390,12 @@ def bootstrap_accounts(
     """Guarantee an owner account exists, adopting any pre-accounts state.
 
     On the first boot after this feature lands there is a studio full of the
-    owner's work and no accounts table. That content becomes account 1, and the
-    owner keeps signing in with the password they already use — the legacy
-    SHA-256 digest is carried over verbatim and upgraded to scrypt the first
-    time it is used (see accounts.verify_password).
+    owner's work and no accounts table. That content becomes account 1. When a
+    seed hash is supplied (CONTENT_STUDIO_OWNER_PASSWORD_HASH on a headless box,
+    or a store that predates scrypt) it is carried over verbatim and upgraded to
+    scrypt the first time it is used (see accounts.verify_password). With no
+    seed the owner is created with no credentials at all, and the gate's first
+    screen asks whoever is at the machine to name the studio and set one.
     """
     existing = store.list_accounts()
     owner = next((account for account in existing if account.is_owner), None)
