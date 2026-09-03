@@ -90,10 +90,15 @@ were pill-soup become `ChipButton`+`Menu` groups with clear labels and current-v
 - Loading: `Spinner` inline or skeleton `bg-bg2 animate-pulse rounded` blocks. Progress with a real
   percentage uses `ProgressBar` + mono percent.
 - Empty: `EmptyState` with an icon, one sentence, and (when sensible) one action. No walls of tips.
-- Errors: inline `Pill tone="danger"` or a bordered `bg-danger-tint` callout with the raw message in
-  `font-mono text-xs` AND a way out (Try again / Dismiss). Never `alert()` — use `toast.error(...)`
-  (the `Toaster` in `App.jsx` sets one baseline: notices 4.5 s, success 3.5 s, errors 6 s — only
-  override for genuinely long copy). Show a failure once (callout OR toast, not both).
+- Errors: `FailureCallout` from `src/ui/kit.jsx` — one translated sentence, the button that repairs
+  it (`remedy`), a way out (Try again / Dismiss), and the raw/technical text under a collapsed
+  `Details` disclosure in `font-mono text-xs`. Never lead with the provider's or the backend's own
+  words: `describeFailure(error, { transport, operation })` in `src/lib/describeFailure.js` writes
+  the sentence and names the repair, and `toastFailure` is the same reading where there is no room
+  for a callout. Inline `Pill tone="danger"` still covers a one-word state. Never `alert()` — use
+  `toast.error(...)` (the `Toaster` in `App.jsx` sets one baseline: notices 4.5 s, success 3.5 s,
+  errors 6 s — only override for genuinely long copy). Show a failure once (callout OR toast, not
+  both), and never present a problem in a place where its fix could have been offered instead.
 - Destructive confirms: `ConfirmModal` — one consistent pattern everywhere (tone above).
 - Keyboard: ⌘/Ctrl+Enter generates in every composer; ⌘/Ctrl+, opens Settings; Escape closes the
   topmost layer; Space and Enter both activate `role="button"` tiles; hover-only actions also show

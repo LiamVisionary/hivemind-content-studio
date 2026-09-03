@@ -31,6 +31,7 @@ import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { Icon } from '../ui/icons.jsx';
 import { LibraryDeleteButton, LibraryStateNote, SaveNameModal } from '../ui/SavedLibrary.jsx';
 import { Button, TextInput } from '../ui/kit.jsx';
+import { toastFailure } from '../ui/failureToast.jsx';
 
 const SECTION_LABEL = { image: 'Image', video: 'Video' };
 // Past this many saved prompts a name list stops being scannable, so a filter
@@ -125,7 +126,7 @@ export function SavedPromptsMenu({
       // The stored library could not be decrypted with this key. Never replace
       // it on the strength of a Save click alone — ask, then retry with consent.
       if (error?.unreadable) { setConfirmReplace(name); return; }
-      toast.error(error.message);
+      toastFailure(error, { operation: 'That saved prompt' });
     } finally {
       setSaving(false);
     }
@@ -188,7 +189,7 @@ export function SavedPromptsMenu({
       toast(`Deleted “${entry.name}”.`);
       closeMenuRef.current?.();
     } catch (error) {
-      toast.error(error.message);
+      toastFailure(error, { operation: 'That saved prompt' });
     }
   };
 

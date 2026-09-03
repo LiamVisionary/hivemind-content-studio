@@ -13,6 +13,7 @@ import { useMediaSrc } from '../../hooks/hooks.js';
 import { getLang } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../../ui/Menu.jsx';
+import { runFailureRemedy } from '../../lib/failureRemedy.js';
 import {
   Button, Card, EmptyState, Field, IconButton, NativeSelect, Pill, SectionLabel,
   Segmented, Spinner, TextArea, TextInput, Toggle, cx,
@@ -399,6 +400,41 @@ function PlanCard({ plan, createdRunId }) {
   );
 }
 
+/**
+ * The repair a failed thread turn named, and the evidence behind it.
+ *
+ * The bubble used to be red text and nothing else: no retry, no "connect an
+ * account", and the raw text as the sentence. This gives the sentence its fix
+ * and demotes the technical tail to a Details row.
+ */
+function FailureActions({ detail = '', action = null, onRetry = null }) {
+  if (!detail && !action && !onRetry) return null;
+  return (
+    <>
+      {action || onRetry ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {action ? (
+            <Button size="sm" variant="primary" onClick={() => void runFailureRemedy(action)}>{action.label}</Button>
+          ) : null}
+          {onRetry ? (
+            <Button size="sm" icon="refresh" onClick={onRetry}>{zh() ? '重试' : 'Try again'}</Button>
+          ) : null}
+        </div>
+      ) : null}
+      {detail ? (
+        <details className="mt-2">
+          <summary className="cursor-pointer list-none text-[11px] font-medium text-ink3 hover:text-ink2">
+            {zh() ? '详情' : 'Details'}
+          </summary>
+          <div className="mt-1 max-h-40 overflow-y-auto break-words font-mono text-[11px] leading-relaxed text-ink3 [overflow-wrap:anywhere]">
+            {detail}
+          </div>
+        </details>
+      ) : null}
+    </>
+  );
+}
+
 function ThreadItem({ item }) {
   if (item.kind === 'user') {
     return (
@@ -419,6 +455,9 @@ function ThreadItem({ item }) {
           <p className={cx('whitespace-pre-wrap text-[14px] leading-relaxed', item.error ? 'text-danger' : 'text-ink1')}>
             {item.message}
           </p>
+          {/* A refusal that named its repair carries the button here, beside
+              the sentence — not on a page two clicks away. */}
+          {item.error ? <FailureActions detail={item.detail} action={item.action} /> : null}
           {Array.isArray(item.questions) && item.questions.length ? (
             <ol className="mt-2 list-decimal space-y-1 pl-5 text-[13px] text-ink2">
               {item.questions.map((question, i) => <li key={i}>{question}</li>)}
@@ -444,7 +483,8 @@ function ThreadItem({ item }) {
           <Icon name="warning" size={15} />
           <b className="text-[13px]">Could not create the run</b>
         </div>
-        <p className="mt-1 font-mono text-xs text-danger">{item.message}</p>
+        <p className="mt-1 text-[13px] leading-relaxed text-danger">{item.message}</p>
+        <FailureActions detail={item.detail} action={item.action} />
       </div>
     );
   }

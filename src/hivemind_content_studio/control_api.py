@@ -2160,6 +2160,22 @@ def build_control_app(
                 },
                 status_code=503,
             )
+        # The last hop before the browser. An upstream refusal arrives as the
+        # gateway's own words — a traceback tail, an absolute path, a JSON body
+        # — and this is the only place left to translate it, so a failed lane
+        # reads as a sentence with the original kept beside it rather than
+        # instead of it. 2xx bodies (images, job records) pass untouched.
+        if status >= 400 and "json" in content_type.lower():
+            try:
+                payload = json.loads(content or b"{}")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict):
+                raw = payload.get("error") or payload.get("detail") or payload.get("message") or ""
+                said = sanitize_error_detail(raw if isinstance(raw, str) else json.dumps(raw))
+                if said:
+                    payload = {**payload, "error": said, "detail": said, "message": said}
+                    return JSONResponse(payload, status_code=status)
         return Response(content=content, status_code=status, media_type=content_type.split(";", 1)[0])
 
     # --- posting a creation to Civitai -------------------------------------
@@ -2905,7 +2921,16 @@ def build_control_app(
             try:
                 plan = plan_with_brain(body.model_dump())
             except RuntimeError as exc:
-                raise HTTPException(status_code=502, detail=str(exc)) from None
+                # HivemindOS's own error body — another product's prose, or a
+                # bare "HivemindOS returned HTTP 502" — is not something to put
+                # in a person's thread. One sentence with the repair beside it;
+                # the original goes to the log, where it is useful.
+                print(f"[content-studio] planner brain failed: {exc}", file=sys.stderr)
+                raise HTTPException(status_code=502, detail={
+                    "message": "The planner could not reach HivemindOS.",
+                    "remedy": "connect-account",
+                    "provider": "hivemindos",
+                }) from None
         draft = plan.get("draft")
         if isinstance(draft, dict):
             selections = (("keyframe", body.imageSelection), ("motion", body.videoSelection))
@@ -3877,9 +3902,12 @@ def build_control_app(
     # the gateway token, which must never reach the browser.
 
     def _restore_error(exc: video_restore.RestoreError) -> HTTPException:
+        # RestoreError carries whatever the gateway said, which on a lane
+        # failure is the runner's stderr with an absolute path in it.
+        said = sanitize_error_detail(str(exc)) or "That restoration could not be started."
         return HTTPException(
             status_code=exc.status_code,
-            detail={"error": str(exc), **({"remedy": exc.remedy} if exc.remedy else {})},
+            detail={"error": said, "message": said, **({"remedy": exc.remedy} if exc.remedy else {})},
         )
 
     @app.get("/api/restore/capabilities", dependencies=[Depends(require_owner)])
@@ -4090,7 +4118,12 @@ def build_control_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from None
+            # An OSError's text is "[Errno 2] No such file or directory:
+            # /Users/<name>/…" — the owner's home directory, in a toast.
+            raise HTTPException(
+                status_code=503,
+                detail=sanitize_error_detail(str(exc)) or "The ingredients sheet could not be composed.",
+            ) from None
         finally:
             for source in sources:
                 source.unlink(missing_ok=True)

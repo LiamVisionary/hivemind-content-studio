@@ -56,6 +56,7 @@ import { DRAFT_USAGE, LOCAL, remedyFor, rowFor, sourceState, startingModelId } f
 import { useModelSources } from '../lib/useModelSources.js';
 import { Button, StudioLayout } from '../ui/kit.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
+import { ConfirmModal } from '../ui/Modal.jsx';
 
 import {
   conceptBrief, contactSheetLayout, contactSheetPrompt, contractBlanks, normalizeConcepts,
@@ -247,7 +248,7 @@ export function StoryStudio({ active = true } = {}) {
       onStatus, signal, snapshot: localSnapshot, source: producer.source,
     });
     // A short answer is not a failure and not a success. Say which it was.
-    for (const note of notes) toast(note, { icon: '✂️', duration: 8000 });
+    for (const note of notes) toast(note, { duration: 8000 });
     void refreshRuntime();
     return result;
   }, [producer, localSnapshot, refreshRuntime]);
@@ -372,12 +373,12 @@ export function StoryStudio({ active = true } = {}) {
     }
     const total = entries.length;
     if (stopped) {
-      if (written) toast(`Stopped — ${written} of ${total} written.`, { icon: '✍️' });
+      if (written) toast(`Stopped — ${written} of ${total} written.`);
       return { written, stopped: true };
     }
     if (failure) {
       if (!written) producerFailed(failureError, failure);
-      else toast(`Filled ${written} of ${total}, then the producer stopped: ${failure}`, { icon: '✍️', duration: 12000 });
+      else toast(`Filled ${written} of ${total}, then the producer stopped: ${failure}`, { duration: 12000 });
       return { written, failed: true };
     }
     if (!written) {
@@ -385,7 +386,7 @@ export function StoryStudio({ active = true } = {}) {
       return { written: 0 };
     }
     if (written < total) {
-      toast(`Filled ${written} of ${total} — the rest came back empty. Press Draft again for those.`, { icon: '✍️' });
+      toast(`Filled ${written} of ${total} — the rest came back empty. Press Draft again for those.`);
     }
     return { written };
   }, [producer, runProducer, update, producerFailed]);
@@ -404,7 +405,7 @@ export function StoryStudio({ active = true } = {}) {
     const redraft = blank.length === 0;
     const entries = redraft ? sections.flatMap((section) => fieldsFor(section, current)) : blank;
     if (!entries.length) {
-      toast('Nothing to write in this stage yet.', { icon: '✍️' });
+      toast('Nothing to write in this stage yet.');
       return;
     }
     const before = redraft ? current : null;
@@ -419,7 +420,7 @@ export function StoryStudio({ active = true } = {}) {
           <span>Redrafted {entries.length} field{entries.length === 1 ? '' : 's'}.</span>
           <Button size="sm" onClick={() => { update(() => before); toast.dismiss(t.id); }}>Undo</Button>
         </span>
-      ), { icon: '✍️', duration: 12000 });
+      ), { duration: 12000 });
     }
   }, [fill, update]);
 
@@ -457,13 +458,16 @@ export function StoryStudio({ active = true } = {}) {
   const fixReadiness = useCallback(async (action) => {
     if (!action) return;
     if (action.kind === 'muapi-key') { setAuthOpen(true); return; }
+    // A missing server-side key opens the producer picker's own inline field —
+    // the same door, so there is one place a key is added rather than two.
+    if (action.kind === 'key') { void runRemedy({ action: 'key', key: action.key }); return; }
     if (action.kind !== 'oauth') return;
     const key = `oauth:${action.provider}`;
     setFixing(key);
     try {
       const url = await startOAuthLogin(action.provider);
       window.open(url, '_blank', 'noopener,noreferrer');
-      toast('Finish the sign-in in the tab that just opened, then press Check again.', { icon: '🔑', duration: 9000 });
+      toast('Finish the sign-in in the tab that just opened, then press Check again.', { duration: 9000 });
     } catch (error) {
       // The reason AND what to do about it. "Could not start the sign-in" on
       // its own is the kind of message this studio is not allowed to ship.
@@ -477,7 +481,7 @@ export function StoryStudio({ active = true } = {}) {
       setFixing('');
       await refreshOAuth();
     }
-  }, [refreshOAuth]);
+  }, [refreshOAuth, runRemedy]);
 
   const choicesFor = useCallback((featureId) => {
     if (!matrix) return [];
@@ -565,7 +569,7 @@ export function StoryStudio({ active = true } = {}) {
         if (off) {
           toast(
             `The ${label} came back ${off.got} — ${model?.name || model?.id || 'that model'} ignored the ${aspect} canvas that was asked for, so the panels are squashed. Draw it with a different model, or set the clip aspect to match.`,
-            { icon: '📐', duration: 14000 },
+            { duration: 14000 },
           );
         }
       });
@@ -1019,8 +1023,12 @@ export function StoryStudio({ active = true } = {}) {
     || story.location.place || story.motion.beats.some((beat) => beat.action),
   );
 
-  const loadExample = () => {
-    if (hasWork && !window.confirm('Replace this production with the worked example? Your sheets and plates stay in your references.')) return;
+  // A native OS confirm popping out of a dark, designed app reads as broken —
+  // and in a Tauri WebView it looks nothing like the product. Both of these ask
+  // through the app's own ConfirmModal instead (DESIGN.md §3).
+  const [confirming, setConfirming] = useState('');
+
+  const applyExample = () => {
     update({
       ...blankStory(),
       ...STORY_EXAMPLE,
@@ -1030,13 +1038,22 @@ export function StoryStudio({ active = true } = {}) {
       characters: STORY_EXAMPLE.characters.map((row) => ({ ...blankCharacter(), ...row, sheetUrl: '', audit: {} })),
     });
     setStage('story');
-    toast('Loaded a worked example — every field filled with the kind of thing that belongs in it.', { icon: '🚌' });
+    toast('Loaded a worked example — every field filled with the kind of thing that belongs in it.');
+  };
+
+  const clearProduction = () => {
+    update(blankStory());
+    setStage('story');
+  };
+
+  const loadExample = () => {
+    if (hasWork) { setConfirming('example'); return; }
+    applyExample();
   };
 
   const startOver = () => {
-    if (hasWork && !window.confirm('Clear this production and start a new one? The sheets and plates stay in your references.')) return;
-    update(blankStory());
-    setStage('story');
+    if (hasWork) { setConfirming('clear'); return; }
+    clearProduction();
   };
 
   /* ---------------- the cast draft's own label ---------------- */
@@ -1217,6 +1234,24 @@ export function StoryStudio({ active = true } = {}) {
           />
         ) : null}
       </div>
+
+      <ConfirmModal
+        open={Boolean(confirming)}
+        onClose={() => setConfirming('')}
+        onConfirm={() => {
+          const which = confirming;
+          setConfirming('');
+          if (which === 'example') applyExample();
+          else clearProduction();
+        }}
+        tone={confirming === 'clear' ? 'danger' : 'primary'}
+        title={confirming === 'clear'
+          ? 'Clear this production and start a new one?'
+          : 'Replace this production with the worked example?'}
+        body="The sheets and plates stay in your references."
+        confirmLabel={confirming === 'clear' ? 'Clear' : 'Replace'}
+        cancelLabel="Cancel"
+      />
 
       {authOpen ? <AuthModal onClose={() => setAuthOpen(false)} onSaved={() => setAuthOpen(false)} /> : null}
     </StudioLayout>

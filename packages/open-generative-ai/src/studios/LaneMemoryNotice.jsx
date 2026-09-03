@@ -17,6 +17,7 @@ import { toast } from 'react-hot-toast';
 import { api } from '../hub/hubData.js';
 import { formatGB, laneNotice } from '../lib/laneMemory.js';
 import { Button } from '../ui/kit.jsx';
+import { toastFailure } from '../ui/failureToast.jsx';
 
 const POLL_MS = 20000;
 
@@ -56,7 +57,7 @@ export function LaneMemoryNotice({ active = true }) {
       // everything else on the machine, so the honest number is the measured one.
       toast.success(`Freed ${formatGB(result?.freedBytes)} from the ${notice.label}`);
     } catch (error) {
-      toast.error(error.message);
+      toastFailure(error, { operation: 'Freeing the lane' });
       refresh();
     } finally {
       setFreeing(false);

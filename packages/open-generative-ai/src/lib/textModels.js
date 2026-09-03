@@ -478,6 +478,10 @@ export const REMEDIES = Object.freeze({
   // which spends the balance they already have. Buying a second one is the
   // fallback for someone who has never had HivemindOS credits at all.
   'connect-account': { label: 'Connect account', action: 'connect' },
+  // The restore and SAM3 capability payloads say `connect` for the same act.
+  // One vocabulary reaching two spellings is cheaper than a server migration
+  // that would silently drop the button on any client that has not shipped yet.
+  connect: { label: 'Connect account', action: 'connect' },
   // No provider account connected at all. Points at the section rather than at
   // one provider, because which one to connect is the owner's choice.
   'connect-provider': { label: 'Connect an account', action: 'accounts' },

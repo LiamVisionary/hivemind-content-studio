@@ -27,6 +27,7 @@ import { HubToolbar } from '../components/HubToolbar.jsx';
 import { Lightbox } from '../components/Lightbox.jsx';
 import { RunCard } from '../components/RunCard.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
+import { toastFailure } from '../../ui/failureToast.jsx';
 
 const zh = () => getLang() === 'zh-CN';
 
@@ -66,7 +67,7 @@ function ArtifactCard({ run, artifact, onOpen }) {
       await navigator.clipboard.writeText(new URL(rawUrl, location.href).href);
       toast('Copied artifact URL.');
     } catch (error) {
-      toast.error(error.message);
+      toastFailure(error, { operation: 'That run action' });
     }
   };
 

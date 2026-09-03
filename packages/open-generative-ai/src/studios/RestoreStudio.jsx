@@ -23,6 +23,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
 import { Icon } from '../ui/icons.jsx';
+import { toastFailure } from '../ui/failureToast.jsx';
+import { runFailureRemedy } from '../lib/failureRemedy.js';
 import {
   Button, Card, EmptyState, Pill, ProgressBar, SectionLabel, Slider, StudioLayout, cx,
 } from '../ui/kit.jsx';
@@ -257,7 +259,9 @@ export function RestoreStudio({ active = true }) {
       toast.success(preview ? 'Rendering a preview…' : 'Restoring — you can close this tab, it keeps going.');
       await poll(started.project_id);
     } catch (error) {
-      toast.error(error?.message || 'That restoration could not be started.');
+      // A hosted-lane refusal carries `remedy` (connect the account, add
+      // credits), so the toast carries the button rather than the sentence.
+      toastFailure(error, { operation: 'Starting the restoration' });
     } finally {
       setBusy('');
     }
@@ -411,6 +415,7 @@ export function RestoreStudio({ active = true }) {
       plan={plan}
       source={file ? source : null}
       busy={Boolean(busy) || Boolean(running)}
+      onRemedy={(remedy) => void runFailureRemedy(remedy)}
     />
   );
 

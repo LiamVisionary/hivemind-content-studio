@@ -30,6 +30,7 @@ import { useLocalImageCatalog } from '../lib/useLocalCatalog.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { registerPromptInserter } from '../app/promptTarget.js';
 import { Icon } from '../ui/icons.jsx';
+import { toastFailure } from '../ui/failureToast.jsx';
 import { Modal } from '../ui/Modal.jsx';
 import {
   Button, Card, EmptyState, Field, NativeSelect, Pill, ProgressBar, SectionLabel, Segmented, Slider,
@@ -261,7 +262,7 @@ export function SpriteStudio({ active = true } = {}) {
     setCustomAction(SPRITE_EXAMPLE.customAction);
     setSoundscape(SPRITE_EXAMPLE.soundscape);
     setPromptOverride('');
-    toast('Loaded the dragon that this feature was built against.', { icon: '🐉' });
+    toast('Loaded the dragon that this feature was built against.');
   }, []);
 
   /* ---------------- stage 1: draw the sprite ---------------- */
@@ -290,7 +291,13 @@ export function SpriteStudio({ active = true } = {}) {
       if (!matteSubject) setMatteSubject(matteSubjectFrom(subject));
     } catch (error) {
       console.warn('[SpriteStudio] sprite generation failed:', error?.message || error);
-      toast.error(error?.message || 'Could not draw the sprite.');
+      // The studio route answers "<Provider>: <the provider's own exception>";
+      // describeFailure turns that into a sentence, and a refusal that named a
+      // repair arrives here as a button rather than as prose.
+      toastFailure(error, {
+        operation: 'Drawing the sprite',
+        handlers: { onMuapiKey: () => setAuthOpen(true), onRetry: () => void drawSprite() },
+      });
     } finally {
       setDrawing(false);
     }
@@ -332,7 +339,10 @@ export function SpriteStudio({ active = true } = {}) {
     } catch (error) {
       if (!error?.cancelled) {
         console.warn('[SpriteStudio] animation failed:', error?.message || error);
-        toast.error(error?.message || 'Could not animate the sprite.');
+        toastFailure(error, {
+          operation: 'Animating the sprite',
+          handlers: { onMuapiKey: () => setAuthOpen(true), onRetry: () => void animate() },
+        });
       }
     } finally {
       setAnimating(false);
@@ -358,7 +368,7 @@ export function SpriteStudio({ active = true } = {}) {
       setFrames(result.frames);
       setSheet(null);
       if (result.frames.length < frameCount) {
-        toast(`Only ${result.frames.length} distinct poses in that clip — the rest were duplicates.`, { icon: '🎞️' });
+        toast(`Only ${result.frames.length} distinct poses in that clip — the rest were duplicates.`);
       }
     } catch (error) {
       console.warn('[SpriteStudio] frame extraction failed:', error?.message || error);

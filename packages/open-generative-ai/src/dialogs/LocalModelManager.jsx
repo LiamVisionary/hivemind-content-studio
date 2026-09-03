@@ -4,12 +4,12 @@
 // wan2gp config probe, per-model download/delete with progress subscriptions
 // that always unsubscribe on success AND error.
 import { useCallback, useEffect, useState } from 'react';
-import { toast } from 'react-hot-toast';
 import { getLang, t, tf } from '../lib/i18n.js';
 import { isLocalAIAvailable, localAI } from '../lib/localInferenceClient.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, EmptyState, Field, Pill, ProgressBar, SectionLabel, Spinner, TextInput, cx } from '../ui/kit.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
+import { toastFailure } from '../ui/failureToast.jsx';
 
 const zh = () => getLang() === 'zh-CN';
 
@@ -369,7 +369,7 @@ function ModelCard({ model, onStateChange }) {
       setConfirmOpen(false);
       onStateChange?.();
     } catch (err) {
-      toast.error(err.message);
+      toastFailure(err, { operation: 'That model action' });
     } finally {
       setDeleting(false);
     }

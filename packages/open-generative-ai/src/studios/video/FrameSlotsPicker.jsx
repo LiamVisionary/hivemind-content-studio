@@ -19,7 +19,6 @@
 //                                       // (e.g. character references replace them)
 //   />
 import { useEffect, useRef, useState } from 'react';
-import { toast } from 'react-hot-toast';
 import { AuthModal } from '../../dialogs/AuthModal.jsx';
 import {
   fetchHivemindReferences,
@@ -39,6 +38,7 @@ import { Icon } from '../../ui/icons.jsx';
 import { Button, SectionLabel, cx } from '../../ui/kit.jsx';
 import { ReferencePreview, Thumb } from '../UploadPicker.jsx';
 import { zh } from './videoLogic.js';
+import { toastFailure } from '../../ui/failureToast.jsx';
 
 export function FrameSlotsPicker({
   slots = [],
@@ -116,7 +116,7 @@ export function FrameSlotsPicker({
       assign(activeKey, uploadedUrl);
     } catch (err) {
       console.error('[FrameSlotsPicker] Upload failed:', err);
-      toast.error(`${zh() ? '图片上传失败' : 'Image upload failed'}: ${err.message}`);
+      toastFailure(err, { operation: zh() ? '图片上传' : 'Image upload' });
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';

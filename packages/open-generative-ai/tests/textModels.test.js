@@ -124,12 +124,15 @@ test('every state a source can be broken in offers the action that repairs it', 
   const { remedyFor, REMEDIES } = await load();
 
   for (const key of ['add-local-model', 'link-hivemindos', 'open-hivemindos', 'top-up',
-                     'connect-account', 'connect-provider', 'retry']) {
+                     'connect-account', 'connect', 'connect-provider', 'retry']) {
     assert.ok(remedyFor(key)?.label, `${key} has no button`);
     assert.ok(remedyFor(key)?.action, `${key} has no action`);
   }
   assert.equal(remedyFor('something-new'), null);
-  assert.equal(Object.keys(REMEDIES).length, 7);
+  // `connect` is the restore/SAM3 capability payloads' spelling of
+  // `connect-account`; both resolve, so a lane row can offer the same button.
+  assert.deepEqual(remedyFor('connect'), remedyFor('connect-account'));
+  assert.equal(Object.keys(REMEDIES).length, 8);
 
   // A provider account's repair has to name WHICH account — "Add key" with no
   // key name is the same dead end as an error with no button. Those arrive as
