@@ -57,7 +57,7 @@ def client(tmp_path: Path, monkeypatch):
         private_cipher=cipher,
     )
     test_client = TestClient(app)
-    assert test_client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
+    assert test_client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"}).status_code == 200
     return test_client
 
 
@@ -86,7 +86,7 @@ def _client_for(monkeypatch, tmp_path: Path | None = None) -> TestClient:
         private_cipher=cipher,
     )
     test_client = TestClient(app)
-    assert test_client.post("/api/owner/unlock", json={"password": "test-owner-password"}).status_code == 200
+    assert test_client.post("/api/accounts/unlock", json={"account_id": 1, "password": "test-owner-password"}).status_code == 200
     return test_client
 
 
