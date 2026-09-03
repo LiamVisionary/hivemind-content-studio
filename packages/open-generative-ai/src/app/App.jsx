@@ -18,8 +18,9 @@ import { OutputRestoreDropZone } from './OutputRestoreDropZone.jsx';
 import { VaultRecoveryModal } from '../bridges/VaultRecoveryModal.jsx';
 import { VaultUnlockModal } from '../bridges/VaultUnlockModal.jsx';
 import { Spinner } from '../ui/kit.jsx';
+import { CommandPalette } from './CommandPalette.jsx';
 import { ErrorBoundary } from './ErrorBoundary.jsx';
-import { HUB_PAGES, isKnownPage } from './navConfig.jsx';
+import { HUB_PAGES, NAV_SECTIONS, isKnownPage } from './navConfig.jsx';
 import { Shell } from './Shell.jsx';
 import { startApiHeartbeat, stopApiHeartbeat } from './statusStore.js';
 import { StudioTabs } from './StudioTabs.jsx';
@@ -72,6 +73,7 @@ export function App() {
   const [studioComps, setStudioComps] = useState({}); // page -> resolved Component, kept mounted
   const [HubComp, setHubComp] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const navTokenRef = useRef(0);
   const pageRef = useRef(null);
   const loadedStudiosRef = useRef({}); // synchronous mirror of studioComps for navigate()
@@ -134,17 +136,33 @@ export function App() {
     setPage(target);
   }, []);
 
-  // ⌘, / Ctrl+, opens Settings (the one app-wide shortcut; the composers own ⌘↵).
+  // App-wide shortcuts (the composers own ⌘↵, the tab strip owns ⌘T/⌘W):
+  //   ⌘,      Settings
+  //   ⌘K      the command palette — pages, tabs, saved prompts, installed models
+  //   ⌘1..⌘9  the first nav tier, in the order the sidebar lists it
   useEffect(() => {
     const onKey = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === ',' && !e.shiftKey && !e.altKey) {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (e.key === ',' && !e.shiftKey) {
         e.preventDefault();
         setSettingsOpen(true);
+        return;
+      }
+      if ((e.key === 'k' || e.key === 'K') && !e.shiftKey) {
+        e.preventDefault();
+        setPaletteOpen((open) => !open);
+        return;
+      }
+      if (/^[1-9]$/.test(e.key) && !e.shiftKey) {
+        const target = (NAV_SECTIONS[0]?.items || [])[Number(e.key) - 1];
+        if (!target) return;
+        e.preventDefault();
+        void navigate(target.page);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [navigate]);
 
   // Inbound router API — hubApp/explore-dock dispatch window 'navigate' events;
   // detail.page === 'settings' opens the settings modal instead of routing.
@@ -231,7 +249,12 @@ export function App() {
 
   return (
     <ErrorBoundary label="The studio" fallback={AppCrash}>
-      <Shell page={page} onNavigate={navigate} onOpenSettings={() => setSettingsOpen(true)}>
+      <Shell
+        page={page}
+        onNavigate={navigate}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenPalette={() => setPaletteOpen(true)}
+      >
         {/* First studio chunk still loading: a centred spinner instead of a black area. */}
         {page === null ? (
           <div className="grid min-h-0 flex-1 place-items-center" aria-busy="true">
@@ -272,6 +295,13 @@ export function App() {
           <SettingsModalLazy onClose={() => setSettingsOpen(false)} />
         </Suspense>
       ) : null}
+
+      <CommandPalette
+        open={paletteOpen}
+        page={page}
+        onClose={() => setPaletteOpen(false)}
+        onNavigate={navigate}
+      />
 
       <VaultRecoveryModal />
       <VaultUnlockModal />
