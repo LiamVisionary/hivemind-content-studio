@@ -619,9 +619,9 @@ export function CastStrip({
   };
 
   const lane = target === 'reference'
-    ? (zh() ? '参考模式' : 'Reference lane')
+    ? (zh() ? '参考模式' : 'Reference mode')
     : target === 'h3-text'
-      ? (zh() ? '文字模式' : 'Text lane')
+      ? (zh() ? '文字模式' : 'Text mode')
       : '';
   // WHO is in the shot. A location plate and a storyboard are members of the
   // cast — they own picture slots and carry their own retention contract — but

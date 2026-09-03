@@ -5,10 +5,60 @@
 // scrolling a dropdown. Each card names the workflow, what it accepts, and hands
 // straight over to the studio that runs it.
 import { useMemo, useState } from 'react';
+import { toast } from 'react-hot-toast';
 import { filterModels, modelCapabilityChips, modelTypeLabel, sortModels } from '../../../lib/modelLibrary.js';
+import { localAI, isLocalAIAvailable } from '../../../lib/localInferenceClient.js';
 import { Button, EmptyState, Pill, Segmented, TextInput } from '../../../ui/kit.jsx';
 import { Icon } from '../../../ui/icons.jsx';
 import { openModelInStudio } from './openInStudio.js';
+
+// Holding a model in memory (or handing the memory back) is housekeeping for
+// THIS MACHINE, not a setting for the picture about to be made — it sat at the
+// bottom of the Image studio's Advanced section, where a Video or Restore user
+// could not reach it and an image user had to scroll past it every time.
+function MachineMemory() {
+  const [busy, setBusy] = useState('');
+  if (!isLocalAIAvailable()) return null;
+
+  const run = async (what, call, done, failed) => {
+    if (busy) return;
+    setBusy(what);
+    try {
+      await call();
+      toast.success(done);
+    } catch (error) {
+      toast.error(error?.message || failed);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b border-line1 px-4 py-2.5 md:px-5">
+      <span className="text-xs text-ink3">
+        Loading a model takes a few seconds — warm it before you start, or give the memory back when you are done.
+      </span>
+      <div className="ml-auto flex items-center gap-2">
+        <Button
+          size="sm"
+          loading={busy === 'warm'}
+          onClick={() => void run('warm', () => localAI.warmIdeogram4(), 'Model is warm.', 'Warm failed')}
+        >
+          Warm up
+        </Button>
+        {/* Unloading is housekeeping, not destruction — neutral, not danger. */}
+        <Button
+          size="sm"
+          variant="neutral"
+          loading={busy === 'unload'}
+          onClick={() => void run('unload', () => localAI.unloadIdeogram4(), 'Model unloaded.', 'Unload failed')}
+        >
+          Free memory
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 function Chip({ children }) {
   return (
@@ -80,6 +130,7 @@ export function RunnableModels({ models, loading }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <MachineMemory />
       <div className="flex flex-wrap items-center gap-2 border-b border-line1 px-4 py-2.5 md:px-5">
         <Segmented
           options={[
@@ -118,7 +169,7 @@ export function RunnableModels({ models, loading }) {
               ? undefined
               : type === 'video' && !counts.video
                 ? 'Video models come from the studio catalog and run in the Video studio — open it to see what is installed.'
-                : 'Workflow JSON dropped into ComfyUI/workflows/auto/ shows up here as a local model.'}
+                : 'Nothing installed yet. If you build your own, drop a ComfyUI workflow in the auto folder and it shows up here.'}
           />
         )}
       </div>

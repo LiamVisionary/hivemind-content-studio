@@ -29,11 +29,7 @@ import {
 import { localAI, isHostedLocalAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { LOCAL_MODEL_CATALOG, getLocalModelById } from '../lib/localModels.js';
 import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';
-import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
-import { RentedSourceStatus } from './RentedSourceStatus.jsx';
-import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
-import { ENHANCE_TAGS, QUICK_PROMPTS } from '../lib/promptUtils.js';
-import { t, aspectRatioName, getLang } from '../lib/i18n.js';
+import { t, getLang } from '../lib/i18n.js';
 import {
   savePendingJob, removePendingJob, getPendingJobs, pendingJobsForTab,
 } from '../lib/pendingJobs.js';
@@ -51,15 +47,15 @@ import { OWNERSHIP_HEADING, applyReferenceRoles, normalizeReferenceRoles, refere
 import { startCivitaiDownload } from '../lib/civitaiDownloadStore.js';
 import { huntLoraIds, isLoraEnabled, loraGenerationPayload, mergeLoraUpdates, replaceLoraInSelection, toggleLoraEnabled, toggleLoraHunt, toggleLoraSelection, updateLoraStrength } from '../lib/loraSelection.js';
 import { localModelSupportsImageInput, localModelSupportsNegativePrompt, negativePromptNeedsGuidance } from '../lib/localImageModelFilter.js';
-import { EDIT_SHORT_SIDES, editBudgetForShortSide, editOutputDimensions } from '../lib/editResolution.js';
+import { editBudgetForShortSide, editOutputDimensions } from '../lib/editResolution.js';
 import { composeRegionalPrompt, hasActiveRegions } from '../lib/regionPrompt.js';
 import { createGenerationContextStore } from '../lib/generationContext.js';
 import { IMAGE_TAB_FIELDS, cloneTabValue, snapshotTabFields } from '../lib/studioTabs.js';
 import { createStudioGenerationQueue } from '../lib/studioGenerationQueue.js';
-import {
-  isCompletionPingEnabled, setCompletionPingEnabled, subscribeCompletionPing,
-  primeCompletionPing, playCompletionPing,
-} from '../lib/completionPing.js';
+// The chime is one app-wide setting: this studio only PLAYS it (and primes the
+// audio context near the click). Its toggle lives beside Generate, in
+// ui/CompletionPingToggle.jsx, which owns the subscription.
+import { primeCompletionPing, playCompletionPing } from '../lib/completionPing.js';
 
 import { loadStudioSetup, registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
 import { useApiStatus } from '../app/statusStore.js';
@@ -73,18 +69,14 @@ import {
 } from '../lib/referenceDrop.js';
 import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { useMediaSrc } from '../hooks/hooks.js';
-import { Icon } from '../ui/icons.jsx';
 import {
-  AspectRatioPicker, Button, Card, CollapsibleSection, EmptyState, FailureCallout, Field, IconButton,
-  NativeSelect, Pill, ProgressBar, SectionLabel, Segmented, Slider, Spinner, TextArea, TextInput,
-  Toggle, cx,
+  Button, Card, EmptyState, FailureCallout, ProgressBar, SectionLabel, Spinner,
 } from '../ui/kit.jsx';
-import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
+import { Menu } from '../ui/Menu.jsx';
 import { StudioLayout } from '../ui/kit.jsx';
 
-import { RegionBoxEditor } from './image/RegionBoxEditor.jsx';
-import { UploadPicker } from './UploadPicker.jsx';
-import { ReferenceRolesMenu } from './image/ReferenceRolesMenu.jsx';
+import { ImageSettingsPanel } from './image/ImageSettingsPanel.jsx';
+import { ImageComposer } from './image/ImageComposer.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
@@ -92,13 +84,10 @@ import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
 
 import { computeSmoothProgress, formatElapsed, estimateGenerationSeconds, recordGenerationSeconds } from '../lib/genProgress.js';
 import {
-  AUTO_SAMPLER_LOW_STEP_THRESHOLD, IMAGE_PREFERENCES_KEY, STYLE_PRESETS,
+  IMAGE_PREFERENCES_KEY, STYLE_PRESETS,
   applyStylePreset, imageTimingProfile, normalizeImagePreferences,
-  parseSeedInput, referenceRolesNeedRewrite, restoredReferenceLimit, startFreshPatch,
+  referenceRolesNeedRewrite, restoredReferenceLimit, startFreshPatch,
 } from './image/imagePrefs.js';
-import { LoraSection } from './image/LoraSection.jsx';
-import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
-import { UgcMenu } from './UgcMenu.jsx';
 import { applyUgcFirstFrame, hasUgcFirstFrame, ugcVariantAt } from '../lib/ugcMode.js';
 import { GalleryCard, ViewerModal } from './image/GalleryAndViewer.jsx';
 import { CompareViewer } from './image/CompareViewer.jsx';
@@ -271,7 +260,6 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     sampler: persistedImagePreferences?.sampler || '',
     scheduler: persistedImagePreferences?.scheduler || '',
     baseSize: persistedImagePreferences?.baseSize || 0,
-    referenceStrength: persistedImagePreferences?.referenceStrength ?? 50,
     // Couple mode — OFF by default; character text is session-only, never persisted.
     coupleMode: Boolean(persistedImagePreferences?.coupleMode),
     coupleDirection: persistedImagePreferences?.coupleDirection === 'vertical' ? 'vertical' : 'horizontal',
@@ -339,9 +327,6 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     progressWorkUnits: 1,
     generationStartedAt: 0,
     generationTimer: null,
-    // Mirror of the shared (all-studio) completion-ping setting, kept here only
-    // so the toggle re-renders; lib/completionPing.js owns the value.
-    pingWhenComplete: isCompletionPingEnabled(),
     viewerUrl: null,
     // Upscaled entry whose before/after compare overlay is open (null = closed).
     compareEntry: null,
@@ -377,9 +362,6 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     enhancerOpen: false,
     enhanceBase: '',
     enhanceTags: new Set(),
-    enhanceCopied: false,
-    warmBusy: false,
-    unloadBusy: false,
     persistTimer: null,
   };
 
@@ -669,11 +651,6 @@ export function ImageStudio({
     s.progressDisplay = success ? 1 : 0;
     if (success) void playCompletionPing();
   };
-  const setPing = (checked) => {
-    s.pingWhenComplete = setCompletionPingEnabled(checked);
-    bump();
-    if (s.pingWhenComplete) void playCompletionPing();
-  };
   const setCurrentLoraSelection = (selection) => {
     const model = currentLoraModel();
     if (!model) return;
@@ -736,7 +713,6 @@ export function ImageStudio({
       sampler: s.sampler,
       scheduler: s.scheduler,
       baseSize: s.baseSize,
-      referenceStrength: s.referenceStrength,
       coupleMode: s.coupleMode,
       coupleDirection: s.coupleDirection,
       coupleSplit: s.coupleSplit,
@@ -1197,7 +1173,6 @@ export function ImageStudio({
     batchCount: s.batchCount,
     customWidth: s.customWidth,
     customHeight: s.customHeight,
-    referenceStrength: s.referenceStrength,
     // Local sampling choices and the short-side resolution — without them a
     // restored run came back on Auto sampler at the workflow default.
     sampler: s.sampler,
@@ -1253,7 +1228,6 @@ export function ImageStudio({
     s.batchCount = context.batchCount ?? s.batchCount;
     s.customWidth = context.customWidth ?? s.customWidth;
     s.customHeight = context.customHeight ?? s.customHeight;
-    s.referenceStrength = context.referenceStrength ?? s.referenceStrength;
     // `??` on purpose: a context captured before these fields existed leaves the
     // current values alone; a new one restores them exactly (false included).
     s.sampler = context.sampler ?? s.sampler;
@@ -2189,38 +2163,6 @@ export function ImageStudio({
   };
   const generate = () => generationQueueRef.current.enqueue(generateNow);
 
-  /* ---------------- warm / unload (Ideogram sidecar) ---------------- */
-
-  // Outcome lands as a toast; the buttons only show busy. (They used to mutate
-  // their own label for 2.5 s — "Warm failed" as a button caption.)
-  const warmModel = async () => {
-    s.warmBusy = true;
-    bump();
-    try {
-      await localAI.warmIdeogram4();
-      toast.success(zh() ? '模型已预热。' : 'Model is warm.');
-    } catch (e) {
-      toast.error(e?.message || (zh() ? '预热失败' : 'Warm failed'));
-    } finally {
-      s.warmBusy = false;
-      bump();
-    }
-  };
-
-  const unloadModel = async () => {
-    s.unloadBusy = true;
-    bump();
-    try {
-      await localAI.unloadIdeogram4();
-      toast.success(zh() ? '模型已卸载。' : 'Model unloaded.');
-    } catch (e) {
-      toast.error(e?.message || (zh() ? '卸载失败' : 'Unload failed'));
-    } finally {
-      s.unloadBusy = false;
-      bump();
-    }
-  };
-
   /* ---------------- mount effects (replicate factory boot order) ---------------- */
 
   useEffect(() => {
@@ -2421,12 +2363,6 @@ export function ImageStudio({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // The completion ping is shared with every other studio — follow the store so
-  // the toggle stays truthful if it is flipped elsewhere.
-  useEffect(() => subscribeCompletionPing((value) => { s.pingWhenComplete = value; bump(); }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []);
-
   // Unmount: mark unmounted (guards the progress timer's bump) and stop the timer.
   useEffect(() => () => {
     mountedRef.current = false;
@@ -2479,7 +2415,6 @@ export function ImageStudio({
         batchCount: 1,
         customWidth: setup?.width ?? s.customWidth,
         customHeight: setup?.height ?? s.customHeight,
-        referenceStrength: s.referenceStrength,
         // Workflow-baked LoRAs are part of the model; restoring them as user
         // LoRAs would double-apply, so leave user LoRAs empty here.
         loras: [],
@@ -2587,23 +2522,22 @@ export function ImageStudio({
   const editOutput = editOutputDimensions(editBudget, referenceDims?.width, referenceDims?.height);
   const coupleOn = coupleActive();
   const sheetOn = characterSheetActive();
-  // Everything below Format lives behind the Advanced disclosure, so whatever is
-  // switched on in there has to show on the closed header — a region layout or a
-  // stale negative prompt silently steering every generation is the exact bug
-  // collapsing a panel invites.
-  const activeLoraCount = s.useLocalModel ? currentLoraSelection().filter((l) => l.enabled !== false).length : 0;
-  const regionCount = s.regionMode && !coupleOn ? (s.regions?.length || 0) : 0;
-  const advancedHint = [
-    // Region mode with no boxes drawn changes nothing, so it is not worth a badge.
-    regionCount ? `${regionCount} region${regionCount === 1 ? '' : 's'}` : '',
-    coupleOn ? 'couple' : '',
-    sheetOn ? 'sheet' : '',
-    activeLoraCount ? `${activeLoraCount} LoRA${activeLoraCount === 1 ? '' : 's'}` : '',
-    s.negativePrompt.trim() && currentModelSupportsNegativePrompt() ? 'negative' : '',
-  ].filter(Boolean).join(' · ');
   const viewerIndex = s.viewerUrl ? s.history.findIndex((e) => e.url === s.viewerUrl) : -1;
   const viewerEntry = viewerIndex >= 0 ? s.history[viewerIndex] : null;
-  const enhanced = [s.enhanceBase.trim(), Array.from(s.enhanceTags).join(', ')].filter(Boolean).join(', ');
+
+  // "~40 s" — what this exact setup has taken before, from the same store the
+  // progress bar uses. It reads out beside Generate and stands in for the
+  // hard-coded Krea-2 timings the Resolution hint used to quote.
+  const etaLabel = (() => {
+    const profile = currentTimingProfile();
+    const seconds = estimateGenerationSeconds(
+      profile.key,
+      profile.work,
+      s.useLocalModel ? DEFAULT_LOCAL_IMAGE_RATE_SEC : DEFAULT_API_IMAGE_ESTIMATE_SEC,
+    );
+    if (!(seconds > 0)) return '';
+    return seconds >= 90 ? `${Math.round(seconds / 60)} min` : `${Math.round(seconds)} s`;
+  })();
 
   // The button says one thing while working; the bridge's status text ("Queued
   // on hosted…") belongs to the progress card, not to a 130px button that
@@ -2616,485 +2550,99 @@ export function ImageStudio({
       ? t('image.placeholderTransform')
       : t('image.placeholder');
 
-  // The helper chips are disabled on an empty box — the tooltip says why.
-  const helperDisabledTitle = zh() ? '先在下方输入一个想法，再让助手润色' : 'Type an idea below first — the helper refines what is in the box';
+  // The LoRA panel's whole prop set, kept here (not in the panel component) so
+  // the selection plumbing stays next to the state it mutates.
+  const loraProps = {
+    open: s.loraOpen,
+    onToggleOpen: () => {
+      s.loraOpen = !s.loraOpen;
+      bump();
+      // Lazy-load exactly like the old Advanced panel toggle did.
+      if (s.loraOpen) void loadLorasForCurrentModel();
+    },
+    baseLabel: s.loraBaseLabel,
+    baseModelId: currentLoraModel()?.id || '',
+    baseModels: s.loraBaseModels,
+    status: s.loraCatalogStatus,
+    message: s.loraCatalogMessage,
+    loras: s.availableLoras,
+    rentedOnly: Boolean(s.rentedOnly),
+    onSwitchToLocal: () => setSource(true, false),
+    selection: currentLoraSelection(),
+    getSelection: currentLoraSelection,
+    onToggleLora: (lora) => {
+      setCurrentLoraSelection(toggleLoraSelection(currentLoraSelection(), lora));
+      bump();
+    },
+    onToggleEnabled: (lora) => {
+      setCurrentLoraSelection(toggleLoraEnabled(currentLoraSelection(), lora.id));
+      persistImagePreferences();
+      bump();
+    },
+    onSetStrength: (id, value) => {
+      setCurrentLoraSelection(updateLoraStrength(currentLoraSelection(), id, value));
+    },
+    onCommitStrength: (id, value) => {
+      setCurrentLoraSelection(updateLoraStrength(currentLoraSelection(), id, value));
+      bump();
+    },
+    onClearAll: () => { setCurrentLoraSelection([]); bump(); },
+    onDownload: () => { s.civitaiOpen = true; bump(); },
+    onUpdateLora: startLoraUpdate,
+    onLoadGroup: (selection) => {
+      setCurrentLoraSelection(selection);
+      persistImagePreferences();
+      bump();
+    },
+    onToggleHunt: strengthHuntCapable() ? (lora) => {
+      setCurrentLoraSelection(toggleLoraHunt(currentLoraSelection(), lora.id));
+      persistImagePreferences();
+      bump();
+    } : undefined,
+  };
 
   const panel = (
-    <>
-      {isLocalAIAvailable() ? (
-        <div className="flex flex-col gap-2">
-          <SectionLabel>{zh() ? '来源' : 'Source'}</SectionLabel>
-          <Segmented
-            value={s.rentedOnly ? 'rented' : s.useLocalModel ? 'local' : 'api'}
-            onChange={(v) => setSource(v !== 'api', v === 'rented')}
-            options={[
-              { value: 'local', label: t('image.local') },
-              { value: 'api', label: t('image.api') },
-              { value: 'rented', label: t('image.rented') },
-            ]}
-          />
-          {s.rentedOnly
-            ? <RentedSourceStatus engine={s} page="image" pinned={s.rentedMachineId || ''} onPin={pinMachine} />
-            : null}
-          {/* Only ever visible when another local lane finished and is still
-              sitting on real memory — see LaneMemoryNotice. Local work is the
-              only work it can affect, so it stays out of the cloud lane. */}
-          {s.useLocalModel && !s.rentedOnly ? <LaneMemoryNotice active={tabActive} /> : null}
-        </div>
-      ) : null}
-
-      {rentedBlocked ? null : (
-        <>
-      <div className="flex flex-col gap-2">
-        <SectionLabel>{zh() ? '模型' : 'Model'}</SectionLabel>
-        {/* A menu of models that cannot run is worse than no menu: it reads as
-            a working studio right up to the press. When the local source has
-            nothing to offer, the section says why and carries the one action
-            that changes it. */}
-        {s.useLocalModel && !s.localImageModels.length && s.localCatalogStatus !== 'ready' ? (
-          <LocalCatalogNotice
-            status={s.localCatalogStatus}
-            onCheckAgain={() => { void discoverLocalCatalog(); }}
-            onSwitchToCloud={() => setSource(false)}
-          />
-        ) : (
-          <ModelMenu
-            engine={s}
-            modelLabel={modelLabel}
-            hasRefs={refCount > 0}
-            onSelectLocal={selectLocalModel}
-            onSelectApi={selectApiModel}
-          />
-        )}
-      </div>
-
-      <div className="flex flex-col gap-3">
-        <SectionLabel>{zh() ? '格式' : 'Format'}</SectionLabel>
-        {referenceDrivesAspect ? (
-          <Field label={zh() ? '宽高比' : 'Aspect ratio'}>
-            <div className="rounded-md border border-line1 bg-bg2 px-3 py-2 text-xs leading-relaxed text-ink3">
-              {zh() ? '与参考图一致——编辑会保留其比例。' : 'Matches your reference image — the edit keeps its proportions.'}
-            </div>
-          </Field>
-        ) : (
-          <Field label={zh() ? '宽高比' : 'Aspect ratio'}>
-            <AspectRatioPicker
-              options={aspectRatios}
-              value={customDimsActive ? 'custom' : s.selectedAr}
-              onChange={(v) => {
-                if (v === 'custom') {
-                  s.customArOpen = true;
-                  if (!(s.customWidth && s.customHeight)) {
-                    s.customWidth = resolvedDims?.width || activeLocalModel?.defaultWidth || 1024;
-                    s.customHeight = resolvedDims?.height || activeLocalModel?.defaultWidth || 1024;
-                  }
-                } else {
-                  s.selectedAr = v;
-                  s.customArOpen = false;
-                  s.customWidth = 0;
-                  s.customHeight = 0;
-                }
-                persistImagePreferences();
-                bump();
-              }}
-              nameFor={aspectRatioName}
-              custom={s.useLocalModel ? {
-                name: t('ar.custom'),
-                detail: (s.customWidth && s.customHeight) ? `${s.customWidth}×${s.customHeight}` : 'W×H',
-              } : null}
-            />
-          </Field>
-        )}
-        {customDimsActive && !referenceDrivesAspect ? (
-          <div className="grid grid-cols-2 gap-2">
-            <Field label={t('image.width')}>
-              <TextInput type="number" className="font-mono" placeholder={t('image.widthPlaceholder')}
-                value={s.customWidth ? String(s.customWidth) : ''}
-                onChange={(e) => { s.customWidth = parseInt(e.target.value) || 0; persistImagePreferences(); bump(); }} />
-            </Field>
-            <Field label={t('image.height')}>
-              <TextInput type="number" className="font-mono" placeholder={t('image.heightPlaceholder')}
-                value={s.customHeight ? String(s.customHeight) : ''}
-                onChange={(e) => { s.customHeight = parseInt(e.target.value) || 0; persistImagePreferences(); bump(); }} />
-            </Field>
-          </div>
-        ) : null}
-        {resolutions.length > 0 ? (
-          <Field label={zh() ? '分辨率' : 'Resolution'}>
-            <NativeSelect
-              title={t('image.qualityTooltip')}
-              value={s.selectedResolution}
-              onChange={(e) => { s.selectedResolution = e.target.value; persistImagePreferences(); bump(); }}
-            >
-              {resolutions.map((r) => <option key={r} value={r}>{r}</option>)}
-            </NativeSelect>
-          </Field>
-        ) : null}
-        {editBudget ? (
-          <Field
-            label={zh() ? '分辨率' : 'Resolution'}
-            hint={editOutput
-              ? `${editOutput.width} × ${editOutput.height} for this reference — ${editBudget.megapixels.toFixed(1)} MP of canvas; sampling time scales with pixel count`
-              : `${editBudget.megapixels.toFixed(1)} MP of canvas, shaped like your reference — sampling time scales with pixel count`}
-          >
-            <NativeSelect
-              value={String(editBudget.shortSide)}
-              onChange={(e) => { s.baseSize = Number(e.target.value) || 0; persistImagePreferences(); bump(); }}
-            >
-              {EDIT_SHORT_SIDES.map((size) => {
-                const tier = editBudgetForShortSide(size);
-                return (
-                  <option key={size} value={size}>
-                    {`${tier.megapixels.toFixed(1)} MP${tier.native ? ' — the model’s native canvas' : ''}`}
-                  </option>
-                );
-              })}
-            </NativeSelect>
-          </Field>
-        ) : null}
-        {s.useLocalModel && resolvedDims && !referenceDrivesAspect ? (
-          <Field
-            label={zh() ? '分辨率' : 'Resolution'}
-            // The measured Krea 2 timings only describe Krea 2; every other
-            // workflow gets the rule without the numbers.
-            hint={resolvedDims.custom
-              ? `${resolvedDims.width} × ${resolvedDims.height} — set by the Custom aspect ratio above`
-              : `${resolvedDims.width} × ${resolvedDims.height} — sampling time scales with pixel count${krea2Selected ? ' (Krea 2 @ 8 steps: 1024≈42s, 896≈32s, 768≈26s, 640≈18s)' : ''}`}
-          >
-            <NativeSelect
-              value={String(s.baseSize || 0)}
-              disabled={resolvedDims.custom}
-              onChange={(e) => { s.baseSize = Number(e.target.value) || 0; persistImagePreferences(); bump(); }}
-            >
-              {LOCAL_BASE_SIZES.map((size) => (
-                <option key={size} value={size}>
-                  {size === 0 ? `Workflow default (${activeLocalModel?.defaultWidth || 1024})` : `${size} short side`}
-                </option>
-              ))}
-            </NativeSelect>
-          </Field>
-        ) : null}
-      </div>
-
-      <CollapsibleSection title={t('image.advancedOptions')} hint={advancedHint} storageKey="image.advanced">
-        {/* Steps, guidance, batch and the negative prompt reach the LOCAL payload
-            only — the cloud request is { model, prompt, aspect_ratio, quality,
-            seed }, so on the API source those controls would be dead and are not
-            shown. Seed and Style preset ride on both. */}
-        {s.useLocalModel ? (
-          <Field label={t('image.steps')}>
-            <Slider min={1} max={50} step={1} value={s.steps}
-              onChange={(v) => { s.steps = v; bump(); }} />
-          </Field>
-        ) : null}
-        {showSampler ? (
-          <>
-            <Field
-              label={zh() ? '采样器' : 'Sampler'}
-              hint={s.sampler
-                ? undefined
-                : krea2Selected
-                  ? (s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD
-                    ? 'Auto: deis_3m — usable at 2–5 steps, but ~2.7 model evals per step (not a speed win)'
-                    : 'Auto: euler_ancestral — tuned for 8–10 steps, 1 eval per step')
-                  : (zh() ? '自动：工作流按步数自行选择' : 'Auto: the workflow picks a pair to match the step count')}
-            >
-              <NativeSelect
-                value={s.sampler}
-                onChange={(e) => { s.sampler = e.target.value; persistImagePreferences(); bump(); }}
-              >
-                <option value="">{zh() ? '自动（按步数）' : 'Auto (match steps)'}</option>
-                {samplerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
-              </NativeSelect>
-            </Field>
-            <Field
-              label={zh() ? '调度器' : 'Scheduler'}
-              hint={s.scheduler || !krea2Selected ? undefined : `Auto: ${s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD ? 'bong_tangent' : 'beta'}`}
-            >
-              <NativeSelect
-                value={s.scheduler}
-                onChange={(e) => { s.scheduler = e.target.value; persistImagePreferences(); bump(); }}
-              >
-                <option value="">{zh() ? '自动（按步数）' : 'Auto (match steps)'}</option>
-                {schedulerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
-              </NativeSelect>
-            </Field>
-          </>
-        ) : null}
-        {s.useLocalModel ? (
-          <Field label={t('image.guidanceScale')}>
-            <Slider min={1} max={20} step={0.5} value={s.guidanceScale}
-              onChange={(v) => { s.guidanceScale = v; bump(); }} />
-          </Field>
-        ) : null}
-        <Field label={t('image.seed')}>
-          <div className="flex items-center gap-1.5">
-            <TextInput
-              type="number"
-              min={0}
-              step={1}
-              className="font-mono"
-              placeholder={t('image.seedPlaceholder')}
-              value={s.seedText}
-              onChange={(e) => { s.seedText = e.target.value; s.seed = parseSeedInput(e.target.value); bump(); }}
-            />
-            <IconButton icon="refresh" label={t('common.randomize')} onClick={() => {
-              s.seed = Math.floor(Math.random() * 999999999);
-              s.seedText = String(s.seed);
-              bump();
-            }} />
-          </div>
-        </Field>
-        {s.useLocalModel ? (
-          <Field label={t('image.batchCount')}>
-            <Slider min={1} max={4} step={1} value={s.batchCount}
-              onChange={(v) => { s.batchCount = v; bump(); }} />
-          </Field>
-        ) : null}
-        <Field label={t('image.stylePreset')}>
-          <NativeSelect value={s.selectedStyle} onChange={(e) => { s.selectedStyle = e.target.value; bump(); }}>
-            {STYLE_PRESETS.map((preset) => <option key={preset} value={preset}>{preset}</option>)}
-          </NativeSelect>
-        </Field>
-        {s.useLocalModel && currentModelSupportsNegativePrompt() ? (
-          <Field
-            label={t('image.negPromptLabel')}
-            // At guidance 1 ComfyUI never evaluates the negative branch, so say so
-            // instead of letting the text look like it is doing something.
-            hint={s.useLocalModel && negativePromptNeedsGuidance(s.guidanceScale)
-              ? t('image.negPromptNeedsGuidance')
-              : undefined}
-          >
-            <TextInput
-              placeholder={t('image.negPromptPlaceholder')}
-              value={s.negativePrompt}
-              onChange={(e) => { s.negativePrompt = e.target.value; bump(); }}
-            />
-          </Field>
-        ) : s.useLocalModel && s.negativePrompt ? (
-          // The field is gone, but text saved under another model is not: explain
-          // why it stopped applying rather than dropping it silently.
-          <p className="text-[11px] leading-relaxed text-ink3">
-            {/* Only local workflows reach here, so name the workflow — not the
-                cloud model that s.selectedModelName tracks. */}
-            {t('image.negPromptUnsupported')(localModelById(s.selectedLocalModel)?.name || 'This workflow')}
-          </p>
-        ) : null}
-        {/* No "Reference strength" slider: neither the local gateway nor the
-            cloud i2i request reads one today (s.referenceStrength is kept in
-            state only so saved preferences keep their shape). */}
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-xs font-medium text-ink2">{t('common.pingWhenComplete')}</span>
-          <Toggle label={t('common.pingWhenComplete')} checked={s.pingWhenComplete} onChange={setPing} />
-        </div>
-      {showRuntimeMode ? (
-        <div className="flex flex-col gap-2">
-          <SectionLabel>{zh() ? '本地运行模式' : 'Local runtime mode'}</SectionLabel>
-          <Segmented
-            value={s.localRuntimeMode}
-            onChange={(v) => { s.localRuntimeMode = v; bump(); }}
-            options={[
-              { value: 'one-off', label: zh() ? '单次生成' : 'One-off generation' },
-              { value: 'persistent', label: zh() ? '常驻模型' : 'Keep model loaded' },
-            ]}
-          />
-          <div className="flex items-center gap-2">
-            <Button size="sm" loading={s.warmBusy} onClick={warmModel}>{zh() ? '预热模型' : 'Warm model'}</Button>
-            {/* Unloading is housekeeping, not destruction — neutral, not danger. */}
-            <Button size="sm" variant="neutral" loading={s.unloadBusy} onClick={unloadModel}>{zh() ? '卸载' : 'Unload'}</Button>
-          </div>
-          <p className="text-xs leading-relaxed text-ink3">
-            {zh()
-              ? '单次生成在每张图后释放内存；常驻模型把模型留在内存中，后续出图更快。'
-              : 'One-off frees memory after each image. Keep loaded holds the model in memory so follow-up images start faster.'}
-          </p>
-        </div>
-      ) : null}
-
-      <div className="flex flex-col gap-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <SectionLabel>{zh() ? '区域框' : 'Region boxes'}</SectionLabel>
-          <Toggle
-            label={zh() ? '区域框' : 'Region boxes'}
-            checked={s.regionMode}
-            onChange={(v) => { s.regionMode = v; persistImagePreferences(); bump(); }}
-          />
-        </div>
-        <p className="text-xs leading-relaxed text-ink3">
-          {zh()
-            ? '说明各元素的位置：每个框都会变成一句位置描述附加到提示词后，适用于所有模型，无需额外节点。框内文字仅保留在本次会话。'
-            : 'Say what goes where: each box becomes a placement sentence appended to your prompt. Works with every model — no extra nodes. Box text stays in this session only.'}
-        </p>
-        {s.regionMode ? (
-          <>
-            {coupleActive() ? (
-              <p className="text-xs leading-relaxed text-warn">
-                {zh() ? '双人模式开启时由它接管提示词，区域框暂不生效。' : 'Couple mode owns the prompt while it is on, so regions stand down.'}
-              </p>
-            ) : null}
-            <RegionBoxEditor
-              regions={s.regions}
-              aspect={selectedArNumber()}
-              disabled={coupleActive()}
-              onChange={(next) => { s.regions = next; bump(); }}
-            />
-          </>
-        ) : null}
-      </div>
-
-      {coupleCapableModel() ? (
-        <div className="flex flex-col gap-2.5">
-          <div className="flex items-center justify-between gap-2">
-            <SectionLabel>{zh() ? '双人模式' : 'Couple mode'}</SectionLabel>
-            <Toggle
-              label={zh() ? '双人模式' : 'Couple mode'}
-              checked={s.coupleMode}
-              onChange={(v) => { s.coupleMode = v; persistImagePreferences(); bump(); }}
-            />
-          </div>
-          <p className="text-xs leading-relaxed text-ink3">
-            {zh()
-              ? '双角色模式：每个角色一段提示词，画布按比例分割。角色文字仅保留在本次会话。'
-              : 'Two-character mode: one prompt per character with a canvas split. Character text stays in this session only.'}
-          </p>
-          {coupleOn ? (
-            <div className="flex flex-col gap-3">
-              <Field label="Shared scene (optional)">
-                <TextInput
-                  placeholder="e.g. sitting by a bonfire at night"
-                  value={s.coupleShared}
-                  onChange={(e) => { s.coupleShared = e.target.value; bump(); }}
-                />
-              </Field>
-              <Field label={s.couplePair === 'mixed' ? 'Character A (girl)' : 'Character A'}>
-                <TextArea rows={2} placeholder="e.g. haruno sakura, pink hair, smiling"
-                  value={s.coupleA}
-                  onChange={(e) => { s.coupleA = e.target.value; bump(); }} />
-              </Field>
-              <Field label={s.couplePair === 'mixed' ? 'Character B (boy)' : 'Character B'}>
-                <TextArea rows={2} placeholder="e.g. black hair, green eyes, crossed arms"
-                  value={s.coupleB}
-                  onChange={(e) => { s.coupleB = e.target.value; bump(); }} />
-              </Field>
-              <Field label="Pair">
-                <Segmented size="sm" value={s.couplePair}
-                  onChange={(v) => { s.couplePair = v; persistImagePreferences(); bump(); }}
-                  options={[
-                    { value: 'girls', label: 'Two girls' },
-                    { value: 'mixed', label: 'Girl & boy' },
-                    { value: 'boys', label: 'Two boys' },
-                  ]}
-                />
-              </Field>
-              <Field label="Layout">
-                <Segmented size="sm" value={s.coupleDirection}
-                  onChange={(v) => { s.coupleDirection = v; persistImagePreferences(); bump(); }}
-                  options={[
-                    { value: 'horizontal', label: 'Side by side' },
-                    { value: 'vertical', label: 'Stacked' },
-                  ]}
-                />
-              </Field>
-              <Field
-                label={s.coupleDirection === 'vertical'
-                  ? `A ${Math.round(s.coupleSplit)}% top / B ${100 - Math.round(s.coupleSplit)}%`
-                  : `A ${Math.round(s.coupleSplit)}% / B ${100 - Math.round(s.coupleSplit)}%`}
-              >
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex h-1.5 w-full overflow-hidden rounded-full">
-                    <div className="bg-honey" style={{ width: `${Math.round(s.coupleSplit)}%` }} />
-                    <div className="bg-info" style={{ width: `${100 - Math.round(s.coupleSplit)}%` }} />
-                  </div>
-                  <Slider min={10} max={90} step={5} value={s.coupleSplit}
-                    onChange={(v) => { s.coupleSplit = v; bump(); }}
-                    onCommit={() => persistImagePreferences()}
-                    format={(v) => `${v}%`} />
-                </div>
-              </Field>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {characterSheetCapable() ? (
-        <div className="flex flex-col gap-2.5">
-          <div className="flex items-center justify-between gap-2">
-            <SectionLabel>{zh() ? '角色设定图' : 'Character sheet'}</SectionLabel>
-            <Toggle
-              label={zh() ? '角色设定图' : 'Character sheet'}
-              checked={s.characterSheetMode}
-              onChange={(v) => { s.characterSheetMode = v; persistImagePreferences(); bump(); }}
-            />
-          </div>
-          <p className="text-xs leading-relaxed text-ink3">
-            {zh()
-              ? '基于参考图的多视角设定图：每个视角单独编辑、共用种子，合成为一张带标注的设定图。提示词框可选，用于补充风格。'
-              : 'Multi-view sheet from your reference: each view is its own edit with a shared seed, composited into one labeled sheet. The prompt box is optional extra styling.'}
-          </p>
-          {sheetOn ? (
-            <Field label="Views">
-              <Segmented size="sm" value={s.characterSheetPreset}
-                onChange={(v) => { s.characterSheetPreset = v; persistImagePreferences(); bump(); }}
-                options={CHARACTER_SHEET_PRESETS}
-              />
-            </Field>
-          ) : null}
-        </div>
-      ) : null}
-
-      {s.useLocalModel ? (
-        <LoraSection
-          open={s.loraOpen}
-          onToggleOpen={() => {
-            s.loraOpen = !s.loraOpen;
-            bump();
-            // Lazy-load exactly like the old Advanced panel toggle did.
-            if (s.loraOpen) void loadLorasForCurrentModel();
-          }}
-          baseLabel={s.loraBaseLabel}
-          baseModelId={currentLoraModel()?.id || ''}
-          baseModels={s.loraBaseModels}
-          status={s.loraCatalogStatus}
-          message={s.loraCatalogMessage}
-          loras={s.availableLoras}
-          rentedOnly={Boolean(s.rentedOnly)}
-          selection={currentLoraSelection()}
-          getSelection={currentLoraSelection}
-          onToggleLora={(lora) => {
-            setCurrentLoraSelection(toggleLoraSelection(currentLoraSelection(), lora));
-            bump();
-          }}
-          onToggleEnabled={(lora) => {
-            setCurrentLoraSelection(toggleLoraEnabled(currentLoraSelection(), lora.id));
-            persistImagePreferences();
-            bump();
-          }}
-          onSetStrength={(id, value) => {
-            setCurrentLoraSelection(updateLoraStrength(currentLoraSelection(), id, value));
-          }}
-          onCommitStrength={(id, value) => {
-            setCurrentLoraSelection(updateLoraStrength(currentLoraSelection(), id, value));
-            bump();
-          }}
-          onClearAll={() => { setCurrentLoraSelection([]); bump(); }}
-          onDownload={() => { s.civitaiOpen = true; bump(); }}
-          onUpdateLora={startLoraUpdate}
-          onLoadGroup={(selection) => {
-            setCurrentLoraSelection(selection);
-            persistImagePreferences();
-            bump();
-          }}
-          onToggleHunt={strengthHuntCapable() ? (lora) => {
-            setCurrentLoraSelection(toggleLoraHunt(currentLoraSelection(), lora.id));
-            persistImagePreferences();
-            bump();
-          } : undefined}
-        />
-      ) : null}
-      </CollapsibleSection>
-        </>
-      )}
-    </>
+    <ImageSettingsPanel
+      engine={s}
+      bump={bump}
+      persist={persistImagePreferences}
+      localAvailable={isLocalAIAvailable()}
+      activeLocalModel={activeLocalModel}
+      modelLabel={modelLabel}
+      aspectRatios={aspectRatios}
+      resolutions={resolutions}
+      resolvedDims={resolvedDims}
+      customDimsActive={customDimsActive}
+      referenceDrivesAspect={referenceDrivesAspect}
+      editBudget={editBudget}
+      editOutput={editOutput}
+      rentedBlocked={rentedBlocked}
+      refCount={refCount}
+      showSampler={showSampler}
+      showRuntimeMode={showRuntimeMode}
+      samplerChoices={samplerChoices}
+      schedulerChoices={schedulerChoices}
+      krea2Selected={krea2Selected}
+      etaLabel={etaLabel}
+      coupleOn={coupleOn}
+      sheetOn={sheetOn}
+      coupleCapable={coupleCapableModel()}
+      characterSheetCapable={characterSheetCapable()}
+      characterSheetPresets={CHARACTER_SHEET_PRESETS}
+      strengthHuntCapable={strengthHuntCapable()}
+      huntArmedCount={armedHuntIds().length}
+      supportsNegativePrompt={currentModelSupportsNegativePrompt()}
+      negativePromptInactive={s.useLocalModel && negativePromptNeedsGuidance(s.guidanceScale)}
+      negativePromptUnsupportedBy={localModelById(s.selectedLocalModel)?.name || ''}
+      selectedArNumber={selectedArNumber()}
+      tabActive={tabActive}
+      loraProps={loraProps}
+      onSetSource={setSource}
+      onPinMachine={pinMachine}
+      onDiscoverLocalCatalog={discoverLocalCatalog}
+      onSelectLocalModel={selectLocalModel}
+      onSelectApiModel={selectApiModel}
+    />
   );
 
   /* ---------------- composer drops ---------------- */
@@ -3122,7 +2670,10 @@ export function ImageStudio({
       files,
       taken: { images: s.uploadedImageUrls.length },
       limits: { images: s.maxImages, videos: 0, audios: 0 },
-      upload: referenceUploader((file) => (s.useLocalModel ? fileToDataUrl(file) : muapi.uploadFile(file))),
+      // A data: URL, on BOTH sources. Bytes reach MUAPI only at Generate, once
+      // the cloud-reference confirm has been answered — see
+      // lib/cloudReferenceUpload.js (referencesNeedingApproval).
+      upload: referenceUploader(fileToDataUrl),
     });
     if (added.images.length) {
       handlePickerChange([...s.uploadedImageUrls, ...added.images.map((item) => item.url)].slice(0, s.maxImages));
@@ -3142,13 +2693,6 @@ export function ImageStudio({
     if (!files.length) return;
     if (!refsSupported) {
       toast.error('The selected model does not accept reference images.');
-      return;
-    }
-    // Same gate the picker uses, with the same retry continuation.
-    if (!s.useLocalModel && needsBrowserKey(muapiRow(s.selectedModel))) {
-      authRetryRef.current = () => { void handleComposerFiles(files); };
-      s.authOpen = true;
-      bump();
       return;
     }
     s.composerAttaching = true;
@@ -3213,294 +2757,47 @@ export function ImageStudio({
   };
 
   const composer = (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-2">
-      {s.promptHelper.open ? (
-        <Card className="flex flex-col gap-2 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <SectionLabel className="text-honey">{s.promptHelper.title || 'Prompt helper'}</SectionLabel>
-            <IconButton icon="x" label="Dismiss prompt helper" size="sm" onClick={() => { closePromptHelper(); bump(); }} />
-          </div>
-          <TextArea
-            rows={4}
-            disabled={s.promptHelper.busy}
-            value={s.promptHelper.result}
-            onChange={(e) => { s.promptHelper = { ...s.promptHelper, result: e.target.value }; bump(); }}
-          />
-          <div className="flex items-center justify-between gap-3">
-            <span className="min-w-0 truncate text-xs text-ink3" role="status" aria-live="polite">
-              {s.promptHelper.status}
-            </span>
-            <Button size="sm" variant="primary" disabled={!s.promptHelper.ready} onClick={usePromptHelperResult}>
-              Use prompt
-            </Button>
-          </div>
-        </Card>
-      ) : null}
-
-      {s.enhancerOpen ? (
-        <Card className="flex flex-col gap-3 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <SectionLabel>{t('image.promptEnhancer')}</SectionLabel>
-            <IconButton icon="x" label={t('common.less')} size="sm" onClick={() => { s.enhancerOpen = false; bump(); }} />
-          </div>
-          <TextInput
-            placeholder={t('image.basePromptPlaceholder')}
-            value={s.enhanceBase}
-            onChange={(e) => { s.enhanceBase = e.target.value; bump(); }}
-          />
-          <div className="flex flex-col gap-2">
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{t('image.enhancementTags')}</span>
-            {Object.entries(ENHANCE_TAGS).map(([category, tags]) => (
-              <div key={category} className="flex flex-wrap items-center gap-1.5">
-                <span className="mr-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">{category}</span>
-                {tags.map((tag) => {
-                  const on = s.enhanceTags.has(tag);
-                  // Multi-select toggle pills: ChipButton's active tokens, the
-                  // Pill's size, aria-pressed so a reader hears the state.
-                  return (
-                    <button
-                      key={tag}
-                      type="button"
-                      data-tag={tag}
-                      aria-pressed={on}
-                      onClick={() => {
-                        if (on) s.enhanceTags.delete(tag); else s.enhanceTags.add(tag);
-                        bump();
-                      }}
-                      className={cx(
-                        'inline-flex h-6 items-center rounded-full border px-2.5 text-[11px] font-medium transition-colors duration-150',
-                        on ? 'border-honey/50 bg-honey-tint text-honey' : 'border-line1 bg-bg2 text-ink2 hover:border-line2 hover:text-ink1',
-                      )}
-                    >
-                      {tag}
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
-          </div>
-          <div className="flex flex-col gap-2">
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{t('image.enhancedPrompt')}</span>
-            <div className={cx('min-h-[40px] rounded-md border border-line1 bg-bg2 px-3 py-2 text-xs leading-relaxed', enhanced ? 'text-ink1' : 'text-ink3')}>
-              {enhanced || t('image.enhancedPlaceholder')}
-            </div>
-            <div className="flex gap-2">
-              <Button size="sm" icon="copy" onClick={() => {
-                if (!enhanced) return;
-                navigator.clipboard.writeText(enhanced);
-                s.enhanceCopied = true;
-                bump();
-                setTimeout(() => { s.enhanceCopied = false; bump(); }, 1500);
-              }}>
-                {s.enhanceCopied ? t('common.copied') : t('common.copy')}
-              </Button>
-              <Button size="sm" variant="neutral" onClick={() => {
-                if (!enhanced) return;
-                setPromptValue(enhanced);
-                s.enhancerOpen = false;
-                bump();
-              }}>
-                {t('common.useInGenerator')}
-              </Button>
-            </div>
-          </div>
-        </Card>
-      ) : null}
-
-      <div className="flex flex-col gap-2 rounded-lg border border-line1 bg-bg1 p-2.5 transition-colors focus-within:border-honey/40">
-        {coupleOn ? (
-          <div className="flex items-center gap-2 px-1 py-1.5 text-[13px] text-ink2">
-            <Icon name="info" size={14} className="shrink-0 text-ink3" />
-            Couple mode is on — set the character prompts in the settings panel; they compose into one generation.
-          </div>
-        ) : (
-          <textarea
-            ref={promptRef}
-            rows={1}
-            placeholder={promptPlaceholder}
-            value={s.prompt}
-            onChange={(e) => setPromptValue(e.target.value)}
-            // Cmd/Ctrl+Enter generates, same guards as the button.
-            onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                e.preventDefault();
-                if (!s.generating && !generateBlocked) generate();
-              }
-            }}
-            className="max-h-[150px] min-h-[40px] w-full resize-none overflow-y-auto border-none bg-transparent px-1 pt-1 text-[15px] leading-relaxed text-ink1 outline-none placeholder:text-ink3 md:max-h-[250px]"
-          />
-        )}
-
-        {/* Chips wrap on a narrow composer; Generate (and Cancel) stay pinned at
-            the right/bottom in their own group instead of wrapping into the
-            chip flow. */}
-        <div className="flex items-end gap-2">
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-          <UploadPicker
-            values={s.uploadedImageUrls}
-            onChange={handlePickerChange}
-            uploadFn={(file) => (s.useLocalModel ? fileToDataUrl(file) : muapi.uploadFile(file))}
-            requireApiKey={() => !s.useLocalModel}
-            maxImages={s.maxImages}
-            accept="image/*"
-            disabled={!refsSupported}
-            compact
-            label={refsSupported ? 'Reference image' : 'This model does not accept reference images'}
-          />
-
-          {refCount > 0 ? (
-            <span
-              className={cx(
-                'inline-flex h-ctl-md shrink-0 items-center gap-2 rounded-md border border-honey/40 bg-honey-tint px-2.5 text-xs font-semibold text-honey',
-                refsIgnored && 'opacity-60',
-              )}
-              title={refsIgnored
-                ? 'The selected model does not accept image references; they stay attached but are not sent.'
-                : 'These references are sent with your next generation.'}
-            >
-              {refsIgnored
-                ? `${refCount} ${refCount === 1 ? 'reference image' : 'reference images'} — ignored by this model`
-                : `Using ${refCount} ${refCount === 1 ? 'reference image' : 'reference images'}`}
-              <Button
-                size="sm"
-                variant="ghost"
-                className="-my-1 -mr-1.5 h-6 px-1.5 text-xs text-honey hover:text-ink1"
-                title={zh() ? '移除全部参考图' : 'Remove every attached reference'}
-                onClick={clearReferences}
-              >
-                {t('common.clearReferences')}
-              </Button>
-            </span>
-          ) : null}
-
-          {/* Which reference supplies what. Only worth offering while the model
-              will actually read them — an ignored reference has no role. */}
-          {refsSupported && refCount > 0 ? (
-            <ReferenceRolesMenu
-              count={refCount}
-              roles={s.referenceRoles}
-              labelStyle={referenceLabelStyleFor(s.useLocalModel ? s.selectedLocalModel : s.selectedModel)}
-              onApply={applyRoles}
-            />
-          ) : null}
-
-          <Menu
-            up
-            width="w-64"
-            trigger={(open, toggle) => (
-              <ChipButton icon="sparkles" label={t('common.tools')} active={open} onClick={toggle} title={t('image.toolsTooltip')} />
-            )}
-          >
-            {(close) => (
-              <>
-                <MenuHeading>{t('image.quickStarters')}</MenuHeading>
-                {QUICK_PROMPTS.map((q) => (
-                  <MenuItem key={q.label} onClick={() => { setPromptValue(q.prompt); close(); }}>
-                    {q.label}
-                  </MenuItem>
-                ))}
-                <MenuHeading>{t('image.quickTools')}</MenuHeading>
-                <MenuItem icon="wand" onClick={() => { s.enhancerOpen = true; bump(); close(); }}>
-                  {t('image.promptEnhancer')}
-                </MenuItem>
-              </>
-            )}
-          </Menu>
-
-          <SavedPromptsMenu
-            section="image"
-            prompt={s.prompt}
-            negativePrompt={s.negativePrompt}
-            capture={() => captureImageContext(s.prompt)}
-            onLoadPrompt={({ prompt, negativePrompt }) => {
-              setPromptValue(prompt);
-              s.negativePrompt = negativePrompt;
-              persistImagePreferences();
-              bump();
-              promptRef.current?.focus();
-            }}
-            onLoadContext={(context) => restoreImageContext(context)}
-          />
-
-          <UgcMenu
-            mode="image"
-            active={hasUgcFirstFrame(s.prompt)}
-            variantIndex={Number.isInteger(s.ugcVariantIndex) ? s.ugcVariantIndex : null}
-            roomIndex={Number.isInteger(s.ugcRoomIndex) ? s.ugcRoomIndex : null}
-            verticalAvailable={ugcVerticalAvailable()}
-            onArm={applyUgc}
-          />
-
-          {/* Starting over lives here rather than in the result viewer: it is how
-              you begin the next image, not something you do to the last one. */}
-          <ChipButton
-            icon="x"
-            label={t('common.startFresh')}
-            chevron={false}
-            onClick={newPrompt}
-          />
-
-          {/* The app's own helper ("Refine", as in the Video studio), available
-              for every model rather than only the workflows that ship a ComfyUI
-              prompt_assistant node. The workflow helper below still renders,
-              under its own profile name, when a workflow declares one. */}
-          <ChipButton
-            icon="sparkles"
-            label={zh() ? '润色' : 'Refine'}
-            chevron={false}
-            disabled={!s.prompt.trim()}
-            onClick={() => { s.localPromptHelperOpen = true; bump(); }}
-            title={!s.prompt.trim()
-              ? helperDisabledTitle
-              : (zh() ? '用提示助手润色这个想法' : 'Refine this idea with the prompt helper')}
-          />
-
-          {helper ? (
-            <ChipButton
-              icon="wand"
-              value={helper.label || (zh() ? '工作流助手' : 'Workflow helper')}
-              chevron={false}
-              disabled={s.promptHelper.busy || !s.prompt.trim()}
-              onClick={runPromptHelper}
-              title={!s.prompt.trim()
-                ? helperDisabledTitle
-                : (zh() ? '用此工作流自带的提示词助手润色' : 'Refine with this workflow’s own prompt helper')}
-            />
-          ) : null}
-        </div>
-
-        {/* The model reads out in the left panel — no duplicate badge here. */}
-        <div className="ml-auto flex shrink-0 items-center gap-2">
-          <Button
-            variant="primary"
-            size="lg"
-            loading={s.generating}
-            disabled={generateBlocked}
-            onClick={generate}
-            title={offlineBlocked
-              ? offlineReason
-              : rentedBlocked
-                ? 'Rent a machine (or switch the source to Local) to generate.'
-                : (localBlockedReason || t('image.generateTooltip'))}
-            className="min-w-[130px]"
-          >
-            {generateLabel}
-          </Button>
-          {s.generating ? (
-            <Button
-              variant="danger"
-              size="lg"
-              onClick={cancelGeneration}
-              title={zh() ? '取消当前生成并重置状态' : 'Cancel the current generation and reset'}
-              className="min-w-[100px]"
-            >
-              {t('common.cancel')}
-            </Button>
-          ) : null}
-        </div>
-        </div>
-      </div>
-    </div>
+    <ImageComposer
+      engine={s}
+      bump={bump}
+      persist={persistImagePreferences}
+      promptRef={promptRef}
+      setPromptValue={setPromptValue}
+      refsSupported={refsSupported}
+      refsIgnored={refsIgnored}
+      refCount={refCount}
+      referenceLabelStyle={referenceLabelStyleFor(s.useLocalModel ? s.selectedLocalModel : s.selectedModel)}
+      uploadFn={fileToDataUrl}
+      requireApiKey={() => false}
+      onPickerChange={handlePickerChange}
+      onClearReferences={clearReferences}
+      onApplyRoles={applyRoles}
+      helper={helper}
+      onRunWorkflowHelper={runPromptHelper}
+      onClosePromptHelper={closePromptHelper}
+      onUsePromptHelperResult={usePromptHelperResult}
+      modelLabel={modelLabel}
+      onSelectLocalModel={selectLocalModel}
+      onSelectApiModel={selectApiModel}
+      captureContext={() => captureImageContext(s.prompt)}
+      onRestoreContext={(context) => restoreImageContext(context)}
+      onApplyUgc={applyUgc}
+      ugcArmed={hasUgcFirstFrame(s.prompt)}
+      ugcVerticalAvailable={ugcVerticalAvailable()}
+      coupleOn={coupleOn}
+      promptPlaceholder={promptPlaceholder}
+      generateLabel={generateLabel}
+      generateBlocked={generateBlocked}
+      generateTitle={offlineBlocked
+        ? offlineReason
+        : rentedBlocked
+          ? 'Rent a machine (or switch the source to Local) to generate.'
+          : (localBlockedReason || t('image.generateTooltip'))}
+      etaLabel={etaLabel}
+      onGenerate={generate}
+      onCancel={cancelGeneration}
+      onNewPrompt={newPrompt}
+    />
   );
 
   return (
@@ -3808,138 +3105,3 @@ export function ImageStudio({
 
 /* ---------------- model picker ---------------- */
 
-function ModelMenu({ engine, modelLabel, hasRefs, onSelectLocal, onSelectApi }) {
-  return (
-    <Menu
-      width="w-[300px]"
-      panelClassName="max-h-[min(480px,70vh)]"
-      trigger={(open, toggle) => (
-        <ChipButton
-          icon={engine.useLocalModel ? 'cpu' : 'cloud'}
-          value={modelLabel}
-          active={open}
-          onClick={toggle}
-          title={t('image.modelTooltip')}
-          className="w-full max-w-full justify-between"
-        />
-      )}
-    >
-      {(close) => (
-        <ModelMenuList
-          engine={engine}
-          hasRefs={hasRefs}
-          close={close}
-          onSelectLocal={onSelectLocal}
-          onSelectApi={onSelectApi}
-        />
-      )}
-    </Menu>
-  );
-}
-
-function ModelMenuList({ engine: s, hasRefs, close, onSelectLocal, onSelectApi }) {
-  const [filter, setFilter] = useState('');
-  const query = filter.toLowerCase();
-  const matches = (m) => m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query);
-
-  const search = (
-    <div className="sticky top-0 z-10 -mx-1.5 -mt-1.5 mb-1 border-b border-line1 bg-bg1 p-1.5">
-      <div className="flex items-center gap-2 rounded-md border border-line1 bg-bg2 px-2.5 focus-within:border-honey/60">
-        <Icon name="search" size={13} className="shrink-0 text-ink3" />
-        <input
-          type="text"
-          autoFocus
-          placeholder={t('common.searchModels')}
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          className="h-8 w-full border-none bg-transparent text-xs text-ink1 outline-none placeholder:text-ink3"
-        />
-      </div>
-    </div>
-  );
-
-  if (s.useLocalModel) {
-    // Runtime-discovered, launchable local image workflows — never filtered by refs.
-    const list = (s.rentedOnly && s.rentedMachines?.length)
-      ? s.localImageModels.filter((m) => servedByAnyMachine(s.rentedMachines, m))
-      : s.localImageModels;
-    const filtered = list.filter(matches);
-    return (
-      <>
-        {search}
-        {filtered.length === 0 ? (
-          <div className="px-2.5 py-4 text-center text-xs text-ink3">{t('common.noResults')}</div>
-        ) : (
-          filtered.map((m) => (
-            <MenuItem
-              key={m.id}
-              selected={s.selectedLocalModel === m.id}
-              meta={`${String(m.type || 'image').toUpperCase()} · ${m.family || 'local'}`}
-              onClick={() => { onSelectLocal(m); close(); }}
-            >
-              <span className="inline-flex items-center gap-1.5">
-                {m.name}
-                {m.featured ? <Pill tone="honey" className="h-4 px-1.5 text-[9px]">Featured</Pill> : null}
-                {m.requires?.image ? <Pill tone="warn" className="h-4 px-1.5 text-[9px]">Image required</Pill> : null}
-              </span>
-            </MenuItem>
-          ))
-        )}
-      </>
-    );
-  }
-
-  // Remote (API) model list — two labeled sections; models are never hidden
-  // because of references. Editing models lead when references are attached.
-  const sections = [
-    {
-      label: hasRefs ? 'Text to image — ignores your reference' : 'Text to image',
-      models: t2iModels.filter(matches),
-      editing: false,
-    },
-    {
-      label: hasRefs ? 'Image editing — uses your reference' : 'Image editing — works with a reference image',
-      models: i2iModels.filter(matches),
-      editing: true,
-    },
-  ];
-  if (hasRefs) sections.reverse();
-  const any = sections.some((section) => section.models.length);
-
-  return (
-    <>
-      {search}
-      {!any ? (
-        <div className="px-2.5 py-4 text-center text-xs text-ink3">{t('common.noResults')}</div>
-      ) : (
-        sections.map((section) => (
-          section.models.length ? (
-            <div key={section.label}>
-              <MenuHeading>{section.label}</MenuHeading>
-              {section.models.map((m) => {
-                const requiresImage = section.editing && apiModelRequiresImage(m.id);
-                return (
-                  <MenuItem
-                    key={m.id}
-                    selected={s.selectedModel === m.id}
-                    meta={m.family || ''}
-                    onClick={() => { onSelectApi(m); close(); }}
-                  >
-                    <span className="inline-flex items-center gap-1.5">
-                      {m.name}
-                      {requiresImage ? (
-                        <Pill tone="warn" className="h-4 px-1.5 text-[9px]">Image required</Pill>
-                      ) : section.editing ? (
-                        <Pill tone="honey" className="h-4 px-1.5 text-[9px]">Image</Pill>
-                      ) : null}
-                    </span>
-                  </MenuItem>
-                );
-              })}
-            </div>
-          ) : null
-        ))
-      )}
-    </>
-  );
-}

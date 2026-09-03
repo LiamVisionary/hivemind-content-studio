@@ -245,7 +245,8 @@ test('the studios send the tab pin as run_on only in Rented mode, persist it, an
   assert.match(image.match(/const currentImagePreferences = [\s\S]*?\n  \};/)[0], /rentedMachineId: s\.rentedMachineId/);
   assert.match(video.match(/const currentVideoPreferences = [\s\S]*?\n  \}\);/)[0], /rentedMachineId: s\.setup\.rentedMachineId/);
   // …and hand the panel the value + the writer, so the picker edits THIS tab.
-  assert.match(image, /<RentedSourceStatus engine=\{s\} page="image" pinned=\{s\.rentedMachineId \|\| ''\} onPin=\{pinMachine\} \/>/);
+  assert.match(read('src/studios/image/ImageSettingsPanel.jsx'), /<RentedSourceStatus engine=\{s\} page="image" pinned=\{s\.rentedMachineId \|\| ''\} onPin=\{onPinMachine\} \/>/);
+  assert.match(image, /onPinMachine=\{pinMachine\}/);
   assert.match(video, /<RentedSourceStatus engine=\{s\} page="video" pinned=\{s\.setup\.rentedMachineId \|\| ''\} onPin=\{pinMachine\} \/>/);
 
   const { IMAGE_TAB_FIELDS } = await import('../src/lib/studioTabs.js');

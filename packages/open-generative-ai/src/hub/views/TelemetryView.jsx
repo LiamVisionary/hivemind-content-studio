@@ -111,7 +111,7 @@ export function TelemetryView({ active }) {
                   <EmptyState
                     icon="pulse"
                     title={zh() ? '没有最近的尝试' : 'No recent attempts'}
-                    hint={zh() ? '当一个运行分派生成意图时，遥测开始。' : 'Telemetry begins when a run dispatches a generation intent.'}
+                    hint={zh() ? '在任意工作室生成一次，这里就会出现记录。' : 'Make something in any studio and it shows up here.'}
                   />
                 )}
               </section>

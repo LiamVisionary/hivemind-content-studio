@@ -103,10 +103,14 @@ test('the LoRA panel renders the registry-filtered catalog in Rented mode', () =
     // one filter over the same catalog, not a second component.
     assert.match(section, /filterRentalLoras\(loras, rentalEntries\)/);
     assert.match(section, /visibleLoras\.map/);
-    // The registry fetch only happens when someone can act on it.
-    assert.match(section, /useRentalLoras\(devMode \|\| rentedOnly\)/);
+    // The registry is read on relevance, not behind a ?dev=1 URL a packaged
+    // window has no address bar to type; it reports 'unsupported' (and the
+    // affordance stays unrendered) on a stack without the routes.
+    assert.match(section, /useRentalLoras\(true\)/);
+    assert.match(section, /const canManageRentals = rentalRegistry\.status === 'ready'/);
+    assert.doesNotMatch(section, /devMode/);
     // Both studios pass their own Rented-source flag.
-    assert.match(read('src/studios/ImageStudio.jsx'), /rentedOnly=\{Boolean\(s\.rentedOnly\)\}/);
+    assert.match(read('src/studios/ImageStudio.jsx'), /rentedOnly: Boolean\(s\.rentedOnly\),/);
     assert.match(read('src/studios/VideoStudio.jsx'), /rentedOnly=\{Boolean\(s\.setup\.rentedOnly\)\}/);
 });
 

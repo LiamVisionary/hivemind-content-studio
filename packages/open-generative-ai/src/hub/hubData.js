@@ -363,7 +363,7 @@ export const STUDIO_MODES = {
   create: {
     label: 'Create',
     heading: 'What do you want to make?',
-    copy: 'Create images, video, and complete media from one prompt, one model router, and one durable run.',
+    copy: 'Say what you want. The studio picks the model, makes it, and keeps it in History.',
     placeholder: 'Create a 20-second product launch ad with a hard pattern interrupt, three cinematic scenes, and a direct CTA…',
     submit: 'Plan creation',
     attachment: 'Images',
@@ -387,7 +387,7 @@ export const STUDIO_MODES = {
   workflow: {
     label: 'Workflow',
     heading: 'Build the complete workflow',
-    copy: 'Control scenes, providers, voice, assembly, publishing, budget, and policy in one production form.',
+    copy: 'Plan a whole piece — scenes, voice, the edit and where it goes — before spending anything.',
     placeholder: '',
     submit: 'Create production',
     attachment: 'Images',

@@ -92,7 +92,7 @@ test('the prompt helper waits for the runtime snapshot and keeps Unload out of t
     // of its own, so it cannot be a <button>.
     assert.match(picker, /role="radio"/);
     assert.doesNotMatch(picker, /role="button"/, 'no control nested in a button');
-    assert.match(dialog, /label=\{model\.provider === 'mtplx' \? 'Stop the MTPLX server' : `Unload \$\{model\.name\}`\}/);
+    assert.match(dialog, /label=\{model\.provider === 'mtplx' \? 'Stop the local helper' : `Unload \$\{model\.name\}`\}/);
     assert.match(dialog, /describeWritingFor\(\{ cast, references \}\)/);
     assert.match(dialog, /https:\/\/github\.com\/ggml-org\/llama\.cpp\/releases/);
     assert.match(dialog, /flattenApiDetail\(payload\?\.detail \?\? payload\?\.error\)/);

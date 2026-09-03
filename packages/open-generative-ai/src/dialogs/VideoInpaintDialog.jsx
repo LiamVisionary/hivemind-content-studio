@@ -410,7 +410,7 @@ export function VideoInpaintDialog({
         setCoverage([...tiles]);
       }
     } catch (error) {
-      toast.error(error?.message || 'could not read frames for the coverage check');
+      toast.error(error?.message || 'Could not read frames for the coverage check.');
     } finally {
       setBusy('');
     }

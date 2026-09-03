@@ -82,6 +82,11 @@ export function SavedPromptsMenu({
   // <Subject 1>), and the stand-ins of the prompt in the composer — saved with
   // it so a library prompt binds its person when it is loaded onto a cast.
   renderGender = undefined, standIns = [],
+  // The image composer folds its quick starters and its UGC block into THIS
+  // menu rather than standing up two more chips beside it: `chip` renames the
+  // trigger and `extraSections` renders above "Save current prompt…".
+  chip = null,
+  extraSections = null,
 }) {
   const { entries, loading, locked, error, unreadable, retry } = useSavedLibrary(LIBRARIES.prompts);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -200,13 +205,13 @@ export function SavedPromptsMenu({
         width="w-[22rem]"
         trigger={(open, toggle) => (
           <ChipButton
-            icon="database"
-            label="Prompts"
+            icon={chip?.icon || 'database'}
+            label={chip?.label || 'Prompts'}
             active={open}
             // Re-check on open: the studio can mount before the owner unlocks,
             // and the locked note tells them to go and unlock.
             onClick={() => { if (locked) retry(); toggle(); }}
-            title="Save this prompt and its settings, or load a saved one"
+            title={chip?.title || 'Save this prompt and its settings, or load a saved one'}
           />
         )}
       >
@@ -214,6 +219,7 @@ export function SavedPromptsMenu({
           closeMenuRef.current = close;
           return (
           <>
+            {extraSections ? extraSections(close) : null}
             <MenuItem
               icon="plus"
               disabled={!hasPrompt}

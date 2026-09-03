@@ -44,7 +44,7 @@ const TEXT = {
   busyTitle: () => (zh() ? '此标签正在生成' : 'This tab is still generating'),
   busyBody: () => (zh()
     ? '关闭后此次生成的结果将无法在工作室中显示。仍要关闭吗？'
-    : 'Closing it drops the result from the studio — the run itself keeps going on the backend. Close anyway?'),
+    : 'The result will still finish and land in History — you just will not see it in this tab. Close anyway?'),
   closeAnyway: () => (zh() ? '关闭' : 'Close tab'),
   cancel: () => (zh() ? '取消' : 'Cancel'),
   busyDot: () => (zh() ? '正在生成' : 'Generating'),

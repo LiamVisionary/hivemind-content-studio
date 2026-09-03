@@ -74,10 +74,10 @@ import {
   savePendingJob, removePendingJob, getPendingJobs, pendingJobsForTab,
 } from '../lib/pendingJobs.js';
 import { videoDownloadName } from '../lib/downloadNames.js';
-import {
-  isCompletionPingEnabled, setCompletionPingEnabled, subscribeCompletionPing,
-  primeCompletionPing, playCompletionPing,
-} from '../lib/completionPing.js';
+// The chime is one app-wide setting: this studio only PLAYS it (and primes the
+// audio context near the click). Its toggle lives beside Generate, in
+// ui/CompletionPingToggle.jsx, which owns the subscription.
+import { primeCompletionPing, playCompletionPing } from '../lib/completionPing.js';
 import {
   cancelHivemindVideoJob,
   deleteHivemindStudioUpload,
@@ -108,6 +108,7 @@ import {
   Toggle, cx,
 } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
+import { CompletionPingToggle } from '../ui/CompletionPingToggle.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { StudioLayout } from '../ui/kit.jsx';
 
@@ -260,9 +261,6 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     catalogs,
     setup,
     hivemindWorkflowSignature: '',
-    // Mirror of the shared (all-studio) completion-ping setting, kept here only
-    // so the toggle re-renders; lib/completionPing.js owns the value.
-    pingWhenComplete: isCompletionPingEnabled(),
     contextStore: createGenerationContextStore(),
     lastSubmittedContext: null,
     lastGenerationId: null,
@@ -601,8 +599,6 @@ export function VideoStudio({
     ingredientSelections: s.sharedIngredientSelections,
     ingredientSheets: s.sharedIngredientSheets,
     ingredientSelectedSheet: s.selectedIngredientSheet,
-    // pingWhenComplete is deliberately NOT persisted here — it is a shared
-    // all-studio setting owned by lib/completionPing.js.
   });
 
   const persistVideoPreferences = () => {
@@ -1166,11 +1162,6 @@ export function VideoStudio({
     focusPrompt();
   };
 
-  const setPing = (checked) => {
-    s.pingWhenComplete = setCompletionPingEnabled(checked);
-    bump();
-    if (s.pingWhenComplete) void playCompletionPing();
-  };
 
   /* ---------------- start / end frame (UploadPicker) ---------------- */
 
@@ -2514,7 +2505,7 @@ export function VideoStudio({
       }
       if (old?.url) URL.revokeObjectURL(old.url);
     } catch (error) {
-      s.timelineBuildError = error?.message || (zh() ? '拼接失败' : 'join failed');
+      s.timelineBuildError = error?.message || (zh() ? '拼接失败' : 'Join failed');
       dropTimelineCombined();
       if (s.timelineShowCombined) s.timelineShowCombined = false;
     } finally {
@@ -3944,12 +3935,6 @@ export function VideoStudio({
   // the panel open on their own.
   useEffect(() => { s.framesPanelAutoOpen = false; });
 
-  // The completion ping is shared with every other studio — follow the store so
-  // the toggle stays truthful if it is flipped elsewhere.
-  useEffect(() => subscribeCompletionPing((value) => { s.pingWhenComplete = value; bump(); }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []);
-
   // Unmount: stop the elapsed timer + release the preview blob. Never abort an
   // in-flight generation poll — bump() is guarded by mountedRef instead.
   useEffect(() => () => {
@@ -4129,8 +4114,8 @@ export function VideoStudio({
             <Field
               label={zh() ? '质量' : 'Quality'}
               hint={active === 'lite'
-                ? (zh() ? '蒸馏模型，约 8 步，速度最快' : 'Distilled — ~8 steps, fastest')
-                : (zh() ? '完整步数 + CFG，约慢 3 倍' : 'Full-step CFG — around 3x slower')}
+                ? (zh() ? '最快——画面略柔（蒸馏，约 8 步）' : 'Fastest — a little softer (distilled, ~8 steps)')
+                : (zh() ? '细节最好，约慢 3 倍（完整步数 + CFG）' : 'Best detail — about 3x slower (full-step CFG)')}
             >
               <Segmented
                 value={active}
@@ -4455,7 +4440,7 @@ export function VideoStudio({
             label={zh() ? '快速高清' : 'Fast high-res'}
             hint={zh()
               ? '先在约五分之一的画布上采样，再用 H3 自己的潜空间放大器把画面提升到目标尺寸，只有最后几步在全尺寸上运行。步数不变，但大部分步数跑在少得多的像素上——在 5090 上实测约快一倍。尺寸、时长和声音都不变。它走的是另一条采样路径，所以同一个种子给出的是另一条镜头，而不是同一条的加速版。'
-              : 'Samples the opening steps on a canvas about a fifth the size, lifts the picture to full size with H3\u2019s own latent upscaler, and spends only the last few steps there. Same number of steps, most of them on far fewer pixels \u2014 measured at about half the render time on a 5090. Size, length and sound are unchanged. It samples a different path, so the same seed gives a DIFFERENT take rather than the same one faster.'}
+              : 'About half the render time, at the same size, length and sound \u2014 most of the steps run on a much smaller canvas before the picture is lifted to full size. The same seed gives a different take, not the same one faster.'}
           >
             <Toggle
               checked={s.setup.fastHighRes === true}
@@ -4469,8 +4454,8 @@ export function VideoStudio({
             <Field
               label={zh() ? '负面提示词' : 'Negative prompt'}
               hint={zh()
-                ? '通过 NAG 生效（快速/精简通道 cfg=1，普通负面提示词无效）。'
-                : 'Applied through NAG. The fast and Lite lanes run cfg=1, where an ordinary negative prompt does nothing.'}
+                ? '要避开的东西。仅在“标准”质量下生效，快速与精简会忽略它。'
+                : 'What to keep out of the shot. Works on Standard quality; Fast and Lite ignore it.'}
             >
               <TextArea
                 rows={2}
@@ -4486,8 +4471,8 @@ export function VideoStudio({
               <Field
                 label={zh() ? '负面引导强度' : 'Negative guidance'}
                 hint={zh()
-                  ? 'NAG 强度。约 +8% 生成时间。'
-                  : 'NAG strength — costs about 8% more time. Raise it if the prompt still is not being followed.'}
+                  ? '把画面推离负面提示词的力度，约 +8% 生成时间。仍不听话就调高一档。'
+                  : 'How hard to push away from the negative prompt — adds about 8% time. Raise it if it is still not listening (NAG).'}
               >
                 <NativeSelect
                   value={String(s.setup.nagScale ?? '')}
@@ -4544,10 +4529,6 @@ export function VideoStudio({
             </NativeSelect>
           </Field>
         ) : null}
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-xs font-medium text-ink2">{t('common.pingWhenComplete')}</span>
-          <Toggle label={t('common.pingWhenComplete')} checked={s.pingWhenComplete} onChange={setPing} />
-        </div>
         {advancedInputs.map((input) => {
           const value = s.setup.advancedValues[input.name];
           if (input.type === 'boolean') {
@@ -4890,8 +4871,8 @@ export function VideoStudio({
                 </span>
                 <button
                   type="button"
-                  title={zh() ? '退出场景接续' : 'Leave scene chaining'}
-                  aria-label={zh() ? '退出场景接续' : 'Leave scene chaining'}
+                  title={zh() ? '退出接续场景' : 'Stop continuing the scene'}
+                  aria-label={zh() ? '退出接续场景' : 'Stop continuing the scene'}
                   className="grid h-4 w-4 place-items-center rounded text-honey transition-colors hover:bg-honey/20"
                   onClick={clearMotionContext}
                 >
@@ -5127,6 +5108,9 @@ export function VideoStudio({
 
           {/* Mode and model read out in the left panel — no duplicate badges here. */}
           <div className="ml-auto flex shrink-0 items-center gap-2">
+            {/* One app-wide setting, beside the outcome it announces — it used to
+                be the last row of this studio's Advanced section. */}
+            <CompletionPingToggle />
             <Button
               variant="primary"
               size="lg"
@@ -5505,7 +5489,7 @@ export function VideoStudio({
               title={zh() ? '创建你的第一个视频' : 'Create your first video'}
               hint={zh()
                 ? '选择模型，添加提示词或起始帧，然后点击生成。本地 LTX 工作流支持配料参考和 LoRA。'
-                : 'Pick a model, add a prompt or start frame, and press Generate. Local LTX workflows add ingredient references and LoRAs.'}
+                : 'Describe a shot or drop in a starting picture, then press Generate. Your first clip lands right here.'}
               className="flex-1"
             />
           ) : null}
