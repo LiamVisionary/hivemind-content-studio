@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from typing import Callable, Mapping
 from urllib.parse import urljoin, urlparse, urlunparse
 
+from .identity import PRODUCT_NAME, SOURCE_URL
+
 
 Probe = Callable[[str], bool]
 
@@ -30,8 +32,8 @@ class SourceRepository:
 SOURCE_REPOSITORIES: tuple[SourceRepository, ...] = (
     SourceRepository(
         "hivemind-content-studio",
-        "Hivemind Content Studio",
-        "https://github.com/LiamVisionary/hivemind-content-studio",
+        PRODUCT_NAME,
+        SOURCE_URL,
         None,
         "product",
         "native",

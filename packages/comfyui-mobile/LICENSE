@@ -1,6 +1,13 @@
 MIT License
 
-Copyright (c) 2026
+Copyright (c) 2026 cosmicbuffalo
+  (upstream: https://github.com/cosmicbuffalo/comfyui-mobile-frontend)
+Copyright (c) 2026 LiamVisionary (modifications)
+
+Upstream ships this notice with the year and no named holder; the first line
+above names the upstream project's owner so the attribution is not blank, and
+the second covers the changes made in this repository. The modifications are
+offered under the same MIT terms as the rest of this directory.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

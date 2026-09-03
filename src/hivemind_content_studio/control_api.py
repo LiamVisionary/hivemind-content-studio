@@ -51,6 +51,7 @@ from .canvas_history import (
 )
 from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brain, plan_with_local_brain
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
+from .identity import version_payload
 from .lanes import LANE_MATRIX
 from . import (
     comfy_lanes, hivemindos_models, hivemindos_sam3, image_router, local_llm, media_posters,
@@ -3066,6 +3067,14 @@ def build_control_app(
     @app.get("/api/runtime")
     def runtime() -> dict:
         return unified_runtime_snapshot()
+
+    @app.get("/api/version")
+    def version() -> dict:
+        # Unauthenticated on purpose: the About panel and the AGPL's "offer the
+        # source" obligation both need this before anyone signs in, and the
+        # payload is the product's own name, tag and source URL — nothing about
+        # the machine it runs on.
+        return version_payload()
 
     @app.post("/api/runs", status_code=201, dependencies=[Depends(require_owner_or_control)])
     def create_run(body: StudioRunDraft, request: Request) -> dict:

@@ -115,6 +115,11 @@ Credentials come from [PassBook](https://github.com/LiamVisionary/passbook), the
 
 `passbook run --` puts the store in front of a command and records which key was read and who asked. The studio does not need it — it asks PassBook directly — but it is what you want for anything that does not. `hive-env-run --` is the older shim over the same store and still works.
 
+Add `--extra faceless-webui` to the sync below only if you want the Streamlit
+WebUI, the MoneyPrinterTurbo HTTP API, the Redis task backend, or the Azure and
+DashScope providers. The stack starts none of them, and the desktop build ships
+without them (`docs/RELEASE.md`).
+
 ```bash
 uv sync --extra dev --extra mcp
 npm --prefix packages/open-generative-ai ci

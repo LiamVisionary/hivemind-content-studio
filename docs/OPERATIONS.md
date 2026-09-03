@@ -155,7 +155,7 @@ Do not delete an old checkout until all of these are true:
 3. A cold start from `scripts/hivemind-studio-stack supervise` reaches every required health endpoint.
 4. Browser checks pass for Studio, Explore, Canvas, Models, Runs, History, Telemetry, and Providers on desktop and mobile widths.
 5. `scripts/migrate_media_state.py` has written a migration receipt and the canonical state files are present.
-6. The two owner forks without detected license files have an explicit redistribution decision before the embedded source is pushed publicly.
+6. ~~The two owner forks without detected license files have an explicit redistribution decision before the embedded source is pushed publicly.~~ Closed 2026-09-03: recorded as "distribute" in `THIRD_PARTY_NOTICES.md`, which now carries no open distribution gate.
 
 Deleting donor checkouts must never include the external ComfyUI checkout, model directories, `~/.comfy-private.noindex`, or `~/.hivemindos/media-studio`. Keep a final archive until at least one real generation has completed through the unified stack.
 

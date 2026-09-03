@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* Hosted Open Generative AI wrapper for Liam's Mac.
+/* Hosted local-inference bridge for Hivemind Content Studio.
  * Serves the Vite build and provides a browser localAI bridge backed by the
  * existing local Z-Image API. Secrets stay server-side; the browser never sees
  * the Z-Image token.
@@ -11,6 +11,8 @@ const https = require('https');
 const { URL } = require('url');
 const { loadHostedImageModels, loadHostedWorkflowModels, missingWeightFiles } = require('./hosted-local-models');
 const { discoverAutoImageWorkflows } = require('./auto-workflow-discovery');
+// Generated from src/hivemind_content_studio/identity.py.
+const identity = require('./electron/identity.json');
 
 const ROOT = __dirname;
 const DIST = path.join(ROOT, 'dist');
@@ -19,7 +21,18 @@ const PORT = Number(process.env.OGA_PORT || 8794);
 const ZIMAGE_URL = process.env.ZIMAGE_API_URL || 'http://127.0.0.1:8787';
 const MEDIA_STATE_ROOT = process.env.HIVEMIND_MEDIA_STATE_DIR || path.join(process.env.HOME || '', '.hivemindos/media-studio');
 const ZIMAGE_TOKEN_FILE = process.env.ZIMAGE_TOKEN_FILE || path.join(MEDIA_STATE_ROOT, 'secure/zimg-token');
-const LOCAL_AI_DIR = path.join(process.env.HOME || '', 'Library/Application Support/open-generative-ai/local-ai');
+// The product's own support folder, named once in
+// src/hivemind_content_studio/identity.py and generated into identity.json.
+// A machine that already downloaded a model under the donor-named folder keeps
+// serving it: the old directory wins only while the new one does not exist, so
+// nobody is asked to re-download a model to rename a folder.
+const APPLICATION_SUPPORT = path.join(process.env.HOME || '', 'Library/Application Support');
+const LOCAL_AI_DIR = (() => {
+  const current = path.join(APPLICATION_SUPPORT, identity.supportDirName, 'local-ai');
+  if (fs.existsSync(current)) return current;
+  const legacy = path.join(APPLICATION_SUPPORT, identity.legacySupportDirName, 'local-ai');
+  return fs.existsSync(legacy) ? legacy : current;
+})();
 const WORKFLOW_REGISTRY = process.env.MEDIA_STUDIO_WORKFLOW_REGISTRY || path.resolve(ROOT, '../media-gateway/workflow-registry.json');
 const MAX_REQUEST_BODY = 25 * 1024 * 1024;
 // FLUX.2 Klein conditions on up to four reference images total. The gateway
@@ -1131,7 +1144,7 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 400, { error: 'Invalid request URL' });
   }
   try {
-    if (u.pathname === '/health' || u.pathname === '/healthz') return sendJson(res, 200, { ok: true, service: 'Open Generative AI Hosted', hosted: true, zimage: ZIMAGE_URL });
+    if (u.pathname === '/health' || u.pathname === '/healthz') return sendJson(res, 200, { ok: true, service: `${identity.productName} local-inference bridge`, hosted: true, zimage: ZIMAGE_URL });
     // Awaited, so a rejection inside a route lands in THIS catch instead of
     // escaping as an unhandled rejection (which terminates Node 22).
     if (u.pathname.startsWith('/local-ai/')) return await handleLocalAi(req, res, u.pathname, u.searchParams);

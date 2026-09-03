@@ -12,22 +12,23 @@ description = "Local-first agent studio for faceless video, animation, clipping,
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "AGPL-3.0-or-later" }
+# The desktop bundle installs exactly this list into a frozen venv (see
+# docs/RELEASE.md). Everything that only the Streamlit WebUI, the MoneyPrinterTurbo
+# HTTP API or an optional cloud voice/LLM provider needs lives in the
+# `faceless-webui` extra below instead, because those five packages cost roughly a
+# third of the venv and no shipped process imports them. `test/studio/test_packaging_extras.py`
+# asserts the split holds and that the engine still imports with them absent.
 dependencies = [
     # The credential standard this app speaks. Its own repo since 1.0.0, so
     # this is a normal dependency rather than a vendored copy that drifts.
     "passbook @ git+https://github.com/LiamVisionary/passbook.git",
     "moviepy==2.2.1",
-    "streamlit==1.59.1",
-    "streamlit-tour==1.1.0",
     "edge-tts==7.2.7",
     "fastapi==0.136.3",
     "uvicorn==0.32.1",
     "openai==2.24.0",
     "faster-whisper==1.1.0",
     "loguru==0.7.3",
-    "dashscope==1.20.14",
-    "azure-cognitiveservices-speech==1.41.1",
-    "redis==5.2.0",
     "python-multipart==0.0.27",
     "cryptography==46.0.6",
     "pyyaml==6.0.3",
@@ -43,6 +44,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# What the shipped desktop app installs: the base dependency list and nothing
+# else. It exists as a named extra so the release build has one thing to say
+# (`uv export --extra desktop`) and so a change to the bundle is a change to a
+# line here rather than to a build script nobody reads.
+desktop = []
+# The Streamlit WebUI (`webui/Main.py`), the MoneyPrinterTurbo HTTP API
+# (`main.py`, `app/router.py`), the Redis task backend and the two cloud
+# voice/LLM providers that only the faceless engine offers. The stack never
+# starts any of them; a developer who wants them runs
+# `uv sync --extra faceless-webui`. Keeping them out of the base list is what
+# makes the bundled venv about a third smaller.
+faceless-webui = [
+    "streamlit==1.59.1",
+    "streamlit-tour==1.1.0",
+    "dashscope==1.20.14",
+    "azure-cognitiveservices-speech==1.41.1",
+    "redis==5.2.0",
+]
 # Optional TwelveLabs (https://twelvelabs.io) video-understanding/embedding
 # integration. Only needed when `twelvelabs_api_keys` is configured; install
 # with `uv sync --extra twelvelabs`.
