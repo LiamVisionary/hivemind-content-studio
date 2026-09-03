@@ -118,6 +118,19 @@ chflags hidden "$PRIV" 2>/dev/null || true
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$SUP_LOG"; }
 
+# Keep the last run's log instead of erasing it, and keep the pair bounded.
+# Only ever called before the children are started, so no writer holds an fd on
+# the file being renamed.
+LOG_ROLL_MAX_BYTES="${LOG_ROLL_MAX_BYTES:-33554432}"
+roll_log() {
+  local path="$1" size=0
+  [ -f "$path" ] || return 0
+  size=$(wc -c < "$path" 2>/dev/null | tr -d ' ') || size=0
+  if [ "${size:-0}" -gt "$LOG_ROLL_MAX_BYTES" ]; then
+    mv -f "$path" "$path.1" 2>/dev/null || true
+  fi
+}
+
 kill_port() {
   local port="$1"
   local pids
@@ -206,13 +219,22 @@ start_children() {
   children=()
   log "starting Hivemind Content Studio as one managed app"
   log "hardware profile=$ZIMG_ACCELERATOR_PROFILE apple_silicon=$ZIMG_IS_APPLE_SILICON flux2_server=$ZIMG_ENABLE_FLUX2_SERVER asfp8_int8=$COMFY_DEFAULT_ASFP8_INT8_EXT asfp8_fp8=$COMFY_DEFAULT_ASFP8_FP8_EXT"
-	  : > "$PRIV/comfy.log"
-	  : > "$PRIV/comfy-ltx.log"
-	  : > "$PRIV/z-image-api.log"
-  : > "$PRIV/z-image-frontend.log"
-  : > "$PRIV/hivemind-content-studio.log"
-  : > "$PRIV/media-studio-mcp.log"
-  : > "$PRIV/z-image-tailscale-https-proxy.log"
+  # These were truncated with ': >' here, on every start. The supervisor loop
+  # below restarts the whole stack automatically after any child exit or failed
+  # health check, so the truncation ran right after a crash — the evidence of a
+  # failure was deleted by the recovery from it, and there was nothing a person
+  # could attach to a report. Rolled instead: the previous run is kept as .1,
+  # and each file is bounded so nothing grows without end.
+  # Every child appends with '>>', so nothing here shares a file descriptor
+  # with the control API's own rotating log, which lives elsewhere entirely
+  # (~/Library/Logs/Hivemind Content Studio) and is never touched from a shell.
+  roll_log "$PRIV/comfy.log"
+  roll_log "$PRIV/comfy-ltx.log"
+  roll_log "$PRIV/z-image-api.log"
+  roll_log "$PRIV/z-image-frontend.log"
+  roll_log "$PRIV/hivemind-content-studio.log"
+  roll_log "$PRIV/media-studio-mcp.log"
+  roll_log "$PRIV/z-image-tailscale-https-proxy.log"
   if [ -L "$COMFY/custom_nodes/comfyui-mobile-frontend" ] || [ ! -e "$COMFY/custom_nodes/comfyui-mobile-frontend" ]; then
     ln -sfn "$MOBILE" "$COMFY/custom_nodes/comfyui-mobile-frontend"
   else
@@ -536,7 +558,12 @@ PY
   fi
 
   cd "$CONTENT_STUDIO" || return 1
+  # The studio's own rotating log, beside the supervisor's, where Console.app
+  # lists it and a person can find it — not in $PRIV, which is chflags hidden.
+  # A DIFFERENT file from the redirect below: a shell '>>' and a rotating
+  # handler on one path means the shell keeps writing to the rotated-away file.
   HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
+  CONTENT_STUDIO_LOG_DIR="$LOG_DIR/Hivemind Content Studio" \
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
 	  COMFY_LANES="$comfy_lanes" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
