@@ -1,0 +1,111 @@
+// One product, one name. See DESIGN.md §6.
+//
+// Users used to meet four names for the same thing — "Content Studio" in the
+// title bar, "Studio API" in the pill, "Media Studio" in the toasts, and
+// "Hivemind Media Studio" in a failure — with no way to tell whether those were
+// the app they installed, a service they had to set up, or another product.
+// Internal names in comments are fine; the strings a user reads are not.
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const SRC = fileURLToPath(new URL('../src', import.meta.url));
+
+// A generated catalog dump: `provider_name` is dead data no view reads.
+const SKIP_FILES = new Set(['modelsData.js']);
+
+function walk(dir, out = []) {
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry);
+    if (statSync(path).isDirectory()) { walk(path, out); continue; }
+    if (!/\.(js|jsx)$/.test(entry) || SKIP_FILES.has(entry)) continue;
+    out.push(path);
+  }
+  return out;
+}
+
+/** Everything except comments — quote-aware, so a `//` inside a string stays. */
+function stripComments(source) {
+  let out = '';
+  let quote = '';
+  for (let i = 0; i < source.length; i += 1) {
+    const c = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      out += c;
+      if (c === '\\') { out += next ?? ''; i += 1; continue; }
+      if (c === quote) quote = '';
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; continue; }
+    if (c === '/' && next === '/') {
+      while (i < source.length && source[i] !== '\n') i += 1;
+      out += '\n';
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      i += 2;
+      // Keep the newlines, so a reported line number is the real one.
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) {
+        if (source[i] === '\n') out += '\n';
+        i += 1;
+      }
+      i += 1;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+const RETIRED = [
+  { name: 'Media Studio', match: (line) => line.includes('Media Studio') },
+  { name: 'Studio API', match: (line) => line.includes('Studio API') },
+  { name: '工作室 API', match: (line) => line.includes('工作室 API') },
+  // One spelling for the provider. Identifiers (MuapiClient, storeMuapiKey) and
+  // console diagnostics are not copy — the word on its own, in a sentence, is.
+  {
+    name: 'Muapi',
+    match: (line) => /(?<![A-Za-z])Muapi(?![A-Za-z])/.test(line) && !line.includes('console.'),
+  },
+];
+
+test('no retired product name survives in a string a user can read', () => {
+  const offenders = [];
+  for (const path of walk(SRC)) {
+    const code = stripComments(readFileSync(path, 'utf8'));
+    code.split('\n').forEach((line, index) => {
+      for (const retired of RETIRED) {
+        if (retired.match(line)) {
+          offenders.push(`${path.slice(SRC.length + 1)}:${index + 1}: ${retired.name} — ${line.trim()}`);
+        }
+      }
+    });
+  }
+  assert.deepEqual(offenders, [], `retired names in user-facing copy:\n${offenders.join('\n')}`);
+});
+
+test('the Agents & API page keeps the technical noun exactly once', () => {
+  const page = readFileSync(join(SRC, 'studios/McpCliStudio.jsx'), 'utf8');
+  const mentions = page.match(/built-in media MCP server/g) || [];
+  assert.equal(mentions.length, 1);
+});
+
+test('the state pill says Ready / Starting / Not running — never a backend name', async () => {
+  globalThis.window = new EventTarget();
+  globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} };
+  const { apiStatusLabel, setApiStatus, getApiStatus, STUDIO_RESTART_COMMAND, apiOfflineSentence } =
+    await import('../src/app/statusStore.js');
+  setApiStatus('online');
+  assert.equal(getApiStatus().label, 'Ready');
+  setApiStatus('offline');
+  assert.equal(getApiStatus().label, 'Not running');
+  setApiStatus('connecting');
+  assert.equal(getApiStatus().label, 'Starting');
+  assert.equal(apiStatusLabel(getApiStatus(), true), '启动中');
+  // Never a problem without its fix: the offline sentence carries the command.
+  assert.match(apiOfflineSentence(false), /not answering/);
+  assert.ok(STUDIO_RESTART_COMMAND.includes('hivemind-studio-stack'));
+});

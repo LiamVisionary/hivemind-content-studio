@@ -488,10 +488,10 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
             // the brain chip cannot serve.
             <EmptyState
               icon="plug"
-              title={zh() ? '工作室 API 不可达' : 'Studio API unreachable'}
+              title={zh() ? '工作室没有运行' : 'The studio is not running'}
               hint={zh()
-                ? '规划器需要本地控制 API。它运行后会自动重试；也可以用顶栏的刷新按钮。'
-                : 'The Planner needs the local control API. It retries on its own once the API is running — or use the refresh button in the top bar.'}
+                ? '规划器需要本机的工作室。它运行后会自动重试；也可以用顶栏的刷新按钮。'
+                : 'The Planner needs the studio on this machine. It retries on its own once the studio is running — or use the refresh button in the top bar.'}
               className="flex-1"
             />
           ) : s.thread.length === 0 ? (

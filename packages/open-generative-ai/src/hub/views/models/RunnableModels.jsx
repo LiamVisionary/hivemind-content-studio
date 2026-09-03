@@ -117,7 +117,7 @@ export function RunnableModels({ models, loading }) {
             hint={loading
               ? undefined
               : type === 'video' && !counts.video
-                ? 'Video models come from the Media Studio catalog and run in the Video studio — open it to see what is installed.'
+                ? 'Video models come from the studio catalog and run in the Video studio — open it to see what is installed.'
                 : 'Workflow JSON dropped into ComfyUI/workflows/auto/ shows up here as a local model.'}
           />
         )}

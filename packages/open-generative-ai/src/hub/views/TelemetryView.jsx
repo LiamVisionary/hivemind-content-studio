@@ -45,8 +45,8 @@ export function TelemetryView({ active }) {
           // state, not a spinner that never ends.
           <EmptyState
             icon="plug"
-            title={zh() ? '工作室 API 不可达' : 'Studio API unreachable'}
-            hint={zh() ? '遥测来自本地控制 API。它恢复后会自动重试。' : 'Telemetry comes from the local control API. It retries on its own once the API is back.'}
+            title={zh() ? '工作室没有运行' : 'The studio is not running'}
+            hint={zh() ? '遥测来自本机的工作室。它恢复后会自动重试。' : 'Telemetry comes from the studio on this machine. It retries on its own once the studio is back.'}
           />
         ) : !telemetry ? (
           <div className="grid flex-1 place-items-center py-16"><Spinner size={22} className="text-ink2" /></div>

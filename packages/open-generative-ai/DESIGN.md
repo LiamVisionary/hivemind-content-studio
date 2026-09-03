@@ -114,3 +114,21 @@ were pill-soup become `ChipButton`+`Menu` groups with clear labels and current-v
 5. No new deps. React 19 + react-hot-toast + existing libs only. Plain `.jsx` — no TypeScript.
 6. Preserve fail-open behaviors exactly (e2eMedia falls back to raw URL; unknown local model must
    not disable upload; muapi 5xx keeps polling; etc. — your spec lists them).
+
+## 6. Names — one product, one word for it
+
+A consumer installed one thing. Running copy calls it **the studio** and never names the parts.
+
+- **The app**: "Hivemind Content Studio" in the title bar, the sidebar mark and About. Everywhere
+  else it is "the studio" — lower case, no product name in the middle of a sentence.
+- **The backend**: never named to the user. There is no "Studio API", no "Media Studio", no
+  "Hivemind Media Studio", no "control API". The state pill says `Ready` / `Starting` /
+  `Not running`; a failure says "The studio could not …", never "Media Studio generation failed".
+  (`src/app/statusStore.js` owns those three words, and the offline sentence with its fix.)
+- **HivemindOS** appears only when the user has to go there — credits, balances, sign-in.
+- **The one exception**: the Agents & API page may say "the built-in media MCP server" once,
+  because an agent author is configuring a server and needs the technical noun.
+- **Third-party providers** keep their own spelling, one way each: `MUAPI` (never "Muapi"),
+  `Higgsfield`, `Civitai`, `ComfyUI`.
+
+`tests/appNames.test.js` greps the user-facing strings for the retired names.

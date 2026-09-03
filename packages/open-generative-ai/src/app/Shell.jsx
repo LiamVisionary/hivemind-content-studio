@@ -7,10 +7,11 @@ import { getLang, t } from '../lib/i18n.js';
 const zhUi = () => getLang() === 'zh-CN';
 import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
-import { IconButton, cx } from '../ui/kit.jsx';
+import { Button, IconButton, cx } from '../ui/kit.jsx';
 import { getExploreDock, subscribeExploreDock, toggleExploreDock } from './exploreDockStore.js';
 import { APP_NAME, NAV_ITEMS, NAV_SECTIONS } from './navConfig.jsx';
-import { getApiStatus, subscribeApiStatus } from './statusStore.js';
+import { Menu } from '../ui/Menu.jsx';
+import { STUDIO_RESTART_COMMAND, apiOfflineSentence, apiStatusLabel, pingApiStatus, useApiStatus } from './statusStore.js';
 
 // Topbar trigger for the Hivemind prompt library (explore dock). Only in studio
 // mode; the panel itself is rendered once by App and anchors under this button.
@@ -39,23 +40,73 @@ function ExploreDockButton() {
   );
 }
 
+// The verdict is a button, not a coloured dot: a user who reads "Not running"
+// needs the sentence and the command in the same place, plus a way to ask again
+// without reloading the page.
 function ApiStatusPill() {
-  const [status, setStatus] = useState(getApiStatus);
-  useEffect(() => subscribeApiStatus(setStatus), []);
+  const status = useApiStatus();
+  const zh = zhUi();
+  const [busy, setBusy] = useState(false);
+  const label = apiStatusLabel(status, zh);
   const tone =
     status.tone === 'online'
       ? 'text-ok bg-ok-tint'
       : status.tone === 'offline'
         ? 'text-danger bg-danger-tint'
         : 'text-warn bg-warn/10';
+  const retry = () => {
+    setBusy(true);
+    void pingApiStatus().finally(() => setBusy(false));
+  };
   return (
-    <span
-      className={cx('inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-semibold', tone)}
-      title={`${zhUi() ? '工作室 API' : 'Studio API'}: ${status.label}`}
+    <Menu
+      align="end"
+      width="w-[300px]"
+      trigger={(open, toggle) => (
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          aria-haspopup="menu"
+          title={zh ? `工作室：${label}` : `The studio: ${label}`}
+          className={cx(
+            'inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-semibold transition-opacity hover:opacity-85',
+            tone,
+          )}
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-current" />
+          <span className="hidden sm:inline">{label}</span>
+        </button>
+      )}
     >
-      <span className="h-1.5 w-1.5 rounded-full bg-current" />
-      <span className="hidden sm:inline">{status.label}</span>
-    </span>
+      {(close) => (
+        <div className="flex flex-col gap-2 p-1.5">
+          <div className="text-[13px] font-semibold text-ink1">
+            {status.online
+              ? (zh ? '工作室正在运行' : 'The studio is running')
+              : status.tone === 'offline'
+                ? (zh ? '工作室没有运行' : 'The studio is not running')
+                : (zh ? '正在联系工作室…' : 'Reaching the studio…')}
+          </div>
+          {status.tone === 'offline' ? (
+            <>
+              <p className="text-xs leading-relaxed text-ink2">{apiOfflineSentence(zh)}</p>
+              <code className="block select-all break-all rounded-md border border-line1 bg-bg2 px-2 py-1.5 font-mono text-[11px] text-ink1">
+                {STUDIO_RESTART_COMMAND}
+              </code>
+            </>
+          ) : null}
+          <Button
+            size="sm"
+            icon="refresh"
+            loading={busy}
+            onClick={() => { retry(); close(); }}
+          >
+            {zh ? '立即重试' : 'Retry now'}
+          </Button>
+        </div>
+      )}
+    </Menu>
   );
 }
 

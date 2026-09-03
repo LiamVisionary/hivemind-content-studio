@@ -509,8 +509,8 @@ export function SpriteStudio({ active = true } = {}) {
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 p-4">
         {!isHivemindStudioEnabled() ? (
           <Card className="border-warn/40 p-3 text-[13px] text-ink2">
-            The sprite pipeline runs against this machine’s Media Studio. Open the studio from
-            the Hivemind Content Studio shell so the animation and cut-out stages can reach it.
+            The sprite pipeline runs on this machine’s studio. Open it from the Hivemind
+            Content Studio shell so the animation and cut-out stages can reach it.
           </Card>
         ) : null}
 

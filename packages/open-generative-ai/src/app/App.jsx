@@ -21,7 +21,7 @@ import { Spinner } from '../ui/kit.jsx';
 import { ErrorBoundary } from './ErrorBoundary.jsx';
 import { HUB_PAGES, isKnownPage } from './navConfig.jsx';
 import { Shell } from './Shell.jsx';
-import { pingApiStatus } from './statusStore.js';
+import { startApiHeartbeat, stopApiHeartbeat } from './statusStore.js';
 import { StudioTabs } from './StudioTabs.jsx';
 
 // Studios that open in tabs. Each tab is a separate mount of the same studio, so
@@ -160,10 +160,15 @@ export function App() {
   // Initial route, then Back/Forward: the URL is the source of truth.
   useEffect(() => {
     navigate(initialPage());
-    void pingApiStatus();
+    // One heartbeat for the whole app: the pill, the studio banners and the
+    // Generate gates all read the answer it publishes.
+    startApiHeartbeat();
     const onPopState = () => { void navigate(initialPage(), { fromHistory: true }); };
     window.addEventListener('popstate', onPopState);
-    return () => window.removeEventListener('popstate', onPopState);
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+      stopApiHeartbeat();
+    };
   }, [navigate]);
 
   // Does this machine hold the MUAPI key? Asked ONCE here, for every studio:

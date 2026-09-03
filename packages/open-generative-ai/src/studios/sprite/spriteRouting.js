@@ -40,7 +40,7 @@ export function animationChoices(rows) {
     let reason = '';
     if (!route.runnable) reason = route.reason;
     else if (!reachable) {
-      reason = `The sprite is sealed on this machine, so this stage sends it to this machine’s Media Studio only — ${route.label} is not wired in here yet. Pick a Media Studio model.`;
+      reason = `The sprite is sealed on this machine, so this stage runs on this machine only — ${route.label} is not wired in here yet. Pick a model that runs here.`;
     }
     return {
       ...row,

@@ -53,8 +53,10 @@ test('the lane still serves its own workflows, and the picker says which rows it
     const route = clipRouteFor({ id: 'x', provider, source: 'cloud' });
     assert.equal(route.transport, 'none', provider);
     assert.equal(route.runnable, false, provider);
-    // The reason names the fix — which rows CAN run — not the failure.
-    assert.match(route.reason, /Media Studio/, provider);
+    // The reason names the fix — which rows CAN run — not the failure. It says
+    // "this machine", never a backend product name (DESIGN.md §6).
+    assert.match(route.reason, /pick a model that runs on this machine/, provider);
+    assert.doesNotMatch(route.reason, /Media Studio/, provider);
   }
 });
 
@@ -78,11 +80,11 @@ test('a row the animation stage cannot reach is offered with its reason, and nev
 
   const byKey = Object.fromEntries(rows.map((row) => [row.key, row]));
   assert.equal(byKey.a.available, false);
-  assert.match(byKey.a.unavailableReason, /Media Studio/);
+  assert.match(byKey.a.unavailableReason, /runs on this machine/);
   // MUAPI is a real clip transport, but the sprite is a sealed reference only
   // this machine's studio can read, so the stage builds no MUAPI request.
   assert.equal(byKey.b.available, false);
-  assert.match(byKey.b.unavailableReason, /Media Studio/);
+  assert.match(byKey.b.unavailableReason, /runs here/);
   assert.equal(byKey.c.available, true);
   assert.equal(byKey.c.unavailableReason, '');
   assert.equal(defaultPick(rows).key, 'c');

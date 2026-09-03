@@ -96,8 +96,8 @@ const translations = {
         'settings.title': 'Settings',
         'settings.apiKey': 'API key',
         'settings.localModels': 'Local models',
-        'settings.muapiKeyLabel': 'Muapi API Key',
-        'settings.keyPlaceholder': 'Enter your Muapi API key...',
+        'settings.muapiKeyLabel': 'MUAPI API Key',
+        'settings.keyPlaceholder': 'Enter your MUAPI API key...',
         'settings.keyNote': 'Kept in this browser and sent only to api.muapi.ai.',
         'settings.keyOnMachine': 'Key on this machine',
         'settings.keyOnMachineNote': 'Cloud generations run through this machine’s shared credential store; the key never enters this browser.',
@@ -106,15 +106,15 @@ const translations = {
 
         // Auth Modal
         'auth.title': 'Connect your cloud account',
-        'auth.subtitle': 'Cloud models run on Muapi, on your own account. Create an access key there, then paste the key value here to continue.',
-        'auth.keyLabel': 'Muapi access key',
+        'auth.subtitle': 'Cloud models run on MUAPI, on your own account. Create an access key there, then paste the key value here to continue.',
+        'auth.keyLabel': 'MUAPI access key',
         'auth.keyPlaceholder': 'Paste your access key value...',
-        'auth.keyNote': 'Do not enter the key name or label; paste the generated key value from Muapi.',
+        'auth.keyNote': 'Do not enter the key name or label; paste the generated key value from MUAPI.',
         'auth.storedOnMachine': 'Saved to this machine’s shared store — every Hive app here can use it, and it never stays in this browser.',
         'auth.storedInBrowser': 'Kept in this browser and sent only to api.muapi.ai.',
         'auth.saving': 'Saving…',
         'auth.initBtn': 'Save and continue',
-        'auth.createKey': 'Create or copy a Muapi access key',
+        'auth.createKey': 'Create or copy a MUAPI access key',
 
         // Image Studio
         'image.title': 'Image Studio',
@@ -314,8 +314,8 @@ const translations = {
         'settings.title': '设置',
         'settings.apiKey': 'API 密钥',
         'settings.localModels': '本地模型',
-        'settings.muapiKeyLabel': 'Muapi API 密钥',
-        'settings.keyPlaceholder': '输入您的 Muapi API 密钥...',
+        'settings.muapiKeyLabel': 'MUAPI API 密钥',
+        'settings.keyPlaceholder': '输入您的 MUAPI API 密钥...',
         'settings.keyNote': '保存在此浏览器中，仅发送到 api.muapi.ai。',
         'settings.keyOnMachine': '密钥已在本机',
         'settings.keyOnMachineNote': '云端生成通过本机的共享凭据库运行；密钥不会进入此浏览器。',
@@ -324,15 +324,15 @@ const translations = {
 
         // Auth Modal
         'auth.title': '连接您的云端账户',
-        'auth.subtitle': '云端模型在 Muapi 上以您自己的账户运行。在那里创建一个访问密钥，然后将密钥值粘贴到这里继续。',
-        'auth.keyLabel': 'Muapi 访问密钥',
+        'auth.subtitle': '云端模型在 MUAPI 上以您自己的账户运行。在那里创建一个访问密钥，然后将密钥值粘贴到这里继续。',
+        'auth.keyLabel': 'MUAPI 访问密钥',
         'auth.keyPlaceholder': '粘贴您的访问密钥值...',
-        'auth.keyNote': '请不要输入密钥名称或标签；粘贴从 Muapi 生成的密钥值。',
+        'auth.keyNote': '请不要输入密钥名称或标签；粘贴从 MUAPI 生成的密钥值。',
         'auth.storedOnMachine': '已保存到本机的共享凭据库 — 本机上的每个 Hive 应用都可使用，且不会留在此浏览器中。',
         'auth.storedInBrowser': '保存在此浏览器中，仅发送到 api.muapi.ai。',
         'auth.saving': '保存中…',
         'auth.initBtn': '保存并继续',
-        'auth.createKey': '创建或复制 Muapi 访问密钥',
+        'auth.createKey': '创建或复制 MUAPI 访问密钥',
 
         // Image Studio
         'image.title': '图像工作室',

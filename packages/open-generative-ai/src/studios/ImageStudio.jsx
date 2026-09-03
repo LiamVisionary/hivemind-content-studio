@@ -60,6 +60,7 @@ import {
 } from '../lib/completionPing.js';
 
 import { loadStudioSetup, registerPromptInserter, registerStudioSetupLoader } from '../app/promptTarget.js';
+import { useApiStatus } from '../app/statusStore.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import {
   attachDroppedReferences,
@@ -397,6 +398,9 @@ export function ImageStudio({
   if (!generationQueueRef.current) generationQueueRef.current = createStudioGenerationQueue();
   const [, setTick] = useState(0);
   const bump = () => setTick((n) => n + 1);
+  // One shared verdict on whether the studio is up, rather than each lane
+  // discovering it separately when a press fails.
+  const apiStatus = useApiStatus();
 
   // The primary tab adopts the composer draft and any pending generation no open
   // tab owns; new and duplicated tabs start clean. StudioTabs decides which tab
@@ -2525,7 +2529,14 @@ export function ImageStudio({
       ? (zh() ? '这台机器上尚未安装图像模型——打开“模型”安装一个，或改用云端。' : 'No image model is installed on this machine yet — open Models to install one, or switch the source to Cloud.')
       : (zh() ? '本地引擎正在启动——它响应后即可生成，或改用云端。' : 'The local engine is starting — generate as soon as it answers, or switch the source to Cloud.'))
     : '';
-  const generateBlocked = rentedBlocked || localBlocked;
+  // The studio itself is down: every lane below it is moot, so the press is
+  // greyed out with that reason rather than failing one provider at a time.
+  // The banner above the canvas (StudioLayout) carries the fix.
+  const offlineBlocked = apiStatus.tone === 'offline';
+  const offlineReason = offlineBlocked
+    ? (zh() ? '工作室没有运行——重新启动后即可生成。' : 'The studio is not running — start it again to generate.')
+    : '';
+  const generateBlocked = rentedBlocked || localBlocked || offlineBlocked;
   // Edit workflows (requires.image) take their ASPECT from the reference on the
   // server, so the aspect-ratio preset would be a lie while a reference is
   // attached — replace it with the truth. The size is still the caller's to set:
@@ -3425,9 +3436,11 @@ export function ImageStudio({
             loading={s.generating}
             disabled={generateBlocked}
             onClick={generate}
-            title={rentedBlocked
-              ? 'Rent a machine (or switch the source to Local) to generate.'
-              : (localBlockedReason || t('image.generateTooltip'))}
+            title={offlineBlocked
+              ? offlineReason
+              : rentedBlocked
+                ? 'Rent a machine (or switch the source to Local) to generate.'
+                : (localBlockedReason || t('image.generateTooltip'))}
             className="min-w-[130px]"
           >
             {generateLabel}

@@ -2,6 +2,8 @@
 // See DESIGN.md. All plain JSX, no external deps.
 import { createContext, useContext, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { STUDIO_RESTART_COMMAND, apiOfflineSentence, pingApiStatus, useApiStatus } from '../app/statusStore.js';
+import { getLang } from '../lib/i18n.js';
 import { Icon } from './icons.jsx';
 
 const FieldIdContext = createContext(undefined);
@@ -664,6 +666,35 @@ function ComposerSlot({ drop, children }) {
   );
 }
 
+// The studio is not answering — said once, at the top of whatever studio the
+// user is standing in, with the same Retry the topbar pill offers. A press that
+// cannot possibly work is greyed out by each studio; this line is why.
+function StudioOfflineBanner() {
+  const status = useApiStatus();
+  const [busy, setBusy] = useState(false);
+  if (status.tone !== 'offline') return null;
+  const zh = getLang() === 'zh-CN';
+  const retry = () => {
+    setBusy(true);
+    void pingApiStatus().finally(() => setBusy(false));
+  };
+  return (
+    <div
+      role="status"
+      className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-warn/40 bg-warn/10 px-3.5 py-2 text-xs text-ink1"
+    >
+      <span className="font-semibold">{zh ? '工作室没有运行' : 'The studio is not running'}</span>
+      <span className="min-w-0 text-ink2">{apiOfflineSentence(zh)}</span>
+      <code className="rounded border border-line1 bg-bg2 px-1.5 py-0.5 font-mono text-[11px] text-ink1">
+        {STUDIO_RESTART_COMMAND}
+      </code>
+      <Button size="sm" icon="refresh" loading={busy} onClick={retry} className="ml-auto">
+        {zh ? '立即重试' : 'Retry now'}
+      </Button>
+    </div>
+  );
+}
+
 // Workspace-first studio frame: left params panel, main canvas, optional bottom composer.
 // On < lg the panel collapses into a toggleable sheet.
 export function StudioLayout({
@@ -695,6 +726,7 @@ export function StudioLayout({
         </>
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
+        <StudioOfflineBanner />
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
         {/* Below lg the panel lives in a sheet; its opener sits in its own row so it
             can never cover the composer (a floating button used to sit on the chips). */}
