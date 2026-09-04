@@ -228,7 +228,7 @@ test('no studio still offers Local / API / Rented as a mode', async () => {
   // …and the Send-to menu's copy of the triad is two places, not three modes.
   const { SEND_SOURCES, SOURCE_LABELS } = await import('../src/lib/studioTargets.js');
   assert.deepEqual([...SEND_SOURCES], ['local', 'api']);
-  assert.deepEqual(SEND_SOURCES.map((source) => SOURCE_LABELS[source].en), ['This Mac', 'Your accounts']);
+  assert.deepEqual(SEND_SOURCES.map((source) => SOURCE_LABELS[source]), ['This Mac', 'Your accounts']);
 });
 
 test('the served-model filter has one implementation, not three', async () => {

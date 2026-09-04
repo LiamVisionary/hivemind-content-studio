@@ -12,9 +12,8 @@
 import { toast } from 'react-hot-toast';
 
 import { describeFailure } from '../lib/describeFailure.js';
+import { t } from '../lib/i18n.js';
 import { runFailureRemedy } from '../lib/failureRemedy.js';
-import { zh } from '../lib/i18n.js';
-
 /**
  * `operation` names what was being attempted ("Reference upload"), so a generic
  * failure still says what it was for. `handlers` is passed through to
@@ -46,7 +45,7 @@ export function toastFailure(error, { operation = '', handlers = null } = {}) {
           className="shrink-0 rounded-sm px-2 py-1 text-xs font-semibold text-ink2 hover:text-ink1"
           onClick={() => toast.dismiss(instance.id)}
         >
-          {zh() ? '关闭' : 'Dismiss'}
+          {t('common.dismiss')}
         </button>
       </span>
     </span>

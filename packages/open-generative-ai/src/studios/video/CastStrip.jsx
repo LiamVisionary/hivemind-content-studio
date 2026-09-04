@@ -46,13 +46,12 @@ import { Icon } from '../../ui/icons.jsx';
 import { LibraryStateNote } from '../../ui/SavedLibrary.jsx';
 import { cx } from '../../ui/kit.jsx';
 import { GenderChips } from './PersonaBar.jsx';
-import { zh } from './videoLogic.js';
 
 // The labels for lib/promptWeave.js's CHARACTER_STYLES — how a cartoon is
 // DRAWN, which is not the same as who it is.
 const STYLE_LABELS = {
-  native: () => (zh() ? '原作画风' : 'As drawn'),
-  cgi: () => (zh() ? '半写实 CGI' : 'Semi-real CGI'),
+  native: () => 'As drawn',
+  cgi: () => 'Semi-real CGI',
 };
 
 const isPersonaLike = (member) => member?.kind === 'persona';
@@ -66,12 +65,12 @@ const isStaging = (member) => member?.retention === 'weak_reference';
 function memberName(member) {
   if (member.name) return member.name;
   if (isScene(member)) {
-    if (isStaging(member)) return zh() ? '分镜' : 'Storyboard';
-    return zh() ? '场景' : 'Location';
+    if (isStaging(member)) return 'Storyboard';
+    return 'Location';
   }
-  if (member.key === REFERENCES_KEY) return zh() ? '你的参考' : 'Your references';
-  if (String(member.key || '').startsWith('person:')) return zh() ? '新成员' : 'New person';
-  return zh() ? '角色 ID' : 'Persona';
+  if (member.key === REFERENCES_KEY) return 'Your references';
+  if (String(member.key || '').startsWith('person:')) return 'New person';
+  return 'Persona';
 }
 
 /** Whether the member's NAME is this strip's to edit — a saved persona is renamed by saving. */
@@ -92,7 +91,7 @@ function AddPersona({ members, onAdd }) {
         className="flex items-center gap-1.5 rounded-md border border-dashed border-line2 px-2 py-1.5 text-[11px] font-medium text-ink2 transition-colors hover:border-honey hover:bg-honey-tint hover:text-honey"
       >
         <Icon name="persona" size={12} />
-        {zh() ? '已保存的角色 ID' : 'A saved persona'}
+        A saved persona
       </button>
       {open ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-line1 bg-bg2 p-1">
@@ -100,9 +99,7 @@ function AddPersona({ members, onAdd }) {
             loading={loading}
             locked={locked}
             empty={!entries.length}
-            emptyHint={zh()
-              ? '还没有保存的角色 ID。先在参考面板里保存一个。'
-              : 'No personas saved yet — save one from the References panel first.'}
+            emptyHint="No personas saved yet — save one from the References panel first."
           />
           {entries.map((entry) => {
             const already = taken.has(`persona:${entry.id}`);
@@ -144,7 +141,7 @@ function AddCharacter({ members, onAdd }) {
         className="flex items-center gap-1.5 rounded-md border border-dashed border-line2 px-2 py-1.5 text-[11px] font-medium text-ink2 transition-colors hover:border-honey hover:bg-honey-tint hover:text-honey"
       >
         <Icon name="clapper" size={12} />
-        {zh() ? '已知角色' : 'A known character'}
+        A known character
       </button>
       {open ? (
         <div className="rounded-md border border-line1 bg-bg2 p-1">
@@ -155,14 +152,14 @@ function AddCharacter({ members, onAdd }) {
               autoFocus
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder={zh() ? '搜索角色或作品…' : 'Search characters or series…'}
+              placeholder="Search characters or series…"
               className="h-7 w-full border-none bg-transparent text-[11px] text-ink1 outline-none placeholder:text-ink3"
             />
           </div>
           <div className="max-h-40 overflow-y-auto">
             {groups.length ? null : (
               <p className="px-2 py-3 text-center text-[10px] text-ink3">
-                {zh() ? '没有匹配的角色。' : 'No characters match.'}
+                No characters match.
               </p>
             )}
             {groups.map((group) => (
@@ -207,8 +204,8 @@ function NumberBadge({ member, number }) {
       <span
         className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-bg3 text-[10px] text-ink2"
         aria-label={isStaging(member)
-          ? (zh() ? '分镜参考（不是主体）' : 'staging reference, not a subject')
-          : (zh() ? '场景参考（不是主体）' : 'place reference, not a subject')}
+          ? 'staging reference, not a subject'
+          : 'place reference, not a subject'}
       >
         {isStaging(member) ? '▤' : '▣'}
       </span>
@@ -220,7 +217,7 @@ function NumberBadge({ member, number }) {
         'grid h-5 w-5 shrink-0 place-items-center rounded-full font-mono text-[10px] font-bold',
         member?.kind === 'character' ? 'bg-bg3 text-ink1' : 'bg-honey text-bg0',
       )}
-      aria-label={zh() ? `第 ${number} 位` : `Person ${number}`}
+      aria-label={`Person ${number}`}
     >
       {number}
     </span>
@@ -234,8 +231,8 @@ function MemberEditor({
   // What this member is CALLED, in plain words, and what the model's grammar
   // calls it — the second only ever as hover text and in the advanced fold.
   const subject = isScene(member)
-    ? (isStaging(member) ? (zh() ? '分镜方向' : 'staging direction') : (zh() ? '地点' : 'the place'))
-    : (zh() ? `第 ${number} 位` : `Person ${number}`);
+    ? (isStaging(member) ? 'staging direction' : 'the place')
+    : `Person ${number}`;
   const subjectToken = isScene(member)
     ? (isStaging(member) ? 'weak_reference' : 'attribute_transfer')
     : `<Subject ${number}>`;
@@ -246,7 +243,7 @@ function MemberEditor({
       const look = await onDraftLook(member);
       if (look) onChange(member.key, { data: { ...(member.data || {}), look: normalizePersonaLook(look) } });
     } catch (error) {
-      toast.error(error?.message || (zh() ? '无法从图片生成外貌描述。' : 'Could not draft the look from the pictures.'));
+      toast.error(error?.message || 'Could not draft the look from the pictures.');
     } finally {
       setDrafting(false);
     }
@@ -264,8 +261,8 @@ function MemberEditor({
             type="button"
             disabled={index === 0}
             onClick={() => onMove(index, -1)}
-            aria-label={zh() ? '前移' : 'Move earlier'}
-            title={zh() ? '前移（顺序即编号）' : 'Move earlier — cast order is the numbering'}
+            aria-label="Move earlier"
+            title="Move earlier — cast order is the numbering"
             className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30"
           >
             <Icon name="arrowRight" size={11} className="rotate-180" />
@@ -274,7 +271,7 @@ function MemberEditor({
             type="button"
             disabled={index === total - 1}
             onClick={() => onMove(index, 1)}
-            aria-label={zh() ? '后移' : 'Move later'}
+            aria-label="Move later"
             className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30"
           >
             <Icon name="arrowRight" size={11} />
@@ -282,10 +279,10 @@ function MemberEditor({
           <button
             type="button"
             onClick={() => { onRemove(member.key); close(); }}
-            aria-label={zh() ? `移出 ${memberName(member)}` : `Remove ${memberName(member)} from the shot`}
+            aria-label={`Remove ${memberName(member)} from the shot`}
             title={isPersonaLike(member)
-              ? (zh() ? '移出镜头——同时从参考行移除其图片与片段' : 'Remove from the shot — its pictures and clips leave the reference rows too')
-              : (zh() ? '移出镜头' : 'Remove from the shot')}
+              ? 'Remove from the shot — its pictures and clips leave the reference rows too'
+              : 'Remove from the shot'}
             className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
           >
             <Icon name="x" size={12} />
@@ -296,24 +293,20 @@ function MemberEditor({
       {isScene(member) ? (
         <div className="flex flex-col gap-2">
           <p className="text-[10px] leading-snug text-ink3">
-            {zh()
-              ? (isStaging(member)
-                ? '按分镜方向使用：只读取动作顺序与大致构图。画风、分格、边框都不会带入，成片始终是一个连续镜头。'
-                : '按地点使用：建筑、材质、色调、光线与布局会带入。它不是主体，里面也没有人。')
-              : (isStaging(member)
+            {isStaging(member)
                 ? 'Used as staging direction only — the order of the action and roughly where things sit. '
                   + 'Its drawing style, panel grid and borders do not carry, and the clip stays one continuous take.'
                 : 'Used as the place — architecture, materials, palette, light and layout carry. '
-                  + 'It is not a subject and holds nobody.')}
+                  + 'It is not a subject and holds nobody.'}
           </p>
           <div className="flex flex-col gap-1">
             <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">
-              {zh() ? '这张图是什么' : 'What this picture is'}
+              What this picture is
             </span>
             <div className="flex gap-1">
               {[
-                ['attribute_transfer', zh() ? '地点' : 'A place'],
-                ['weak_reference', zh() ? '分镜' : 'Staging'],
+                ['attribute_transfer', 'A place'],
+                ['weak_reference', 'Staging'],
               ].map(([value, label]) => (
                 <button
                   key={value}
@@ -341,17 +334,17 @@ function MemberEditor({
       ) : isPersonaLike(member) ? (
         <>
           <p className="text-[10px] leading-snug text-ink3">
-            {zh() ? describeMember(member, { zh: true }) : describeMember(member)}
+            {describeMember(member)}
           </p>
           {nameEditable(member) ? (
             <div className="flex flex-col gap-1">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">{zh() ? '名字' : 'Name'}</span>
+              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">Name</span>
               <input
                 type="text"
                 value={member.name || ''}
                 maxLength={80}
                 onChange={(event) => onChange(member.key, { name: event.target.value })}
-                placeholder={zh() ? '可选——没有图片时会写进提示词' : 'Optional — written into the prompt when there are no pictures'}
+                placeholder="Optional — written into the prompt when there are no pictures"
                 className="h-7 w-full rounded-md border border-line1 bg-bg1 px-2 text-[11px] text-ink1 outline-none placeholder:text-ink3 focus:border-honey"
               />
             </div>
@@ -359,17 +352,15 @@ function MemberEditor({
           {referenceLane && onAddMedia ? (
             <div className="flex flex-wrap items-center gap-1">
               {[
-                ['images', zh() ? '+ 图片' : '+ Pictures'],
-                ['videos', zh() ? '+ 动作片段' : '+ Motion clip'],
-                ['audios', zh() ? '+ 声音片段' : '+ Voice clip'],
+                ['images', '+ Pictures'],
+                ['videos', '+ Motion clip'],
+                ['audios', '+ Voice clip'],
               ].map(([kind, label]) => (
                 <button
                   key={kind}
                   type="button"
                   onClick={() => { onAddMedia(member.key, kind); close(); }}
-                  title={zh()
-                    ? '为这位成员附加参考——归属这位成员，而不是并入第一位'
-                    : 'Attach references FOR this member — they are claimed here, not merged into the first person'}
+                  title="Attach references FOR this member — they are claimed here, not merged into the first person"
                   className="rounded-md border border-dashed border-line2 px-2 py-1 text-[10px] font-medium text-ink2 transition-colors hover:border-honey hover:bg-honey-tint hover:text-honey"
                 >
                   {label}
@@ -379,13 +370,11 @@ function MemberEditor({
           ) : null}
           {!memberHasMedia(member) ? (
             <p className="text-[10px] leading-snug text-ink3">
-              {zh()
-                ? '没有参考时，这位成员由名字、性别和外貌的文字定义。'
-                : 'With no references, this member is defined by the name, gender and look written here.'}
+              With no references, this member is defined by the name, gender and look written here.
             </p>
           ) : null}
           <div className="flex flex-col gap-1">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">{zh() ? '性别' : 'Gender'}</span>
+            <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">Gender</span>
             <GenderChips
               compact
               value={member.data?.gender || ''}
@@ -394,19 +383,17 @@ function MemberEditor({
           </div>
           <div className="flex flex-col gap-1">
             <span className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">
-              <span>{zh() ? '外貌' : 'Look'}</span>
+              <span>Look</span>
               {onDraftLook ? (
                 <button
                   type="button"
                   disabled={drafting || !(member.data?.images || []).length}
                   onClick={draftLook}
-                  title={zh()
-                    ? '让本地助手看图写出发型、面部、体型和穿着（需要已加载的视觉模型）'
-                    : 'Have the local helper look at the pictures and write hair, face, build and wardrobe (needs a vision-capable model loaded)'}
+                  title="Have the local helper look at the pictures and write hair, face, build and wardrobe (needs a vision-capable model loaded)"
                   className="flex items-center gap-1 rounded px-1.5 py-0.5 normal-case tracking-normal text-honey transition-colors hover:bg-honey-tint disabled:opacity-40"
                 >
                   <Icon name="sparkles" size={10} />
-                  {drafting ? (zh() ? '正在看图…' : 'Looking…') : (zh() ? '从图片生成' : 'Draft from pictures')}
+                  {drafting ? 'Looking…' : 'Draft from pictures'}
                 </button>
               ) : null}
             </span>
@@ -415,9 +402,7 @@ function MemberEditor({
               maxLength={PERSONA_LOOK_MAX}
               value={member.data?.look || ''}
               onChange={(event) => onChange(member.key, { data: { ...(member.data || {}), look: event.target.value } })}
-              placeholder={zh()
-                ? '发型、面部、体型、穿着——写出来。模型靠这些文字和图片一起认人。'
-                : 'Hair, face, build, wardrobe — write it out. The model holds identity from these words as much as from the pictures.'}
+              placeholder="Hair, face, build, wardrobe — write it out. The model holds identity from these words as much as from the pictures."
               className="w-full resize-none rounded-md border border-line1 bg-bg1 px-2 py-1.5 text-[11px] leading-snug text-ink1 outline-none placeholder:text-ink3 focus:border-honey"
             />
           </div>
@@ -446,7 +431,7 @@ function MemberEditor({
               member.useVoice ? 'bg-honey-tint text-honey' : 'text-ink3 hover:bg-bg3 hover:text-ink2',
             )}
           >
-            {zh() ? '本人声音' : 'own voice'}
+            own voice
           </button>
         </div>
       )}
@@ -476,10 +461,10 @@ function MemberChip({
         type="button"
         onClick={() => { if (!drag.happened()) onOpenChange(!open); }}
         title={isScene(member)
-          ? (zh() ? '这张图是地点还是分镜（可拖动排序）' : 'Whether this picture is a place or staging — drag to reorder')
+          ? 'Whether this picture is a place or staging — drag to reorder'
           : isPersonaLike(member)
-            ? (zh() ? '名字、性别、外貌、参考、顺序（可拖动排序）' : 'Name, gender, look, references, order — drag to reorder')
-            : (zh() ? '画风、声音、顺序（可拖动排序）' : 'Style, voice, order — drag to reorder')}
+            ? 'Name, gender, look, references, order — drag to reorder'
+            : 'Style, voice, order — drag to reorder'}
         className={cx(
           'inline-flex h-7 max-w-[260px] cursor-grab items-center gap-1.5 rounded-md border px-1.5 text-[12px] transition-colors active:cursor-grabbing',
           open ? 'border-honey bg-honey-tint' : 'border-line1 bg-bg2 hover:border-line2 hover:bg-bg3',
@@ -491,8 +476,8 @@ function MemberChip({
         <span className="truncate font-medium text-ink1">{memberName(member)}</span>
         <span className="hidden truncate text-[10px] text-ink3 sm:inline">
           {isPersonaLike(member) || isScene(member)
-            ? describeMember(member, { zh: zh() })
-            : (zh() ? '已知角色' : 'known character')}
+            ? describeMember(member)
+            : 'known character'}
         </span>
       </button>
       {open ? (
@@ -622,9 +607,9 @@ export function CastStrip({
   };
 
   const lane = target === 'reference'
-    ? (zh() ? '参考模式' : 'Reference mode')
+    ? 'Reference mode'
     : target === 'h3-text'
-      ? (zh() ? '文字模式' : 'Text mode')
+      ? 'Text mode'
       : '';
   // WHO is in the shot. A location plate and a storyboard are members of the
   // cast — they own picture slots and carry their own retention contract — but
@@ -637,7 +622,7 @@ export function CastStrip({
   return (
     <div className="flex flex-wrap items-center gap-1.5" data-cast-strip>
       <span className="mr-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">
-        {zh() ? '镜头里是谁' : 'In the shot'}
+        In the shot
       </span>
       {people.map((member, index) => (
         <MemberChip
@@ -665,25 +650,21 @@ export function CastStrip({
           <button
             type="button"
             onClick={toggle}
-            title={zh()
-              ? '加入镜头：上传图片或片段、已保存的角色 ID、已知角色'
-              : 'Put someone in the shot: upload pictures or clips, a saved persona, or a known character'}
+            title="Put someone in the shot: upload pictures or clips, a saved persona, or a known character"
             className={cx(
               'inline-flex h-7 items-center gap-1 rounded-md border border-dashed px-2 text-[12px] font-medium transition-colors',
               open ? 'border-honey bg-honey-tint text-honey' : 'border-line2 text-ink2 hover:border-honey hover:bg-honey-tint hover:text-honey',
             )}
           >
             <Icon name="plus" size={12} />
-            {people.length ? (zh() ? '加入' : 'Add') : (zh() ? '加入某人' : 'Add someone')}
+            {people.length ? 'Add' : 'Add someone'}
           </button>
         )}
       >
         {(close) => (
           <div className="flex flex-col gap-2">
             <p className="text-[10px] leading-snug text-ink3">
-              {zh()
-                ? '顺序即编号：第一位就是第 1 位。提示词按位置指代，换人也能用。'
-                : 'Order is the numbering — whoever is first is Person 1. Prompts refer to people by their place, so they work with any cast.'}
+              Order is the numbering — whoever is first is Person 1. Prompts refer to people by their place, so they work with any cast.
             </p>
             {referenceLane && !people.length ? (
               <button
@@ -692,7 +673,7 @@ export function CastStrip({
                 className="flex items-center gap-1.5 rounded-md border border-dashed border-line2 px-2 py-1.5 text-[11px] font-medium text-ink2 transition-colors hover:border-honey hover:bg-honey-tint hover:text-honey"
               >
                 <Icon name="upload" size={12} />
-                {zh() ? '图片或片段（参考面板）' : 'Pictures or clips of a person'}
+                Pictures or clips of a person
               </button>
             ) : null}
             {/* Anyone can be a second subject — a NEW person, never merged into
@@ -703,22 +684,18 @@ export function CastStrip({
               type="button"
               onClick={() => addPerson(close)}
               title={referenceLane
-                ? (zh()
-                  ? '新增一位成员：用成员卡片上的 + 按钮为 TA 附加图片/片段，或仅用文字定义'
-                  : "Add a new member — give them their own pictures with the chip's + buttons, or define them in text")
-                : (zh()
-                  ? '此模型没有参考槽位——新成员由名字、性别和外貌的文字定义'
-                  : 'This model has no reference slots — the new member is defined by name, gender and look in text')}
+                ? "Add a new member — give them their own pictures with the chip's + buttons, or define them in text"
+                : 'This model has no reference slots — the new member is defined by name, gender and look in text'}
               className="flex items-center gap-1.5 rounded-md border border-dashed border-line2 px-2 py-1.5 text-[11px] font-medium text-ink2 transition-colors hover:border-honey hover:bg-honey-tint hover:text-honey"
             >
               <Icon name="plus" size={12} />
-              {people.length ? (zh() ? '另一位成员' : 'Another person') : (zh() ? '仅用文字定义的成员' : 'A person described in text')}
+              {people.length ? 'Another person' : 'A person described in text'}
             </button>
             {referenceLane ? <AddPersona members={members} onAdd={(member) => { add(member); close(); }} /> : null}
             <AddCharacter members={members} onAdd={(member) => { add(member); close(); }} />
             {people.length ? null : (
               <p className="text-[10px] leading-snug text-ink3">
-                {zh() ? `角色 ID 默认${PERSONA_DEFAULT_STYLE}` : `A person from pictures is rendered ${PERSONA_DEFAULT_STYLE}.`}
+                {`A person from pictures is rendered ${PERSONA_DEFAULT_STYLE}.`}
               </p>
             )}
           </div>
@@ -736,7 +713,7 @@ export function CastStrip({
             <button
               type="button"
               onClick={toggle}
-              title={zh() ? '织入时的提醒' : 'Notes from the last weave'}
+              title="Notes from the last weave"
               className={cx(
                 'inline-flex h-6 items-center gap-1 rounded px-1.5 text-[10px] font-medium transition-colors',
                 open ? 'bg-honey-tint text-honey' : 'text-honey hover:bg-honey-tint',
@@ -764,16 +741,14 @@ export function CastStrip({
                 type="button"
                 onClick={onWeave}
                 className="rounded border border-honey bg-honey-tint px-1.5 py-0.5 font-medium text-honey transition-colors hover:bg-bg2"
-                title={zh()
-                  ? '提示词还没有按参考改写——点此织入'
-                  : 'The prompt does not address your references yet — weave them in'}
+                title="The prompt does not address your references yet — weave them in"
               >
-                {zh() ? '织入提示词' : 'Weave into prompt'}
+                Weave into prompt
               </button>
             ) : (promptEmpty ? null : (
               <span className="inline-flex items-center gap-0.5 text-honey">
                 <Icon name="check" size={10} />
-                {zh() ? '已织入' : 'woven'}
+                woven
               </span>
             ))
           ) : null}

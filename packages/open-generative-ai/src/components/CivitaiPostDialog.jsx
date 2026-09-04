@@ -12,7 +12,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { downloadMedia } from '../lib/downloadMedia.js';
-import { zh } from '../lib/i18n.js';
 import {
   CIVITAI_LIMITS, CIVITAI_UPLOAD_URL, canHandOffDirectly, dropCivitaiPost, formatBytes,
   normalizeTags, postMetaFromEntry, prepareCivitaiPost, stageCivitaiPost,
@@ -72,7 +71,7 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
       if (!opened) {
         // A blocked popup is not a failure — the link is still good, and the
         // dialog now shows it as one to click.
-        toast(zh() ? '浏览器拦截了新标签页，请点击下面的链接。' : 'Your browser blocked the new tab — use the link below.');
+        toast('Your browser blocked the new tab — use the link below.');
       }
     } catch (err) {
       setError(err?.message || 'Could not hand this to Civitai.');
@@ -119,26 +118,26 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
     <Modal
       open
       onClose={onClose}
-      title={zh() ? '发布到 Civitai' : 'Post to Civitai'}
+      title="Post to Civitai"
       size="lg"
       footer={
         posted ? (
           <>
             <span className="mr-auto text-[11px] text-ink3">
-              {zh() ? '已在 Civitai 打开，请在那里完成发布。' : 'Finish the post in the Civitai tab.'}
+              Finish the post in the Civitai tab.
             </span>
             <Button
               variant="neutral"
               icon="external"
               onClick={() => window.open(posted.intentUrl, '_blank', 'noopener,noreferrer')}
             >
-              {zh() ? '重新打开' : 'Reopen Civitai'}
+              Reopen Civitai
             </Button>
-            <Button variant="primary" icon="check" onClick={onClose}>{zh() ? '完成' : 'Done'}</Button>
+            <Button variant="primary" icon="check" onClick={onClose}>Done</Button>
           </>
         ) : (
           <>
-            <Button variant="ghost" className="mr-auto" onClick={onClose}>{zh() ? '取消' : 'Cancel'}</Button>
+            <Button variant="ghost" className="mr-auto" onClick={onClose}>Cancel</Button>
             <Button
               variant="primary"
               icon="upload"
@@ -147,8 +146,8 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
               onClick={() => void (direct ? post() : postManually())}
             >
               {direct
-                ? (zh() ? '发布到 Civitai' : 'Continue to Civitai')
-                : (zh() ? '保存并打开 Civitai' : 'Save file & open Civitai')}
+                ? 'Continue to Civitai'
+                : 'Save file & open Civitai'}
             </Button>
           </>
         )
@@ -158,7 +157,7 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
         {!prepared && !error ? (
           <div className="flex items-center gap-2 py-6 text-xs text-ink3">
             <Spinner size={14} className="text-honey" />
-            {zh() ? '正在读取该作品…' : 'Reading this creation…'}
+            Reading this creation…
           </div>
         ) : null}
 
@@ -182,9 +181,7 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
                 {/* Named plainly. This is the one screen where the studio's
                     usual promise does not apply, so it says so. */}
                 <span className="text-warn">
-                  {zh()
-                    ? '将以未加密的原始文件上传至 Civitai。'
-                    : 'Uploaded to Civitai unencrypted — this is public once you publish it there.'}
+                  Uploaded to Civitai unencrypted — this is public once you publish it there.
                 </span>
               </div>
             </div>
@@ -197,28 +194,26 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
 
             {!posted ? (
               <>
-                <Field label={zh() ? '标题' : 'Title'}>
+                <Field label="Title">
                   <TextInput
                     value={title}
                     onChange={(event) => setTitle(event.target.value)}
-                    placeholder={zh() ? '可选' : 'Optional'}
+                    placeholder="Optional"
                     maxLength={255}
                   />
                 </Field>
-                <Field label={zh() ? '描述' : 'Description'}>
+                <Field label="Description">
                   <TextArea
                     value={description}
                     onChange={(event) => setDescription(event.target.value)}
-                    placeholder={zh() ? '可选' : 'Optional'}
+                    placeholder="Optional"
                     rows={3}
                     maxLength={1000}
                   />
                 </Field>
                 <Field
-                  label={zh() ? '标签' : 'Tags'}
-                  hint={zh()
-                    ? `逗号分隔，最多 ${CIVITAI_LIMITS.tags} 个`
-                    : `Comma separated · Civitai allows ${CIVITAI_LIMITS.tags}`}
+                  label="Tags"
+                  hint={`Comma separated · Civitai allows ${CIVITAI_LIMITS.tags}`}
                   labelRight={
                     <span className={cx('text-[10px]', tagList.length >= CIVITAI_LIMITS.tags ? 'text-warn' : 'text-ink3')}>
                       {tagList.length}/{CIVITAI_LIMITS.tags}
@@ -235,35 +230,27 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
                 {!direct ? (
                   <div className="rounded-md border border-line1 bg-bg2 p-2.5 text-[11px] leading-relaxed text-ink2">
                     <span className="font-medium text-ink1">
-                      {zh() ? '此地址无法一键发布。' : 'One-click posting needs the secure address.'}
+                      One-click posting needs the secure address.
                     </span>{' '}
-                    {zh()
-                      ? '浏览器不允许 Civitai 的页面读取以 http:// 打开的本机地址，因此这里会把带元数据的文件保存到本地，并打开 Civitai 的上传页供你拖入。改用 https:// 的 Tailscale 地址即可一键完成。'
-                      : 'Browsers will not let Civitai’s page read an http:// address, so this will save the file (with its metadata written in) and open Civitai’s uploader for you to drop it into. Open the studio on its https Tailscale address to post in one step.'}
+                    Browsers will not let Civitai’s page read an http:// address, so this will save the file (with its metadata written in) and open Civitai’s uploader for you to drop it into. Open the studio on its https Tailscale address to post in one step.
                   </div>
                 ) : null}
 
                 <p className="text-[11px] leading-relaxed text-ink3">
-                  {zh()
-                    ? 'Civitai 没有上传 API，因此这里会把作品在本机短暂暂存，然后打开 Civitai 的发布页由其读取；提示词与生成参数会写入文件内部。发布前你仍可在 Civitai 上修改。'
-                    : 'Civitai has no upload API, so the studio stages this file locally for a few minutes and opens Civitai’s own post composer to read it — the prompt and settings are written inside the file on the way. Nothing is published until you press post on Civitai.'}
+                  Civitai has no upload API, so the studio stages this file locally for a few minutes and opens Civitai’s own post composer to read it — the prompt and settings are written inside the file on the way. Nothing is published until you press post on Civitai.
                 </p>
               </>
             ) : (
               <div className="flex flex-col gap-2 rounded-md border border-ok/40 bg-bg2 p-3 text-xs text-ink2">
                 <span className="font-medium text-ink1">
                   {posted.manual
-                    ? (zh() ? '文件已保存，Civitai 上传页已打开。' : 'File saved — Civitai’s uploader is open. Drop it in there.')
-                    : (zh() ? 'Civitai 已打开该作品。' : 'Civitai has been opened with this creation.')}
+                    ? 'File saved — Civitai’s uploader is open. Drop it in there.'
+                    : 'Civitai has been opened with this creation.'}
                 </span>
                 <span>
                   {posted.metadataEmbedded
-                    ? (zh()
-                      ? '提示词与生成参数已写入文件内部。'
-                      : 'The prompt and settings were written into the file.')
-                    : (zh()
-                      ? '未能将参数写入该文件，请在 Civitai 上手动填写提示词。'
-                      : 'The settings could not be written into this file — add the prompt on Civitai by hand.')}
+                    ? 'The prompt and settings were written into the file.'
+                    : 'The settings could not be written into this file — add the prompt on Civitai by hand.'}
                 </span>
                 {/* Video metadata is real but not yet read by Civitai: their
                     own MP4/WebM detection is still an open PR, so saying
@@ -271,15 +258,11 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
                     not happen on their side yet. */}
                 {kind === 'video' && posted.metadataEmbedded ? (
                   <span className="text-ink3">
-                    {zh()
-                      ? 'Civitai 目前尚未原生读取视频元数据（相关 PR 仍在进行中），因此可能需要手动填写。'
-                      : 'Civitai does not read video metadata natively yet (their PR for it is still open), so the fields there may still need filling in.'}
+                    Civitai does not read video metadata natively yet (their PR for it is still open), so the fields there may still need filling in.
                   </span>
                 ) : null}
                 <span className="text-ink3">
-                  {zh()
-                    ? '本机暂存文件将在 30 分钟内自动删除。'
-                    : 'The local staged copy is removed within 30 minutes.'}
+                  The local staged copy is removed within 30 minutes.
                 </span>
               </div>
             )}

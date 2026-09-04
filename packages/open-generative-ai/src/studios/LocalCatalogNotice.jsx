@@ -16,7 +16,7 @@
 // the only action that changes anything. It is checked ONLY when the section
 // already has nothing to offer, so a healthy machine never pays for the probe.
 import { Button, EmptyState, Spinner, cx } from '../ui/kit.jsx';
-import { zh } from '../lib/i18n.js';
+import { t } from '../lib/i18n.js';
 import { useComfyConnection } from '../lib/comfyConnection.js';
 import { navigateHub } from '../hub/hubData.js';
 
@@ -25,18 +25,10 @@ const openConnectComfy = () => navigateHub('machines');
 
 /** One sentence per status — shared so Image, Story and Sprite say the same thing. */
 export function localCatalogSentence(status) {
-  if (status === 'no-comfy') {
-    return zh() ? '尚未连接 ComfyUI。' : 'ComfyUI is not connected.';
-  }
-  if (status === 'unreachable') {
-    return zh() ? '本地引擎正在启动——它还没有响应。' : 'The local engine is starting — it has not answered yet.';
-  }
-  if (status === 'empty') {
-    return zh() ? '尚未安装图像模型。' : 'No image model installed yet.';
-  }
-  if (status === 'discovering') {
-    return zh() ? '正在查看这台机器能运行什么…' : 'Looking at what this machine can run…';
-  }
+  if (status === 'no-comfy') return t('setup.comfyNotConnected');
+  if (status === 'unreachable') return t('localModels.engineStarting');
+  if (status === 'empty') return t('setup.noImageModel');
+  if (status === 'discovering') return t('setup.discovering');
   return '';
 }
 
@@ -80,16 +72,14 @@ export function LocalCatalogNotice({
           icon="cpu"
           className="px-4 py-8"
           title={localCatalogSentence('no-comfy')}
-          hint={zh()
-            ? '本地模型需要 ComfyUI。连接一个即可，或改用云端/租用模型——它们无需 ComfyUI。'
-            : 'Local models run on ComfyUI. Connect one — or use a cloud or rented model, which need no ComfyUI at all.'}
+          hint={t('setup.comfyHint')}
           action={(
             <div className="flex flex-wrap items-center justify-center gap-2">
               <Button size="sm" icon="plug" onClick={openConnectComfy}>
-                {zh() ? '连接 ComfyUI' : 'Connect ComfyUI'}
+                {t('common.connectComfy')}
               </Button>
               {onSwitchToCloud
-                ? <Button size="sm" variant="neutral" icon="cloud" onClick={onSwitchToCloud}>{zh() ? '改用云端' : 'Switch to cloud'}</Button>
+                ? <Button size="sm" variant="neutral" icon="cloud" onClick={onSwitchToCloud}>{t('common.switchToCloud')}</Button>
                 : null}
             </div>
           )}
@@ -105,10 +95,8 @@ export function LocalCatalogNotice({
           icon="cpu"
           className="px-4 py-8"
           title={localCatalogSentence('empty')}
-          hint={zh()
-            ? '安装一个模型后，它会出现在这里。'
-            : 'Install one and it shows up here.'}
-          action={<Button size="sm" icon="download" onClick={openModels}>{zh() ? '打开模型' : 'Open Models'}</Button>}
+          hint={t('setup.noImageModelHint')}
+          action={<Button size="sm" icon="download" onClick={openModels}>{t('common.openModels')}</Button>}
         />
       </div>
     );
@@ -120,14 +108,12 @@ export function LocalCatalogNotice({
         icon="cpu"
         className="px-4 py-8"
         title={localCatalogSentence('unreachable')}
-        hint={zh()
-          ? '它启动后会自动出现在这里，或者现在改用云端。'
-          : 'It appears here as soon as it answers — or use the cloud for this one.'}
+        hint={t('setup.engineHint')}
         action={(
           <div className="flex flex-wrap items-center justify-center gap-2">
-            <Button size="sm" icon="refresh" onClick={onCheckAgain}>{zh() ? '再试一次' : 'Check again'}</Button>
+            <Button size="sm" icon="refresh" onClick={onCheckAgain}>{t('common.checkAgain')}</Button>
             {onSwitchToCloud
-              ? <Button size="sm" variant="neutral" icon="cloud" onClick={onSwitchToCloud}>{zh() ? '改用云端' : 'Switch to cloud'}</Button>
+              ? <Button size="sm" variant="neutral" icon="cloud" onClick={onSwitchToCloud}>{t('common.switchToCloud')}</Button>
               : null}
           </div>
         )}

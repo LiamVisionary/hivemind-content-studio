@@ -9,8 +9,8 @@
 // the setup mapping below has to carry that through without inventing values.
 
 export const INSPO_KINDS = [
-  { value: 'image', label: 'Images', zh: '图片' },
-  { value: 'video', label: 'Videos', zh: '视频' },
+  { value: 'image', label: 'Images' },
+  { value: 'video', label: 'Videos' },
 ];
 
 // Civitai's own sort vocabulary for /images — NOT the /models one (which has

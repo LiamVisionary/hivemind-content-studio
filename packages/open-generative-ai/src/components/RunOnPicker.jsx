@@ -23,7 +23,7 @@ import { RATING_LABELS } from '../lib/capabilityMatrix.js';
 import { PLACE_THIS_MAC, groupRunTargets, readoutText, runOnReadout } from '../lib/runTargets.js';
 import { RATING_TONE } from '../studios/ModelFitPicker.jsx';
 import { RentedSourceStatus } from '../studios/RentedSourceStatus.jsx';
-import { t, zh } from '../lib/i18n.js';
+import { t } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { Pill, SectionLabel, cx } from '../ui/kit.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
@@ -91,7 +91,7 @@ export function RunOnList({
 
       {automatic?.target && onAutomatic ? (
         <div>
-          <MenuHeading>{zh() ? '自动' : 'Automatic'}</MenuHeading>
+          <MenuHeading>{t('runOn.automatic')}</MenuHeading>
           <MenuItem
             selected={isAutomatic}
             meta={automatic.target.placeLabel}
@@ -163,7 +163,7 @@ export function RunOnPicker({
   });
   return (
     <div className={cx(compact ? 'contents' : 'flex flex-col gap-2', className)}>
-      {compact ? null : <SectionLabel>{zh() ? '运行于' : 'Runs on'}</SectionLabel>}
+      {compact ? null : <SectionLabel>{t('runOn.label')}</SectionLabel>}
       <Menu
         width="w-[320px]"
         panelClassName="max-h-[min(480px,70vh)]"
@@ -174,7 +174,7 @@ export function RunOnPicker({
             active={open}
             onClick={toggle}
             title={readoutText(readout)}
-            label={compact ? (zh() ? '运行于' : 'Runs on') : ''}
+            label={compact ? t('runOn.label') : ''}
             className={compact ? '' : 'w-full max-w-full justify-between'}
           />
         )}
@@ -197,7 +197,7 @@ export function RunOnPicker({
       </Menu>
       {!compact && isAutomatic && readout.note ? (
         <small className="text-[11px] text-ink3">
-          {zh() ? '自动选择：' : 'Automatic — '}{readout.note}
+          {t('runOn.automaticPrefix')}{readout.note}
         </small>
       ) : null}
     </div>

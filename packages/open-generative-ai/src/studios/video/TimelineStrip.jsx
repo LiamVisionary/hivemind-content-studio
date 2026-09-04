@@ -74,7 +74,7 @@ function InsertBar({ active }) {
 }
 
 export function TimelineStrip({
-  zh, segments, selectedId, pendingSegmentId = '',
+  segments, selectedId, pendingSegmentId = '',
   extendAvailable = false, extendMode = '', extendOn = false, onToggleExtend,
   canCombine = false, showCombined = false, combined = null, building = false, buildError = '',
   onToggleCombined, onExportCombined,
@@ -151,10 +151,10 @@ export function TimelineStrip({
         <div className="flex min-w-0 items-center gap-2">
           <Icon name="layers" size={13} className="text-honey" />
           <span className="text-[11px] font-semibold uppercase tracking-wide text-ink2">
-            {zh ? '场景' : 'Scene'}
+            Scene
           </span>
           <span className="font-mono text-[11px] text-ink3">
-            {zh ? `${filled} 段` : `${filled} clip${filled === 1 ? '' : 's'}`}
+            {`${filled} clip${filled === 1 ? '' : 's'}`}
             {combinedSeconds > 0 && !buildError ? ` · ${Math.round(combinedSeconds)}s` : ''}
           </span>
         </div>
@@ -164,37 +164,33 @@ export function TimelineStrip({
             <label
               className="flex cursor-pointer items-center gap-1.5"
               title={extendMode === 'chain'
-                ? (zh
-                  ? '开启后，每个新片段都从上一段的结尾接续生成（画面与环境音无缝衔接）'
-                  : 'Each new segment continues exactly where the previous clip ended — motion and room tone carry across the cut (MiniMax scene chaining)')
-                : (zh
-                  ? '开启后，每个新片段以上一段的最后一帧作为起始帧'
-                  : "Each new segment opens on the previous clip's last frame, grabbed on this device as its start frame")}
+                ? 'Each new segment continues exactly where the previous clip ended — motion and room tone carry across the cut (MiniMax scene chaining)'
+                : "Each new segment opens on the previous clip's last frame, grabbed on this device as its start frame"}
             >
-              <Toggle checked={extendOn} onChange={onToggleExtend} label={zh ? '自动接续' : 'Auto-continue'} />
-              <span className="text-[11px] text-ink2">{zh ? '自动接续' : 'Auto-continue'}</span>
+              <Toggle checked={extendOn} onChange={onToggleExtend} label="Auto-continue" />
+              <span className="text-[11px] text-ink2">Auto-continue</span>
             </label>
           ) : null}
 
           <div className="flex items-center gap-1" title={buildError
-            ? (zh ? `无法无损拼接：${buildError}` : `Cannot combine losslessly: ${buildError}`)
+            ? `Cannot combine losslessly: ${buildError}`
             : (canCombine
-              ? (zh ? '在主画布预览单段或完整合成片' : 'Preview one shot, or the whole cut, in the player above')
-              : (zh ? '至少需要两段片段才能合成' : 'Add a second clip to build the full cut'))}
+              ? 'Preview one shot, or the whole cut, in the player above'
+              : 'Add a second clip to build the full cut')}
           >
             <Segmented
               size="sm"
               value={showCombined ? 'combined' : 'shot'}
               onChange={(value) => onToggleCombined(value === 'combined')}
               options={[
-                { value: 'shot', label: zh ? '单段' : 'Shot' },
+                { value: 'shot', label: 'Shot' },
                 {
                   value: 'combined',
                   label: (
                     <span className="flex items-center gap-1">
                       {building ? <Spinner size={10} className="text-honey" /> : null}
                       {buildError ? <Icon name="warning" size={10} className="text-warn" /> : null}
-                      {zh ? '完整片' : 'Full cut'}
+                      Full cut
                     </span>
                   ),
                 },
@@ -204,7 +200,7 @@ export function TimelineStrip({
               <IconButton
                 icon="download"
                 size="sm"
-                label={zh ? '导出完整合成片' : 'Export the full cut'}
+                label="Export the full cut"
                 onClick={onExportCombined}
               />
             ) : null}
@@ -213,7 +209,7 @@ export function TimelineStrip({
           <IconButton
             icon="x"
             size="sm"
-            label={zh ? '关闭场景（片段会保留）' : 'Close the scene (your clips are kept)'}
+            label="Close the scene (your clips are kept)"
             onClick={onClose}
           />
         </div>
@@ -221,9 +217,7 @@ export function TimelineStrip({
 
       {buildError ? (
         <p className="text-[11px] text-warn">
-          {zh
-            ? `完整片暂不可用：${buildError} 同一模型、同一分辨率的片段可以无损合成。`
-            : `Full cut unavailable: ${buildError} Clips from the same model at the same resolution combine losslessly.`}
+          {`Full cut unavailable: ${buildError} Clips from the same model at the same resolution combine losslessly.`}
         </p>
       ) : null}
 
@@ -240,11 +234,11 @@ export function TimelineStrip({
               <div
                 role="button"
                 tabIndex={0}
-                aria-label={zh ? `第 ${index + 1} 段` : `Segment ${index + 1}`}
+                aria-label={`Segment ${index + 1}`}
                 aria-current={selected ? 'true' : undefined}
                 title={seg.url
-                  ? (promptFor?.(seg) || (zh ? `第 ${index + 1} 段` : `Segment ${index + 1}`))
-                  : (zh ? '空片段——生成的视频会落在这里' : 'Empty segment — the next generated clip lands here')}
+                  ? (promptFor?.(seg) || `Segment ${index + 1}`)
+                  : 'Empty segment — the next generated clip lands here'}
                 onClick={() => { if (!dragHappenedRef.current) onSelect(seg); }}
                 onKeyDown={(event) => {
                   if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -271,10 +265,10 @@ export function TimelineStrip({
                         ? <Spinner size={14} className="mx-auto text-honey" />
                         : <Icon name="clapper" size={14} className="mx-auto text-ink3" />}
                       <div className="mt-1 text-[10px] font-semibold text-ink2">
-                        {zh ? `第 ${index + 1} 段` : `Shot ${index + 1}`}
+                        {`Shot ${index + 1}`}
                       </div>
                       <div className="text-[10px] text-ink3">
-                        {pending ? (zh ? '生成中…' : 'rendering…') : (zh ? '待生成' : 'to generate')}
+                        {pending ? 'rendering…' : 'to generate'}
                       </div>
                     </div>
                   </div>
@@ -286,12 +280,12 @@ export function TimelineStrip({
                 ) : null}
                 {replaceHover ? (
                   <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-bg0/85 px-1.5 py-0.5 text-center text-[10px] font-semibold text-honey">
-                    {zh ? '替换这一段' : 'Replace this clip'}
+                    Replace this clip
                   </div>
                 ) : null}
                 {seg.excluded ? (
                   <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-bg0/80 px-1.5 py-0.5 text-center text-[10px] text-ink2">
-                    {zh ? '已移出合成片' : 'Dropped from the cut'}
+                    Dropped from the cut
                   </div>
                 ) : null}
                 {/* Visible on keyboard focus too, not only under a pointer. */}
@@ -300,7 +294,7 @@ export function TimelineStrip({
                     <IconButton
                       icon="download"
                       size="xs"
-                      label={zh ? '导出这一段' : 'Export this shot'}
+                      label="Export this shot"
                       className="border border-line1 bg-bg0/85 hover:border-line2"
                       onClick={(event) => { event.stopPropagation(); onExportSegment(seg); }}
                     />
@@ -310,8 +304,8 @@ export function TimelineStrip({
                       icon={seg.excluded ? 'plus' : 'minus'}
                       size="xs"
                       label={seg.excluded
-                        ? (zh ? '放回合成片' : 'Put back in the cut')
-                        : (zh ? '从合成片中移除（不删除该视频）' : 'Drop from the cut — the clip is kept')}
+                        ? 'Put back in the cut'
+                        : 'Drop from the cut — the clip is kept'}
                       className="border border-line1 bg-bg0/85 hover:border-line2"
                       onClick={(event) => { event.stopPropagation(); onToggleExcluded(seg); }}
                     />
@@ -319,7 +313,7 @@ export function TimelineStrip({
                   <IconButton
                     icon="x"
                     size="xs"
-                    label={zh ? '移除这一段' : 'Remove this segment'}
+                    label="Remove this segment"
                     className="border border-line1 bg-bg0/85 hover:border-danger/40"
                     onClick={(event) => { event.stopPropagation(); onRemove(seg); }}
                   />
@@ -334,8 +328,8 @@ export function TimelineStrip({
         <div
           role="button"
           tabIndex={0}
-          aria-label={zh ? '添加片段' : 'Add a segment'}
-          title={zh ? '添加下一段（也可以把片段拖到这里）' : 'Add the next segment — or drop a clip here'}
+          aria-label="Add a segment"
+          title="Add the next segment — or drop a clip here"
           onClick={() => { if (!dragHappenedRef.current) onAdd(); }}
           onKeyDown={(event) => {
             if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -352,7 +346,7 @@ export function TimelineStrip({
         >
           <div className="px-2 py-4 text-center">
             <Icon name="plus" size={16} className="mx-auto text-honey" />
-            <div className="mt-1 text-[10px] font-semibold text-ink2">{zh ? '添加片段' : 'Add segment'}</div>
+            <div className="mt-1 text-[10px] font-semibold text-ink2">Add segment</div>
           </div>
         </div>
       </div>

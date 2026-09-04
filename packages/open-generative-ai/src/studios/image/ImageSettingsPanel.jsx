@@ -23,7 +23,7 @@ import {
   AspectRatioPicker, CollapsibleSection, Field, IconButton, NativeSelect,
   SectionLabel, Segmented, Slider, TextArea, TextInput, Toggle, cx,
 } from '../../ui/kit.jsx';
-import { t, aspectRatioName, zh } from '../../lib/i18n.js';
+import { t, aspectRatioName } from '../../lib/i18n.js';
 import { EDIT_SHORT_SIDES, editBudgetForShortSide } from '../../lib/editResolution.js';
 import { AUTO_SAMPLER_LOW_STEP_THRESHOLD, STYLE_PRESETS, parseSeedInput } from './imagePrefs.js';
 import { LocalCatalogNotice } from '../LocalCatalogNotice.jsx';
@@ -142,15 +142,15 @@ export function ImageSettingsPanel({
           </div>
 
           <div className="flex flex-col gap-3">
-            <SectionLabel>{zh() ? '格式' : 'Format'}</SectionLabel>
+            <SectionLabel>Format</SectionLabel>
             {referenceDrivesAspect ? (
-              <Field label={zh() ? '宽高比' : 'Aspect ratio'}>
+              <Field label="Aspect ratio">
                 <div className="rounded-md border border-line1 bg-bg2 px-3 py-2 text-xs leading-relaxed text-ink3">
-                  {zh() ? '与参考图一致——编辑会保留其比例。' : 'Matches your reference image — the edit keeps its proportions.'}
+                  Matches your reference image — the edit keeps its proportions.
                 </div>
               </Field>
             ) : (
-              <Field label={zh() ? '宽高比' : 'Aspect ratio'} hint={etaLabel ? `About ${etaLabel} per image` : undefined}>
+              <Field label="Aspect ratio" hint={etaLabel ? `About ${etaLabel} per image` : undefined}>
                 <AspectRatioPicker
                   options={aspectRatios}
                   value={customDimsActive ? 'custom' : s.selectedAr}
@@ -179,7 +179,7 @@ export function ImageSettingsPanel({
               </Field>
             )}
             {resolutions.length > 0 ? (
-              <Field label={zh() ? '分辨率' : 'Resolution'}>
+              <Field label="Resolution">
                 <NativeSelect
                   title={t('image.qualityTooltip')}
                   value={s.selectedResolution}
@@ -221,7 +221,7 @@ export function ImageSettingsPanel({
           {/* "How many" — the batch reaches the local payload only, so on the
               cloud source there is nothing to choose. */}
           {s.useLocalModel ? (
-            <Field label={zh() ? '生成数量' : 'How many'} hint={zh() ? undefined : 'Pictures per press — each one costs the same time again'}>
+            <Field label="How many" hint="Pictures per press — each one costs the same time again">
               <Segmented
                 value={String(s.batchCount || 1)}
                 onChange={(v) => { s.batchCount = Number(v) || 1; persist(); bump(); }}
@@ -234,26 +234,26 @@ export function ImageSettingsPanel({
               "Add" opens the catalog. */}
           {s.useLocalModel ? <LoraSection {...loraProps} /> : null}
 
-          <CollapsibleSection title={t('image.advancedOptions')} hint={advancedHint} storageKey="image.advanced">
+          <CollapsibleSection title={t('common.advanced')} hint={advancedHint} storageKey="image.advanced">
             {/* Steps, guidance and the negative prompt reach the LOCAL payload
                 only — the cloud request is { model, prompt, aspect_ratio,
                 quality, seed }, so on the API source those controls would be
                 dead and are not shown. Seed rides on both. */}
             {s.useLocalModel ? (
-              <Field label={t('image.steps')} hint={zh() ? undefined : 'More detail, more time — every step is another pass over the picture'}>
+              <Field label={t('image.steps')} hint="More detail, more time — every step is another pass over the picture">
                 <Slider min={1} max={50} step={1} value={s.steps}
                   onChange={(v) => { s.steps = v; repaint(); }}
                   onCommit={() => bump()} />
               </Field>
             ) : null}
             {s.useLocalModel ? (
-              <Field label={t('image.guidanceScale')} hint={zh() ? undefined : 'How literally the model follows your words — high sticks to the prompt, low invents (CFG)'}>
+              <Field label={t('image.guidanceScale')} hint="How literally the model follows your words — high sticks to the prompt, low invents (CFG)">
                 <Slider min={1} max={20} step={0.5} value={s.guidanceScale}
                   onChange={(v) => { s.guidanceScale = v; repaint(); }}
                   onCommit={() => bump()} />
               </Field>
             ) : null}
-            <Field label={t('image.seed')} hint={zh() ? undefined : 'The same seed and the same settings make the same picture again — leave it at -1 for a new one every press'}>
+            <Field label={t('image.seed')} hint="The same seed and the same settings make the same picture again — leave it at -1 for a new one every press">
               <div className="flex items-center gap-1.5">
                 <TextInput
                   type="number"
@@ -274,32 +274,32 @@ export function ImageSettingsPanel({
             {showSampler ? (
               <>
                 <Field
-                  label={zh() ? '采样器' : 'Sampler'}
+                  label="Sampler"
                   hint={s.sampler
                     ? undefined
                     : krea2Selected
                       ? (s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD
                         ? 'Auto — clean at 2–5 steps, but not a speed win (deis_3m, ~2.7 model evals a step)'
                         : 'Auto — tuned for 8–10 steps, one pass each (euler_ancestral)')
-                      : (zh() ? '自动：工作流按步数自行选择' : 'Auto — the workflow picks a pair to match the step count')}
+                      : 'Auto — the workflow picks a pair to match the step count'}
                 >
                   <NativeSelect
                     value={s.sampler}
                     onChange={(e) => { s.sampler = e.target.value; persist(); bump(); }}
                   >
-                    <option value="">{zh() ? '自动（按步数）' : 'Auto (match steps)'}</option>
+                    <option value="">Auto (match steps)</option>
                     {samplerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
                   </NativeSelect>
                 </Field>
                 <Field
-                  label={zh() ? '调度器' : 'Scheduler'}
+                  label="Scheduler"
                   hint={s.scheduler || !krea2Selected ? undefined : `Auto — ${s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD ? 'bong_tangent' : 'beta'} for this step count`}
                 >
                   <NativeSelect
                     value={s.scheduler}
                     onChange={(e) => { s.scheduler = e.target.value; persist(); bump(); }}
                   >
-                    <option value="">{zh() ? '自动（按步数）' : 'Auto (match steps)'}</option>
+                    <option value="">Auto (match steps)</option>
                     {schedulerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
                   </NativeSelect>
                 </Field>
@@ -327,7 +327,7 @@ export function ImageSettingsPanel({
             ) : null}
             {editBudget ? (
               <Field
-                label={zh() ? '分辨率' : 'Resolution'}
+                label="Resolution"
                 hint={editOutput
                   ? `${editOutput.width} × ${editOutput.height} for this reference — ${editBudget.megapixels.toFixed(1)} MP of canvas; sampling time scales with pixel count`
                   : `${editBudget.megapixels.toFixed(1)} MP of canvas, shaped like your reference — sampling time scales with pixel count`}
@@ -349,7 +349,7 @@ export function ImageSettingsPanel({
             ) : null}
             {s.useLocalModel && resolvedDims && !referenceDrivesAspect ? (
               <Field
-                label={zh() ? '分辨率' : 'Resolution'}
+                label="Resolution"
                 // The ETA comes from measured runs of THIS setup — no model's
                 // hard-coded timings pretending to describe every workflow.
                 hint={resolvedDims.custom
@@ -371,17 +371,15 @@ export function ImageSettingsPanel({
             ) : null}
             {showRuntimeMode ? (
               <Field
-                label={zh() ? '本地运行模式' : 'Memory'}
-                hint={zh()
-                  ? '单次生成在每张图后释放内存；常驻模型把模型留在内存中，后续出图更快。'
-                  : 'Keep loaded makes the next picture start faster; One-off gives the memory back after each one.'}
+                label="Memory"
+                hint="Keep loaded makes the next picture start faster; One-off gives the memory back after each one."
               >
                 <Segmented
                   value={s.localRuntimeMode}
                   onChange={(v) => { s.localRuntimeMode = v; persist(); bump(); }}
                   options={[
-                    { value: 'one-off', label: zh() ? '单次生成' : 'One-off' },
-                    { value: 'persistent', label: zh() ? '常驻模型' : 'Keep loaded' },
+                    { value: 'one-off', label: 'One-off' },
+                    { value: 'persistent', label: 'Keep loaded' },
                   ]}
                 />
               </Field>
@@ -389,12 +387,12 @@ export function ImageSettingsPanel({
             {customDimsActive && !referenceDrivesAspect ? (
               <div className="grid grid-cols-2 gap-2">
                 <Field label={t('image.width')}>
-                  <TextInput type="number" className="font-mono" placeholder={t('image.widthPlaceholder')}
+                  <TextInput type="number" className="font-mono" placeholder={t('common.auto')}
                     value={s.customWidth ? String(s.customWidth) : ''}
                     onChange={(e) => { s.customWidth = parseInt(e.target.value, 10) || 0; persist(); bump(); }} />
                 </Field>
                 <Field label={t('image.height')}>
-                  <TextInput type="number" className="font-mono" placeholder={t('image.heightPlaceholder')}
+                  <TextInput type="number" className="font-mono" placeholder={t('common.auto')}
                     value={s.customHeight ? String(s.customHeight) : ''}
                     onChange={(e) => { s.customHeight = parseInt(e.target.value, 10) || 0; persist(); bump(); }} />
                 </Field>
@@ -402,26 +400,24 @@ export function ImageSettingsPanel({
             ) : null}
           </CollapsibleSection>
 
-          <CollapsibleSection title={zh() ? '模式' : 'Modes'} hint={modesHint} storageKey="image.modes">
+          <CollapsibleSection title="Modes" hint={modesHint} storageKey="image.modes">
             <div className="flex flex-col gap-2.5">
               <div className="flex items-center justify-between gap-2">
-                <SectionLabel>{zh() ? '区域框' : 'Region boxes'}</SectionLabel>
+                <SectionLabel>Region boxes</SectionLabel>
                 <Toggle
-                  label={zh() ? '区域框' : 'Region boxes'}
+                  label="Region boxes"
                   checked={s.regionMode}
                   onChange={(v) => { s.regionMode = v; persist(); bump(); }}
                 />
               </div>
               <p className="text-xs leading-relaxed text-ink3">
-                {zh()
-                  ? '说明各元素的位置：每个框都会变成一句位置描述附加到提示词后，适用于所有模型，无需额外节点。框内文字仅保留在本次会话。'
-                  : 'Say what goes where: each box becomes a placement sentence appended to your prompt. Works with every model — no extra nodes. Box text stays in this session only.'}
+                Say what goes where: each box becomes a placement sentence appended to your prompt. Works with every model — no extra nodes. Box text stays in this session only.
               </p>
               {s.regionMode ? (
                 <>
                   {coupleOn ? (
                     <p className="text-xs leading-relaxed text-warn">
-                      {zh() ? '双人模式开启时由它接管提示词，区域框暂不生效。' : 'Couple mode owns the prompt while it is on, so regions stand down.'}
+                      Couple mode owns the prompt while it is on, so regions stand down.
                     </p>
                   ) : null}
                   <RegionBoxEditor
@@ -437,17 +433,15 @@ export function ImageSettingsPanel({
             {coupleCapable ? (
               <div className="flex flex-col gap-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <SectionLabel>{zh() ? '双人模式' : 'Couple mode'}</SectionLabel>
+                  <SectionLabel>Couple mode</SectionLabel>
                   <Toggle
-                    label={zh() ? '双人模式' : 'Couple mode'}
+                    label="Couple mode"
                     checked={s.coupleMode}
                     onChange={(v) => { s.coupleMode = v; persist(); bump(); }}
                   />
                 </div>
                 <p className="text-xs leading-relaxed text-ink3">
-                  {zh()
-                    ? '双角色模式：每个角色一段提示词，画布按比例分割。角色文字仅保留在本次会话。'
-                    : 'Two-character mode: one prompt per character with a canvas split. Character text stays in this session only.'}
+                  Two-character mode: one prompt per character with a canvas split. Character text stays in this session only.
                 </p>
                 {coupleOn ? (
                   <div className="flex flex-col gap-3">
@@ -511,17 +505,15 @@ export function ImageSettingsPanel({
             {characterSheetCapable ? (
               <div className="flex flex-col gap-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <SectionLabel>{zh() ? '角色设定图' : 'Character sheet'}</SectionLabel>
+                  <SectionLabel>Character sheet</SectionLabel>
                   <Toggle
-                    label={zh() ? '角色设定图' : 'Character sheet'}
+                    label="Character sheet"
                     checked={s.characterSheetMode}
                     onChange={(v) => { s.characterSheetMode = v; persist(); bump(); }}
                   />
                 </div>
                 <p className="text-xs leading-relaxed text-ink3">
-                  {zh()
-                    ? '基于参考图的多视角设定图：每个视角单独编辑、共用种子，合成为一张带标注的设定图。提示词框可选，用于补充风格。'
-                    : 'Multi-view sheet from your reference: each view is its own edit with a shared seed, composited into one labeled sheet. The prompt box is optional extra styling.'}
+                  Multi-view sheet from your reference: each view is its own edit with a shared seed, composited into one labeled sheet. The prompt box is optional extra styling.
                 </p>
                 {sheetOn ? (
                   <Field label="Views">
@@ -536,7 +528,7 @@ export function ImageSettingsPanel({
 
             {strengthHuntCapable ? (
               <div className="flex flex-col gap-1.5">
-                <SectionLabel>{zh() ? '强度搜索' : 'Strength Hunt'}</SectionLabel>
+                <SectionLabel>Strength Hunt</SectionLabel>
                 <p className="text-xs leading-relaxed text-ink3">
                   {huntArmedCount
                     ? `Armed on ${huntArmedCount} LoRA${huntArmedCount === 1 ? '' : 's'} — one press sweeps each from 0 to its weight and adds a labeled comparison sheet.`

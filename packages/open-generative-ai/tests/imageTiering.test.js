@@ -78,22 +78,22 @@ test('the default panel is Model, Aspect, Style, How many and LoRAs — the rest
     assert.doesNotMatch(panel, /<Segmented[\s\S]{0,120}image\.local/, 'the source triad is gone');
     assert.match(basic, /<AspectRatioPicker/, 'Aspect is always visible');
     assert.match(basic, /\{t\('image\.stylePreset'\)\}/, 'Style is always visible');
-    assert.match(basic, /'How many'/, 'the batch count is always visible');
+    assert.match(basic, /label="How many"/, 'the batch count is always visible');
     assert.match(basic, /<LoraSection \{\.\.\.loraProps\} \/>/, 'the adapters are always visible');
 
     // Exactly two disclosures, and each names what is armed inside it.
     const sections = panel.match(/<CollapsibleSection[\s\S]{0,220}?>/g) || [];
     assert.equal(sections.length, 2, 'one Advanced, one Modes — no third disclosure');
-    assert.match(sections[0], /title=\{t\('image\.advancedOptions'\)\} hint=\{advancedHint\}/);
-    assert.match(sections[1], /title=\{zh\(\) \? '模式' : 'Modes'\} hint=\{modesHint\}/);
+    assert.match(sections[0], /title=\{t\('common\.advanced'\)\} hint=\{advancedHint\}/);
+    assert.match(sections[1], /title="Modes" hint=\{modesHint\}/);
     // Tuning lives in Advanced; the modes that change what the composer MEANS
     // live in Modes.
-    const advanced = panel.slice(panel.indexOf('<CollapsibleSection'), panel.indexOf("title={zh() ? '模式' : 'Modes'}"));
-    for (const control of [/t\('image\.steps'\)/, /t\('image\.guidanceScale'\)/, /t\('image\.seed'\)/, /'Sampler'/, /'Scheduler'/, /t\('image\.negPromptLabel'\)/, /LOCAL_BASE_SIZES/, /t\('image\.width'\)/]) {
+    const advanced = panel.slice(panel.indexOf('<CollapsibleSection'), panel.indexOf('title="Modes"'));
+    for (const control of [/t\('image\.steps'\)/, /t\('image\.guidanceScale'\)/, /t\('image\.seed'\)/, /label="Sampler"/, /label="Scheduler"/, /t\('image\.negPromptLabel'\)/, /LOCAL_BASE_SIZES/, /t\('image\.width'\)/]) {
         assert.match(advanced, control, `Advanced is missing ${control}`);
     }
-    const modes = panel.slice(panel.indexOf("title={zh() ? '模式' : 'Modes'}"));
-    for (const control of [/'Region boxes'/, /'Couple mode'/, /'Character sheet'/, /'Strength Hunt'/]) {
+    const modes = panel.slice(panel.indexOf('title="Modes"'));
+    for (const control of [/Region boxes/, /Couple mode/, /Character sheet/, /Strength Hunt/]) {
         assert.match(modes, control, `Modes is missing ${control}`);
     }
     // Both hints read the live state rather than a stored flag.
@@ -119,7 +119,7 @@ test('the composer is five chips and one door for improving a prompt', () => {
     const row = composer.slice(composer.indexOf('<div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">'));
     // Attach, Starters, Improve, Start fresh, Model.
     assert.match(row, /<UploadPicker/);
-    assert.match(row, /label=\{zh\(\) \? '附加' : 'Attach'\}/);
+    assert.match(row, /label=\{t\('composer\.attach'\)\}/);
     // Starters is loaded on press (its shipped prompt library is the heaviest
     // thing on this page), so the row holds the lazy component plus the chip
     // that stands in for it while the chunk arrives — both named by the same
@@ -127,8 +127,8 @@ test('the composer is five chips and one door for improving a prompt', () => {
     assert.match(row, /<SavedPromptsMenuLazy/);
     assert.match(row, /chip=\{startersChip\}/);
     assert.match(row, /\{\.\.\.startersChip\}/);
-    assert.match(composer, /label: zh\(\) \? '起点' : 'Starters'/);
-    assert.match(row, /label=\{zh\(\) \? '润色' : 'Improve'\}/);
+    assert.match(composer, /label: t\('composer\.starters'\)/);
+    assert.match(row, /label=\{t\('composer\.improve'\)\}/);
     assert.match(row, /label=\{t\('common\.startFresh'\)\}/);
     assert.match(row, /<RunOnPicker/);
     // The three separate "make my prompt better" doors are one menu now.
@@ -139,7 +139,7 @@ test('the composer is five chips and one door for improving a prompt', () => {
     // Quick starters and UGC are sections of the Starters menu.
     assert.match(composer, /extraSections=\{\(close\) => \(/);
     assert.match(composer, /\{t\('image\.quickStarters'\)\}/);
-    assert.match(composer, /'UGC first frame'/);
+    assert.match(composer, /<MenuHeading>UGC first frame<\/MenuHeading>/);
     // The enhancer's copy-to-clipboard flow is gone: "Use in generator" is the
     // only action, because the box is right there.
     assert.doesNotMatch(composer, /navigator\.clipboard\.writeText/);

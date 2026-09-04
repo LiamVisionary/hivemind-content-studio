@@ -144,7 +144,7 @@ import { SavedPromptsMenu } from './SavedPromptsMenu.jsx';
 import { IngredientsPanel } from './video/IngredientsPanel.jsx';
 
 import {
-  VIDEO_PREFERENCES_KEY, zh,
+  VIDEO_PREFERENCES_KEY,
   buildCatalogs, buildInitialSetup, adaptHivemindToVideoEntry, v2vModels,
   allVideoModels, currentModel, generationModelsFor, resolveVideoModel, withSelectedModel,
   currentIngredientModel, frameSlotsVisible, activeIngredientSheetItems, ingredientSelectionSignature,
@@ -200,7 +200,7 @@ function ResultVideo({ url, unmuted = false, hasAudio = false }) {
       {hasAudio ? (
         <Pill tone="neutral" className="pointer-events-none absolute left-2 top-2 gap-1 bg-bg0/80">
           <Icon name="sound" size={11} />
-          {zh() ? '有声' : 'Sound'}
+          Sound
         </Pill>
       ) : null}
     </div>
@@ -215,7 +215,7 @@ function ResultVideo({ url, unmuted = false, hasAudio = false }) {
 function HistoryThumb({ url }) {
   const { poster, resolved, pending } = useMediaPoster(url, { kind: 'video' });
   if (poster) return <img src={poster} alt="" className="aspect-video w-full bg-bg0 object-contain" />;
-  if (!resolved || pending) return <div className="aspect-video w-full animate-pulse bg-bg2" aria-label={zh() ? '解密中' : 'Decrypting'} />;
+  if (!resolved || pending) return <div className="aspect-video w-full animate-pulse bg-bg2" aria-label="Decrypting" />;
   return (
     <div className="grid aspect-video w-full place-items-center bg-bg0 text-ink3">
       <Icon name="film" size={18} />
@@ -665,9 +665,7 @@ export function VideoStudio({
   // it may never be silent. The alternative — leaving it — is a beat that
   // disappears with no message at all, which is what happened before.
   const announceRefit = (fitted) => {
-    toast(zh()
-      ? `已按 ${fitted.to}秒 重新排布 ${fitted.moved.length} 个镜头的时间点（原脚本约 ${Math.round(fitted.from)}秒）。`
-      : `Re-timed ${fitted.moved.length} shots to fit ${fitted.to}s — the prompt was written for about ${Math.round(fitted.from)}s.`);
+    toast(`Re-timed ${fitted.moved.length} shots to fit ${fitted.to}s — the prompt was written for about ${Math.round(fitted.from)}s.`);
   };
 
   // A prompt arriving WHOLE from somewhere that is not the keyboard — a starter,
@@ -778,7 +776,7 @@ export function VideoStudio({
           className="font-semibold text-honey hover:underline"
           onClick={() => { restoreWeaveSnapshot(snapshot); toast.dismiss(instance.id); }}
         >
-          {zh() ? '撤销' : 'Undo'}
+          Undo
         </button>
       </span>
     ), { duration: 7000 });
@@ -931,13 +929,12 @@ export function VideoStudio({
         provisioning: s.rentedProvisioning || [],
       },
       hasSourceToggle: isLocalAIAvailable(),
-      zh: zh(),
     });
     return publishSendTarget(`video:${tabIdRef.current}`, {
       section: 'video',
       tabId: tabIdRef.current,
       index: tabIdRef.current,
-      label: `${zh() ? '标签' : 'Tab'} ${tabIdRef.current || 1}`,
+      label: `${'Tab'} ${tabIdRef.current || 1}`,
       active: Boolean(tabActive),
       current: s.setup.rentedOnly ? 'rented' : s.setup.localMode ? 'local' : 'api',
       sources,
@@ -953,9 +950,9 @@ export function VideoStudio({
   // the persona's name — and only to the loopback llama-server.
   const draftLookFor = async (member) => {
     const urls = (member?.data?.images || []).slice(0, 3);
-    if (!urls.length) throw new Error(zh() ? '这位成员没有图片。' : 'This member has no pictures.');
+    if (!urls.length) throw new Error('This member has no pictures.');
     const images = (await Promise.all(urls.map((url) => mediaSourceToDataUrl(url, 'image').catch(() => null)))).filter(Boolean);
-    if (!images.length) throw new Error(zh() ? '无法读取图片。' : 'Could not read the pictures.');
+    if (!images.length) throw new Error('Could not read the pictures.');
     const response = await fetch('/api/prompt-helper/describe-look', {
       method: 'POST',
       credentials: 'same-origin',
@@ -964,7 +961,7 @@ export function VideoStudio({
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || !payload?.ok) {
-      throw new Error(payload?.detail || payload?.error || (zh() ? '助手没有返回外貌描述。' : 'The helper did not return a look.'));
+      throw new Error(payload?.detail || payload?.error || 'The helper did not return a look.');
     }
     return String(payload.look || '');
   };
@@ -1008,7 +1005,7 @@ export function VideoStudio({
       }
     } catch (err) {
       console.error('[VideoStudio] member attach failed:', err);
-      toast.error(err?.message || (zh() ? '附加失败' : 'Could not attach that.'));
+      toast.error(err?.message || 'Could not attach that.');
     } finally {
       s.claimNewFor = '';
       s.composerAttaching = false;
@@ -1032,7 +1029,7 @@ export function VideoStudio({
     if (weaveTargetNow() === 'reference' && s.cast.length && s.setup.prompt.trim()) {
       const woven = acceptPrompt(s.setup.prompt);
       if (woven.prompt !== before.prompt) {
-        announceWeave(zh() ? '已把参考织入提示词' : 'Wove your references into the prompt', before);
+        announceWeave('Wove your references into the prompt', before);
       }
     }
     bump();
@@ -1385,9 +1382,7 @@ export function VideoStudio({
     // announce, with Undo.
     if (announce && (woven.prompt !== before.prompt || JSON.stringify(woven.rows) !== JSON.stringify(before.rows))) {
       announceWeave(
-        zh()
-          ? `已应用演员表 · ${s.cast.length} 位 · ${total} 个参考`
-          : `Cast woven in — ${s.cast.length} member${s.cast.length === 1 ? '' : 's'}, ${total} reference${total === 1 ? '' : 's'}`,
+        `Cast woven in — ${s.cast.length} member${s.cast.length === 1 ? '' : 's'}, ${total} reference${total === 1 ? '' : 's'}`,
         before,
       );
     }
@@ -1406,14 +1401,12 @@ export function VideoStudio({
     if (!s.cast.length) return;
     if (weaveTargetNow() === 'reference') {
       announceWeave(
-        zh()
-          ? `已按当前演员表改写提示词 · ${s.cast.length} 位`
-          : `Prompt woven onto your cast — ${s.cast.length} member${s.cast.length === 1 ? '' : 's'}`,
+        `Prompt woven onto your cast — ${s.cast.length} member${s.cast.length === 1 ? '' : 's'}`,
         before,
       );
     } else if (woven.prompt !== fitShotTimeline(text, Number(s.setup.duration) || 0).prompt) {
       // Changed by the cast, not merely re-timed.
-      announceWeave(zh() ? '已把演员表织入提示词' : 'Cast woven into the prompt', before);
+      announceWeave('Cast woven into the prompt', before);
     }
   };
 
@@ -1485,14 +1478,10 @@ export function VideoStudio({
   const confirmSourceVideoSwitch = (cost) => new Promise((resolve) => {
     const lines = [];
     if (cost.switchesModel) {
-      lines.push(zh()
-        ? `${cost.fromModel} 无法延长视频，将切换到 ${cost.toModel}。`
-        : `${cost.fromModel} cannot extend or edit a clip, so this switches to ${cost.toModel}.`);
+      lines.push(`${cost.fromModel} cannot extend or edit a clip, so this switches to ${cost.toModel}.`);
     }
     if (cost.droppedReferences) {
-      lines.push(zh()
-        ? `已添加的 ${cost.droppedReferences} 个参考会被移除（源视频与参考模式不能同时使用）。`
-        : `Your ${cost.droppedReferences} attached reference${cost.droppedReferences === 1 ? '' : 's'} will be removed — a source clip and reference mode cannot be used together.`);
+      lines.push(`Your ${cost.droppedReferences} attached reference${cost.droppedReferences === 1 ? '' : 's'} will be removed — a source clip and reference mode cannot be used together.`);
     }
     s.sourceSwitchConfirm = { lines, resolve };
     bump();
@@ -1521,7 +1510,7 @@ export function VideoStudio({
         continueSceneFrom(upload.url, s.setup.modelId);
       } catch (err) {
         console.error('[VideoStudio] Clip upload failed:', err);
-        toastFailure(err, { operation: zh() ? '视频上传' : 'Video upload' });
+        toastFailure(err, { operation: 'Video upload' });
       } finally {
         s.videoUploading = false;
         bump();
@@ -1547,7 +1536,7 @@ export function VideoStudio({
       persistVideoPreferences();
     } catch (err) {
       console.error('[VideoStudio] Video upload failed:', err);
-      toastFailure(err, { operation: zh() ? '视频上传' : 'Video upload' });
+      toastFailure(err, { operation: 'Video upload' });
     } finally {
       s.videoUploading = false;
       bump();
@@ -1664,7 +1653,7 @@ export function VideoStudio({
     const maximum = Number(model.ingredientInputs?.max_images || 12);
     const toUpload = files.slice(0, Math.max(0, maximum - existing.length));
     if (!toUpload.length) return;
-    s.ingredientUploadMessage = `${zh() ? '正在添加' : 'Adding'} ${toUpload.length} ${zh() ? '个视图…' : `view${toUpload.length === 1 ? '' : 's'}…`}`;
+    s.ingredientUploadMessage = `${'Adding'} ${toUpload.length} ${`view${toUpload.length === 1 ? '' : 's'}…`}`;
     bump();
     try {
       const uploaded = [];
@@ -1677,7 +1666,7 @@ export function VideoStudio({
       setCurrentIngredientSelection([...existing, ...uploaded]);
       s.ingredientUploadMessage = '';
     } catch (error) {
-      s.ingredientUploadMessage = `${zh() ? '上传失败' : 'Upload failed'}: ${error.message}`;
+      s.ingredientUploadMessage = `${'Upload failed'}: ${error.message}`;
     }
     bump();
   };
@@ -1687,7 +1676,7 @@ export function VideoStudio({
     if (!model) return;
     const toUpload = files.slice(0, Math.max(0, 12 - s.sharedIngredientSheets.length));
     if (!toUpload.length) return;
-    s.ingredientUploadMessage = `${zh() ? '正在添加' : 'Adding'} ${toUpload.length} ${zh() ? '张配料表…' : `sheet${toUpload.length === 1 ? '' : 's'}…`}`;
+    s.ingredientUploadMessage = `${'Adding'} ${toUpload.length} ${`sheet${toUpload.length === 1 ? '' : 's'}…`}`;
     bump();
     try {
       for (const file of toUpload) {
@@ -1698,7 +1687,7 @@ export function VideoStudio({
       }
       s.ingredientUploadMessage = '';
     } catch (error) {
-      s.ingredientUploadMessage = `${zh() ? '上传失败' : 'Upload failed'}: ${error.message}`;
+      s.ingredientUploadMessage = `${'Upload failed'}: ${error.message}`;
     }
     syncSelectedIngredientSheet();
     if (s.selectedIngredientSheet && s.selectedIngredientSheet !== 'stitched') void matchAspectToIngredientSheet(s.selectedIngredientSheet);
@@ -1755,7 +1744,7 @@ export function VideoStudio({
     }
     s.videoLoraCatalogModelId = model.workflowId;
     s.videoLoraCatalogStatus = 'loading';
-    s.videoLoraCatalogMessage = `${zh() ? '正在加载 LoRA：' : 'Loading LoRAs for '}${model.name}…`;
+    s.videoLoraCatalogMessage = `${'Loading LoRAs for '}${model.name}…`;
     bump();
     try {
       const data = await localAI.listLoras(model.workflowId, model.compatibleBaseModels);
@@ -1763,15 +1752,15 @@ export function VideoStudio({
       s.availableVideoLoras = Array.isArray(data?.loras) ? data.loras : [];
       s.videoLoraCatalogStatus = data?.supported === false ? 'unsupported' : 'ready';
       s.videoLoraCatalogMessage = data?.supported === false
-        ? (zh() ? '此工作流未提供附加 LoRA 通道。' : 'This workflow does not expose an add-on LoRA path.')
+        ? 'This workflow does not expose an add-on LoRA path.'
         : s.availableVideoLoras.length
-          ? `${s.availableVideoLoras.length} ${zh() ? '个兼容 LoRA 已安装。' : `compatible LoRA${s.availableVideoLoras.length === 1 ? '' : 's'} installed.`}`
-          : (zh() ? '此工作流未安装兼容的 LoRA。' : 'No compatible LoRAs are installed for this workflow.');
+          ? `${s.availableVideoLoras.length} ${`compatible LoRA${s.availableVideoLoras.length === 1 ? '' : 's'} installed.`}`
+          : 'No compatible LoRAs are installed for this workflow.';
       void refreshVideoLoraUpdates(request, model.compatibleBaseModels);
     } catch (error) {
       if (request !== s.videoLoraCatalogRequest) return;
       s.videoLoraCatalogStatus = 'error';
-      s.videoLoraCatalogMessage = `${zh() ? '无法加载 LoRA：' : 'Unable to load LoRAs: '}${error.message}`;
+      s.videoLoraCatalogMessage = `${'Unable to load LoRAs: '}${error.message}`;
     }
     bump();
   };
@@ -1941,9 +1930,7 @@ export function VideoStudio({
     if (s.smoothingClip || !url) return;
     s.smoothingClip = true;
     bump();
-    const loadingId = toast.loading(zh()
-      ? `RIFE ${factor}× 平滑中——在现有帧之间插入新帧…`
-      : `Smoothing ${factor}× with RIFE — inserting frames between the existing ones…`);
+    const loadingId = toast.loading(`Smoothing ${factor}× with RIFE — inserting frames between the existing ones…`);
     try {
       const src = await resolveMediaSrc(url);
       const blob = await (await fetch(src)).blob();
@@ -1963,7 +1950,7 @@ export function VideoStudio({
       };
       addToHistory(entry);
       showVideoInCanvas(result.url, entry.model);
-      toast.success(zh() ? `已平滑 ${factor}× — 已加入历史。` : `Smoothed ${factor}× — added to history.`, { id: loadingId });
+      toast.success(`Smoothed ${factor}× — added to history.`, { id: loadingId });
     } catch (error) {
       toast.error(error?.message || 'Interpolation failed', { id: loadingId });
     } finally {
@@ -1998,15 +1985,13 @@ export function VideoStudio({
       addToHistory({
         id: `episode-${Date.now()}`,
         url: saved.url,
-        model: zh() ? '合成片' : 'Joined episode',
+        model: 'Joined episode',
         timestamp: new Date().toISOString(),
       });
-      toast.success(zh() ? '合成片已保存到历史记录。' : 'Episode saved — it is in History now.');
+      toast.success('Episode saved — it is in History now.');
     } catch (error) {
       // Not fatal: the cut is on screen and the export button still works.
-      toast.error(zh()
-        ? `合成片未能保存到历史记录：${error?.message || ''}`
-        : `Could not save the episode to History: ${error?.message || 'unknown error'}`);
+      toast.error(`Could not save the episode to History: ${error?.message || 'unknown error'}`);
     }
   };
 
@@ -2016,14 +2001,12 @@ export function VideoStudio({
   const buildChainCut = async (urls, key) => {
     if (s.joiningChain) return null;
     if (!Array.isArray(urls) || urls.length < 2) {
-      toast.error(zh() ? '没有可拼接的接续镜头。' : 'No chained shots to join for this clip.');
+      toast.error('No chained shots to join for this clip.');
       return null;
     }
     s.joiningChain = true;
     bump();
-    const loadingId = toast.loading(zh()
-      ? `拼接 ${urls.length} 段镜头（无损，本机完成）…`
-      : `Joining ${urls.length} shots losslessly on this device…`);
+    const loadingId = toast.loading(`Joining ${urls.length} shots losslessly on this device…`);
     try {
       const { joinClips } = await import('../lib/clipJoiner.js');
       const blobs = [];
@@ -2033,7 +2016,7 @@ export function VideoStudio({
       }
       const joined = await joinClips(blobs, {
         onProgress: (index, total) => {
-          toast.loading(zh() ? `拼接第 ${index + 1}/${total} 段…` : `Joining shot ${index + 1} of ${total}…`, { id: loadingId });
+          toast.loading(`Joining shot ${index + 1} of ${total}…`, { id: loadingId });
         },
       });
       // The previous cut's object URL is dead the moment a new one replaces it.
@@ -2044,10 +2027,8 @@ export function VideoStudio({
         audioJoined: joined.audioJoined,
         key,
       };
-      showVideoInCanvas(s.chainCombined.url, zh() ? '合成片' : 'Joined episode', { anchorChain: false });
-      toast.success(zh()
-        ? `已拼接 ${urls.length} 段（${Math.round(joined.seconds)} 秒）。`
-        : `Joined ${urls.length} shots (${Math.round(joined.seconds)}s)${joined.audioJoined ? '' : ' — video only, a shot had no audio'}.`, { id: loadingId });
+      showVideoInCanvas(s.chainCombined.url, 'Joined episode', { anchorChain: false });
+      toast.success(`Joined ${urls.length} shots (${Math.round(joined.seconds)}s)${joined.audioJoined ? '' : ' — video only, a shot had no audio'}.`, { id: loadingId });
       // Keep it: an object URL dies with the tab, so the finished episode is
       // stored as a real output — sealed like any other, and therefore in
       // History and restorable later. Best-effort: the cut is already on
@@ -2279,7 +2260,7 @@ export function VideoStudio({
     persistVideoPreferences();
     bump();
     focusPrompt();
-    if (hadSomething) announceWeave(zh() ? '已清空提示词与输入' : 'Cleared the prompt and its inputs', before);
+    if (hadSomething) announceWeave('Cleared the prompt and its inputs', before);
   };
   const extend = () => {
     if (!s.lastGenerationId) return;
@@ -2322,7 +2303,7 @@ export function VideoStudio({
 
   /* ---------------- manual timeline (lib/videoTimeline.js) ---------------- */
 
-  const timelineCutLabel = () => (zh() ? '时间线合成片' : 'Timeline cut');
+  const timelineCutLabel = () => 'Timeline cut';
 
   const persistTimeline = () => saveTimelineState(tabIdRef.current, {
     on: s.timelineOn,
@@ -2495,9 +2476,7 @@ export function VideoStudio({
       s.timelineSeededFrame = dataUrl;
       commit({ ...s.setup, imageUrl: dataUrl });
     } catch (error) {
-      toast.error(zh()
-        ? `无法提取上一段的最后一帧：${error?.message || ''}`
-        : `Could not grab the previous clip's last frame: ${error?.message || 'unknown error'}`);
+      toast.error(`Could not grab the previous clip's last frame: ${error?.message || 'unknown error'}`);
     }
   };
 
@@ -2605,7 +2584,7 @@ export function VideoStudio({
       }
       if (old?.url) URL.revokeObjectURL(old.url);
     } catch (error) {
-      s.timelineBuildError = error?.message || (zh() ? '拼接失败' : 'Join failed');
+      s.timelineBuildError = error?.message || 'Join failed';
       dropTimelineCombined();
       if (s.timelineShowCombined) s.timelineShowCombined = false;
     } finally {
@@ -2631,7 +2610,7 @@ export function VideoStudio({
       return;
     }
     if (!timelineCanCombine(s.timelineSegments)) {
-      toast(zh() ? '至少需要两段片段才能合成完整片。' : 'Add a second clip and the full cut builds itself.');
+      toast('Add a second clip and the full cut builds itself.');
       return;
     }
     if (s.timelineBuildError) return; // the note under the header says why
@@ -2761,7 +2740,7 @@ export function VideoStudio({
       if (s.setup.motionContextUrl === segment.url) clearMotionContext();
       bump();
     } catch (error) {
-      toast.error(error?.message || (zh() ? '删除文件失败' : 'Could not delete the file'));
+      toast.error(error?.message || 'Could not delete the file');
     }
   };
 
@@ -2818,12 +2797,10 @@ export function VideoStudio({
   // the drop's own position; the rest follow it in order.
   const timelineAttachFiles = async (target, files) => {
     if (!isHivemindStudioEnabled()) {
-      toast.error(zh() ? '上传片段需要工作室正在运行。' : 'Uploading clips needs the studio to be running.');
+      toast.error('Uploading clips needs the studio to be running.');
       return;
     }
-    const loadingId = toast.loading(zh()
-      ? `正在上传 ${files.length} 段片段…`
-      : `Uploading ${files.length} clip${files.length === 1 ? '' : 's'}…`);
+    const loadingId = toast.loading(`Uploading ${files.length} clip${files.length === 1 ? '' : 's'}…`);
     try {
       let landTarget = target;
       for (const file of files) {
@@ -2835,9 +2812,9 @@ export function VideoStudio({
         // Follow-on files insert directly after wherever the last one landed.
         landTarget = { id: s.timelineSelectedId, region: 'after' };
       }
-      toast.success(zh() ? '片段已加入时间线。' : 'Clips added to the timeline.', { id: loadingId });
+      toast.success('Clips added to the timeline.', { id: loadingId });
     } catch (error) {
-      toast.error(`${zh() ? '上传失败' : 'Upload failed'}: ${error?.message || ''}`, { id: loadingId });
+      toast.error(`${'Upload failed'}: ${error?.message || ''}`, { id: loadingId });
     }
   };
 
@@ -2855,7 +2832,7 @@ export function VideoStudio({
     if (output?.url) {
       const mediaType = String(output.mediaType || '').toLowerCase();
       if (!mediaType.startsWith('video/') && output.section !== 'video') {
-        toast.error(zh() ? '时间线只接受视频片段。' : 'The timeline takes video clips only.');
+        toast.error('The timeline takes video clips only.');
         return;
       }
       const clip = { url: output.url, model: clipModelFor(output.url) };
@@ -2868,7 +2845,7 @@ export function VideoStudio({
       void timelineAttachFiles(target, videos);
       return;
     }
-    if (dropped.length) toast.error(zh() ? '时间线只接受视频文件。' : 'The timeline takes video files only.');
+    if (dropped.length) toast.error('The timeline takes video files only.');
   };
 
   // Timeline segments + toggles survive a reload, per tab. The built cut is an
@@ -2914,12 +2891,12 @@ export function VideoStudio({
       // Same honesty as the source panel: name the actual blocker.
       toast.error(
         s.rentedBroken?.length
-          ? (zh() ? '与租用机器的连接已断开——请在“来源”面板或“机器”页重新连接。' : 'Lost the connection to your rented machine — reconnect it from the Source panel or Machines.')
+          ? 'Lost the connection to your rented machine — reconnect it from the Source panel or Machines.'
           : s.rentedIdle?.length
-            ? (zh() ? '租用机器尚未接入本工作室——请在“来源”面板点击“用于本工作室”。' : 'Your rented machine is not connected to this studio yet — click "Use it here" in the Source panel.')
+            ? 'Your rented machine is not connected to this studio yet — click "Use it here" in the Source panel.'
             : s.rentedProvisioning?.length
-              ? (zh() ? '租用机器仍在上线中——“机器”页可查看进度。' : 'Your rented machine is still coming online — the Machines view shows its progress.')
-              : (zh() ? '没有租用机器在运行此模型。请在“机器”页租用一台，或把来源切回本地。' : 'No rented machine is serving this model. Rent one in Machines, or switch the source to Local.'),
+              ? 'Your rented machine is still coming online — the Machines view shows its progress.'
+              : 'No rented machine is serving this model. Rent one in Machines, or switch the source to Local.',
       );
       return;
     }
@@ -2934,7 +2911,7 @@ export function VideoStudio({
       const before = weaveSnapshot();
       const woven = acceptPrompt(s.setup.prompt);
       if (woven.prompt !== before.prompt) {
-        announceWeave(zh() ? '发送前已把参考织入提示词' : 'Wove your references into the prompt before sending', before);
+        announceWeave('Wove your references into the prompt before sending', before);
       }
     }
     const prompt = s.setup.prompt.trim();
@@ -2959,20 +2936,20 @@ export function VideoStudio({
     // head-swap with no clip and failed on the backend.
     const swapCheck = headSwapReadiness(setup);
     if (swapCheck.active && !swapCheck.ready) {
-      toast.error(`${zh() ? '还需要：' : 'Still needed: '}${swapCheck.missing.join(zh() ? '、' : ' and ')}`);
+      toast.error(`${'Still needed: '}${swapCheck.missing.join(' and ')}`);
       return;
     }
     if (isHivemindVideoInput) {
       if (!model?.supportsVideoInput) {
-        toast.error(zh() ? '此本地工作流不支持源视频延长。' : 'This local workflow does not support source-video extension.');
+        toast.error('This local workflow does not support source-video extension.');
         return;
       }
     } else if (setup.v2vMode) {
-      if (!setup.videoUrl) { toast.error(zh() ? '请先上传视频。' : 'Please upload a video first.'); return; }
-      if (model?.imageField && !setup.imageUrl) { toast.error(zh() ? '请上传用于运动控制的参考图片。' : 'Please upload a reference image for motion control.'); return; }
-      if (model?.promptRequired && !prompt) { toast.error(zh() ? '请描述您想要的动作。' : 'Please describe the motion you want.'); return; }
+      if (!setup.videoUrl) { toast.error('Please upload a video first.'); return; }
+      if (model?.imageField && !setup.imageUrl) { toast.error('Please upload a reference image for motion control.'); return; }
+      if (model?.promptRequired && !prompt) { toast.error('Please describe the motion you want.'); return; }
     } else if (isExtendMode) {
-      if (!s.lastGenerationId) { toast.error(zh() ? '未找到可延长的 Seedance 2.0 生成，请先生成一个视频。' : 'No Seedance 2.0 generation found to extend. Generate a video first.'); return; }
+      if (!s.lastGenerationId) { toast.error('No Seedance 2.0 generation found to extend. Generate a video first.'); return; }
     } else if (setup.imageMode) {
       // LTX 2.3 supports text-to-video: for a plain Hivemind LTX model (not an
       // ingredient/reference-sheet model), a prompt alone is a valid request —
@@ -2980,17 +2957,17 @@ export function VideoStudio({
       const hiveTextToVideo = isHivemindLocal && !model?.supportsIngredientImages;
       if (!setup.imageUrl && !hasIngredientReferences) {
         if (hiveTextToVideo) {
-          if (!prompt) { toast.error(zh() ? '请输入提示词以生成视频。' : 'Please enter a prompt to generate a video.'); return; }
+          if (!prompt) { toast.error('Please enter a prompt to generate a video.'); return; }
         } else {
           toast.error(model?.supportsIngredientImages
-            ? (zh() ? '请添加参考视图或选择一张配料表。' : 'Please add reference views or select an ingredients sheet.')
-            : (zh() ? '请先上传起始帧图片。' : 'Please upload a start frame image first.'));
+            ? 'Please add reference views or select an ingredients sheet.'
+            : 'Please upload a start frame image first.');
           return;
         }
       }
-      if (model?.supportsIngredientImages && !prompt) { toast.error(zh() ? '请描述要从这些参考生成的镜头。' : 'Please describe the shot to generate from these references.'); return; }
+      if (model?.supportsIngredientImages && !prompt) { toast.error('Please describe the shot to generate from these references.'); return; }
     } else if (!prompt) {
-      toast.error(zh() ? '请输入提示词以生成视频。' : 'Please enter a prompt to generate a video.');
+      toast.error('Please enter a prompt to generate a video.');
       return;
     }
 
@@ -3385,10 +3362,10 @@ export function VideoStudio({
         // so describeFailure keeps them and only adds the action.
         const failure = describeFailure(e, {
           transport: isWan2gpLocal ? 'local' : isHivemindLocal ? 'studio' : 'muapi',
-          operation: zh() ? '生成' : 'Generation',
+          operation: 'Generation',
         });
         s.generateFailure = failure;
-        s.generateError = failure.title || (zh() ? '生成失败' : 'Generation failed');
+        s.generateError = failure.title || 'Generation failed';
       }
     } finally {
       if (typeof unsubscribeProgress === 'function') unsubscribeProgress();
@@ -3426,11 +3403,9 @@ export function VideoStudio({
         if (result?.stopped === false) {
           // A plain toast with a lifetime: toast.loading() has none, and the
           // old one sat on screen for the rest of the session.
-          toast(zh()
-            ? '正在停止：租用机器需完成当前步骤才能释放，新的生成会排在其后。'
-            : 'Stopping… the machine finishes its current step before it frees up, and a new generation queues behind it.', { duration: 6000 });
+          toast('Stopping… the machine finishes its current step before it frees up, and a new generation queues behind it.', { duration: 6000 });
         } else {
-          toast.success(zh() ? '已取消生成。' : 'Generation cancelled.');
+          toast.success('Generation cancelled.');
         }
       });
     }
@@ -3449,7 +3424,7 @@ export function VideoStudio({
     bump();
     // With a job id the toast comes from the backend's verdict above; without
     // one there is nothing to stop and the reset IS the whole cancel.
-    if (!jobId) toast.success(zh() ? '已取消生成。' : 'Generation cancelled.');
+    if (!jobId) toast.success('Generation cancelled.');
   };
 
   /* ---------------- hivemind catalog + window events ---------------- */
@@ -3793,10 +3768,10 @@ export function VideoStudio({
               console.warn('[VideoStudio] Video resume failed:', live.requestId, e?.message);
               const failure = describeFailure(e, {
                 transport: isLocalJob ? 'studio' : 'muapi',
-                operation: zh() ? '生成' : 'Generation',
+                operation: 'Generation',
               });
               s.generateFailure = failure;
-              s.generateError = failure.title || (zh() ? '生成失败' : 'Generation failed');
+              s.generateError = failure.title || 'Generation failed';
             }
             stopGenerationProgress();
           } finally {
@@ -3919,9 +3894,7 @@ export function VideoStudio({
         // that never had a picture lane already said so on the Story page, and
         // one still waiting for its catalog has not been attempted yet.
         if (!landed.deferred && landed.wanted && !landed.attached) {
-          toast(zh()
-            ? `这个故事带来了 ${landed.wanted} 张图，但当前模型没有对应的通道，因此未附加。`
-            : `${landed.wanted} picture${landed.wanted === 1 ? '' : 's'} came with this story, but the model now `
+          toast(`${landed.wanted} picture${landed.wanted === 1 ? '' : 's'} came with this story, but the model now `
               + 'selected has no lane for them, so nothing was attached.',
           { duration: 12000 });
         }
@@ -4071,7 +4044,7 @@ export function VideoStudio({
   const videoTask = activeVideoTask(s.setup);
   const availableTasks = videoTasksFor(s.setup);
   const swapState = headSwapReadiness(s.setup);
-  const slotLabels = slotLabelsFor(videoTask, zh());
+  const slotLabels = slotLabelsFor(videoTask);
   // Scene chaining (MiniMax H3): armed = the next generation continues the
   // armed clip. One decision, taken in videoTasks.js like every other plan.
   const chainArmed = videoRequestPlan(s.setup).sendMotionContext;
@@ -4201,12 +4174,12 @@ export function VideoStudio({
   })();
   const advancedHint = [
     activeVideoLoras ? `${activeVideoLoras} LoRA${activeVideoLoras === 1 ? '' : 's'}` : '',
-    String(s.setup.negativePrompt || '').trim() ? (zh() ? '负面' : 'avoid list') : '',
-    s.setup.detailerStrength ? (zh() ? '细节增强' : 'detailer') : '',
-    s.setup.spectrum === false ? (zh() ? '全步采样' : 'full sampling') : '',
-    standardTierSelected ? (zh() ? '最佳画质' : 'best quality') : '',
-    minimaxStepsAvailable && minimaxRefinement === 'high' ? (zh() ? '高细节' : 'high detail') : '',
-    Number(s.setup.seed) >= 0 ? (zh() ? `种子 ${s.setup.seed}` : `seed ${s.setup.seed}`) : '',
+    String(s.setup.negativePrompt || '').trim() ? 'avoid list' : '',
+    s.setup.detailerStrength ? 'detailer' : '',
+    s.setup.spectrum === false ? 'full sampling' : '',
+    standardTierSelected ? 'best quality' : '',
+    minimaxStepsAvailable && minimaxRefinement === 'high' ? 'high detail' : '',
+    Number(s.setup.seed) >= 0 ? `seed ${s.setup.seed}` : '',
   ].filter(Boolean).join(' · ');
 
   // "Use this person" is ONE control. The LTX graph's reference views — the
@@ -4261,23 +4234,16 @@ export function VideoStudio({
     const card = motionLimit.cardVramGb ? ` on this ${motionLimit.cardVramGb} GB card` : '';
     const bigger = motionLimit.cardVramGb && motionLimit.cardVramGb < 96
       ? ' A bigger card (an RTX PRO 6000) lifts the cap.' : '';
-    const biggerZh = motionLimit.cardVramGb && motionLimit.cardVramGb < 96
-      ? '换用更大显存的显卡（RTX PRO 6000）可以提高上限。' : '';
     if (motionLimit.referenceVideoCount > 0) {
-      return zh()
-        ? `最长 ${longest} 秒 — 动作参考会被裁剪到成片长度，因此长参考会把成片也限制在同样长度。改用 ${motionLimit.maxSeconds.toFixed(1)} 秒以内的动作参考，它会保留自身长度、占用更少显存，完整时长即可恢复；移除动作参考同样可以。参考图片无论多长都是固定开销。${biggerZh}`
-        : `Up to ${longest}s${card} — a motion reference is trimmed to the clip's own length, so a long reference caps the clip at the same length. Use a motion reference of ${motionLimit.maxSeconds.toFixed(1)}s or less and it keeps its own length instead, costing less and opening the full range. Removing it works too. Reference pictures cost the same whatever the length.${bigger}`;
+      return `Up to ${longest}s${card} — a motion reference is trimmed to the clip's own length, so a long reference caps the clip at the same length. Use a motion reference of ${motionLimit.maxSeconds.toFixed(1)}s or less and it keeps its own length instead, costing less and opening the full range. Removing it works too. Reference pictures cost the same whatever the length.${bigger}`;
     }
     const pics = motionLimit.referencePictureCount || 0;
     const sounds = motionLimit.referenceSoundCount || 0;
     const parts = [];
-    const partsZh = [];
-    if (pics) { parts.push(`${pics} reference picture${pics === 1 ? '' : 's'}`); partsZh.push(`${pics} 张参考图片`); }
-    if (sounds) { parts.push(`${sounds} sound reference${sounds === 1 ? '' : 's'}`); partsZh.push(`${sounds} 段参考音频`); }
+    if (pics) parts.push(`${pics} reference picture${pics === 1 ? '' : 's'}`);
+    if (sounds) parts.push(`${sounds} sound reference${sounds === 1 ? '' : 's'}`);
     const inventory = parts.join(' and ');
-    return zh()
-      ? `最长 ${longest} 秒 — 成片和${partsZh.join('、')}共用显卡上的同一段序列，成片越长留给参考的空间越少。参考的开销与时长无关，所以只能缩短成片，或少放几个参考。${biggerZh}`
-      : `Up to ${longest}s${card} — the clip and everything attached to it share one sequence on the card, and a longer clip leaves less room. Your ${inventory} cost the same at every length, so the clip is what has to give: shorten it, or send fewer references for the full range.${bigger}`;
+    return `Up to ${longest}s${card} — the clip and everything attached to it share one sequence on the card, and a longer clip leaves less room. Your ${inventory} cost the same at every length, so the clip is what has to give: shorten it, or send fewer references for the full range.${bigger}`;
   })();
   const resolutionOptions = resolutionsFor(s.setup, s.setup.modelId);
   const qualityOptions = qualitiesFor(s.setup, s.catalogs, s.setup.modelId);
@@ -4285,20 +4251,20 @@ export function VideoStudio({
   const effectOptions = effectNamesFor(s.setup, s.catalogs, s.setup.modelId);
 
   const modeLabel = (() => {
-    if (isMotionControlV2V(s.setup, s.catalogs)) return zh() ? '视频+图片 → 视频' : 'Video + image → video';
-    if (s.setup.v2vMode) return zh() ? '视频工具' : 'Video tool';
-    if (videoTask === 'head-swap') return zh() ? '换脸' : 'Head swap';
-    if (isHivemindVideoInputMode(s.setup)) return zh() ? '延长上传的镜头' : 'Extend uploaded shot';
-    if (model?.requiresRequestId) return zh() ? '延长' : 'Extend';
+    if (isMotionControlV2V(s.setup, s.catalogs)) return 'Video + image → video';
+    if (s.setup.v2vMode) return 'Video tool';
+    if (videoTask === 'head-swap') return 'Head swap';
+    if (isHivemindVideoInputMode(s.setup)) return 'Extend uploaded shot';
+    if (model?.requiresRequestId) return 'Extend';
     // From the request plan, not from imageMode: every local workflow is
     // selected with imageMode true (the frame is an optional input), so H3
     // read "Image → video" with nothing attached — and with references armed.
     const plan = videoRequestPlan(s.setup);
-    if (plan.sendReferenceImages) return zh() ? '参考 → 视频' : 'Reference → video';
-    if (plan.sendMotionContext) return zh() ? '接续场景' : 'Continue scene';
+    if (plan.sendReferenceImages) return 'Reference → video';
+    if (plan.sendMotionContext) return 'Continue scene';
     const hasFrame = isHivemindVideoModelId(s.setup.modelId) ? Boolean(s.setup.imageUrl) : s.setup.imageMode;
-    if (hasFrame) return zh() ? '图片 → 视频' : 'Image → video';
-    return zh() ? '文本 → 视频' : 'Text → video';
+    if (hasFrame) return 'Image → video';
+    return 'Text → video';
   })();
 
   const isSeedanceResult = s.resultModel === 'seedance-v2.0-t2v' || s.resultModel === 'seedance-v2.0-i2v';
@@ -4315,8 +4281,8 @@ export function VideoStudio({
   const progressEta = progressRemainingMs == null
     ? null
     : (progressRemainingMs > 0
-      ? `${zh() ? '约剩 ' : '~'}${formatVideoGenerationElapsed(progressRemainingMs)}${zh() ? '' : ' left'}`
-      : (zh() ? '即将完成…' : 'finishing…'));
+      ? `${'~'}${formatVideoGenerationElapsed(progressRemainingMs)}${' left'}`
+      : 'finishing…');
   const progressSteps = s.progressSteps?.total
     ? tf('video.progress.step', s.progressSteps.step, s.progressSteps.total)
     : null;
@@ -4359,9 +4325,7 @@ export function VideoStudio({
             only fail. */}
         {runOn.unreachable.length ? (
           <small className="text-[11px] text-ink3">
-            {zh()
-              ? `${runOn.unreachable.join('、')}目前只能生成图片，还不能生成视频。`
-              : `${runOn.unreachable.join(' and ')} can make stills here, not clips yet.`}
+            {`${runOn.unreachable.join(' and ')} can make stills here, not clips yet.`}
           </small>
         ) : null}
         <Pill tone="honey" className="w-fit">{modeLabel}</Pill>
@@ -4369,7 +4333,7 @@ export function VideoStudio({
 
       {availableTasks.length > 1 ? (
         <div className="flex flex-col gap-3">
-          <SectionLabel>{zh() ? '任务' : 'Task'}</SectionLabel>
+          <SectionLabel>Task</SectionLabel>
           {/* Explicit, and first: every input slot below reads its meaning from
               this. Inferring it from whichever files were attached is what made
               an uploaded clip always mean "extend". */}
@@ -4377,38 +4341,32 @@ export function VideoStudio({
             value={videoTask}
             onChange={(next) => commit({ ...s.setup, videoTask: next })}
             options={[
-              { value: 'generate', label: zh() ? '生成' : 'Generate' },
-              { value: 'extend', label: zh() ? '延长' : 'Extend' },
-              { value: 'head-swap', label: zh() ? '换脸' : 'Head swap' },
+              { value: 'generate', label: 'Generate' },
+              { value: 'extend', label: 'Extend' },
+              { value: 'head-swap', label: 'Head swap' },
             ]}
           />
           <p className="text-[11px] leading-relaxed text-ink3">
             {videoTask === 'head-swap'
-              ? (zh()
-                ? '用“新面孔”替换“源视频”中的人脸。换脸 LoRA 由本模式自动启用；提示词格式为 “head_swap: FACE: … ACTION: …”。'
-                : 'Replaces the face in the source video with the new face. The BFS head-swap LoRA is switched on by this mode — you do not need to select it. Prompt shaped "head_swap: FACE: … ACTION: …".')
+              ? 'Replaces the face in the source video with the new face. The BFS head-swap LoRA is switched on by this mode — you do not need to select it. Prompt shaped "head_swap: FACE: … ACTION: …".'
               : videoTask === 'extend'
-                ? (zh() ? '在上传视频的结尾追加新画面。' : 'Appends new footage to the end of the uploaded video.')
-                : (zh() ? '从提示词生成；可选起始帧。' : 'Generates from the prompt, optionally starting from a frame you attach.')}
+                ? 'Appends new footage to the end of the uploaded video.'
+                : 'Generates from the prompt, optionally starting from a frame you attach.'}
           </p>
           {videoTask === 'head-swap' ? (
             <>
               <Field
-                label={zh() ? '换脸引擎' : 'Swap engine'}
+                label="Swap engine"
                 hint={s.setup.headSwapBackend === 'facefusion'
-                  ? (zh()
-                    ? '仅替换面部区域，其余画面与原视频完全一致；速度快约 10 倍，但发型和头型保持原样。'
-                    : 'Swaps only the face region — body, clothing, background and motion stay identical to your source, and it runs about 10× quicker. Hair and head shape stay the original actor\'s.')
-                  : (zh()
-                    ? '重绘每一帧，可改变发型与头型，但整个画面会被重新生成。'
-                    : 'Regenerates every frame, so it can change hair and head shape — but the whole picture is reinvented rather than preserved.')}
+                  ? 'Swaps only the face region — body, clothing, background and motion stay identical to your source, and it runs about 10× quicker. Hair and head shape stay the original actor\'s.'
+                  : 'Regenerates every frame, so it can change hair and head shape — but the whole picture is reinvented rather than preserved.'}
               >
                 <Segmented
                   value={s.setup.headSwapBackend === 'facefusion' ? 'facefusion' : 'bfs'}
                   onChange={(next) => commit({ ...s.setup, headSwapBackend: next })}
                   options={[
-                    { value: 'bfs', label: zh() ? '重绘整帧' : 'Regenerate whole frame' },
-                    { value: 'facefusion', label: zh() ? '只换脸部' : 'Swap face only' },
+                    { value: 'bfs', label: 'Regenerate whole frame' },
+                    { value: 'facefusion', label: 'Swap face only' },
                   ]}
                 />
               </Field>
@@ -4416,14 +4374,12 @@ export function VideoStudio({
                 <Toggle
                   checked={Boolean(s.setup.headSwapFaceEnhancer)}
                   onChange={(next) => commit({ ...s.setup, headSwapFaceEnhancer: next })}
-                  label={zh() ? '面部增强（约慢一倍）' : 'Face enhancer (about 2× slower)'}
+                  label="Face enhancer (about 2× slower)"
                 />
               ) : (
                 <Field
-                  label={zh() ? '换脸强度' : 'Head-swap strength'}
-                  hint={zh()
-                    ? '1.0 动作最自然；高于 1.0 更强的身份与发型还原，但可能失真。'
-                    : '1.0 gives the best motion fidelity. Above 1.0 captures identity and hair more strongly, but can distort.'}
+                  label="Head-swap strength"
+                  hint="1.0 gives the best motion fidelity. Above 1.0 captures identity and hair more strongly, but can distort."
                 >
                   <Slider
                     min={0.5}
@@ -4439,7 +4395,7 @@ export function VideoStudio({
           ) : null}
           {swapState.active && !swapState.ready ? (
             <p className="text-[11px] font-medium text-danger">
-              {zh() ? '还需要：' : 'Still needed: '}{swapState.missing.join(zh() ? '、' : ' and ')}
+              {'Still needed: '}{swapState.missing.join(' and ')}
             </p>
           ) : null}
         </div>
@@ -4447,11 +4403,11 @@ export function VideoStudio({
 
       {(visibility.ar || visibility.duration || visibility.resolution || visibility.quality || visibility.mode || visibility.effect) ? (
         <div className="flex flex-col gap-3">
-          <SectionLabel>{zh() ? '格式' : 'Format'}</SectionLabel>
+          <SectionLabel>Format</SectionLabel>
           {visibility.ar ? (
             <Field
-              label={zh() ? '宽高比' : 'Aspect ratio'}
-              hint={arMatchedToFrame ? (zh() ? '已匹配起始帧，不裁剪' : 'Matched to the starting frame — no cropping') : undefined}
+              label="Aspect ratio"
+              hint={arMatchedToFrame ? 'Matched to the starting frame — no cropping' : undefined}
             >
               <AspectRatioPicker
                 options={arOptions}
@@ -4465,10 +4421,10 @@ export function VideoStudio({
           {startFrameArMatchAvailable ? (
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs font-medium text-ink2">
-                {zh() ? '使用起始帧宽高比' : 'Use starting frame aspect ratio'}
+                Use starting frame aspect ratio
               </span>
               <Toggle
-                label={zh() ? '使用起始帧宽高比' : 'Use starting frame aspect ratio'}
+                label="Use starting frame aspect ratio"
                 checked={s.setup.matchStartFrameAr}
                 onChange={setMatchStartFrameAr}
               />
@@ -4477,12 +4433,10 @@ export function VideoStudio({
           {visibility.duration ? (
             minimaxSelected ? (
               <Field
-                label={zh() ? '时长' : 'Duration'}
+                label="Duration"
                 hint={durationCapped
                   ? motionCapHint
-                  : (zh()
-                    ? '最长 15 秒 — 模型约在 15 秒内保持人物与场景一致，因此不提供更长时长。'
-                    : 'Up to 15s — the model keeps people and scenes consistent for about 15 seconds, so longer takes are not offered.')}
+                  : 'Up to 15s — the model keeps people and scenes consistent for about 15 seconds, so longer takes are not offered.'}
               >
                 <Slider
                   min={Number(durationOptions[0]) || 1}
@@ -4494,7 +4448,7 @@ export function VideoStudio({
                 />
               </Field>
             ) : (
-              <Field label={zh() ? '时长' : 'Duration'}>
+              <Field label="Duration">
                 <NativeSelect value={String(s.setup.duration)} onChange={(e) => setDuration(e.target.value)}>
                   {durationOptions.map((d) => <option key={d} value={String(d)}>{`${d}s`}</option>)}
                 </NativeSelect>
@@ -4504,31 +4458,25 @@ export function VideoStudio({
           {visibility.resolution ? (
             minimaxSelected ? (
               <Field
-                label={zh() ? '分辨率' : 'Resolution'}
+                label="Resolution"
                 hint={{
-                  Standard: zh()
-                    ? '草稿 · 0.3MP — 最快，适合先试想法再正式渲染。'
-                    : 'Fastest — try an idea cheaply before a real render (0.3MP).',
-                  High: zh()
-                    ? '高清 · 0.9MP — 速度与细节的均衡默认档。'
-                    : 'The balanced default for speed and detail (0.9MP).',
-                  Max: zh()
-                    ? '原生 · 1.0MP — 模型的原生画布：细节、音频与画面文字最佳，渲染最慢。超过 1MP 模型会变得不稳定，因此以此为上限。'
-                    : "Best quality — the model's own canvas: sharpest detail, audio and on-screen text, and the slowest to render (1.0MP, its ceiling).",
+                  Standard: 'Fastest — try an idea cheaply before a real render (0.3MP).',
+                  High: 'The balanced default for speed and detail (0.9MP).',
+                  Max: "Best quality — the model's own canvas: sharpest detail, audio and on-screen text, and the slowest to render (1.0MP, its ceiling).",
                 }[s.setup.resolution] || undefined}
               >
                 <Segmented
                   value={s.setup.resolution}
                   onChange={setResolution}
                   options={[
-                    { value: 'Standard', label: zh() ? '草稿' : 'Draft' },
-                    { value: 'High', label: zh() ? '高清' : 'High' },
-                    { value: 'Max', label: zh() ? '最佳画质' : 'Best quality' },
+                    { value: 'Standard', label: 'Draft' },
+                    { value: 'High', label: 'High' },
+                    { value: 'Max', label: 'Best quality' },
                   ]}
                 />
               </Field>
             ) : (
-              <Field label={zh() ? '分辨率' : 'Resolution'}>
+              <Field label="Resolution">
                 <NativeSelect value={s.setup.resolution} onChange={(e) => setResolution(e.target.value)}>
                   {resolutionOptions.map((r) => <option key={r} value={r}>{r}</option>)}
                 </NativeSelect>
@@ -4536,21 +4484,21 @@ export function VideoStudio({
             )
           ) : null}
           {visibility.quality ? (
-            <Field label={zh() ? '质量' : 'Quality'}>
+            <Field label="Quality">
               <NativeSelect value={s.setup.quality} onChange={(e) => setQuality(e.target.value)}>
                 {qualityOptions.map((q) => <option key={q} value={q}>{q}</option>)}
               </NativeSelect>
             </Field>
           ) : null}
           {visibility.mode ? (
-            <Field label={zh() ? '模式' : 'Mode'}>
+            <Field label="Mode">
               <NativeSelect value={s.setup.mode} onChange={(e) => setMode(e.target.value)}>
                 {modeOptions.map((m) => <option key={m} value={m}>{m}</option>)}
               </NativeSelect>
             </Field>
           ) : null}
           {visibility.effect ? (
-            <Field label={zh() ? '效果类型' : 'Effect type'}>
+            <Field label="Effect type">
               <NativeSelect value={s.setup.effectName} onChange={(e) => setEffect(e.target.value)}>
                 {effectOptions.map((eff) => <option key={eff} value={eff}>{eff}</option>)}
               </NativeSelect>
@@ -4559,7 +4507,7 @@ export function VideoStudio({
         </div>
       ) : null}
 
-      <CollapsibleSection title={zh() ? '高级' : 'Advanced'} hint={advancedHint} storageKey="video.advanced">
+      <CollapsibleSection title="Advanced" hint={advancedHint} storageKey="video.advanced">
         {/* The tuning bench, behind the ONE disclosure convention. Quality tier,
             refinement and the seed steer every render, so the closed header
             names whichever of them is armed (advancedHint) — hidden is fine,
@@ -4573,17 +4521,17 @@ export function VideoStudio({
           const active = pair.lite.id === s.setup.modelId ? 'lite' : 'standard';
           return (
             <Field
-              label={zh() ? '画质档位' : 'Quality'}
+              label="Quality"
               hint={active === 'lite'
-                ? (zh() ? '最快——画面略柔（蒸馏，约 8 步）' : 'Fastest, with softer detail (distilled, ~8 steps)')
-                : (zh() ? '细节最好，约慢 3 倍（完整步数 + CFG）' : 'Best quality — about 3x slower (full-step CFG)')}
+                ? 'Fastest, with softer detail (distilled, ~8 steps)'
+                : 'Best quality — about 3x slower (full-step CFG)'}
             >
               <Segmented
                 value={active}
                 onChange={(tier) => { if (pair[tier]) selectHiveModel(pair[tier]); }}
                 options={[
-                  { value: 'lite', label: zh() ? '更快' : 'Faster' },
-                  { value: 'standard', label: zh() ? '最佳画质' : 'Best quality' },
+                  { value: 'lite', label: 'Faster' },
+                  { value: 'standard', label: 'Best quality' },
                 ]}
               />
             </Field>
@@ -4591,29 +4539,25 @@ export function VideoStudio({
         })()}
         {minimaxStepsAvailable ? (
           <Field
-            label={zh() ? '精修' : 'Refinement'}
+            label="Refinement"
             hint={minimaxRefinement === 'high'
-              ? (zh()
-                ? '动作更流畅、手部面部更清晰、音频更干净；渲染时间约为两倍（32 步采样）。'
-                : 'Smoother motion, sharper hands and faces, cleaner audio — roughly twice the render time (32 sampling passes).')
-              : (zh()
-                ? `最快，使用模型默认设置（${Math.round(model?.defaultSteps || 15)} 步采样）。`
-                : `Quickest, at the model's own default (${Math.round(model?.defaultSteps || 15)} sampling passes).`)}
+              ? 'Smoother motion, sharper hands and faces, cleaner audio — roughly twice the render time (32 sampling passes).'
+              : `Quickest, at the model's own default (${Math.round(model?.defaultSteps || 15)} sampling passes).`}
           >
             <Segmented
               value={minimaxRefinement}
               onChange={(next) => commit({ ...s.setup, steps: next === 'high' ? 32 : null })}
               options={[
-                { value: 'standard', label: zh() ? '标准' : 'Standard' },
-                { value: 'high', label: zh() ? '高细节' : 'High detail' },
+                { value: 'standard', label: 'Standard' },
+                { value: 'high', label: 'High detail' },
               ]}
             />
           </Field>
         ) : null}
         {isHivemindVideoModelId(s.setup.modelId) ? (
           <Field
-            label={zh() ? '种子' : 'Seed'}
-            hint={zh() ? '锁定后同样的设置会给出同一条镜头。' : 'Lock one and the same settings give you the same take again.'}
+            label="Seed"
+            hint="Lock one and the same settings give you the same take again."
           >
             <div className="flex items-center gap-1.5">
               <TextInput
@@ -4621,14 +4565,14 @@ export function VideoStudio({
                 min={0}
                 step={1}
                 value={s.setup.seed >= 0 ? String(s.setup.seed) : ''}
-                placeholder={zh() ? '随机' : 'Random'}
+                placeholder="Random"
                 onChange={(e) => setSeed(e.target.value === '' ? -1 : e.target.value)}
                 className="flex-1"
               />
               <IconButton
                 icon="refresh"
-                label={zh() ? '随机种子' : 'Randomize seed'}
-                title={zh() ? '每次生成使用随机种子' : 'Use a fresh random seed each generation'}
+                label="Randomize seed"
+                title="Use a fresh random seed each generation"
                 active={s.setup.seed < 0}
                 onClick={randomizeSeed}
               />
@@ -4639,68 +4583,56 @@ export function VideoStudio({
                 onClick={lockLastSeed}
                 className="mt-1 text-left text-xs text-ink3 hover:text-honey"
               >
-                {(zh() ? '上次种子：' : 'Last seed: ') + s.lastSeed + (zh() ? '（点击锁定）' : ' · click to lock')}
+                {'Last seed: ' + s.lastSeed + ' · click to lock'}
               </button>
             ) : null}
           </Field>
         ) : null}
         {supportsSpectrum(model) ? (
           <Field
-            label={zh() ? '更快，细节略柔' : 'Faster, softer detail'}
+            label="Faster, softer detail"
             hint={chainArmed
-              ? (zh()
-                ? '场景接续期间强制关闭：步进预测会算错拼接处固定的画面行。'
-                : 'Forced off while chaining scenes: step forecasting mispredicts the pinned join frames.')
-              : (zh()
-                ? '预测约一半的采样步而非全部计算：采样时间约减半，但细节会变柔、高光可能发散。追求最高画质时请关闭。'
-                : 'About half the sampling time: roughly half the steps are predicted rather than computed, so fine detail softens and highlights can bloom. Turn it off for maximum fidelity (Spectrum).')}
+              ? 'Forced off while chaining scenes: step forecasting mispredicts the pinned join frames.'
+              : 'About half the sampling time: roughly half the steps are predicted rather than computed, so fine detail softens and highlights can bloom. Turn it off for maximum fidelity (Spectrum).'}
           >
             <Toggle
               checked={!chainArmed && s.setup.spectrum !== false}
               disabled={chainArmed}
               onChange={(next) => commit({ ...s.setup, spectrum: next })}
-              label={zh() ? '更快，细节略柔' : 'Faster, softer detail'}
+              label="Faster, softer detail"
             />
           </Field>
         ) : null}
         {supportsFastHighRes(model) ? (
           <Field
-            label={zh() ? '快速高清' : 'Fast high-res'}
-            hint={zh()
-              ? '先在约五分之一的画布上采样，再用 H3 自己的潜空间放大器把画面提升到目标尺寸，只有最后几步在全尺寸上运行。步数不变，但大部分步数跑在少得多的像素上——在 5090 上实测约快一倍。尺寸、时长和声音都不变。它走的是另一条采样路径，所以同一个种子给出的是另一条镜头，而不是同一条的加速版。'
-              : 'About half the render time, at the same size, length and sound \u2014 most of the steps run on a much smaller canvas before the picture is lifted to full size. The same seed gives a different take, not the same one faster.'}
+            label="Fast high-res"
+            hint="About half the render time, at the same size, length and sound — most of the steps run on a much smaller canvas before the picture is lifted to full size. The same seed gives a different take, not the same one faster."
           >
             <Toggle
               checked={s.setup.fastHighRes === true}
               onChange={(next) => commit({ ...s.setup, fastHighRes: next })}
-              label={zh() ? '快速高清' : 'Fast high-res'}
+              label="Fast high-res"
             />
           </Field>
         ) : null}
         {denoiseAvailable ? (
           <>
             <Field
-              label={zh() ? '不要出现的东西' : 'Avoid these things'}
-              hint={zh()
-                ? '要避开的东西。仅在“标准”质量下生效，快速与精简会忽略它。'
-                : 'What to keep out of the shot. Works at best quality; the faster lanes ignore it.'}
+              label="Avoid these things"
+              hint="What to keep out of the shot. Works at best quality; the faster lanes ignore it."
             >
               <TextArea
                 rows={2}
                 value={s.setup.negativePrompt || ''}
                 onChange={(e) => setNegativePrompt(e.target.value)}
-                placeholder={zh()
-                  ? '模糊, 解剖错误, 多余手指, 水印'
-                  : 'blurry, bad anatomy, extra fingers, deformed hands, watermark'}
+                placeholder="blurry, bad anatomy, extra fingers, deformed hands, watermark"
                 className="resize-y text-xs"
               />
             </Field>
             {String(s.setup.negativePrompt || '').trim() ? (
               <Field
-                label={zh() ? '排除力度' : 'How hard to avoid them'}
-                hint={zh()
-                  ? '把画面推离负面提示词的力度，约 +8% 生成时间。仍不听话就调高一档。'
-                  : 'How hard to push the shot away from that list — adds about 8% to the render. Raise it if it is still not listening (NAG).'}
+                label="How hard to avoid them"
+                hint="How hard to push the shot away from that list — adds about 8% to the render. Raise it if it is still not listening (NAG)."
               >
                 <NativeSelect
                   value={String(s.setup.nagScale ?? '')}
@@ -4709,10 +4641,10 @@ export function VideoStudio({
                     nagScale: e.target.value === '' ? null : Number(e.target.value),
                   })}
                 >
-                  <option value="">{zh() ? '默认 (11)' : 'Default (11)'}</option>
-                  <option value="5">{zh() ? '弱 (5)' : 'Subtle (5)'}</option>
-                  <option value="15">{zh() ? '强 (15)' : 'Strong (15)'}</option>
-                  <option value="1">{zh() ? '关闭' : 'Off'}</option>
+                  <option value="">Default (11)</option>
+                  <option value="5">Subtle (5)</option>
+                  <option value="15">Strong (15)</option>
+                  <option value="1">Off</option>
                 </NativeSelect>
               </Field>
             ) : null}
@@ -4720,40 +4652,38 @@ export function VideoStudio({
         ) : null}
         {denoiseAvailable ? (
           <Field
-            label={zh() ? '细节增强' : 'Detailer'}
+            label="Detailer"
             hint={s.setup.detailerStrength
-              ? (zh()
-                ? 'Lightricks 的 IC-LoRA 细节增强会对片段再做一次采样以补足细节纹理，生成时间约为两倍。'
-                : "Lightricks' IC-LoRA Detailer runs a second sampling pass over the clip to add fine texture. Roughly doubles generation time.")
-              : (zh() ? '关闭 — 单次采样，速度不变。' : 'Off — one pass, exactly as fast as before.')}
+              ? "Lightricks' IC-LoRA Detailer runs a second sampling pass over the clip to add fine texture. Roughly doubles generation time."
+              : 'Off — one pass, exactly as fast as before.'}
           >
             <NativeSelect
               value={String(s.setup.detailerStrength || 0)}
               onChange={(e) => commit({ ...s.setup, detailerStrength: Number(e.target.value) })}
             >
-              <option value="0">{zh() ? '关闭' : 'Off'}</option>
-              <option value="0.4">{zh() ? '弱 (0.4)' : 'Subtle (0.4)'}</option>
-              <option value="0.6">{zh() ? '推荐 (0.6)' : 'Recommended (0.6)'}</option>
-              <option value="0.9">{zh() ? '强 (0.9)' : 'Strong (0.9)'}</option>
+              <option value="0">Off</option>
+              <option value="0.4">Subtle (0.4)</option>
+              <option value="0.6">Recommended (0.6)</option>
+              <option value="0.9">Strong (0.9)</option>
             </NativeSelect>
           </Field>
         ) : null}
         {denoiseAvailable ? (
           <Field
-            label={zh() ? '颗粒清理' : 'Grain cleanup'}
+            label="Grain cleanup"
             hint={s.setup.denoise
               ? (s.setup.denoise === 'strong'
-                ? (zh() ? '运动自适应的时域去噪加一次空域去噪，生成后重新编码。' : 'Motion-adaptive temporal pass + a spatial pass. Re-encodes after generation.')
-                : (zh() ? '运动自适应的时域去噪：平均静态颗粒，保留运动细节。' : 'Motion-adaptive temporal pass: averages static grain, leaves moving detail alone.'))
-              : (zh() ? '关闭 — 按模型渲染的原样保存。' : 'Off — the clip is saved exactly as the model rendered it.')}
+                ? 'Motion-adaptive temporal pass + a spatial pass. Re-encodes after generation.'
+                : 'Motion-adaptive temporal pass: averages static grain, leaves moving detail alone.')
+              : 'Off — the clip is saved exactly as the model rendered it.'}
           >
             <NativeSelect
               value={s.setup.denoise || ''}
               onChange={(e) => commit({ ...s.setup, denoise: e.target.value })}
             >
-              <option value="">{zh() ? '关闭' : 'Off'}</option>
-              <option value="light">{zh() ? '轻度' : 'Light'}</option>
-              <option value="strong">{zh() ? '强' : 'Strong'}</option>
+              <option value="">Off</option>
+              <option value="light">Light</option>
+              <option value="strong">Strong</option>
             </NativeSelect>
           </Field>
         ) : null}
@@ -4900,7 +4830,7 @@ export function VideoStudio({
     if (picture) {
       const uploaded = await referenceUploader(uploadFnForFrame)('images', picture);
       onStartFrameChange([uploaded.url]);
-      toast.success(zh() ? '已设为起始帧' : 'Attached as the start frame');
+      toast.success('Attached as the start frame');
     }
     if (clip) await handleVideoFile(clip);
     for (const file of files) {
@@ -4931,7 +4861,7 @@ export function VideoStudio({
       else await attachDroppedToFrames(files);
     } catch (err) {
       console.error('[VideoStudio] composer drop failed:', err);
-      toast.error(err?.message || (zh() ? '附加失败' : 'Could not attach that.'));
+      toast.error(err?.message || 'Could not attach that.');
     } finally {
       s.composerAttaching = false;
       bump();
@@ -4950,11 +4880,11 @@ export function VideoStudio({
       const limits = referenceLimits();
       if (!referenceEntry) {
         if (kind !== 'images') {
-          toast.error(zh() ? '该模型只接受起始帧图片' : 'This model takes a picture as its start frame.');
+          toast.error('This model takes a picture as its start frame.');
           return;
         }
         onStartFrameChange([await promoteOutputToReference(payload.url)]);
-        toast.success(zh() ? '已设为起始帧' : 'Attached as the start frame');
+        toast.success('Attached as the start frame');
         return;
       }
       if (current[kind].length >= limits[kind]) {
@@ -4979,7 +4909,7 @@ export function VideoStudio({
       }));
     } catch (err) {
       console.error('[VideoStudio] composer output drop failed:', err);
-      toast.error(err?.message || (zh() ? '附加失败' : 'Could not attach that.'));
+      toast.error(err?.message || 'Could not attach that.');
     } finally {
       s.composerAttaching = false;
       bump();
@@ -5034,7 +4964,7 @@ export function VideoStudio({
             onWeave={() => {
               const before = weaveSnapshot();
               const woven = acceptPrompt(s.setup.prompt, { scaffold: true });
-              if (woven.prompt !== before.prompt) announceWeave(zh() ? '已把参考织入提示词' : 'Wove your references into the prompt', before);
+              if (woven.prompt !== before.prompt) announceWeave('Wove your references into the prompt', before);
               focusPrompt();
             }}
             onDraftLook={draftLookFor}
@@ -5068,11 +4998,11 @@ export function VideoStudio({
             {ltxFramesVisible ? (
               // LTX 2.3: one control with Start / Middle / End rows (all optional).
               <FrameSlotsPicker
-                label={zh() ? '关键帧' : 'Frames'}
+                label="Frames"
                 slots={[
                   { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
-                  { key: 'middle', label: zh() ? '中间帧' : 'Middle', url: s.setup.ltxMiddleUrl },
-                  { key: 'end', label: zh() ? '结束帧' : 'End', url: s.setup.ltxEndUrl },
+                  { key: 'middle', label: 'Middle', url: s.setup.ltxMiddleUrl },
+                  { key: 'end', label: 'End', url: s.setup.ltxEndUrl },
                 ]}
                 onSlotChange={(key, url) => {
                   const value = url ? [url] : [];
@@ -5089,18 +5019,16 @@ export function VideoStudio({
               // the opening of this shot, so the picker gives way to the chain chip.
               <div
                 className="flex items-center gap-1.5 rounded-md border border-honey/40 bg-honey-tint px-2 py-1"
-                title={zh()
-                  ? '接续的画面会延续上一段的运动与环境音，但场景要靠提示词维持：保留原有的风格与主体描述，先按上一段的收尾构图停一拍，再写接下来发生什么。'
-                  : "The pinned frames carry motion and room tone — the SCENE carries through the prompt. Keep the shot's style and subject words, hold the previous closing framing for a beat, then describe what happens next."}
+                title="The pinned frames carry motion and room tone — the SCENE carries through the prompt. Keep the shot's style and subject words, hold the previous closing framing for a beat, then describe what happens next."
               >
                 <Icon name="film" size={13} className="text-honey" />
                 <span className="text-xs font-medium text-honey">
-                  {zh() ? `接续第 ${chainShot} 段` : `Continuing shot ${chainShot}`}
+                  {`Continuing shot ${chainShot}`}
                 </span>
                 <button
                   type="button"
-                  title={zh() ? '退出接续场景' : 'Stop continuing the scene'}
-                  aria-label={zh() ? '退出接续场景' : 'Stop continuing the scene'}
+                  title="Stop continuing the scene"
+                  aria-label="Stop continuing the scene"
                   className="grid h-4 w-4 place-items-center rounded text-honey transition-colors hover:bg-honey/20"
                   onClick={clearMotionContext}
                 >
@@ -5115,10 +5043,10 @@ export function VideoStudio({
               // mounted (dimmed, with a note) — hiding it stranded an already-set
               // start frame with no way to change it or add the end frame.
               <FrameSlotsPicker
-                label={zh() ? '关键帧' : 'Frames'}
+                label="Frames"
                 slots={[
                   { key: 'start', label: slotLabels.image, url: s.setup.imageUrl },
-                  { key: 'end', label: zh() ? '结束帧（可选）' : 'End (optional)', url: s.setup.endImageUrl },
+                  { key: 'end', label: 'End (optional)', url: s.setup.endImageUrl },
                 ]}
                 onSlotChange={(key, url) => {
                   const value = url ? [url] : [];
@@ -5128,7 +5056,7 @@ export function VideoStudio({
                 uploadFn={uploadFnForFrame}
                 requireApiKey={frameRequiresApiKey}
                 inactiveNote={refsArmed
-                  ? (zh() ? '已附加角色参考——生成时将使用参考，替代首尾帧' : 'Character references replace these frames while attached')
+                  ? 'Character references replace these frames while attached'
                   : ''}
               />
             ) : (
@@ -5141,7 +5069,7 @@ export function VideoStudio({
                 requireApiKey={frameRequiresApiKey}
                 maxImages={1}
                 accept="image/*"
-                label={zh() ? '起始帧' : 'Start frame'}
+                label="Start frame"
                 ignored={refsArmed}
               />
             )}
@@ -5225,19 +5153,17 @@ export function VideoStudio({
             {(() => {
               const continues = clipChipContinues;
               const label = continues
-                ? (zh() ? '接续片段' : 'Continue from clip')
-                : (zh() ? '源视频' : 'Source video');
+                ? 'Continue from clip'
+                : 'Source video';
               const idle = continues
-                ? (zh()
-                  ? '从一段片段接续：下一个镜头从它的结尾开始（画面与环境音衔接）'
-                  : 'Continue from a clip — the next shot picks up where it ends, motion and room tone carrying across')
-                : `${zh() ? '上传' : 'Upload'}: ${slotLabels.video}${slotLabels.videoHint ? ` — ${slotLabels.videoHint}` : ''}`;
-              const attachedText = `${s.setup.videoName || label} — ${zh() ? '点击清除' : 'click to clear'}`;
+                ? 'Continue from a clip — the next shot picks up where it ends, motion and room tone carrying across'
+                : `${'Upload'}: ${slotLabels.video}${slotLabels.videoHint ? ` — ${slotLabels.videoHint}` : ''}`;
+              const attachedText = `${s.setup.videoName || label} — ${'click to clear'}`;
               return (
                 <ChipButton
                   icon={continues ? 'film' : 'upload'}
                   label={label}
-                  value={attachedClipUrl() ? (s.setup.videoName || (zh() ? '已附加' : 'attached')) : ''}
+                  value={attachedClipUrl() ? (s.setup.videoName || 'attached') : ''}
                   active={Boolean(attachedClipUrl())}
                   chevron={false}
                   disabled={s.videoUploading}
@@ -5316,7 +5242,7 @@ export function VideoStudio({
                     onWeave={() => {
                       const before = weaveSnapshot();
                       const woven = acceptPrompt(s.setup.prompt, { scaffold: true });
-                      if (woven.prompt !== before.prompt) announceWeave(zh() ? '已把参考织入提示词' : 'Wove your references into the prompt', before);
+                      if (woven.prompt !== before.prompt) announceWeave('Wove your references into the prompt', before);
                       focusPrompt();
                     }}
                     onRefine={() => { s.promptHelperOpen = true; bump(); }}
@@ -5332,13 +5258,11 @@ export function VideoStudio({
                   an action, not a menu. */}
               <ChipButton
                 icon="sparkles"
-                value={zh() ? '润色' : 'Refine'}
+                value={t('composer.refine')}
                 chevron={false}
                 disabled={!s.setup.prompt.trim()}
                 onClick={() => { s.promptHelperOpen = true; bump(); }}
-                title={zh()
-                  ? '让本地助手按当前模型的提示词指南、演员表和片长改写提示词'
-                  : "Rewrite what is in the box with the prompt helper — it knows this model's prompting guide, the cast, the lane and the clip length"}
+                title={t('composer.refineTitle')}
               />
             </>
             )}
@@ -5356,11 +5280,11 @@ export function VideoStudio({
               disabled={offlineBlocked || rentedBlocked || (swapState.active && !swapState.ready)}
               onClick={generate}
               title={offlineBlocked
-                ? (zh() ? '工作室没有运行——重新启动后即可生成。' : 'The studio is not running — start it again to generate.')
+                ? t('video.generateOffline')
                 : rentedBlocked
-                ? (zh() ? '请先租用机器（或把来源切回本地）再生成。' : 'Rent a machine (or switch the source to Local) to generate.')
+                ? 'Rent a machine (or switch the source to Local) to generate.'
                 : (swapState.active && !swapState.ready)
-                  ? `${zh() ? '还需要：' : 'Still needed: '}${swapState.missing.join(zh() ? '、' : ' and ')}`
+                  ? `${'Still needed: '}${swapState.missing.join(' and ')}`
                   : `${t('video.generateTooltip')} (⌘/Ctrl+Enter)`}
               className="min-w-[130px]"
             >
@@ -5371,10 +5295,10 @@ export function VideoStudio({
                 variant="danger"
                 size="lg"
                 onClick={cancelGeneration}
-                title={zh() ? '取消当前生成并重置状态' : 'Cancel the current generation and reset'}
+                title={t('composer.cancelTitle')}
                 className="min-w-[100px]"
               >
-                {zh() ? '取消' : 'Cancel'}
+                {t('common.cancel')}
               </Button>
             ) : null}
           </div>
@@ -5391,7 +5315,7 @@ export function VideoStudio({
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       <StudioLayout
         panel={panel}
-        panelTitle={zh() ? '视频设置' : 'Video settings'}
+        panelTitle="Video settings"
         composer={composer}
         composerDrop={composerDrop}
       >
@@ -5402,10 +5326,8 @@ export function VideoStudio({
             const onRented = (() => {
               if (!s.setup.rentedOnly) return '';
               const machine = servingMachineFor(s.setup, s.setup.modelId, s.rentedMachines);
-              if (!machine) return zh() ? '（租用机器）' : ' on the rented machine';
-              return zh()
-                ? `（租用机器 ${machine.gpu || ''} ${machine.rental_id || ''}）`
-                : ` on ${machine.gpu || 'the rented machine'} (${machine.rental_id || 'rented'})`;
+              if (!machine) return ' on the rented machine';
+              return ` on ${machine.gpu || 'the rented machine'} (${machine.rental_id || 'rented'})`;
             })();
             return (
               <FailureCallout
@@ -5417,10 +5339,10 @@ export function VideoStudio({
                   onRetry: () => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); },
                 })}
                 onRetry={() => { s.generateError = ''; s.generateFailure = null; bump(); void generate(); }}
-                retryLabel={zh() ? '重试' : 'Try again'}
-                detailsLabel={zh() ? '详情' : 'Details'}
+                retryLabel="Try again"
+                detailsLabel="Details"
                 onDismiss={() => { s.generateError = ''; s.generateFailure = null; bump(); }}
-                dismissLabel={zh() ? '关闭' : 'Dismiss'}
+                dismissLabel="Dismiss"
               />
             );
           })() : null}
@@ -5452,16 +5374,12 @@ export function VideoStudio({
                   a motionless bar from reading as a hang. */}
               {s.progressQueuePosition ? (
                 <div className="text-[11px] text-ink3">
-                  {zh()
-                    ? `正在排队，前面还有 ${s.progressQueuePosition} 个渲染 — 轮到它时会自动开始。`
-                    : `Waiting behind ${s.progressQueuePosition === 1 ? 'one render' : `${s.progressQueuePosition} renders`} — this one starts by itself when the GPU is free.`}
+                  {`Waiting behind ${s.progressQueuePosition === 1 ? 'one render' : `${s.progressQueuePosition} renders`} — this one starts by itself when the GPU is free.`}
                 </div>
               ) : null}
               {s.progressOvertimeMin ? (
                 <div className="text-[11px] text-ink3">
-                  {zh()
-                    ? `已渲染 ${s.progressOvertimeMin} 分钟，仍在进行 — 可以继续等待，或用上方的“取消”停止。`
-                    : `Still rendering after ${s.progressOvertimeMin} min — keep waiting, or use Cancel above to stop.`}
+                  {`Still rendering after ${s.progressOvertimeMin} min — keep waiting, or use Cancel above to stop.`}
                 </div>
               ) : null}
             </Card>
@@ -5516,18 +5434,16 @@ export function VideoStudio({
                         variant="primary"
                         icon="arrowRight"
                         onClick={() => continueSceneFrom(s.resultUrl, s.resultModel)}
-                        title={zh()
-                          ? '下一个镜头将从这段视频的结尾继续（画面与环境音无缝衔接）'
-                          : 'The next shot picks up exactly where this clip ends — motion and room tone carry across the cut'}
+                        title="The next shot picks up exactly where this clip ends — motion and room tone carry across the cut"
                       >
-                        {zh() ? '接续场景' : 'Continue scene'}
+                        Continue scene
                       </Button>
                     ) : (
-                      <Button variant="primary" icon="plus" onClick={newPrompt}>{t('video.new')}</Button>
+                      <Button variant="primary" icon="plus" onClick={newPrompt}>{t('common.new')}</Button>
                     )}
-                    <Button variant="neutral" icon="download" onClick={download}>{t('video.download')}</Button>
-                    <Button variant="neutral" icon="refresh" onClick={regenerate}>{t('video.regenerate')}</Button>
-                    <Button variant="ghost" icon="chevronLeft" onClick={backToSetup}>{t('video.backToSetup')}</Button>
+                    <Button variant="neutral" icon="download" onClick={download}>{t('common.download')}</Button>
+                    <Button variant="neutral" icon="refresh" onClick={regenerate}>{t('common.regenerate')}</Button>
+                    <Button variant="ghost" icon="chevronLeft" onClick={backToSetup}>{t('common.backToSetup')}</Button>
                     <Menu
                       align="end"
                       width="w-[260px]"
@@ -5539,20 +5455,20 @@ export function VideoStudio({
                           aria-expanded={open}
                           aria-haspopup="menu"
                         >
-                          {zh() ? '更多' : 'More'}
+                          More
                         </Button>
                       )}
                     >
                       {(close) => (
                         <>
                           {canContinue ? (
-                            <MenuItem icon="plus" onClick={() => { close(); newPrompt(); }}>{t('video.new')}</MenuItem>
+                            <MenuItem icon="plus" onClick={() => { close(); newPrompt(); }}>{t('common.new')}</MenuItem>
                           ) : null}
                           {isSeedanceResult ? (
                             <MenuItem
                               icon="arrowRight"
                               onClick={() => { close(); extend(); }}
-                              title={zh() ? '使用 Seedance 2.0 延长此视频' : 'Extend this video using Seedance 2.0 Extend'}
+                              title="Extend this video using Seedance 2.0 Extend"
                             >
                               {t('video.extend')}
                             </MenuItem>
@@ -5562,11 +5478,9 @@ export function VideoStudio({
                               icon="film"
                               disabled={s.smoothingClip}
                               onClick={() => { close(); void smoothClip(s.resultUrl, s.resultModel, 2); }}
-                              title={zh()
-                                ? '真 RIFE 插帧（本地 MLX）：帧率翻倍，音频保持不变'
-                                : 'Doubles the frame rate so motion reads smoother; the audio passes through untouched (RIFE interpolation, on this device)'}
+                              title="Doubles the frame rate so motion reads smoother; the audio passes through untouched (RIFE interpolation, on this device)"
                             >
-                              {zh() ? '平滑运动 2×' : 'Smooth motion 2×'}
+                              Smooth motion 2×
                             </MenuItem>
                           ) : null}
                           {chainLength >= 2 ? (
@@ -5574,24 +5488,20 @@ export function VideoStudio({
                               icon="layers"
                               disabled={s.joiningChain}
                               onClick={() => { close(); void joinChainFrom(currentEntry); }}
-                              title={zh()
-                                ? '在本机把整条接续镜头无损拼接成一个 MP4（内容不离开这台设备）'
-                                : 'Join the whole chained episode into one MP4, losslessly, on this device — the clips never leave it'}
+                              title="Join the whole chained episode into one MP4, losslessly, on this device — the clips never leave it"
                             >
-                              {zh() ? `拼接 ${chainLength} 段` : `Join ${chainLength} shots`}
+                              {`Join ${chainLength} shots`}
                             </MenuItem>
                           ) : null}
                           {/* Publishing is the one action here that sends the clip
                               off this machine in the clear, so the row says so. */}
                           <MenuItem
                             icon="upload"
-                            meta={zh() ? '离开本机' : 'leaves device'}
+                            meta="leaves device"
                             onClick={() => { close(); postToCivitai(); }}
-                            title={zh()
-                              ? '把这段视频未加密地发布到 Civitai'
-                              : 'Publish this clip to Civitai — it leaves this device unencrypted'}
+                            title="Publish this clip to Civitai — it leaves this device unencrypted"
                           >
-                            {zh() ? '发布到 Civitai' : 'Post to Civitai'}
+                            Post to Civitai
                           </MenuItem>
                         </>
                       )}
@@ -5612,12 +5522,10 @@ export function VideoStudio({
                 <div className="flex justify-end">
                   <ChipButton
                     icon="layers"
-                    value={zh() ? '场景' : 'Scene'}
+                    value="Scene"
                     chevron={false}
                     onClick={openTimelineView}
-                    title={zh()
-                      ? '把多段片段排成一个场景：逐段生成、拖放片段、预览完整合成片'
-                      : 'Arrange clips into one scene: generate shot by shot, drag clips in, preview the full cut'}
+                    title="Arrange clips into one scene: generate shot by shot, drag clips in, preview the full cut"
                   />
                 </div>
               );
@@ -5627,7 +5535,6 @@ export function VideoStudio({
             const selectedSeg = s.timelineSegments.find((seg) => seg.id === s.timelineSelectedId);
             return (
               <TimelineStrip
-                zh={zh()}
                 segments={s.timelineSegments}
                 selectedId={s.timelineSelectedId}
                 pendingSegmentId={s.generating && selectedSeg && !selectedSeg.url ? selectedSeg.id : ''}
@@ -5657,7 +5564,7 @@ export function VideoStudio({
           {hasHistory ? (
             <>
               <div className="flex items-center justify-between gap-2">
-                <SectionLabel>{t('video.history')}</SectionLabel>
+                <SectionLabel>{t('common.history')}</SectionLabel>
                 <span className="font-mono text-[11px] text-ink3">{s.generationHistory.length}</span>
               </div>
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(200px,1fr))]">
@@ -5691,7 +5598,7 @@ export function VideoStudio({
                       <HistoryThumb url={entry.url} />
                       <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-bg0/90 to-transparent p-2 pt-6 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100">
                         <div className="truncate text-[11px] text-ink1">
-                          {entry.prompt_private ? (zh() ? '私密提示词（已隐去）' : 'Private prompt (hidden)') : (entry.prompt || '—')}
+                          {entry.prompt_private ? 'Private prompt (hidden)' : (entry.prompt || '—')}
                         </div>
                         <div className="truncate font-mono text-[10px] text-ink3">{entry.model || ''}</div>
                       </div>
@@ -5701,7 +5608,7 @@ export function VideoStudio({
                           <IconButton
                             icon="arrowRight"
                             size="sm"
-                            label={zh() ? '接续场景：下一个镜头从这段结尾继续' : 'Continue scene: the next shot picks up where this clip ends'}
+                            label="Continue scene: the next shot picks up where this clip ends"
                             className="border border-line1 bg-bg0/80 hover:border-honey/40"
                             onClick={(e) => { e.stopPropagation(); continueSceneFrom(entry.url, entry.model); }}
                           />
@@ -5709,7 +5616,7 @@ export function VideoStudio({
                         <IconButton
                           icon="download"
                           size="sm"
-                          label={zh() ? '下载视频' : 'Download video'}
+                          label="Download video"
                           className="border border-line1 bg-bg0/80 hover:border-line2"
                           onClick={(e) => {
                             e.stopPropagation();
@@ -5720,7 +5627,7 @@ export function VideoStudio({
                         <IconButton
                           icon="trash"
                           size="sm"
-                          label={zh() ? '从列表中删除' : 'Remove from the strip'}
+                          label="Remove from the strip"
                           className="border border-line1 bg-bg0/80 text-danger hover:border-danger/40"
                           onClick={(e) => { e.stopPropagation(); s.deleteTarget = entry; bump(); }}
                         />
@@ -5735,10 +5642,8 @@ export function VideoStudio({
           {!hasHistory && !s.generating && !s.resultUrl ? (
             <EmptyState
               icon="clapper"
-              title={zh() ? '创建你的第一个视频' : 'Create your first video'}
-              hint={zh()
-                ? '选择模型，添加提示词或起始帧，然后点击生成。本地 LTX 工作流支持配料参考和 LoRA。'
-                : 'Describe a shot or drop in a starting picture, then press Generate. Your first clip lands right here.'}
+              title="Create your first video"
+              hint="Describe a shot or drop in a starting picture, then press Generate. Your first clip lands right here."
               className="flex-1"
             />
           ) : null}
@@ -5918,9 +5823,9 @@ export function VideoStudio({
         open={Boolean(s.deleteTarget)}
         onClose={() => { s.deleteTarget = null; bump(); }}
         onConfirm={confirmDeleteHistoryEntry}
-        title={zh() ? '删除视频' : 'Delete video'}
-        body={zh() ? '从本次会话的列表中移除这个视频（它仍保留在历史记录中心）。' : 'Remove this video from this session\'s strip. It stays in the History hub.'}
-        confirmLabel={zh() ? '删除' : 'Delete'}
+        title="Delete video"
+        body="Remove this video from this session's strip. It stays in the History hub."
+        confirmLabel="Delete"
       />
 
       {/* Removing a timeline segment: the segment always goes; the FILE goes
@@ -5930,13 +5835,11 @@ export function VideoStudio({
         open={Boolean(s.timelineDeleteTarget)}
         onClose={() => { s.timelineDeleteTarget = null; bump(); }}
         onConfirm={() => void confirmTimelineRemove()}
-        title={zh() ? '移除这一段？' : 'Remove this segment?'}
+        title="Remove this segment?"
         body={(
           <div className="flex flex-col gap-3">
             <p className="text-[13px] leading-relaxed text-ink2">
-              {zh()
-                ? '把这一段从时间线中移除。片段本身仍保留在会话列表和历史记录中心。'
-                : 'The segment comes off the timeline. The clip itself stays in the session strip and the History hub.'}
+              The segment comes off the timeline. The clip itself stays in the session strip and the History hub.
             </p>
             <label className={cx(
               'flex items-start gap-2.5',
@@ -5951,28 +5854,24 @@ export function VideoStudio({
                   s.timelineDeleteTarget = { ...s.timelineDeleteTarget, deleteDisk: value };
                   bump();
                 }}
-                label={zh() ? '同时删除视频文件' : 'Also delete the video?'}
+                label="Also delete the video?"
               />
               <span className="flex flex-col gap-0.5">
-                <span className="text-[13px] text-ink1">{zh() ? '同时删除视频文件' : 'Also delete the video?'}</span>
+                <span className="text-[13px] text-ink1">Also delete the video?</span>
                 <span className={cx('text-[11px]', s.timelineDeleteTarget?.deleteDisk ? 'text-danger' : 'text-ink3')}>
                   {s.timelineDeleteTarget?.resolvingRow
-                    ? (zh() ? '正在检查本机文件…' : 'Checking for the file on this device…')
+                    ? 'Checking for the file on this device…'
                     : s.timelineDeleteTarget?.row
-                      ? (zh()
-                        ? '将从本机和历史记录中永久删除该文件，无法恢复。'
-                        : 'Permanently deletes the file from this device, along with its History row. This cannot be undone.')
-                      : (zh()
-                        ? '本机上没有这个片段的文件可删（云端结果，或已被删除）。'
-                        : 'No file to delete on this device — a cloud result, or one already gone.')}
+                      ? 'Permanently deletes the file from this device, along with its History row. This cannot be undone.'
+                      : 'No file to delete on this device — a cloud result, or one already gone.'}
                 </span>
               </span>
             </label>
           </div>
         )}
         confirmLabel={s.timelineDeleteTarget?.deleteDisk
-          ? (zh() ? '移除并删除文件' : 'Remove and delete file')
-          : (zh() ? '移除' : 'Remove')}
+          ? 'Remove and delete file'
+          : 'Remove'}
       />
 
       {/* A drop onto a filled card replaces its clip — said out loud first,
@@ -5982,12 +5881,10 @@ export function VideoStudio({
         tone="primary"
         onClose={() => { s.timelineReplaceTarget = null; bump(); }}
         onConfirm={confirmTimelineReplace}
-        title={zh() ? '替换这一段？' : 'Replace this clip?'}
-        body={zh()
-          ? '拖入的片段将取代这一段现有的片段。被替换的片段仍保留在会话列表和历史记录中。'
-          : 'The dropped clip takes this segment\'s place. The clip it replaces stays in the strip and in History.'}
-        confirmLabel={zh() ? '替换' : 'Replace'}
-        cancelLabel={zh() ? '保留原片段' : 'Keep the current clip'}
+        title="Replace this clip?"
+        body="The dropped clip takes this segment's place. The clip it replaces stays in the strip and in History."
+        confirmLabel="Replace"
+        cancelLabel="Keep the current clip"
       />
 
       {/* Attaching a source clip costs a model switch and/or the attached
@@ -5997,23 +5894,21 @@ export function VideoStudio({
         tone="primary"
         onClose={() => answerSourceSwitch(false)}
         onConfirm={() => answerSourceSwitch(true)}
-        title={zh() ? '附加这段片段？' : 'Attach this clip?'}
+        title="Attach this clip?"
         body={(
           <div className="flex flex-col gap-2 text-[13px] leading-relaxed text-ink2">
             {(s.sourceSwitchConfirm?.lines || []).map((line) => <p key={line}>{line}</p>)}
           </div>
         )}
-        confirmLabel={zh() ? '切换并附加' : 'Switch and attach'}
-        cancelLabel={zh() ? '保持不变' : 'Keep as is'}
+        confirmLabel="Switch and attach"
+        cancelLabel="Keep as is"
       />
 
       {s.resumeRemaining > 0
         ? createPortal(
           <div className="fixed left-1/2 top-4 z-[200] flex -translate-x-1/2 items-center gap-2.5 rounded-lg border border-line1 bg-bg1 px-4 py-2.5 text-[13px] text-ink1 shadow-pop">
             <Spinner size={14} className="text-honey" />
-            <span>{zh()
-              ? `正在恢复 ${s.resumeRemaining} 个待处理生成…`
-              : `Resuming ${s.resumeRemaining} pending generation${s.resumeRemaining > 1 ? 's' : ''}…`}</span>
+            <span>{`Resuming ${s.resumeRemaining} pending generation${s.resumeRemaining > 1 ? 's' : ''}…`}</span>
           </div>,
           document.body,
         )

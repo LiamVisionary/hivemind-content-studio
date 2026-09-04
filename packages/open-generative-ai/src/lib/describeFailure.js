@@ -20,7 +20,7 @@
 //
 // Pure (no React, no toast, no fetch) like the rest of src/lib, so every branch
 // is testable in node.
-import { zh } from './i18n.js';
+import { t, tf } from './i18n.js';
 import { describeMuapiError, flattenApiDetail } from './muapiErrors.js';
 import { remedyFor } from './textModels.js';
 
@@ -52,8 +52,7 @@ export function looksTechnical(text) {
 /** The generic sentence, named by what was being attempted when it failed. */
 function genericTitle(operation) {
   const what = String(operation || '').trim();
-  if (zh()) return what ? `${what}失败` : '这一步失败了';
-  return what ? `${what} failed` : 'That did not work';
+  return what ? tf('failure.genericNamed', what) : t('failure.generic');
 }
 
 /** A sentence the caller may show, plus the tail it must hide. */
@@ -109,10 +108,10 @@ export function describeFailure(error, { transport = '', operation = '', canLowe
 
   if (OOM.test(raw)) {
     return {
-      title: zh() ? '这个尺寸的显存不够' : 'Not enough memory for this size',
+      title: t('failure.notEnoughMemory'),
       detail: raw,
       remedy: canLowerResolution
-        ? { label: zh() ? '降低分辨率' : 'Lower resolution', action: 'lower-resolution' }
+        ? { label: t('failure.lowerResolution'), action: 'lower-resolution' }
         : null,
     };
   }
@@ -120,14 +119,14 @@ export function describeFailure(error, { transport = '', operation = '', canLowe
   if (UNREACHABLE.test(raw)) {
     return transport === 'local'
       ? {
-        title: zh() ? '本机引擎没有在运行' : 'The local engine is not running',
+        title: t('failure.localEngineDown'),
         detail: raw,
-        remedy: { label: zh() ? '再检查一次' : 'Check again', action: 'refresh' },
+        remedy: { label: t('common.checkAgain'), action: 'refresh' },
       }
       : {
-        title: zh() ? '工作室没有响应' : 'The studio is not answering',
+        title: t('failure.studioNotAnswering'),
         detail: raw,
-        remedy: { label: zh() ? '再检查一次' : 'Check again', action: 'refresh' },
+        remedy: { label: t('common.checkAgain'), action: 'refresh' },
       };
   }
 

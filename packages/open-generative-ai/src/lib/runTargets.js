@@ -25,6 +25,7 @@
 // This module holds the vocabulary, the joins and the ladder. It renders
 // nothing and fetches nothing, so both the picker and the tests apply exactly
 // the rules the studio applies.
+import { t } from './i18n.js';
 import {
   PLACE_ACCOUNTS, PLACE_HIVEMINDOS, PLACE_THIS_MAC, clipRouteFor, placeFor, placeLabelFor, transportFor,
 } from './modelRunner.js';
@@ -42,18 +43,18 @@ export { PLACE_ACCOUNTS, PLACE_HIVEMINDOS, PLACE_THIS_MAC };
 export const RUN_PLACES = Object.freeze([
   Object.freeze({
     id: PLACE_THIS_MAC,
-    label: 'This Mac',
-    blurb: 'Free, private, and as fast as the hardware — nothing leaves the machine.',
+    label: t('place.thisMac'),
+    blurb: t('place.thisMacBlurb'),
   }),
   Object.freeze({
     id: PLACE_HIVEMINDOS,
-    label: 'HivemindOS credits',
-    blurb: 'One balance of HivemindOS credits — the same one the HivemindOS app spends.',
+    label: t('place.hivemindos'),
+    blurb: t('place.hivemindosBlurb'),
   }),
   Object.freeze({
     id: PLACE_ACCOUNTS,
-    label: 'Your accounts',
-    blurb: 'Billed by the provider to an account you already pay for. No HivemindOS credits spent.',
+    label: t('place.accounts'),
+    blurb: t('place.accountsBlurb'),
   }),
 ]);
 
@@ -96,7 +97,7 @@ function makeTarget({
     // The ONE display label for where this runs. When a rental serves the
     // model, the machine IS the place: "This Mac" would be a true sentence
     // about the lane and a false one about the hardware doing the work.
-    placeLabel: machine ? (machine.gpu || 'Rented GPU') : placeLabelFor(row),
+    placeLabel: machine ? (machine.gpu || t('place.rentedGpu')) : placeLabelFor(row),
     machine,
     rating,
     ratingReason,
@@ -200,11 +201,11 @@ export function pickRunTarget(kind = 'image', { catalog = [], machines = null, r
   const onThisMac = ready.filter((target) => target.place === PLACE_THIS_MAC);
   const unrented = onThisMac.filter((target) => !target.machine);
   const localPick = unrented.find(wellRated);
-  if (localPick) return { target: localPick, reason: 'free, stays on this Mac' };
+  if (localPick) return { target: localPick, reason: t('runOn.freeStaysOnThisMac') };
 
   if (readiness?.hivemindosCredits) {
     const hosted = ready.find((target) => target.place === PLACE_HIVEMINDOS);
-    if (hosted) return { target: hosted, reason: 'on your HivemindOS credits' };
+    if (hosted) return { target: hosted, reason: t('runOn.onYourCredits') };
   }
 
   const connected = new Set(readiness?.connectedProviders || []);
@@ -224,7 +225,9 @@ export function pickRunTarget(kind = 'image', { catalog = [], machines = null, r
   // provider that is up with no credential. Still a real answer: better a row
   // with its state on it than an empty picker.
   const fallback = unrented[0] || ready[0];
-  return fallback ? { target: fallback, reason: fallback.place === PLACE_THIS_MAC ? 'free, stays on this Mac' : '' } : none;
+  return fallback
+    ? { target: fallback, reason: fallback.place === PLACE_THIS_MAC ? t('runOn.freeStaysOnThisMac') : '' }
+    : none;
 }
 
 /**
@@ -235,12 +238,12 @@ export function pickRunTarget(kind = 'image', { catalog = [], machines = null, r
  */
 export function runOnReadout(target, { reason = '', automatic = false } = {}) {
   if (!target) {
-    return { place: 'Nowhere yet', model: '', note: 'No model here can run this yet', automatic: false };
+    return { place: t('runOn.nowhere'), model: '', note: t('runOn.nothingRuns'), automatic: false };
   }
   const note = target.machine
     ? hourly(target.machine)
-    : (reason || (target.place === PLACE_THIS_MAC ? 'free, stays here' : ''));
-  return { place: target.placeLabel || 'This Mac', model: target.label, note, automatic: Boolean(automatic) };
+    : (reason || (target.place === PLACE_THIS_MAC ? t('runOn.freeStaysHere') : ''));
+  return { place: target.placeLabel || t('place.thisMac'), model: target.label, note, automatic: Boolean(automatic) };
 }
 
 export function readoutText(readout) {

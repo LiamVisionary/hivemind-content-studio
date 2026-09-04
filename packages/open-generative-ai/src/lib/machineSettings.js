@@ -65,18 +65,16 @@ export function sectionRows(payload, section) {
  *  "saved" there would be a lie, so the badge names the variable and the file
  *  it is most likely set in.
  */
-export function sourceNote(row, zh = false) {
+export function sourceNote(row) {
   if (!row) return null;
   if (row.source === 'env') {
     return {
       tone: 'warn',
-      label: zh ? '被环境变量覆盖' : 'Overridden',
-      detail: zh
-        ? `这台机器的 ${row.env_override} 环境变量优先于此设置。`
-        : `${row.env_override} is set on this machine and wins over this setting. Remove it from stack-local.env (or the shell that started the studio) for your choice to take effect.`,
+      label: 'Overridden',
+      detail: `${row.env_override} is set on this machine and wins over this setting. Remove it from stack-local.env (or the shell that started the studio) for your choice to take effect.`,
     };
   }
-  if (row.source === 'file') return { tone: 'honey', label: zh ? '已更改' : 'Changed', detail: '' };
+  if (row.source === 'file') return { tone: 'honey', label: 'Changed', detail: '' };
   return null;
 }
 

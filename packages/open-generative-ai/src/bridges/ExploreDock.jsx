@@ -27,7 +27,6 @@ import {
   loadStudioGenerationHistory,
 } from '../lib/hivemindStudio.js';
 import { resetVaultSession } from '../lib/vaultSession.js';
-import { zh } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { SectionLabel, cx } from '../ui/kit.jsx';
 
@@ -52,7 +51,7 @@ function PromptItemButton({ label, text, onInsert }) {
 
 function PromptItemList({ items, kind, onInsert }) {
   if (!items.length) {
-    return <p className="px-1 py-2 text-[11px] text-ink3">{zh() ? '还没有保存的内容。' : 'Nothing saved yet.'}</p>;
+    return <p className="px-1 py-2 text-[11px] text-ink3">Nothing saved yet.</p>;
   }
   const shown = items.slice(0, LIST_LIMIT);
   return (
@@ -71,13 +70,13 @@ function PromptItemList({ items, kind, onInsert }) {
       })}
       {items.length > shown.length ? (
         <div className="flex items-center justify-between px-1 pt-0.5 text-[11px] text-ink3">
-          <span>{zh() ? `显示 ${shown.length} / ${items.length}` : `${shown.length} of ${items.length}`}</span>
+          <span>{`${shown.length} of ${items.length}`}</span>
           <button
             type="button"
             onClick={() => { window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'history' } })); setExploreDock(false); }}
             className="font-medium text-honey hover:underline"
           >
-            {zh() ? '打开历史记录' : 'Open History'}
+            Open History
           </button>
         </div>
       ) : null}
@@ -196,7 +195,7 @@ function ExploreDockInner() {
     if (!text) return;
     const page = new URLSearchParams(window.location.search).get('page') || '';
     if (!PROMPT_PAGES.has(page)) {
-      toast(zh() ? '打开图像或视频工作室后再插入提示词。' : 'Open the Image or Video studio to insert prompts.');
+      toast('Open the Image or Video studio to insert prompts.');
       return;
     }
     insertIntoActivePrompt(text);
@@ -217,12 +216,12 @@ function ExploreDockInner() {
           <div className="flex items-center justify-between gap-3 border-b border-line1 pb-2.5">
             <div>
               <SectionLabel className="text-honey">Hivemind</SectionLabel>
-              <div className="text-[13px] font-semibold text-ink1">{zh() ? '提示词库' : 'Prompt library'}</div>
+              <div className="text-[13px] font-semibold text-ink1">Prompt library</div>
             </div>
             <button
               type="button"
               onClick={() => setExploreDock(false)}
-              aria-label={zh() ? '关闭' : 'Close'}
+              aria-label="Close"
               className="grid h-7 w-7 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg2 hover:text-ink1"
             >
               <Icon name="x" size={14} />
@@ -230,7 +229,7 @@ function ExploreDockInner() {
           </div>
 
           <DisclosureSection
-            title={zh() ? '模板' : 'Templates'}
+            title="Templates"
             open={section === 'templates'}
             onToggle={() => setSection(section === 'templates' ? null : 'templates')}
           >
@@ -238,7 +237,7 @@ function ExploreDockInner() {
           </DisclosureSection>
 
           <DisclosureSection
-            title={zh() ? '配料' : 'Ingredients'}
+            title="Ingredients"
             open={section === 'ingredients'}
             onToggle={() => setSection(section === 'ingredients' ? null : 'ingredients')}
           >

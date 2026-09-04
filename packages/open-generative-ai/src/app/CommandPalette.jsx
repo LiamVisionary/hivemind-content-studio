@@ -12,7 +12,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useSavedLibrary } from '../hooks/hooks.js';
 import { buildPaletteEntries, filterPaletteEntries, paletteGroupLabel } from '../lib/commandPalette.js';
-import { zh } from '../lib/i18n.js';
 import { localAI } from '../lib/localInferenceClient.js';
 import { LIBRARIES } from '../lib/savedLibraryStore.js';
 import { readTabLabels } from '../lib/studioTabLabel.js';
@@ -26,15 +25,15 @@ import { insertIntoActivePrompt } from './promptTarget.js';
 
 
 const TEXT = {
-  title: () => (zh() ? '快速跳转' : 'Go to'),
-  placeholder: () => (zh() ? '搜索页面、标签、提示词、模型…' : 'Search pages, tabs, prompts, models…'),
-  empty: () => (zh() ? '没有匹配项。' : 'Nothing matches that.'),
-  unlock: () => (zh() ? '解锁保险库以搜索已保存的提示词' : 'Unlock your vault to search saved prompts'),
-  inserted: () => (zh() ? '提示词已插入' : 'Prompt added to the composer'),
-  noComposer: () => (zh() ? '当前页面没有可插入的提示词框——请先打开一个工作室。' : 'This page has no prompt box — open a studio first.'),
-  handoffFailed: () => (zh() ? '打不开该模型——请在“模型”页中打开。' : "Couldn't open that model — try it from the Models page."),
-  hintNav: () => (zh() ? '选择' : 'to select'),
-  hintOpen: () => (zh() ? '打开' : 'to open'),
+  title: () => 'Go to',
+  placeholder: () => 'Search pages, tabs, prompts, models…',
+  empty: () => 'Nothing matches that.',
+  unlock: () => 'Unlock your vault to search saved prompts',
+  inserted: () => 'Prompt added to the composer',
+  noComposer: () => 'This page has no prompt box — open a studio first.',
+  handoffFailed: () => "Couldn't open that model — try it from the Models page.",
+  hintNav: () => 'to select',
+  hintOpen: () => 'to open',
 };
 
 export function CommandPalette({ open, page, onClose, onNavigate }) {
@@ -68,7 +67,6 @@ export function CommandPalette({ open, page, onClose, onNavigate }) {
       tabs,
       prompts: library.entries || [],
       models,
-      zh: zh(),
     });
   }, [open, page, library.entries, models]);
 
@@ -145,7 +143,7 @@ export function CommandPalette({ open, page, onClose, onNavigate }) {
             <p className="px-1 py-6 text-center text-[13px] text-ink3">{TEXT.empty()}</p>
           ) : null}
           {shown.map((entry, index) => {
-            const heading = entry.kind !== lastKind ? paletteGroupLabel(entry.kind, zh()) : '';
+            const heading = entry.kind !== lastKind ? paletteGroupLabel(entry.kind) : '';
             lastKind = entry.kind;
             const on = index === Math.min(cursor, shown.length - 1);
             return (
@@ -179,7 +177,7 @@ export function CommandPalette({ open, page, onClose, onNavigate }) {
         <div className="mt-3 flex items-center gap-3 border-t border-line1 pt-2.5 text-[11px] text-ink3">
           <span className="inline-flex items-center gap-1"><Kbd>↑</Kbd><Kbd>↓</Kbd> {TEXT.hintNav()}</span>
           <span className="inline-flex items-center gap-1"><Kbd>↵</Kbd> {TEXT.hintOpen()}</span>
-          <span className="inline-flex items-center gap-1"><Kbd>esc</Kbd> {zh() ? '关闭' : 'to close'}</span>
+          <span className="inline-flex items-center gap-1"><Kbd>esc</Kbd> to close</span>
         </div>
       </div>
     </Modal>

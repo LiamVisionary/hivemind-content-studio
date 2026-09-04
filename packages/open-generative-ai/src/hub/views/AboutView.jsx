@@ -13,7 +13,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { APP_VERSION, shortCommit, versionLabel } from '../../lib/appVersion.js';
 import { describeFailure } from '../../lib/describeFailure.js';
-import { zh } from '../../lib/i18n.js';
 import { Button, Card, FailureCallout, Pill, SectionLabel, Spinner } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 
@@ -84,8 +83,8 @@ function LicenseGroup({ group }) {
           className="mt-1.5 text-[11px] font-medium text-honey hover:underline"
         >
           {open
-            ? (zh() ? '收起' : 'Show fewer')
-            : (zh() ? `再显示 ${group.packages.length - shown.length} 个` : `Show ${group.packages.length - shown.length} more`)}
+            ? 'Show fewer'
+            : `Show ${group.packages.length - shown.length} more`}
         </button>
       ) : null}
     </div>
@@ -107,7 +106,7 @@ export function AboutView({ active }) {
       setAbout(await response.json());
       setLoaded(true);
     } catch (error) {
-      setFailure(describeFailure(error, { operation: zh() ? '读取版本信息' : 'reading the version' }));
+      setFailure(describeFailure(error, { operation: 'reading the version' }));
     } finally {
       setLoading(false);
     }
@@ -135,11 +134,9 @@ export function AboutView({ active }) {
     // inside itself (DESIGN.md §2).
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker={zh() ? '关于' : 'About'}
+        kicker="About"
         title={about?.product || 'Hivemind Content Studio'}
-        subtitle={zh()
-          ? '本机运行的版本、许可证，以及构成它的第三方组件。'
-          : 'The build running on this machine, the licence it is under, and everything it is made of.'}
+        subtitle="The build running on this machine, the licence it is under, and everything it is made of."
         right={<Pill tone="neutral">{about?.license || 'AGPL-3.0-or-later'}</Pill>}
       />
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
@@ -150,84 +147,72 @@ export function AboutView({ active }) {
             detail={failure.detail}
             onRetry={load}
             retryDisabled={loading}
-            retryLabel={zh() ? '重试' : 'Try again'}
+            retryLabel="Try again"
           />
         ) : null}
 
         <Card className="p-4">
-          <Row label={zh() ? '版本' : 'Version'}>
+          <Row label="Version">
             <span className="font-mono">{versionLabel({ version: shownVersion, commit: about?.commit }) || (loading ? '…' : '—')}</span>
             {mismatch ? (
               <span className="ml-2 text-[11px] text-warn">
-                {zh()
-                  ? `此页面来自 ${APP_VERSION} 构建 — 请刷新页面。`
-                  : `this page was built from ${APP_VERSION} — reload to catch up`}
+                {`this page was built from ${APP_VERSION} — reload to catch up`}
               </span>
             ) : null}
           </Row>
-          <Row label={zh() ? '构建日期' : 'Built'}>
+          <Row label="Built">
             <span className="font-mono">{about?.build_date ? String(about.build_date).slice(0, 10) : '—'}</span>
           </Row>
-          <Row label={zh() ? '许可证' : 'Licence'}>
+          <Row label="Licence">
             {about?.license || 'AGPL-3.0-or-later'}
           </Row>
-          <Row label={zh() ? '源代码' : 'Source'}>
+          <Row label="Source">
             <a
               href={taggedSource}
               target="_blank"
               rel="noreferrer"
               className="text-honey hover:underline"
             >
-              {zh() ? '查看源代码' : 'View source'}
+              View source
             </a>
             <span className="ml-2 text-[11px] text-ink3">
               {about?.commit
-                ? (zh()
-                  ? `本次构建对应提交 ${shortCommit(about.commit)}`
-                  : `this build is commit ${shortCommit(about.commit)}`)
-                : (zh() ? '完整源代码' : 'the complete corresponding source')}
+                ? `this build is commit ${shortCommit(about.commit)}`
+                : 'the complete corresponding source'}
             </span>
           </Row>
-          <Row label={zh() ? '安全' : 'Security'}>
+          <Row label="Security">
             <a
               href={`${sourceUrl}/security/advisories/new`}
               target="_blank"
               rel="noreferrer"
               className="text-honey hover:underline"
             >
-              {zh() ? '私下报告漏洞' : 'Report a vulnerability privately'}
+              Report a vulnerability privately
             </a>
             <span className="ml-2 text-[11px] text-ink3">
-              {zh()
-                ? '每个端口监听什么、由什么认证，见 .github/SECURITY.md。'
-                : 'what listens where, and what authenticates it, is in .github/SECURITY.md'}
+              what listens where, and what authenticates it, is in .github/SECURITY.md
             </span>
           </Row>
         </Card>
 
         <section className="flex flex-col gap-2">
-          <SectionLabel>{zh() ? '担保' : 'Warranty'}</SectionLabel>
+          <SectionLabel>Warranty</SectionLabel>
           <Card className="p-4 text-[13px] leading-relaxed text-ink2">
             <p>
-              {zh()
-                ? '本程序不提供任何担保，在适用法律允许的范围内亦无适销性或特定用途适用性的默示担保。'
-                : 'This program comes with ABSOLUTELY NO WARRANTY, to the extent permitted by applicable law — not even the implied warranty of merchantability or fitness for a particular purpose.'}
+              This program comes with ABSOLUTELY NO WARRANTY, to the extent permitted by applicable law — not even the implied warranty of merchantability or fitness for a particular purpose.
             </p>
             <p className="mt-2">
-              {zh()
-                ? '这是自由软件，你可以在 GNU Affero 通用公共许可证第 3 版或更新版本的条款下重新分发和修改它。'
-                : 'This is free software, and you are welcome to redistribute and modify it under the terms of the GNU Affero General Public License, version 3 or later.'}
+              This is free software, and you are welcome to redistribute and modify it under the terms of the GNU Affero General Public License, version 3 or later.
             </p>
             <p className="mt-2 text-ink3">
-              {zh()
-                ? '完整许可证文本随本应用一同分发（LICENSE），第三方组件的说明见 THIRD_PARTY_NOTICES.md。'
-                : 'The full licence text ships with the app (LICENSE); the donor and component provenance is in THIRD_PARTY_NOTICES.md.'}
+              The full licence text ships with the app (LICENSE); the donor and component provenance is in THIRD_PARTY_NOTICES.md.
             </p>
           </Card>
         </section>
 
         <section className="flex flex-col gap-2">
-          <SectionLabel>{zh() ? '更新内容' : "What's new"}</SectionLabel>
+          <SectionLabel>What's new</SectionLabel>
           {about?.whats_new?.length ? (
             <Card className="p-4">
               <ul className="flex flex-col gap-2">
@@ -241,16 +226,14 @@ export function AboutView({ active }) {
             </Card>
           ) : (
             <Card className="p-4 text-[13px] text-ink3">
-              {zh()
-                ? '本次构建未附带更新日志。完整历史见源代码仓库的 CHANGELOG.md。'
-                : 'This build did not ship a changelog. The full history is in CHANGELOG.md in the source above.'}
+              This build did not ship a changelog. The full history is in CHANGELOG.md in the source above.
             </Card>
           )}
         </section>
 
         <section className="flex flex-col gap-2">
           <SectionLabel>
-            {zh() ? '第三方组件' : 'Third-party notices'}
+            Third-party notices
             {total ? <span className="ml-2 font-normal text-ink3">{total}</span> : null}
           </SectionLabel>
           {loading && !about ? (
@@ -261,21 +244,17 @@ export function AboutView({ active }) {
             // what is missing and how it comes back.
             <Card className="flex flex-col items-start gap-2 p-4">
               <p className="text-[13px] text-ink2">
-                {zh()
-                  ? '此次构建未包含生成的依赖许可证清单。'
-                  : 'This build shipped without the generated dependency licence list.'}
+                This build shipped without the generated dependency licence list.
               </p>
               <p className="font-mono text-[11px] text-ink3">python3 scripts/generate_notices.py</p>
               <Button size="sm" variant="neutral" icon="refresh" onClick={load} disabled={loading}>
-                {zh() ? '重试' : 'Try again'}
+                Try again
               </Button>
             </Card>
           ) : groups.length ? (
             <>
               <p className="text-[12px] text-ink3">
-                {zh()
-                  ? '按许可证分组，由构建时的 Python 发行版和三个 npm 锁文件生成。'
-                  : 'Grouped by licence, generated at build time from the installed Python distributions and the three npm lockfiles.'}
+                Grouped by licence, generated at build time from the installed Python distributions and the three npm lockfiles.
                 {about?.notices?.generated_at ? ` · ${about.notices.generated_at}` : ''}
               </p>
               <div className="grid gap-2 md:grid-cols-2">

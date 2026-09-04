@@ -12,9 +12,7 @@ import {
   cameraMotionPhrase,
   normalizeCameraMotions,
 } from '../../lib/cameraMotion.js';
-// `zh` lives in lib/i18n.js; videoLogic re-exports it, which is the import every
-// sibling panel here uses (see IngredientsPanel.jsx).
-import { zh } from './videoLogic.js';
+import { t } from '../../lib/i18n.js';
 import { ChipButton, Menu } from '../../ui/Menu.jsx';
 import { Button, cx } from '../../ui/kit.jsx';
 
@@ -42,13 +40,11 @@ export function CameraMotionMenu({ selectedIds, onApply }) {
       trigger={(open, toggleMenu) => (
         <ChipButton
           icon="camera"
-          label={zh() ? '运镜' : 'Camera'}
+          label={t('composer.camera')}
           value={applied.length ? String(applied.length) : ''}
           active={open || applied.length > 0}
           onClick={() => { setDraft(null); toggleMenu(); }}
-          title={zh()
-            ? '选择最多三个镜头运动，按顺序合成提示词短语'
-            : `Camera moves — pick up to ${MAX_CAMERA_MOTIONS}; their order becomes begin / continue / finish`}
+          title={`Camera moves — pick up to ${MAX_CAMERA_MOTIONS}; their order becomes begin / continue / finish`}
         />
       )}
     >
@@ -107,16 +103,16 @@ export function CameraMotionMenu({ selectedIds, onApply }) {
               disabled={!current.length && !applied.length}
               onClick={() => { onApply(current); setDraft(null); close(); }}
             >
-              {zh() ? '应用到提示词' : 'Apply to prompt'}
+              Apply to prompt
             </Button>
             {applied.length ? (
               <Button
                 size="sm"
                 variant="neutral"
                 onClick={() => { onApply([]); setDraft(null); close(); }}
-                title={zh() ? '从提示词中移除运镜短语' : 'Remove the camera phrase from the prompt'}
+                title="Remove the camera phrase from the prompt"
               >
-                {zh() ? '清除' : 'Clear'}
+                Clear
               </Button>
             ) : null}
             <span className="ml-auto pr-1 text-[10px] text-ink3">

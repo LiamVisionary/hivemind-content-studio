@@ -76,7 +76,7 @@ test('end-frame models get the combined slots picker, never twin icon buttons', 
     // identical unlabeled icon buttons.
     const studio = read('src/studios/VideoStudio.jsx');
     assert.match(studio, /endFrameVisible \? \(/);
-    assert.match(studio, /\{ key: 'end', label: zh\(\) \? '结束帧（可选）' : 'End \(optional\)', url: s\.setup\.endImageUrl \}/);
+    assert.match(studio, /\{ key: 'end', label: 'End \(optional\)', url: s\.setup\.endImageUrl \}/);
     assert.doesNotMatch(studio, /keepOpenOnSelect=\{endFrameVisible\}/);
 });
 

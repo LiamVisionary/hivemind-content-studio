@@ -29,7 +29,7 @@ test('the chips wrap as a group and Generate is a pinned sibling', () => {
     assert.match(result, /\{canContinue \? \(\s*<Button\s+variant="primary"\s+icon="arrowRight"[\s\S]*?Continue scene[\s\S]*?\) : \(\s*<Button variant="primary" icon="plus" onClick=\{newPrompt\}/);
     assert.match(result, /variant="neutral"\s+icon="download"/);
     assert.match(result, /<MenuItem[\s\S]*?Post to Civitai/, 'publishing moved under More');
-    assert.match(result, /meta=\{zh\(\) \? '离开本机' : 'leaves device'\}/, 'and says it leaves the device');
+    assert.match(result, /meta="leaves device"/, 'and says it leaves the device');
 });
 
 test('one trigger primitive, distinct icons, H3-only grammar chips, no chips on a disabled prompt', () => {
@@ -40,13 +40,13 @@ test('one trigger primitive, distinct icons, H3-only grammar chips, no chips on 
     // The clip chip says which of its two meanings it carries, from the request
     // plan: it CHAINS from a clip, or the clip is this run's source video.
     assert.match(studio, /const clipChipContinues = videoRequestPlan\(s\.setup\)\.task === 'generate'/);
-    assert.match(studio, /\? \(zh\(\) \? '接续片段' : 'Continue from clip'\)\s*\n\s*: \(zh\(\) \? '源视频' : 'Source video'\)/);
+    assert.match(studio, /\? 'Continue from clip'\s*\n\s*: 'Source video'/);
     assert.match(studio, /icon=\{continues \? 'film' : 'upload'\}/);
     assert.match(studio, /Continue from a clip/);
     // Camera is "Camera" with the camera icon; Style is the wand; Refine keeps sparkles as a VALUE.
-    assert.match(read('src/studios/video/CameraMotionMenu.jsx'), /icon="camera"\s+label=\{zh\(\) \? '运镜' : 'Camera'\}/);
+    assert.match(read('src/studios/video/CameraMotionMenu.jsx'), /icon="camera"\s+label=\{t\('composer\.camera'\)\}/);
     assert.match(read('src/studios/video/RestyleMenu.jsx'), /icon="wand"/);
-    assert.match(studio, /icon="sparkles"\s+value=\{zh\(\) \? '润色' : 'Refine'\}/);
+    assert.match(studio, /icon="sparkles"\s+value=\{t\('composer\.refine'\)\}/);
     // UGC, Style, Shots and Check all write H3 grammar: gated together on isH3().
     assert.match(studio, /\{isH3\(\) \? \(\s*<>\s*<UgcMenu/);
     // The prompt-writing chips go with a disabled textarea.
@@ -59,7 +59,7 @@ test('keyboard, confirms, and the canvas actions behave', () => {
     assert.match(studio, /if \(e\.key !== 'Enter' \|\| !\(e\.metaKey \|\| e\.ctrlKey\)\) return;[\s\S]*?if \(rentedBlocked \|\| s\.generating\) return;\s*void generate\(\);/);
     // No native confirm anywhere in the studio; the source-clip switch resolves a ConfirmModal.
     assert.doesNotMatch(studio, /window\.confirm/);
-    assert.match(studio, /confirmLabel=\{zh\(\) \? '切换并附加' : 'Switch and attach'\}/);
+    assert.match(studio, /confirmLabel="Switch and attach"/);
     assert.match(studio, /if \(cost && !\(await confirmSourceVideoSwitch\(cost\)\)\) return;/);
     // "Back to setup" only clears the canvas.
     const back = studio.match(/const backToSetup = \(\) => \{[\s\S]*?\n  \};/)[0];
@@ -73,12 +73,12 @@ test('keyboard, confirms, and the canvas actions behave', () => {
     assert.match(read('src/studios/video/TimelineStrip.jsx'), /useMediaPoster\(url, \{ kind: 'video' \}\)/);
     // The failure callout offers Try again and says it once (no duplicate toast) —
     // and, since the failure is read through describeFailure, the repair it named.
-    assert.match(studio, /s\.generateError = failure\.title \|\| \(zh\(\) \? '生成失败' : 'Generation failed'\);/);
+    assert.match(studio, /s\.generateError = failure\.title \|\| 'Generation failed';/);
     assert.match(studio, /<FailureCallout/);
     assert.match(studio, /remedy=\{s\.generateFailure\?\.remedy \|\| null\}/);
     assert.doesNotMatch(studio, /toast\.error\(e\.message\)/);
     // The "still stopping" notice has a lifetime.
-    assert.doesNotMatch(studio, /toast\.loading\(zh\(\)\s*\? '正在停止/);
+    assert.doesNotMatch(studio, /toast\.loading\('Stopping/);
     // The joined tile: static honey border, animated only while building, no cyan/violet.
     const css = read('src/style.css');
     assert.doesNotMatch(css, /#7dd3fc|#c084fc|#f472b6/);

@@ -12,7 +12,6 @@
 // Reusable on purpose — this is the shape any studio handing work to another
 // one needs, and the Story studio is simply the first.
 import { useEffect, useMemo, useState } from 'react';
-import { zh } from '../lib/i18n.js';
 import { Menu, MenuHeading } from '../ui/Menu.jsx';
 import { Button, cx } from '../ui/kit.jsx';
 import { Icon } from '../ui/icons.jsx';
@@ -47,7 +46,7 @@ export function useSendTargets(section = 'video', resolve = null) {
 }
 
 function SourceRow({ source, descriptor, describeFor, selected, onSelect }) {
-  const label = SOURCE_LABELS[source]?.[zh() ? 'zh' : 'en'] || source;
+  const label = SOURCE_LABELS[source] || source;
   const available = Boolean(descriptor?.available);
   // The sender describes its own trip: how much of a production survives is a
   // property of the production and the target together, so a picture count
@@ -96,7 +95,7 @@ function SourceRow({ source, descriptor, describeFor, selected, onSelect }) {
             source does not offer what is loaded now, so picking it moves the tab. */}
         <span className="truncate text-[11px] text-ink3">
           {available
-            ? `${descriptor.switches ? (zh() ? '切换到 ' : 'switches to ') : ''}${descriptor.modelName || descriptor.modelId}`
+            ? `${descriptor.switches ? 'switches to ' : ''}${descriptor.modelName || descriptor.modelId}`
             : consequence}
         </span>
         {available && consequence ? (
@@ -133,7 +132,7 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
   if (!target) {
     return (
       <p className="px-2.5 py-4 text-center text-[11px] leading-snug text-ink3">
-        {zh() ? '正在读取视频工作室的设置…' : 'Reading the Video studio’s settings…'}
+        Reading the Video studio’s settings…
       </p>
     );
   }
@@ -143,7 +142,7 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
       {/* Only when there is a choice to make. One tab is not a decision. */}
       {targets.length > 1 ? (
         <>
-          <MenuHeading>{zh() ? '发送到哪个标签' : 'Which tab'}</MenuHeading>
+          <MenuHeading>Which tab</MenuHeading>
           <div className="flex flex-wrap gap-1 px-1.5 pb-1" role="radiogroup">
             {targets.map((entry) => (
               <button
@@ -160,14 +159,14 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
                 )}
               >
                 {entry.label}
-                {entry.active ? ` · ${zh() ? '当前' : 'front'}` : ''}
+                {entry.active ? ` · ${'front'}` : ''}
               </button>
             ))}
           </div>
         </>
       ) : null}
 
-      <MenuHeading>{zh() ? '在哪里运行' : 'Run it on'}</MenuHeading>
+      <MenuHeading>Run it on</MenuHeading>
       <div role="radiogroup" className="flex flex-col">
         {SEND_SOURCES.map((entry) => (
           <SourceRow
@@ -191,7 +190,7 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
             close();
           }}
         >
-          {zh() ? '发送' : 'Send'}
+          Send
         </Button>
       </div>
     </div>
@@ -221,7 +220,7 @@ export function SendToMenu({
       width="w-[19rem]"
       trigger={(open, toggle) => (
         <Button variant={variant} icon={icon} disabled={disabled} onClick={toggle} aria-expanded={open}>
-          {label || (zh() ? '发送到…' : 'Send to…')}
+          {label || 'Send to…'}
         </Button>
       )}
     >

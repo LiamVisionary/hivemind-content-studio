@@ -1,10 +1,10 @@
-// One language, one home for `zh`, and no chrome that reloads to change it.
+// One language, one mechanism, and no chrome that reloads to change it.
 //
-// v1 ships English only: zh-CN covered the toolbars and left three studios,
-// every dialog and most of the hub in English, so the toggle promised a
-// translated app and delivered a bilingual one. The dictionary and the ~1,000
-// `zh() ? … : …` branches all stay — LANGS_ENABLED is the switch — which means
-// nothing in the source tells you the language is off. These tests do.
+// v1 ships English only. It used to ship English only through a SWITCH: a
+// half-translated zh-CN dictionary plus ~1,400 inline `zh() ? '中文' : 'English'`
+// ternaries that LANGS_ENABLED silently held on the English branch. Both are
+// gone. What renders is one key table (lib/i18n.js STRINGS) read through `t`,
+// and these tests are what keep a second mechanism from growing back.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -94,19 +94,27 @@ test('no language toggle is left in the chrome', () => {
   assert.doesNotMatch(code(settings), /Segmented/, 'Settings has no language control');
 });
 
-test('`zh` has exactly one home', () => {
+test('no language predicate survives anywhere — `t` is the only mechanism', () => {
+  // Three shapes, all of them a way to write a second string beside the first:
+  // the `zh()` call, a `zh` boolean threaded as a prop or a parameter, and the
+  // `t(en, cn)` helper one card had grown of its own.
   const offenders = [];
   for (const file of FILES) {
-    if (rel(file) === 'lib/i18n.js') continue;
     const source = fs.readFileSync(file, 'utf8');
-    for (const line of source.split('\n')) {
-      if (/^\s*(?:export\s+)?const zh\w* = \(\) =>/.test(line)) offenders.push(`${rel(file)}: ${line.trim()}`);
-    }
+    source.split('\n').forEach((line, index) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('//') || trimmed.startsWith('*')) return;
+      if (/(?:^|[^\w.])zh(?:Ui)?\s*\(\)/.test(line)) offenders.push(`${rel(file)}:${index + 1} zh()`);
+      if (/(?:^|[^\w.])zh(?:Ui)?\s*[?)]/.test(line)) offenders.push(`${rel(file)}:${index + 1} zh ?`);
+      if (/^\s*(?:export\s+)?const t = \(en/.test(line)) offenders.push(`${rel(file)}:${index + 1} t(en, cn)`);
+    });
   }
-  assert.deepEqual(offenders, [], 'the language predicate is exported from lib/i18n.js');
-  assert.match(read('lib/i18n.js'), /^export const zh = \(\) => getLang\(\) === 'zh-CN';$/m);
-  // videoLogic re-exports the same binding; a dozen video panels import it there.
-  assert.match(read('studios/video/videoLogic.js'), /export \{ zh \};/);
+  assert.deepEqual(offenders, [], 'a string is chosen by key, never by a language branch');
+  assert.doesNotMatch(read('lib/i18n.js'), /export const zh\b/, 'i18n.js exports no language predicate');
+  assert.doesNotMatch(read('studios/video/videoLogic.js'), /export \{ zh \}/, 'and videoLogic re-exports none');
+  // One table, not two dictionaries keyed by language.
+  assert.match(read('lib/i18n.js'), /^export const STRINGS = \{$/m);
+  assert.doesNotMatch(read('lib/i18n.js'), /^const translations = \{$/m);
 });
 
 test('unlocking the vault re-resolves in place instead of reloading', () => {
@@ -139,7 +147,7 @@ test('a sealed prompt is a sentence with a way out, not a padlock glyph', () => 
   assert.match(history, /onClick=\{requestVaultUnlock\}/, 'and offers the unlock');
 });
 
-test('no dead i18n key is left in the dictionary', () => {
+test('no dead i18n key is left in the key table', () => {
   const i18n = read('lib/i18n.js');
   const used = new Set();
   for (const file of FILES) {

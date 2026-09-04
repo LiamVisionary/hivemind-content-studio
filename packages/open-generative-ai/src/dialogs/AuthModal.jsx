@@ -48,7 +48,7 @@ export function AuthModal({ onClose, onSaved }) {
   };
 
   // Where the key will land, said BEFORE it is pasted rather than after.
-  const note = isHivemindStudioEnabled() ? t('auth.storedOnMachine') : t('auth.storedInBrowser');
+  const note = isHivemindStudioEnabled() ? t('auth.storedOnMachine') : t('settings.keyInBrowser');
 
   return (
     <Modal open onClose={onClose} title={t('auth.title')} size="md">

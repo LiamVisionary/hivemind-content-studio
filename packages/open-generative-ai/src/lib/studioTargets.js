@@ -16,6 +16,7 @@
 // Module state, deliberately: it describes what is mounted right now. Nothing
 // here is persisted — a target that is not on screen is not a target.
 
+import { t } from './i18n.js';
 import { loadTabState, saveTabState } from './studioTabs.js';
 
 const targets = new Map(); // key -> descriptor
@@ -86,8 +87,8 @@ export function resetSendTargets() {
 export const SEND_SOURCES = Object.freeze(['local', 'api']);
 
 export const SOURCE_LABELS = Object.freeze({
-  local: { en: 'This Mac', zh: '这台 Mac' },
-  api: { en: 'Your accounts', zh: '你的账户' },
+  local: t('place.thisMac'),
+  api: t('place.accounts'),
 });
 
 /**

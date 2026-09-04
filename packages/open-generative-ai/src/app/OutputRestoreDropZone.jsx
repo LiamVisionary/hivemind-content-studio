@@ -15,7 +15,6 @@ import toast from 'react-hot-toast';
 import { loadStudioSetup } from './promptTarget.js';
 import { basenameOf, resolveGenerationSetup, warmGenerationSetupLookup } from '../lib/generationSetupStore.js';
 import { HIVEMIND_OUTPUT_DRAG_TYPE } from '../lib/referenceDrop.js';
-import { zh } from '../lib/i18n.js';
 import { Spinner, cx } from '../ui/kit.jsx';
 
 const CUSTOM_TYPE = HIVEMIND_OUTPUT_DRAG_TYPE;
@@ -84,25 +83,22 @@ function restoreFullContext(section, context) {
     (Array.isArray(context.loras) && context.loras.length);
   // Named, not guessed: a lip sync restored into "the Image studio" sends the
   // owner to a studio that has none of it.
-  const STUDIO_NAMES = { video: ['视频', 'Video'], lipsync: ['唇语同步', 'Lip Sync'], image: ['图像', 'Image'] };
-  const [zhName, enName] = STUDIO_NAMES[section] || STUDIO_NAMES.image;
-  const where = zh() ? zhName : enName;
+  const STUDIO_NAMES = { video: 'Video', lipsync: 'Lip Sync', image: 'Image' };
+  const where = STUDIO_NAMES[section] || STUDIO_NAMES.image;
   // Oversized inline references are not sealed (they would bloat the vault and cost
   // the settings of older generations), so say so rather than letting the user
   // generate with a silently smaller reference set than the run they restored.
   if (omitted) {
     toast.success(
-      zh()
-        ? `设置已恢复到${where}工作室 — 请重新附加 ${omitted} 张参考图。`
-        : `Settings restored into the ${where} studio — re-attach ${omitted} reference image${omitted === 1 ? '' : 's'}.`,
+      `Settings restored into the ${where} studio — re-attach ${omitted} reference image${omitted === 1 ? '' : 's'}.`,
       { duration: 6000 },
     );
     return;
   }
   toast.success(
     needsAttention
-      ? (zh() ? `设置已恢复到${where}工作室 — 请检查参考图 / LoRA。` : `Settings restored into the ${where} studio — re-check reference images / LoRAs.`)
-      : (zh() ? `设置已恢复到${where}工作室。` : `Settings restored into the ${where} studio.`),
+      ? `Settings restored into the ${where} studio — re-check reference images / LoRAs.`
+      : `Settings restored into the ${where} studio.`,
   );
 }
 
@@ -121,7 +117,7 @@ async function tryEmbeddedMetadata(file) {
       seed: recovered.seed,
     });
     window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'image' } }));
-    toast.success(zh() ? '已从图片内嵌的工作流中恢复提示词。' : 'Recovered the prompt from the image’s embedded workflow.');
+    toast.success('Recovered the prompt from the image’s embedded workflow.');
     return true;
   } catch {
     return false;
@@ -165,10 +161,10 @@ async function handleDrop(dataTransfer) {
   if (!result?.needsUnlock && await tryCanvasHistory(identity)) return;
 
   if (result?.needsUnlock) {
-    toast(zh() ? '先在顶栏解锁保险库，再拖放一次即可恢复保存的设置。' : 'Unlock your vault (topbar) to restore saved settings, then drop again.');
+    toast('Unlock your vault (topbar) to restore saved settings, then drop again.');
     return;
   }
-  toast(zh() ? '没有找到这个文件的已保存设置。' : 'No saved settings found for this file.');
+  toast('No saved settings found for this file.');
 }
 
 export function OutputRestoreDropZone() {
@@ -243,14 +239,14 @@ export function OutputRestoreDropZone() {
           <>
             <div className="flex items-center justify-center gap-2 text-sm font-medium text-ink1">
               <Spinner size={14} className="text-honey" />
-              {zh() ? '正在恢复设置…' : 'Restoring settings…'}
+              Restoring settings…
             </div>
-            <div className="mt-1 text-xs text-ink3">{zh() ? '正在用你的密钥解密这个输出保存的设置' : 'Decrypting this output’s saved setup with your key'}</div>
+            <div className="mt-1 text-xs text-ink3">Decrypting this output’s saved setup with your key</div>
           </>
         ) : (
           <>
-            <div className="text-sm font-medium text-ink1">{zh() ? '拖放此工作室生成的图片或视频以恢复其设置' : 'Drop an image or video from this studio to restore its settings'}</div>
-            <div className="mt-1 text-xs text-ink3">{zh() ? '会把提示词、模型和全部设置载入对应的工作室' : 'Loads the prompt, model and every setting into the matching studio'}</div>
+            <div className="text-sm font-medium text-ink1">Drop an image or video from this studio to restore its settings</div>
+            <div className="mt-1 text-xs text-ink3">Loads the prompt, model and every setting into the matching studio</div>
           </>
         )}
       </div>

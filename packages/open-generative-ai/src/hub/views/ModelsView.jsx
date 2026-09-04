@@ -21,7 +21,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LocalModelManager } from '../../dialogs/LocalModelManager.jsx';
 import { mapHivemindWorkflowModels } from '../../lib/hivemindStudio.js';
-import { zh } from '../../lib/i18n.js';
 import { localAI } from '../../lib/localInferenceClient.js';
 import { Button, IconButton, Segmented, Spinner } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
@@ -32,10 +31,10 @@ import { InstalledAssets } from './models/InstalledAssets.jsx';
 import { RunnableModels } from './models/RunnableModels.jsx';
 
 const TABS = () => [
-  { value: 'models', label: zh() ? '模型' : 'Models' },
-  { value: 'engine', label: zh() ? '引擎' : 'Engine' },
-  { value: 'installed', label: zh() ? '已安装' : 'Installed' },
-  { value: 'discover', label: zh() ? '发现' : 'Discover' },
+  { value: 'models', label: 'Models' },
+  { value: 'engine', label: 'Engine' },
+  { value: 'installed', label: 'Installed' },
+  { value: 'discover', label: 'Discover' },
 ];
 
 export function ModelsView({ active }) {
@@ -66,7 +65,7 @@ export function ModelsView({ active }) {
       ]);
       // The catalog fetch reports an unreachable engine instead of rejecting.
       if (!modelsError && localCatalog?.status === 'unreachable') {
-        modelsError = zh() ? '本地引擎正在启动——尚未响应。' : 'The local engine is starting — it has not answered yet.';
+        modelsError = 'The local engine is starting — it has not answered yet.';
       }
       setModels(Array.isArray(localCatalog?.models) ? localCatalog.models : []);
       setLibrary(installed);
@@ -90,13 +89,13 @@ export function ModelsView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker={zh() ? '本地运行时' : 'Local runtime'}
-        title={zh() ? '模型' : 'Models'}
+        kicker="Local runtime"
+        title="Models"
         right={
           <>
             {loading ? <Spinner size={14} className="text-honey" /> : null}
             <Segmented options={TABS()} value={tab} onChange={setTab} />
-            <IconButton icon="refresh" label={zh() ? '重新扫描已安装的模型' : 'Rescan installed models'} onClick={() => void load()} />
+            <IconButton icon="refresh" label="Rescan installed models" onClick={() => void load()} />
           </>
         }
       />
@@ -104,7 +103,7 @@ export function ModelsView({ active }) {
       {error ? (
         <div className="flex items-center justify-between gap-3 border-b border-line1 bg-danger-tint px-4 py-2 md:px-5">
           <span className="min-w-0 truncate text-xs text-danger" title={error}>{error}</span>
-          <Button size="sm" onClick={() => void load()}>{zh() ? '重试' : 'Retry'}</Button>
+          <Button size="sm" onClick={() => void load()}>Retry</Button>
         </div>
       ) : null}
 

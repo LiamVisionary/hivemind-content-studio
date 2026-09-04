@@ -19,7 +19,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useMediaPoster } from '../hooks/hooks.js';
-import { zh } from '../lib/i18n.js';
 import { getPendingJobs, pendingJobsForTab } from '../lib/pendingJobs.js';
 import { publishTabLabels, tabChipLabel } from '../lib/studioTabLabel.js';
 import {
@@ -43,29 +42,25 @@ const BUSY_POLL_MS = 1500;
 const TABS_HINT_KEY = 'studio.tabsHintShown';
 
 const TEXT = {
-  tab: (n) => (zh() ? `标签 ${n}` : `Tab ${n}`),
-  emptyTab: () => (zh() ? '新标签' : 'New tab'),
+  tab: (n) => `Tab ${n}`,
+  emptyTab: () => 'New tab',
   tabsHint: () => {
     const key = typeof navigator !== 'undefined' && navigator.platform?.startsWith('Mac') ? '⌘T' : 'Ctrl+T';
-    return zh()
-      ? `再开一个标签（${key}），渲染的同时继续工作。`
-      : `Open another tab (${key}) to keep working while this renders`;
+    return `Open another tab (${key}) to keep working while this renders`;
   },
-  newTab: () => (zh() ? '新建标签（默认设置）— ⌘T' : 'New tab — default settings, empty prompt (⌘T)'),
-  duplicate: () => (zh() ? '复制此标签（含全部设置与提示词）' : 'Duplicate this tab with all its settings'),
-  close: () => (zh() ? '关闭标签（⌘W）' : 'Close tab (⌘W)'),
-  busyTitle: () => (zh() ? '此标签正在生成' : 'This tab is still generating'),
-  busyBody: () => (zh()
-    ? '渲染会继续进行，文件仍会保存——只是不会出现在这个标签里。仍要关闭吗？'
-    : "The render keeps going and the file is still saved — you just won't see it land in this tab. Close anyway?"),
-  closeAnyway: () => (zh() ? '关闭' : 'Close tab'),
-  cancel: () => (zh() ? '取消' : 'Cancel'),
-  busyDot: () => (zh() ? '正在生成' : 'Generating'),
+  newTab: () => 'New tab — default settings, empty prompt (⌘T)',
+  duplicate: () => 'Duplicate this tab with all its settings',
+  close: () => 'Close tab (⌘W)',
+  busyTitle: () => 'This tab is still generating',
+  busyBody: () => "The render keeps going and the file is still saved — you just won't see it land in this tab. Close anyway?",
+  closeAnyway: () => 'Close tab',
+  cancel: () => 'Cancel',
+  busyDot: () => 'Generating',
   // A restored tab nobody has opened yet: the strip knows its position, not
   // what is in it, because the studio behind it has not booted. One click and
   // it says what it really is.
-  sleeping: () => (zh() ? '点击打开此标签' : 'Click to open this tab'),
-  tooMany: () => (zh() ? `最多打开 ${MAX_TABS} 个标签 — 先关闭一个。` : `Up to ${MAX_TABS} tabs can be open — close one first.`),
+  sleeping: () => 'Click to open this tab',
+  tooMany: () => `Up to ${MAX_TABS} tabs can be open — close one first.`,
 };
 
 // The last thing this tab made, at 20px. A poster (one decoded frame) rather

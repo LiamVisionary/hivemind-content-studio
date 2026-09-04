@@ -27,6 +27,7 @@
 // which doubles as the caller's declaration of what it can serve: a row that
 // resolves to a transport the caller built nothing for is refused, loudly,
 // instead of being sent a payload shaped for somewhere else.
+import { t } from './i18n.js';
 import { isLocalAIAvailable, localAI, localCatalogStatusNow } from './localInferenceClient.js';
 import { adoptCloudOutput } from './cloudAdopt.js';
 import { canvasPixels } from '../studios/story/sheetLayout.js';
@@ -120,7 +121,7 @@ export function placeFor(row) {
 /** The label a person reads for that place. '' when the place is unknown — a
  *  caller that prints this must print nothing rather than the provider id. */
 export function placeLabelFor(row) {
-  if (row?.source === 'local') return 'This Mac';
+  if (row?.source === 'local') return t('place.thisMac');
   return PROVIDER_TRANSPORTS[String(row?.provider || '')]?.placeLabel || '';
 }
 

@@ -212,22 +212,20 @@ export function grammarFor(plan, { pictures = 0 } = {}) {
 }
 
 /** One line saying what will and will not travel — for a Send-to picker. */
-export function describePlan(plan, { pictures = 0, zh = false } = {}) {
+export function describePlan(plan, { pictures = 0 } = {}) {
   if (!plan) return '';
   if (plan.pictures) {
     const taking = Math.min(pictures, plan.pictures.max);
     const kind = plan.pictures.kind === 'ingredients'
-      ? (zh ? '配料参考' : 'ingredient references')
-      : (zh ? '参考图' : 'reference pictures');
-    if (!pictures) return zh ? `可接收${kind}` : `takes ${kind}`;
-    return zh ? `${taking} 张作为${kind}` : `${taking} as ${kind}`;
+      ? 'ingredient references'
+      : 'reference pictures';
+    if (!pictures) return `takes ${kind}`;
+    return `${taking} as ${kind}`;
   }
   if (!pictures) {
     return plan.frames.length
-      ? (zh ? '只接收首/尾帧' : `takes ${plan.frames.join('/')} frames only`)
-      : (zh ? '只接收文字' : 'takes text only');
+      ? `takes ${plan.frames.join('/')} frames only`
+      : 'takes text only';
   }
-  return zh
-    ? `不接收图片 — ${pictures} 张不会随行`
-    : `no picture lane — ${pictures} would not travel`;
+  return `no picture lane — ${pictures} would not travel`;
 }

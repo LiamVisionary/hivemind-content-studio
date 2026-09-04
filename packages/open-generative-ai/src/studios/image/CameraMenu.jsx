@@ -7,7 +7,6 @@
 //
 // UI pattern follows UgcMenu (ChipButton + Menu popover); the block composer
 // lives in src/lib/cameraRig.js, and the controls in studios/CameraControls.jsx.
-import { zh } from '../../lib/i18n.js';
 import { cameraRigSentence } from '../../lib/cameraRig.js';
 import { ChipButton, Menu } from '../../ui/Menu.jsx';
 import { cx } from '../../ui/kit.jsx';
@@ -45,13 +44,11 @@ export function CameraMenu({
       trigger={(isOpen, toggle) => (
         <ChipButton
           icon="camera"
-          label={zh() ? '机位' : 'Camera'}
+          label="Camera"
           value={armed ? `${rig.focal}mm · ${rig.aperture}` : ''}
           active={isOpen || armed}
           onClick={toggle}
-          title={zh()
-            ? '把机身、镜头、焦距与光圈写成提示词中的一句机位描述'
-            : 'Writes the body, lens, focal length and aperture into the prompt as one camera sentence'}
+          title="Writes the body, lens, focal length and aperture into the prompt as one camera sentence"
         />
       )}
     >
@@ -60,12 +57,10 @@ export function CameraMenu({
           {/* Cinema's own headline, carried over — the composer's placeholder is
               fixed, so this is where the line still gets to ask its question. */}
           <p className="text-[13px] font-medium leading-snug text-ink1">
-            {zh() ? '如果预算无限，你会拍什么？' : 'What would you shoot with infinite budget?'}
+            What would you shoot with infinite budget?
           </p>
           <p className="-mt-1 text-[11px] leading-relaxed text-ink3">
-            {zh()
-              ? '把机位写成提示词里的一句话。换设置会替换这一句，不会叠加。'
-              : 'One editable camera sentence at the end of the prompt. Changing it replaces that sentence rather than stacking another.'}
+            One editable camera sentence at the end of the prompt. Changing it replaces that sentence rather than stacking another.
           </p>
           <CameraControls value={rig} onChange={(next) => onChange?.(next)} />
 
@@ -80,24 +75,24 @@ export function CameraMenu({
               className="rounded-sm border border-honey/50 bg-honey-tint px-2 py-1 text-[11px] font-semibold text-honey transition-colors hover:border-honey"
             >
               {armed
-                ? (zh() ? '更新提示词' : 'Update the prompt')
-                : (zh() ? '写入提示词' : 'Add to the prompt')}
+                ? 'Update the prompt'
+                : 'Add to the prompt'}
             </button>
             {armed ? (
               <button
                 type="button"
                 onClick={() => { onArm?.(null); close(); }}
-                title={zh() ? '从提示词中移除机位描述' : 'Remove the camera sentence from the prompt'}
+                title="Remove the camera sentence from the prompt"
                 className={cx(
                   'rounded-sm border border-line1 bg-bg1 px-2 py-1 text-[11px] font-semibold',
                   'text-ink1 transition-colors hover:border-line2',
                 )}
               >
-                {zh() ? '关闭' : 'Turn off'}
+                Turn off
               </button>
             ) : null}
             <span className="ml-auto pr-1 text-[10px] text-ink3">
-              {zh() ? '适用于任何模型' : 'works with any model'}
+              works with any model
             </span>
           </div>
         </div>

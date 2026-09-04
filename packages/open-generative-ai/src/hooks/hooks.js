@@ -9,7 +9,6 @@ import {
 import { captureImagePoster, captureVideoPoster, peekMediaPoster } from '../lib/mediaPoster.js';
 import { ensureLibraryLoaded, isLibraryLoaded, isLibraryUnreadable, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
 import { VAULT_UNLOCKED_EVENT } from '../lib/vaultSession.js';
-import { getLang, setLang, t, tf } from '../lib/i18n.js';
 
 // Same-origin API media is served as an E2E envelope (ciphertext JSON). Pointing
 // an <img>/<video> at that raw URL flashes a broken image until it decrypts, so
@@ -151,23 +150,6 @@ export function useMediaPoster(url, { kind = 'video' } = {}) {
     return () => { alive = false; };
   }, [resolved, kind]);
   return { poster, resolved, pending };
-}
-
-// i18n — a language change re-renders instead of reloading the page: setLang
-// emits 'og_lang_change' when it is told not to reload, and this is the
-// subscriber that was missing. Nothing switches language today (LANGS_ENABLED
-// is ['en']), but the plumbing is what lets zh-CN come back without the shell
-// throwing away every mounted studio to do it.
-export function useLang() {
-  const [lang, setLangState] = useState(getLang);
-  useWindowEvent('og_lang_change', useCallback(() => setLangState(getLang()), []));
-  return {
-    lang,
-    zh: lang === 'zh-CN',
-    t,
-    tf,
-    toggle: () => setLang(lang === 'zh-CN' ? 'en' : 'zh-CN', { reload: false }),
-  };
 }
 
 // Owner session probe (topbar lock button). Absent/failed = standalone mode.

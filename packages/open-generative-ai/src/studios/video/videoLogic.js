@@ -38,11 +38,7 @@ import { personaIdentity } from '../../lib/personaId.js';
 import { routingLeaderFor } from '../../lib/rentedMachines.js';
 import { isSoundOnlyReference, referenceVideoCanvas } from '../../lib/h3References.js';
 import { H3_RESTYLE_PRESETS, restylePhrase } from '../../lib/h3RestylePresets.js';
-import { t, zh } from '../../lib/i18n.js';
-
-// One home for the language predicate (lib/i18n.js). Re-exported here because a
-// dozen video panels import `zh` from this module; the binding is the same one.
-export { zh };
+import { t } from '../../lib/i18n.js';
 
 // Persisted settings, advanced-input reading, and the pure geometry/format
 // helpers now live in lib/videoPreferences.js so the node:test suite can reach
@@ -583,19 +579,13 @@ export function deriveExtendBanner(s, c) {
     // setup makes the model render the old and new staging as a UNION, and a
     // held frame with no business renders as a literal freeze.
     const shot = Number(s.motionContextIndex) > 0 ? Number(s.motionContextIndex) : 1;
-    return zh()
-      ? `正在接续第 ${shot} 段的结尾（拼接处约 1 秒会重渲染并自动裁掉）。开场先保持上一镜头的构图约 2 秒，给角色一点小动作（呼吸、转视线），再切到新画面。`
-      : `Continuing shot ${shot} — the new clip picks up exactly where it ended (≈1s is re-rendered for the join, then trimmed off). Open by holding the previous framing for ~2s with small business (a breath, an eyeline), then cut to the new setup.`;
+    return `Continuing shot ${shot} — the new clip picks up exactly where it ended (≈1s is re-rendered for the join, then trimmed off). Open by holding the previous framing for ~2s with small business (a breath, an eyeline), then cut to the new setup.`;
   }
   if (isHivemindVideoInputMode(s)) {
-    return zh()
-      ? '正在延长已上传的 LTX 镜头；时长控制追加多少新画面'
-      : 'Extending the uploaded LTX shot; duration controls how much new footage is appended';
+    return 'Extending the uploaded LTX shot; duration controls how much new footage is appended';
   }
   if (model?.requiresRequestId) {
-    return zh()
-      ? '正在延长上一次 Seedance 2.0 生成；可添加可选提示词引导延续'
-      : 'Extending previous Seedance 2.0 generation; add an optional prompt to guide the continuation';
+    return 'Extending previous Seedance 2.0 generation; add an optional prompt to guide the continuation';
   }
   return '';
 }
@@ -609,45 +599,45 @@ export function derivePromptUi(s, c) {
       if (s.videoUrl && s.imageUrl) {
         return {
           placeholder: model.promptRequired
-            ? (zh() ? '描述动作' : 'Describe the motion')
-            : (zh() ? '描述动作（可选）' : 'Describe the motion (optional)'),
+            ? 'Describe the motion'
+            : 'Describe the motion (optional)',
           disabled: false,
         };
       }
-      if (s.imageUrl) return { placeholder: zh() ? '现在请添加参考视频' : 'Now attach a reference video', disabled: false };
-      if (s.videoUrl) return { placeholder: zh() ? '现在请添加参考图片' : 'Now attach a reference image', disabled: false };
+      if (s.imageUrl) return { placeholder: 'Now attach a reference video', disabled: false };
+      if (s.videoUrl) return { placeholder: 'Now attach a reference image', disabled: false };
       return {
         placeholder: model.promptRequired
-          ? (zh() ? '上传参考视频和图片，然后描述动作' : 'Upload a reference video and image, then describe the motion')
-          : (zh() ? '上传参考视频和图片，然后描述动作（可选）' : 'Upload a reference video and image, then describe the motion (optional)'),
+          ? 'Upload a reference video and image, then describe the motion'
+          : 'Upload a reference video and image, then describe the motion (optional)',
         disabled: false,
       };
     }
     const disabled = !(model?.hasPrompt || model?.promptRequired);
-    if (s.videoUrl) return { placeholder: zh() ? '视频已就绪 — 点击生成' : 'Video ready — click Generate', disabled };
-    return { placeholder: zh() ? '先添加一个视频，然后点击生成' : 'Attach a video, then click Generate', disabled };
+    if (s.videoUrl) return { placeholder: 'Video ready — click Generate', disabled };
+    return { placeholder: 'Attach a video, then click Generate', disabled };
   }
   if (isHivemindVideoInputMode(s)) {
-    return { placeholder: zh() ? '描述镜头应如何延续' : 'Describe how the shot should continue', disabled: false };
+    return { placeholder: 'Describe how the shot should continue', disabled: false };
   }
   if (videoRequestPlan(s).sendMotionContext) {
-    return { placeholder: zh() ? '描述下一个镜头' : 'Describe the next shot', disabled: false };
+    return { placeholder: 'Describe the next shot', disabled: false };
   }
   if (model?.requiresRequestId) {
-    return { placeholder: zh() ? '可选：描述视频如何继续…' : 'Optional: describe how to continue the video...', disabled: false };
+    return { placeholder: 'Optional: describe how to continue the video...', disabled: false };
   }
   if (model?.supportsIngredientImages) {
-    return { placeholder: zh() ? '使用所选角色参考来描述镜头' : 'Describe the shot using the selected character references', disabled: false };
+    return { placeholder: 'Describe the shot using the selected character references', disabled: false };
   }
   // Local workflows (H3, LTX) take the start frame as an OPTIONAL input — H3 is
   // text-to-video by default — so the box asks for the shot, not for a frame
   // the user does not need. (The old "Upload a start frame image, then…" read
   // as a requirement, on a model that generates from text.)
   if (isHivemindVideoModelId(s.modelId)) {
-    return { placeholder: zh() ? '描述这个镜头' : 'Describe the shot', disabled: false };
+    return { placeholder: 'Describe the shot', disabled: false };
   }
   if (s.imageMode) {
-    return { placeholder: zh() ? '描述动作或效果（可选）' : 'Describe the motion or effect (optional)', disabled: false };
+    return { placeholder: 'Describe the motion or effect (optional)', disabled: false };
   }
   return { placeholder: t('video.placeholder'), disabled: false };
 }

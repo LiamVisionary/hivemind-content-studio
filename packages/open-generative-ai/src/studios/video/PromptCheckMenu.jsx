@@ -15,8 +15,6 @@ import { checkSummaryText, describeCheckFinding } from './promptCheckText.js';
 import { ChipButton, Menu } from '../../ui/Menu.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { SectionLabel, cx } from '../../ui/kit.jsx';
-import { zh } from './videoLogic.js';
-
 /**
  * @param {object} props
  * @param {string} props.prompt          what is in the composer now
@@ -71,25 +69,23 @@ export function PromptCheckMenu({
       trigger={(open, toggle) => (
         <ChipButton
           icon={tone === 'clean' ? 'check' : 'warning'}
-          label={zh() ? '检查' : 'Check'}
+          label="Check"
           value={badge ? String(badge) : ''}
           active={open || tone !== 'clean'}
           warn={tone === 'error'}
           onClick={toggle}
-          title={zh()
-            ? '生成前检查提示词结构、镜头时间、台词标签、参考标签与声音'
-            : 'Check structure, shot timing, dialogue tags, reference tags and sound before spending a generation'}
+          title="Check structure, shot timing, dialogue tags, reference tags and sound before spending a generation"
         />
       )}
     >
       {(close) => (
         <div className="flex flex-col gap-2">
           <div>
-            <SectionLabel>{zh() ? '提示词检查' : 'Prompt check'}</SectionLabel>
+            <SectionLabel>Prompt check</SectionLabel>
             <p className="mt-1 text-[10px] leading-snug text-ink3">
               {checkSummaryText(result)}
               {result.mode === 'reference' && result.sections.length
-                ? (zh() ? ` · 已识别 ${result.sections.length}/6 个字段` : ` · ${result.sections.length}/6 sections found`)
+                ? ` · ${result.sections.length}/6 sections found`
                 : ''}
             </p>
           </div>
@@ -122,12 +118,10 @@ export function PromptCheckMenu({
               type="button"
               className="flex items-center justify-center gap-1.5 rounded-md border border-honey bg-honey-tint px-2 py-1.5 text-[10px] font-medium text-ink1 hover:bg-bg2"
               onClick={() => { onWeave(); close(); }}
-              title={zh()
-                ? '按已附加的参考和演员表重写“镜头里是谁”与“哪些会带过来”，并把他们写进场景'
-                : 'Write who is in it and what carries over for whoever is attached, and bind the scene to them'}
+              title="Write who is in it and what carries over for whoever is attached, and bind the scene to them"
             >
               <Icon name="wand" size={11} className="text-honey" />
-              {zh() ? '把参考织入提示词' : 'Weave references into the prompt'}
+              Weave references into the prompt
             </button>
           ) : null}
 
@@ -136,14 +130,10 @@ export function PromptCheckMenu({
               type="button"
               className="flex items-center justify-center gap-1.5 rounded-md border border-honey bg-honey-tint px-2 py-1.5 text-[10px] font-medium text-ink1 hover:bg-bg2"
               onClick={() => { onRefine(); close(); }}
-              title={zh()
-                ? '打开助手：它知道演员表，会把每位主体写进场景'
-                : 'Open the helper — it is told the cast by slot and writes every subject into the scene'}
+              title="Open the helper — it is told the cast by slot and writes every subject into the scene"
             >
               <Icon name="sparkles" size={11} className="text-honey" />
-              {zh()
-                ? `让助手把${unstaged.map((n) => `第 ${n} 位`).join('、')}写进场景`
-                : `Write ${unstaged.map((n) => `Person ${n}`).join(', ')} into the scene with the helper`}
+              {`Write ${unstaged.map((n) => `Person ${n}`).join(', ')} into the scene with the helper`}
             </button>
           ) : null}
 
@@ -152,26 +142,18 @@ export function PromptCheckMenu({
               type="button"
               className="flex items-center justify-center gap-1.5 rounded-md border border-honey bg-honey-tint px-2 py-1.5 text-[10px] font-medium text-ink1 hover:bg-bg2"
               onClick={() => { onRefit(); close(); }}
-              title={zh()
-                ? '按当前时长等比重排镜头时间点，保留每一个镜头'
-                : 'Rescale the shot timestamps to fit the clip, keeping every shot'}
+              title="Rescale the shot timestamps to fit the clip, keeping every shot"
             >
               <Icon name="wand" size={11} className="text-honey" />
-              {zh()
-                ? `重新排布镜头以适配 ${durationSeconds}秒`
-                : `Re-time shots to fit ${durationSeconds}s`}
+              {`Re-time shots to fit ${durationSeconds}s`}
             </button>
           ) : null}
 
           {findings.length && !nothingYet ? null : (
             <p className="rounded-md border border-line1 bg-bg0 p-2 text-[10px] leading-snug text-ink2">
               {nothingYet
-                ? (zh()
-                  ? '写点什么，或者用「分镜」搭一条时间线，这里就会开始检查。'
-                  : 'Write something, or build a timeline with Shots, and this starts checking.')
-                : (zh()
-                  ? '结构、镜头时间、台词标签、参考标签和声音都没有发现问题。这不代表模型一定听话——只代表提示词本身说得清楚。'
-                  : 'Structure, shot timing, dialogue tags, reference tags and sound all read clean. That is not a promise the model will comply — only that the prompt is unambiguous.')}
+                ? 'Write something, or build a timeline with Shots, and this starts checking.'
+                : 'Structure, shot timing, dialogue tags, reference tags and sound all read clean. That is not a promise the model will comply — only that the prompt is unambiguous.'}
             </p>
           )}
         </div>

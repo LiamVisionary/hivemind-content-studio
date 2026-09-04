@@ -7,6 +7,8 @@
 // its own. Offline is a state the whole app shares, not a pill frozen at boot.
 import { useSyncExternalStore } from 'react';
 
+import { t } from '../lib/i18n.js';
+
 // /healthz answers before the owner gate, so a locked account still gets a
 // truthful "the studio is up" rather than a 401 read as death.
 const HEALTH_PATH = '/healthz';
@@ -14,14 +16,17 @@ const PROBE_TIMEOUT_MS = 6000;
 export const BEAT_MS = 15000;
 export const MAX_BACKOFF_MS = 60000;
 
-// Three words, no backend name: the user installed one thing.
-const LABELS = { online: 'Ready', connecting: 'Starting', offline: 'Not running' };
-const ZH_LABELS = { online: '就绪', connecting: '启动中', offline: '未运行' };
+// Three words, no backend name: the user installed one thing. They live in the
+// key table with everything else a person reads (lib/i18n.js).
+const LABELS = {
+  online: t('common.ready'),
+  connecting: t('app.status.starting'),
+  offline: t('app.status.notRunning'),
+};
 
-/** The pill label in the reader's language. */
-export function apiStatusLabel(status, zh) {
+/** The pill label. */
+export function apiStatusLabel(status) {
   const tone = status?.tone || 'connecting';
-  if (zh) return ZH_LABELS[tone] || ZH_LABELS.connecting;
   return status?.label || LABELS[tone] || LABELS.connecting;
 }
 
@@ -32,10 +37,8 @@ export function apiStatusLabel(status, zh) {
 // "Restart studio" action wired to the supervisor sidecar.
 export const STUDIO_RESTART_COMMAND = 'scripts/hivemind-studio-stack restart';
 
-export function apiOfflineSentence(zh) {
-  return zh
-    ? '工作室的本地服务没有响应，生成暂时无法运行。在终端里运行下面这行重新启动它：'
-    : 'The studio’s local service is not answering, so nothing can generate. Start it again by running:';
+export function apiOfflineSentence() {
+  return t('app.offlineSentence');
 }
 
 let state = { tone: 'connecting', online: false, since: null, label: LABELS.connecting };

@@ -18,15 +18,15 @@ const GROUP_CAPS = { page: 24, tab: 12, prompt: 8, model: 8 };
 
 const text = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 
-function groupLabel(kind, zh) {
-  if (kind === 'page') return zh ? '页面' : 'Pages';
-  if (kind === 'tab') return zh ? '标签' : 'Tabs';
-  if (kind === 'prompt') return zh ? '已保存的提示词' : 'Saved prompts';
-  return zh ? '模型' : 'Models';
+function groupLabel(kind) {
+  if (kind === 'page') return 'Pages';
+  if (kind === 'tab') return 'Tabs';
+  if (kind === 'prompt') return 'Saved prompts';
+  return 'Models';
 }
 
-export function paletteGroupLabel(kind, zh = false) {
-  return groupLabel(kind, zh);
+export function paletteGroupLabel(kind) {
+  return groupLabel(kind);
 }
 
 /**
@@ -38,10 +38,9 @@ export function paletteGroupLabel(kind, zh = false) {
  * @param {string} sources.studioType the page those tabs belong to ('' when the page has none)
  * @param {Array} sources.prompts   saved library entries — {id, name, data:{prompt, summary}}
  * @param {Array} sources.models    installed runnable models — {id, name, type, ready}
- * @param {boolean} sources.zh
  */
 export function buildPaletteEntries({
-  navItems = [], tabs = [], studioType = '', prompts = [], models = [], zh = false,
+  navItems = [], tabs = [], studioType = '', prompts = [], models = [],
 } = {}) {
   const entries = [];
 
@@ -64,7 +63,7 @@ export function buildPaletteEntries({
       id: `tab:${studioType}:${tab.id}`,
       kind: 'tab',
       label: text(tab.label) || `Tab ${Number(tab.index) + 1 || 1}`,
-      hint: tab.busy ? (zh ? '正在生成' : 'Generating') : `${zh ? '标签' : 'Tab'} ${Number(tab.index) + 1 || 1}`,
+      hint: tab.busy ? 'Generating' : `${'Tab'} ${Number(tab.index) + 1 || 1}`,
       icon: 'copy',
       payload: { studioType, tabId: Number(tab.id) },
     });
@@ -90,7 +89,7 @@ export function buildPaletteEntries({
       id: `model:${model.id}`,
       kind: 'model',
       label: text(model.name) || String(model.id),
-      hint: video ? (zh ? '视频' : 'Video') : (zh ? '图像' : 'Image'),
+      hint: video ? 'Video' : 'Image',
       icon: video ? 'video' : 'image',
       disabled: model.ready === false,
       payload: { model },

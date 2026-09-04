@@ -50,7 +50,4 @@ export async function adoptCloudOutput(url, { kind = 'image', model = '', provid
 }
 
 /** What a studio shows next to Download while a result exists only on screen. */
-export const UNSAVED_RESULT_LABEL = Object.freeze({
-  en: 'Not saved — download to keep',
-  zh: '未保存 — 下载以保留',
-});
+export const UNSAVED_RESULT_LABEL = 'Not saved — download to keep';

@@ -3,7 +3,6 @@
 // from Mix-Studio's Style Transfer presets; strongest with reference media,
 // but the phrase steers any H3 generation.
 import { H3_RESTYLE_PRESETS } from '../../lib/h3RestylePresets.js';
-import { zh } from './videoLogic.js';
 import { ChipButton, Menu } from '../../ui/Menu.jsx';
 import { cx } from '../../ui/kit.jsx';
 
@@ -16,13 +15,11 @@ export function RestyleMenu({ activeId, onApply }) {
       trigger={(open, toggle) => (
         <ChipButton
           icon="wand"
-          label={zh() ? '风格' : 'Style'}
+          label="Style"
           value={active ? active.label : ''}
           active={open || Boolean(active)}
           onClick={toggle}
-          title={zh()
-            ? '选择 H3 视觉风格预设（幂等应用到提示词）'
-            : 'Pick an H3 visual-style preset — applied to the prompt, switching replaces it'}
+          title="Pick an H3 visual-style preset — applied to the prompt, switching replaces it"
         />
       )}
     >
@@ -52,7 +49,7 @@ export function RestyleMenu({ activeId, onApply }) {
               onClick={() => { onApply(null); close(); }}
               className="rounded-md border border-line1 bg-bg1 px-2.5 py-1.5 text-left text-[12px] font-semibold text-ink1 transition-colors hover:border-line2"
             >
-              {zh() ? '清除风格' : 'Clear style'}
+              Clear style
             </button>
           ) : null}
         </div>

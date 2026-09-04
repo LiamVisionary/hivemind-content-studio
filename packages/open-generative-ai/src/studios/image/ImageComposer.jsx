@@ -14,7 +14,7 @@
 import { lazy, Suspense, useState } from 'react';
 
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../../lib/promptUtils.js';
-import { t, zh } from '../../lib/i18n.js';
+import { t } from '../../lib/i18n.js';
 import { ugcVariantAt } from '../../lib/ugcMode.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Button, Card, IconButton, SectionLabel, TextArea, TextInput, cx } from '../../ui/kit.jsx';
@@ -83,9 +83,7 @@ export function ImageComposer({
 }) {
   const enhanced = [s.enhanceBase.trim(), Array.from(s.enhanceTags).join(', ')].filter(Boolean).join(', ');
   // The helper doors are disabled on an empty box — the tooltip says why.
-  const helperDisabledTitle = zh()
-    ? '先在下方输入一个想法，再让助手润色'
-    : 'Type an idea below first — the helper refines what is in the box';
+  const helperDisabledTitle = t('composer.improveDisabled');
   const hasPrompt = Boolean(s.prompt.trim());
   const ugcNextIndex = Number.isInteger(s.ugcVariantIndex) ? s.ugcVariantIndex + 1 : 0;
   const ugcCast = ugcVariantAt(ugcArmed ? s.ugcVariantIndex : ugcNextIndex);
@@ -95,8 +93,8 @@ export function ImageComposer({
   const [startersOpen, setStartersOpen] = useState(false);
   const startersChip = {
     icon: 'sparkles',
-    label: zh() ? '起点' : 'Starters',
-    title: zh() ? '快速起点、UGC 段落与已保存提示词' : 'Quick starters, the UGC block, and your saved prompts',
+    label: t('composer.starters'),
+    title: t('composer.startersTitle'),
   };
 
   return (
@@ -104,8 +102,8 @@ export function ImageComposer({
       {s.promptHelper.open ? (
         <Card className="flex flex-col gap-2 p-3">
           <div className="flex items-center justify-between gap-2">
-            <SectionLabel className="text-honey">{s.promptHelper.title || 'Prompt helper'}</SectionLabel>
-            <IconButton icon="x" label="Dismiss prompt helper" size="sm" onClick={() => { onClosePromptHelper(); bump(); }} />
+            <SectionLabel className="text-honey">{s.promptHelper.title || t('image.promptHelper')}</SectionLabel>
+            <IconButton icon="x" label={t('composer.dismissHelper')} size="sm" onClick={() => { onClosePromptHelper(); bump(); }} />
           </div>
           <TextArea
             rows={4}
@@ -226,14 +224,12 @@ export function ImageComposer({
               accept="image/*"
               disabled={!refsSupported}
               ignored={refsIgnored}
-              label={zh() ? '附加' : 'Attach'}
+              label={t('composer.attach')}
               footer={refCount > 0 ? (
                 <>
                   {refsIgnored ? (
                     <p className="text-[11px] leading-relaxed text-ink3">
-                      {zh()
-                        ? '当前模型不读取参考图——它们仍会保留，但不会发送。'
-                        : 'This model does not read reference pictures — they stay attached but are not sent.'}
+                      This model does not read reference pictures — they stay attached but are not sent.
                     </p>
                   ) : null}
                   <div className="flex flex-wrap items-center gap-2">
@@ -249,7 +245,7 @@ export function ImageComposer({
                       size="sm"
                       variant="neutral"
                       onClick={onClearReferences}
-                      title={zh() ? '移除全部参考图' : 'Remove every attached reference'}
+                      title={t('composer.clearReferencesTitle')}
                     >
                       {t('common.clearReferences')}
                     </Button>
@@ -280,7 +276,7 @@ export function ImageComposer({
                           {q.label}
                         </MenuItem>
                       ))}
-                      <MenuHeading>{zh() ? 'UGC 首帧' : 'UGC first frame'}</MenuHeading>
+                      <MenuHeading>UGC first frame</MenuHeading>
                       <MenuItem
                         icon="persona"
                         meta={ugcVerticalAvailable ? 'also sets 9:16' : 'no 9:16 here'}
@@ -288,12 +284,12 @@ export function ImageComposer({
                         title={`${ugcCast.person} — ${ugcCast.room.place}, ${ugcCast.room.light}`}
                       >
                         {ugcArmed
-                          ? (zh() ? '换一组阵容' : 'Deal a new cast')
-                          : (zh() ? '开启 UGC 模式' : 'Turn on UGC mode')}
+                          ? 'Deal a new cast'
+                          : 'Turn on UGC mode'}
                       </MenuItem>
                       {ugcArmed ? (
                         <MenuItem icon="x" onClick={() => { onApplyUgc(null); close(); }}>
-                          {zh() ? '关闭 UGC 模式' : 'Turn off UGC mode'}
+                          Turn off UGC mode
                         </MenuItem>
                       ) : null}
                       <div className="my-1 h-px bg-line1" />
@@ -328,10 +324,10 @@ export function ImageComposer({
               trigger={(open, toggle) => (
                 <ChipButton
                   icon="wand"
-                  label={zh() ? '润色' : 'Improve'}
+                  label={t('composer.improve')}
                   active={open}
                   onClick={toggle}
-                  title={zh() ? '润色提示词，或加上风格标签' : 'Refine the prompt, or add style tags'}
+                  title={t('composer.improveTitle')}
                 />
               )}
             >
@@ -343,7 +339,7 @@ export function ImageComposer({
                     title={hasPrompt ? undefined : helperDisabledTitle}
                     onClick={() => { s.localPromptHelperOpen = true; bump(); close(); }}
                   >
-                    {zh() ? '用提示助手润色' : 'Refine with the prompt helper'}
+                    Refine with the prompt helper
                   </MenuItem>
                   {helper ? (
                     <MenuItem
@@ -352,11 +348,11 @@ export function ImageComposer({
                       title={hasPrompt ? undefined : helperDisabledTitle}
                       onClick={() => { onRunWorkflowHelper(); close(); }}
                     >
-                      {helper.label || (zh() ? '工作流助手' : "This model's own helper")}
+                      {helper.label || "This model's own helper"}
                     </MenuItem>
                   ) : null}
                   <MenuItem icon="plus" onClick={() => { s.enhancerOpen = true; bump(); close(); }}>
-                    {zh() ? '添加风格标签' : 'Add style tags'}
+                    Add style tags
                   </MenuItem>
                 </>
               )}
@@ -406,8 +402,8 @@ export function ImageComposer({
             {/* The chime belongs where its outcome is felt, not at the bottom of
                 a tuning panel — and it is one app-wide value, not a per-studio one. */}
             {!s.generating && etaLabel ? (
-              <span className="hidden text-[11px] text-ink3 sm:inline" title="Estimated from your own past runs at these settings">
-                {zh() ? `约 ${etaLabel}` : `~${etaLabel}`}
+              <span className="hidden text-[11px] text-ink3 sm:inline" title={t('composer.etaTitle')}>
+                {`~${etaLabel}`}
               </span>
             ) : null}
             <CompletionPingToggle />
@@ -427,7 +423,7 @@ export function ImageComposer({
                 variant="danger"
                 size="lg"
                 onClick={onCancel}
-                title={zh() ? '取消当前生成并重置状态' : 'Cancel the current generation and reset'}
+                title={t('composer.cancelTitle')}
                 className="min-w-[100px]"
               >
                 {t('common.cancel')}

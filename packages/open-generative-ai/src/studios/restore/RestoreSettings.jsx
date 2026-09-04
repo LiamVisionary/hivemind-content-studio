@@ -17,6 +17,7 @@ import { Icon } from '../../ui/icons.jsx';
 import {
   Button, Card, CollapsibleSection, Field, NativeSelect, SectionLabel, Segmented, Slider, Toggle, cx,
 } from '../../ui/kit.jsx';
+import { t } from '../../lib/i18n.js';
 import { remedyFor } from '../../lib/textModels.js';
 import {
   CLOUD_LANE, COLOR_CORRECTIONS, RESOLUTION_PRESETS, RESTORE_MODELS,
@@ -29,8 +30,8 @@ import {
 function laneName(lane) {
   if (lane.lane === CLOUD_LANE) return 'Hosted GPU';
   if (lane.paid) return lane.machine || 'Rented GPU';
-  if (lane.lane === 'default') return 'This computer';
-  return `This computer — ${lane.lane} lane`;
+  if (lane.lane === 'default') return t('place.thisMac');
+  return `${t('place.thisMac')} — ${lane.lane} lane`;
 }
 
 // Two paid lanes that say "Paid" and nothing else are a choice nobody can make.

@@ -1,12 +1,15 @@
 // The copy rules, guarded.
 //
 // Four rules in DESIGN.md kept regressing because nothing in the suite checked
-// them: a `t()` key that exists in one dictionary renders as its own key string
-// in the other (i18n.js falls back to the key, silently); `window.confirm` puts
-// a native OS dialog in the middle of a designed app; an emoji as an icon
-// renders in whatever the OS font decides and breaks the one-stroke-family
-// look; and `toast.error(error.message)` is how a Python traceback, an absolute
-// path or another product's error body reaches a person.
+// them: a `t()` key nothing defines renders as its own key string (i18n.js
+// falls back to the key, silently); `window.confirm` puts a native OS dialog in
+// the middle of a designed app; an emoji as an icon renders in whatever the OS
+// font decides and breaks the one-stroke-family look; and
+// `toast.error(error.message)` is how a Python traceback, an absolute path or
+// another product's error body reaches a person.
+//
+// The key table's own shape — no duplicate values, no empty ones, and no bare
+// literal left on a covered surface — is guarded next door, in keyTable.test.js.
 //
 // This walks src/ as text on purpose — the rules are about what is WRITTEN, and
 // a runtime check would only see the branches a test happens to take.
@@ -30,31 +33,29 @@ const FILES = walk(SRC);
 const rel = (file) => path.relative(SRC, file);
 const readAll = () => FILES.map((file) => [rel(file), fs.readFileSync(file, 'utf8')]);
 
-/* ---------------- every key exists in both dictionaries ---------------- */
+/* ---------------- every key the app asks for exists ---------------- */
 
-// The two dictionaries, read out of i18n.js as text. They are module-private
-// (nothing imports `translations`), and exporting them just so a test can look
-// would widen the module's surface for the test's convenience.
-function dictionaries() {
+// The one table, read out of i18n.js as text. It is exported, but reading the
+// SOURCE is the point here: a key is only ever named as a literal at its call
+// site, and a literal is what has to match.
+function tableKeys() {
   const source = fs.readFileSync(path.join(SRC, 'lib/i18n.js'), 'utf8');
   const lines = source.split('\n');
-  const start = (marker) => lines.findIndex((line) => line.trimEnd() === marker);
-  const bounds = (marker) => {
-    const from = start(marker);
-    assert.ok(from > 0, `i18n.js has no ${marker}`);
-    const to = lines.findIndex((line, index) => index > from && line.trimEnd() === '    },');
-    assert.ok(to > from, `${marker} is not closed`);
-    return lines.slice(from + 1, to);
-  };
-  const keysIn = (block) => new Set(
-    block.map((line) => /^\s*'([^']+)'\s*:/.exec(line)).filter(Boolean).map((match) => match[1]),
+  const from = lines.findIndex((line) => line.trimEnd() === 'export const STRINGS = {');
+  assert.ok(from >= 0, 'i18n.js has no STRINGS table');
+  const to = lines.findIndex((line, index) => index > from && line.trimEnd() === '};');
+  assert.ok(to > from, 'the STRINGS table is not closed');
+  return new Set(
+    lines.slice(from + 1, to)
+      .map((line) => /^\s*'([^']+)'\s*:/.exec(line))
+      .filter(Boolean)
+      .map((match) => match[1]),
   );
-  return { en: keysIn(bounds('    en: {')), zh: keysIn(bounds('    zh: {')) };
 }
 
-test('every t()/tf() key the app uses exists in BOTH dictionaries', () => {
-  const { en, zh } = dictionaries();
-  assert.ok(en.size > 100 && zh.size > 100, 'both dictionaries were read');
+test('every t()/tf() key the app uses exists in the key table', () => {
+  const keys = tableKeys();
+  assert.ok(keys.size > 150, `expected a full table, read ${keys.size} keys`);
 
   const used = new Map();
   for (const [name, source] of readAll()) {
@@ -65,19 +66,13 @@ test('every t()/tf() key the app uses exists in BOTH dictionaries', () => {
   }
   assert.ok(used.size > 100, `expected the app to use many keys, saw ${used.size}`);
 
-  const missing = [];
+  // A key nothing defines renders as its own NAME on screen — silently.
   const unknown = [];
   for (const [key, where] of used) {
-    // A dotted key is an i18n key by construction (`t('image.steps')`); a bare
-    // word is one of the local `t` helpers this codebase also has.
     if (!key.includes('.')) continue;
-    if (!en.has(key)) { unknown.push(`${key} (used in ${where})`); continue; }
-    // A key English knows and Chinese does not renders as its own NAME in the
-    // Chinese UI — silently, because t() falls back to the key.
-    if (!zh.has(key)) missing.push(`${key} (used in ${where})`);
+    if (!keys.has(key)) unknown.push(`${key} (used in ${where})`);
   }
-  assert.deepEqual(missing, [], 'keys present in English but missing in zh-CN');
-  assert.deepEqual(unknown, [], 'keys used by the app that no dictionary defines');
+  assert.deepEqual(unknown, [], 'keys used by the app that the table does not define');
 });
 
 /* ---------------- native dialogs are banned ---------------- */

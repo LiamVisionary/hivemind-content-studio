@@ -12,7 +12,7 @@
 // so an empty machine reaches its first picture without a studio menu.
 import { useCallback, useEffect, useState } from 'react';
 import { fetchCapabilityMatrix } from '../lib/capabilityMatrix.js';
-import { t, tf, zh } from '../lib/i18n.js';
+import { t, tf } from '../lib/i18n.js';
 import { isLocalAIAvailable, localAI } from '../lib/localInferenceClient.js';
 import {
   capabilityBadges, fetchDoctor, modelFit, modelPurpose, recommendedModelId, starterPromptFor,
@@ -286,7 +286,7 @@ function AuxRow({ label, auxKey, status, onStateChange }) {
         </div>
         <div className="shrink-0">
           {isReady ? (
-            <span className="text-[11px] font-medium text-ok">{t('localModels.ready')}</span>
+            <span className="text-[11px] font-medium text-ok">{t('common.ready')}</span>
           ) : (
             <Button size="sm" icon="download" onClick={download} loading={busy}>
               {error ? t('common.retry') : t('localModels.get')}
@@ -428,7 +428,7 @@ function ModelCard({ model, onStateChange, hardware = null, matrix = null, recom
         <div className="flex min-w-0 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-[13px] font-medium text-ink1">{model.name}</span>
-            {recommended ? <Pill tone="honey">{zh() ? '从这里开始' : 'Start here'}</Pill> : null}
+            {recommended ? <Pill tone="honey">Start here</Pill> : null}
             {model.featured && !recommended ? <Pill tone="honey">{t('localModels.featured')}</Pill> : null}
             {fullyReady ? <Icon name="check" size={13} className="text-ok" /> : null}
           </div>
@@ -462,7 +462,7 @@ function ModelCard({ model, onStateChange, hardware = null, matrix = null, recom
                 title={auxReady ? 'Open the Image studio on this model' : 'Get the required components first'}
                 onClick={() => openModelInStudio(model, { prompt: starterPromptFor(model) })}
               >
-                {zh() ? '试一下' : 'Try it'}
+                Try it
               </Button>
               <Button variant="danger" size="sm" icon="trash" onClick={() => setConfirmOpen(true)} aria-label={`Delete ${model.name}`} />
             </>
@@ -476,7 +476,7 @@ function ModelCard({ model, onStateChange, hardware = null, matrix = null, recom
               disabled={Boolean(fit.blocksInstall)}
               title={fit.blocksInstall ? fit.text : undefined}
             >
-              {error ? t('common.retry') : busy ? t('localModels.starting') : t('localModels.download')}
+              {error ? t('common.retry') : busy ? t('localModels.starting') : t('common.download')}
             </Button>
           )}
         </div>
@@ -495,10 +495,10 @@ function ModelCard({ model, onStateChange, hardware = null, matrix = null, recom
         open={confirmOpen}
         onClose={() => setConfirmOpen(false)}
         onConfirm={doDelete}
-        title={zh() ? '删除模型？' : 'Delete model?'}
+        title="Delete model?"
         body={tf('localModels.deleteConfirm', model.name)}
-        confirmLabel={zh() ? '删除' : 'Delete'}
-        cancelLabel={zh() ? '取消' : 'Cancel'}
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
         busy={deleting}
       />
     </div>
@@ -531,7 +531,7 @@ export function LocalModelManager({ initialModels = null, initialHardware = null
       setModels(list);
       // The catalog fetch reports why it is empty instead of rejecting, so an
       // engine that is not answering still has to reach the banner.
-      if (status === 'unreachable') setListError(t('localModels.engineNotAnswering'));
+      if (status === 'unreachable') setListError(t('localModels.engineStarting'));
     } catch (err) {
       setListError(err.message);
       setModels([]);
@@ -598,7 +598,7 @@ export function LocalModelManager({ initialModels = null, initialHardware = null
           ) : listError ? (
             <EmptyState
               icon="warning"
-              title={zh() ? '无法列出本地模型' : "Couldn't list local models"}
+              title="Couldn't list local models"
               hint={<span className="font-mono text-xs text-danger">{listError}</span>}
               action={<Button size="sm" icon="refresh" onClick={refreshModels}>{t('common.retry')}</Button>}
               className="py-8"
@@ -606,8 +606,8 @@ export function LocalModelManager({ initialModels = null, initialHardware = null
           ) : models.length === 0 ? (
             <EmptyState
               icon="cpu"
-              title={zh() ? '还没有可用的本地模型' : 'No local models available yet'}
-              hint={zh() ? '安装推理引擎后，这里会列出可下载的模型。' : 'Install the inference engine and the downloadable models will be listed here.'}
+              title="No local models available yet"
+              hint="Install the inference engine and the downloadable models will be listed here."
               action={<Button size="sm" icon="refresh" onClick={refreshModels}>{t('common.retry')}</Button>}
               className="py-8"
             />
