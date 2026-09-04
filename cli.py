@@ -338,8 +338,9 @@ Output and exit status:
         default=None,
         metavar="PATH",
         help=(
-            "custom supported audio file inside storage/bgm or resource/songs; "
-            "accepts a filename or an allowed managed path"
+            "custom supported audio file inside storage/bgm (where your uploads "
+            "land) or resource/songs; accepts a filename or an allowed managed "
+            "path. No track ships with the project — see resource/SONGS.md"
         ),
     )
     audio_group.add_argument(

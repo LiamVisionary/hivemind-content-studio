@@ -61,9 +61,13 @@ inherits one.
 * **The tailnet URL.** Nothing to supervise: `tailscale serve` holds it, not a
   process of ours. See §2.4.
 
-Not shipped at all: the Streamlit WebUI (`webui/Main.py`), the MoneyPrinterTurbo
-HTTP API (`main.py`, `app/router.py`), and the Redis task backend. The stack has
-never started them. They now live behind the `faceless-webui` extra (§5).
+Not shipped at all: the Streamlit WebUI, the MoneyPrinterTurbo HTTP API and the
+Redis task backend. The stack has never started them. Their dependencies live
+behind the `faceless-webui` extra (§5), and the donor shell itself — `webui/`,
+its launchers, `main.py`, the donor's docs, screenshots, agent skill and landing
+page, and the seven `test_webui_*.py` files — is archived under
+`archive/moneyprinterturbo/` with a README saying how to run it against `app/`.
+The engine in `app/` and its own tests stay where they are.
 
 ---
 
@@ -258,10 +262,22 @@ is read from the signing environment.
 **Notices**: `python3 scripts/generate_notices.py` regenerates `docs/notices.json`
 (runtime Python distributions plus the three npm lockfiles) and
 `--check` fails the build when it is stale. `docs/notices.json`,
-`THIRD_PARTY_NOTICES.md` and `LICENSE` ship inside the bundle, and the About
-panel renders them with the `/api/version` payload — product, version, commit,
-licence, source URL, build date — which is what satisfies the AGPL's offer of
-source.
+`THIRD_PARTY_NOTICES.md`, `CHANGELOG.md` and `LICENSE` ship inside the bundle
+(`CONTENT_STUDIO_DOCS_DIR` points the app at wherever they land). The About page
+— nav key `about`, and the version chip in the topbar — renders them from
+`GET /api/about`: the `/api/version` payload (product, version, commit, licence,
+source URL, build date) plus the generated notices and the recent changelog
+headlines. That page is what satisfies the AGPL's interactive notice and its
+offer of source, and `test/studio/test_repo_contract.py` fails the build if the
+notices file still carries an open distribution gate.
+
+The version itself has exactly one home: `[project] version` in `pyproject.toml`.
+Python reads it through package metadata; the JavaScript side reads the same line
+through `packages/open-generative-ai/scripts/projectVersion.cjs`, which vite
+(`__APP_VERSION__`), electron-builder and the .deb packager all use. The four
+package.json files no longer carry versions of their own. `app.__version__` is
+the exception and stays: it is the embedded MoneyPrinterTurbo engine's version
+and the marker the upstream sync compares against.
 
 ---
 

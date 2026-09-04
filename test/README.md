@@ -7,6 +7,15 @@ which of its failures are the environment rather than the code.
 [`docs/RELEASE_CHECKLIST.md`](../docs/RELEASE_CHECKLIST.md) is the same list as a
 gate, with the counts a release is expected to see.
 
+- `services/`: Domain-focused unit and controller tests
+  - `test_task.py`: Task pipeline tests
+  - `test_task_manager.py`: In-memory and Redis queue tests
+  - `test_controller_*.py`: API controller tests split by controller domain
+  - `test_video.py`, `test_voice.py`: Media service tests
+- The donor Streamlit shell's tests (`test_webui_*.py`) and the donor HTTP
+  entry-point test moved with the shell to `archive/moneyprinterturbo/test/`;
+  `pytest` does not collect them (`testpaths = ["test"]`).
+
 ## The five suites
 
 | Suite | Where | Command |

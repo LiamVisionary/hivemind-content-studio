@@ -118,7 +118,9 @@ Credentials come from [PassBook](https://github.com/LiamVisionary/passbook), the
 Add `--extra faceless-webui` to the sync below only if you want the Streamlit
 WebUI, the MoneyPrinterTurbo HTTP API, the Redis task backend, or the Azure and
 DashScope providers. The stack starts none of them, and the desktop build ships
-without them (`docs/RELEASE.md`).
+without them (`docs/RELEASE.md`). The donor's Streamlit shell itself is archived
+under `archive/moneyprinterturbo/`; its README says how to run it against the
+engine in `app/`.
 
 ```bash
 uv sync --extra dev --extra mcp

@@ -100,6 +100,10 @@ uv run content-studio stack start
 
 Open `http://127.0.0.1:8765`. Use `content-studio stack status`, `restart`, `stop`, or `url` for lifecycle control. The supervisor owns ports 8765, 8787, 8788, 8794, 8796, the configured ComfyUI lanes, and optional native MLX/Tailscale listeners. Creating a run is a safe local draft operation; resume, retry, cancellation, and approval decisions require `Authorization: Bearer <CONTENT_STUDIO_CONTROL_TOKEN>`. The approval signing secret and operator token remain server-side.
 
+`.github/SECURITY.md` has the full "what listens where" table — every port, its
+bind address, and what authenticates it — plus how to report a vulnerability
+privately.
+
 The stable LaunchAgent still invokes `~/.local/bin/zimage-stack`. Install the reversible link only after verification:
 
 ```bash

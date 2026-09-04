@@ -3,6 +3,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from functools import lru_cache
 from pathlib import Path
 import threading
@@ -126,6 +127,138 @@ def font_dir(sub_dir: str = ""):
     if not os.path.exists(d):
         os.makedirs(d)
     return d
+
+
+# The subtitle font this project actually ships. BeVietnamPro is SIL OFL 1.1 and
+# lives in resource/fonts; the faces that used to be the default —
+# MicrosoftYaHei*.ttc and STHeiti*.ttc — are Windows and macOS system fonts under
+# vendor licences that do not permit redistribution, so they were removed from the
+# tree. See resource/FONTS.md.
+DEFAULT_SUBTITLE_FONT = "BeVietnamPro-Bold.ttf"
+
+# Where a font named by filename actually lives on each platform. A user who asks
+# for "STHeitiMedium.ttc" is asking for their OWN copy of a system font, which is
+# a request this can honour without shipping it.
+_SYSTEM_FONT_DIRS: dict[str, tuple[str, ...]] = {
+    "darwin": (
+        "/System/Library/Fonts",
+        "/System/Library/Fonts/Supplemental",
+        "/Library/Fonts",
+        "~/Library/Fonts",
+    ),
+    "win32": (
+        "C:/Windows/Fonts",
+        "~/AppData/Local/Microsoft/Windows/Fonts",
+    ),
+    "linux": (
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        "~/.local/share/fonts",
+        "~/.fonts",
+    ),
+}
+
+# The names the removed files carry once they are installed by the OS rather than
+# copied into resource/fonts. Keyed lowercase so a saved task that still says
+# "STHeitiMedium.ttc" keeps rendering in the same face on the machine that has it.
+_SYSTEM_FONT_ALIASES: dict[str, tuple[str, ...]] = {
+    "stheitimedium.ttc": ("STHeiti Medium.ttc",),
+    "stheitilight.ttc": ("STHeiti Light.ttc",),
+    "microsoftyaheibold.ttc": ("msyhbd.ttc", "msyh.ttc"),
+    "microsoftyaheinormal.ttc": ("msyh.ttc",),
+}
+
+# Ordered per platform: the first face here that can draw the script in hand is
+# what a run falls back to when the bundled Latin font cannot. Every entry is a
+# font the OS installs itself, so nothing is downloaded and nothing is shipped.
+_SCRIPT_FALLBACK_FONTS: dict[str, tuple[str, ...]] = {
+    "darwin": ("PingFang.ttc", "STHeiti Medium.ttc", "Hiragino Sans GB.ttc", "Arial Unicode.ttf"),
+    "win32": ("msyh.ttc", "msyhbd.ttc", "simhei.ttf", "arialuni.ttf"),
+    "linux": (
+        "NotoSansCJK-Regular.ttc",
+        "NotoSansCJKsc-Regular.otf",
+        "DroidSansFallbackFull.ttf",
+        "wqy-zenhei.ttc",
+    ),
+}
+
+
+def _platform_key() -> str:
+    if sys.platform.startswith("win"):
+        return "win32"
+    if sys.platform == "darwin":
+        return "darwin"
+    return "linux"
+
+
+def system_font_dirs() -> tuple[str, ...]:
+    """The directories this OS keeps installed fonts in, expanded and existing."""
+    return tuple(
+        path
+        for path in (
+            os.path.expanduser(candidate)
+            for candidate in _SYSTEM_FONT_DIRS.get(_platform_key(), ())
+        )
+        if os.path.isdir(path)
+    )
+
+
+def find_system_font(font_name: str) -> str:
+    """Locate an installed font by file name. Returns "" when the machine has none.
+
+    Linux keeps fonts in per-family subdirectories, so the search descends one
+    level; macOS and Windows keep them flat and the walk costs nothing there.
+    """
+    name = os.path.basename(str(font_name or "").strip())
+    if not name:
+        return ""
+    wanted = [name, *_SYSTEM_FONT_ALIASES.get(name.lower(), ())]
+    lowered = {candidate.lower(): candidate for candidate in wanted}
+    for directory in system_font_dirs():
+        for root, _dirs, files in os.walk(directory):
+            for file_name in files:
+                if file_name.lower() in lowered:
+                    return os.path.join(root, file_name)
+            # One level down is enough for the fontconfig layout; deeper walks
+            # turn a font lookup into a filesystem scan.
+            if os.path.dirname(root) != os.path.dirname(directory):
+                _dirs[:] = []
+    return ""
+
+
+def script_fallback_fonts() -> list[str]:
+    """Installed fonts, in preference order, that can carry a non-Latin script."""
+    found = []
+    for candidate in _SCRIPT_FALLBACK_FONTS.get(_platform_key(), ()):
+        path = find_system_font(candidate)
+        if path:
+            found.append(path)
+    return found
+
+
+def resolve_font_path(font_name: str = "") -> str:
+    """Turn a subtitle font NAME into a path that exists on this machine.
+
+    Order: the OFL fonts this project ships, then the same name installed as a
+    system font (which is how a task that names STHeiti or YaHei keeps working
+    without those files being redistributed), then the bundled default. Only the
+    base name is used, so a task cannot point the renderer at an arbitrary file.
+    """
+    name = os.path.basename(str(font_name or "").strip()) or DEFAULT_SUBTITLE_FONT
+    bundled = os.path.join(font_dir(), name)
+    if os.path.isfile(bundled):
+        return bundled
+    installed = find_system_font(name)
+    if installed:
+        return installed
+    fallback = os.path.join(font_dir(), DEFAULT_SUBTITLE_FONT)
+    if name != DEFAULT_SUBTITLE_FONT:
+        logger.warning(
+            f"subtitle font not found: name={name}. Using the bundled "
+            f"{DEFAULT_SUBTITLE_FONT}; install the font or pick one from "
+            f"{font_dir()} to change it."
+        )
+    return fallback if os.path.isfile(fallback) else ""
 
 
 def song_dir(sub_dir: str = ""):

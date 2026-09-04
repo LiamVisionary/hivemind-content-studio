@@ -41,7 +41,7 @@ jobs:
       # clipping engine. Linting only the inherited faceless engine is how an
       # undefined `sys` sat in the Machines route's never-crash handler.
       - name: Lint Python sources
-        run: uv run --no-sync ruff check app cli.py main.py webui test src
+        run: uv run --no-sync ruff check app cli.py archive/moneyprinterturbo test src
 
   tests:
     name: Python ${{ matrix.python-version }} tests
@@ -117,7 +117,7 @@ jobs:
           npm --prefix packages/open-generative-ai run vite:build
 
       - name: Compile Python sources
-        run: uv run --no-sync python -m compileall app cli.py main.py webui test src
+        run: uv run --no-sync python -m compileall app cli.py archive/moneyprinterturbo test src
 
       - name: Run unit tests with coverage
         # pytest 兼容现有 unittest.TestCase，同时会收集仓库中的 pytest 风格
@@ -214,7 +214,7 @@ jobs:
         run: uv sync --frozen --python 3.11
 
       - name: Compile Python sources
-        run: uv run --no-sync python -m compileall app cli.py main.py webui test src
+        run: uv run --no-sync python -m compileall app cli.py archive/moneyprinterturbo test src
 
       - name: Run core service smoke tests
         run: >-

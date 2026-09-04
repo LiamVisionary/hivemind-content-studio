@@ -527,8 +527,16 @@ def get_bgm_file(bgm_type: str = "random", bgm_file: str = ""):
     if bgm_type == "random":
         files = bgm_service.list_bgm_files()
         # 当背景音乐目录为空时，直接回退为“不使用 BGM”，避免 random.choice([]) 抛异常。
+        # This is the normal state of a fresh checkout: no track ships with the
+        # project (resource/SONGS.md), so "random" means "one of yours" and the
+        # message says where yours go rather than reporting a missing file.
         if not files:
-            logger.warning("no background music files found")
+            logger.warning(
+                "background music was requested but none is available. Add your "
+                f"own tracks to {bgm_service.uploaded_bgm_dir(create=False)} (or "
+                "upload them in the app), or set bgm_type to none. Rendering "
+                "without background music."
+            )
             return ""
         return random.choice(files)
 
@@ -1000,6 +1008,38 @@ def subtitle_font_supports_text(font_path: str, text: str) -> bool:
     return _subtitle_font_supports_sample(font_path, sample)
 
 
+def resolve_subtitle_font(font_name: str = "", sample_text: str = "") -> str:
+    """The font file a render should actually open, for this name and this script.
+
+    `utils.resolve_font_path` answers the name — a bundled OFL font, or the same
+    face installed on this machine when a task still names a system font this
+    project does not ship. What it cannot answer is whether that face can DRAW the
+    script in hand: the bundled default is Latin, so a Chinese or Thai script
+    would render as blank subtitles rather than as an error. When that happens we
+    look for an installed font that can, and say so; if the machine has none, the
+    warning names the fix instead of leaving empty subtitles unexplained.
+    """
+    font_path = utils.resolve_font_path(font_name)
+    if not font_path or not sample_text:
+        return font_path
+    if subtitle_font_supports_text(font_path, sample_text):
+        return font_path
+    for candidate in utils.script_fallback_fonts():
+        if subtitle_font_supports_text(candidate, sample_text):
+            logger.info(
+                f"subtitle font {os.path.basename(font_path)} cannot draw this "
+                f"script; using the installed {os.path.basename(candidate)}"
+            )
+            return candidate
+    logger.warning(
+        f"no font on this machine can draw this script: font="
+        f"{os.path.basename(font_path)}. Install a font that covers it (a Noto "
+        f"pack covers most scripts) or drop one into {utils.font_dir()} and set "
+        f"font_name to its file name; subtitles would otherwise render blank."
+    )
+    return font_path
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -1032,8 +1072,8 @@ def generate_video(
     font_path = ""
     if params.subtitle_enabled:
         if not params.font_name:
-            params.font_name = "STHeitiMedium.ttc"
-        font_path = os.path.join(utils.font_dir(), params.font_name)
+            params.font_name = utils.DEFAULT_SUBTITLE_FONT
+        font_path = resolve_subtitle_font(params.font_name, params.video_script)
         if os.name == "nt":
             font_path = font_path.replace("\\", "/")
 

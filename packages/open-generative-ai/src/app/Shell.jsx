@@ -10,6 +10,7 @@ import { Button, CollapsibleSection, IconButton, Kbd, cx, openSection } from '..
 import { getExploreDock, subscribeExploreDock, toggleExploreDock } from './exploreDockStore.js';
 import { getNavBadges, subscribeNavBadges } from './navBadges.js';
 import { APP_NAME, NAV_ITEMS, NAV_SECTIONS } from './navConfig.jsx';
+import { APP_VERSION, shortCommit, versionLabel } from '../lib/appVersion.js';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { STUDIO_RESTART_COMMAND, apiOfflineSentence, apiStatusLabel, pingApiStatus, useApiStatus } from './statusStore.js';
 
@@ -289,6 +290,43 @@ function PaletteHint({ onOpen }) {
   );
 }
 
+// The version chip. AGPL 5(d) wants an interactive program to say what it is and
+// under what terms; this is the door to the page that says it, and it is also the
+// fastest honest answer to "which build am I on".
+//
+// The number comes from the bundle (vite substitutes pyproject.toml's version at
+// build), so it needs no request and is never blank while one is in flight. The
+// commit is only known once the server has answered, so the chip shows the
+// version alone until then and grows the commit after.
+function VersionChip({ onNavigate }) {
+  const [commit, setCommit] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    // Unauthenticated by design, and tiny. A failure here is not worth a word on
+    // screen: the chip still names the version and still opens About, which is
+    // where a real problem reading the version reports itself.
+    fetch('/api/version', { headers: { Accept: 'application/json' } })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => { if (!cancelled && body?.commit) setCommit(shortCommit(body.commit)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const label = versionLabel({ version: APP_VERSION, commit });
+  if (!label) return null;
+  const title = zhUi() ? `关于 · ${label} · AGPL-3.0-or-later` : `About · ${label} · AGPL-3.0-or-later`;
+  return (
+    <button
+      type="button"
+      onClick={() => onNavigate('about')}
+      title={title}
+      aria-label={title}
+      className="hidden items-center rounded-md border border-line1 bg-bg2 px-2 py-1 font-mono text-[11px] text-ink3 transition-colors hover:border-line2 hover:text-ink2 md:inline-flex"
+    >
+      {label}
+    </button>
+  );
+}
+
 // One disclosure convention: a collapsible group is a kit CollapsibleSection with
 // its closed-state hint, and the rail draws every group flat because a fold whose
 // title you cannot read is a trap.
@@ -442,6 +480,7 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
             <span className="hidden truncate text-xs text-ink3 md:inline">{APP_NAME}</span>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <VersionChip onNavigate={onNavigate} />
             <ExploreDockButton />
             <ApiStatusPill />
             <RefreshButton zh={zh} />

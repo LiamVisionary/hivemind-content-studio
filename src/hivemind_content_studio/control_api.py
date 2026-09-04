@@ -58,6 +58,7 @@ from .canvas_history import (
 )
 from .hivemindos_brain import brain_catalog, local_brain_catalog, plan_with_brain, plan_with_local_brain
 from .generation_telemetry import generation_telemetry_snapshot, record_hivemind_generation_metric
+from .about import about_payload
 from .identity import version_payload
 from .lanes import LANE_MATRIX
 from . import (
@@ -3917,6 +3918,16 @@ def build_control_app(
         # payload is the product's own name, tag and source URL — nothing about
         # the machine it runs on.
         return version_payload()
+
+    @app.get("/api/about")
+    def about() -> dict:
+        # Unauthenticated for the same reason /api/version is: the licence, the
+        # source offer and the third-party notices are what the AGPL requires an
+        # interactive program to show, and requiring a sign-in to read them would
+        # defeat the point. It adds the generated dependency notices and the
+        # recent changelog headlines to the same payload so the About page is one
+        # request rather than three.
+        return about_payload()
 
     @app.post("/api/runs", status_code=201, dependencies=[Depends(require_owner_or_control)])
     def create_run(body: StudioRunDraft, request: Request) -> dict:

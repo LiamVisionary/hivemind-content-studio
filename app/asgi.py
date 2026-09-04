@@ -81,5 +81,10 @@ app.mount(
     "/tasks", StaticFiles(directory=task_dir, html=True, follow_symlink=True), name=""
 )
 
+# The donor's landing page moved to archive/moneyprinterturbo/resource/public
+# with the shell that served it, so this mount is an empty directory unless a
+# developer puts something in resource/public. Only the archived
+# `archive/moneyprinterturbo/main.py` ever serves this app; the product's own
+# frontend is served by src/hivemind_content_studio/control_api.py.
 public_dir = utils.public_dir()
 app.mount("/", StaticFiles(directory=public_dir, html=True), name="")

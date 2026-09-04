@@ -378,7 +378,13 @@ class TestLiteLLMProvider(unittest.TestCase):
 
     def test_provider_tip_templates_accept_registry_defaults(self):
         """所有语言的 Provider 提示模板都必须能安全注入 Registry 默认值。"""
-        i18n_dir = Path(__file__).parent.parent.parent / "webui" / "i18n"
+        i18n_dir = (
+            Path(__file__).resolve().parents[2]
+            / "archive"
+            / "moneyprinterturbo"
+            / "webui"
+            / "i18n"
+        )
         for locale_file in i18n_dir.glob("*.json"):
             translations = json.loads(locale_file.read_text(encoding="utf-8"))[
                 "Translation"
@@ -402,7 +408,13 @@ class TestLiteLLMProvider(unittest.TestCase):
 
     def test_primary_provider_tips_use_consistent_structure(self):
         """中英文配置说明统一展示 API Key、Base URL 和模型名称。"""
-        i18n_dir = Path(__file__).parent.parent.parent / "webui" / "i18n"
+        i18n_dir = (
+            Path(__file__).resolve().parents[2]
+            / "archive"
+            / "moneyprinterturbo"
+            / "webui"
+            / "i18n"
+        )
         for language in ("zh", "en"):
             translations = json.loads(
                 (i18n_dir / f"{language}.json").read_text(encoding="utf-8")
@@ -422,7 +434,13 @@ class TestLiteLLMProvider(unittest.TestCase):
 
     def test_required_api_key_providers_have_clickable_entry_points(self):
         """需要密钥的 Provider 必须提供统一申请入口，避免 WebUI 只给出文字。"""
-        i18n_dir = Path(__file__).parent.parent.parent / "webui" / "i18n"
+        i18n_dir = (
+            Path(__file__).resolve().parents[2]
+            / "archive"
+            / "moneyprinterturbo"
+            / "webui"
+            / "i18n"
+        )
         locale_translations = {
             locale_file.stem: json.loads(locale_file.read_text(encoding="utf-8"))[
                 "Translation"

@@ -80,7 +80,7 @@ test('the tiers hold exactly the pages they are meant to', async () => {
 
     assert.deepEqual(create.items.map((i) => i.page), ['image', 'video', 'story', 'restore']);
     assert.deepEqual(produce.items.map((i) => i.page), ['planner', 'history', 'runs', 'inspo', 'models']);
-    assert.deepEqual(advanced.items.map((i) => i.page), ['machines', 'providers', 'passbook', 'canvas', 'mcp-cli']);
+    assert.deepEqual(advanced.items.map((i) => i.page), ['machines', 'providers', 'passbook', 'canvas', 'mcp-cli', 'about']);
     assert.deepEqual(create.labs.items.map((i) => i.page), ['sprite', 'lipsync']);
 
     // Both folds are collapsed by default and remember what you did with them.

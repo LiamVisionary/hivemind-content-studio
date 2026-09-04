@@ -29,6 +29,9 @@ import { PassBookView } from './views/PassBookView.jsx';
 // Agents & API is a static docs page with no state or fetches of its own; it
 // rides the hub layer rather than the studio mount registry.
 import { McpCliStudio } from '../studios/McpCliStudio.jsx';
+// About is the licence surface: version, source offer, notices. One fetch on
+// first open and nothing after, so it rides the hub layer too.
+import { AboutView } from './views/AboutView.jsx';
 
 export function HubLayer({ visible, view }) {
   const rootRef = useRef(null);
@@ -72,6 +75,7 @@ export function HubLayer({ visible, view }) {
       <ErrorBoundary label="PassBook" hidden={current !== 'passbook'}><PassBookView active={current === 'passbook'} /></ErrorBoundary>
       <ErrorBoundary label="Machines" hidden={current !== 'machines'}><GpuMachinesView active={current === 'machines'} /></ErrorBoundary>
       <ErrorBoundary label="Agents &amp; API" hidden={current !== 'agents'}><McpCliStudio active={current === 'agents'} /></ErrorBoundary>
+      <ErrorBoundary label="About" hidden={current !== 'about'}><AboutView active={current === 'about'} /></ErrorBoundary>
     </div>
   );
 }
