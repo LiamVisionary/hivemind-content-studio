@@ -201,3 +201,33 @@ app; `tauri.conf.json` must agree with it, which
 `scripts/check_updater_config.py` enforces. Get the pair from
 `cargo tauri signer generate`, commit only the public half, and store the
 private half as the repository secret above.
+
+`signer generate` **prints** both halves and writes nothing unless you pass
+`-w <path>`, so the plain form is the one to use for CI: copy the printed
+private key into the `TAURI_SIGNING_PRIVATE_KEY` secret. It prompts for a
+password unless you pass `-p` or `--ci`; if you give the key a password, the
+build needs `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` too, and if you leave it empty
+that variable is not needed at all.
+
+Tauri reads three variables, and the release workflow deliberately sets only
+the two that suit a CI secret:
+
+| Variable | Holds | Used by |
+|---|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | The private key **as a string** | The release workflow, from the repository secret |
+| `TAURI_SIGNING_PRIVATE_KEY_PATH` | A **path** to the key file `-w` wrote | A signed build run locally |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The key's password | Both, and only when the key has one |
+
+So a signed build **on this machine** — which step 4's smoke test needs, since
+the DMG a person installs is the only place the Download control and the
+updater can really be exercised — wants the path form:
+
+```bash
+cargo tauri signer generate -w ~/.tauri/hivemind-content-studio.key
+export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.tauri/hivemind-content-studio.key"
+# and, only if you gave the key a password:
+# export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=...
+```
+
+Keep that file out of the repository and out of any transcript. The public half
+is the only part that belongs in git.
