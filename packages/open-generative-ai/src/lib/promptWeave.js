@@ -375,26 +375,25 @@ export function castSubjects(members = []) {
 }
 
 /** "You · 3 pictures · voice" / "SpongeBob · known character" for a chip. */
-export function describeMember(member, { zh = false } = {}) {
+export function describeMember(member) {
   if (isScene(member)) {
     const count = (member.data?.images || []).length;
     const staging = member.retention === 'weak_reference';
-    if (zh) return staging ? `分镜参考 · ${count} 张` : `场景参考 · ${count} 张`;
     return `${staging ? 'staging sheet' : 'place'} · ${count} picture${count === 1 ? '' : 's'} · nobody`;
   }
-  if (!isPersonaLike(member)) return zh ? '已知角色' : 'known character';
+  if (!isPersonaLike(member)) return 'known character';
   const data = member.data || {};
   const parts = [];
   const images = (data.images || []).length;
   const motion = (data.videos || []).filter((item) => item?.motion !== false).length;
   const voice = (data.audios || []).length + (data.videos || []).filter((item) => item?.useAudio || item?.motion === false).length;
-  if (images) parts.push(zh ? `${images} 张图` : `${images} picture${images === 1 ? '' : 's'}`);
-  if (motion) parts.push(zh ? `${motion} 段动作` : `${motion} motion clip${motion === 1 ? '' : 's'}`);
-  if (voice) parts.push(zh ? '声音' : 'voice');
+  if (images) parts.push(`${images} picture${images === 1 ? '' : 's'}`);
+  if (motion) parts.push(`${motion} motion clip${motion === 1 ? '' : 's'}`);
+  if (voice) parts.push('voice');
   if (!parts.length) {
     return String(data.look || '').trim()
-      ? (zh ? '仅文字定义' : 'described in text')
-      : (zh ? '还没有图片' : 'no pictures yet');
+      ? 'described in text'
+      : 'no pictures yet';
   }
   return parts.join(' · ');
 }

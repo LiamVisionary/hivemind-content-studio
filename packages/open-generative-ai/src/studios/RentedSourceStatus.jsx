@@ -6,7 +6,6 @@
 import { useEffect, useState } from 'react';
 import { Button, Spinner } from '../ui/kit.jsx';
 import { Icon } from '../ui/icons.jsx';
-import { zh } from '../lib/i18n.js';
 import { api } from '../hub/hubData.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, withPin } from '../lib/rentedMachines.js';
 
@@ -40,19 +39,19 @@ function seconds(machine) {
 function MachinePicker({ machines, all, pinned, pendingId, onSelect }) {
   return (
     <div className="flex flex-col gap-1">
-      <small className="text-[11px] text-ink3">{zh() ? '运行于' : 'Run on'}</small>
+      <small className="text-[11px] text-ink3">Run on</small>
       {machines.map((machine) => {
         const leading = isRoutingLeader(machine, all);
         const locked = machine.rental_id === pinned;
         const pending = machine.rental_id === pendingId;
         const dead = machine.attached && !machine.tunnel_alive;
         const label = dead
-          ? (zh() ? '重新连接' : 'reconnect')
+          ? 'reconnect'
           : locked
-            ? (zh() ? '已锁定' : 'locked')
+            ? 'locked'
             : leading
-              ? (zh() ? '使用中' : 'in use')
-              : (zh() ? '切换' : 'switch');
+              ? 'in use'
+              : 'switch';
         return (
           <button
             key={machine.rental_id}
@@ -60,10 +59,10 @@ function MachinePicker({ machines, all, pinned, pendingId, onSelect }) {
             aria-pressed={locked}
             data-rental-id={machine.rental_id}
             title={locked && !dead
-              ? (zh() ? '再次点击可取消锁定，跟随“机器”页的默认选择' : 'Click again to unpin — this tab follows the Machines default')
+              ? 'Click again to unpin — this tab follows the Machines default'
               : (dead
-                ? (zh() ? '重新连接这台机器' : 'Reconnect this machine')
-                : (zh() ? '把此标签页锁定到这台机器' : 'Lock this tab to this machine'))}
+                ? 'Reconnect this machine'
+                : 'Lock this tab to this machine')}
             onClick={() => onSelect(machine)}
             className={`flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors ${
               leading ? 'border-honey/50 bg-honey-tint' : 'border-line1 bg-bg1 hover:border-line2'
@@ -186,12 +185,8 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
         />
         <small className="text-[11px] text-ink3">
           {lockedHere
-            ? (zh()
-              ? `此标签页已锁定到该机器：它发出的生成在那里运行并加密返回。再次点击该机器可取消锁定（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
-              : `This tab is locked to that machine — what you make runs there and comes back encrypted. Click it again to follow the default. ${live.length} running, about $${rate.toFixed(2)}/hr in total.`)
-            : (zh()
-              ? `当前跟随“机器”页的默认选择；点击一台机器即可将此标签页锁定到它（共 ${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
-              : `Following the Machines default — click a machine to lock this tab to it. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`)}
+            ? `This tab is locked to that machine — what you make runs there and comes back encrypted. Click it again to follow the default. ${live.length} running, about $${rate.toFixed(2)}/hr in total.`
+            : `Following the Machines default — click a machine to lock this tab to it. ${live.length} online, ~$${rate.toFixed(2)}/hr total.`}
         </small>
         {error ? <small className="text-[11px] text-warn">{error}</small> : null}
       </div>
@@ -202,9 +197,7 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
     const rate = live.reduce((total, m) => total + (m.usd_per_hour || 0), 0);
     return (
       <small className="text-[11px] text-ink3">
-        {zh()
-          ? `生成将在租用的机器上运行并加密返回（${live.length} 台在线，约 $${rate.toFixed(2)}/小时）。`
-          : `Made on your rented GPU and encrypted on the way back — ${live.length} running, about $${rate.toFixed(2)}/hr until you stop them.`}
+        {`Made on your rented GPU and encrypted on the way back — ${live.length} running, about $${rate.toFixed(2)}/hr until you stop them.`}
       </small>
     );
   }
@@ -216,12 +209,10 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
       <div className="flex flex-col gap-1">
         <Line>
           <small className="text-[11px] text-ink2">
-            {zh()
-              ? `机器已就绪（${machine.gpu || 'GPU'}，约 $${(machine.usd_per_hour || 0).toFixed(2)}/小时）。`
-              : `Machine ready — ${machine.gpu || 'GPU'}, ~$${(machine.usd_per_hour || 0).toFixed(2)}/hr.`}
+            {`Machine ready — ${machine.gpu || 'GPU'}, ~$${(machine.usd_per_hour || 0).toFixed(2)}/hr.`}
           </small>
           <Button variant="primary" size="sm" loading={busy} disabled={busy} onClick={() => attach(machine)}>
-            {zh() ? '用于本工作室' : 'Use it here'}
+            Use it here
           </Button>
         </Line>
         {error ? <small className="text-[11px] text-warn">{error}</small> : null}
@@ -236,15 +227,13 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
       <div className="flex flex-col gap-1">
         <Line>
           <small className="text-[11px] text-warn">
-            {zh()
-              ? '与机器的连接已断开，生成暂时无法在其上运行。'
-              : 'Lost the connection to your machine — generations cannot reach it.'}
+            Lost the connection to your machine — generations cannot reach it.
           </small>
           <Button variant="primary" size="sm" loading={busy} disabled={busy} onClick={() => attach(machine)}>
-            {zh() ? '重新连接' : 'Reconnect'}
+            Reconnect
           </Button>
           <Button variant="ghost" size="sm" onClick={openMachines}>
-            {zh() ? '查看机器' : 'View machines'}
+            View machines
           </Button>
         </Line>
         {error ? <small className="text-[11px] text-warn">{error}</small> : null}
@@ -256,16 +245,16 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
   if (provisioning.length) {
     const machine = provisioning[0];
     const models = machine.provision?.total
-      ? ` — ${machine.provision.done}/${machine.provision.total} ${zh() ? '个模型' : 'models'}`
+      ? ` — ${machine.provision.done}/${machine.provision.total} ${'models'}`
       : '';
     return (
       <Line>
         <Spinner size={12} className="text-honey" />
         <small className="text-[11px] text-ink2">
-          {zh() ? '机器正在准备中：' : 'Machine coming online: '}{machine.phase}{models}
+          {'Machine coming online: '}{machine.phase}{models}
         </small>
         <Button variant="ghost" size="sm" onClick={openMachines}>
-          {zh() ? '查看机器' : 'View machines'}
+          View machines
         </Button>
       </Line>
     );
@@ -274,12 +263,10 @@ export function RentedSourceStatus({ engine: s, page, pinned = '', onPin = null 
   return (
     <Line>
       <small className="text-[11px] text-ink3">
-        {zh()
-          ? '暂无租用机器。租用一台即可在云端 GPU 上运行这些模型。'
-          : 'No rented machine yet — rent one to run these models on a cloud GPU.'}
+        No rented machine yet — rent one to run these models on a cloud GPU.
       </small>
       <Button variant="primary" size="sm" onClick={openMachines}>
-        {zh() ? '租用机器' : 'Rent a machine'}
+        Rent a machine
       </Button>
     </Line>
   );

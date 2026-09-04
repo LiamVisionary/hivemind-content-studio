@@ -2,63 +2,63 @@
 // Three tiers, one disclosure convention: Create (with a Labs fold), Produce,
 // and a collapsed Advanced group. Labels changed with the tiers; keys did not,
 // so every old link still resolves.
-import { t, zh } from '../lib/i18n.js';
+import { t } from '../lib/i18n.js';
 
 export const NAV_SECTIONS = [
   {
     id: 'create',
-    label: () => (zh() ? '创作' : 'Create'),
+    label: () => t('nav.create'),
     items: [
       { page: 'image', icon: 'image', label: () => t('nav.image') },
-      { page: 'video', icon: 'video', label: () => t('nav.video') },
-      { page: 'story', icon: 'persona', label: () => (zh() ? '故事' : 'Story') },
-      { page: 'restore', icon: 'wand', label: () => (zh() ? '修复' : 'Restore') },
+      { page: 'video', icon: 'video', label: () => t('common.video') },
+      { page: 'story', icon: 'persona', label: () => t('nav.story') },
+      { page: 'restore', icon: 'wand', label: () => t('nav.restore') },
 
     ],
     // Working studios that each need something this machine may not have — a
     // rented GPU, a local checkpoint, a third-party account. Folded, not hidden.
     labs: {
       id: 'labs',
-      label: () => (zh() ? '实验室' : 'Labs'),
+      label: () => t('nav.labs'),
       collapsible: true,
       defaultOpen: false,
       storageKey: 'nav.labs',
       items: [
-        { page: 'sprite', icon: 'grid', label: () => (zh() ? '精灵图' : 'Sprite') },
+        { page: 'sprite', icon: 'grid', label: () => t('nav.sprite') },
         { page: 'lipsync', icon: 'mic', label: () => t('nav.lipsync') },
       ],
     },
   },
   {
     id: 'produce',
-    label: () => (zh() ? '生产' : 'Produce'),
+    label: () => t('nav.produce'),
     items: [
-      { page: 'planner', icon: 'sparkles', label: () => (zh() ? '规划器' : 'Planner') },
-      { page: 'history', icon: 'clock', label: () => (zh() ? '作品库' : 'Library') },
-      { page: 'runs', icon: 'stack', label: () => (zh() ? '制作' : 'Productions') },
-      { page: 'inspo', icon: 'star', label: () => (zh() ? '灵感' : 'Inspo') },
-      { page: 'models', icon: 'database', label: () => (zh() ? '模型' : 'Models') },
+      { page: 'planner', icon: 'sparkles', label: () => t('nav.planner') },
+      { page: 'history', icon: 'clock', label: () => t('nav.library') },
+      { page: 'runs', icon: 'stack', label: () => t('nav.productions') },
+      { page: 'inspo', icon: 'star', label: () => t('nav.inspo') },
+      { page: 'models', icon: 'database', label: () => t('nav.models') },
     ],
   },
   {
     id: 'advanced',
-    label: () => (zh() ? '高级' : 'Advanced'),
+    label: () => t('common.advanced'),
     collapsible: true,
     defaultOpen: false,
     storageKey: 'nav.advanced',
     items: [
-      { page: 'machines', icon: 'cpu', label: () => (zh() ? '租用的 GPU' : 'Rented GPUs') },
-      { page: 'providers', icon: 'plug', label: () => (zh() ? '服务商' : 'Providers') },
-      { page: 'passbook', icon: 'key', label: () => 'PassBook' },
-      { page: 'canvas', icon: 'nodes', label: () => (zh() ? '画布' : 'Canvas') },
+      { page: 'machines', icon: 'cpu', label: () => t('nav.machines') },
+      { page: 'providers', icon: 'plug', label: () => t('nav.providers') },
+      { page: 'passbook', icon: 'key', label: () => t('nav.passbook') },
+      { page: 'canvas', icon: 'nodes', label: () => t('nav.canvas') },
       { page: 'mcp-cli', icon: 'terminal', label: () => t('nav.mcpcli') },
       // Still opened by ⌘, — it is a page now rather than a dialog, because a
       // packaged app's machine-level settings do not fit in a modal.
-      { page: 'settings', icon: 'settings', label: () => t('settings.title') },
+      { page: 'settings', icon: 'settings', label: () => t('common.settings') },
       // Version, licence, source and third-party notices. AGPL §5(d) asks an
       // interactive program to show these; the topbar version chip is the other
       // door to the same page.
-      { page: 'about', icon: 'info', label: () => (zh() ? '关于' : 'About') },
+      { page: 'about', icon: 'info', label: () => t('nav.about') },
     ],
   },
 ];
@@ -72,7 +72,7 @@ export function navGroups(section) {
 
 export const NAV_GROUPS = NAV_SECTIONS.flatMap(navGroups);
 export const NAV_ITEMS = NAV_GROUPS.flatMap((g) => g.items);
-export const APP_NAME = 'Hivemind Content Studio';
+export const APP_NAME = t('app.name');
 
 // Studios mount once on first visit and are display-toggled thereafter (App.jsx
 // keeps them alive so an in-flight generation survives a page switch); hub pages
@@ -84,7 +84,7 @@ export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'lipsync', 're
 // by URL and from inside Productions, but deliberately not in the rail — leaves
 // the PREVIOUS page's title in the tab. Same strings the views themselves use.
 export const OFF_NAV_PAGE_TITLES = {
-  telemetry: () => (zh() ? '活动' : 'Activity'),
+  telemetry: () => t('nav.activity'),
 };
 
 export const HUB_PAGES = {

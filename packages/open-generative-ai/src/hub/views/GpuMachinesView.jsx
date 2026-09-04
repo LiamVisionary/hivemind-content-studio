@@ -3,7 +3,6 @@
 // the hosted customer billing gateway). Tier presets, prices, and expected
 // speeds come from the server; this view only renders and confirms.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { zh } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import {
@@ -1189,9 +1188,9 @@ export function GpuMachinesView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker={zh() ? '自有算力' : 'Owner compute'}
-        title={zh() ? '租用的 GPU' : 'Rented GPUs'}
-        subtitle={zh() ? '运行时按秒计费' : 'Billed per second while running'}
+        kicker="Owner compute"
+        title="Rented GPUs"
+        subtitle="Billed per second while running"
       />
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         {loadError && (

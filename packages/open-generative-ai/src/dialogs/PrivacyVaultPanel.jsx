@@ -9,7 +9,6 @@
 // what stops a borrowed session from rotating either one.
 import { useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { zh } from '../lib/i18n.js';
 import { changeWorkspacePassword, mintNewRecoveryKey } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, Field, SectionLabel, TextInput } from '../ui/kit.jsx';
@@ -18,28 +17,18 @@ import { Button, Field, SectionLabel, TextInput } from '../ui/kit.jsx';
 // reaches this screen: these are the only five outcomes either call has.
 function reasonText(reason) {
   if (reason === 'password') {
-    return zh()
-      ? '当前密码不正确。请重新输入后再试。'
-      : 'That is not this workspace’s current password. Type it again and retry.';
+    return 'That is not this workspace’s current password. Type it again and retry.';
   }
   if (reason === 'novault') {
-    return zh()
-      ? '此工作区尚未创建保险库。请重新加载工作室后再试。'
-      : 'This workspace has not created its vault yet. Reload the studio once, then try again.';
+    return 'This workspace has not created its vault yet. Reload the studio once, then try again.';
   }
   if (reason === 'refused') {
-    return zh()
-      ? '登录状态已过期。请重新登录后再试。'
-      : 'This session has expired. Sign in again, then retry.';
+    return 'This session has expired. Sign in again, then retry.';
   }
   if (reason === 'offline') {
-    return zh()
-      ? '无法连接到工作室。请检查连接后重试。'
-      : 'Could not reach the studio. Check the connection and try again.';
+    return 'Could not reach the studio. Check the connection and try again.';
   }
-  return zh()
-    ? '没有任何更改 — 当前密码仍然有效。请重试。'
-    : 'Nothing was changed and your current password still works. Try again.';
+  return 'Nothing was changed and your current password still works. Try again.';
 }
 
 function VaultNote({ children }) {
@@ -64,7 +53,7 @@ export function PrivacyVaultPanel({ onDone }) {
     event.preventDefault();
     setError('');
     if (next !== confirm) {
-      setError(zh() ? '两次输入的新密码不一致。' : 'Those two new passwords are different. Type the new one twice.');
+      setError('Those two new passwords are different. Type the new one twice.');
       return;
     }
     setBusy('password');
@@ -77,7 +66,7 @@ export function PrivacyVaultPanel({ onDone }) {
     setCurrent('');
     setNext('');
     setConfirm('');
-    toast.success(zh() ? '密码已更改' : 'Password changed');
+    toast.success('Password changed');
     onDone?.();
   };
 
@@ -100,14 +89,12 @@ export function PrivacyVaultPanel({ onDone }) {
   return (
     <div className="flex flex-col gap-6">
       <section className="flex flex-col gap-3">
-        <SectionLabel>{zh() ? '工作区密码' : 'Workspace password'}</SectionLabel>
+        <SectionLabel>Workspace password</SectionLabel>
         <VaultNote>
-          {zh()
-            ? '密码同时解锁此工作区和它的加密库。更改密码不会重新加密任何内容，已注册的通行密钥和此浏览器记住的解锁方式仍然有效。'
-            : 'Your password opens this workspace and decrypts its library. Changing it re-seals one copy of the key, so nothing is re-encrypted and any passkey — or this browser’s remembered unlock — keeps working.'}
+          Your password opens this workspace and decrypts its library. Changing it re-seals one copy of the key, so nothing is re-encrypted and any passkey — or this browser’s remembered unlock — keeps working.
         </VaultNote>
         <form onSubmit={changePassword} className="flex flex-col gap-3">
-          <Field label={zh() ? '当前密码' : 'Current password'}>
+          <Field label="Current password">
             <TextInput
               type="password"
               value={current}
@@ -116,7 +103,7 @@ export function PrivacyVaultPanel({ onDone }) {
               disabled={Boolean(busy)}
             />
           </Field>
-          <Field label={zh() ? '新密码' : 'New password'}>
+          <Field label="New password">
             <TextInput
               type="password"
               value={next}
@@ -125,7 +112,7 @@ export function PrivacyVaultPanel({ onDone }) {
               disabled={Boolean(busy)}
             />
           </Field>
-          <Field label={zh() ? '再次输入新密码' : 'Type the new one again'} error={error}>
+          <Field label="Type the new one again" error={error}>
             <TextInput
               type="password"
               value={confirm}
@@ -141,24 +128,22 @@ export function PrivacyVaultPanel({ onDone }) {
               loading={busy === 'password'}
               disabled={Boolean(busy) || !current || !next || !confirm}
             >
-              {zh() ? '更改密码' : 'Change password'}
+              Change password
             </Button>
           </div>
         </form>
       </section>
 
       <section className="flex flex-col gap-3">
-        <SectionLabel>{zh() ? '恢复密钥' : 'Recovery key'}</SectionLabel>
+        <SectionLabel>Recovery key</SectionLabel>
         <VaultNote>
-          {zh()
-            ? '恢复密钥是忘记密码后唯一的进入方式 — 服务器从未持有你的密钥，无法为你重置。生成新密钥会立即使旧密钥失效，你的内容不受影响。'
-            : 'A recovery key is the only way back in if you forget your password — the server has never held your key and cannot reset it for you. Minting a new one retires the old key immediately and leaves everything you have made untouched.'}
+          A recovery key is the only way back in if you forget your password — the server has never held your key and cannot reset it for you. Minting a new one retires the old key immediately and leaves everything you have made untouched.
         </VaultNote>
         <form onSubmit={rotateRecovery} className="flex flex-col gap-3">
           <Field
-            label={zh() ? '当前密码' : 'Current password'}
+            label="Current password"
             error={rotateError}
-            hint={zh() ? '新密钥只会显示一次。' : 'The new key is shown once, and then only you have it.'}
+            hint="The new key is shown once, and then only you have it."
           >
             <TextInput
               type="password"
@@ -174,7 +159,7 @@ export function PrivacyVaultPanel({ onDone }) {
               loading={busy === 'recovery'}
               disabled={Boolean(busy) || !rotateWith}
             >
-              {zh() ? '生成新的恢复密钥' : 'Show a new recovery key'}
+              Show a new recovery key
             </Button>
           </div>
         </form>

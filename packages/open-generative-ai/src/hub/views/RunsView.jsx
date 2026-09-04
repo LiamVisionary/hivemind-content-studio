@@ -12,7 +12,6 @@
 import { useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useMediaSrc } from '../../hooks/hooks.js';
-import { zh } from '../../lib/i18n.js';
 import { downloadMedia } from '../../lib/downloadMedia.js';
 import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { Icon } from '../../ui/icons.jsx';
@@ -143,8 +142,8 @@ function RunDetail({ run, operatorToken }) {
     return (
       <EmptyState
         icon="stack"
-        title={zh() ? '选择一个制作' : 'Pick a production'}
-        hint={zh() ? '查看它做了什么、做出了什么，以及下一步。' : 'See what it did, what it made, and what happens next.'}
+        title="Pick a production"
+        hint="See what it did, what it made, and what happens next."
         className="flex-1"
       />
     );
@@ -167,7 +166,7 @@ function RunDetail({ run, operatorToken }) {
         <div className="min-w-0">
           {/* The lane is the kicker unless it is already the title (a brief with no title of its own). */}
           <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink3">
-            {runDisplayTitle(run) === laneLabel(run.lane) ? (zh() ? '制作' : 'Production') : laneLabel(run.lane)}
+            {runDisplayTitle(run) === laneLabel(run.lane) ? 'Production' : laneLabel(run.lane)}
           </p>
           <h3 className="truncate text-[15px] font-semibold text-ink1">{runDisplayTitle(run)}</h3>
           <p className="mt-0.5 truncate font-mono text-[11px] text-ink3" title={run.run_id}>{run.run_id}</p>
@@ -294,13 +293,13 @@ export function RunsView({ active }) {
   // run the Planner. It is the same productions, counted — so it lives here.
   const [tab, setTab] = useState('productions');
   const tabs = [
-    { value: 'productions', label: zh() ? '制作' : 'Productions' },
-    { value: 'activity', label: zh() ? '活动' : 'Activity' },
+    { value: 'productions', label: 'Productions' },
+    { value: 'activity', label: 'Activity' },
   ];
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker={zh() ? '持久化制作' : 'Durable production'} title={zh() ? '制作' : 'Productions'}>
+      <HubToolbar kicker="Durable production" title="Productions">
         <Segmented options={tabs} value={tab} onChange={setTab} />
         {tab === 'productions' ? <Segmented options={FILTERS} value={s.statusFilter} onChange={setStatusFilter} /> : null}
       </HubToolbar>
@@ -318,8 +317,8 @@ export function RunsView({ active }) {
           ) : (
             <EmptyState
               icon="stack"
-              title={zh() ? '没有匹配的制作' : 'No matching productions'}
-              hint={zh() ? '创建一个制作，或更改筛选条件。' : 'Create a production or change the filter.'}
+              title="No matching productions"
+              hint="Create a production or change the filter."
             />
           )}
         </div>

@@ -52,8 +52,6 @@ import {
   Button, CollapsibleSection, Field, NativeSelect, SectionLabel, TextArea, TextInput, cx,
 } from '../../ui/kit.jsx';
 import { ChipButton } from '../../ui/Menu.jsx';
-import { zh } from './videoLogic.js';
-
 /** The builder's whole state, held by the studio so it survives closing. */
 export function blankTimeline() {
   return {
@@ -75,11 +73,11 @@ const num = (value) => {
 // H3's own names for its shapes (Ref2VA, FL2VA, I2VA, L2VA, T2VA) are jargon in
 // a footer; say what is attached instead.
 const MODE_TEXT = {
-  reference: () => (zh() ? '参考' : 'Reference'),
-  flf: () => (zh() ? '首尾帧' : 'First + last frame'),
-  first: () => (zh() ? '首帧' : 'First frame'),
-  last: () => (zh() ? '尾帧' : 'Last frame'),
-  text: () => (zh() ? '文本' : 'Text'),
+  reference: () => 'Reference',
+  flf: () => 'First + last frame',
+  first: () => 'First frame',
+  last: () => 'Last frame',
+  text: () => 'Text',
 };
 
 const options = (list) => list.map(([value, label]) => (
@@ -118,80 +116,80 @@ function CameraFields({ camera, onChange }) {
   return (
     <div className="flex flex-col gap-2">
       <div className={grid}>
-        <Field label={zh() ? '景别' : 'Framing'}>
+        <Field label="Framing">
           <NativeSelect value={camera.framing} onChange={(e) => set({ framing: e.target.value })}>{options(CAMERA_FRAMINGS)}</NativeSelect>
         </Field>
-        <Field label={zh() ? '取景重点' : 'On'}>
+        <Field label="On">
           <NativeSelect value={camera.focusArea} onChange={(e) => set({ focusArea: e.target.value })}>{options(CAMERA_FOCUS_AREAS)}</NativeSelect>
         </Field>
-        <Field label={zh() ? '机位方向' : 'Viewpoint'}>
+        <Field label="Viewpoint">
           <NativeSelect value={camera.viewpoint} onChange={(e) => set({ viewpoint: e.target.value })}>{options(CAMERA_VIEWPOINTS)}</NativeSelect>
         </Field>
-        <Field label={zh() ? '机位高度' : 'Angle'}>
+        <Field label="Angle">
           <NativeSelect value={camera.angle} onChange={(e) => set({ angle: e.target.value })}>{options(CAMERA_ANGLES)}</NativeSelect>
         </Field>
       </div>
       <div className={grid}>
-        <Field label={zh() ? '构图' : 'Composition'}>
+        <Field label="Composition">
           <NativeSelect value={camera.composition} onChange={(e) => set({ composition: e.target.value })}>{options(CAMERA_COMPOSITIONS)}</NativeSelect>
         </Field>
-        <Field label={zh() ? '运镜' : 'Move'}>
+        <Field label="Move">
           <NativeSelect value={camera.moveId} onChange={(e) => set({ moveId: e.target.value })}>{options(CAMERA_MOVE_OPTIONS)}</NativeSelect>
         </Field>
         {/* H3's own qualifiers — spelled the way the model was trained to read
             them, which is why they are picked rather than typed. */}
-        <Field label={zh() ? '幅度' : 'Range'}>
+        <Field label="Range">
           <NativeSelect value={camera.amplitude} onChange={(e) => set({ amplitude: e.target.value })}>{options(CAMERA_AMPLITUDES)}</NativeSelect>
         </Field>
-        <Field label={zh() ? '速度' : 'Speed'}>
+        <Field label="Speed">
           <NativeSelect value={camera.speed} onChange={(e) => set({ speed: e.target.value })}>{options(CAMERA_SPEEDS)}</NativeSelect>
         </Field>
       </div>
       <div className={grid}>
         <Field
-          label={zh() ? '运镜时机' : 'Move happens'}
-          hint={zh() ? '决定运镜写在动作前还是台词后' : 'Where in the shot the move is stated'}
+          label="Move happens"
+          hint="Where in the shot the move is stated"
         >
           <NativeSelect value={camera.timing} onChange={(e) => set({ timing: e.target.value })}>{options(CAMERA_TIMINGS)}</NativeSelect>
         </Field>
-        <Field label={zh() ? '稳定度' : 'Operator'}>
+        <Field label="Operator">
           <NativeSelect value={camera.stability} onChange={(e) => set({ stability: e.target.value })}>{options(CAMERA_STABILITY)}</NativeSelect>
         </Field>
-        <Field label={zh() ? '镜头' : 'Lens'}>
+        <Field label="Lens">
           <NativeSelect value={camera.lens} onChange={(e) => set({ lens: e.target.value })}>{options(CAMERA_LENSES)}</NativeSelect>
         </Field>
-        <Field label={zh() ? '景深' : 'Depth'}>
+        <Field label="Depth">
           <NativeSelect value={camera.depth} onChange={(e) => set({ depth: e.target.value })}>{options(CAMERA_DEPTH)}</NativeSelect>
         </Field>
       </div>
       <div className={grid}>
-        <Field label={zh() ? '对焦' : 'Focus'}>
+        <Field label="Focus">
           <NativeSelect value={camera.focusBehaviour} onChange={(e) => set({ focusBehaviour: e.target.value })}>{options(CAMERA_FOCUS_BEHAVIOUR)}</NativeSelect>
         </Field>
         {camera.focusBehaviour === 'rack' || camera.focusBehaviour === 'enter' ? (
           <>
-            <Field label={zh() ? '从' : 'From'}>
-              <TextInput value={camera.focusFrom} onChange={(e) => set({ focusFrom: e.target.value })} placeholder={zh() ? '开场对焦对象' : 'the opening target'} />
+            <Field label="From">
+              <TextInput value={camera.focusFrom} onChange={(e) => set({ focusFrom: e.target.value })} placeholder="the opening target" />
             </Field>
-            <Field label={zh() ? '到' : 'To'}>
-              <TextInput value={camera.focusTo} onChange={(e) => set({ focusTo: e.target.value })} placeholder={zh() ? '结束对焦对象' : 'the ending target'} />
+            <Field label="To">
+              <TextInput value={camera.focusTo} onChange={(e) => set({ focusTo: e.target.value })} placeholder="the ending target" />
             </Field>
           </>
         ) : null}
         {/* Where the move LANDS. Only the framing is offered: an endpoint that
             re-specifies everything reads to the model as a second shot. */}
-        <Field label={zh() ? '收在' : 'Ends on'}>
+        <Field label="Ends on">
           <NativeSelect value={camera.endFraming} onChange={(e) => set({ endFraming: e.target.value })}>{options(CAMERA_FRAMINGS)}</NativeSelect>
         </Field>
       </div>
-      <Field label={zh() ? '收尾补充（可选）' : 'Ending note (optional)'}>
-        <TextInput value={camera.endNote} onChange={(e) => set({ endNote: e.target.value })} placeholder={zh() ? '门在她身后关上' : 'the door closes behind her'} />
+      <Field label="Ending note (optional)">
+        <TextInput value={camera.endNote} onChange={(e) => set({ endNote: e.target.value })} placeholder="the door closes behind her" />
       </Field>
       <Field
-        label={zh() ? '自定义运镜（覆盖以上运镜）' : 'Custom move (replaces the move above)'}
-        hint={zh() ? '写了这一行，上面选的运镜就不再生成句子' : 'Written here, the picked move stops generating a sentence'}
+        label="Custom move (replaces the move above)"
+        hint="Written here, the picked move stops generating a sentence"
       >
-        <TextInput value={camera.custom} onChange={(e) => set({ custom: e.target.value })} placeholder={zh() ? '镜头猛地一甩，短暂跟丢了她' : 'the camera swings wildly, losing her for a moment'} />
+        <TextInput value={camera.custom} onChange={(e) => set({ custom: e.target.value })} placeholder="the camera swings wildly, losing her for a moment" />
       </Field>
     </div>
   );
@@ -202,34 +200,34 @@ function DialogueRow({ line, beats, onChange, onRemove }) {
   return (
     <div className="flex flex-col gap-1.5 rounded-md border border-line1 bg-bg0 p-2">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Field label={zh() ? '说话人' : 'Speaker'}>
+        <Field label="Speaker">
           <TextInput value={line.speaker} onChange={(e) => set({ speaker: e.target.value })} placeholder="<Subject 1>" />
         </Field>
-        <Field label={zh() ? '语言' : 'Language'} hint={zh() ? '决定口音' : 'Decides the accent'}>
+        <Field label="Language" hint="Decides the accent">
           <TextInput value={line.lang} onChange={(e) => set({ lang: e.target.value })} placeholder="English" />
         </Field>
-        <Field label={zh() ? '语气' : 'Delivery'}>
-          <TextInput value={line.delivery} onChange={(e) => set({ delivery: e.target.value })} placeholder={zh() ? '压着嗓子，急促' : 'in an urgent whisper'} />
+        <Field label="Delivery">
+          <TextInput value={line.delivery} onChange={(e) => set({ delivery: e.target.value })} placeholder="in an urgent whisper" />
         </Field>
-        <Field label={zh() ? '时机' : 'Timing'}>
+        <Field label="Timing">
           <NativeSelect value={line.beatId} onChange={(e) => set({ beatId: e.target.value })}>
-            <option value="">{zh() ? '动作之后' : 'After the action'}</option>
+            <option value="">After the action</option>
             {beats.map((beat, index) => (
               <option key={beat.id} value={beat.id}>
-                {zh() ? `第 ${index + 1} 拍` : `Beat ${index + 1}`} · {num(beat.startSec).toFixed(2)}–{num(beat.endSec).toFixed(2)}s
+                {`Beat ${index + 1}`} · {num(beat.startSec).toFixed(2)}–{num(beat.endSec).toFixed(2)}s
               </option>
             ))}
           </NativeSelect>
         </Field>
       </div>
-      <Field label={zh() ? '台词' : 'Line'}>
-        <TextArea rows={2} value={line.line} onChange={(e) => set({ line: e.target.value })} placeholder={zh() ? '我还没准备好打开它。' : "I don't think I'm ready to open it."} />
+      <Field label="Line">
+        <TextArea rows={2} value={line.line} onChange={(e) => set({ line: e.target.value })} placeholder="I don't think I'm ready to open it." />
       </Field>
       <div className="flex flex-wrap items-center gap-1">
         {[
-          ['voiceover', zh() ? '旁白' : 'voiceover'],
-          ['offscreen', zh() ? '画外' : 'off-screen'],
-          ['cutoff', zh() ? '结尾截断' : 'cut off by the end'],
+          ['voiceover', 'voiceover'],
+          ['offscreen', 'off-screen'],
+          ['cutoff', 'cut off by the end'],
         ].map(([key, label]) => (
           <button
             key={key}
@@ -250,14 +248,14 @@ function DialogueRow({ line, beats, onChange, onRemove }) {
           value={line.carry === true ? 'out' : line.carry}
           onChange={(e) => set({ carry: e.target.value })}
         >
-          <option value="">{zh() ? '不跨镜头' : 'stays in this shot'}</option>
-          <option value="out">{zh() ? '接到下一镜' : 'runs into the next shot'}</option>
-          <option value="in">{zh() ? '承接上一镜' : 'carries over from the previous'}</option>
+          <option value="">stays in this shot</option>
+          <option value="out">runs into the next shot</option>
+          <option value="in">carries over from the previous</option>
         </NativeSelect>
         <button
           type="button"
           onClick={onRemove}
-          aria-label={zh() ? '删除台词' : 'Remove line'}
+          aria-label="Remove line"
           className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
         >
           <Icon name="x" size={12} />
@@ -301,7 +299,7 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
         >
           <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} className="shrink-0 text-ink3" />
           <span className="text-[12px] font-semibold text-ink1">
-            {zh() ? `第 ${index + 1} 镜` : `Shot ${index + 1}`}
+            {`Shot ${index + 1}`}
           </span>
           {index > 0 ? (
             <span className="shrink-0 font-mono text-[10px] text-ink3">{timecode(shot.cutSec)}</span>
@@ -312,7 +310,7 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
           {shot.dialogue.some((line) => line.line.trim())
             ? <Icon name="mic" size={11} className="shrink-0 text-honey" /> : null}
           <span className="min-w-0 flex-1 truncate text-[10px] text-ink3">
-            {shot.action || shot.openingState || (zh() ? '还没写这一镜' : 'nothing written yet')}
+            {shot.action || shot.openingState || 'nothing written yet'}
           </span>
         </button>
         <span className="flex shrink-0 items-center">
@@ -320,7 +318,7 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
             type="button"
             disabled={index === 0}
             onClick={() => onMove(index, -1)}
-            aria-label={zh() ? '上移' : 'Move up'}
+            aria-label="Move up"
             className="grid h-6 w-5 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30"
           >
             <Icon name="chevronDown" size={11} className="rotate-180" />
@@ -329,7 +327,7 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
             type="button"
             disabled={index === total - 1}
             onClick={() => onMove(index, 1)}
-            aria-label={zh() ? '下移' : 'Move down'}
+            aria-label="Move down"
             className="grid h-6 w-5 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30"
           >
             <Icon name="chevronDown" size={11} />
@@ -338,7 +336,7 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
             type="button"
             disabled={total === 1}
             onClick={() => onRemove(shot.id)}
-            aria-label={zh() ? '删除这一镜' : 'Remove shot'}
+            aria-label="Remove shot"
             className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30"
           >
             <Icon name="x" size={12} />
@@ -351,9 +349,9 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
           {index > 0 ? (
             <div className="grid grid-cols-2 gap-2">
               <Field
-                label={zh() ? '切点（秒）' : 'Cuts at (seconds)'}
+                label="Cuts at (seconds)"
                 hint={durationSeconds && num(shot.cutSec) >= durationSeconds
-                  ? (zh() ? '已超过片长——这一镜不会出现' : 'past the end — this shot never happens')
+                  ? 'past the end — this shot never happens'
                   : ''}
               >
                 <TextInput
@@ -364,36 +362,36 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
                   onChange={(e) => set({ cutSec: num(e.target.value) })}
                 />
               </Field>
-              <Field label={zh() ? '转场' : 'Transition'}>
+              <Field label="Transition">
                 <NativeSelect value={shot.transition} onChange={(e) => set({ transition: e.target.value })}>
                   {options(SHOT_TRANSITIONS)}
                 </NativeSelect>
               </Field>
-              <Field className="col-span-2" label={zh() ? '切到什么' : 'Cuts to'}>
+              <Field className="col-span-2" label="Cuts to">
                 <TextInput
                   value={shot.cutTo}
                   onChange={(e) => set({ cutTo: e.target.value })}
-                  placeholder={zh() ? '她双手的特写' : 'a close-up of her hands'}
+                  placeholder="a close-up of her hands"
                 />
               </Field>
             </div>
           ) : null}
 
           <Field
-            label={zh() ? '开场状态' : 'Opening state'}
-            hint={zh() ? '这一镜开始时已经是什么样子' : 'How things already are when the shot starts'}
+            label="Opening state"
+            hint="How things already are when the shot starts"
           >
             <TextArea rows={2} value={shot.openingState} onChange={(e) => set({ openingState: e.target.value })} />
           </Field>
-          <Field label={zh() ? '动作' : 'Action'}>
+          <Field label="Action">
             <TextArea rows={2} value={shot.action} onChange={(e) => set({ action: e.target.value })} />
           </Field>
 
           {/* Thirteen selects, folded: open when something is set, else one
               line — every open shot used to unroll all of them. */}
           <CollapsibleSection
-            title={zh() ? '摄影机' : 'Camera'}
-            hint={cameraSet ? (zh() ? '已设置' : 'set') : ''}
+            title="Camera"
+            hint={cameraSet ? 'set' : ''}
             defaultOpen={cameraSet}
           >
             {cameraSet ? (
@@ -402,7 +400,7 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
                 onClick={() => set({ camera: blankCamera() })}
                 className="-mt-1 self-end text-[10px] text-ink3 transition-colors hover:text-ink1"
               >
-                {zh() ? '清除摄影机设置' : 'Clear camera'}
+                Clear camera
               </button>
             ) : null}
             <CameraFields camera={shot.camera} onChange={(camera) => set({ camera })} />
@@ -410,26 +408,26 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
 
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <SectionLabel>{zh() ? '定时动作' : 'Timed beats'}</SectionLabel>
+              <SectionLabel>Timed beats</SectionLabel>
               <button
                 type="button"
                 onClick={addBeat}
                 className="ml-auto text-[10px] font-semibold text-honey transition-colors hover:underline"
               >
-                {zh() ? '＋ 加一拍' : '+ Add beat'}
+                + Add beat
               </button>
             </div>
             {shot.beats.length ? (
               <div className="flex flex-col gap-1.5">
                 {shot.beats.map((beat, at) => (
                   <div key={beat.id} className="flex items-end gap-1.5">
-                    <Field className="w-20 shrink-0" label={at === 0 ? (zh() ? '从' : 'From') : ''}>
+                    <Field className="w-20 shrink-0" label={at === 0 ? 'From' : ''}>
                       <TextInput type="number" min="0" step="0.1" value={beat.startSec} onChange={(e) => setBeat(beat.id, { startSec: num(e.target.value) })} />
                     </Field>
-                    <Field className="w-20 shrink-0" label={at === 0 ? (zh() ? '到' : 'To') : ''}>
+                    <Field className="w-20 shrink-0" label={at === 0 ? 'To' : ''}>
                       <TextInput type="number" min="0" step="0.1" value={beat.endSec} onChange={(e) => setBeat(beat.id, { endSec: num(e.target.value) })} />
                     </Field>
-                    <Field className="min-w-0 flex-1" label={at === 0 ? (zh() ? '这段时间里发生什么' : 'What happens in that span') : ''}>
+                    <Field className="min-w-0 flex-1" label={at === 0 ? 'What happens in that span' : ''}>
                       <TextInput value={beat.action} onChange={(e) => setBeat(beat.id, { action: e.target.value })} />
                     </Field>
                     <button
@@ -440,7 +438,7 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
                         // silently stop being timed; unpin it instead.
                         dialogue: shot.dialogue.map((line) => (line.beatId === beat.id ? { ...line, beatId: '' } : line)),
                       })}
-                      aria-label={zh() ? '删除这一拍' : 'Remove beat'}
+                      aria-label="Remove beat"
                       className="mb-1 grid h-7 w-7 shrink-0 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
                     >
                       <Icon name="x" size={12} />
@@ -450,22 +448,20 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
               </div>
             ) : (
               <p className="text-[10px] leading-snug text-ink3">
-                {zh()
-                  ? '不加也行。加了就是告诉 H3「第几秒到第几秒之间做什么」，动作顺序才不会被它自己排。'
-                  : 'Optional. A beat tells H3 what happens between two stamped seconds, so the order of events stops being its choice.'}
+                Optional. A beat tells H3 what happens between two stamped seconds, so the order of events stops being its choice.
               </p>
             )}
           </div>
 
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <SectionLabel>{zh() ? '台词' : 'Dialogue'}</SectionLabel>
+              <SectionLabel>Dialogue</SectionLabel>
               <button
                 type="button"
                 onClick={() => set({ dialogue: [...shot.dialogue, newDialogue()] })}
                 className="ml-auto text-[10px] font-semibold text-honey transition-colors hover:underline"
               >
-                {zh() ? '＋ 加一句' : '+ Add line'}
+                + Add line
               </button>
             </div>
             {shot.dialogue.length ? (
@@ -484,10 +480,10 @@ function ShotCard({ shot, index, total, durationSeconds, onChange, onRemove, onM
           </div>
 
           <Field
-            label={zh() ? '这一镜的声音' : "This shot's sound"}
-            hint={zh() ? '同步的物理音，不是整体氛围' : 'Synchronised physical sound, not the overall ambience'}
+            label="This shot's sound"
+            hint="Synchronised physical sound, not the overall ambience"
           >
-            <TextInput value={shot.sound} onChange={(e) => set({ sound: e.target.value })} placeholder={zh() ? '纸被撕开的声音' : 'paper tearing'} />
+            <TextInput value={shot.sound} onChange={(e) => set({ sound: e.target.value })} placeholder="paper tearing" />
           </Field>
         </div>
       ) : null}
@@ -577,32 +573,30 @@ export function ShotBuilderDialog({
       open={open}
       onClose={onClose}
       size="xl"
-      title={zh() ? '分镜' : 'Shot builder'}
+      title="Shot builder"
       footer={(
         <>
           <span className="mr-auto flex min-w-0 flex-col text-[11px] text-ink3">
             <span>
-              {zh() ? `${MODE_TEXT[mode]()} · ${timeline.shots.length} 镜 · ${composed.length.toLocaleString()} 字符` : `${MODE_TEXT[mode]()} · ${timeline.shots.length} shot${timeline.shots.length === 1 ? '' : 's'} · ${composed.length.toLocaleString()} chars`}
+              {`${MODE_TEXT[mode]()} · ${timeline.shots.length} shot${timeline.shots.length === 1 ? '' : 's'} · ${composed.length.toLocaleString()} chars`}
             </span>
             {seededShots ? (
               <span className="text-honey">
-                {zh() ? `已从提示词中已有的 ${seededShots} 镜读入` : `Seeded from the ${seededShots} shot${seededShots === 1 ? '' : 's'} already in the prompt`}
+                {`Seeded from the ${seededShots} shot${seededShots === 1 ? '' : 's'} already in the prompt`}
               </span>
             ) : replaces ? (
               <span className="text-honey">
-                {zh() ? `提示词里已有 ${promptShotCount} 镜——写入会替换它们` : `This prompt already has ${promptShotCount} shot${promptShotCount === 1 ? '' : 's'} — writing replaces them`}
+                {`This prompt already has ${promptShotCount} shot${promptShotCount === 1 ? '' : 's'} — writing replaces them`}
               </span>
             ) : null}
           </span>
-          <Button variant="ghost" onClick={onClose}>{zh() ? '取消' : 'Cancel'}</Button>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
             onClick={() => { onApply?.(composed); onClose?.(); }}
-            title={zh()
-              ? '写入镜头描述、声音与配乐；主体定义与保留分析保持不变'
-              : 'Writes the description, the soundscape and the music. subject_definitions and retention_analysis are left exactly as the cast wrote them.'}
+            title="Writes the description, the soundscape and the music. subject_definitions and retention_analysis are left exactly as the cast wrote them."
           >
-            {zh() ? '写入提示词' : 'Write into the prompt'}
+            Write into the prompt
           </Button>
         </>
       )}
@@ -611,20 +605,20 @@ export function ShotBuilderDialog({
         <div className="flex min-w-0 flex-col gap-2.5">
           <div className="grid grid-cols-2 gap-2">
             <Field
-              label={zh() ? '这一段讲谁' : 'This scene is about'}
-              hint={zh() ? '摄影机的句子会指向这个名字' : 'The camera sentences point at this name'}
+              label="This scene is about"
+              hint="The camera sentences point at this name"
             >
               <TextInput value={timeline.subject} onChange={(e) => set({ subject: e.target.value })} placeholder="<Subject 1>" />
             </Field>
-            <Field label={zh() ? '第二主体（可选）' : 'Second subject (optional)'}>
+            <Field label="Second subject (optional)">
               <TextInput value={timeline.secondary} onChange={(e) => set({ secondary: e.target.value })} placeholder="<Subject 2>" />
             </Field>
           </div>
           <Field
-            label={zh() ? '整体画风' : 'Look'}
-            hint={zh() ? '写在镜头之前，统管整段' : 'Stated once, before the shots, and governs all of them'}
+            label="Look"
+            hint="Stated once, before the shots, and governs all of them"
           >
-            <TextInput value={timeline.style} onChange={(e) => set({ style: e.target.value })} placeholder={zh() ? '手持纪录片素材，自然光' : 'Handheld documentary footage, natural light'} />
+            <TextInput value={timeline.style} onChange={(e) => set({ style: e.target.value })} placeholder="Handheld documentary footage, natural light" />
           </Field>
 
           {timeline.shots.map((shot, index) => (
@@ -645,26 +639,26 @@ export function ShotBuilderDialog({
             onClick={addShot}
             className="rounded-md border border-dashed border-line2 py-2 text-[11px] font-semibold text-ink2 transition-colors hover:border-honey hover:text-ink1"
           >
-            {zh() ? '＋ 加一镜' : '+ Add shot'}
+            + Add shot
           </button>
 
-          <Field label={zh() ? '摘要（可选）' : 'Summary (optional)'} hint={zh() ? '留空就沿用提示词里已有的摘要' : 'Left blank, whatever the prompt already says stays'}>
+          <Field label="Summary (optional)" hint="Left blank, whatever the prompt already says stays">
             <TextArea rows={2} value={timeline.summary} onChange={(e) => set({ summary: e.target.value })} />
           </Field>
           <Field
-            label={zh() ? '整体声音' : 'Overall soundscape'}
-            hint={zh() ? 'H3 连声音一起生成，不写就由它自己发挥' : 'H3 renders the audio too — unsaid means invented'}
+            label="Overall soundscape"
+            hint="H3 renders the audio too — unsaid means invented"
           >
-            <TextArea rows={2} value={timeline.soundscape} onChange={(e) => set({ soundscape: e.target.value })} placeholder={zh() ? '安静的室内，只有雨声和纸张的声音。' : 'A quiet interior — rain on the window, paper, nothing else.'} />
+            <TextArea rows={2} value={timeline.soundscape} onChange={(e) => set({ soundscape: e.target.value })} placeholder="A quiet interior — rain on the window, paper, nothing else." />
           </Field>
-          <Field label={zh() ? '配乐' : 'Non-diegetic music'} hint={zh() ? '留空即为 N/A' : "Blank means N/A — no score"}>
+          <Field label="Non-diegetic music" hint="Blank means N/A — no score">
             <TextInput value={timeline.music} onChange={(e) => set({ music: e.target.value })} />
           </Field>
         </div>
 
         <div className="flex min-w-0 flex-col gap-2 lg:sticky lg:top-0 lg:self-start">
           <div>
-            <SectionLabel>{zh() ? '将写入' : 'What gets written'}</SectionLabel>
+            <SectionLabel>What gets written</SectionLabel>
             <pre className="mt-1 max-h-[26rem] overflow-auto whitespace-pre-wrap break-words rounded-md border border-line1 bg-bg0 p-2 font-mono text-[10px] leading-relaxed text-ink2">
               {composed}
             </pre>
@@ -672,7 +666,7 @@ export function ShotBuilderDialog({
 
           {ids.size ? (
             <div className="rounded-md border border-line1 bg-bg0 p-2">
-              <SectionLabel>{zh() ? '说话人编号' : 'Speaker ids'}</SectionLabel>
+              <SectionLabel>Speaker ids</SectionLabel>
               <ul className="mt-1 flex flex-col gap-0.5">
                 {[...ids.entries()].map(([who, sid]) => (
                   <li key={sid} className="flex items-center gap-1.5 text-[10px] text-ink2">
@@ -682,13 +676,13 @@ export function ShotBuilderDialog({
                 ))}
               </ul>
               <p className="mt-1 text-[10px] leading-snug text-ink3">
-                {zh() ? '按出声先后自动编号。' : 'Numbered in the order they are first heard.'}
+                Numbered in the order they are first heard.
               </p>
             </div>
           ) : null}
 
           <div>
-            <SectionLabel>{zh() ? '检查' : 'Check'}</SectionLabel>
+            <SectionLabel>Check</SectionLabel>
             <p className="mt-1 text-[10px] text-ink3">{checkSummaryText(check)}</p>
             {check.findings.length ? (
               <ul className="mt-1 flex flex-col gap-1">
@@ -729,18 +723,14 @@ export function ShotBuilderChip({ timeline, prompt = '', onOpen }) {
   return (
     <ChipButton
       icon="clapper"
-      label={zh() ? '分镜' : 'Shots'}
+      label="Shots"
       value={count ? String(count) : ''}
       active={count > 0}
       chevron={false}
       onClick={onOpen}
       title={inPrompt
-        ? (zh()
-          ? `提示词里已有 ${inPrompt} 镜——打开分镜会从它们开始`
-          : `The prompt already has ${inPrompt} shot${inPrompt === 1 ? '' : 's'} — the builder opens on them`)
-        : (zh()
-          ? '在一次生成里排好多个镜头：切点、运镜、定时动作和台词，按 H3 的写法生成'
-          : "Lay out several shots inside one generation — cuts, camera, timed beats and dialogue, written in H3's own grammar")}
+        ? `The prompt already has ${inPrompt} shot${inPrompt === 1 ? '' : 's'} — the builder opens on them`
+        : "Lay out several shots inside one generation — cuts, camera, timed beats and dialogue, written in H3's own grammar"}
     />
   );
 }

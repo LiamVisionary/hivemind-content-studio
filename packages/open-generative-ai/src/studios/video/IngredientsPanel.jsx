@@ -9,8 +9,6 @@ import { useMediaSrc } from '../../hooks/hooks.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Button, Pill, SectionLabel, Spinner, TextInput, cx } from '../../ui/kit.jsx';
 import { ConfirmModal } from '../../ui/Modal.jsx';
-import { zh } from './videoLogic.js';
-
 function RefImage({ url, alt, className }) {
   const src = useMediaSrc(url);
   // Not lazy — these sit in the video settings panel, which often does not scroll,
@@ -26,8 +24,8 @@ function SheetCard({ sheetId, label, detail, selected, onSelect, children, corne
         type="button"
         aria-pressed={selected}
         title={selected
-          ? (zh() ? '再次点击可关闭配料参考' : 'Tap again to turn ingredients off')
-          : (zh() ? '将此配料表用于下一次生成' : 'Use this ingredients sheet for the next generation')}
+          ? 'Tap again to turn ingredients off'
+          : 'Use this ingredients sheet for the next generation'}
         onClick={onSelect}
         className={cx(
           'block w-full overflow-hidden rounded-md border bg-bg0 text-left transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-honey/40',
@@ -40,7 +38,7 @@ function SheetCard({ sheetId, label, detail, selected, onSelect, children, corne
             <span className={cx('block truncate text-[11px] font-semibold', selected ? 'text-honey' : 'text-ink1')}>{label}</span>
             {detail ? <span className="block truncate text-[10px] text-ink3">{detail}</span> : null}
           </span>
-          {selected ? <Pill tone="honey" className="h-4 px-1.5 text-[9px] uppercase">{zh() ? '启用' : 'On'}</Pill> : null}
+          {selected ? <Pill tone="honey" className="h-4 px-1.5 text-[9px] uppercase">On</Pill> : null}
         </div>
       </button>
       {corner ? <div className="absolute right-1 top-1 z-10">{corner}</div> : null}
@@ -75,22 +73,22 @@ export function IngredientsPanel({
   const selectedSheetEntry = sheets.find((sheet) => sheet.url === selectedSheet) || null;
 
   const countsLine = [
-    `${selection.length} / ${maximum} ${zh() ? '视图' : 'views'}`,
-    ...(sheets.length ? [`${sheets.length} ${zh() ? '张已上传配料表' : `uploaded sheet${sheets.length === 1 ? '' : 's'}`}`] : []),
+    `${selection.length} / ${maximum} ${'views'}`,
+    ...(sheets.length ? [`${sheets.length} ${`uploaded sheet${sheets.length === 1 ? '' : 's'}`}`] : []),
   ].join(' · ');
 
   const previewMatches = preview.signature === previewSignature;
   const previewStatus = previewMatches ? preview.status : 'loading';
 
   return (
-    <section className="flex flex-col gap-3" aria-label={zh() ? '配料参考' : 'Ingredient references'}>
+    <section className="flex flex-col gap-3" aria-label="Ingredient references">
       <input
         ref={viewsInputRef}
         type="file"
         accept="image/*"
         multiple
         className="hidden"
-        aria-label={zh() ? '添加配料参考图片' : 'Add ingredient reference images'}
+        aria-label="Add ingredient reference images"
         onChange={(e) => { onAddViews(Array.from(e.target.files || [])); e.target.value = ''; }}
       />
       <input
@@ -99,19 +97,19 @@ export function IngredientsPanel({
         accept="image/*"
         multiple
         className="hidden"
-        aria-label={zh() ? '上传成品配料表' : 'Upload finished ingredients sheets'}
+        aria-label="Upload finished ingredients sheets"
         onChange={(e) => { onAddSheets(Array.from(e.target.files || [])); e.target.value = ''; }}
       />
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
-          <SectionLabel>{zh() ? '配料参考' : 'Ingredient references'}</SectionLabel>
+          <SectionLabel>Ingredient references</SectionLabel>
           <div className="mt-1 text-[11px] text-ink3">{countsLine}</div>
         </div>
         {activeCount ? (
-          <Pill tone="ok" dot>{zh() ? '下一次生成启用' : 'Active in next generation'}</Pill>
+          <Pill tone="ok" dot>Active in next generation</Pill>
         ) : (selection.length || sheets.length) ? (
-          <Pill tone="neutral" dot>{zh() ? '关闭 — 点击配料表启用' : 'Off — tap a sheet to use it'}</Pill>
+          <Pill tone="neutral" dot>Off — tap a sheet to use it</Pill>
         ) : null}
       </div>
 
@@ -120,28 +118,28 @@ export function IngredientsPanel({
           size="sm"
           icon="plus"
           disabled={selection.length >= maximum}
-          title={zh() ? '添加会被拼接成一张配料表的参考视图' : 'Add reference views that get stitched into one sheet'}
+          title="Add reference views that get stitched into one sheet"
           onClick={() => viewsInputRef.current?.click()}
         >
-          {zh() ? '添加视图' : 'Add views'}
+          Add views
         </Button>
         <Button
           size="sm"
           icon="grid"
           disabled={sheets.length >= 12}
-          title={zh() ? '上传一张成品配料表，原样使用不再拼接' : 'Upload a finished ingredients sheet, used as-is without stitching'}
+          title="Upload a finished ingredients sheet, used as-is without stitching"
           onClick={() => sheetsInputRef.current?.click()}
         >
-          {zh() ? '添加配料表' : 'Add sheet'}
+          Add sheet
         </Button>
         {(selection.length || sheets.length) ? (
           <Button
             size="sm"
             variant="danger"
-            title={zh() ? '移除所有配料参考和配料表' : 'Remove all ingredient references and sheets'}
+            title="Remove all ingredient references and sheets"
             onClick={() => setConfirmClear(true)}
           >
-            {zh() ? '清除' : 'Clear'}
+            Clear
           </Button>
         ) : null}
       </div>
@@ -155,17 +153,17 @@ export function IngredientsPanel({
       {(selection.length || sheets.length) ? (
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] font-semibold text-ink2">{zh() ? '配料表' : 'Ingredients sheet'}</span>
-            <span className="text-[10px] text-ink3">{zh() ? '点击选择 · 再次点击关闭' : 'Tap to select · tap again to turn off'}</span>
+            <span className="text-[11px] font-semibold text-ink2">Ingredients sheet</span>
+            <span className="text-[10px] text-ink3">Tap to select · tap again to turn off</span>
           </div>
           <div className="grid grid-cols-2 gap-2">
             {selection.length ? (
               <SheetCard
                 sheetId="stitched"
-                label={zh() ? '拼接配料表' : 'Stitched sheet'}
+                label="Stitched sheet"
                 detail={previewStatus === 'ready' && (preview.width && preview.height)
                   ? [`${preview.width} × ${preview.height}`, preview.columns && preview.rows ? `${preview.columns} × ${preview.rows} grid` : `${preview.sourceCount} views`].filter(Boolean).join(' · ')
-                  : `${selection.length} ${selection.length === 1 ? (zh() ? '个视图' : 'view') : (zh() ? '个视图' : 'views')}`}
+                  : `${selection.length} ${selection.length === 1 ? 'view' : 'views'}`}
                 selected={selectedSheet === 'stitched'}
                 onSelect={() => onToggleSheet('stitched')}
                 corner={previewStatus === 'ready' && preview.url ? (
@@ -173,7 +171,7 @@ export function IngredientsPanel({
                     href={preview.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    title={zh() ? '全尺寸打开拼接配料表' : 'Open stitched sheet full size'}
+                    title="Open stitched sheet full size"
                     className="grid h-6 w-6 place-items-center rounded-md bg-bg0/70 text-ink2 backdrop-blur transition-colors hover:bg-bg0 hover:text-ink1"
                     onClick={(e) => e.stopPropagation()}
                   >
@@ -182,7 +180,7 @@ export function IngredientsPanel({
                 ) : previewStatus === 'error' ? (
                   <button
                     type="button"
-                    title={zh() ? '重试拼接配料表预览' : 'Retry stitched sheet preview'}
+                    title="Retry stitched sheet preview"
                     className="grid h-6 w-6 place-items-center rounded-md bg-bg0/70 text-ink2 backdrop-blur transition-colors hover:bg-bg0 hover:text-ink1"
                     onClick={(e) => { e.stopPropagation(); onRetryPreview(); }}
                   >
@@ -193,9 +191,9 @@ export function IngredientsPanel({
                 {previewStatus === 'ready' && preview.url ? (
                   <img src={preview.url} alt={`Stitched ingredient sheet containing ${preview.sourceCount} reference views`} className="h-24 w-full bg-bg0 object-contain" />
                 ) : previewStatus === 'error' ? (
-                  <div className="px-2 text-center text-[10px] text-danger">{preview.error || (zh() ? '预览不可用' : 'Preview unavailable')}</div>
+                  <div className="px-2 text-center text-[10px] text-danger">{preview.error || 'Preview unavailable'}</div>
                 ) : (
-                  <div className="h-full w-full animate-pulse bg-bg2" role="status" aria-label={zh() ? '正在合成拼接配料表' : 'Composing stitched ingredient sheet'} />
+                  <div className="h-full w-full animate-pulse bg-bg2" role="status" aria-label="Composing stitched ingredient sheet" />
                 )}
               </SheetCard>
             ) : null}
@@ -204,14 +202,14 @@ export function IngredientsPanel({
               <SheetCard
                 key={sheet.url}
                 sheetId={sheet.url}
-                label={`${zh() ? '已上传配料表' : 'Uploaded sheet'} ${index + 1}`}
-                detail={zh() ? '原样使用，不拼接' : 'Used as-is, no stitching'}
+                label={`${'Uploaded sheet'} ${index + 1}`}
+                detail="Used as-is, no stitching"
                 selected={selectedSheet === sheet.url}
                 onSelect={() => onToggleSheet(sheet.url)}
                 corner={(
                   <button
                     type="button"
-                    title={`${zh() ? '移除已上传配料表' : 'Remove uploaded ingredients sheet'} ${index + 1}`}
+                    title={`${'Remove uploaded ingredients sheet'} ${index + 1}`}
                     className="grid h-6 w-6 place-items-center rounded-md bg-bg0/70 text-danger backdrop-blur transition-colors hover:bg-bg0"
                     onClick={(e) => { e.stopPropagation(); onRemoveSheet(sheet.url); }}
                   >
@@ -229,8 +227,8 @@ export function IngredientsPanel({
               type="text"
               maxLength={1000}
               value={selectedSheetEntry.description || ''}
-              placeholder={zh() ? '描述这张配料表的每个画面（可选）' : 'Describe every panel in this sheet (optional)'}
-              aria-label={zh() ? '所选配料表的描述' : 'Description for the selected ingredients sheet'}
+              placeholder="Describe every panel in this sheet (optional)"
+              aria-label="Description for the selected ingredients sheet"
               onChange={(e) => onSheetDescription(selectedSheetEntry.url, e.target.value)}
               className="text-[11px]"
             />
@@ -241,8 +239,8 @@ export function IngredientsPanel({
       {selection.length ? (
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] font-semibold text-ink2">{zh() ? '参考视图' : 'Reference views'}</span>
-            <span className="text-[10px] text-ink3">{zh() ? '拼接进上方的配料表' : 'Stitched into the sheet above'}</span>
+            <span className="text-[11px] font-semibold text-ink2">Reference views</span>
+            <span className="text-[10px] text-ink3">Stitched into the sheet above</span>
           </div>
           <div className="flex flex-col gap-2">
             {selection.map((item, index) => (
@@ -252,14 +250,14 @@ export function IngredientsPanel({
                   type="text"
                   maxLength={1000}
                   value={item.description || ''}
-                  placeholder={`${zh() ? '视图' : 'View'} ${index + 1}: ${zh() ? '正面、侧面、全身…' : 'front, profile, full body…'}`}
+                  placeholder={`${'View'} ${index + 1}: ${'front, profile, full body…'}`}
                   aria-label={`Description for ingredient reference ${index + 1}`}
                   onChange={(e) => onViewDescription(index, e.target.value)}
                   className="min-w-0 text-[11px]"
                 />
                 <button
                   type="button"
-                  title={`${zh() ? '移除配料参考' : 'Remove ingredient reference'} ${index + 1}`}
+                  title={`${'Remove ingredient reference'} ${index + 1}`}
                   aria-label={`Remove ingredient reference ${index + 1}`}
                   className="grid h-7 w-7 place-items-center rounded-sm border border-transparent bg-danger-tint text-danger transition-colors hover:border-danger/40"
                   onClick={() => onRemoveView(index)}
@@ -274,7 +272,7 @@ export function IngredientsPanel({
 
       {preview.status === 'loading' && selection.length ? (
         <div className="flex items-center gap-2 text-[11px] text-ink3">
-          <Spinner size={12} /> <span>{zh() ? '正在合成拼接配料表…' : 'Composing stitched sheet…'}</span>
+          <Spinner size={12} /> <span>Composing stitched sheet…</span>
         </div>
       ) : null}
 
@@ -282,11 +280,9 @@ export function IngredientsPanel({
         open={confirmClear}
         onClose={() => setConfirmClear(false)}
         onConfirm={() => { setConfirmClear(false); onClear(); }}
-        title={zh() ? '清除配料参考？' : 'Clear ingredient references?'}
-        body={zh()
-          ? `将删除 ${selection.length} 个视图和 ${sheets.length} 张配料表的上传文件。此操作无法撤销。`
-          : `This deletes the uploads behind ${selection.length} view${selection.length === 1 ? '' : 's'} and ${sheets.length} sheet${sheets.length === 1 ? '' : 's'}. It cannot be undone.`}
-        confirmLabel={zh() ? '清除' : 'Clear'}
+        title="Clear ingredient references?"
+        body={`This deletes the uploads behind ${selection.length} view${selection.length === 1 ? '' : 's'} and ${sheets.length} sheet${sheets.length === 1 ? '' : 's'}. It cannot be undone.`}
+        confirmLabel="Clear"
       />
     </section>
   );

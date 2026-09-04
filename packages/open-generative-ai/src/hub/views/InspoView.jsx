@@ -22,7 +22,6 @@ import {
   DEFAULT_INSPO_FILTERS, INSPO_KINDS, INSPO_PERIODS, INSPO_SORTS,
   inspoCredits, inspoSearchParams, inspoSection, inspoSettings, inspoToStudioSetup, mergeInspoResults,
 } from '../../lib/civitaiInspo.js';
-import { zh } from '../../lib/i18n.js';
 import { pref, setPrefs } from '../../lib/prefs.js';
 import { localAI } from '../../lib/localInferenceClient.js';
 import { formatCount } from '../../lib/modelLibrary.js';
@@ -47,8 +46,8 @@ function sendToStudio(item) {
   loadStudioSetup(section, inspoToStudioSetup(item));
   window.dispatchEvent(new CustomEvent('navigate', { detail: { page: section } }));
   toast.success(section === 'video'
-    ? (zh() ? '提示词已载入视频工作室。' : 'Prompt loaded into the Video studio.')
-    : (zh() ? '提示词已载入图片工作室。' : 'Prompt loaded into the Image studio.'));
+    ? 'Prompt loaded into the Video studio.'
+    : 'Prompt loaded into the Image studio.');
 }
 
 function Preview({ item, playing, className = '' }) {
@@ -134,12 +133,12 @@ function ResultCard({ item, onOpen, nsfwAllowed }) {
             className="flex-1"
             onClick={() => sendToStudio(item)}
           >
-            {zh() ? '使用提示词' : 'Use prompt'}
+            Use prompt
           </Button>
           <button
             type="button"
             onClick={() => onOpen(item)}
-            title={zh() ? '详情' : 'Details'}
+            title="Details"
             aria-label="Show the full prompt and settings"
             className="grid h-ctl-sm w-7 shrink-0 place-items-center rounded-sm text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
           >
@@ -175,16 +174,16 @@ function DetailDialog({ item, onClose }) {
               className="mr-auto"
               onClick={() => window.open(item.pageUrl, '_blank', 'noopener,noreferrer')}
             >
-              {zh() ? '在 Civitai 打开' : 'Open on Civitai'}
+              Open on Civitai
             </Button>
           ) : null}
           <Button variant="neutral" icon="copy" onClick={() => copy(item.prompt, 'Prompt')}>
-            {zh() ? '复制提示词' : 'Copy prompt'}
+            Copy prompt
           </Button>
           <Button variant="primary" icon="sparkles" onClick={() => { sendToStudio(item); onClose(); }}>
             {item.kind === 'video'
-              ? (zh() ? '载入视频工作室' : 'Use in Video studio')
-              : (zh() ? '载入图片工作室' : 'Use in Image studio')}
+              ? 'Use in Video studio'
+              : 'Use in Image studio'}
           </Button>
         </>
       }
@@ -203,7 +202,7 @@ function DetailDialog({ item, onClose }) {
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{zh() ? '提示词' : 'Prompt'}</span>
+          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Prompt</span>
           <p className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line1 bg-bg2 p-2.5 font-mono text-xs leading-relaxed text-ink1">
             {item.prompt}
           </p>
@@ -211,7 +210,7 @@ function DetailDialog({ item, onClose }) {
 
         {item.negativePrompt ? (
           <div className="flex flex-col gap-1.5">
-            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">{zh() ? '负面提示词' : 'Negative prompt'}</span>
+            <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-ink3">Negative prompt</span>
             <p className="max-h-28 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line1 bg-bg2 p-2.5 font-mono text-xs leading-relaxed text-ink2">
               {item.negativePrompt}
             </p>
@@ -231,9 +230,9 @@ function DetailDialog({ item, onClose }) {
             prompt — the id is Civitai's and means nothing to this machine. */}
         {item.baseModel || item.modelName || loras.length ? (
           <div className="rounded-md border border-line1 bg-bg2 p-2.5 text-[11px] text-ink2">
-            <div className="mb-1 font-medium text-ink1">{zh() ? '原作使用' : 'Made with'}</div>
-            {item.baseModel ? <div>{zh() ? '基础模型' : 'Base model'}: <span className="font-mono">{item.baseModel}</span></div> : null}
-            {item.modelName ? <div>{zh() ? '检查点' : 'Checkpoint'}: <span className="font-mono">{item.modelName}</span></div> : null}
+            <div className="mb-1 font-medium text-ink1">Made with</div>
+            {item.baseModel ? <div>Base model: <span className="font-mono">{item.baseModel}</span></div> : null}
+            {item.modelName ? <div>Checkpoint: <span className="font-mono">{item.modelName}</span></div> : null}
             {loras.map((entry, index) => (
               <div key={`${entry.modelVersionId}-${index}`}>
                 LoRA: <span className="font-mono">{entry.modelVersionName || entry.modelVersionId}</span>
@@ -241,9 +240,7 @@ function DetailDialog({ item, onClose }) {
               </div>
             ))}
             <div className="mt-1.5 text-ink3">
-              {zh()
-                ? '仅载入提示词与参数：模型不会被切换，可在“模型”页安装这些资源。'
-                : 'Only the prompt and settings are loaded — your model is not switched. Install these from the Models page to match it exactly.'}
+              Only the prompt and settings are loaded — your model is not switched. Install these from the Models page to match it exactly.
             </div>
           </div>
         ) : null}
@@ -271,7 +268,7 @@ export function InspoView({ active }) {
   const setFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
 
   const search = useCallback(async (nextFilters) => {
-    setState({ status: 'loading', message: zh() ? '正在搜索 Civitai…' : 'Searching Civitai…' });
+    setState({ status: 'loading', message: 'Searching Civitai…' });
     setNextCursor('');
     try {
       const result = await localAI.searchCivitaiImages(inspoSearchParams(nextFilters));
@@ -326,7 +323,7 @@ export function InspoView({ active }) {
 
   const nsfwAllowed = filters.nsfw === 'true' || filters.nsfw === '';
   const kindOptions = useMemo(
-    () => INSPO_KINDS.map((entry) => ({ value: entry.value, label: zh() ? entry.zh : entry.label })),
+    () => INSPO_KINDS.map((entry) => ({ value: entry.value, label: entry.label })),
     [],
   );
 
@@ -334,7 +331,7 @@ export function InspoView({ active }) {
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
         kicker="Civitai"
-        title={zh() ? '灵感' : 'Inspo'}
+        title="Inspo"
         right={
           <>
             {state.status === 'loading' ? <Spinner size={14} className="text-honey" /> : null}
@@ -343,7 +340,7 @@ export function InspoView({ active }) {
                 they compose into one query and share the Search button, the
                 same way the model browser's filters do. */}
             <Segmented options={kindOptions} value={filters.kind} onChange={(value) => switchKind(value)} />
-            <Button icon="refresh" onClick={() => void search(filters)}>{zh() ? '刷新' : 'Refresh'}</Button>
+            <Button icon="refresh" onClick={() => void search(filters)}>Refresh</Button>
           </>
         }
       />
@@ -367,13 +364,13 @@ export function InspoView({ active }) {
               <TextInput
                 value={filters.username || ''}
                 onChange={(event) => setFilter('username', event.target.value)}
-                placeholder={zh() ? '按创作者筛选（可选）' : 'Filter by creator (optional)'}
+                placeholder="Filter by creator (optional)"
                 aria-label="Civitai creator"
                 className="pl-8"
               />
             </div>
             <NativeSelect aria-label="Base model" value={filters.baseModels} onChange={(event) => setFilter('baseModels', event.target.value)} className="w-[170px]">
-              <option value="">{zh() ? '任意基础模型' : 'Any base model'}</option>
+              <option value="">Any base model</option>
               {baseModelOptions.map((value) => <option key={value} value={value}>{value}</option>)}
             </NativeSelect>
             <NativeSelect aria-label="Sort" value={filters.sort} onChange={(event) => setFilter('sort', event.target.value)} className="w-[160px]">
@@ -388,7 +385,7 @@ export function InspoView({ active }) {
               <option value="">Any rating</option>
             </NativeSelect>
             <Button type="submit" variant="primary" icon="search" loading={state.status === 'loading'}>
-              {zh() ? '搜索' : 'Search'}
+              Search
             </Button>
           </form>
 
@@ -409,7 +406,7 @@ export function InspoView({ active }) {
                 {nextCursor ? (
                   <div className="mt-4 flex justify-center">
                     <Button icon="chevronDown" loading={loadingMore} onClick={() => void loadMore()}>
-                      {zh() ? '加载更多' : 'Load more'}
+                      Load more
                     </Button>
                   </div>
                 ) : null}

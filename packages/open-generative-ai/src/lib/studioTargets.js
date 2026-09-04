@@ -16,6 +16,7 @@
 // Module state, deliberately: it describes what is mounted right now. Nothing
 // here is persisted — a target that is not on screen is not a target.
 
+import { t, tf } from './i18n.js';
 import { PLACE_ACCOUNTS, PLACE_THIS_MAC } from './modelRunner.js';
 import { loadTabState, saveTabState } from './studioTabs.js';
 
@@ -87,8 +88,8 @@ export function resetSendTargets() {
 export const SEND_SOURCES = Object.freeze(['local', 'api']);
 
 export const SOURCE_LABELS = Object.freeze({
-  local: { en: 'This Mac', zh: '这台 Mac' },
-  api: { en: 'Your accounts', zh: '你的账户' },
+  local: t('place.thisMac'),
+  api: t('place.accounts'),
 });
 
 /** Which of the three places each wire source IS. The menu shows the same
@@ -109,7 +110,7 @@ export const SOURCE_PLACES = Object.freeze({
  * @param {object} target one entry from useSendTargets
  * @param {function|null} describeFor the sender's own "what would travel there"
  */
-export function sendRunTargets(target, describeFor = null, zhLang = false) {
+export function sendRunTargets(target, describeFor = null) {
   return SEND_SOURCES.map((source) => {
     const descriptor = target?.sources?.[source] || null;
     const available = Boolean(descriptor?.available);
@@ -125,10 +126,10 @@ export function sendRunTargets(target, describeFor = null, zhLang = false) {
       provider: 'send',
       source,
       label: available && descriptor.switches
-        ? `${zhLang ? '切换到 ' : 'switches to '}${model}`
-        : (model || SOURCE_LABELS[source][zhLang ? 'zh' : 'en']),
+        ? tf('sendTo.switchesTo', model)
+        : (model || SOURCE_LABELS[source]),
       place: SOURCE_PLACES[source],
-      placeLabel: SOURCE_LABELS[source][zhLang ? 'zh' : 'en'],
+      placeLabel: SOURCE_LABELS[source],
       available,
       unavailableReason: descriptor?.reason || '',
       reason: consequence,

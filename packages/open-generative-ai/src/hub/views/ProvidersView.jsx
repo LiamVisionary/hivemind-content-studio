@@ -10,7 +10,6 @@
 // another tab lands on its card by itself.
 import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-import { zh } from '../../lib/i18n.js';
 import { Button, Card, EmptyState, Field, Pill, SectionLabel, TextInput } from '../../ui/kit.jsx';
 import { api, providerLabel, refreshOAuth, startOAuth, useHub } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
@@ -29,19 +28,19 @@ function OAuthCard({ card, link, checking, offline }) {
   // a dead API is said outright instead of checking forever.
   const detail = card.detail
     || (offline
-      ? (zh() ? '状态不可用 — 工作室没有运行。' : 'Status unavailable — the studio is not running.')
+      ? 'Status unavailable — the studio is not running.'
       : checking
-        ? (zh() ? '正在检查 HivemindOS 的 OAuth 会话…' : `Checking the HivemindOS ${card.label} OAuth session…`)
+        ? `Checking the HivemindOS ${card.label} OAuth session…`
         : card.ready
-          ? (zh() ? '已连接。' : 'Connected.')
-          : (zh() ? '未连接。' : 'Not connected.'));
+          ? 'Connected.'
+          : 'Not connected.');
   return (
     <Card className="flex flex-col gap-2.5 p-4">
       <div className="flex items-center justify-between gap-2">
         <h4 className="text-sm font-semibold text-ink1">{card.label}</h4>
         <StatusPill
           status={card.ready ? 'ready' : checking ? 'pending' : 'idle'}
-          label={card.ready ? (zh() ? '已连接' : 'Connected') : checking ? (zh() ? '检查中' : 'Checking') : (zh() ? '需要设置' : 'Needs setup')}
+          label={card.ready ? 'Connected' : checking ? 'Checking' : 'Needs setup'}
         />
       </div>
       <p className="break-words text-[12px] leading-relaxed text-ink3 [overflow-wrap:anywhere]">
@@ -51,16 +50,16 @@ function OAuthCard({ card, link, checking, offline }) {
       </p>
       {link ? (
         <p className="text-[12px] text-ink2">
-          {zh() ? '登录标签页被阻止。' : 'The sign-in tab was blocked.'}{' '}
+          The sign-in tab was blocked.{' '}
           <a href={link} target="_blank" rel="noopener noreferrer" className="font-medium text-honey underline-offset-2 hover:underline">
-            {zh() ? '在此打开登录页面' : 'Open the sign-in page here'}
+            Open the sign-in page here
           </a>
         </p>
       ) : null}
       <Button size="sm" icon="external" loading={busy} onClick={connect} className="self-start">
         {card.ready || card.needsReconnect
-          ? (zh() ? `重新连接 ${card.label}` : `Reconnect ${card.label}`)
-          : (zh() ? `连接 ${card.label}` : `Connect ${card.label}`)}
+          ? `Reconnect ${card.label}`
+          : `Connect ${card.label}`}
       </Button>
     </Card>
   );
@@ -84,7 +83,7 @@ function AddKeyRow({ name, configured, onSaved }) {
       await api('/api/passbook', { method: 'POST', body: JSON.stringify({ values: { [name]: value } }) });
       setValue('');
       setOpen(false);
-      toast.success(zh() ? `${name} 已保存。` : `${name} saved.`);
+      toast.success(`${name} saved.`);
       onSaved?.();
     } catch (error) {
       // api() has already turned the refusal into a sentence.
@@ -97,8 +96,8 @@ function AddKeyRow({ name, configured, onSaved }) {
     return (
       <Button size="sm" className="self-start" onClick={() => setOpen(true)}>
         {configured
-          ? (zh() ? `替换 ${name}` : `Replace ${name}`)
-          : (zh() ? `添加 ${name}` : `Add ${name}`)}
+          ? `Replace ${name}`
+          : `Add ${name}`}
       </Button>
     );
   }
@@ -111,15 +110,15 @@ function AddKeyRow({ name, configured, onSaved }) {
           type="password"
           autoComplete="off"
           spellCheck={false}
-          placeholder={zh() ? '粘贴密钥' : 'Paste the key'}
+          placeholder="Paste the key"
           value={value}
           onChange={(event) => setValue(event.target.value)}
         />
       </Field>
       <Button size="sm" variant="primary" loading={busy} disabled={busy || !value.trim()} onClick={save}>
-        {zh() ? '保存' : 'Save'}
+        Save
       </Button>
-      <Button size="sm" onClick={() => { setOpen(false); setValue(''); }}>{zh() ? '取消' : 'Cancel'}</Button>
+      <Button size="sm" onClick={() => { setOpen(false); setValue(''); }}>Cancel</Button>
     </div>
   );
 }
@@ -136,7 +135,7 @@ function ProviderCard({ provider, settable, onSaved }) {
         <h3 className="min-w-0 truncate text-[13px] font-semibold text-ink1">{providerLabel(provider.id)}</h3>
         <StatusPill
           status={provider.available ? 'ready' : 'idle'}
-          label={provider.available ? (zh() ? '就绪' : 'Ready') : (zh() ? '需要设置' : 'Needs setup')}
+          label={provider.available ? 'Ready' : 'Needs setup'}
           className="h-5 px-2 text-[10px]"
         />
       </div>
@@ -228,21 +227,19 @@ export function ProvidersView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker={zh() ? '能力路由' : 'Capability routing'} title={zh() ? '提供商' : 'Providers'}>
-        {s.apiOnline === false ? <Pill tone="warn" dot>{zh() ? '离线' : 'Offline'}</Pill> : null}
+      <HubToolbar kicker="Capability routing" title="Providers">
+        {s.apiOnline === false ? <Pill tone="warn" dot>Offline</Pill> : null}
         <Button size="sm" icon="refresh" loading={checking} onClick={checkStatus}>
-          {zh() ? '检查状态' : 'Check status'}
+          Check status
         </Button>
       </HubToolbar>
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         <div className="flex flex-col gap-6">
           <section className="flex flex-col gap-3">
             <div>
-              <SectionLabel>{zh() ? '服务端身份验证' : 'Server-side authentication'}</SectionLabel>
+              <SectionLabel>Server-side authentication</SectionLabel>
               <p className="mt-1 text-xs text-ink3">
-                {zh()
-                  ? 'OAuth 保留在 HivemindOS 内。这个工作室只接收状态。'
-                  : 'OAuth stays inside HivemindOS. This studio receives status only — finish a sign-in in its tab and the card updates here.'}
+                OAuth stays inside HivemindOS. This studio receives status only — finish a sign-in in its tab and the card updates here.
               </p>
             </div>
             <div className="grid gap-3 md:grid-cols-2">
@@ -259,7 +256,7 @@ export function ProvidersView({ active }) {
           </section>
 
           <section className="flex flex-col gap-3">
-            <SectionLabel>{zh() ? '生成路由 · 能力提供商' : 'Generation routes · capability providers'}</SectionLabel>
+            <SectionLabel>Generation routes · capability providers</SectionLabel>
             {providers.length ? (
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(240px,1fr))]">
                 {providers.map((provider) => (
@@ -274,8 +271,8 @@ export function ProvidersView({ active }) {
             ) : (
               <EmptyState
                 icon="plug"
-                title={zh() ? '没有可用的提供商' : 'No providers advertised'}
-                hint={zh() ? '工作室运行后，提供商的就绪状态和路由会出现在这里。' : 'Provider readiness and routing appear once the studio is running.'}
+                title="No providers advertised"
+                hint="Provider readiness and routing appear once the studio is running."
               />
             )}
           </section>

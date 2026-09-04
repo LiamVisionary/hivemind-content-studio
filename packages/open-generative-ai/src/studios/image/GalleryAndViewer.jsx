@@ -2,7 +2,7 @@
 // Every media src is resolved through useMediaSrc (E2E decrypt, fail-open).
 import { memo, useEffect, useRef } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
-import { t, zh } from '../../lib/i18n.js';
+import { t } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Modal } from '../../ui/Modal.jsx';
 import { ActionButton, IconButton, Pill, cx } from '../../ui/kit.jsx';
@@ -193,7 +193,7 @@ export function ViewerModal({
               CDN link that expires — say so beside the button that saves it,
               rather than letting the owner discover it after a relaunch. */}
           {entry?.saved === false ? (
-            <Pill tone="warn">{zh() ? '未保存 — 下载以保留' : 'Not saved — download to keep'}</Pill>
+            <Pill tone="warn">Not saved — download to keep</Pill>
           ) : null}
           <ActionButton variant="primary" icon="download" label={t('common.download')} onClick={onDownload} />
         </>

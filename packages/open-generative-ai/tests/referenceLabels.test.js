@@ -571,9 +571,9 @@ test('each video row carries a Compact switch beside its sound switch, held off 
     // The control strip under the row reads Motion · Sound · Compact: the sound
     // switch first, Compact right after it — and Compact is held off both while
     // no picture is attached and on a sound-only row (which sends no pixels).
-    const motion = menu.indexOf("{zh() ? '动作' : 'Motion'}");
-    const sound = menu.indexOf("{zh() ? '声音' : 'Sound'}");
-    const compact = menu.indexOf("{zh() ? '小尺寸（更省）' : 'Small (cheaper)'}");
+    const motion = menu.indexOf('\n            Motion\n');
+    const sound = menu.indexOf('\n            Sound\n');
+    const compact = menu.indexOf('\n            Small (cheaper)\n');
     assert.ok(motion > 0 && sound > motion && compact > sound, 'the size switch sits beside the sound toggle on the video row');
     assert.match(menu, /Stage this clip small \(384 px\) — same motion, 3x cheaper\. Off when the clip is the character reference\./);
     assert.match(menu, /Off while no picture is attached: this clip is the character reference, and identity needs pixels\./);

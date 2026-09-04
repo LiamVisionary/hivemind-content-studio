@@ -27,6 +27,7 @@
 //                   — and the price is quoted and approved before a byte moves.
 //                   It is also the one lane where footage leaves the machine.
 
+import { t, tf } from './i18n.js';
 import { PLACE_HIVEMINDOS, PLACE_THIS_MAC } from './modelRunner.js';
 
 // The hosted lane's name, as the gateway reports it. Not a machine: there is
@@ -327,82 +328,25 @@ const RESTORE_MODEL_MISSING = /(model|checkpoint).{0,40}(not installed|is missin
  * card — because an action offered by a screen that cannot do it is the same
  * dead end as no action at all.
  */
-export function describeRestoreFailure(error, zhLang = false) {
+export function describeRestoreFailure(error) {
   const raw = String(error?.message || error?.error || error || '').trim();
   const say = (title, action) => ({ title, action, detail: raw === title ? '' : raw });
-  if (!raw) {
-    return say(
-      zhLang ? '这次修复停止了。' : 'That render stopped.',
-      zhLang ? '继续上一次未完成的分块。' : 'Resume picks up at the first unfinished chunk.',
-    );
-  }
-  if (RESTORE_CANCELLED.test(raw)) {
-    return say(
-      zhLang ? '已停止 — 已完成的分块都保留着。' : 'Stopped. Every finished chunk is still here.',
-      zhLang ? '按继续，从下一个分块接着渲染。' : 'Resume continues from the next one — nothing already rendered is repeated.',
-    );
-  }
-  if (RESTORE_OOM.test(raw)) {
-    return say(
-      zhLang ? '这台机器的显存不够跑这个分块。' : 'That machine ran out of memory on this chunk.',
-      zhLang
-        ? '把"时间批次"调小，或降低输出分辨率，然后按继续。'
-        : 'Lower the temporal batch or the output size in Advanced, then resume — the finished chunks are kept.',
-    );
-  }
-  if (RESTORE_PROJECT_GONE.test(raw)) {
-    return say(
-      zhLang ? '这个项目已经不在本机了。' : 'That project is no longer on this machine.',
-      zhLang
-        ? '中间文件到期后会被清理 — 成片仍在历史记录里。'
-        : 'Working files are cleared once they age out; any master it produced is still in History.',
-    );
-  }
-  if (RESTORE_SOURCE_GONE.test(raw)) {
-    return say(
-      zhLang ? '这个项目的源片已经不在本机了。' : "This project's source clip is no longer on this machine.",
-      zhLang ? '重新载入原片再继续。' : 'Load the original clip again and start it — the finished chunks are still reused.',
-    );
-  }
-  if (RESTORE_DOWNLOAD.test(raw)) {
-    return say(
-      zhLang ? '这台机器没能下载到模型权重。' : 'That machine could not download the model weights.',
-      zhLang ? '检查网络后重试，或换一个已经装好的模型。' : 'Check the connection and resume, or pick a model this machine already has.',
-    );
-  }
-  if (RESTORE_MODEL_MISSING.test(raw)) {
-    return say(
-      zhLang ? '这台机器没有这个修复模型。' : 'That machine does not have this restore model.',
-      zhLang ? '换一个模型，或换一台机器。' : 'Pick another model, or another machine, and resume.',
-    );
-  }
-  if (RESTORE_SPEND.test(raw)) {
-    return say(
-      zhLang ? '这次渲染已经用完你批准的金额。' : 'This render reached the amount you approved.',
-      zhLang ? '按继续会按当天价格重新报价并批准。' : 'Resume quotes the rest at today’s price and asks you to approve it.',
-    );
-  }
-  if (RESTORE_RENTAL_GONE.test(raw)) {
-    return say(
-      zhLang ? '那台租用的机器已经不在了。' : 'The rented machine is no longer there.',
-      zhLang ? '在"机器"页重新连接，或改用本机继续。' : 'Attach it again on the Machines page, or switch the machine and resume.',
-    );
-  }
-  if (RESTORE_UNREACHABLE.test(raw)) {
-    return say(
-      zhLang ? '那台机器没有响应。' : 'That machine stopped answering.',
-      zhLang ? '确认它还在运行后再继续。' : 'Check it is still running, then resume — the finished chunks are kept.',
-    );
-  }
-  return say(
-    zhLang ? '这次修复停止了。' : 'That render stopped.',
-    zhLang ? '继续会从第一个未完成的分块接着渲染。' : 'Resume continues from the first unfinished chunk; the details below say what the machine reported.',
-  );
+  if (!raw) return say(t('restore.stopped'), t('restore.stoppedResume'));
+  if (RESTORE_CANCELLED.test(raw)) return say(t('restore.cancelled'), t('restore.cancelledResume'));
+  if (RESTORE_OOM.test(raw)) return say(t('restore.oom'), t('restore.oomFix'));
+  if (RESTORE_PROJECT_GONE.test(raw)) return say(t('restore.projectGone'), t('restore.projectGoneFix'));
+  if (RESTORE_SOURCE_GONE.test(raw)) return say(t('restore.sourceGone'), t('restore.sourceGoneFix'));
+  if (RESTORE_DOWNLOAD.test(raw)) return say(t('restore.weightsFailed'), t('restore.weightsFailedFix'));
+  if (RESTORE_MODEL_MISSING.test(raw)) return say(t('restore.modelMissing'), t('restore.modelMissingFix'));
+  if (RESTORE_SPEND.test(raw)) return say(t('restore.spendReached'), t('restore.spendReachedFix'));
+  if (RESTORE_RENTAL_GONE.test(raw)) return say(t('restore.rentalGone'), t('restore.rentalGoneFix'));
+  if (RESTORE_UNREACHABLE.test(raw)) return say(t('restore.unreachable'), t('restore.unreachableFix'));
+  return say(t('restore.stopped'), t('restore.stoppedDetail'));
 }
 
 /** The same reading where there is only room for one line — a toast, a row. */
-export function restoreFailureLine(error, zhLang = false) {
-  const read = describeRestoreFailure(error, zhLang);
+export function restoreFailureLine(error) {
+  const read = describeRestoreFailure(error);
   return read.action ? `${read.title} ${read.action}` : read.title;
 }
 
@@ -416,27 +360,19 @@ export function restoreFailureLine(error, zhLang = false) {
  * difference between "the free version" and "the paid version" being a real
  * choice rather than a surprise on the invoice.
  */
-export function describeLane(lane, zh = false) {
+export function describeLane(lane) {
   if (!lane) return '';
   if (!lane.available) {
     const missing = (lane.missing || []).join(', ');
-    return zh
-      ? `这台机器没有安装 SeedVR2 节点${missing ? `（缺少 ${missing}）` : ''}。`
-      : `This machine has no SeedVR2 nodes${missing ? ` (missing ${missing})` : ''}.`;
+    return `${t('place.thisMac')} has no SeedVR2 nodes${missing ? ` (missing ${missing})` : ''}.`;
   }
   if (lane.lane === CLOUD_LANE) {
-    return zh
-      ? '按次计费的托管 GPU — 无需租用机器，渲染前先报价。素材会离开本机。'
-      : 'Hosted GPU, billed per render in your HivemindOS credits. Nothing is rented and nothing runs between renders — and the price is quoted before anything is sent. This is the one machine your footage leaves this computer to reach.';
+    return 'Hosted GPU, billed per render in your HivemindOS credits. Nothing is rented and nothing runs between renders — and the price is quoted before anything is sent. This is the one machine your footage leaves this computer to reach.';
   }
   if (lane.paid) {
-    return zh
-      ? '租用的 GPU — 按小时计费，分块结果加密回传，最终拼接在浏览器完成（接缝为硬切）。'
-      : 'Rented GPU — billed by the hour for as long as it is rented. Chunks come back sealed and are joined here in the browser, so its seams are hard cuts.';
+    return 'Rented GPU — billed by the hour for as long as it is rented. Chunks come back sealed and are joined here in the browser, so its seams are hard cuts.';
   }
-  return zh
-    ? '这台电脑 — 免费，分块保留在本地，接缝可溶解，收尾可随时重做。'
-    : 'This computer — free. Chunks are kept losslessly here, so seams dissolve and the finish can be redone any time.';
+  return `${t('place.thisMac')} — free. Chunks are kept losslessly here, so seams dissolve and the finish can be redone any time.`;
 }
 
 /**
@@ -448,25 +384,21 @@ export function describeLane(lane, zh = false) {
  * MEASURED speedup, never a promise), or working but nothing built yet.
  * "TensorRT: off" with no reason is indistinguishable from a bug.
  */
-export function describeTensorRt(lane, zh = false) {
+export function describeTensorRt(lane) {
   const trt = lane?.tensorrt;
   if (!trt) return '';
   if (trt.available) {
     if (trt.speedup > 1) {
-      return zh
-        ? `TensorRT VAE 解码：本机实测快 ${trt.speedup}倍`
-        : `TensorRT VAE decode — measured ${trt.speedup}x faster on this machine`;
+      return `TensorRT VAE decode — measured ${trt.speedup}x faster on this machine`;
     }
-    return zh
-      ? 'TensorRT 可用 — 首个分块会编译引擎，之后的分块复用'
-      : 'TensorRT ready — the first chunk builds the engine, every chunk after it reuses it';
+    return 'TensorRT ready — the first chunk builds the engine, every chunk after it reuses it';
   }
   // The lane's own sentence, verbatim: each one already explains itself, and
   // prefixing "No TensorRT —" onto a sentence that ends "— TensorRT is NVIDIA
   // only" reads as two dashes and one thought.
   const reason = String(trt.reason || '').trim();
-  if (reason) return zh ? `TensorRT 未启用：${reason}` : reason.charAt(0).toUpperCase() + reason.slice(1);
-  return zh ? 'TensorRT 未启用' : 'No TensorRT on this machine';
+  if (reason) return reason.charAt(0).toUpperCase() + reason.slice(1);
+  return 'No TensorRT on this machine';
 }
 
 /** Whether it is worth showing the acceleration line at all for this lane. */
@@ -481,7 +413,8 @@ export function laneHasTensorRt(lane) {
  * so: it had its own list, its own three words ("This computer", "Rented GPU",
  * "Hosted GPU") and its own CLOUD_LANE id, beside an Image studio saying "This
  * Mac / HivemindOS credits / Your accounts" for the same three bills. The lane
- * NAME is the wire value and does not move; what a person reads does.
+ * NAME is the wire value and does not move; what a person reads does, and it
+ * now reads off the one key table like every other picker.
  *
  *   a local lane   This Mac      free
  *   a rented lane  This Mac      billed by the hour — a rental is a property of
@@ -491,19 +424,19 @@ export function laneHasTensorRt(lane) {
  * Shaped for runTargets.runTargetsFromRows, which turns these into the same
  * rows the RunOnPicker shows everywhere else.
  */
-export function restoreRunTargets(lanes, zh = false) {
+export function restoreRunTargets(lanes) {
   return (lanes || []).map((lane) => {
     const hosted = lane.lane === CLOUD_LANE;
-    // Two local lanes both called "This computer" is a picker nobody can use,
-    // so the default lane keeps the friendly name and every other one is named.
+    // Two local lanes both called "This Mac" is a picker nobody can use, so the
+    // default lane keeps the plain name and every other one is named.
     const label = hosted
-      ? (zh ? '托管 GPU' : 'Hosted GPU')
+      ? t('restore.laneHostedGpu')
       : lane.paid
-        ? (lane.machine || (zh ? '租用的 GPU' : 'Rented GPU'))
+        ? (lane.machine || t('place.rentedGpu'))
         : lane.lane === 'default'
-          ? (zh ? '这台电脑' : 'This computer')
-          : `${zh ? '这台电脑' : 'This computer'} — ${lane.lane}`;
-    const accel = lane.available ? describeTensorRt(lane, zh) : '';
+          ? t('place.thisMac')
+          : `${t('place.thisMac')} — ${lane.lane}`;
+    const accel = lane.available ? describeTensorRt(lane) : '';
     return {
       // The lane name IS the id: it is what `run_on` carries to the gateway.
       id: lane.lane,
@@ -511,43 +444,42 @@ export function restoreRunTargets(lanes, zh = false) {
       source: hosted ? 'cloud' : 'local',
       label,
       place: hosted ? PLACE_HIVEMINDOS : PLACE_THIS_MAC,
-      placeLabel: hosted ? (zh ? 'HivemindOS 额度' : 'HivemindOS credits') : label,
+      placeLabel: hosted ? t('place.hivemindos') : label,
       // Free, by the hour, or by the render — the whole decision, said once.
       // No price on a machine that cannot run the job: "Free" beside "cannot do
       // this" reads as an offer.
       badge: lane.available
         ? {
-          label: hosted ? (zh ? '按次' : 'Per render') : lane.paid ? (zh ? '按小时' : 'Per hour') : (zh ? '免费' : 'Free'),
+          label: hosted ? t('badge.perRender') : lane.paid ? t('badge.perHour') : t('badge.free'),
           tone: lane.paid || hosted ? 'neutral' : 'ok',
         }
         : null,
       available: Boolean(lane.available),
-      unavailableReason: lane.available ? '' : (lane.reason || describeLane(lane, zh)),
+      unavailableReason: lane.available ? '' : (lane.reason || describeLane(lane)),
       // What choosing this lane actually means, and — where it matters — what
       // its VAE acceleration is doing.
-      reason: [describeLane(lane, zh), accel].filter(Boolean).join(' '),
+      reason: [describeLane(lane), accel].filter(Boolean).join(' '),
       remedy: lane.remedy || '',
     };
   });
 }
 
-export function describeChunkPlan(plan, zh = false) {
+export function describeChunkPlan(plan) {
   if (!plan?.chunks?.length) return '';
   const count = plan.chunks.length;
   const seconds = plan.chunkFrames / (plan.fps || 24);
-  if (zh) return `${count} 个分块 × 约 ${seconds.toFixed(1)} 秒 → ${plan.width}×${plan.height}`;
   return `${count} chunk${count === 1 ? '' : 's'} of about ${seconds.toFixed(1)}s → ${plan.width}x${plan.height}`;
 }
 
 /** An ETA only ever extrapolated from chunks this project actually finished. */
-export function describeEta(progress, zh = false) {
+export function describeEta(progress) {
   const seconds = Number(progress?.eta_seconds) || 0;
   if (!seconds) return '';
   const minutes = Math.round(seconds / 60);
-  if (minutes < 1) return zh ? '不到一分钟' : 'under a minute left';
-  if (minutes < 60) return zh ? `约剩 ${minutes} 分钟` : `about ${minutes} min left`;
+  if (minutes < 1) return 'under a minute left';
+  if (minutes < 60) return `about ${minutes} min left`;
   const hours = Math.floor(minutes / 60);
-  return zh ? `约剩 ${hours} 小时 ${minutes % 60} 分钟` : `about ${hours}h ${minutes % 60}m left`;
+  return `about ${hours}h ${minutes % 60}m left`;
 }
 
 // --- reading the file the owner picked ---------------------------------------
@@ -607,23 +539,18 @@ export function describeBytes(bytes) {
  * file, which is to say after the wait, and then only as "could not be started".
  * Returns '' when the file fits.
  */
-export function sourceTooLargeAdvice(file, capabilities, zhLang = false) {
+export function sourceTooLargeAdvice(file, capabilities) {
   const size = Number(file?.size) || 0;
   const ceiling = maxSourceBytes(capabilities);
   if (!size || size <= ceiling) return '';
-  return zhLang
-    ? `这个文件 ${describeBytes(size)}，超过本机上限 ${describeBytes(ceiling)} — 请先裁短，或分两段修复。`
-    : `That clip is ${describeBytes(size)} and this machine takes up to ${describeBytes(ceiling)}. `
-      + 'Trim it, or restore it in two halves.';
+  return tf('restore.tooLarge', describeBytes(size), describeBytes(ceiling));
 }
 
 /** How long the machine keeps a project's working files, in one line. */
-export function describeRetention(capabilities, zhLang = false) {
+export function describeRetention(capabilities) {
   const days = Number(capabilities?.retention?.project_ttl_days) || 0;
   if (days <= 0) return '';
-  return zhLang
-    ? `中间文件保留 ${days} 天，之后会被清理（成片仍在历史记录里）。`
-    : `Intermediates are kept ${days} days, then cleared — any finished master stays in History.`;
+  return tf('restore.retention', days);
 }
 
 /**
@@ -697,18 +624,14 @@ export function estimatePrice({ usdPerHour, seconds }) {
   return { usd: Math.round(((hourly * duration) / 3600) * 100) / 100, usdPerHour: hourly, seconds: duration };
 }
 
-export function describePrice(estimate, zh = false) {
+export function describePrice(estimate) {
   if (!estimate) return '';
   if (estimate.usd == null) {
-    if (!estimate.usdPerHour) return zh ? '按小时计费' : 'Billed by the hour on that machine.';
-    return zh
-      ? `按 $${estimate.usdPerHour}/小时计费 — 首个分块完成后才能估算时长。`
-      : `$${estimate.usdPerHour}/hr — the estimate needs one finished chunk before it means anything.`;
+    if (!estimate.usdPerHour) return 'Billed by the hour on that machine.';
+    return `$${estimate.usdPerHour}/hr — the estimate needs one finished chunk before it means anything.`;
   }
   const minutes = Math.max(1, Math.round(estimate.seconds / 60));
-  return zh
-    ? `约 $${estimate.usd.toFixed(2)}（${minutes} 分钟 × $${estimate.usdPerHour}/小时）`
-    : `About $${estimate.usd.toFixed(2)} — ${minutes} min at $${estimate.usdPerHour}/hr`;
+  return `About $${estimate.usd.toFixed(2)} — ${minutes} min at $${estimate.usdPerHour}/hr`;
 }
 
 /**
@@ -720,12 +643,11 @@ export function describePrice(estimate, zh = false) {
  * smoother one the invoices then exceed. `null` when it could not be priced —
  * an unpriced lane is offered as unpriced, never as free.
  */
-export function describeCloudPrice(quote, zh = false) {
+export function describeCloudPrice(quote) {
   const total = Number(quote?.totalUsd);
   if (!Number.isFinite(total) || total <= 0) return '';
   const chunks = quote?.chunks?.length || 0;
   const money = total < 1 ? `${Math.round(total * 100)}¢` : `$${total.toFixed(2)}`;
-  if (zh) return `约 ${money} — ${chunks} 个分块，渲染前扣除额度`;
   return `About ${money} for this render — ${chunks} ${chunks === 1 ? 'chunk' : 'chunks'}, charged as each one finishes.`;
 }
 

@@ -1,19 +1,22 @@
 import { pref, setPrefs } from './prefs.js';
 
-// The stored choice moved into the one preferences document (lib/prefs.js),
-// which migrates the old `og_lang` key on first load. Everything else about
-// this module is unchanged: the choice is canonicalised, never overwritten
-// with the shipping language, and LANGS_ENABLED is still the switch.
+// THE key table. One mechanism, one language.
+//
+// What used to be here was two mechanisms and neither covered the app: a
+// 199-key dictionary, and ~1,400 inline `zh() ? '中文' : 'English'` ternaries
+// spread over 77 files. The ternaries were the real cost — not because of
+// translation, but because a string written inline in JSX is a string nobody
+// can see beside its siblings, which is how one idea ended up phrased four ways
+// in four studios ("Runs on" / "Runs at", "This Mac" / "This machine").
+// The ternaries are gone; STRINGS below is the one place a phrase is decided.
+//
+// Adding a language means adding a second table beside STRINGS and putting its
+// tag in LANGS_ENABLED — not re-editing 1,400 call sites. Nothing here is
+// translated today, and that is deliberate: one honest language beats two
+// dishonest ones. The stored choice still survives (lib/prefs.js), so a build
+// that adds a table lands a person back on the language they last picked.
 
 // The languages this build actually ships.
-//
-// zh-CN exists here as a half-translated dictionary: three studios, every
-// dialog and most of the hub are English literals, so a Chinese-locale user was
-// promised a translated app and got a bilingual one. Until the ~1,000 inline
-// ternaries move into this key table, one honest language beats two dishonest
-// ones — so the dictionary, the `zh()` branches and the stored choice all stay
-// where they are and THIS LIST is the switch. Add 'zh-CN' back and the app
-// speaks Chinese again, on whatever the person last chose.
 export const LANGS_ENABLED = ['en'];
 
 /** The BCP-47 tag `raw` names, whether or not this build ships it. */
@@ -29,9 +32,6 @@ export function normalizeLang(raw) {
     const canonical = canonicalLang(raw);
     return LANGS_ENABLED.includes(canonical) ? canonical : LANGS_ENABLED[0];
 }
-
-/** True when the interface is running in Chinese (never, while zh-CN is off). */
-export const zh = () => getLang() === 'zh-CN';
 
 // A stored choice is canonicalised (legacy `zh` → `zh-CN`) but never rewritten
 // to the shipping language: overwriting it would silently discard the language
@@ -69,8 +69,8 @@ export function applyDocumentLang(lang = getLang()) {
 
 // The CHOICE is stored (canonical), the RENDERED language is what ships — so
 // picking a language this build does not carry yet is recorded rather than
-// thrown away. Callers should pass { reload: false }: useLang() re-renders on
-// the 'og_lang_change' event, so nothing on screen has to be torn down.
+// thrown away. `og_lang_change` is what a second table would repaint on, so a
+// caller that has one to switch to passes { reload: false }.
 export function setLang(lang, { reload = true } = {}) {
     const chosen = canonicalLang(lang);
     const normalized = normalizeLang(chosen);
@@ -83,332 +83,317 @@ export function setLang(lang, { reload = true } = {}) {
     }
 }
 
-function dictFor(lang) {
-    const key = normalizeLang(lang);
-    if (key === 'zh-CN') return translations['zh-CN'] || translations.zh;
-    return translations.en;
-}
+// The one table, ordered by the surface a person meets it on.
+export const STRINGS = {
+    // ---- The app itself -----------------------------------------------
+    'app.name': 'Hivemind Content Studio',
+    // Three words for the one thing the person installed — never a backend name.
+    'app.status.starting': 'Starting',
+    'app.status.notRunning': 'Not running',
+    'app.running': 'The studio is running',
+    'app.notRunning': 'The studio is not running',
+    'app.reaching': 'Reaching the studio…',
+    'app.offlineSentence': 'The studio’s local service is not answering, so nothing can generate. Start it again by running:',
+    'app.statusTitle': (label) => `The studio: ${label}`,
+    'app.refresh': 'Refresh',
+    'app.refreshTitle': 'Refresh catalog, runs and history',
+    'app.widenSidebar': 'Widen the sidebar',
+    'app.collapseSidebar': 'Collapse to icons',
+    'app.more': 'More',
 
-const translations = {
-    en: {
-        // Navigation
-        'nav.image': 'Image',
-        'nav.video': 'Video',
-        'nav.lipsync': 'Lip sync',
-        'nav.mcpcli': 'Agents & API',
-        'nav.settings': 'Settings',
+    // ---- Navigation ------------------------------------------------------
+    // Page keys are a wire contract; these are only what a person reads.
+    'nav.create': 'Create',
+    'nav.labs': 'Labs',
+    // Activity is routable but not a rail row; it still has to name its tab.
+    'nav.activity': 'Activity',
+    'nav.produce': 'Produce',
+    'nav.image': 'Image',
+    'nav.story': 'Story',
+    'nav.restore': 'Restore',
+    'nav.sprite': 'Sprite',
+    'nav.lipsync': 'Lip sync',
+    'nav.planner': 'Planner',
+    'nav.library': 'Library',
+    'nav.productions': 'Productions',
+    'nav.inspo': 'Inspo',
+    'nav.models': 'Models',
+    'nav.machines': 'Rented GPUs',
+    'nav.providers': 'Providers',
+    'nav.passbook': 'PassBook',
+    'nav.canvas': 'Canvas',
+    'nav.mcpcli': 'Agents & API',
+    'nav.about': 'About',
 
-        // Common
-        'common.generate': 'Generate',
-        'common.clearReferences': 'Clear',
-        'common.startFresh': 'Start fresh',
-        'common.generating': 'Generating…',
-        'common.download': 'Download',
-        'common.cancel': 'Cancel',
-        'common.save': 'Save',
-        'common.history': 'History',
-        'common.less': 'Less',
-        'common.searchModels': 'Search models...',
-        'common.retry': 'Retry',
-        'common.noResults': 'No local models match',
-        'common.regenerate': 'Regenerate',
-        'common.backToSetup': 'Back to setup',
-        'common.useInGenerator': 'Use in generator',
-        'common.randomize': 'Randomize',
-        'common.pingWhenComplete': 'Ping when complete',
+    // ---- Words more than one surface says --------------------------------
+    // A word that appears twice belongs here once. Two keys with the same value
+    // is how "Retry now" and "Try again" ended up on the same press.
+    'common.generate': 'Generate',
+    'common.clearReferences': 'Clear',
+    'common.startFresh': 'Start fresh',
+    'common.generating': 'Generating…',
+    'common.download': 'Download',
+    'common.cancel': 'Cancel',
+    'common.save': 'Save',
+    'common.history': 'History',
+    'common.less': 'Less',
+    'common.new': 'New',
+    'common.ready': 'Ready',
+    'common.advanced': 'Advanced',
+    'common.auto': 'Auto',
+    'common.video': 'Video',
+    'common.settings': 'Settings',
+    'common.searchModels': 'Search models...',
+    'common.retry': 'Retry',
+    'common.noResults': 'No local models match',
+    'common.regenerate': 'Regenerate',
+    'common.backToSetup': 'Back to setup',
+    'common.useInGenerator': 'Use in generator',
+    'common.randomize': 'Randomize',
+    'common.pingWhenComplete': 'Ping when complete',
+    // The two repairs that are NOT the same act: press the thing again, or ask
+    // the machine again. "Retry now" was a third spelling of the first.
+    'common.tryAgain': 'Try again',
+    'common.checkAgain': 'Check again',
+    'common.dismiss': 'Dismiss',
+    'common.openModels': 'Open Models',
+    'common.connectComfy': 'Connect ComfyUI',
+    'common.switchToCloud': 'Switch to cloud',
+    'common.connect': 'Connect',
+    'common.detach': 'Detach',
 
-        // Settings Modal
-        'settings.title': 'Settings',
-        'settings.apiKey': 'API key',
-        'settings.muapiKeyLabel': 'MUAPI API Key',
-        'settings.keyPlaceholder': 'Enter your MUAPI API key...',
-        'settings.keyNote': 'Kept in this browser and sent only to api.muapi.ai.',
-        'settings.keyOnMachine': 'Key on this machine',
-        'settings.keyOnMachineNote': 'Cloud generations run through this machine’s shared credential store; the key never enters this browser.',
-        'settings.manageKeys': 'Manage in PassBook',
-        'settings.invalidKey': 'Please enter a valid API key.',
+    // ---- Where work runs -------------------------------------------------
+    // ONE vocabulary for the three bills. The image/video picker said "This
+    // Mac", the text producer said "This machine", the restore lanes said
+    // "This computer", and the send-to menu had a fourth copy of the list.
+    'place.thisMac': 'This Mac',
+    'place.thisMacBlurb': 'Free, private, and as fast as the hardware — nothing leaves the machine.',
+    'place.hivemindos': 'HivemindOS credits',
+    'place.hivemindosBlurb': 'One balance of HivemindOS credits — the same one the HivemindOS app spends.',
+    'place.accounts': 'Your accounts',
+    'place.accountsBlurb': 'Billed by the provider to an account you already pay for. No HivemindOS credits spent.',
+    'place.rentedGpu': 'Rented GPU',
+    'sendTo.switchesTo': (model) => `switches to ${model}`,
+    // The Restore studio's lanes, which used to be a fourth vocabulary of their
+    // own ("This computer" / "Rented GPU" / "Hosted GPU").
+    'restore.laneHostedGpu': 'Hosted GPU',
+    'badge.free': 'Free',
+    'badge.perHour': 'Per hour',
+    'badge.perRender': 'Per render',
 
-        // Auth Modal
-        'auth.title': 'Connect your cloud account',
-        'auth.subtitle': 'Cloud models run on MUAPI, on your own account. Create an access key there, then paste the key value here to continue.',
-        'auth.keyLabel': 'MUAPI access key',
-        'auth.keyPlaceholder': 'Paste your access key value...',
-        'auth.keyNote': 'Do not enter the key name or label; paste the generated key value from MUAPI.',
-        'auth.storedOnMachine': 'Saved to this machine’s shared store — every Hive app here can use it, and it never stays in this browser.',
-        'auth.storedInBrowser': 'Kept in this browser and sent only to api.muapi.ai.',
-        'auth.saving': 'Saving…',
-        'auth.initBtn': 'Save and continue',
-        'auth.createKey': 'Create or copy a MUAPI access key',
+    // ---- The Runs-on control ---------------------------------------------
+    'runOn.label': 'Runs on',
+    'runOn.automatic': 'Automatic',
+    'runOn.automaticPrefix': 'Automatic — ',
+    'runOn.nowhere': 'Nowhere yet',
+    'runOn.nothingRuns': 'No model here can run this yet',
+    'runOn.freeStaysHere': 'free, stays here',
+    'runOn.freeStaysOnThisMac': 'free, stays on this Mac',
+    'runOn.onYourCredits': 'on your HivemindOS credits',
 
-        // Image Studio
-        'image.placeholder': 'Describe the image you want to create',
-        'image.placeholderTransform': 'Describe how to transform this image (optional)',
-        'image.generateTooltip': 'Generate AI image from prompt',
-        'image.multiImageNote': 'images selected — describe the transformation (optional)',
-        'ar.square': 'Square',
-        'ar.portrait': 'Portrait',
-        'ar.landscape': 'Landscape',
-        'ar.wide': 'Wide',
-        'ar.tall': 'Tall',
-        'ar.cinema': 'Cinema',
-        'ar.custom': 'Custom',
-        'image.qualityTooltip': 'Set output quality',
-        'image.generatingLocally': 'Generating locally...',
-        'image.quickStarters': 'Quick starters',
-        'image.promptEnhancer': 'Prompt enhancer',
-        'image.basePromptPlaceholder': 'Enter base prompt...',
-        'image.enhancementTags': 'Enhancement tags',
-        'image.enhancedPrompt': 'Enhanced prompt',
-        'image.enhancedPlaceholder': 'Your enhanced prompt will appear here...',
-        'image.advancedOptions': 'Advanced',
-        'image.stylePreset': 'Style preset',
-        'image.negPromptLabel': 'Negative prompt',
-        'image.negPromptPlaceholder': 'What to exclude from the image (e.g., blurry, distorted, watermark)',
-        'image.negPromptNeedsGuidance': 'Not doing anything right now — raise Guidance above 1 for this to take effect (at 1 the sampler skips the negative pass).',
-        'image.negPromptUnsupported': (name) => `${name} ignores negative prompts — this workflow never wires one, so saved text is not sent.`,
-        'image.guidanceScale': 'Guidance scale',
-        'image.steps': 'Steps',
-        'image.seed': 'Seed',
-        'image.seedPlaceholder': '-1 for random',
-        'image.width': 'Width',
-        'image.height': 'Height',
-        'image.widthPlaceholder': 'Auto',
-        'image.heightPlaceholder': 'Auto',
+    // ---- Setup: the doors out of an empty Model section ------------------
+    'setup.comfyNotConnected': 'ComfyUI is not connected.',
+    'setup.comfyHint': 'Local models run on ComfyUI. Connect one — or use a cloud or rented model, which need no ComfyUI at all.',
+    'setup.noImageModel': 'No image model installed yet.',
+    'setup.noImageModelHint': 'Install one and it shows up here.',
+    'setup.discovering': 'Looking at what this machine can run…',
+    'setup.engineHint': 'It appears here as soon as it answers — or use the cloud for this one.',
+    'setup.comfyAnswering': 'Answering',
+    'setup.comfyNotAnswering': 'Not connected',
+    'setup.comfyAttached': 'Attached',
+    'setup.comfyLanes': 'Lanes',
+    'setup.comfyLooking': 'Looking at this machine…',
+    'setup.comfyAnsweringNow': 'Answering right now',
+    'setup.comfyUseThis': 'Use this one',
+    'setup.comfyPasteAddress': 'Or paste the address',
+    'setup.comfyAddressHint': 'The address in ComfyUI’s own window — usually http://127.0.0.1:8188, or http://127.0.0.1:8000 for ComfyUI Desktop.',
+    'setup.comfyBlurb': 'ComfyUI is optional. Cloud and rented models work without it; connect one to use the local lanes. This studio only reads — it never changes a ComfyUI you installed yourself.',
+    'setup.comfyFoundHere': 'Found on this machine',
+    'setup.comfyNoneFound': 'No ComfyUI found on this machine. ',
+    'setup.comfyHowToInstall': 'How to install it',
+    'setup.comfyThenComeBack': ' — then come back and connect it here.',
+    'setup.comfyNoAnswer': 'That address did not answer',
+    'setup.comfyRefused': 'Could not connect to that address.',
+    'setup.comfyConnected': (target) => `Connected to ${target}. Local models are available again.`,
 
-        // Video Studio
-        'video.placeholder': 'Describe the video you want to create',
-        'video.generateTooltip': 'Generate AI video',
-        'video.history': 'History',
-        'video.regenerate': 'Regenerate',
-        'video.download': 'Download',
-        'video.extend': 'Extend',
-        'video.new': 'New',
-        'video.backToSetup': 'Back to setup',
-        'video.progressTitle': 'Creating your video',
-        'video.progress.preparing': 'Preparing generation',
-        'video.progress.loading': 'Loading model',
-        'video.progress.queued': 'Queued with provider',
-        'video.progress.rendering': 'Rendering frames',
-        'video.progress.finishing': 'Preparing playback',
-        'video.progress.inProgress': 'In progress',
-        'video.progress.elapsed': 'Elapsed',
-        // Real sampler counters off the executing backend, not an estimate.
-        'video.progress.step': (step, total) => `Step ${step} of ${total}`,
+    // ---- What a composer offers, in every studio -------------------------
+    // The Image and Video composers each grew their own spelling of the same
+    // five chips; these are the shared ones.
+    'composer.attach': 'Attach',
+    'composer.clearReferencesTitle': 'Remove every attached reference',
+    'composer.starters': 'Starters',
+    'composer.startersTitle': 'Quick starters, the UGC block, and your saved prompts',
+    'composer.improve': 'Improve',
+    'composer.improveTitle': 'Refine the prompt, or add style tags',
+    'composer.improveDisabled': 'Type an idea below first — the helper refines what is in the box',
+    'composer.dismissHelper': 'Dismiss prompt helper',
+    'composer.etaTitle': 'Estimated from your own past runs at these settings',
+    'composer.cancelTitle': 'Cancel the current generation and reset',
+    'composer.refine': 'Refine',
+    'composer.camera': 'Camera',
+    'composer.refineTitle': "Rewrite what is in the box with the prompt helper — it knows this model's prompting guide, the cast, the lane and the clip length",
 
-        // Lip Sync Studio
-        'lipsync.input': 'Input',
-        'lipsync.portraitImage': 'Portrait image',
-        'lipsync.video': 'Video',
-        'lipsync.promptPlaceholder': 'Optional: describe the talking style or motion...',
-        'lipsync.regenerate': 'Regenerate',
-        'lipsync.download': 'Download',
-        'lipsync.new': 'New',
-        'lipsync.history': 'History',
-        'lipsync.noAudioAlert': 'Please upload an audio file first.',
-        'lipsync.noImageAlert': 'Please upload a portrait image first.',
-        'lipsync.noVideoAlert': 'Please upload a source video first.',
+    // ---- Failures: the sentence, and the button that repairs it ----------
+    'failure.generic': 'That did not work',
+    'failure.genericNamed': (operation) => `${operation} failed`,
+    'failure.notEnoughMemory': 'Not enough memory for this size',
+    'failure.lowerResolution': 'Lower resolution',
+    'failure.localEngineDown': 'The local engine is not running',
+    'failure.studioNotAnswering': 'The studio is not answering',
+    'failure.addKey': 'Add key',
+    'failure.signIn': 'Sign in',
+    'failure.openHivemindos': 'Open HivemindOS',
+    'failure.addCredits': 'Add credits',
+    'failure.connectAccount': 'Connect account',
+    'failure.connectProvider': 'Connect an account',
+    'failure.finishSignIn': 'Finish the sign-in in the tab that opened, then press Try again.',
+    'failure.finishCheckout': 'Finish the checkout in the tab that opened, then press Try again.',
 
-        // Local Model Manager
-        'localModels.title': 'Local models',
-        'localModels.webOnly': 'Local models are managed by the desktop app.',
-        'localModels.inferenceEngine': 'Inference engine',
-        'localModels.checking': 'Checking...',
-        'localModels.installed': 'Installed and ready',
-        'localModels.notInstalled': 'Not installed — required for local generation',
-        'localModels.installEngine': 'Install engine',
-        'localModels.downloading': 'Downloading...',
-        'localModels.extracting': 'Extracting...',
-        'localModels.storedIn': 'Stored in',
-        'localModels.storedDefault': 'Stored in your app data folder',
-        'localModels.checkingStorage': 'Checking storage...',
-        'localModels.engineNotAnswering': 'The local engine is starting — it has not answered yet.',
-        'localModels.loading': 'Loading...',
-        'localModels.featured': 'Featured',
-        'localModels.download': 'Download',
-        'localModels.requiredComponents': 'Required components',
-        'localModels.ready': 'Ready',
-        'localModels.available': 'Available',
-        'localModels.offline': 'Unavailable',
-        'localModels.starting': 'Starting...',
-        'localModels.complete': 'Complete!',
-        'localModels.preparing': 'Preparing...',
-        'localModels.get': 'Get',
-        'localModels.notConfigured': 'Not configured',
-        'localModels.notConfiguredNote': 'Not configured (Wan2GP models will appear offline)',
-        'localModels.probing': 'Probing...',
-        'localModels.deleteConfirm': (name) => `Delete "${name}"? You'll need to re-download it to use it again.`,
+    // ---- Restore: a stopped render, and what continues it ----------------
+    'restore.stopped': 'That render stopped.',
+    'restore.stoppedResume': 'Resume picks up at the first unfinished chunk.',
+    'restore.stoppedDetail': 'Resume continues from the first unfinished chunk; the details below say what the machine reported.',
+    'restore.cancelled': 'Stopped. Every finished chunk is still here.',
+    'restore.cancelledResume': 'Resume continues from the next one — nothing already rendered is repeated.',
+    'restore.oom': 'That machine ran out of memory on this chunk.',
+    'restore.oomFix': 'Lower the temporal batch or the output size in Advanced, then resume — the finished chunks are kept.',
+    'restore.projectGone': 'That project is no longer on this machine.',
+    'restore.projectGoneFix': 'Working files are cleared once they age out; any master it produced is still in History.',
+    'restore.sourceGone': "This project's source clip is no longer on this machine.",
+    'restore.sourceGoneFix': 'Load the original clip again and start it — the finished chunks are still reused.',
+    'restore.weightsFailed': 'That machine could not download the model weights.',
+    'restore.weightsFailedFix': 'Check the connection and resume, or pick a model this machine already has.',
+    'restore.modelMissing': 'That machine does not have this restore model.',
+    'restore.modelMissingFix': 'Pick another model, or another machine, and resume.',
+    'restore.spendReached': 'This render reached the amount you approved.',
+    'restore.spendReachedFix': 'Resume quotes the rest at today’s price and asks you to approve it.',
+    'restore.rentalGone': 'The rented machine is no longer there.',
+    'restore.rentalGoneFix': 'Attach it again on the Machines page, or switch the machine and resume.',
+    'restore.unreachable': 'That machine stopped answering.',
+    'restore.unreachableFix': 'Check it is still running, then resume — the finished chunks are kept.',
+    'restore.tooLarge': (size, ceiling) => `That clip is ${size} and this machine takes up to ${ceiling}. Trim it, or restore it in two halves.`,
+    'restore.retention': (days) => `Intermediates are kept ${days} days, then cleared — any finished master stays in History.`,
 
-        // Web shell
+    // Settings Modal
+    'settings.apiKey': 'API key',
+    'settings.muapiKeyLabel': 'MUAPI API Key',
+    'settings.keyPlaceholder': 'Enter your MUAPI API key...',
+    'settings.keyOnMachine': 'Key on this machine',
+    'settings.keyInBrowser': 'Kept in this browser and sent only to api.muapi.ai.',
+    'settings.keyOnMachineNote': 'Cloud generations run through this machine’s shared credential store; the key never enters this browser.',
+    'settings.manageKeys': 'Manage in PassBook',
+    'settings.invalidKey': 'Please enter a valid API key.',
 
-        // MCP & CLI page
-    },
-    zh: {
-        // Navigation
-        'nav.image': '图像',
-        'nav.video': '视频',
-        'nav.lipsync': '唇语同步',
-        'nav.mcpcli': '代理与 API',
-        'nav.settings': '设置',
+    // Auth Modal
+    'auth.title': 'Connect your cloud account',
+    'auth.subtitle': 'Cloud models run on MUAPI, on your own account. Create an access key there, then paste the key value here to continue.',
+    'auth.keyLabel': 'MUAPI access key',
+    'auth.keyPlaceholder': 'Paste your access key value...',
+    'auth.keyNote': 'Do not enter the key name or label; paste the generated key value from MUAPI.',
+    'auth.storedOnMachine': 'Saved to this machine’s shared store — every Hive app here can use it, and it never stays in this browser.',
+    'auth.saving': 'Saving…',
+    'auth.initBtn': 'Save and continue',
+    'auth.createKey': 'Create or copy a MUAPI access key',
 
-        // Common
-        'common.generate': '生成',
-        'common.clearReferences': '清除',
-        'common.startFresh': '重新开始',
-        'common.generating': '生成中…',
-        'common.download': '下载',
-        'common.cancel': '取消',
-        'common.save': '保存',
-        'common.history': '历史记录',
-        'common.less': '收起',
-        'common.searchModels': '搜索模型...',
-        'common.retry': '重试',
-        'common.noResults': '未找到本地模型',
-        'common.regenerate': '重新生成',
-        'common.backToSetup': '返回设置',
-        'common.useInGenerator': '用于生成器',
-        'common.randomize': '随机',
-        'common.pingWhenComplete': '完成时提示音',
+    // Image Studio
+    'image.placeholder': 'Describe the image you want to create',
+    'image.placeholderTransform': 'Describe how to transform this image (optional)',
+    'image.generateTooltip': 'Generate AI image from prompt',
+    'image.multiImageNote': 'images selected — describe the transformation (optional)',
+    'ar.square': 'Square',
+    'ar.portrait': 'Portrait',
+    'ar.landscape': 'Landscape',
+    'ar.wide': 'Wide',
+    'ar.tall': 'Tall',
+    'ar.cinema': 'Cinema',
+    'ar.custom': 'Custom',
+    'image.qualityTooltip': 'Set output quality',
+    'image.generatingLocally': 'Generating locally...',
+    'image.quickStarters': 'Quick starters',
+    'image.promptEnhancer': 'Prompt enhancer',
+    'image.promptHelper': 'Prompt helper',
+    'image.basePromptPlaceholder': 'Enter base prompt...',
+    'image.enhancementTags': 'Enhancement tags',
+    'image.enhancedPrompt': 'Enhanced prompt',
+    'image.enhancedPlaceholder': 'Your enhanced prompt will appear here...',
+    'image.stylePreset': 'Style preset',
+    'image.negPromptLabel': 'Negative prompt',
+    'image.negPromptPlaceholder': 'What to exclude from the image (e.g., blurry, distorted, watermark)',
+    'image.negPromptNeedsGuidance': 'Not doing anything right now — raise Guidance above 1 for this to take effect (at 1 the sampler skips the negative pass).',
+    'image.negPromptUnsupported': (name) => `${name} ignores negative prompts — this workflow never wires one, so saved text is not sent.`,
+    'image.guidanceScale': 'Guidance scale',
+    'image.steps': 'Steps',
+    'image.seed': 'Seed',
+    'image.seedPlaceholder': '-1 for random',
+    'image.width': 'Width',
+    'image.height': 'Height',
 
-        // Settings Modal
-        'settings.title': '设置',
-        'settings.apiKey': 'API 密钥',
-        'settings.muapiKeyLabel': 'MUAPI API 密钥',
-        'settings.keyPlaceholder': '输入您的 MUAPI API 密钥...',
-        'settings.keyNote': '保存在此浏览器中，仅发送到 api.muapi.ai。',
-        'settings.keyOnMachine': '密钥已在本机',
-        'settings.keyOnMachineNote': '云端生成通过本机的共享凭据库运行；密钥不会进入此浏览器。',
-        'settings.manageKeys': '在 PassBook 中管理',
-        'settings.invalidKey': '请输入有效的 API 密钥。',
+    // Video Studio
+    'video.placeholder': 'Describe the video you want to create',
+    'video.generateTooltip': 'Generate AI video',
+    'video.generateOffline': 'The studio is not running — start it again to generate.',
+    'video.extend': 'Extend',
+    'video.progressTitle': 'Creating your video',
+    'video.progress.preparing': 'Preparing generation',
+    'video.progress.loading': 'Loading model',
+    'video.progress.queued': 'Queued with provider',
+    'video.progress.rendering': 'Rendering frames',
+    'video.progress.finishing': 'Preparing playback',
+    'video.progress.inProgress': 'In progress',
+    'video.progress.elapsed': 'Elapsed',
+    // Real sampler counters off the executing backend, not an estimate.
+    'video.progress.step': (step, total) => `Step ${step} of ${total}`,
 
-        // Auth Modal
-        'auth.title': '连接您的云端账户',
-        'auth.subtitle': '云端模型在 MUAPI 上以您自己的账户运行。在那里创建一个访问密钥，然后将密钥值粘贴到这里继续。',
-        'auth.keyLabel': 'MUAPI 访问密钥',
-        'auth.keyPlaceholder': '粘贴您的访问密钥值...',
-        'auth.keyNote': '请不要输入密钥名称或标签；粘贴从 MUAPI 生成的密钥值。',
-        'auth.storedOnMachine': '已保存到本机的共享凭据库 — 本机上的每个 Hive 应用都可使用，且不会留在此浏览器中。',
-        'auth.storedInBrowser': '保存在此浏览器中，仅发送到 api.muapi.ai。',
-        'auth.saving': '保存中…',
-        'auth.initBtn': '保存并继续',
-        'auth.createKey': '创建或复制 MUAPI 访问密钥',
+    // Lip Sync Studio
+    'lipsync.input': 'Input',
+    'lipsync.portraitImage': 'Portrait image',
+    'lipsync.promptPlaceholder': 'Optional: describe the talking style or motion...',
+    'lipsync.noAudioAlert': 'Please upload an audio file first.',
+    'lipsync.noImageAlert': 'Please upload a portrait image first.',
+    'lipsync.noVideoAlert': 'Please upload a source video first.',
 
-        // Image Studio
-        'image.placeholder': '描述您想创建的图像',
-        'image.placeholderTransform': '描述您想如何转换此图像（可选）',
-        'image.generateTooltip': '根据提示词生成 AI 图像',
-        'image.multiImageNote': '张图片已选择——描述要做的变化（可选）',
-        'ar.square': '方形',
-        'ar.portrait': '竖版',
-        'ar.landscape': '横版',
-        'ar.wide': '宽屏',
-        'ar.tall': '竖屏',
-        'ar.cinema': '影院宽幅',
-        'ar.custom': '自定义',
-        'image.qualityTooltip': '设置输出质量',
-        'image.generatingLocally': '本地生成中...',
-        'image.quickStarters': '快速启动',
-        'image.promptEnhancer': '提示词增强器',
-        'image.basePromptPlaceholder': '输入基础提示词...',
-        'image.enhancementTags': '增强标签',
-        'image.enhancedPrompt': '增强后的提示词',
-        'image.enhancedPlaceholder': '增强后的提示词将显示在这里...',
-        'image.advancedOptions': '高级选项',
-        'image.stylePreset': '风格预设',
-        'image.negPromptLabel': '反向提示词',
-        'image.negPromptPlaceholder': '图像中要排除的内容（如：模糊、失真、水印）',
-        'image.negPromptNeedsGuidance': '引导系数为 1 时无效——采样器会跳过反向通道。调高引导系数后才会生效。',
-        'image.negPromptUnsupported': (name) => `${name} 不支持反向提示词——该工作流没有接入反向编码，保存的文本不会发送。`,
-        'image.guidanceScale': '引导系数',
-        'image.steps': '步数',
-        'image.seed': '随机种子',
-        'image.seedPlaceholder': '-1 表示随机',
-        'image.width': '宽度',
-        'image.height': '高度',
-        'image.widthPlaceholder': '自动',
-        'image.heightPlaceholder': '自动',
+    // Local Model Manager
+    'localModels.title': 'Local models',
+    'localModels.webOnly': 'Local models are managed by the desktop app.',
+    'localModels.inferenceEngine': 'Inference engine',
+    'localModels.checking': 'Checking...',
+    'localModels.installed': 'Installed and ready',
+    'localModels.notInstalled': 'Not installed — required for local generation',
+    'localModels.installEngine': 'Install engine',
+    'localModels.downloading': 'Downloading...',
+    'localModels.extracting': 'Extracting...',
+    'localModels.storedIn': 'Stored in',
+    'localModels.storedDefault': 'Stored in your app data folder',
+    'localModels.checkingStorage': 'Checking storage...',
+    'localModels.engineStarting': 'The local engine is starting — it has not answered yet.',
+    'localModels.loading': 'Loading...',
+    'localModels.featured': 'Featured',
+    'localModels.requiredComponents': 'Required components',
+    'localModels.available': 'Available',
+    'localModels.offline': 'Unavailable',
+    'localModels.starting': 'Starting...',
+    'localModels.complete': 'Complete!',
+    'localModels.preparing': 'Preparing...',
+    'localModels.get': 'Get',
+    'localModels.notConfigured': 'Not configured',
+    'localModels.notConfiguredNote': 'Not configured (Wan2GP models will appear offline)',
+    'localModels.probing': 'Probing...',
+    'localModels.deleteConfirm': (name) => `Delete "${name}"? You'll need to re-download it to use it again.`,
 
-        // Video Studio
-        'video.placeholder': '描述您想创建的视频',
-        'video.generateTooltip': '生成 AI 视频',
-        'video.history': '历史记录',
-        'video.regenerate': '重新生成',
-        'video.download': '下载',
-        'video.extend': '延伸',
-        'video.new': '新建',
-        'video.backToSetup': '返回设置',
-        'video.progressTitle': '正在创建视频',
-        'video.progress.preparing': '正在准备生成',
-        'video.progress.loading': '正在加载模型',
-        'video.progress.queued': '已加入提供商队列',
-        'video.progress.rendering': '正在渲染画面',
-        'video.progress.finishing': '正在准备播放',
-        'video.progress.inProgress': '进行中',
-        'video.progress.elapsed': '已用时间',
-        'video.progress.step': (step, total) => `第 ${step} / ${total} 步`,
-
-        // Lip Sync Studio
-        'lipsync.input': '输入',
-        'lipsync.portraitImage': '人像图',
-        'lipsync.video': '视频',
-        'lipsync.promptPlaceholder': '可选：描述说话风格或动作...',
-        'lipsync.regenerate': '重新生成',
-        'lipsync.download': '下载',
-        'lipsync.new': '新建',
-        'lipsync.history': '历史记录',
-        'lipsync.noAudioAlert': '请先上传音频文件。',
-        'lipsync.noImageAlert': '请先上传人像图片。',
-        'lipsync.noVideoAlert': '请先上传源视频。',
-
-        // Local Model Manager
-        'localModels.title': '本地模型',
-        'localModels.webOnly': '本地模型由桌面应用管理。',
-        'localModels.inferenceEngine': '推理引擎',
-        'localModels.checking': '检查中...',
-        'localModels.installed': '已安装，可以使用',
-        'localModels.notInstalled': '未安装 — 本地生成所必需',
-        'localModels.installEngine': '安装引擎',
-        'localModels.downloading': '下载中...',
-        'localModels.extracting': '解压中...',
-        'localModels.storedIn': '存储于',
-        'localModels.storedDefault': '存储在应用数据文件夹中',
-        'localModels.checkingStorage': '检查存储...',
-        'localModels.engineNotAnswering': '本地引擎正在启动——尚未响应。',
-        'localModels.loading': '加载中...',
-        'localModels.featured': '推荐',
-        'localModels.download': '下载',
-        'localModels.requiredComponents': '所需组件',
-        'localModels.ready': '已就绪',
-        'localModels.available': '可用',
-        'localModels.offline': '不可用',
-        'localModels.starting': '启动中...',
-        'localModels.complete': '完成！',
-        'localModels.preparing': '准备中...',
-        'localModels.get': '获取',
-        'localModels.notConfigured': '未配置',
-        'localModels.notConfiguredNote': '未配置（Wan2GP 模型将显示为离线）',
-        'localModels.probing': '探测中...',
-        'localModels.deleteConfirm': (name) => `删除"${name}"？您需要重新下载才能再次使用。`,
-
-        // Web shell
-
-        // MCP & CLI page
-    },
 };
 
-translations['zh-CN'] = translations.zh;
-
+/** The string `key` names. An unknown key renders as its own name, which is why
+ *  tests/keyTable.test.js checks every key a surface asks for. */
 export function t(key) {
-    const lang = getLang();
-    const dict = dictFor(lang);
-    const val = dict[key] !== undefined ? dict[key] : (translations.en[key] !== undefined ? translations.en[key] : key);
-    return typeof val === 'function' ? val : val;
+    const value = STRINGS[key];
+    return value === undefined ? key : value;
 }
 
+/** The same, for the few keys whose value is a function of its arguments. */
 export function tf(key, ...args) {
-    const lang = getLang();
-    const dict = dictFor(lang);
-    const val = dict[key] !== undefined ? dict[key] : (translations.en[key] !== undefined ? translations.en[key] : key);
-    return typeof val === 'function' ? val(...args) : val;
+    const value = STRINGS[key];
+    if (value === undefined) return key;
+    return typeof value === 'function' ? value(...args) : value;
 }
 
 // Friendly display name for a "W:H" aspect-ratio string; distinctive shapes get

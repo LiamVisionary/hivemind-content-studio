@@ -105,8 +105,8 @@ test('the state pill says Ready / Starting / Not running — never a backend nam
   assert.equal(getApiStatus().label, 'Not running');
   setApiStatus('connecting');
   assert.equal(getApiStatus().label, 'Starting');
-  assert.equal(apiStatusLabel(getApiStatus(), true), '启动中');
+  assert.equal(apiStatusLabel(getApiStatus()), 'Starting');
   // Never a problem without its fix: the offline sentence carries the command.
-  assert.match(apiOfflineSentence(false), /not answering/);
+  assert.match(apiOfflineSentence(), /not answering/);
   assert.ok(STUDIO_RESTART_COMMAND.includes('hivemind-studio-stack'));
 });

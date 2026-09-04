@@ -12,8 +12,6 @@ import { useEffect } from 'react';
 import { useMediaPoster } from '../../hooks/hooks.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Thumb } from '../UploadPicker.jsx';
-import { zh } from './videoLogic.js';
-
 export function ReferenceThumb({ url, posterUrl = null, kind = 'video', alt = '', icon, onPosterCaptured }) {
   const { poster, resolved, pending } = useMediaPoster(posterUrl ? '' : url, { kind });
   useEffect(() => {
@@ -23,13 +21,13 @@ export function ReferenceThumb({ url, posterUrl = null, kind = 'video', alt = ''
 
   if (posterUrl) return <Thumb src={posterUrl} alt={alt} />;
   if (!resolved || pending) {
-    return <div className="h-full w-full animate-pulse bg-bg3" aria-label={zh() ? '解密中' : 'Decrypting'} />;
+    return <div className="h-full w-full animate-pulse bg-bg3" aria-label="Decrypting" />;
   }
   if (!poster) {
     // Nothing decodable. A picture can still be shown as itself; a clip cannot.
     if (kind === 'image') return <Thumb src={url} alt={alt} />;
     return (
-      <span className="grid h-full w-full place-items-center bg-bg3 text-ink3" title={zh() ? '无法预览此片段' : 'This clip could not be previewed'}>
+      <span className="grid h-full w-full place-items-center bg-bg3 text-ink3" title="This clip could not be previewed">
         <Icon name={icon || 'film'} size={12} />
       </span>
     );

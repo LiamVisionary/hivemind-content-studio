@@ -1,9 +1,9 @@
 // App chrome: tiered sidebar (≥lg, an icon rail under 1280px), slim topbar, and
 // a mobile chip strip that keeps the folded tiers behind one More menu.
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { useLang, useOwnerSession } from '../hooks/hooks.js';
+import { useOwnerSession } from '../hooks/hooks.js';
 import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
-import { t, zh as zhUi } from '../lib/i18n.js';
+import { t, tf } from '../lib/i18n.js';
 import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, CollapsibleSection, IconButton, Kbd, cx, openSection } from '../ui/kit.jsx';
@@ -25,8 +25,8 @@ function ExploreDockButton() {
       type="button"
       data-explore-trigger
       onClick={toggleExploreDock}
-      title={zhUi() ? 'Hivemind 提示词库' : 'Hivemind prompt library'}
-      aria-label={zhUi() ? 'Hivemind 提示词库' : 'Hivemind prompt library'}
+      title="Hivemind prompt library"
+      aria-label="Hivemind prompt library"
       aria-pressed={open}
       className={cx(
         'inline-flex h-ctl-md items-center gap-1.5 rounded-md border px-2.5 text-xs font-semibold transition-colors duration-150',
@@ -46,9 +46,8 @@ function ExploreDockButton() {
 // without reloading the page.
 function ApiStatusPill() {
   const status = useApiStatus();
-  const zh = zhUi();
   const [busy, setBusy] = useState(false);
-  const label = apiStatusLabel(status, zh);
+  const label = apiStatusLabel(status);
   const tone =
     status.tone === 'online'
       ? 'text-ok bg-ok-tint'
@@ -69,7 +68,7 @@ function ApiStatusPill() {
           onClick={toggle}
           aria-expanded={open}
           aria-haspopup="menu"
-          title={zh ? `工作室：${label}` : `The studio: ${label}`}
+          title={tf('app.statusTitle', label)}
           className={cx(
             'inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-semibold transition-opacity hover:opacity-85',
             tone,
@@ -84,14 +83,14 @@ function ApiStatusPill() {
         <div className="flex flex-col gap-2 p-1.5">
           <div className="text-[13px] font-semibold text-ink1">
             {status.online
-              ? (zh ? '工作室正在运行' : 'The studio is running')
+              ? t('app.running')
               : status.tone === 'offline'
-                ? (zh ? '工作室没有运行' : 'The studio is not running')
-                : (zh ? '正在联系工作室…' : 'Reaching the studio…')}
+                ? t('app.notRunning')
+                : t('app.reaching')}
           </div>
           {status.tone === 'offline' ? (
             <>
-              <p className="text-xs leading-relaxed text-ink2">{apiOfflineSentence(zh)}</p>
+              <p className="text-xs leading-relaxed text-ink2">{apiOfflineSentence()}</p>
               <code className="block select-all break-all rounded-md border border-line1 bg-bg2 px-2 py-1.5 font-mono text-[11px] text-ink1">
                 {STUDIO_RESTART_COMMAND}
               </code>
@@ -103,7 +102,7 @@ function ApiStatusPill() {
             loading={busy}
             onClick={() => { retry(); close(); }}
           >
-            {zh ? '立即重试' : 'Retry now'}
+            {t('common.tryAgain')}
           </Button>
         </div>
       )}
@@ -127,11 +126,11 @@ function VaultUnlockButton({ signedIn }) {
     <button
       type="button"
       onClick={requestVaultUnlock}
-      title={zhUi() ? '已锁定——解锁以查看加密媒体与已保存项目' : 'Locked — unlock to see your encrypted media and saved items'}
+      title="Locked — unlock to see your encrypted media and saved items"
       className="inline-flex h-ctl-md items-center gap-1.5 rounded-md border border-honey/50 bg-honey-tint px-3 text-xs font-semibold text-honey transition-colors hover:border-honey"
     >
       <Icon name="unlock" size={14} />
-      <span className="hidden sm:inline">{zhUi() ? '解锁保险库' : 'Unlock vault'}</span>
+      <span className="hidden sm:inline">Unlock vault</span>
     </button>
   );
 }
@@ -157,11 +156,11 @@ function LockButton() {
         <button
           type="button"
           onClick={lock}
-          title={zhUi() ? '退出并锁定工作室' : 'Sign out and lock this studio'}
+          title="Sign out and lock this studio"
           className="inline-flex h-ctl-md items-center gap-1.5 rounded-md border border-line1 bg-bg2 px-3 text-xs font-semibold text-ink2 transition-colors hover:border-line2 hover:text-ink1"
         >
           <Icon name="lock" size={14} />
-          <span className="hidden sm:inline">{zhUi() ? '锁定' : 'Lock'}</span>
+          <span className="hidden sm:inline">Lock</span>
         </button>
       ) : null}
     </>
@@ -170,7 +169,7 @@ function LockButton() {
 
 // Topbar refresh: re-reads the catalog, runs and history. The icon spins briefly
 // so the click is visibly acknowledged even on pages that refresh silently.
-function RefreshButton({ zh }) {
+function RefreshButton() {
   const [busy, setBusy] = useState(false);
   const refresh = () => {
     window.dispatchEvent(new Event('hivemind-hub-refresh'));
@@ -181,8 +180,8 @@ function RefreshButton({ zh }) {
     <button
       type="button"
       onClick={refresh}
-      title={zh ? '刷新目录、运行与历史' : 'Refresh catalog, runs and history'}
-      aria-label={zh ? '刷新' : 'Refresh'}
+      title={t('app.refreshTitle')}
+      aria-label={t('app.refresh')}
       className="grid h-ctl-md w-[36px] shrink-0 place-items-center rounded-md text-ink2 transition-colors hover:bg-bg2 hover:text-ink1"
     >
       <Icon name="refresh" size={17} className={busy ? 'hive-motion-keep animate-[hive-spin_0.7s_linear_infinite]' : ''} />
@@ -275,7 +274,7 @@ function NavEntry({ item, active, collapsed, count = 0, onNavigate }) {
 // nobody uses, so ⌘K sits beside the page title and is also clickable.
 function PaletteHint({ onOpen }) {
   const mac = typeof navigator !== 'undefined' && navigator.platform?.startsWith('Mac');
-  const label = zhUi() ? '搜索页面、标签、提示词、模型' : 'Search pages, tabs, prompts and models';
+  const label = 'Search pages, tabs, prompts and models';
   return (
     <button
       type="button"
@@ -313,7 +312,7 @@ function VersionChip({ onNavigate }) {
   }, []);
   const label = versionLabel({ version: APP_VERSION, commit });
   if (!label) return null;
-  const title = zhUi() ? `关于 · ${label} · AGPL-3.0-or-later` : `About · ${label} · AGPL-3.0-or-later`;
+  const title = `About · ${label} · AGPL-3.0-or-later`;
   return (
     <button
       type="button"
@@ -373,7 +372,6 @@ function NavGroup({ group, page, collapsed, hint, countFor, onNavigate }) {
 }
 
 export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, children }) {
-  const { zh } = useLang();
   const activeItem = NAV_ITEMS.find((i) => i.page === page);
   const [railed, setRailed] = useSidebarRail();
   const badges = useNavBadges();
@@ -387,9 +385,7 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
   // on hints the closed Advanced header open, and a production still running is
   // counted on the Productions row itself.
   const advancedHint = badges.passbookPending > 0
-    ? (zh
-      ? `${badges.passbookPending} 个请求等待批准`
-      : `${badges.passbookPending} request${badges.passbookPending > 1 ? 's' : ''} waiting on you`)
+    ? `${badges.passbookPending} request${badges.passbookPending > 1 ? 's' : ''} waiting on you`
     : '';
   const countFor = (item) => (item.page === 'runs' ? badges.runningProductions : 0);
 
@@ -460,12 +456,10 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
         <div className={cx('flex items-center gap-1 border-t border-line1 p-3', railed && 'flex-wrap justify-center')}>
           <IconButton
             icon={railed ? 'chevronRight' : 'chevronLeft'}
-            label={railed
-              ? (zh ? '展开侧边栏' : 'Widen the sidebar')
-              : (zh ? '收起为图标栏' : 'Collapse to icons')}
+            label={railed ? t('app.widenSidebar') : t('app.collapseSidebar')}
             onClick={() => setRailed(!railed)}
           />
-          <IconButton icon="settings" label={`${t('nav.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
+          <IconButton icon="settings" label={`${t('common.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
         </div>
       </aside>
 
@@ -484,10 +478,10 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
             <VersionChip onNavigate={onNavigate} />
             <ExploreDockButton />
             <ApiStatusPill />
-            <RefreshButton zh={zh} />
+            <RefreshButton />
             <LockButton />
             <span className="lg:hidden">
-              <IconButton icon="settings" label={`${t('nav.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
+              <IconButton icon="settings" label={`${t('common.settings')} (${navigator.platform?.startsWith('Mac') ? '⌘' : 'Ctrl+'},)`} onClick={onOpenSettings} />
             </span>
           </div>
         </header>
@@ -524,7 +518,7 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
               trigger={(open, togglePanel) => (
                 <ChipButton
                   icon="more"
-                  value={moreItem ? moreItem.label() : (zh ? '更多' : 'More')}
+                  value={moreItem ? moreItem.label() : t('app.more')}
                   active={open || Boolean(moreItem)}
                   onClick={togglePanel}
                   aria-haspopup="menu"

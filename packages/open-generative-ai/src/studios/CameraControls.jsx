@@ -12,7 +12,6 @@
 // tolerates either, but the old normalizer stores a Number).
 import { CAMERA_MAP, LENS_MAP, FOCAL_PERSPECTIVE, APERTURE_EFFECT } from '../lib/promptUtils.js';
 import { APERTURE_OPTIONS, CAMERA_OPTIONS, FOCAL_OPTIONS, LENS_OPTIONS } from '../lib/cameraRig.js';
-import { zh } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { ChipButton, Menu } from '../ui/Menu.jsx';
 import { Segmented, cx } from '../ui/kit.jsx';
@@ -87,20 +86,20 @@ export function CameraControls({ value, onChange }) {
   return (
     <div className="flex flex-col gap-4">
       <ListPicker
-        label={zh() ? '摄像机' : 'Camera'}
+        label="Camera"
         options={CAMERA_OPTIONS}
         value={value.camera}
         hintFor={(v) => CAMERA_MAP[v] || ''}
         onChange={(v) => set({ camera: v })}
       />
       <ListPicker
-        label={zh() ? '镜头' : 'Lens'}
+        label="Lens"
         options={LENS_OPTIONS}
         value={value.lens}
         hintFor={(v) => LENS_MAP[v] || ''}
         onChange={(v) => set({ lens: v })}
       />
-      <PickerRow label={zh() ? '焦距' : 'Focal'} hint={`${focal}mm · ${FOCAL_PERSPECTIVE[focal] || ''}`}>
+      <PickerRow label="Focal" hint={`${focal}mm · ${FOCAL_PERSPECTIVE[focal] || ''}`}>
         <Segmented
           size="sm"
           value={focal}
@@ -108,7 +107,7 @@ export function CameraControls({ value, onChange }) {
           options={FOCAL_OPTIONS.map((f) => ({ value: f, label: String(f) }))}
         />
       </PickerRow>
-      <PickerRow label={zh() ? '光圈' : 'Aperture'} hint={APERTURE_EFFECT[value.aperture] || ''}>
+      <PickerRow label="Aperture" hint={APERTURE_EFFECT[value.aperture] || ''}>
         <Segmented size="sm" value={value.aperture} onChange={(v) => set({ aperture: v })} options={APERTURE_OPTIONS} />
       </PickerRow>
     </div>

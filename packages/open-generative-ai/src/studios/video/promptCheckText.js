@@ -5,18 +5,16 @@
 // studio speaks Chinese. Every line says the consequence, not the rule — "this
 // cut never happens" rather than "cut > duration" — because the consequence is
 // the part that tells someone whether to care.
-import { zh } from './videoLogic.js';
-
 // The six sections in plain words. H3 reads them positionally under their own
 // field names; a reader should not have to. The field name itself survives in
 // lib/castPrompt.js, which is what actually writes the document.
 const SECTION_NAMES = {
-  subject_definitions: () => (zh() ? '主体定义' : 'who is in it'),
-  summary: () => (zh() ? '摘要' : 'the summary'),
-  retention_analysis: () => (zh() ? '保留分析' : 'what carries over'),
-  detailed_description: () => (zh() ? '镜头描述' : 'what happens'),
-  overall_soundscape: () => (zh() ? '整体声音' : 'the sound'),
-  non_diegetic_music: () => (zh() ? '配乐' : 'the music'),
+  subject_definitions: () => 'who is in it',
+  summary: () => 'the summary',
+  retention_analysis: () => 'what carries over',
+  detailed_description: () => 'what happens',
+  overall_soundscape: () => 'the sound',
+  non_diegetic_music: () => 'the music',
 };
 
 const sectionName = (name) => (SECTION_NAMES[name] ? SECTION_NAMES[name]() : name);
@@ -27,29 +25,21 @@ const seconds = (value) => `${(Number(value) || 0).toFixed(2)}s`;
 function budgetText(problem) {
   switch (problem?.code) {
     case 'over-total':
-      return zh()
-        ? `参考总数 ${problem.count} 个，超过 H3 的 ${problem.limit} 个上限（含 ${problem.soundtracks} 条随片声轨）。`
-        : `${problem.count} references attached — H3 takes ${problem.limit} (${problem.soundtracks} of them are clip soundtracks).`;
+      return `${problem.count} references attached — H3 takes ${problem.limit} (${problem.soundtracks} of them are clip soundtracks).`;
     case 'over-audio-clips':
-      return zh()
-        ? `声音参考 ${problem.count} 条，超过上限 ${problem.limit} 条。`
-        : `${problem.count} voice clips — H3 takes ${problem.limit}.`;
+      return `${problem.count} voice clips — H3 takes ${problem.limit}.`;
     case 'audio-without-visual':
-      return zh()
-        ? '只有声音参考，没有可依附的图片或动作片段。'
-        : 'A voice clip with no picture or clip to attach to.';
+      return 'A voice clip with no picture or clip to attach to.';
     case 'clip-too-short':
-      return zh() ? `有片段只有 ${problem.seconds}s，短于 ${problem.limit}s。` : `A clip is ${problem.seconds}s — under the ${problem.limit}s floor.`;
+      return `A clip is ${problem.seconds}s — under the ${problem.limit}s floor.`;
     case 'clip-too-long':
-      return zh() ? `有片段长 ${problem.seconds}s，超过 ${problem.limit}s。` : `A clip is ${problem.seconds}s — over the ${problem.limit}s ceiling.`;
+      return `A clip is ${problem.seconds}s — over the ${problem.limit}s ceiling.`;
     case 'over-video-seconds':
-      return zh() ? `动作参考合计 ${problem.seconds}s，超过 ${problem.limit}s。` : `${problem.seconds}s of motion reference — the ceiling is ${problem.limit}s.`;
+      return `${problem.seconds}s of motion reference — the ceiling is ${problem.limit}s.`;
     case 'over-audio-seconds':
-      return zh()
-        ? `声音合计 ${problem.seconds}s，超过 ${problem.limit}s（${problem.soundtracks} 条随片声轨也计入）。`
-        : `${problem.seconds}s of audio — the ceiling is ${problem.limit}s, and ${problem.soundtracks} clip soundtrack(s) count toward it.`;
+      return `${problem.seconds}s of audio — the ceiling is ${problem.limit}s, and ${problem.soundtracks} clip soundtrack(s) count toward it.`;
     default:
-      return zh() ? '参考预算有问题。' : 'The reference budget has a problem.';
+      return 'The reference budget has a problem.';
   }
 }
 
@@ -60,135 +50,79 @@ export function describeCheckFinding(finding) {
 
   switch (finding.code) {
     case 'empty':
-      return zh() ? '还没有提示词。' : 'Nothing written yet.';
+      return 'Nothing written yet.';
 
     case 'over-chars':
-      return zh()
-        ? `提示词 ${finding.count.toLocaleString()} 字符，超过 H3 的 ${finding.limit.toLocaleString()} 上限——超出部分会被截断。`
-        : `${finding.count.toLocaleString()} characters — H3 takes ${finding.limit.toLocaleString()}, and the rest is cut off.`;
+      return `${finding.count.toLocaleString()} characters — H3 takes ${finding.limit.toLocaleString()}, and the rest is cut off.`;
     case 'near-chars':
-      return zh()
-        ? `提示词 ${finding.count.toLocaleString()} 字符，接近 ${finding.limit.toLocaleString()} 上限。`
-        : `${finding.count.toLocaleString()} characters, close to the ${finding.limit.toLocaleString()} ceiling.`;
+      return `${finding.count.toLocaleString()} characters, close to the ${finding.limit.toLocaleString()} ceiling.`;
 
     case 'no-sections':
-      return zh()
-        ? '已附加参考，但提示词没有分节。参考模式下 H3 读的是六个字段，纯散文会让它自己猜谁是谁。'
-        : 'References are attached but the prompt has no sections. With references H3 reads six fields; loose prose leaves it guessing who is who.';
+      return 'References are attached but the prompt has no sections. With references H3 reads six fields; loose prose leaves it guessing who is who.';
     case 'partial-sections':
-      return zh()
-        ? `缺少字段：${finding.missing.map(sectionName).join('、')}。`
-        : `Missing: ${finding.missing.map(sectionName).join(', ')}.`;
+      return `Missing: ${finding.missing.map(sectionName).join(', ')}.`;
     case 'sections-out-of-order':
-      return zh()
-        ? 'H3 是按位置读这六个字段的——顺序乱了，摘要就成了对下文的摘要。'
-        : 'H3 reads the six fields positionally — out of order, the summary summarises nothing.';
+      return 'H3 reads the six fields positionally — out of order, the summary summarises nothing.';
     case 'empty-section':
-      return zh() ? `${sectionName(finding.section)} 是空的。` : `${sectionName(finding.section)} is empty.`;
+      return `${sectionName(finding.section)} is empty.`;
     case 'no-soundscape':
-      return zh()
-        ? '没有写 overall_soundscape。H3 会连声音一起生成，没说就由它自己发挥。'
-        : 'Nothing says what this sounds like. H3 renders the audio too — unsaid means invented.';
+      return 'Nothing says what this sounds like. H3 renders the audio too — unsaid means invented.';
 
     case 'shot-number':
-      return zh()
-        ? `第 ${finding.at} 个镜头标成了 [Shot ${finding.found}]，编号断了。`
-        : `The ${finding.at}${finding.at === 2 ? 'nd' : finding.at === 3 ? 'rd' : 'th'} marker says [Shot ${finding.found}] — the numbering skips.`;
+      return `The ${finding.at}${finding.at === 2 ? 'nd' : finding.at === 3 ? 'rd' : 'th'} marker says [Shot ${finding.found}] — the numbering skips.`;
     case 'cut-past-end':
-      return zh()
-        ? `[Shot ${finding.shot}] 的切点在 ${seconds(finding.cutSec)}，而这段只有 ${seconds(finding.duration)}——这个镜头不会出现。`
-        : `[Shot ${finding.shot}] cuts at ${seconds(finding.cutSec)} but the clip is ${seconds(finding.duration)} — that shot never happens.`;
+      return `[Shot ${finding.shot}] cuts at ${seconds(finding.cutSec)} but the clip is ${seconds(finding.duration)} — that shot never happens.`;
     case 'cut-out-of-order':
-      return zh()
-        ? `[Shot ${finding.shot}] 的切点 ${seconds(finding.cutSec)} 早于上一镜的 ${seconds(finding.previous)}。`
-        : `[Shot ${finding.shot}] cuts at ${seconds(finding.cutSec)}, before the previous shot's ${seconds(finding.previous)}.`;
+      return `[Shot ${finding.shot}] cuts at ${seconds(finding.cutSec)}, before the previous shot's ${seconds(finding.previous)}.`;
     case 'shot-no-cut':
-      return zh()
-        ? `[Shot ${finding.shot}] 没写切点时间，切在哪由模型自己决定。`
-        : `[Shot ${finding.shot}] has no timecode — where it cuts is the model's guess.`;
+      return `[Shot ${finding.shot}] has no timecode — where it cuts is the model's guess.`;
 
     case 'dialogue-unbalanced':
-      return zh()
-        ? `<d> 有 ${finding.opens} 个，</d> 有 ${finding.closes} 个——没闭合的台词会把后面的描述一起当成台词念出来。`
-        : `${finding.opens} <d> and ${finding.closes} </d> — an unclosed line makes the model speak the description after it.`;
+      return `${finding.opens} <d> and ${finding.closes} </d> — an unclosed line makes the model speak the description after it.`;
     case 'dialogue-no-language':
-      return zh()
-        ? `第 ${finding.index} 句台词没有语言标签（例如 [English]），口音由模型随机决定。`
-        : `Line ${finding.index} has no language tag (e.g. [English]) — the accent becomes the model's guess.`;
+      return `Line ${finding.index} has no language tag (e.g. [English]) — the accent becomes the model's guess.`;
     case 'dialogue-empty':
-      return zh() ? `第 ${finding.index} 个 <d> 里没有台词。` : `Line ${finding.index} has an empty <d> block.`;
+      return `Line ${finding.index} has an empty <d> block.`;
     case 'scenetrans-unpaired':
-      return zh()
-        ? `<scenetrans> 不成对：${finding.out} 句说要接下去，${finding.in} 句接得上。`
-        : `<scenetrans> is unpaired: ${finding.out} line(s) run on, ${finding.in} pick up.`;
+      return `<scenetrans> is unpaired: ${finding.out} line(s) run on, ${finding.in} pick up.`;
     case 'cutoff-not-last':
-      return zh()
-        ? `第 ${finding.index} 句带 <cutoff>，但它不是最后一句——这会让片子提前收在半句话上。`
-        : `Line ${finding.index} carries <cutoff> but is not the last line — the clip is being told to end mid-word early.`;
+      return `Line ${finding.index} carries <cutoff> but is not the last line — the clip is being told to end mid-word early.`;
     case 'speaker-ids-start':
-      return zh()
-        ? `说话人编号从 (S${finding.first}) 开始，应当从 (S1) 起，按出声先后编号。`
-        : `Speaker ids start at (S${finding.first}) — they number from (S1), in the order voices are first heard.`;
+      return `Speaker ids start at (S${finding.first}) — they number from (S1), in the order voices are first heard.`;
     case 'speaker-ids-skip':
-      return zh()
-        ? `说话人编号从 (S${finding.after}) 跳到 (S${finding.found})。`
-        : `Speaker ids jump from (S${finding.after}) to (S${finding.found}).`;
+      return `Speaker ids jump from (S${finding.after}) to (S${finding.found}).`;
 
     case 'tag-unbacked':
       if (!finding.attached) {
-        return zh()
-          ? `提示词里写了 ${finding.tag}，但这一类参考一个都没挂——这个标签会被忽略。`
-          : `The prompt names ${finding.tag} with none of that kind attached — the tag is ignored.`;
+        return `The prompt names ${finding.tag} with none of that kind attached — the tag is ignored.`;
       }
-      return zh()
-        ? `提示词里写了 ${finding.tag}，但只挂了 ${finding.attached} 个——这个标签会被忽略。`
-        : `The prompt names ${finding.tag} but only ${finding.attached} ${finding.attached === 1 ? 'is' : 'are'} attached — that tag is ignored.`;
+      return `The prompt names ${finding.tag} but only ${finding.attached} ${finding.attached === 1 ? 'is' : 'are'} attached — that tag is ignored.`;
     case 'placeholder-left': {
       const where = finding.where ? sectionName(finding.where) : '';
       // Each blank fails in its own way, so each says what the clip will do.
       if (finding.blank === 'Write the line you want spoken here') {
-        return zh()
-          ? '台词还是占位文字——模型会把「Write the line you want spoken here」原样念出来，用的正是克隆的声音。'
-          : 'The dialogue is still the placeholder — the model will read “Write the line you want spoken here” out loud, in the cloned voice.';
+        return 'The dialogue is still the placeholder — the model will read “Write the line you want spoken here” out loud, in the cloned voice.';
       }
       if (finding.blank === 'write it out') {
-        return zh()
-          ? `${where || '主体定义'} 里的第 1 位还是空白。H3 从文字里认人的程度不亚于从图片，所以描述里写的是谁，出来的就是谁——不是你挂的参考。`
-          : `The first person is still blank in ${where || 'who is in it'}. H3 takes identity from the words as much as from the pictures, so whoever the description describes is who you get — not the references you attached.`;
+        return `The first person is still blank in ${where || 'who is in it'}. H3 takes identity from the words as much as from the pictures, so whoever the description describes is who you get — not the references you attached.`;
       }
-      return zh()
-        ? `${where || '提示词'} 里还留着占位文字「${finding.blank}」，模型会照着它生成。`
-        : `${where || 'The prompt'} still carries the placeholder “${finding.blank}” — the model will act on it.`;
+      return `${where || 'The prompt'} still carries the placeholder “${finding.blank}” — the model will act on it.`;
     }
     case 'subject-not-in-scene':
-      return zh()
-        ? `第 ${finding.subject} 位已定义，但摘要和镜头描述里都没有出现——模型会自行决定这个位置上是谁。用「织入」或让助手把他们写进场景。`
-        : `Person ${finding.subject} is defined but never appears in the summary or description — the model decides who fills that slot. Weave, or ask the helper to write them into the scene.`;
+      return `Person ${finding.subject} is defined but never appears in the summary or description — the model decides who fills that slot. Weave, or ask the helper to write them into the scene.`;
     case 'pictures-unnamed':
-      return zh()
-        ? `挂了 ${finding.count} 张图片，但提示词里没有指认它们——模型不知道该拿它们做什么。`
-        : `${finding.count} picture${finding.count === 1 ? '' : 's'} attached, but the prompt never refers to them — the model is not told what to do with them.`;
+      return `${finding.count} picture${finding.count === 1 ? '' : 's'} attached, but the prompt never refers to them — the model is not told what to do with them.`;
     case 'motion-unnamed':
-      return zh()
-        ? `${finding.labels.join('、')} 没有在提示词里出现。`
-        : `${finding.labels.join(', ')} ${finding.labels.length === 1 ? 'is' : 'are'} never named in the prompt.`;
+      return `${finding.labels.join(', ')} ${finding.labels.length === 1 ? 'is' : 'are'} never named in the prompt.`;
     case 'motion-no-exclusion':
-      return zh()
-        ? '有图片也有动作片段，但没写清哪些东西不要从片段里带过来——片段里的人可能会顶替掉你的角色。'
-        : 'A picture and a motion clip, with nothing saying what must NOT carry from the clip — its performer can replace your character.';
+      return 'A picture and a motion clip, with nothing saying what must NOT carry from the clip — its performer can replace your character.';
 
     case 'voice-without-line':
-      return zh()
-        ? '挂了声音参考，但没有 <d> 台词——克隆出来的声音没有词可说，模型会自己编。'
-        : 'A voice reference with no <d> line — the cloned voice has nothing to say, so the model invents words.';
+      return 'A voice reference with no <d> line — the cloned voice has nothing to say, so the model invents words.';
     case 'unscripted-time':
-      return zh()
-        ? `台词约 ${finding.spoken}s，片长 ${finding.duration}s，还有约 ${finding.gap}s 没有交代——这段空白模型常拿来编话。`
-        : `About ${finding.spoken}s of speech in a ${finding.duration}s clip leaves ~${finding.gap}s unaccounted for — the model tends to fill it with invented speech.`;
+      return `About ${finding.spoken}s of speech in a ${finding.duration}s clip leaves ~${finding.gap}s unaccounted for — the model tends to fill it with invented speech.`;
     case 'overscripted-time':
-      return zh()
-        ? `台词约需 ${finding.spoken}s，但片长只有 ${seconds(finding.duration)}——模型不会加快，只会说不完。`
-        : `About ${finding.spoken}s of speech in a ${seconds(finding.duration)} clip — the model does not speed up, it runs out.`;
+      return `About ${finding.spoken}s of speech in a ${seconds(finding.duration)} clip — the model does not speed up, it runs out.`;
 
     default:
       return finding.code;
@@ -199,11 +133,11 @@ export function describeCheckFinding(finding) {
 export function checkSummaryText(result) {
   if (!result) return '';
   if (result.findings.length === 1 && result.findings[0].code === 'empty') {
-    return zh() ? '还没有提示词' : 'Nothing to check yet';
+    return 'Nothing to check yet';
   }
-  if (!result.findings.length) return zh() ? '未发现问题' : 'Nothing to flag';
+  if (!result.findings.length) return 'Nothing to flag';
   const bits = [];
-  if (result.errors) bits.push(zh() ? `${result.errors} 处会出错` : `${result.errors} will break`);
-  if (result.warnings) bits.push(zh() ? `${result.warnings} 处需留意` : `${result.warnings} worth a look`);
-  return bits.join(zh() ? '，' : ' · ');
+  if (result.errors) bits.push(`${result.errors} will break`);
+  if (result.warnings) bits.push(`${result.warnings} worth a look`);
+  return bits.join(' · ');
 }

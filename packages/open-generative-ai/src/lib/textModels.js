@@ -20,6 +20,7 @@
 // choice, the cost of a press, and the sentence each source is honest about.
 // Nothing here fetches a catalog of its own, so the picker cannot drift from
 // what will actually run.
+import { t } from './i18n.js';
 import { pref, setPrefs } from './prefs.js';
 import { formatBytes, modelStatus } from './promptHelperRuntime.js';
 
@@ -47,7 +48,7 @@ export const ALL = '';
 export const SECTIONS = Object.freeze([
   {
     id: LOCAL,
-    label: 'This machine',
+    label: t('place.thisMac'),
     blurb: 'Runs here. Free, private, and as fast as the hardware.',
     privacy: 'Everything it is told stays on this machine — it is a llama-server here, not a cloud model.',
   },
@@ -59,8 +60,8 @@ export const SECTIONS = Object.freeze([
   },
   {
     id: ACCOUNTS,
-    label: 'Your accounts',
-    blurb: 'Billed by the provider to accounts you already pay for. No HivemindOS credits spent.',
+    label: t('place.accounts'),
+    blurb: t('place.accountsBlurb'),
     privacy: 'The story is sent straight to the provider you picked and billed to your own account there. It does not pass through HivemindOS.',
   },
 ]);
@@ -456,26 +457,26 @@ export function privacyLine(row) {
  * after a press has already been spent.
  */
 export const REMEDIES = Object.freeze({
-  'add-local-model': { label: 'Open Models', action: 'models' },
-  'link-hivemindos': { label: 'Open HivemindOS', action: 'open' },
-  'open-hivemindos': { label: 'Open HivemindOS', action: 'open' },
+  'add-local-model': { label: t('common.openModels'), action: 'models' },
+  'link-hivemindos': { label: t('failure.openHivemindos'), action: 'open' },
+  'open-hivemindos': { label: t('failure.openHivemindos'), action: 'open' },
   // Adding credits is two different acts: with the app running it belongs there,
   // so the machine keeps one balance; without it the studio opens the checkout
   // itself, because "go and install HivemindOS first" is not an answer for
   // someone who does not have it.
-  'top-up': { label: 'Add credits', action: 'top-up' },
+  'top-up': { label: t('failure.addCredits'), action: 'top-up' },
   // The answer for a studio with no app: the owner's HivemindOS account key,
   // which spends the balance they already have. Buying a second one is the
   // fallback for someone who has never had HivemindOS credits at all.
-  'connect-account': { label: 'Connect account', action: 'connect' },
+  'connect-account': { label: t('failure.connectAccount'), action: 'connect' },
   // The restore and SAM3 capability payloads say `connect` for the same act.
   // One vocabulary reaching two spellings is cheaper than a server migration
   // that would silently drop the button on any client that has not shipped yet.
-  connect: { label: 'Connect account', action: 'connect' },
+  connect: { label: t('failure.connectAccount'), action: 'connect' },
   // No provider account connected at all. Points at the section rather than at
   // one provider, because which one to connect is the owner's choice.
-  'connect-provider': { label: 'Connect an account', action: 'accounts' },
-  retry: { label: 'Try again', action: 'refresh' },
+  'connect-provider': { label: t('failure.connectProvider'), action: 'accounts' },
+  retry: { label: t('common.tryAgain'), action: 'refresh' },
 });
 
 /**
@@ -490,10 +491,10 @@ export const REMEDIES = Object.freeze({
 export function remedyFor(remedy) {
   const value = String(remedy || '');
   if (value.startsWith('key:')) {
-    return { label: 'Add key', action: 'key', key: value.slice(4) };
+    return { label: t('failure.addKey'), action: 'key', key: value.slice(4) };
   }
   if (value.startsWith('oauth:')) {
-    return { label: 'Sign in', action: 'oauth', provider: value.slice(6) };
+    return { label: t('failure.signIn'), action: 'oauth', provider: value.slice(6) };
   }
   return REMEDIES[value] || null;
 }

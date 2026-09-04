@@ -12,10 +12,9 @@
 // handed in rather than guessed at.
 import toast from 'react-hot-toast';
 
+import { t } from './i18n.js';
 import { startCreditTopUp } from './localProducer.js';
 import { startOAuthLogin } from './providerReadiness.js';
-import { zh } from './i18n.js';
-
 function openPage(page) {
   try {
     window.dispatchEvent(new CustomEvent('navigate', { detail: { page } }));
@@ -43,9 +42,7 @@ export async function runFailureRemedy(remedy, handlers = {}) {
   if (action === 'oauth') {
     try {
       window.open(await startOAuthLogin(String(remedy?.provider || '')), '_blank', 'noopener,noreferrer');
-      toast(zh()
-        ? '在打开的标签页中完成登录，然后按“重试”。'
-        : 'Finish the sign-in in the tab that opened, then press Try again.', { duration: 10000 });
+      toast(t('failure.finishSignIn'), { duration: 10000 });
     } catch {
       // The sign-in could not even be started — the Providers page is where the
       // connection lives, so send them there rather than repeating the failure.
@@ -58,9 +55,7 @@ export async function runFailureRemedy(remedy, handlers = {}) {
       const { checkoutUrl } = await startCreditTopUp();
       if (!checkoutUrl) throw new Error('no checkout');
       window.open(checkoutUrl, '_blank', 'noopener,noreferrer');
-      toast(zh()
-        ? '在打开的标签页中完成付款，然后按“重试”。'
-        : 'Finish the checkout in the tab that opened, then press Try again.', { duration: 10000 });
+      toast(t('failure.finishCheckout'), { duration: 10000 });
     } catch {
       openPage('providers');
     }

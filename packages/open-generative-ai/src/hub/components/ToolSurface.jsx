@@ -6,7 +6,6 @@
 // module-singleton owner/lock/bridge plumbing can reach it. Reload re-arms only
 // the iframe, never the React tree.
 import { useCallback, useEffect, useState } from 'react';
-import { zh } from '../../lib/i18n.js';
 import { Button, EmptyState, IconButton, Spinner } from '../../ui/kit.jsx';
 import { registerToolSurfaceFrame, reloadToolSurface, toolSurfaceUrl } from '../hubData.js';
 import { HubToolbar } from './HubToolbar.jsx';
@@ -52,8 +51,8 @@ export function ToolSurface({ name, title, kicker, active }) {
         title={title}
         right={
           <>
-            <IconButton icon="external" label={zh() ? '在新标签页打开' : 'Open in a new tab'} onClick={openExternal} />
-            <IconButton icon="refresh" label={zh() ? `重新加载${title}` : `Reload ${title}`} onClick={reload} />
+            <IconButton icon="external" label="Open in a new tab" onClick={openExternal} />
+            <IconButton icon="refresh" label={`Reload ${title}`} onClick={reload} />
           </>
         }
       />
@@ -71,14 +70,12 @@ export function ToolSurface({ name, title, kicker, active }) {
             <div className="absolute inset-0 grid place-items-center bg-bg0">
               <EmptyState
                 icon="warning"
-                title={zh() ? `${title}未能启动` : `${title} did not start`}
-                hint={zh()
-                  ? '媒体网关没有响应。重新加载，或在新标签页中打开以查看浏览器的说明。'
-                  : 'The media gateway did not answer. Reload, or open it in a new tab to see what the browser says.'}
+                title={`${title} did not start`}
+                hint="The media gateway did not answer. Reload, or open it in a new tab to see what the browser says."
                 action={(
                   <div className="flex flex-wrap justify-center gap-2">
-                    <Button variant="primary" icon="refresh" onClick={reload}>{zh() ? '重新加载' : 'Reload'}</Button>
-                    <Button icon="external" onClick={openExternal}>{zh() ? '在新标签页打开' : 'Open in a new tab'}</Button>
+                    <Button variant="primary" icon="refresh" onClick={reload}>Reload</Button>
+                    <Button icon="external" onClick={openExternal}>Open in a new tab</Button>
                   </div>
                 )}
               />
@@ -87,7 +84,7 @@ export function ToolSurface({ name, title, kicker, active }) {
             <div className="pointer-events-none absolute inset-0 grid place-items-center bg-bg0">
               <div className="flex flex-col items-center gap-3 text-ink3">
                 <Spinner size={20} className="text-honey" />
-                <span className="text-xs">{zh() ? `正在启动${title}…` : `Starting ${title}…`}</span>
+                <span className="text-xs">{`Starting ${title}…`}</span>
               </div>
             </div>
           )

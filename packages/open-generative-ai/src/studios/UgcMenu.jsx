@@ -10,7 +10,6 @@
 //
 // UI pattern follows CameraMotionMenu (ChipButton + Menu popover); the cast bank
 // and the block composers live in src/lib/ugcMode.js.
-import { zh } from '../lib/i18n.js';
 import { ugcClock, ugcTimeline, ugcVariantAt } from '../lib/ugcMode.js';
 import { ChipButton, Menu } from '../ui/Menu.jsx';
 import { cx } from '../ui/kit.jsx';
@@ -65,12 +64,10 @@ export function UgcMenu({
           // persona, not camera: the Video composer's Camera chip wears the
           // camera glyph, and two of them sat side by side on H3.
           icon="persona"
-          label={armed ? `UGC · ${zh() ? '第' : 'cast '}${cast.index + 1}` : 'UGC'}
+          label={armed ? `UGC · ${'cast '}${cast.index + 1}` : 'UGC'}
           active={open || armed}
           onClick={toggle}
-          title={zh()
-            ? '真人自拍风格 UGC 模式：每次重新发牌都会换人物、房间、光线与小动作'
-            : 'Phone-selfie UGC mode — every deal is a different person, room, light and beat set'}
+          title="Phone-selfie UGC mode — every deal is a different person, room, light and beat set"
         />
       )}
     >
@@ -78,26 +75,22 @@ export function UgcMenu({
         <div className="flex flex-col gap-2">
           <p className="text-[11px] leading-relaxed text-ink2">
             {video
-              ? (zh()
-                ? '写入一段可见的 UGC 提要：人物、房间、具名光源、手机麦克风音轨，以及按当前时长计算的 钩子/正文/CTA 时间轴。'
-                : 'Writes a visible UGC brief into the prompt — cast, room, a named light source, phone-mic audio, and a hook / body / CTA timeline sized to this clip.')
-              : (zh()
-                ? '写入首帧真实感堆叠：真实皮肤纹理、具名光源、有生活痕迹的背景、9:16。'
-                : 'Writes the first-frame realism stack — real skin texture, a named light source, a lived-in background, 9:16.')}
+              ? 'Writes a visible UGC brief into the prompt — cast, room, a named light source, phone-mic audio, and a hook / body / CTA timeline sized to this clip.'
+              : 'Writes the first-frame realism stack — real skin texture, a named light source, a lived-in background, 9:16.'}
           </p>
 
           <div className="flex flex-col gap-1 rounded-md border border-line1 bg-bg0 px-2 py-2">
             <div className="pb-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink3">
               {armed
-                ? `${zh() ? '当前阵容' : 'Cast'} ${cast.index + 1}`
-                : (zh() ? '下一组阵容' : 'Next cast')}
+                ? `${'Cast'} ${cast.index + 1}`
+                : 'Next cast'}
             </div>
-            <CastRow label={zh() ? '人物' : 'Who'}>{subject || cast.person}</CastRow>
-            <CastRow label={zh() ? '场景' : 'Where'}>
+            <CastRow label="Who">{subject || cast.person}</CastRow>
+            <CastRow label="Where">
               {cast.room.place}, {cast.room.light}. {cast.room.detail}
             </CastRow>
-            <CastRow label={zh() ? '声音' : 'Sound'}>{cast.room.sound}</CastRow>
-            <CastRow label={zh() ? '动作' : 'Beats'}>{cast.beats.join('; ')}</CastRow>
+            <CastRow label="Sound">{cast.room.sound}</CastRow>
+            <CastRow label="Beats">{cast.beats.join('; ')}</CastRow>
           </div>
 
           {video ? (
@@ -112,10 +105,8 @@ export function UgcMenu({
               <span className="text-ink3">
                 {' '}
                 {timeline.hasBody
-                  ? (zh() ? '钩子 · 正文 · CTA' : 'hook · body · CTA')
-                  : (zh()
-                    ? '钩子 · CTA — 这个时长放不下正文，调长一点'
-                    : 'hook · CTA — too short for a body beat, lengthen the clip')}
+                  ? 'hook · body · CTA'
+                  : 'hook · CTA — too short for a body beat, lengthen the clip'}
               </span>
             </div>
           ) : null}
@@ -123,14 +114,10 @@ export function UgcMenu({
           {armed ? (
             <p className="text-[11px] leading-relaxed text-ink3">
               {video
-                ? (zh()
-                  ? '在 HOOK / BODY / CTA 三行的 ⟨…⟩ 处写下你的台词，然后交给提示词助手改写成目标模型格式。重新发牌会保留台词。'
-                  : (subject
+                ? (subject
                     ? 'Write your three lines where the ⟨…⟩ marks are — the brief is already shaped the way the model reads it, with the first person bound to your pictures and your lines as their dialogue. Re-dealing keeps your lines and changes the room, light and beats.'
-                    : 'Write your three lines where the ⟨…⟩ marks are, then hand it to the prompt helper to render into the model\'s format. Re-dealing keeps your lines.'))
-                : (zh()
-                  ? '这段可直接用作首帧提示词。'
-                  : 'This is usable as the first-frame prompt as it stands.')}
+                    : 'Write your three lines where the ⟨…⟩ marks are, then hand it to the prompt helper to render into the model\'s format. Re-dealing keeps your lines.')
+                : 'This is usable as the first-frame prompt as it stands.'}
             </p>
           ) : null}
 
@@ -141,26 +128,26 @@ export function UgcMenu({
               className="rounded-sm border border-honey/50 bg-honey-tint px-2 py-1 text-[11px] font-semibold text-honey transition-colors hover:border-honey"
             >
               {armed
-                ? (zh() ? '换一组阵容' : 'Deal a new cast')
-                : (zh() ? '开启 UGC 模式' : 'Turn on UGC mode')}
+                ? 'Deal a new cast'
+                : 'Turn on UGC mode'}
             </button>
             {armed ? (
               <button
                 type="button"
                 onClick={() => { onArm?.(null); close(); }}
-                title={zh() ? '从提示词中移除 UGC 段落' : 'Remove the UGC block from the prompt'}
+                title="Remove the UGC block from the prompt"
                 className={cx(
                   'rounded-sm border border-line1 bg-bg1 px-2 py-1 text-[11px] font-semibold',
                   'text-ink1 transition-colors hover:border-line2',
                 )}
               >
-                {zh() ? '关闭' : 'Turn off'}
+                Turn off
               </button>
             ) : null}
             <span className="ml-auto pr-1 text-[10px] text-ink3">
               {verticalAvailable
-                ? (zh() ? '同时切到 9:16' : 'also sets 9:16')
-                : (zh() ? '此模型无 9:16' : 'no 9:16 on this model')}
+                ? 'also sets 9:16'
+                : 'no 9:16 on this model'}
             </span>
           </div>
         </div>

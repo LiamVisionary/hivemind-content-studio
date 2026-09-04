@@ -115,8 +115,12 @@ were pill-soup become `ChipButton`+`Menu` groups with clear labels and current-v
 2. Every fetch route, storage key, window event, postMessage type, and payload shape in your area's
    spec (`specs/*.json`) survives verbatim. Media `<img>/<video>` srcs go through
    `useMediaSrc` (wraps `resolveMediaSrc`) so E2E-encrypted media keeps decrypting client-side.
-3. i18n: keep every `t()`/`tf()` key and `zh()` ternary. New strings you introduce: English + add
-   the same inline `zh()` pattern where surrounding code does. `setLang` keeps its reload behavior.
+3. i18n: there is ONE mechanism and it is `t('key')` (`tf` for the few that interpolate), reading
+   `STRINGS` in `src/lib/i18n.js` — one flat namespaced table ordered by surface. The `zh()`
+   ternary, the `zh` boolean prop and the local `t(en, cn)` helper are all gone; do not bring any
+   of them back. A word two surfaces say lives under ONE key (`common.*`) — `tests/keyTable.test.js`
+   fails on two keys with the same value. `setLang` keeps its reload behavior, and a second
+   language means a second table beside `STRINGS`, never a branch at a call site.
 4. Studios mount once on first visit and are display-toggled after that, so an in-flight
    generation survives a page switch; re-clicking the active tab is a no-op; hub views stay
    mounted forever once visited (iframes must never reload on tab switch).

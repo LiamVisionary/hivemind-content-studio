@@ -11,7 +11,6 @@
 import { useSyncExternalStore } from 'react';
 
 import { formatElapsed } from '../../lib/genProgress.js';
-import { zh } from '../../lib/i18n.js';
 import { Card, ProgressBar } from '../../ui/kit.jsx';
 
 const EMPTY = { pct: 0, startedAt: 0, estimateSec: 0, label: '' };
@@ -43,7 +42,7 @@ export function GenerationProgressCard({ store, heading, fallbackLabel }) {
         <span className="text-xs font-semibold text-ink2">{heading}</span>
         <span className="font-mono text-xs font-semibold text-honey">{Math.round(pct * 100)}%</span>
       </div>
-      <ProgressBar value={pct} label={zh() ? '生成进度' : 'Generation progress'} />
+      <ProgressBar value={pct} label="Generation progress" />
       <div className="flex items-center justify-between gap-3 font-mono text-[11px] text-ink3">
         {/* The bridge's status text lives here, not on the Generate button. */}
         <span className="min-w-0 truncate">{progress.label || fallbackLabel}</span>

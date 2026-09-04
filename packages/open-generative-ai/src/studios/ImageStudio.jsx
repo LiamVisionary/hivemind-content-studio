@@ -47,7 +47,7 @@ import {
 import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
-import { t, zh } from '../lib/i18n.js';
+import { t } from '../lib/i18n.js';
 import {
   savePendingJob, removePendingJob, getPendingJobs, pendingJobsForTab,
 } from '../lib/pendingJobs.js';
@@ -1935,7 +1935,7 @@ export function ImageStudio({
     s.generateError = '';
     s.generateFailure = null;
     bump();
-    toast(zh() ? '已取消生成。' : 'Generation cancelled.');
+    toast('Generation cancelled.');
   };
 
   /**
@@ -1948,13 +1948,13 @@ export function ImageStudio({
   const failGeneration = (error, transport) => {
     const failure = describeFailure(error, {
       transport,
-      operation: zh() ? '生成' : 'Generation',
+      operation: 'Generation',
       // Only the local lane has a size dial to step down; a cloud model's
       // "Lower resolution" would point at a control this screen does not own.
       canLowerResolution: transport === 'local' && LOCAL_BASE_SIZES.some((size) => size && size < (s.baseSize || 1280)),
     });
     s.generateFailure = failure;
-    s.generateError = failure.title || (zh() ? '生成失败' : 'Generation failed');
+    s.generateError = failure.title || 'Generation failed';
   };
 
   /** Step the local short side down one tier — what "Lower resolution" means. */
@@ -1968,7 +1968,7 @@ export function ImageStudio({
     s.generateError = '';
     s.generateFailure = null;
     bump();
-    toast(zh() ? `分辨率已降到 ${next} 短边。` : `Resolution lowered to a ${next}px short side.`);
+    toast(`Resolution lowered to a ${next}px short side.`);
   };
 
   const generateNow = async () => {
@@ -2738,15 +2738,15 @@ export function ImageStudio({
   );
   const localBlockedReason = localBlocked
     ? (s.localCatalogStatus === 'empty'
-      ? (zh() ? '这台机器上尚未安装图像模型——打开“模型”安装一个，或改用云端。' : 'No image model is installed on this machine yet — open Models to install one, or switch the source to Cloud.')
-      : (zh() ? '本地引擎正在启动——它响应后即可生成，或改用云端。' : 'The local engine is starting — generate as soon as it answers, or switch the source to Cloud.'))
+      ? 'No image model is installed on this machine yet — open Models to install one, or switch the source to Cloud.'
+      : 'The local engine is starting — generate as soon as it answers, or switch the source to Cloud.')
     : '';
   // The studio itself is down: every lane below it is moot, so the press is
   // greyed out with that reason rather than failing one provider at a time.
   // The banner above the canvas (StudioLayout) carries the fix.
   const offlineBlocked = apiStatus.tone === 'offline';
   const offlineReason = offlineBlocked
-    ? (zh() ? '工作室没有运行——重新启动后即可生成。' : 'The studio is not running — start it again to generate.')
+    ? 'The studio is not running — start it again to generate.'
     : '';
   const generateBlocked = rentedBlocked || localBlocked || offlineBlocked;
   // Edit workflows (requires.image) take their ASPECT from the reference on the
@@ -3079,7 +3079,7 @@ export function ImageStudio({
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
-      <StudioLayout panel={panel} panelTitle={zh() ? '图像设置' : 'Image settings'} composer={composer} composerDrop={composerDrop}>
+      <StudioLayout panel={panel} panelTitle="Image settings" composer={composer} composerDrop={composerDrop}>
         <div className="flex flex-col gap-4 p-4 md:p-5">
           {/* The last failure stays on the canvas until dismissed or the next
               run — one sentence, the button that repairs it, and the raw text
@@ -3096,10 +3096,10 @@ export function ImageStudio({
               })}
               onRetry={generate}
               retryDisabled={s.generating || generateBlocked}
-              retryLabel={zh() ? '重试' : 'Try again'}
-              detailsLabel={zh() ? '详情' : 'Details'}
+              retryLabel="Try again"
+              detailsLabel="Details"
               onDismiss={() => { s.generateError = ''; s.generateFailure = null; bump(); }}
-              dismissLabel={zh() ? '关闭' : 'Dismiss'}
+              dismissLabel="Dismiss"
             />
           ) : null}
 
@@ -3114,10 +3114,8 @@ export function ImageStudio({
           {s.history.length === 0 && !s.generating ? (
             <EmptyState
               icon="image"
-              title={zh() ? '还没有图像' : 'Nothing here yet'}
-              hint={zh()
-                ? '在下方输入提示词并点击生成。之前的作品都在作品库里。'
-                : 'Describe the image below and press Generate. Everything you have made before is in the Library.'}
+              title="Nothing here yet"
+              hint="Describe the image below and press Generate. Everything you have made before is in the Library."
               action={(
                 <Button
                   size="sm"
@@ -3125,7 +3123,7 @@ export function ImageStudio({
                   icon="history"
                   onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'history' } }))}
                 >
-                  {zh() ? '打开作品库' : 'Open Library'}
+                  Open Library
                 </Button>
               )}
               className="flex-1"

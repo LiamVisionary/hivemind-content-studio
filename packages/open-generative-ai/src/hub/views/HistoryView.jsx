@@ -14,7 +14,6 @@ import { registerMediaDownloadName } from '../../lib/e2eMedia.js';
 import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { downloadMedia } from '../../lib/downloadMedia.js';
 import { basenameOf } from '../../lib/generationSetupStore.js';
-import { zh } from '../../lib/i18n.js';
 import { requestVaultUnlock } from '../../lib/vaultSession.js';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import { Icon } from '../../ui/icons.jsx';
@@ -31,10 +30,10 @@ import { Lightbox } from '../components/Lightbox.jsx';
 import { MediaThumb, VaultLockedTile } from '../components/MediaThumb.jsx';
 
 const FILTERS = () => [
-  { value: '', label: zh() ? '全部' : 'All' },
-  { value: 'prompts', label: zh() ? '提示词' : 'Prompts' },
-  { value: 'canvas', label: zh() ? '输出' : 'Outputs' },
-  { value: 'favorites', label: zh() ? '收藏' : 'Favorites' },
+  { value: '', label: 'All' },
+  { value: 'prompts', label: 'Prompts' },
+  { value: 'canvas', label: 'Outputs' },
+  { value: 'favorites', label: 'Favorites' },
 ];
 
 function useOnVisible(cb, { once = false, rootMargin = '0px', resetKey } = {}) {
@@ -120,10 +119,10 @@ function CanvasVideo({ url }) {
       type="button"
       onClick={() => { openedVideos.add(url); setLoad(true); }}
       className="flex h-full w-full flex-col items-center justify-center gap-1.5 text-ink3 transition-colors hover:text-ink1"
-      aria-label={zh() ? '加载加密视频预览' : 'Load encrypted video preview'}
+      aria-label="Load encrypted video preview"
     >
       <Icon name="play" size={22} />
-      <b className="text-[11px] font-semibold">{zh() ? '加载视频' : 'Load video'}</b>
+      <b className="text-[11px] font-semibold">Load video</b>
     </button>
   );
 }
@@ -153,7 +152,7 @@ function HistoryMenu({ items }) {
         <button
           type="button"
           onClick={toggle}
-          aria-label={zh() ? '操作' : 'Actions'}
+          aria-label="Actions"
           aria-expanded={open}
           className={cx(
             'grid h-7 w-7 place-items-center rounded-md transition-colors',
@@ -183,7 +182,7 @@ function HistoryMenu({ items }) {
 // so "Canvas output" on every card was wrong for most of them.
 function outputKindLabel(entry) {
   const isVideo = entry.media_type?.startsWith('video/');
-  const kind = isVideo ? (zh() ? '视频' : 'Video') : (zh() ? '图像' : 'Image');
+  const kind = isVideo ? 'Video' : 'Image';
   const model = entry.models?.[0];
   return model ? `${kind} · ${model}` : kind;
 }
@@ -211,7 +210,7 @@ const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
   // The title already names the first model; the detail line carries the seed
   // (or the other models), and a plain "—" when nothing is known.
   const detail = entry.seeds?.length
-    ? `${zh() ? '种子' : 'seed'} ${entry.seeds.join(', ')}`
+    ? `${'seed'} ${entry.seeds.join(', ')}`
     : known ? (entry.models.length > 1 ? entry.models.slice(1).join(', ') : '') : canvasEntryModelLabel(entry);
 
   return (
@@ -220,13 +219,13 @@ const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
       <div className="absolute right-2 top-2 z-10 rounded-md bg-bg1/80 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
         <HistoryMenu
           items={[
-            { label: zh() ? '在工作室中打开' : 'Load in Studio', icon: 'sparkles', onClick: () => loadCanvasOutputInStudio(entry.history_id) },
-            { label: zh() ? '在 Canvas 中打开' : 'Load in Canvas', icon: 'nodes', onClick: () => loadCanvasOutputInCanvas(entry.history_id) },
+            { label: 'Load in Studio', icon: 'sparkles', onClick: () => loadCanvasOutputInStudio(entry.history_id) },
+            { label: 'Load in Canvas', icon: 'nodes', onClick: () => loadCanvasOutputInCanvas(entry.history_id) },
             // The players carry controlsList="nodownload", so this is the ONLY way
             // to save from History — and it is the one that names the file properly.
             { label: 'Download', icon: 'download', onClick: () => void downloadMedia(entry.media_url, downloadName) },
-            { label: zh() ? '复制提示词' : 'Copy prompt', icon: 'copy', onClick: () => copyCanvasPrompt(entry.history_id) },
-            { label: zh() ? '删除' : 'Delete', icon: 'trash', danger: true, onClick: () => onDelete(entry) },
+            { label: 'Copy prompt', icon: 'copy', onClick: () => copyCanvasPrompt(entry.history_id) },
+            { label: 'Delete', icon: 'trash', danger: true, onClick: () => onDelete(entry) },
           ]}
         />
       </div>
@@ -237,7 +236,7 @@ const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
           <button
             type="button"
             onClick={() => onPreview(entry)}
-            aria-label={zh() ? '打开预览' : 'Open preview'}
+            aria-label="Open preview"
             className="block h-full w-full cursor-zoom-in"
           >
             <MediaThumb url={entry.media_url} alt={kindLabel} className="h-full w-full" />
@@ -253,7 +252,7 @@ const CanvasCard = memo(function CanvasCard({ entry, onDelete, onPreview }) {
         <div className="mt-1 flex items-center gap-1.5">
           {entry.file_format ? <Pill tone="neutral" className="h-5 px-2 text-[10px]">{(entry.file_format || '').toUpperCase()}</Pill> : null}
           <Pill tone={entry.encrypted_at_rest ? 'honey' : 'neutral'} className="h-5 px-2 text-[10px]">
-            {entry.encrypted_at_rest ? (zh() ? '静态加密' : 'Encrypted at rest') : (zh() ? '私有输出' : 'Private output')}
+            {entry.encrypted_at_rest ? 'Encrypted at rest' : 'Private output'}
           </Pill>
         </div>
       </div>
@@ -281,7 +280,7 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
         <button
           type="button"
           onClick={() => setPromptFavorite(entry.prompt_id, !entry.favorite)}
-          aria-label={entry.favorite ? (zh() ? '取消收藏' : 'Remove from favorites') : (zh() ? '加入收藏' : 'Add to favorites')}
+          aria-label={entry.favorite ? 'Remove from favorites' : 'Add to favorites'}
           aria-pressed={entry.favorite}
           className={cx('grid h-7 w-7 shrink-0 place-items-center rounded-md transition-colors', entry.favorite ? 'text-honey' : 'text-ink3 hover:text-ink1')}
         >
@@ -291,7 +290,7 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
             <Icon name="lock" size={14} className="shrink-0 text-honey" />
             <p className="min-w-0 text-[13px] leading-relaxed text-ink2">
-              {zh() ? '这条提示词已加密 — 解锁保险库即可查看。' : 'Sealed prompt — unlock your vault to read it.'}
+              Sealed prompt — unlock your vault to read it.
             </p>
             <button
               type="button"
@@ -299,7 +298,7 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
               className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-honey/50 bg-honey-tint px-2.5 text-[11px] font-semibold text-honey transition-colors hover:border-honey"
             >
               <Icon name="unlock" size={13} />
-              {zh() ? '解锁' : 'Unlock'}
+              Unlock
             </button>
           </div>
         ) : (
@@ -311,16 +310,16 @@ const PromptCard = memo(function PromptCard({ entry, onDelete }) {
             // sentence, not the prompt — so those doors stay shut until it opens.
             ...(sealed ? [] : [
               // Lands in the Planner composer (not a studio) — say so.
-              { label: zh() ? '在规划器中使用' : 'Use in Planner', icon: 'sparkles', onClick: usePrompt },
-              { label: zh() ? '复制提示词' : 'Copy prompt', icon: 'copy', onClick: () => copyText(entry.prompt) },
+              { label: 'Use in Planner', icon: 'sparkles', onClick: usePrompt },
+              { label: 'Copy prompt', icon: 'copy', onClick: () => copyText(entry.prompt) },
             ]),
-            { label: zh() ? '删除' : 'Delete', icon: 'trash', danger: true, onClick: () => onDelete(entry) },
+            { label: 'Delete', icon: 'trash', danger: true, onClick: () => onDelete(entry) },
           ]}
         />
       </div>
       {entry.user_prompt && entry.user_prompt !== entry.prompt ? (
         <details className="pl-9 text-xs text-ink3">
-          <summary className="cursor-pointer select-none">{zh() ? '你的原始措辞' : 'Your original wording'}</summary>
+          <summary className="cursor-pointer select-none">Your original wording</summary>
           <p className="mt-1 leading-relaxed text-ink2">{entry.user_prompt}</p>
         </details>
       ) : null}
@@ -410,11 +409,11 @@ export function HistoryView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker={zh() ? '私有存档' : 'Private archive'} title={zh() ? '作品库' : 'Library'}>
+      <HubToolbar kicker="Private archive" title="Library">
         {refreshing ? <Spinner size={14} className="text-honey" /> : null}
         {s.apiOnline === false ? (
-          <Pill tone="warn" dot title={zh() ? '工作室未响应上一次轮询' : 'The studio did not answer the latest poll'}>
-            {zh() ? '离线 · 显示上次读取' : 'Offline · showing the last reading'}
+          <Pill tone="warn" dot title="The studio did not answer the latest poll">
+            Offline · showing the last reading
           </Pill>
         ) : null}
         <div className="relative min-w-[200px]">
@@ -423,8 +422,8 @@ export function HistoryView({ active }) {
             type="search"
             value={s.historyQuery}
             onChange={(e) => setHistoryQuery(e.target.value)}
-            placeholder={zh() ? '筛选提示词和输出' : 'Filter prompts and outputs'}
-            aria-label={zh() ? '筛选提示词和输出' : 'Filter prompts and outputs'}
+            placeholder="Filter prompts and outputs"
+            aria-label="Filter prompts and outputs"
             className="pl-8 text-xs"
           />
         </div>
@@ -432,21 +431,21 @@ export function HistoryView({ active }) {
         {showCanvas ? (
           <div className="flex items-center gap-2">
             <NativeSelect
-              aria-label={zh() ? '格式' : 'Format'}
+              aria-label="Format"
               className="min-w-[7.5rem]"
               value={s.canvasFormat}
               onChange={(e) => setCanvasFilters({ format: e.target.value })}
             >
-              <option value="">{zh() ? '所有格式' : 'All formats'}</option>
+              <option value="">All formats</option>
               {s.canvasFormats.map((format) => <option key={format} value={format}>{format}</option>)}
             </NativeSelect>
             <NativeSelect
-              aria-label={zh() ? '模型' : 'Model'}
+              aria-label="Model"
               className="min-w-[8.5rem]"
               value={s.canvasModel}
               onChange={(e) => setCanvasFilters({ model: e.target.value })}
             >
-              <option value="">{zh() ? '所有模型' : 'All models'}</option>
+              <option value="">All models</option>
               {s.canvasModels.map((model) => <option key={model} value={model}>{model}</option>)}
             </NativeSelect>
           </div>
@@ -455,23 +454,21 @@ export function HistoryView({ active }) {
 
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         <p className="mb-4 text-[11px] leading-relaxed text-ink3">
-          {zh()
-            ? '这里的一切都保留在这台机器上并静态加密。输出来自各工作室和 Canvas；在规划器中规划的制作位于「运行」下。'
-            : 'Everything here stays on this machine, encrypted at rest. Outputs come from the studios and Canvas · productions planned in the Planner live under Runs.'}
+          Everything here stays on this machine, encrypted at rest. Outputs come from the studios and Canvas · productions planned in the Planner live under Runs.
         </p>
 
         <div className="flex flex-col gap-6">
           {showCanvas ? (
             !s.historyLoaded && !hasData ? (
               <section className="flex flex-col gap-3">
-                <GroupHeading kicker={zh() ? '工作室与 Canvas' : 'Studios & Canvas'} title={zh() ? '输出' : 'Outputs'} />
+                <GroupHeading kicker="Studios & Canvas" title="Outputs" />
                 <SkeletonGrid />
               </section>
             ) : outputs.length ? (
               <section className="flex flex-col gap-3">
                 <GroupHeading
-                  kicker={zh() ? '工作室与 Canvas' : 'Studios & Canvas'}
-                  title={zh() ? '输出' : 'Outputs'}
+                  kicker="Studios & Canvas"
+                  title="Outputs"
                   right={filtering ? `${outputs.length} of ${s.canvasHistory.length}` : `${s.canvasHistory.length} of ${s.canvasTotal}`}
                 />
                 <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
@@ -483,7 +480,7 @@ export function HistoryView({ active }) {
                 </div>
                 {s.canvasHasMore && !filtering ? (
                   <div ref={sentinelRef} className="flex min-h-[1.5rem] items-center justify-center gap-2 py-4 text-xs text-ink3" aria-live="polite">
-                    {s.canvasLoading ? <><Spinner size={14} className="text-honey" /> {zh() ? '正在加载更多输出…' : 'Loading more outputs…'}</> : null}
+                    {s.canvasLoading ? <><Spinner size={14} className="text-honey" /> Loading more outputs…</> : null}
                   </div>
                 ) : null}
               </section>
@@ -491,11 +488,11 @@ export function HistoryView({ active }) {
               <EmptyState
                 icon="grid"
                 title={filtering
-                  ? (zh() ? '没有匹配的输出' : 'No outputs match')
-                  : (zh() ? '还没有输出' : 'No outputs yet')}
+                  ? 'No outputs match'
+                  : 'No outputs yet'}
                 hint={filtering
-                  ? (zh() ? '换一个词，或清空筛选。' : 'Try another word, or clear the filter.')
-                  : (zh() ? '去任一工作室生成一些内容，它会出现在这里。' : 'Generate something in a studio and it appears here.')}
+                  ? 'Try another word, or clear the filter.'
+                  : 'Generate something in a studio and it appears here.'}
               />
             )
           ) : null}
@@ -504,7 +501,7 @@ export function HistoryView({ active }) {
             !s.historyLoaded && !hasData ? (
               s.historyFilter ? (
                 <section className="flex flex-col gap-3" aria-busy="true">
-                  <GroupHeading kicker={zh() ? '提示词库' : 'Prompt library'} title={zh() ? '正在加载…' : 'Loading…'} />
+                  <GroupHeading kicker="Prompt library" title="Loading…" />
                   <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
                     {Array.from({ length: 4 }, (_, i) => <div key={i} className="h-24 animate-pulse rounded-lg border border-line1 bg-bg2" />)}
                   </div>
@@ -513,8 +510,8 @@ export function HistoryView({ active }) {
             ) : prompts.length ? (
               <section className="flex flex-col gap-3">
                 <GroupHeading
-                  kicker={zh() ? '提示词库' : 'Prompt library'}
-                  title={s.historyFilter === 'favorites' ? (zh() ? '收藏' : 'Favorites') : (zh() ? '生成提示词' : 'Generation prompts')}
+                  kicker="Prompt library"
+                  title={s.historyFilter === 'favorites' ? 'Favorites' : 'Generation prompts'}
                   right={filtering ? `${prompts.length} of ${s.prompts.length}` : undefined}
                 />
                 <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
@@ -527,13 +524,13 @@ export function HistoryView({ active }) {
               <EmptyState
                 icon="history"
                 title={filtering
-                  ? (zh() ? '没有匹配的提示词' : 'No prompts match')
-                  : s.historyFilter === 'favorites' ? (zh() ? '还没有收藏' : 'No favorites yet') : (zh() ? '还没有提示词' : 'No prompts yet')}
+                  ? 'No prompts match'
+                  : s.historyFilter === 'favorites' ? 'No favorites yet' : 'No prompts yet'}
                 hint={filtering
-                  ? (zh() ? '换一个词，或清空筛选。' : 'Try another word, or clear the filter.')
+                  ? 'Try another word, or clear the filter.'
                   : s.historyFilter === 'favorites'
-                    ? (zh() ? '给提示词加星，把它留作可复用的素材。' : 'Star a prompt to keep it as a reusable ingredient.')
-                    : (zh() ? '创建一个制作，它的最终生成提示词会记录在这里。' : 'Create a production and its final generation prompt will be recorded here.')}
+                    ? 'Star a prompt to keep it as a reusable ingredient.'
+                    : 'Create a production and its final generation prompt will be recorded here.'}
               />
             )
           ) : null}
@@ -547,15 +544,11 @@ export function HistoryView({ active }) {
         onClose={() => (deleting ? null : setConfirm(null))}
         onConfirm={runDelete}
         busy={deleting}
-        title={confirm?.kind === 'canvas' ? (zh() ? '删除这个生成的输出？' : 'Delete this generated output?') : (zh() ? '删除这条提示词？' : 'Delete this prompt?')}
-        confirmLabel={zh() ? '永久删除' : 'Delete permanently'}
+        title={confirm?.kind === 'canvas' ? 'Delete this generated output?' : 'Delete this prompt?'}
+        confirmLabel="Delete permanently"
         body={confirm?.kind === 'canvas'
-          ? (zh()
-            ? '这会永久移除所有同名媒体副本、加密附属文件、历史引用、工作流索引条目和可再生的预览缓存。此操作无法撤销。'
-            : 'This permanently removes every same-name media copy, encrypted sidecar, history reference, workflow-index entry, and regenerable preview cache. This cannot be undone.')
-          : (zh()
-            ? '这会从你的库中永久移除已保存的提示词。此操作无法撤销。'
-            : 'This permanently removes the saved prompt from your library. This cannot be undone.')}
+          ? 'This permanently removes every same-name media copy, encrypted sidecar, history reference, workflow-index entry, and regenerable preview cache. This cannot be undone.'
+          : 'This permanently removes the saved prompt from your library. This cannot be undone.'}
       />
     </div>
   );

@@ -35,10 +35,10 @@
 export const PERSONA_GENDERS = Object.freeze(['', 'female', 'male', 'nonbinary']);
 
 export const PERSONA_GENDER_OPTIONS = Object.freeze([
-  { value: '', label: 'Not set', zh: '未设置' },
-  { value: 'female', label: 'Female', zh: '女' },
-  { value: 'male', label: 'Male', zh: '男' },
-  { value: 'nonbinary', label: 'Non-binary', zh: '非二元' },
+  { value: '', label: 'Not set' },
+  { value: 'female', label: 'Female' },
+  { value: 'male', label: 'Male' },
+  { value: 'nonbinary', label: 'Non-binary' },
 ]);
 
 // Alternate spellings a persona file from elsewhere (or an agent) might carry.
@@ -57,10 +57,10 @@ export function normalizePersonaGender(value) {
   return GENDER_ALIASES[key] || '';
 }
 
-export function personaGenderLabel(gender, { zh = false } = {}) {
+export function personaGenderLabel(gender) {
   const option = PERSONA_GENDER_OPTIONS.find((item) => item.value === normalizePersonaGender(gender));
   if (!option || !option.value) return '';
-  return zh ? option.zh : option.label;
+  return option.label;
 }
 
 // The English a prompt needs. `noun` is what to call the person; `her` is the

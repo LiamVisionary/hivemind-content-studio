@@ -14,7 +14,6 @@
 // Reusable on purpose — this is the shape any studio handing work to another
 // one needs, and the Story studio is simply the first.
 import { useEffect, useMemo, useState } from 'react';
-import { zh } from '../lib/i18n.js';
 import { Menu, MenuHeading } from '../ui/Menu.jsx';
 import { Button, cx } from '../ui/kit.jsx';
 import { RunOnList } from './RunOnPicker.jsx';
@@ -74,14 +73,14 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
   const descriptor = target?.sources?.[chosen] || null;
   const ready = Boolean(target && descriptor?.available);
   const runTargets = useMemo(
-    () => runTargetsFromRows(sendRunTargets(target, describeFor, zh()), { kind: 'video' }),
+    () => runTargetsFromRows(sendRunTargets(target, describeFor), { kind: 'video' }),
     [target, describeFor],
   );
 
   if (!target) {
     return (
       <p className="px-2.5 py-4 text-center text-[11px] leading-snug text-ink3">
-        {zh() ? '正在读取视频工作室的设置…' : 'Reading the Video studio’s settings…'}
+        Reading the Video studio’s settings…
       </p>
     );
   }
@@ -91,7 +90,7 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
       {/* Only when there is a choice to make. One tab is not a decision. */}
       {targets.length > 1 ? (
         <>
-          <MenuHeading>{zh() ? '发送到哪个标签' : 'Which tab'}</MenuHeading>
+          <MenuHeading>Which tab</MenuHeading>
           <div className="flex flex-wrap gap-1 px-1.5 pb-1" role="radiogroup">
             {targets.map((entry) => (
               <button
@@ -108,7 +107,7 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
                 )}
               >
                 {entry.label}
-                {entry.active ? ` · ${zh() ? '当前' : 'front'}` : ''}
+                {entry.active ? ` · ${'front'}` : ''}
               </button>
             ))}
           </div>
@@ -136,7 +135,7 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
             close();
           }}
         >
-          {zh() ? '发送' : 'Send'}
+          Send
         </Button>
       </div>
     </div>
@@ -166,7 +165,7 @@ export function SendToMenu({
       width="w-[19rem]"
       trigger={(open, toggle) => (
         <Button variant={variant} icon={icon} disabled={disabled} onClick={toggle} aria-expanded={open}>
-          {label || (zh() ? '发送到…' : 'Send to…')}
+          {label || 'Send to…'}
         </Button>
       )}
     >

@@ -191,19 +191,19 @@ export function storySound(story) {
  * storyboard is a scene reference to H3 and nothing at all to LTX's ingredients
  * lane, so "4 pictures" is the wrong answer to both.
  */
-export function describeHandoff(handoff, { zh = false } = {}) {
+export function describeHandoff(handoff) {
   const { pictures = 0, available = 0, unattached = 0 } = handoff?.counts || {};
   const kind = handoff?.grammar === 'ltx-ingredients'
-    ? (zh ? '配料参考' : 'ingredient references')
-    : (zh ? '参考图' : 'reference pictures');
+    ? 'ingredient references'
+    : 'reference pictures';
   const trimmed = handoff?.seconds < handoff?.askedSeconds
-    ? (zh ? `，裁到 ${handoff.seconds} 秒` : `, trimmed to ${handoff.seconds}s`)
+    ? `, trimmed to ${handoff.seconds}s`
     : '';
-  if (!available) return `${zh ? '只发送脚本' : 'the script only'}${trimmed}`;
-  if (!pictures) return `${zh ? `没有图片通道 — ${available} 张不会随行` : `no picture lane — ${available} would not travel`}${trimmed}`;
+  if (!available) return `${'the script only'}${trimmed}`;
+  if (!pictures) return `${`no picture lane — ${available} would not travel`}${trimmed}`;
   const some = unattached
-    ? (zh ? `${available} 张中的 ${pictures} 张作为${kind}` : `${pictures} of ${available} as ${kind}`)
-    : (zh ? `${pictures} 张作为${kind}` : `${pictures} as ${kind}`);
+    ? `${pictures} of ${available} as ${kind}`
+    : `${pictures} as ${kind}`;
   return `${some}${trimmed}`;
 }
 

@@ -112,24 +112,18 @@ export function headSwapReadiness(setup) {
 }
 
 /** Labels for the frame/video slots, which mean different things per task. */
-export function slotLabelsFor(task, zh = false) {
+export function slotLabelsFor(task) {
     if (task === 'head-swap') {
-        return zh
-            ? { image: '新面孔', video: '源视频', imageHint: '要换上的面孔', videoHint: '要被换脸的素材' }
-            : { image: 'New face', video: 'Source video', imageHint: 'The face to swap in', videoHint: 'Footage whose face gets replaced' };
+        return { image: 'New face', video: 'Source video', imageHint: 'The face to swap in', videoHint: 'Footage whose face gets replaced' };
     }
     if (task === 'extend') {
-        return zh
-            ? { image: '起始帧', video: '要延长的视频', imageHint: '', videoHint: '在其结尾追加新画面' }
-            : { image: 'Start frame', video: 'Video to extend', imageHint: '', videoHint: 'New footage is appended to its end' };
+        return { image: 'Start frame', video: 'Video to extend', imageHint: '', videoHint: 'New footage is appended to its end' };
     }
     // NOT "Reference video". This slot is the SOURCE clip — attaching one puts
     // the run on the extend/tools path and clears any references. Naming it
     // "Reference video" put it one word away from the References menu beside
     // it, which conditions on motion clips and is a different input entirely.
-    return zh
-        ? { image: '起始帧', video: '要延长或编辑的片段', imageHint: '第一帧', videoHint: '会切换到延长/视频工具流程' }
-        : {
+    return {
             image: 'Start frame',
             video: 'Clip to extend or edit',
             imageHint: 'Becomes the first frame',

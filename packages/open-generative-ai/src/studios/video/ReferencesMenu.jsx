@@ -69,7 +69,6 @@ import { IconButton, SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
 import { PersonaBar } from './PersonaBar.jsx';
 import { ReferenceThumb } from './ReferenceThumb.jsx';
 import { KIND_META, describeReferenceRejection, plainReferenceLabel } from './referenceKinds.js';
-import { zh } from './videoLogic.js';
 import { toastFailure } from '../../ui/failureToast.jsx';
 
 // Scene sits directly under the character pictures because that is where its
@@ -79,8 +78,8 @@ const KINDS = ['images', 'scene', 'videos', 'audios'];
 
 /** A place or a staging sheet — the two things a non-subject picture can be. */
 export const SCENE_ROLES = Object.freeze([
-  { id: 'attribute_transfer', label: () => (zh() ? '地点' : 'A place') },
-  { id: 'weak_reference', label: () => (zh() ? '分镜' : 'Staging') },
+  { id: 'attribute_transfer', label: () => 'A place' },
+  { id: 'weak_reference', label: () => 'Staging' },
 ]);
 
 function fileLabel(item) {
@@ -102,8 +101,8 @@ function AudioRowPreview({ url }) {
         if (!element) return;
         if (element.paused) { void element.play(); } else { element.pause(); }
       }}
-      aria-label={playing ? (zh() ? '暂停' : 'Pause') : (zh() ? '试听' : 'Preview')}
-      title={playing ? (zh() ? '暂停' : 'Pause') : (zh() ? '试听' : 'Preview')}
+      aria-label={playing ? 'Pause' : 'Preview'}
+      title={playing ? 'Pause' : 'Preview'}
       className="grid h-full w-full place-items-center bg-bg3 text-ink2 transition-colors hover:text-honey disabled:opacity-50"
     >
       {resolved ? <Icon name={playing ? 'pause' : 'play'} size={14} /> : <Spinner size={12} />}
@@ -162,7 +161,7 @@ function ReferenceRow({
     <IconButton
       icon="x"
       size="xs"
-      label={zh() ? '移除参考' : 'Remove reference'}
+      label="Remove reference"
       onClick={onRemove}
       className="shrink-0 text-ink3"
     />
@@ -193,10 +192,8 @@ function ReferenceRow({
             <button
               type="button"
               onClick={onOpen}
-              title={zh()
-                ? '打开该片段：拖动播放并遮罩要替换的头部'
-                : 'Open this clip — scrub it and mask the head to replace'}
-              aria-label={zh() ? '打开并遮罩该片段' : 'Open and mask this clip'}
+              title="Open this clip — scrub it and mask the head to replace"
+              aria-label="Open and mask this clip"
               className="absolute inset-0 grid place-items-center bg-bg0/70 text-ink1 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/thumb:opacity-100"
             >
               <Icon name="expand" size={13} />
@@ -215,15 +212,15 @@ function ReferenceRow({
           >
             {plainReferenceLabel(primaryTag)}
             {secondaryTag ? <span className="text-ink3">{` + ${plainReferenceLabel(secondaryTag)}`}</span> : null}
-            {soundOnly ? <span className="ml-1 font-sans text-ink3">{zh() ? '仅声音' : 'sound only'}</span> : null}
+            {soundOnly ? <span className="ml-1 font-sans text-ink3">sound only</span> : null}
             {kind === 'scene' ? (
               <span className="ml-1 font-sans text-ink3">
                 {(role || 'attribute_transfer') === 'weak_reference'
-                  ? (zh() ? '分镜方向' : 'staging direction')
-                  : (zh() ? '地点' : 'the place')}
+                  ? 'staging direction'
+                  : 'the place'}
               </span>
             ) : null}
-            {!soundOnly && item?.compact && !compactLocked ? <span className="ml-1 font-sans text-ink3">{zh() ? '小尺寸' : 'small'}</span> : null}
+            {!soundOnly && item?.compact && !compactLocked ? <span className="ml-1 font-sans text-ink3">small</span> : null}
           </span>
         </span>
         {/* Motion rows carry their switches on a strip of their own below;
@@ -262,27 +259,19 @@ function ReferenceRow({
             on={motionOn}
             onClick={onToggleMotion}
             title={motionOn
-              ? (zh()
-                ? '使用该片段的动作。关闭后只使用声音：片段成为音色参考，画面不会发送。'
-                : "Use this clip's movement. Switch off for sound only: the clip becomes a voice reference and its pixels are never sent.")
-              : (zh()
-                ? '重新使用该片段的动作'
-                : "Use this clip's movement again")}
+              ? "Use this clip's movement. Switch off for sound only: the clip becomes a voice reference and its pixels are never sent."
+              : "Use this clip's movement again"}
           >
-            {zh() ? '动作' : 'Motion'}
+            Motion
           </RowSwitch>
           <RowSwitch
             on={soundOn}
             onClick={onToggleAudio}
             title={soundOnly
-              ? (zh()
-                ? '仅声音：该片段的原声是音色参考。关闭后恢复为动作参考。'
-                : "Sound only: this clip's soundtrack is a voice reference. Switch off to go back to motion.")
-              : (zh()
-                ? '同时使用该片段自带的声音（会额外占用一个声音位）'
-                : "Also condition on this clip's own soundtrack — it takes a voice slot of its own")}
+              ? "Sound only: this clip's soundtrack is a voice reference. Switch off to go back to motion."
+              : "Also condition on this clip's own soundtrack — it takes a voice slot of its own"}
           >
-            {zh() ? '声音' : 'Sound'}
+            Sound
           </RowSwitch>
           {/* Staging size. A MOTION clip carries the same movement staged 384 px
               wide as at the node's full canvas, for about a third of the
@@ -295,29 +284,23 @@ function ReferenceRow({
             disabled={compactLocked || !motionOn}
             onClick={onToggleCompact}
             title={!motionOn
-              ? (zh() ? '仅声音的参考不发送画面。' : 'A sound-only reference sends no pixels.')
+              ? 'A sound-only reference sends no pixels.'
               : compactLocked
-                ? (zh()
-                  ? '没有附加图片时，该片段就是角色参考——身份需要像素，紧凑模式不可用。'
-                  : 'Off while no picture is attached: this clip is the character reference, and identity needs pixels.')
-                : (zh()
-                  ? '以小尺寸（384 px）送入该片段——动作相同，开销约为三分之一。片段作为角色参考时不可用。'
-                  : 'Stage this clip small (384 px) — same motion, 3x cheaper. Off when the clip is the character reference.')}
+                ? 'Off while no picture is attached: this clip is the character reference, and identity needs pixels.'
+                : 'Stage this clip small (384 px) — same motion, 3x cheaper. Off when the clip is the character reference.'}
           >
-            {zh() ? '小尺寸（更省）' : 'Small (cheaper)'}
+            Small (cheaper)
           </RowSwitch>
           <span className="flex-1" />
           {onPrep ? (
             <button
               type="button"
               onClick={onPrep}
-              title={zh()
-                ? '在本机裁剪、压缩这段参考——更短更小的参考会释放完整的生成时长'
-                : 'Trim, crop and compress this reference on this device — a shorter, smaller reference frees the full generation range'}
+              title="Trim, crop and compress this reference on this device — a shorter, smaller reference frees the full generation range"
               className="flex h-6 shrink-0 items-center gap-1 rounded px-1.5 text-[10px] font-medium text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
             >
               <Icon name="scissors" size={11} />
-              {zh() ? '裁剪' : 'Trim'}
+              Trim
             </button>
           ) : null}
           {removeButton}
@@ -358,9 +341,7 @@ export function ReferenceSection({
             arithmetic nobody could parse. */}
         <span
           className="text-[10px] text-ink3"
-          title={used == null ? undefined : (zh()
-            ? '角色图与场景图共用同一组图片位'
-            : 'Character pictures and scene pictures share one row of slots')}
+          title={used == null ? undefined : 'Character pictures and scene pictures share one row of slots'}
         >
           {used == null ? `${items.length}/${limit}` : `${items.length} · ${taken}/${limit}`}
         </span>
@@ -398,7 +379,7 @@ export function ReferenceSection({
         )}
       >
         {busy ? <Spinner size={12} /> : <Icon name="plus" size={12} />}
-        {full ? (zh() ? '已达上限' : 'All slots used') : meta.add()}
+        {full ? 'All slots used' : meta.add()}
       </button>
       {!full && recent.length ? (
         // Saved clips and voice notes get a wider tile with their filename:
@@ -434,7 +415,7 @@ export function ReferenceSection({
                   : <span className="grid h-full w-full place-items-center text-ink3"><Icon name={meta.icon} size={12} /></span>}
               </span>
               <span className="min-w-0 flex-1 truncate text-[10px] text-ink2">
-                {entry.name || (zh() ? '已保存的参考' : 'Saved reference')}
+                {entry.name || 'Saved reference'}
               </span>
             </button>
           )))}
@@ -692,7 +673,7 @@ export function ReferencesMenu({
     if (attached >= 0) {
       const label = labels[kind][attached];
       const tag = label?.video || label || KIND_META[kind].tag(attached);
-      toast(zh() ? `已作为 ${tag} 附加` : `Already attached as ${tag}`);
+      toast(`Already attached as ${tag}`);
       return;
     }
     if ((kind === 'images' || kind === 'scene' ? orderedImages.length : current.length) >= limits[kind === 'scene' ? 'images' : kind]) return;
@@ -733,7 +714,7 @@ export function ReferencesMenu({
       attach(kind, uploaded.url, uploaded.name);
     } catch (err) {
       console.error('[ReferencesMenu] upload failed:', err);
-      toastFailure(err, { operation: zh() ? '参考上传' : 'Reference upload' });
+      toastFailure(err, { operation: 'Reference upload' });
     }
   };
 
@@ -779,7 +760,7 @@ export function ReferencesMenu({
           the value: what is attached is a character, not "four references". */}
       <ChipButton
         icon={persona?.name ? 'persona' : 'layers'}
-        label={zh() ? '参考' : 'References'}
+        label="References"
         value={persona?.name ? `${persona.name} · ${total}` : (total > 0 ? String(total) : '')}
         active={panelOpen || total > 0}
         chevron={false}
@@ -787,12 +768,8 @@ export function ReferencesMenu({
         aria-expanded={panelOpen}
         onClick={() => setPanelOpen((open) => !open)}
         title={viewsOnly
-          ? (zh()
-            ? '参考：这个人的多个视角，会拼接成一张参考图'
-            : 'References — several views of the same person or thing, stitched into one reference sheet')
-          : (zh()
-            ? '参考：角色图片、声音片段、动作片段——附加任意一种即切换到参考模式（取代首尾帧）'
-            : 'References — pictures of a person, voice clips, motion clips. Attaching any switches the run to Reference mode, which replaces the start/end frames')}
+          ? 'References — several views of the same person or thing, stitched into one reference sheet'
+          : 'References — pictures of a person, voice clips, motion clips. Attaching any switches the run to Reference mode, which replaces the start/end frames'}
       />
 
       {panelOpen ? (
@@ -906,40 +883,26 @@ export function ReferencesMenu({
           {budget.counts.total && !budget.ok ? (
             <div className="rounded-md border border-danger bg-bg2 px-2 py-1.5 text-[10px] leading-snug text-ink2">
               <span className="font-mono">
-                {budget.counts.total}/{budget.counts.limit} {zh() ? '个参考' : 'refs'}
+                {budget.counts.total}/{budget.counts.limit} refs
                 {' · '}
-                {budget.counts.audioClips}/3 {zh() ? '音频' : 'audio'}
+                {budget.counts.audioClips}/3 audio
                 {budget.seconds.video ? ` · ${budget.seconds.video}/${budget.seconds.limit}s video` : ''}
                 {budget.seconds.audio ? ` · ${budget.seconds.audio}/${budget.seconds.limit}s audio` : ''}
               </span>
               {budget.unmeasured ? (
                 <span className="text-ink3">
-                  {zh() ? ` · ${budget.unmeasured} 个待测量` : ` · measuring ${budget.unmeasured}`}
+                  {` · measuring ${budget.unmeasured}`}
                 </span>
               ) : null}
               {budget.problems.map((problem) => (
                 <span key={`${problem.code}${problem.url || ''}`} className="mt-1 block text-danger">
-                  {problem.code === 'over-total' && (zh()
-                    ? `超出 ${problem.count}/${problem.limit} 个参考${problem.soundtracks ? `（含 ${problem.soundtracks} 条自带原声，各占一个名额）` : ''}。`
-                    : `${problem.count} references attached; H3 takes ${problem.limit}.${problem.soundtracks ? ` ${problem.soundtracks} of them ${problem.soundtracks === 1 ? 'is a' : 'are'} split soundtrack${problem.soundtracks === 1 ? '' : 's'}, which counts as its own reference — switching one off gives a slot back.` : ''}`)}
-                  {problem.code === 'over-audio-clips' && (zh()
-                    ? `音频参考 ${problem.count} 个，上限 3 个（自带原声也算）。`
-                    : `${problem.count} audio clips; H3 takes 3 — and a clip's split soundtrack is one of them.`)}
-                  {problem.code === 'audio-without-visual' && (zh()
-                    ? '声音参考不能单独发送，至少还需要一张图片或一段视频。'
-                    : 'Audio cannot be sent on its own — attach at least one picture or clip alongside it.')}
-                  {problem.code === 'clip-too-short' && (zh()
-                    ? `有片段只有 ${problem.seconds} 秒，最短 ${problem.limit} 秒。`
-                    : `A clip runs ${problem.seconds}s; the minimum is ${problem.limit}s.`)}
-                  {problem.code === 'clip-too-long' && (zh()
-                    ? `有片段长 ${problem.seconds} 秒，单段上限 ${problem.limit} 秒——用该行的「裁剪」。`
-                    : `A clip runs ${problem.seconds}s; ${problem.limit}s is the per-clip maximum — use Trim on its row.`)}
-                  {problem.code === 'over-video-seconds' && (zh()
-                    ? `视频参考合计 ${problem.seconds} 秒，上限 ${problem.limit} 秒（这是所有片段的总和，不是每段的额度）。`
-                    : `Video references total ${problem.seconds}s against a ${problem.limit}s budget — that ${problem.limit}s is the total across every clip, not a per-clip allowance.`)}
-                  {problem.code === 'over-audio-seconds' && (zh()
-                    ? `音频合计 ${problem.seconds} 秒，上限 ${problem.limit} 秒${problem.soundtracks ? '。自带原声会同时占用视频与音频两份时长' : ''}。`
-                    : `Audio totals ${problem.seconds}s against a ${problem.limit}s budget.${problem.soundtracks ? ' A split soundtrack spends from the video AND audio totals at once, so switching one off frees the most.' : ''}`)}
+                  {problem.code === 'over-total' && `${problem.count} references attached; H3 takes ${problem.limit}.${problem.soundtracks ? ` ${problem.soundtracks} of them ${problem.soundtracks === 1 ? 'is a' : 'are'} split soundtrack${problem.soundtracks === 1 ? '' : 's'}, which counts as its own reference — switching one off gives a slot back.` : ''}`}
+                  {problem.code === 'over-audio-clips' && `${problem.count} audio clips; H3 takes 3 — and a clip's split soundtrack is one of them.`}
+                  {problem.code === 'audio-without-visual' && 'Audio cannot be sent on its own — attach at least one picture or clip alongside it.'}
+                  {problem.code === 'clip-too-short' && `A clip runs ${problem.seconds}s; the minimum is ${problem.limit}s.`}
+                  {problem.code === 'clip-too-long' && `A clip runs ${problem.seconds}s; ${problem.limit}s is the per-clip maximum — use Trim on its row.`}
+                  {problem.code === 'over-video-seconds' && `Video references total ${problem.seconds}s against a ${problem.limit}s budget — that ${problem.limit}s is the total across every clip, not a per-clip allowance.`}
+                  {problem.code === 'over-audio-seconds' && `Audio totals ${problem.seconds}s against a ${problem.limit}s budget.${problem.soundtracks ? ' A split soundtrack spends from the video AND audio totals at once, so switching one off frees the most.' : ''}`}
                 </span>
               ))}
             </div>
@@ -947,32 +910,22 @@ export function ReferencesMenu({
           {timeWarning ? (
             <p className="rounded-md border border-honey/40 bg-honey-tint px-2 py-1.5 text-[10px] leading-snug text-honey">
               {timeWarning.kind === 'no-line'
-                ? (zh()
-                  ? '已附加声音参考，但提示词里没有任何 <d>…</d> 台词。克隆的声音无话可说时，模型会自己编。'
-                  : "A voice reference is attached but the prompt has no <d>…</d> line. A cloned voice with nothing to say tends to invent something.")
-                : (zh()
-                  ? `台词约 ${timeWarning.spoken} 秒，片长 ${timeWarning.duration} 秒——约 ${timeWarning.gap} 秒无人指定。请缩短片长、增加台词，或在镜头描述与 overall_soundscape 里写明这段时间发生什么（并声明没有其他说话声）。`
-                  : `Dialogue runs about ${timeWarning.spoken}s; the clip is ${timeWarning.duration}s. Roughly ${timeWarning.gap}s is unaccounted for — shorten the clip, write more line, or say what fills the time and that nobody else speaks.`)}
+                ? "A voice reference is attached but the prompt has no <d>…</d> line. A cloned voice with nothing to say tends to invent something."
+                : `Dialogue runs about ${timeWarning.spoken}s; the clip is ${timeWarning.duration}s. Roughly ${timeWarning.gap}s is unaccounted for — shorten the clip, write more line, or say what fills the time and that nobody else speaks.`}
             </p>
           ) : null}
           {motionReferenceRows(videos).length && !orderedImages.length ? (
             // No picture: the clip is the character reference, and the model is
             // told so — the exclusion advice below is for the picture+clip case.
             <p className="rounded-md border border-line1 px-2 py-1.5 text-[10px] leading-snug text-ink3">
-              {zh()
-                ? '没有附加图片：第一段动作参考就是角色参考——片中人物的长相、发型、服装与动作方式会带入成片。附加图片后，视频仅作动作参考。'
-                : "No picture attached: the first motion clip is the character reference — its performer's face, hair, wardrobe and manner carry into the clip. Attach a picture and the clip becomes motion-only."}
+              No picture attached: the first motion clip is the character reference — its performer's face, hair, wardrobe and manner carry into the clip. Attach a picture and the clip becomes motion-only.
             </p>
           ) : null}
           {motionWarning ? (
             <p className="rounded-md border border-honey/40 bg-honey-tint px-2 py-1.5 text-[10px] leading-snug text-honey">
               {motionWarning.kind === 'unnamed'
-                ? (zh()
-                  ? `提示词里没有出现 ${motionWarning.labels.join('、')}。动作参考若无人指认，模型可能直接照搬片中人物的长相与场景。`
-                  : `Your prompt never names ${motionWarning.labels.join(', ')}. An unnamed motion clip tends to bring its own performer — face, clothing and setting — into the shot.`)
-                : (zh()
-                  ? '写清楚动作参考里哪些东西不能带过来（长相、服装、场景、取景），否则它可能取代你的角色。'
-                  : "Say what must NOT carry from the motion clip — its performer's appearance, clothing, setting and framing — or it can replace your subject entirely.")}
+                ? `Your prompt never names ${motionWarning.labels.join(', ')}. An unnamed motion clip tends to bring its own performer — face, clothing and setting — into the shot.`
+                : "Say what must NOT carry from the motion clip — its performer's appearance, clothing, setting and framing — or it can replace your subject entirely."}
             </p>
           ) : null}
         </div>
@@ -1015,7 +968,7 @@ export function ReferencesMenu({
               )));
             } catch (err) {
               console.error('[ReferencesMenu] prepared clip upload failed:', err);
-              toastFailure(err, { operation: zh() ? '片段上传' : 'Prepared clip upload' });
+              toastFailure(err, { operation: 'Prepared clip upload' });
             }
           }}
         />

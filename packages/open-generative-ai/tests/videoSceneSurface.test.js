@@ -124,29 +124,29 @@ test('no prompt-grammar token renders outside the fold', () => {
     assert.match(cast, /title=\{subjectToken\}/);
     // The six sections have plain names in the check's wording.
     const check = read('src/studios/video/promptCheckText.js');
-    assert.match(check, /subject_definitions: \(\) => \(zh\(\) \? '主体定义' : 'who is in it'\)/);
-    assert.match(check, /retention_analysis: \(\) => \(zh\(\) \? '保留分析' : 'what carries over'\)/);
+    assert.match(check, /subject_definitions: \(\) => 'who is in it'/);
+    assert.match(check, /retention_analysis: \(\) => 'what carries over'/);
 });
 
 test('the tuning bench is behind Advanced, and the closed header names what is armed', () => {
     const studio = read('src/studios/VideoStudio.jsx');
     const format = studio.slice(
-        studio.indexOf("<SectionLabel>{zh() ? '格式' : 'Format'}</SectionLabel>"),
-        studio.indexOf("<CollapsibleSection title={zh() ? '高级' : 'Advanced'}"),
+        studio.indexOf('<SectionLabel>Format</SectionLabel>'),
+        studio.indexOf('<CollapsibleSection title="Advanced"'),
     );
     assert.ok(format.length > 0, 'the Format section is still there');
-    assert.doesNotMatch(format, /label=\{zh\(\) \? '种子' : 'Seed'\}/, 'no seed in Format');
+    assert.doesNotMatch(format, /label="Seed"/, 'no seed in Format');
     assert.doesNotMatch(format, /tierPairFor/, 'no model tier in Format');
-    assert.doesNotMatch(format, /label=\{zh\(\) \? '精修' : 'Refinement'\}/, 'no refinement in Format');
+    assert.doesNotMatch(format, /label="Refinement"/, 'no refinement in Format');
 
-    const advanced = studio.slice(studio.indexOf("<CollapsibleSection title={zh() ? '高级' : 'Advanced'}"));
-    assert.match(advanced, /label=\{zh\(\) \? '种子' : 'Seed'\}/);
+    const advanced = studio.slice(studio.indexOf('<CollapsibleSection title="Advanced"'));
+    assert.match(advanced, /label="Seed"/);
     assert.match(advanced, /tierPairFor\(s\.catalogs\.hivemindI2V, s\.setup\.modelId\)/);
-    assert.match(advanced, /label=\{zh\(\) \? '精修' : 'Refinement'\}/);
+    assert.match(advanced, /label="Refinement"/);
 
     // Hidden is fine; unsaid is not.
-    assert.match(studio, /standardTierSelected \? \(zh\(\) \? '最佳画质' : 'best quality'\) : ''/);
-    assert.match(studio, /Number\(s\.setup\.seed\) >= 0 \? \(zh\(\) \? `种子 \$\{s\.setup\.seed\}` : `seed \$\{s\.setup\.seed\}`\) : ''/);
+    assert.match(studio, /standardTierSelected \? 'best quality' : ''/);
+    assert.match(studio, /Number\(s\.setup\.seed\) >= 0 \? `seed \$\{s\.setup\.seed\}` : ''/);
 });
 
 test('the inpaint dialog cannot arm a run the workflow refuses', () => {

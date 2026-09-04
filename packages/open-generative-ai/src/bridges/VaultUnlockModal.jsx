@@ -15,7 +15,6 @@
 import { useCallback, useState } from 'react';
 import { useWindowEvent } from '../hooks/hooks.js';
 import { clearMediaSealFailures } from '../lib/e2eMedia.js';
-import { zh } from '../lib/i18n.js';
 import { announceVaultUnlocked, retryVaultBootstrap, unlockOwnerSession, VAULT_UNLOCK_REQUEST_EVENT } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, Field, TextInput } from '../ui/kit.jsx';
@@ -66,29 +65,27 @@ export function VaultUnlockModal() {
     }
     setBusy(false);
     setError(result.status === 429
-      ? (zh() ? '尝试次数过多。请稍等一分钟再试。' : 'Too many attempts. Wait a minute and try again.')
+      ? 'Too many attempts. Wait a minute and try again.'
       : result.status === 0
-        ? (zh() ? '无法连接到工作室。请检查连接后重试。' : 'Could not reach the studio. Check the connection and try again.')
-        : (zh() ? '密码错误。请重试。' : 'Wrong password. Try again.'));
+        ? 'Could not reach the studio. Check the connection and try again.'
+        : 'Wrong password. Try again.');
   };
 
   if (!open) return null;
 
   return (
-    <Modal open title={zh() ? '解锁你的保险库' : 'Unlock your vault'} size="sm" onClose={close} dismissable={!busy}>
+    <Modal open title="Unlock your vault" size="sm" onClose={close} dismissable={!busy}>
       <form onSubmit={submit} className="flex flex-col gap-4">
         <div className="flex items-start gap-3 rounded-md border border-line1 bg-bg2 px-3.5 py-3">
           <Icon name="lock" size={16} className="mt-0.5 shrink-0 text-honey" />
           <p className="text-[13px] leading-relaxed text-ink2">
-            {zh()
-              ? '你的媒体是端到端加密的，密钥只存在于已解锁的标签页中。此标签页还没有它 — 输入工作室密码即可在此解密。'
-              : <>Your media is end-to-end encrypted and the key lives only in an unlocked tab. This tab doesn&rsquo;t have it yet — enter your studio password to decrypt here.</>}
+            {<>Your media is end-to-end encrypted and the key lives only in an unlocked tab. This tab doesn&rsquo;t have it yet — enter your studio password to decrypt here.</>}
           </p>
         </div>
         <Field
-          label={zh() ? '工作室密码' : 'Studio password'}
+          label="Studio password"
           error={error}
-          hint={zh() ? '解锁后，此标签页中已加密的内容会直接显示。' : 'Sealed media in this tab opens as soon as you unlock — nothing you have open is lost.'}
+          hint="Sealed media in this tab opens as soon as you unlock — nothing you have open is lost."
         >
           <TextInput
             type="password"
@@ -100,9 +97,9 @@ export function VaultUnlockModal() {
           />
         </Field>
         <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={close} disabled={busy}>{zh() ? '取消' : 'Cancel'}</Button>
+          <Button variant="ghost" onClick={close} disabled={busy}>Cancel</Button>
           <Button variant="primary" type="submit" loading={busy} disabled={!password}>
-            {zh() ? '解锁' : 'Unlock'}
+            Unlock
           </Button>
         </div>
       </form>

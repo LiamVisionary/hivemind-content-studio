@@ -2,7 +2,6 @@
 // media, credentials, or provider payloads). Baseline for the phase-2 agent.
 // Summary tiles, per-provider routing evidence, and recent attempts, all from
 // the /api/telemetry/generations shape via hubData formatters.
-import { zh } from '../../lib/i18n.js';
 import { Card, EmptyState, Pill, SectionLabel, Spinner } from '../../ui/kit.jsx';
 import { formatTelemetryDuration, humanize, providerLabel, useHub } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
@@ -35,8 +34,8 @@ export function TelemetryPanel() {
           // state, not a spinner that never ends.
           <EmptyState
             icon="plug"
-            title={zh() ? '工作室没有运行' : 'The studio is not running'}
-            hint={zh() ? '遥测来自本机的工作室。它恢复后会自动重试。' : 'Telemetry comes from the studio on this machine. It retries on its own once the studio is back.'}
+            title="The studio is not running"
+            hint="Telemetry comes from the studio on this machine. It retries on its own once the studio is back."
           />
         ) : !telemetry ? (
           <div className="grid flex-1 place-items-center py-16"><Spinner size={22} className="text-ink2" /></div>
@@ -72,8 +71,8 @@ export function TelemetryPanel() {
                 ) : (
                   <EmptyState
                     icon="pulse"
-                    title={zh() ? '还没有生成样本' : 'No generation samples yet'}
-                    hint={zh() ? '规划器运行中的图像、视频、语音和音乐尝试会显示在这里 — 工作室的生成不计入。' : 'Image, video, voice, and music attempts made by Planner runs appear here — studio generations are not counted.'}
+                    title="No generation samples yet"
+                    hint="Image, video, voice, and music attempts made by Planner runs appear here — studio generations are not counted."
                   />
                 )}
               </section>
@@ -100,8 +99,8 @@ export function TelemetryPanel() {
                 ) : (
                   <EmptyState
                     icon="pulse"
-                    title={zh() ? '没有最近的尝试' : 'No recent attempts'}
-                    hint={zh() ? '开始一个制作，它的生成尝试会在运行时出现在这里。' : 'Start a production and its generation attempts show up here as they run.'}
+                    title="No recent attempts"
+                    hint="Start a production and its generation attempts show up here as they run."
                   />
                 )}
               </section>
@@ -118,13 +117,11 @@ export function TelemetryView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker={zh() ? '生成运营' : 'Generation operations'}
-        title={zh() ? '活动' : 'Activity'}
-        subtitle={zh()
-          ? '仅智能体路由的制作 · 仅本地元数据，无提示词、媒体、凭据或提供商负载'
-          : 'Agent-routed productions only · local metadata, no prompts, media, credentials, or provider payloads'}
+        kicker="Generation operations"
+        title="Activity"
+        subtitle="Agent-routed productions only · local metadata, no prompts, media, credentials, or provider payloads"
       >
-        {s.telemetry && s.apiOnline === false ? <Pill tone="warn" dot>{zh() ? '离线 · 显示上次读取' : 'Offline · showing the last reading'}</Pill> : null}
+        {s.telemetry && s.apiOnline === false ? <Pill tone="warn" dot>Offline · showing the last reading</Pill> : null}
       </HubToolbar>
       <TelemetryPanel />
     </div>

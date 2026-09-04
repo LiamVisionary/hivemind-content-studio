@@ -10,7 +10,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { registerPromptInserter } from '../../app/promptTarget.js';
 import { useMediaSrc } from '../../hooks/hooks.js';
-import { zh } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../../ui/Menu.jsx';
 import { runFailureRemedy } from '../../lib/failureRemedy.js';
@@ -377,9 +376,9 @@ function PlanCard({ plan, createdRunId }) {
       {plan.mode === 'confirmation' ? (
         createdRunId ? (
           <div className="flex flex-wrap items-center gap-2">
-            <Pill tone="ok" dot>{zh() ? '制作已创建' : 'Production created'}</Pill>
+            <Pill tone="ok" dot>Production created</Pill>
             <Button size="sm" variant="ghost" icon="arrowRight" onClick={() => openRun(createdRunId)}>
-              {zh() ? '打开运行' : 'Open run'}
+              Open run
             </Button>
           </div>
         ) : (
@@ -390,7 +389,7 @@ function PlanCard({ plan, createdRunId }) {
             onClick={() => { void confirm(); }}
             className="self-start"
           >
-            {zh() ? '确认并创建制作' : 'Confirm & create production'}
+            {'Confirm & create production'}
           </Button>
         )
       ) : null}
@@ -415,14 +414,14 @@ function FailureActions({ detail = '', action = null, onRetry = null }) {
             <Button size="sm" variant="primary" onClick={() => void runFailureRemedy(action)}>{action.label}</Button>
           ) : null}
           {onRetry ? (
-            <Button size="sm" icon="refresh" onClick={onRetry}>{zh() ? '重试' : 'Try again'}</Button>
+            <Button size="sm" icon="refresh" onClick={onRetry}>Try again</Button>
           ) : null}
         </div>
       ) : null}
       {detail ? (
         <details className="mt-2">
           <summary className="cursor-pointer list-none text-[11px] font-medium text-ink3 hover:text-ink2">
-            {zh() ? '详情' : 'Details'}
+            Details
           </summary>
           <div className="mt-1 max-h-40 overflow-y-auto break-words font-mono text-[11px] leading-relaxed text-ink3 [overflow-wrap:anywhere]">
             {detail}
@@ -526,10 +525,8 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
             // the brain chip cannot serve.
             <EmptyState
               icon="plug"
-              title={zh() ? '工作室没有运行' : 'The studio is not running'}
-              hint={zh()
-                ? '规划器需要本机的工作室。它运行后会自动重试；也可以用顶栏的刷新按钮。'
-                : 'The Planner needs the studio on this machine. It retries on its own once the studio is running — or use the refresh button in the top bar.'}
+              title="The studio is not running"
+              hint="The Planner needs the studio on this machine. It retries on its own once the studio is running — or use the refresh button in the top bar."
               className="flex-1"
             />
           ) : s.thread.length === 0 ? (
@@ -549,9 +546,9 @@ function SimpleStudio({ threadRef, promptRef, fileRef }) {
 
           {s.composerRestoredFrom ? (
             <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink3">
-              <Pill tone="neutral" dot>{zh() ? '已从上次运行恢复' : 'Restored from your last run'}</Pill>
+              <Pill tone="neutral" dot>Restored from your last run</Pill>
               <button type="button" onClick={clearRestoredComposer} className="font-medium text-ink2 underline-offset-2 hover:text-ink1 hover:underline">
-                {zh() ? '清除' : 'Clear'}
+                Clear
               </button>
             </div>
           ) : null}
@@ -1022,8 +1019,8 @@ export function PlannerView({ active }) {
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker={zh() ? '智能体主导的制作' : 'Agent-directed production'}
-        title={zh() ? '规划器' : 'Planner'}
+        kicker="Agent-directed production"
+        title="Planner"
         right={<Segmented options={MODE_OPTIONS} value={s.studioMode} onChange={setStudioMode} />}
       />
       {advanced

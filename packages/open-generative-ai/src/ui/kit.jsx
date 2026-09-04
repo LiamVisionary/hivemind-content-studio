@@ -3,7 +3,7 @@
 import { createContext, useContext, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { STUDIO_RESTART_COMMAND, apiOfflineSentence, pingApiStatus, useApiStatus } from '../app/statusStore.js';
-import { zh as zhUi } from '../lib/i18n.js';
+import { t } from '../lib/i18n.js';
 import { sectionOpen, setSectionOpen } from '../lib/prefs.js';
 import { Icon } from './icons.jsx';
 
@@ -515,7 +515,7 @@ export function FailureCallout({
   onRemedy = null,
   onRetry = null,
   onDismiss = null,
-  retryLabel = 'Try again',
+  retryLabel = t('common.tryAgain'),
   detailsLabel = 'Details',
   dismissLabel = 'Dismiss',
   retryDisabled = false,
@@ -742,7 +742,6 @@ function StudioOfflineBanner() {
   const status = useApiStatus();
   const [busy, setBusy] = useState(false);
   if (status.tone !== 'offline') return null;
-  const zh = zhUi();
   const retry = () => {
     setBusy(true);
     void pingApiStatus().finally(() => setBusy(false));
@@ -752,13 +751,13 @@ function StudioOfflineBanner() {
       role="status"
       className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-warn/40 bg-warn/10 px-3.5 py-2 text-xs text-ink1"
     >
-      <span className="font-semibold">{zh ? '工作室没有运行' : 'The studio is not running'}</span>
-      <span className="min-w-0 text-ink2">{apiOfflineSentence(zh)}</span>
+      <span className="font-semibold">{t('app.notRunning')}</span>
+      <span className="min-w-0 text-ink2">{apiOfflineSentence()}</span>
       <code className="rounded border border-line1 bg-bg2 px-1.5 py-0.5 font-mono text-[11px] text-ink1">
         {STUDIO_RESTART_COMMAND}
       </code>
       <Button size="sm" icon="refresh" loading={busy} onClick={retry} className="ml-auto">
-        {zh ? '立即重试' : 'Retry now'}
+        {t('common.tryAgain')}
       </Button>
     </div>
   );

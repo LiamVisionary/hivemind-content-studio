@@ -10,7 +10,6 @@
 // installed, this Mac not signed in, the tailnet's HTTPS certificates turned
 // off. There is no state here whose only remedy is somewhere else.
 import { useCallback, useEffect, useState } from 'react';
-import { zh } from '../../lib/i18n.js';
 import { Button, Card, FailureCallout, Pill, SectionLabel, Spinner, Toggle } from '../../ui/kit.jsx';
 import { api } from '../hubData.js';
 
@@ -27,7 +26,7 @@ export function RemoteAccessCard() {
     } catch (error) {
       setState(null);
       setFailure({
-        title: zh() ? '无法读取远程访问状态' : 'Could not read the remote access setting',
+        title: 'Could not read the remote access setting',
         detail: String(error?.message || ''),
       });
     }
@@ -42,7 +41,7 @@ export function RemoteAccessCard() {
       setState(await api('/api/remote-access', { method: 'POST', body: JSON.stringify({ enabled: next }) }));
     } catch (error) {
       setFailure({
-        title: String(error?.message || (zh() ? '无法更改远程访问' : 'Could not change remote access')),
+        title: String(error?.message || 'Could not change remote access'),
         detail: String(error?.remedy || ''),
       });
     } finally {
@@ -67,20 +66,18 @@ export function RemoteAccessCard() {
 
   return (
     <section className="flex flex-col gap-3" aria-label="Remote access">
-      <SectionLabel>{zh() ? '在我的其他设备上打开' : 'Open on my other devices'}</SectionLabel>
+      <SectionLabel>Open on my other devices</SectionLabel>
       <Card className="flex flex-col gap-3 p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 flex-col gap-1">
             <div className="flex items-center gap-2">
               <b className="text-[13px] text-ink1">
-                {zh() ? '通过 Tailscale 发布这个工作室' : 'Publish this studio on my tailnet'}
+                Publish this studio on my tailnet
               </b>
-              {enabled ? <Pill tone="honey">{zh() ? '已发布' : 'Published'}</Pill> : null}
+              {enabled ? <Pill tone="honey">Published</Pill> : null}
             </div>
             <small className="text-[12px] leading-relaxed text-ink3">
-              {zh()
-                ? '默认关闭。开启后只会发布工作室自身的端口——画布端口始终只在本机。'
-                : 'Off by default. Turning it on publishes only the studio’s own port; the Canvas port stays on this Mac either way.'}
+              Off by default. Turning it on publishes only the studio’s own port; the Canvas port stays on this Mac either way.
             </small>
           </div>
           {state === null && !failure
@@ -90,7 +87,7 @@ export function RemoteAccessCard() {
                 checked={enabled}
                 disabled={busy || !supported}
                 onChange={toggle}
-                label={zh() ? '发布到 tailnet' : 'Publish on my tailnet'}
+                label="Publish on my tailnet"
               />
             )}
         </div>
@@ -107,7 +104,7 @@ export function RemoteAccessCard() {
             <div className="flex items-center gap-2">
               <code className="min-w-0 flex-1 break-all font-mono text-[12px] text-ink1">{state.url}</code>
               <Button size="sm" variant="neutral" icon="copy" onClick={copy}>
-                {copied ? (zh() ? '已复制' : 'Copied') : (zh() ? '复制' : 'Copy')}
+                {copied ? 'Copied' : 'Copy'}
               </Button>
             </div>
             <small className="text-[12px] leading-relaxed text-ink2">{state.audience}</small>
@@ -123,7 +120,7 @@ export function RemoteAccessCard() {
             title={failure.title}
             detail={failure.detail}
             onRetry={() => { void load(); }}
-            retryLabel={zh() ? '再检查一次' : 'Check again'}
+            retryLabel="Check again"
             onDismiss={() => setFailure(null)}
           />
         ) : null}

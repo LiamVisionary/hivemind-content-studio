@@ -52,7 +52,7 @@ export function videoModelsForSource(source, { setup, catalogs, hasSourceToggle 
  * disagree about what is wrong.
  */
 export function videoSourceDescriptor(source, {
-  setup, catalogs, machines = EMPTY_MACHINES, hasSourceToggle = true, zh = false,
+  setup, catalogs, machines = EMPTY_MACHINES, hasSourceToggle = true,
 } = {}) {
   const unavailable = (reason) => ({
     available: false, modelId: '', modelName: '', plan: null, switches: false, note: '', reason,
@@ -60,7 +60,7 @@ export function videoSourceDescriptor(source, {
   const offered = videoModelsForSource(source, { setup, catalogs, hasSourceToggle });
   const chosen = offered.find((model) => model.id === setup?.modelId) || offered[0] || null;
   if (!chosen) {
-    return unavailable(zh ? '这里暂无视频模型' : 'No video model here');
+    return unavailable('No video model here');
   }
   // A rental is a property of This Mac, said on the row rather than offered as
   // a place of its own: this is the box the work would actually land on.
@@ -68,9 +68,7 @@ export function videoSourceDescriptor(source, {
     ? routingLeaderFor([...(machines.live || [])], { id: chosen.id, name: chosen.name })
     : null;
   const note = machine
-    ? (zh
-      ? `在 ${machine.gpu || 'GPU'} 上运行（约 $${(machine.usd_per_hour || 0).toFixed(2)}/小时）`
-      : `on your ${machine.gpu || 'GPU'} · $${(machine.usd_per_hour || 0).toFixed(2)}/hr`)
+    ? `on your ${machine.gpu || 'GPU'} · $${(machine.usd_per_hour || 0).toFixed(2)}/hr`
     : '';
   const entry = resolveVideoModel(chosen.id, catalogs) || chosen;
   return {

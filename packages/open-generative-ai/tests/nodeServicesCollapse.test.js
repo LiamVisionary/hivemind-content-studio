@@ -5,6 +5,11 @@
 // path prefixes of a single port. These are the two things that decide whether
 // a request still lands where it used to: the prefix routing, and the fact that
 // each entry point still listens on its own port when it IS the program.
+//
+// Deliberately textual: the subjects are a bash supervisor script and three
+// Node entry points. There is no component here to mount — what is being
+// asserted is that the stack script starts one child instead of three and that
+// each old port still has an owner.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

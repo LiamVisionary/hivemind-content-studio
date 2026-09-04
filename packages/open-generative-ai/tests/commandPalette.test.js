@@ -99,8 +99,9 @@ test('a prefix match sorts above a mid-word one', () => {
     assert.deepEqual(filterPaletteEntries(entries, 'sto').map((entry) => entry.label), ['Story', 'History']);
 });
 
-test('group headings are translated', () => {
+test('every group heading is one word from the key table', () => {
     assert.equal(paletteGroupLabel('page'), 'Pages');
+    assert.equal(paletteGroupLabel('tab'), 'Tabs');
     assert.equal(paletteGroupLabel('prompt'), 'Saved prompts');
-    assert.equal(paletteGroupLabel('model', true), '模型');
+    assert.equal(paletteGroupLabel('model'), 'Models');
 });

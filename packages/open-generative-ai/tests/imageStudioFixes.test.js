@@ -150,7 +150,7 @@ test('cancel flags the run, tears down the timer and listener, and the late resu
     assert.match(cancel, /finishImageProgress\(false\)/, 'the 300 ms progress timer is cleared on cancel');
     assert.match(cancel, /run\.unsub\(\)/, 'the progress listener is released on cancel');
     assert.match(cancel, /window\.localAI\.cancelGeneration\(run\.jobId\)/, 'the hosted bridge stops polling that job by id');
-    assert.match(cancel, /toast\(zh\(\) \? '已取消生成。' : 'Generation cancelled\.'\)/);
+    assert.match(cancel, /toast\('Generation cancelled\.'\)/);
     assert.doesNotMatch(cancel, /toast\.error/);
     // The local continuation checks the flag before history / viewer / chime…
     assert.match(studio, /if \(run\.cancelled\) break;\n\s+if \(run\.jobId\) \{ removePendingJob\(run\.jobId\); run\.jobId = null; \}/);
@@ -308,7 +308,7 @@ test('on the cloud source the inert Advanced controls are hidden and the seed ri
     // Steps / guidance / how-many / negative are local-only now.
     assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('image\.steps'\)\}/);
     assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('image\.guidanceScale'\)\}/);
-    assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label=\{zh\(\) \? '生成数量' : 'How many'\}/);
+    assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label="How many"/);
     assert.match(panel, /\{s\.useLocalModel && supportsNegativePrompt \? \(/);
     // The reference-strength slider is gone, and so is the dead value behind it.
     assert.doesNotMatch(panel, /t\('image\.refStrength'\)/);
@@ -342,7 +342,7 @@ test('a failed generation leaves ONE callout — described, with its remedy — 
     assert.match(studio, /remedy=\{s\.generateFailure\?\.remedy \|\| null\}/);
     assert.match(studio, /onRemedy=\{\(remedy\) => void runFailureRemedy\(remedy, \{/);
     assert.match(studio, /onLowerResolution: lowerResolution,/);
-    assert.match(studio, /\{zh\(\) \? '重试' : 'Try again'\}/);
+    assert.match(studio, /retryLabel="Try again"/);
 });
 
 test('the composer keeps the chips wrapping and Generate pinned in its own group', () => {
@@ -351,7 +351,7 @@ test('the composer keeps the chips wrapping and Generate pinned in its own group
     assert.match(composer, /<div className="flex items-end gap-2">\s*<div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">/);
     assert.match(composer, /<div className="ml-auto flex shrink-0 items-center gap-2">/);
     // The app helper lives inside the one "Improve" menu now.
-    assert.match(composer, /label=\{zh\(\) \? '润色' : 'Improve'\}/);
+    assert.match(composer, /label=\{t\('composer\.improve'\)\}/);
     assert.doesNotMatch(composer, /className="border-honey\/40 text-honey"/);
     // The progress card carries the bridge status; the button just says Generating.
     assert.match(studio, /const generateLabel = s\.generating \? t\('common\.generating'\) : t\('common\.generate'\);/);
