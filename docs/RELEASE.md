@@ -149,7 +149,13 @@ Consequences accepted with this: no Mac App Store distribution (direct DMG
 only), and hardened-runtime + notarization carry the security story instead.
 The entitlements needed are `com.apple.security.cs.allow-jit` (the webview),
 `allow-unsigned-executable-memory` and `disable-library-validation` (the bundled
-Python loading native wheels — torch, cryptography, faster-whisper).
+Python loading native wheels — torch, cryptography, faster-whisper). They live in
+[`desktop/src-tauri/Entitlements.plist`](../desktop/src-tauri/Entitlements.plist),
+which `bundle.macOS.entitlements` points at, and that file carries the same
+no-sandbox note so nobody adds `com.apple.security.app-sandbox` back to it later.
+The plist is applied to what Tauri signs — the main binary and any sidecar; the
+nested Mach-O inside the staged Python tree carries the wheels' own signatures
+and is a separate signing question the first notarized build will answer.
 
 ### 2.4 Every port binds loopback, and remote access is a switch
 
@@ -219,9 +225,58 @@ anchor download → clipboard (for text, which is what makes the recovery key
 survive a webview with no save path at all) → a tab the user can print. A
 cancelled save sheet is reported as `cancelled` and nothing else fires.
 
-`tests/saveBytes.test.js` pins both sides of the branch. It cannot pin the real
+All four are now in place, plus one the section had not accounted for: the
+capability declares `remote: { urls: ["http://127.0.0.1:*"] }`. The window loads
+the control API's loopback origin (§2.1), which the capability system treats as a
+*remote* origin — so without that block the IPC is denied on the studio page and
+the save pair is unreachable even with both plugins registered.
+`the_capability_pattern_matches_every_origin_the_shell_can_load` in `ports.rs`
+parses that literal with Tauri's own `RemoteUrlPattern` and tests it against
+every port `reserve_port` can return.
+
+`tests/saveBytes.test.js` pins both sides of the branch and
+`test/studio/test_desktop_bundle.py` pins the shell side. Neither can pin the real
 webview; step 6 of the release checklist is where a Download button is pressed in
 the built app.
+
+### 2.6 The bundle carries the app, and `bundle.resources` is where that is said
+
+Tauri bundles only what `bundle.resources` names. It named nothing, so
+`cargo tauri build` produced an .app holding the Rust shell, `splash/index.html`
+and none of §1's table — and `Layout::resolve` then looked for its interpreter at
+`<cwd>/.venv/bin/python`, which for a Finder launch is `/.venv/bin/python`. Every
+sidecar failed to spawn and the boot screen was all anyone ever saw.
+
+Five entries now, filled by
+[`scripts/stage_desktop_resources.py`](../scripts/stage_desktop_resources.py):
+
+| Resource | What it is | Produced by |
+|---|---|---|
+| `desktop-python/` | The frozen venv and the static ffmpeg/ffprobe pair | `scripts/build_desktop_python.py --build` |
+| `node/` | The Node binary the three Node surfaces run on | staged from the build runner's Node |
+| `studio/` | The application: `src/`, the two Node services, and the three built frontends | `npm run build:embedded`, then staged |
+| `legal/` | LICENSE, THIRD_PARTY_NOTICES.md, CHANGELOG.md, notices.json | staged |
+| `runtime.json` | Where the shell finds all of the above | written by the staging script |
+
+`runtime.json`'s paths are **relative to the app's resource directory**, because
+a bundle does not know where it will be installed; `ShellConfig::anchor_to`
+resolves them against that directory, and the environment still wins over the
+file so `cargo tauri dev` against a checkout is unchanged. `pathPrepend` puts the
+staged ffmpeg in front of every child's `PATH`, which is what makes `shutil.which`
+in `doctor.py` find the bundled pair rather than the user's.
+
+Three gates, because this failed silently once:
+
+* `tauri-build` refuses to compile when a path named in `bundle.resources` does
+  not exist. That is why a placeholder for each part is committed — a checkout
+  that has built nothing still has to compile.
+* `python3 scripts/stage_desktop_resources.py --verify` fails while any part is
+  still a placeholder or missing a build output. The release workflow runs it
+  between staging and the bundle step.
+* `test/studio/test_desktop_bundle.py` holds `ShellConfig` and `runtime.json` to
+  each other: a new field on the shell's config fails the suite until it is
+  either pointed at something inside the bundle or written down as deliberately
+  left alone.
 
 ---
 
@@ -371,7 +426,7 @@ list, so it does not drift from a second copy here. The shape of it:
 3. `python -m hivemind_content_studio.identity --write` produces no diff — identity has not drifted from the generated JSON, and `python3 scripts/generate_gate_css.py --check` is clean — the sign-in gate's stylesheet still matches the design tokens.
 4. A cold start of the packaged app on a machine with no repository checkout, no `uv`, no Node and no ComfyUI reaches the studio, signs in with a passkey, and shows the local lanes as "not set up" rather than as errors.
 5. Tag `studio-v0.x`, build, sign, notarize, staple.
-6. Smoke-test the built DMG on a second machine: install, launch, sign in, one hosted generation, one restore, **press Download on the result and confirm a native save sheet appears and writes the file** (§2.4), quit — and confirm no ComfyUI process was killed on quit.
+6. Smoke-test the built DMG on a second machine: install, launch, sign in, one hosted generation, one restore, **press Download on the result and confirm a native save sheet appears and writes the file** (§2.5 — blocking, not advisory: the anchor fallback reports success while writing nothing), quit — and confirm no ComfyUI process was killed on quit.
 7. Promote `latest.json`. This is the step that ships it; until it runs, the tag is only an artifact.
 
 ## 8. Still open
@@ -379,7 +434,8 @@ list, so it does not drift from a second copy here. The shape of it:
 Named here rather than left implicit:
 
 * **Nothing here has been launched as a `.app`.** `cargo check` and `cargo test` pass and the supervisor's logic is unit-tested, but the shell has never been built into a bundle and double-clicked. Step 4 of the checklist is the first time that happens.
-* **The runtimes are not bundled.** `desktop/src-tauri` resolves its sidecar commands from configuration, and in a checkout those default to `<root>/.venv/bin/python` and `node` on PATH. §1's table is still the specification for what the DMG must carry. The bundled Python is built by `scripts/build_desktop_python.py`; a release still needs a static arm64 ffmpeg/ffprobe pair (repository variable `DESKTOP_FFMPEG_ARCHIVE_URL`, or `vendor/ffmpeg/darwin-arm64`) and a python-build-standalone 3.12 interpreter passed to `--python`.
-* **No updater key pair has been generated**, so `src-tauri/updater.json` carries an empty `pubkey` and the build lane produces UNSIGNED artifacts. `scripts/check_updater_config.py --require-key` is the gate that keeps such a build from being promoted, and it holds `tauri.conf.json` to that same one source for the updater endpoint and public key.
+* **The bundled interpreter is not yet relocatable.** `bundle.resources` now names every part of §1's table and `scripts/stage_desktop_resources.py` assembles them (§2.6), but the release workflow calls `scripts/build_desktop_python.py` with no `--python`, so `uv venv` picks the runner's own interpreter and `venv/bin/python` symlinks a path that does not exist on a user's machine. A python-build-standalone 3.12 arm64 interpreter has to be downloaded on the runner and passed to `--python`, and the interpreter itself copied into the staged tree. `--verify` catches the dangling symlink (a broken link does not `exist()`), so this fails the build rather than shipping.
+* A release also needs a static arm64 ffmpeg/ffprobe pair on the runner — repository variable `DESKTOP_FFMPEG_ARCHIVE_URL`, or `vendor/ffmpeg/darwin-arm64` locally. Neither is a secret; both are public download URLs.
+* **No updater key pair has been generated** (`cargo tauri signer generate` — the owner's step, and the private half never enters this repository), so `src-tauri/updater.json` carries an empty `pubkey` and the build lane produces UNSIGNED artifacts. The plugin itself is now in the build: `tauri-plugin-updater` is a dependency, registered in `lib.rs`, and granted `updater:default` in the capability, and `check_updater_config.py` asserts all three — it used to compare two JSON files and call a configuration with no plugin behind it healthy. `scripts/check_updater_config.py --require-key` is the gate that keeps such a build from being promoted, and it holds `tauri.conf.json` to that same one source for the updater endpoint and public key.
 * The frontend still hard-codes `:8788` for the Canvas iframe and `:8796` for the MCP page. The shell prefers those ports and attaches to whatever already answers on them, so a collision degrades one panel rather than boot — but the discovery half of finding `startup-08` is unwritten.
 * The packaged app's configuration surface (the ~dozen env names and five hard-coded loopback ports the control API resolves by convention) still has no single settings object; see finding `cp-config-surface-for-packaging`.* Windows and Linux need bundled runtimes and a signing chain before their lanes can be re-enabled.

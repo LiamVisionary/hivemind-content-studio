@@ -49,12 +49,21 @@ pub struct ShellConfig {
     pub frontend_dist: Option<String>,
     pub media_state_dir: Option<String>,
     pub comfy_lanes: Option<String>,
+    /// Directories put in front of every child's `PATH`. The bundled static
+    /// ffmpeg/ffprobe pair lives in one of them, and `doctor.py` and the engine
+    /// reach for both with `shutil.which`.
+    pub path_prepend: Vec<String>,
 }
 
 impl ShellConfig {
     /// Read `runtime.json` from the app's resource directory, then let the
     /// environment win over it — that is what makes `cargo tauri dev` against
     /// a checkout possible without a second config file.
+    ///
+    /// Paths in the file are relative to that resource directory, because the
+    /// bundle does not know where it will be installed. Paths from the
+    /// environment are taken exactly as given: those are a developer naming
+    /// their own checkout.
     pub fn load(resource_dir: Option<&Path>) -> Self {
         let mut config = resource_dir
             .map(|dir| dir.join("runtime.json"))
@@ -62,6 +71,9 @@ impl ShellConfig {
             .and_then(|path| std::fs::read_to_string(path).ok())
             .and_then(|raw| serde_json::from_str::<ShellConfig>(&raw).ok())
             .unwrap_or_default();
+        if let Some(dir) = resource_dir {
+            config.anchor_to(dir);
+        }
 
         let take = |key: &str| std::env::var(key).ok().filter(|value| !value.trim().is_empty());
         if let Some(value) = take("HIVEMIND_STUDIO_ROOT") {
@@ -83,6 +95,36 @@ impl ShellConfig {
             config.comfy_lanes = Some(value);
         }
         config
+    }
+
+    /// Make every relative path in the file absolute, against the directory the
+    /// file came from.
+    ///
+    /// `runtime.json` is written by `scripts/stage_desktop_resources.py` and
+    /// says `desktop-python/venv/bin/python`, not an absolute path: the bundle
+    /// is built on a runner and installed wherever the user drops it. A
+    /// relative program would be resolved against the process's cwd, which for
+    /// a Finder launch is `/`.
+    fn anchor_to(&mut self, resource_dir: &Path) {
+        let anchor = |value: &mut Option<String>| {
+            if let Some(current) = value.as_ref() {
+                let path = Path::new(current);
+                if path.is_relative() {
+                    *value = Some(resource_dir.join(path).display().to_string());
+                }
+            }
+        };
+        anchor(&mut self.studio_root);
+        anchor(&mut self.python);
+        anchor(&mut self.node);
+        anchor(&mut self.frontend_dist);
+        anchor(&mut self.media_state_dir);
+        for entry in &mut self.path_prepend {
+            let path = Path::new(entry.as_str());
+            if path.is_relative() {
+                *entry = resource_dir.join(path).display().to_string();
+            }
+        }
     }
 }
 
@@ -106,6 +148,8 @@ pub struct Layout {
     pub bridge_port: u16,
     pub mcp_port: u16,
     pub comfy_lanes: String,
+    /// Directories placed in front of every child's `PATH`.
+    pub path_prepend: Vec<PathBuf>,
 }
 
 impl Layout {
@@ -173,7 +217,33 @@ impl Layout {
             bridge_port: BRIDGE_PORT,
             mcp_port: MCP_PORT,
             comfy_lanes,
+            path_prepend: config.path_prepend.iter().map(PathBuf::from).collect(),
         }
+    }
+
+    /// The `PATH` every child gets: the bundled directories first, then whatever
+    /// the OS handed this process.
+    ///
+    /// The static ffmpeg/ffprobe pair ships in `desktop-python/bin`, and the
+    /// engine resolves both with `shutil.which`. Without this the packaged app
+    /// would carry them and still use whichever pair the user happens to have,
+    /// or none at all — a Finder launch has no PATH worth the name.
+    pub fn child_path(&self) -> Option<String> {
+        if self.path_prepend.is_empty() {
+            return None;
+        }
+        let mut parts: Vec<String> = self
+            .path_prepend
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect();
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        if inherited.trim().is_empty() {
+            parts.push("/usr/bin:/bin:/usr/sbin:/sbin".to_string());
+        } else {
+            parts.push(inherited);
+        }
+        Some(parts.join(":"))
     }
 
     pub fn studio_origin(&self) -> String {
@@ -241,6 +311,11 @@ pub fn service_plans(layout: &Layout) -> Vec<ServicePlan> {
     // What the proxy and MCP layers use to reach the control API. Always
     // passed, because the port it names is only sometimes 8765.
     shared.insert("HIVEMIND_STUDIO_TARGET".into(), layout.studio_origin());
+    // The bundled ffmpeg pair, in front of whatever the user has. Absent in a
+    // developer checkout, where the OS PATH is the whole answer.
+    if let Some(path) = layout.child_path() {
+        shared.insert("PATH".into(), path);
+    }
 
     let with = |extra: &[(&str, String)]| -> BTreeMap<String, String> {
         let mut env = shared.clone();
@@ -409,6 +484,7 @@ mod tests {
                 frontend_dist: Some("/opt/studio/dist".into()),
                 media_state_dir: Some("/home/person/.hivemindos/media-studio".into()),
                 comfy_lanes: None,
+                path_prepend: vec!["/opt/studio/runtime/bin".into()],
             },
             PathBuf::from("/data"),
             PathBuf::from("/cache"),
@@ -552,6 +628,95 @@ mod tests {
             layout.frontend_dist,
             PathBuf::from("/checkout/packages/open-generative-ai/dist")
         );
+    }
+
+    /// The packaged app's `runtime.json` names its runtimes relative to the
+    /// resource directory, because the bundle does not know where it will be
+    /// installed. A relative program is resolved against the process cwd, which
+    /// for a Finder launch is `/` — the exact way the bundled interpreter would
+    /// be missed while sitting inside the .app.
+    #[test]
+    fn a_bundled_runtime_json_is_read_relative_to_the_resources_it_ships_with() {
+        let resources = std::env::temp_dir().join(format!(
+            "studio-runtime-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&resources).expect("temp resources");
+        std::fs::write(
+            resources.join("runtime.json"),
+            r#"{
+              "staged": true,
+              "studioRoot": "studio",
+              "python": "desktop-python/venv/bin/python",
+              "node": "node/node",
+              "frontendDist": "studio/packages/open-generative-ai/dist",
+              "pathPrepend": ["desktop-python/bin"]
+            }"#,
+        )
+        .expect("write runtime.json");
+
+        let config = ShellConfig::load(Some(&resources));
+        std::fs::remove_dir_all(&resources).ok();
+
+        for value in [&config.studio_root, &config.python, &config.node, &config.frontend_dist] {
+            let path = PathBuf::from(value.as_ref().expect("named in runtime.json"));
+            assert!(path.is_absolute(), "{} was left relative", path.display());
+            assert!(path.starts_with(&resources), "{} left the bundle", path.display());
+        }
+        assert_eq!(
+            config.python,
+            Some(
+                resources
+                    .join("desktop-python/venv/bin/python")
+                    .display()
+                    .to_string()
+            )
+        );
+        assert!(config.path_prepend[0].starts_with(resources.to_string_lossy().as_ref()));
+        // Nothing in the file says where the user's private state root is, so
+        // the shell keeps adopting it wherever they already have it.
+        assert!(config.media_state_dir.is_none());
+    }
+
+    /// The bundle carries a static ffmpeg/ffprobe pair and the engine reaches
+    /// for both with `shutil.which`. Carrying them and not putting them on the
+    /// children's PATH would use whatever the user happens to have, or nothing.
+    #[test]
+    fn the_bundled_binaries_go_in_front_of_every_childs_path() {
+        let plans = service_plans(&layout_with_port(8765));
+        for plan in &plans {
+            let path = plan.env.get("PATH").unwrap_or_else(|| {
+                panic!("{} was not handed the bundled binaries", plan.id);
+            });
+            assert!(
+                path.starts_with("/opt/studio/runtime/bin:"),
+                "{} resolves ffmpeg from somewhere else first: {path}",
+                plan.id
+            );
+            assert!(path.len() > "/opt/studio/runtime/bin:".len());
+        }
+    }
+
+    /// A developer checkout stages nothing, so the OS PATH is the whole answer
+    /// and the children must not be handed a truncated one.
+    #[test]
+    fn a_checkout_with_nothing_staged_leaves_the_path_alone() {
+        let layout = Layout::resolve(
+            &ShellConfig {
+                studio_root: Some("/checkout".into()),
+                ..ShellConfig::default()
+            },
+            PathBuf::from("/data"),
+            PathBuf::from("/cache"),
+            PathBuf::from("/logs"),
+            "secret".into(),
+            8765,
+        );
+        assert!(layout.child_path().is_none());
+        assert!(service_plans(&layout)
+            .iter()
+            .all(|plan| !plan.env.contains_key("PATH")));
     }
 
     #[test]

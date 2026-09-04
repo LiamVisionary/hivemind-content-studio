@@ -1,0 +1,11 @@
+{
+  "$comment": [
+    "A PLACEHOLDER runtime.json. It names no runtimes on purpose:",
+    "with every key absent the shell keeps its development defaults",
+    "(this checkout's .venv, node on PATH, packages/*/dist), which is",
+    "what `cargo tauri dev` needs. The release build overwrites this",
+    "file with paths relative to the app's own resource directory."
+  ],
+  "schema_version": 1,
+  "staged": false
+}

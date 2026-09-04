@@ -213,6 +213,22 @@ jobs:
             --build desktop/src-tauri/resources/desktop-python \
             --ffmpeg-dir vendor/ffmpeg/darwin-arm64
 
+      # Tauri bundles only what `bundle.resources` names, and what it names has
+      # to be on disk before the bundle step runs. This is where the frozen
+      # Python, the Node binary, the application tree with its three built
+      # frontends and the licence files become one staged directory, and where
+      # `runtime.json` is written so the shell looks for its runtimes inside the
+      # .app instead of in the cwd (which for a Finder launch is `/`).
+      - name: Stage the bundle resources
+        run: |
+          set -euo pipefail
+          python3 scripts/stage_desktop_resources.py --node "$(command -v node)"
+
+      # Separate from the step above on purpose: this is the one that refuses to
+      # let a build carry the committed placeholders instead of the runtimes.
+      - name: The bundle must carry every runtime it declares
+        run: python3 scripts/stage_desktop_resources.py --verify
+
       # Every Apple secret is referenced by name and unset in this repository.
       # This step is the only place that decides signed vs unsigned, and both
       # paths produce an artifact — a build that cannot be signed still has to

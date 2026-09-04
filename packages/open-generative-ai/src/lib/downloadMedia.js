@@ -73,9 +73,10 @@ export async function resolvePlaintextMedia(url) {
  * A WKWebView does not carry out `<a download>` of a `blob:` URL on its own, so
  * in the packaged Tauri app every Download button in this studio would click and
  * do nothing. Tauri exposes its plugin APIs on `window.__TAURI__` when the shell
- * sets `app.withGlobalTauri` (see docs/RELEASE.md §2.4 for the plugins and the
- * capability scope this expects); both halves are checked because the dialog
- * without the write is a save sheet that saves nothing.
+ * sets `app.withGlobalTauri` (see docs/RELEASE.md §2.5 for the plugins, the
+ * capability scope and the loopback origin this expects); both halves are
+ * checked because the dialog without the write is a save sheet that saves
+ * nothing.
  */
 function desktopSavePair() {
   const tauri = typeof window === 'undefined' ? null : window.__TAURI__;

@@ -102,4 +102,47 @@ mod tests {
         assert_eq!(loopback_origin(8765), "http://127.0.0.1:8765");
         assert_eq!(loopback_origin(8771), "http://127.0.0.1:8771");
     }
+
+    /// The capability's `remote.urls` literal, tested against every origin the
+    /// shell can actually load.
+    ///
+    /// The window loads `http://127.0.0.1:<port>` (§2.1), so the capability
+    /// system treats the studio as a REMOTE origin and grants it nothing unless
+    /// a URLPattern in `capabilities/default.json` matches. A pattern that
+    /// looks right and matches nothing produces exactly the failure this whole
+    /// area exists to prevent: Download returns success and writes no file. The
+    /// pattern is parsed with the same type Tauri resolves capabilities with,
+    /// so this is the check, not a re-implementation of it.
+    #[test]
+    fn the_capability_pattern_matches_every_origin_the_shell_can_load() {
+        use std::str::FromStr;
+        use tauri::utils::acl::RemoteUrlPattern;
+
+        let declared: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json"))
+                .expect("capabilities/default.json is JSON");
+        let literal = declared["remote"]["urls"][0]
+            .as_str()
+            .expect("the capability must declare a remote URL, or the studio page gets no IPC")
+            .to_string();
+
+        let pattern = RemoteUrlPattern::from_str(&literal)
+            .unwrap_or_else(|error| panic!("{literal} is not a valid URLPattern: {error:?}"));
+
+        for port in PREFERRED_CONTROL_PORT..=CONTROL_PORT_RANGE_END {
+            let origin = url::Url::parse(&format!("{}/", loopback_origin(port))).expect("origin");
+            assert!(
+                pattern.test(&origin),
+                "{literal} does not match {origin}, so the studio page would have no IPC there"
+            );
+        }
+        // A fallback below the range is still loopback and still ours.
+        let ephemeral = url::Url::parse("http://127.0.0.1:49221/studio?page=video").expect("url");
+        assert!(pattern.test(&ephemeral));
+        // Anything that is not loopback is not covered by it.
+        for foreign in ["http://localhost:8765/", "https://example.invalid/"] {
+            let url = url::Url::parse(foreign).expect("url");
+            assert!(!pattern.test(&url), "{literal} must not reach {foreign}");
+        }
+    }
 }
