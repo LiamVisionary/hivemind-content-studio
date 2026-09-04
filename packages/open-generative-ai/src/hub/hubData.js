@@ -2083,6 +2083,10 @@ export function nextPollDelay(current, ok) {
 
 let eventsBound = false;
 
+// Where the embedded Canvas editor may send the shell. Models is the one it
+// asks for today (its "Models & LoRAs" buttons); History is the natural second.
+const CANVAS_NAVIGABLE_PAGES = new Set(['models', 'history']);
+
 function bindEvents() {
   if (eventsBound) return;
   eventsBound = true;
@@ -2091,6 +2095,18 @@ function bindEvents() {
   window.addEventListener('message', (event) => {
     const frame = ownerAccessFrameForEvent(event);
     if (frame) void postOwnerAccess(frame, 'hivemind-owner-unlock');
+  });
+
+  // Canvas navigation bridge — the embedded editor asking the shell for one of
+  // its own pages instead of opening a second tab into another app. Only from
+  // the canvas frame, only at its own origin, and only to a page on this list:
+  // an iframe must not be able to steer the shell anywhere it likes.
+  window.addEventListener('message', (event) => {
+    if (event.data?.type !== 'hivemind-navigate') return;
+    const frame = surfaceFrames.get('canvas');
+    if (!frame?.contentWindow || event.source !== frame.contentWindow || event.origin !== canvasFrameOrigin()) return;
+    if (!CANVAS_NAVIGABLE_PAGES.has(String(event.data.page || ''))) return;
+    window.dispatchEvent(new CustomEvent('navigate', { detail: { page: String(event.data.page) } }));
   });
 
   // Canvas history bridge — ready flag + request/response correlation.

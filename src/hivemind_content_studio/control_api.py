@@ -158,6 +158,7 @@ from .observability import (
     record_incident,
     remedy_text,
 )
+from .doctor import collect_report as doctor_report
 from .settings import SettingsError, apply as apply_settings, describe as describe_settings, settings as studio_settings
 from .studio_drafts import StudioRunDraft
 from .vault_store import VaultStore
@@ -3891,6 +3892,25 @@ def build_control_app(
             cached = unified_runtime_snapshot()
             runtime_cache.update(payload=cached, at=time.time())
         return {**cached, "version": app_version}
+
+    @app.get("/api/doctor", dependencies=[Depends(require_owner)])
+    def doctor() -> dict:
+        """One answer to "what is this machine, and what can it run?".
+
+        The CLI's `content-studio doctor` checks, the live engine snapshot and
+        this box's hardware, merged — because the Models page has to put a
+        hardware-fit line on every card ("fits your 36 GB Mac" / "needs a
+        rented GPU") and asking three routes for it would be three round trips
+        and three different moments in time.
+
+        Owner-gated and secret-free by construction: every part of it reports
+        whether something is PRESENT (a binary on PATH, a key configured, a
+        port answering), never what it holds. `doctor.collect_report` builds to
+        a deadline so a hung probe cannot hold the page.
+        """
+        # `ok` is the doctor's own verdict, not "the request worked" — a machine
+        # missing ffmpeg answers 200 and says so.
+        return {**doctor_report(), "version": app_version}
 
     @app.get("/api/diagnostics/bundle", dependencies=[Depends(require_owner)])
     def diagnostics_zip() -> Response:

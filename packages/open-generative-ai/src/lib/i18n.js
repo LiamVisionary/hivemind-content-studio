@@ -120,7 +120,6 @@ const translations = {
         // Settings Modal
         'settings.title': 'Settings',
         'settings.apiKey': 'API key',
-        'settings.localModels': 'Local models',
         'settings.muapiKeyLabel': 'MUAPI API Key',
         'settings.keyPlaceholder': 'Enter your MUAPI API key...',
         'settings.keyNote': 'Kept in this browser and sent only to api.muapi.ai.',
@@ -278,7 +277,6 @@ const translations = {
         // Settings Modal
         'settings.title': '设置',
         'settings.apiKey': 'API 密钥',
-        'settings.localModels': '本地模型',
         'settings.muapiKeyLabel': 'MUAPI API 密钥',
         'settings.keyPlaceholder': '输入您的 MUAPI API 密钥...',
         'settings.keyNote': '保存在此浏览器中，仅发送到 api.muapi.ai。',

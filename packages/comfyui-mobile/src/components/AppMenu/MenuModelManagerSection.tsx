@@ -1,5 +1,6 @@
 import { CaretDownIcon, CloudDownloadIcon, DownloadIcon } from '@/components/icons';
 import { openLoraManagerUiInNewTab } from '@/utils/loraManagerUi';
+import { isEmbeddedInStudio, requestStudioPage } from '@/utils/studioNavigation';
 
 interface MenuModelManagerSectionProps {
   open: boolean;
@@ -12,7 +13,11 @@ export function MenuModelManagerSection({
   sectionRef,
   onToggle,
 }: MenuModelManagerSectionProps) {
+  // Inside the studio this is the studio's own Models page — one manager, no
+  // second tab. Standalone, it stays the external LoRA manager UI.
+  const embedded = isEmbeddedInStudio();
   const openModelManager = () => {
+    if (requestStudioPage('models')) return;
     openLoraManagerUiInNewTab();
   };
 
@@ -40,7 +45,7 @@ export function MenuModelManagerSection({
               <span className="font-medium text-gray-900">Model Manager</span>
               <span className="text-xs text-gray-500">Browse installed files and Civitai downloads</span>
             </span>
-            <span className="ml-auto text-gray-400">↗</span>
+            <span className="ml-auto text-gray-400">{embedded ? '→' : '↗'}</span>
           </button>
 
           <button
@@ -54,7 +59,7 @@ export function MenuModelManagerSection({
               <span className="font-medium text-gray-900">Download LoRA from Civitai</span>
               <span className="text-xs text-gray-500">Search or paste civitai.com / civitai.red URLs</span>
             </span>
-            <span className="ml-auto text-gray-400">↗</span>
+            <span className="ml-auto text-gray-400">{embedded ? '→' : '↗'}</span>
           </button>
         </div>
       )}
