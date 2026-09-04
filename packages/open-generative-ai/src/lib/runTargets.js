@@ -83,6 +83,42 @@ const hourly = (machine) => `$${(Number(machine?.usd_per_hour) || 0).toFixed(2)}
  * provider's is the probe. Two answers is how the same model came to be offered
  * in Image and refused in Sprite at the same moment.
  */
+/**
+ * What a row says when it is blocked on a credential.
+ *
+ * NOT a credential REQUIREMENT. providers.py declares MUAPI's as the literal
+ * "MUAPI_API_KEY or MUAPI_KEY", and the media catalog puts that on the wire —
+ * on `detail` for MUAPI, on `needs` for others, so neither field can be trusted
+ * to be prose by virtue of its name. Rendering one put an environment variable
+ * on screen where a sentence belongs: a first-run user met "Nano Banana —
+ * MUAPI_API_KEY or MUAPI_KEY" and learned nothing they could act on. The
+ * requirement is still CARRIED on the target, because readinessFor reads it to
+ * choose between "add this key" and "the provider is down" — it is just never
+ * the thing a person reads.
+ *
+ * Some of those values ARE sentences and still name the variable ("XAI_API_KEY
+ * is missing"), which is the same leak wearing a verb, so the test is for the
+ * NAME rather than for the shape of the whole string. What that drops is never
+ * the only route to the fix: the readiness block under the row carries the door
+ * ("Add key", "Connect"), and an account reachable two ways is already two
+ * rows, each naming its own door.
+ */
+// A credential name: SCREAMING_SNAKE with at least one underscore, which is
+// what every key in the registry looks like and what no English sentence does.
+// "OpenAI API key" and "MUAPI account" are prose and stay; "OPENAI_API_KEY is
+// missing; use the separate GPT Image OAuth provider" is developer copy and
+// goes, embedded in a sentence or not.
+const CREDENTIAL_NAME = /[A-Z]{2,}_[A-Z0-9_]+/;
+
+const asProse = (value) => {
+  const text = String(value || '').trim();
+  return text && !CREDENTIAL_NAME.test(text) ? text : '';
+};
+
+function credentialReason(detail, needs) {
+  return asProse(detail) || asProse(needs) || t('runOn.needsCredential');
+}
+
 export function credentialReady(row, available = true) {
   if (transportFor(row).transport === 'muapi') return !needsBrowserKey(row);
   return available !== false;
@@ -133,7 +169,7 @@ function makeTarget({
     // says what the transport said; a row refused for a missing credential
     // carries the server's own sentence, so the picker has something to print
     // even where no readiness adapter is passed.
-    reason: route.runnable ? (credentialled ? '' : (String(needs || '') || String(detail || ''))) : route.reason,
+    reason: route.runnable ? (credentialled ? '' : credentialReason(detail, needs)) : route.reason,
     transport: route.transport,
     // The credential half of the row, carried rather than dropped: readinessFor
     // reads exactly these to decide between "not configured — add this key" and

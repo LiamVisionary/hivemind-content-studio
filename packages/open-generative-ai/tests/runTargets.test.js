@@ -441,3 +441,55 @@ test('a rental is the per-tab pin now, not a mode any preference remembers', asy
   assert.ok(IMAGE_TAB_FIELDS.includes('rentedMachineId'));
   assert.equal(IMAGE_TAB_FIELDS.includes('rentedOnly'), false);
 });
+
+// A credential's variable name is not a sentence.
+//
+// Found live on 2026-09-04, after the readiness work closed the "disabled row
+// with no reason" blocker: every disabled MUAPI row then read
+// "Nano Banana — MUAPI_API_KEY or MUAPI_KEY". That string is what providers.py
+// declares as the provider's credential REQUIREMENT, and the target carries it
+// for readinessFor to read. Printing it swapped one unusable row for another.
+test('a row blocked on a credential reads as prose, never as the credential name', async () => {
+  const { buildRunTargets } = await import('../src/lib/runTargets.js');
+  const targets = buildRunTargets({
+    kind: 'image',
+    catalogProviders: [
+      // Exactly the shape providers.py produces for MUAPI.
+      // The real wire shape: the media catalog puts MUAPI's requirement on
+      // `detail`, not `needs`, so a guard that only checked `needs` passed
+      // while the app still printed the variable name. Both are covered.
+      { id: 'muapi', available: true, detail: 'MUAPI_API_KEY or MUAPI_KEY', keys: ['MUAPI_API_KEY'],
+        models: [{ id: 'nano-banana', label: 'Nano Banana' }] },
+      { id: 'muapi-alt', available: true, needs: 'MUAPI_API_KEY or MUAPI_KEY',
+        models: [{ id: 'nano-banana-alt', label: 'Nano Banana Alt' }] },
+      // A sentence that still names the variable is the same leak wearing a
+      // verb — this is what providers.py really writes for OpenAI and xAI.
+      { id: 'openai-gpt-image', available: false,
+        detail: 'OPENAI_API_KEY is missing; use the separate GPT Image OAuth provider if ChatGPT/Codex is connected',
+        models: [{ id: 'gpt-image-2', label: 'GPT Image 2' }] },
+      { id: 'higgsfield-cloud', available: false, detail: 'HIGGSFIELD_API_KEY_ID + HIGGSFIELD_API_KEY_SECRET',
+        models: [{ id: 'soul-standard', label: 'Soul Standard' }] },
+      // A provider whose server wrote a sentence with no variable in it keeps it.
+      { id: 'xai-imagine-oauth', available: false, needs: 'Needs an OpenAI API key.',
+        models: [{ id: 'grok-imagine', label: 'Grok Imagine' }] },
+    ],
+  });
+  const muapi = targets.find((entry) => entry.id === 'nano-banana');
+  const prose = targets.find((entry) => entry.id === 'grok-imagine');
+
+  // The requirement is still CARRIED — readinessFor reads it — just not printed.
+  assert.equal(muapi.detail, 'MUAPI_API_KEY or MUAPI_KEY');
+  assert.ok(muapi.reason, 'a blocked row must still say something');
+  assert.doesNotMatch(muapi.reason, /[A-Z]{2,}_[A-Z0-9_]+/, `reason printed a credential name: ${muapi.reason}`);
+  assert.equal(prose.reason, 'Needs an OpenAI API key.', 'a sentence with no variable in it is kept as written');
+
+  // And no target's rendered strings may carry one, whatever the source.
+  for (const target of targets) {
+    for (const field of ['label', 'placeLabel', 'reason', 'credentialLabel']) {
+      assert.doesNotMatch(
+        String(target[field] || ''), /[A-Z]{2,}_[A-Z0-9_]+/,
+        `${field} on ${target.id} reads like an internal identifier: ${target[field]}`,
+      );
+    }
+  }
+});

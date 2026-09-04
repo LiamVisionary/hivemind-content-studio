@@ -222,6 +222,9 @@ export const STRINGS = {
     'runOn.nothingRuns': 'No model here can run this yet',
     'runOn.freeStaysHere': 'free, stays here',
     'runOn.onYourCredits': `on your ${HIVEMINDOS_CREDITS}`,
+    // Said when a row is blocked on a credential and nothing prose-shaped was
+    // supplied. Never the credential's variable name — see credentialReason.
+    'runOn.needsCredential': 'This account needs a key before it can run here.',
 
     // ---- Setup: the doors out of an empty Model section ------------------
     'setup.comfyNotConnected': 'ComfyUI is not connected.',
