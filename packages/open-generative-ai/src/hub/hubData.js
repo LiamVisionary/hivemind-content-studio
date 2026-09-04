@@ -6,6 +6,7 @@
 // from hubApp.js — when in doubt, that file is the contract.
 import { useSyncExternalStore } from 'react';
 import { toast } from 'react-hot-toast';
+import { setNavBadges } from '../app/navBadges.js';
 import { setApiStatus as setApiStatusStore } from '../app/statusStore.js';
 import { decryptMedia } from '../lib/e2eVault.js';
 import { loadStudioSetup } from '../app/promptTarget.js';
@@ -97,6 +98,8 @@ export const hubState = {
   canvasWorkflowPayloads: {},
   loadedCanvasSetup: null,
   telemetry: null,
+  // How many credential requests are waiting on the owner right now (count only).
+  passbookPending: 0,
   historyFilter: '',
   // Client-side text filter over prompts (text) and outputs (model/basename).
   historyQuery: '',
@@ -368,7 +371,7 @@ export const STUDIO_MODES = {
   create: {
     label: 'Create',
     heading: 'What do you want to make?',
-    copy: 'Create images, video, and complete media from one prompt, one model router, and one durable run.',
+    copy: 'Say what you want. The studio picks the model, makes it, and keeps it in your Library.',
     placeholder: 'Create a 20-second product launch ad with a hard pattern interrupt, three cinematic scenes, and a direct CTA…',
     submit: 'Plan creation',
     attachment: 'Images',
@@ -376,7 +379,7 @@ export const STUDIO_MODES = {
   edit: {
     label: 'Edit',
     heading: 'What should change?',
-    copy: 'Add one or more ordered references, describe the transformation, and keep every result in the same asset history.',
+    copy: 'Add the pictures to work from, say what should change, and every version lands in your Library.',
     placeholder: 'Replace the background with a warm editorial studio while preserving the product, framing, and lighting direction…',
     submit: 'Plan edit',
     attachment: 'References',
@@ -384,7 +387,7 @@ export const STUDIO_MODES = {
   animate: {
     label: 'Animate',
     heading: 'What should move?',
-    copy: 'Animate an idea or attached frame with the same video models, run history, provenance, and approvals.',
+    copy: 'Bring a picture or an idea to life as a clip — same video models the Video studio uses.',
     placeholder: 'Animate this frame with a slow push-in, subtle fabric movement, natural parallax, and a clean final hold…',
     submit: 'Plan animation',
     attachment: 'Start frame',
@@ -392,7 +395,7 @@ export const STUDIO_MODES = {
   workflow: {
     label: 'Workflow',
     heading: 'Build the complete workflow',
-    copy: 'Control scenes, providers, voice, assembly, publishing, budget, and policy in one production form.',
+    copy: 'Plan a whole piece — scenes, voice, the edit and where it goes — before spending anything.',
     placeholder: '',
     submit: 'Create production',
     attachment: 'Images',
@@ -864,9 +867,11 @@ export function generationProgressPct(card) {
 /* Navigation (hubApp.js:781-800)                                     */
 /* ------------------------------------------------------------------ */
 
-export const HUB_VIEWS = ['create', 'canvas', 'inspo', 'models', 'runs', 'history', 'telemetry', 'providers', 'passbook', 'machines'];
-// View name → AppShell page id ('create' renders on the 'planner' page).
-const hubPageForView = (view) => (view === 'create' ? 'planner' : view);
+export const HUB_VIEWS = ['create', 'canvas', 'inspo', 'models', 'runs', 'history', 'telemetry', 'providers', 'passbook', 'machines', 'agents'];
+// View name → AppShell page id ('create' renders on the 'planner' page, 'agents'
+// on the 'mcp-cli' page — both page keys are the wire contract, not the view name).
+const HUB_PAGE_FOR_VIEW = { create: 'planner', agents: 'mcp-cli' };
+const hubPageForView = (view) => HUB_PAGE_FOR_VIEW[view] || view;
 
 // Hub-internal navigation goes through the App router so the rail, URL, and
 // document title stay in sync. The router mounts/activates the hub view.
@@ -882,7 +887,9 @@ export function activateHubView(view) {
   notifyHub();
   if (selected === 'canvas') loadToolSurface(selected);
   if (selected === 'history') void loadPrompts({ quiet: true });
-  if (selected === 'telemetry') void loadGenerationTelemetry({ quiet: true });
+  // Activity lives on the Productions page now; the standalone telemetry page
+  // stays routable, and both read the same payload.
+  if (selected === 'telemetry' || selected === 'runs') void loadGenerationTelemetry({ quiet: true });
   if (selected === 'providers') void loadOAuth().catch(() => {});
 }
 
@@ -2000,6 +2007,28 @@ function viewIsShowing(view) {
   return hubState.hubVisible && hubState.activeView === view;
 }
 
+// Anything waiting on the owner, key names only (/api/passbook/policy is the
+// same shape PassBook's own page reads). Fail-soft: a store that will not answer
+// is "nothing waiting", never a toast on a background tick.
+async function loadPassbookPending() {
+  try {
+    const rules = await api('/api/passbook/policy');
+    hubState.passbookPending = Array.isArray(rules?.pending) ? rules.pending.length : 0;
+  } catch {
+    hubState.passbookPending = 0;
+  }
+}
+
+// The collapsed Advanced group carries these on its closed header, so a folded
+// group never hides an agent waiting on an approval or a production mid-flight.
+const RUN_SETTLED = ['completed', 'cancelled', 'failed'];
+function publishNavBadges() {
+  setNavBadges({
+    passbookPending: hubState.passbookPending,
+    runningProductions: hubState.runs.filter((run) => !RUN_SETTLED.includes(run.status)).length,
+  });
+}
+
 export async function refreshAll({ quiet = false } = {}) {
   try {
     if (!hubState.catalog || !quiet) hubState.catalog = await api('/api/catalog');
@@ -2007,7 +2036,16 @@ export async function refreshAll({ quiet = false } = {}) {
     // OAuth status is re-read on every tick while Providers is showing, so a
     // sign-in finished in another tab lands on the card without a manual refresh.
     if (!hubState.oauth || !quiet || viewIsShowing('providers')) await loadOAuth();
-    const [runsChanged, telemetryChanged] = await Promise.all([loadRuns(), loadGenerationTelemetry({ quiet: true })]);
+    // Telemetry counts Planner/agent runs only, so reading it on every tick of
+    // every page bought nothing: fetch it while a run is actually generating, or
+    // while one of the pages that shows it is open.
+    const wantsTelemetry = anyRunningGenerationCard() || viewIsShowing('runs') || viewIsShowing('telemetry');
+    const [runsChanged, telemetryChanged] = await Promise.all([
+      loadRuns(),
+      wantsTelemetry ? loadGenerationTelemetry({ quiet: true }) : Promise.resolve(false),
+      loadPassbookPending(),
+    ]);
+    publishNavBadges();
     setApiOnline(true);
     // An idle quiet tick must publish nothing at all — loadRuns/loadGenerationTelemetry
     // already notified if their data moved, and a blanket notify here re-rendered the

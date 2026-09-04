@@ -18,7 +18,9 @@ function Tile({ label, value, detail }) {
   );
 }
 
-export function TelemetryView({ active }) {
+// The tiles themselves — rendered on the Productions page's Activity tab, and on
+// this page, which stays routable for anyone with the link or an old bookmark.
+export function TelemetryPanel() {
   const s = useHub();
   const telemetry = s.telemetry;
   const summary = telemetry?.summary || {};
@@ -27,17 +29,7 @@ export function TelemetryView({ active }) {
   const attempts = telemetry?.recent_attempts || [];
 
   return (
-    <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar
-        kicker={zh() ? '生成运营' : 'Generation operations'}
-        title={zh() ? '遥测' : 'Telemetry'}
-        subtitle={zh()
-          ? '仅智能体路由的制作 · 仅本地元数据，无提示词、媒体、凭据或提供商负载'
-          : 'Agent-routed productions only · local metadata, no prompts, media, credentials, or provider payloads'}
-      >
-        {telemetry && s.apiOnline === false ? <Pill tone="warn" dot>{zh() ? '离线 · 显示上次读取' : 'Offline · showing the last reading'}</Pill> : null}
-      </HubToolbar>
-      <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+    <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         {!telemetry && s.apiOnline === false ? (
           // The last refresh failed and nothing was ever loaded: an offline
           // state, not a spinner that never ends.
@@ -109,14 +101,32 @@ export function TelemetryView({ active }) {
                   <EmptyState
                     icon="pulse"
                     title={zh() ? '没有最近的尝试' : 'No recent attempts'}
-                    hint={zh() ? '当一个运行分派生成意图时，遥测开始。' : 'Telemetry begins when a run dispatches a generation intent.'}
+                    hint={zh() ? '开始一个制作，它的生成尝试会在运行时出现在这里。' : 'Start a production and its generation attempts show up here as they run.'}
                   />
                 )}
               </section>
             </div>
           </div>
         )}
-      </div>
+    </div>
+  );
+}
+
+export function TelemetryView({ active }) {
+  const s = useHub();
+
+  return (
+    <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+      <HubToolbar
+        kicker={zh() ? '生成运营' : 'Generation operations'}
+        title={zh() ? '活动' : 'Activity'}
+        subtitle={zh()
+          ? '仅智能体路由的制作 · 仅本地元数据，无提示词、媒体、凭据或提供商负载'
+          : 'Agent-routed productions only · local metadata, no prompts, media, credentials, or provider payloads'}
+      >
+        {s.telemetry && s.apiOnline === false ? <Pill tone="warn" dot>{zh() ? '离线 · 显示上次读取' : 'Offline · showing the last reading'}</Pill> : null}
+      </HubToolbar>
+      <TelemetryPanel />
     </div>
   );
 }

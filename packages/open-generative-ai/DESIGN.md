@@ -36,8 +36,11 @@ The old UI centered a hero header + composer in a void. The new pattern for ever
 └────────┴──────────────────────────────────────────┘
 ```
 
-- **Sidebar** (`Shell.jsx`, already built): labeled nav grouped Studios / Produce / System.
-  Collapses to icon rail < 1280px, bottom tab bar on mobile. Don't rebuild it.
+- **Sidebar** (`Shell.jsx`, already built): labeled nav grouped Create (with a collapsed
+  Labs fold) / Produce / a collapsed Advanced group, all driven off `navConfig.jsx` —
+  add a page there, not here. Collapses to an icon rail < 1280px (the chevron in the
+  footer overrides it, remembered in `studio.sidebarCollapsed`); under `lg` it becomes a
+  top chip strip whose folded tiers ride in one More menu. Don't rebuild it.
 - **Studio layout**: use `<StudioLayout>` from `src/ui/kit.jsx` — left `panel` slot (params),
   main `children` (results/canvas), optional bottom `composer` slot (prompt bar). It handles
   scrolling, responsive stacking (panel becomes a sheet under `lg`), and empty-state centering.
@@ -114,8 +117,9 @@ were pill-soup become `ChipButton`+`Menu` groups with clear labels and current-v
    `useMediaSrc` (wraps `resolveMediaSrc`) so E2E-encrypted media keeps decrypting client-side.
 3. i18n: keep every `t()`/`tf()` key and `zh()` ternary. New strings you introduce: English + add
    the same inline `zh()` pattern where surrounding code does. `setLang` keeps its reload behavior.
-4. Studios remount on navigation (fresh state, re-run discovery); re-clicking the active tab is a
-   no-op; hub views stay mounted forever once visited (iframes must never reload on tab switch).
+4. Studios mount once on first visit and are display-toggled after that, so an in-flight
+   generation survives a page switch; re-clicking the active tab is a no-op; hub views stay
+   mounted forever once visited (iframes must never reload on tab switch).
 5. No new deps. React 19 + react-hot-toast + existing libs only. Plain `.jsx` — no TypeScript.
 6. Preserve fail-open behaviors exactly (e2eMedia falls back to raw URL; unknown local model must
    not disable upload; muapi 5xx keeps polling; etc. — your spec lists them).

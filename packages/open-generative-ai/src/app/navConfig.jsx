@@ -1,46 +1,77 @@
 // Navigation model — page keys are a wire contract (?page=, 'navigate' events).
+// Three tiers, one disclosure convention: Create (with a Labs fold), Produce,
+// and a collapsed Advanced group. Labels changed with the tiers; keys did not,
+// so every old link still resolves.
 import { t, zh } from '../lib/i18n.js';
 
 export const NAV_SECTIONS = [
   {
-    label: () => (zh() ? '工作室' : 'Studios'),
+    id: 'create',
+    label: () => (zh() ? '创作' : 'Create'),
     items: [
       { page: 'image', icon: 'image', label: () => t('nav.image') },
       { page: 'video', icon: 'video', label: () => t('nav.video') },
-      { page: 'sprite', icon: 'grid', label: () => (zh() ? '精灵图' : 'Sprite') },
       { page: 'story', icon: 'persona', label: () => (zh() ? '故事' : 'Story') },
-      { page: 'lipsync', icon: 'mic', label: () => t('nav.lipsync') },
       { page: 'restore', icon: 'wand', label: () => (zh() ? '修复' : 'Restore') },
-      { page: 'canvas', icon: 'nodes', label: () => (zh() ? '画布' : 'Canvas') },
+
     ],
+    // Working studios that each need something this machine may not have — a
+    // rented GPU, a local checkpoint, a third-party account. Folded, not hidden.
+    labs: {
+      id: 'labs',
+      label: () => (zh() ? '实验室' : 'Labs'),
+      collapsible: true,
+      defaultOpen: false,
+      storageKey: 'nav.labs',
+      items: [
+        { page: 'sprite', icon: 'grid', label: () => (zh() ? '精灵图' : 'Sprite') },
+        { page: 'lipsync', icon: 'mic', label: () => t('nav.lipsync') },
+      ],
+    },
   },
   {
+    id: 'produce',
     label: () => (zh() ? '生产' : 'Produce'),
     items: [
       { page: 'planner', icon: 'sparkles', label: () => (zh() ? '规划器' : 'Planner') },
+      { page: 'history', icon: 'clock', label: () => (zh() ? '作品库' : 'Library') },
+      { page: 'runs', icon: 'stack', label: () => (zh() ? '制作' : 'Productions') },
       { page: 'inspo', icon: 'star', label: () => (zh() ? '灵感' : 'Inspo') },
-      { page: 'runs', icon: 'stack', label: () => (zh() ? '运行' : 'Runs') },
-      { page: 'history', icon: 'clock', label: () => (zh() ? '历史' : 'History') },
+      { page: 'models', icon: 'database', label: () => (zh() ? '模型' : 'Models') },
     ],
   },
   {
-    label: () => (zh() ? '系统' : 'System'),
+    id: 'advanced',
+    label: () => (zh() ? '高级' : 'Advanced'),
+    collapsible: true,
+    defaultOpen: false,
+    storageKey: 'nav.advanced',
     items: [
-      { page: 'models', icon: 'database', label: () => (zh() ? '模型' : 'Models') },
-      { page: 'telemetry', icon: 'pulse', label: () => (zh() ? '遥测' : 'Telemetry') },
+      { page: 'machines', icon: 'cpu', label: () => (zh() ? '租用的 GPU' : 'Rented GPUs') },
       { page: 'providers', icon: 'plug', label: () => (zh() ? '服务商' : 'Providers') },
       { page: 'passbook', icon: 'key', label: () => 'PassBook' },
-      { page: 'machines', icon: 'cpu', label: () => (zh() ? 'GPU 机器' : 'Machines') },
+      { page: 'canvas', icon: 'nodes', label: () => (zh() ? '画布' : 'Canvas') },
       { page: 'mcp-cli', icon: 'terminal', label: () => t('nav.mcpcli') },
     ],
   },
 ];
 
-export const NAV_ITEMS = NAV_SECTIONS.flatMap((s) => s.items);
+// Every group a section renders, in the order it renders them — the flat item
+// list and the mobile strip are both derived from this, so a group added above
+// is navigable everywhere without a second registration.
+export function navGroups(section) {
+  return section.labs ? [section, section.labs] : [section];
+}
+
+export const NAV_GROUPS = NAV_SECTIONS.flatMap(navGroups);
+export const NAV_ITEMS = NAV_GROUPS.flatMap((g) => g.items);
 export const APP_NAME = 'Hivemind Content Studio';
 
-// Studio pages rebuild on every navigation; hub pages persist once mounted.
-export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'lipsync', 'restore', 'mcp-cli'];
+// Studios mount once on first visit and are display-toggled thereafter (App.jsx
+// keeps them alive so an in-flight generation survives a page switch); hub pages
+// persist the same way once the hub layer exists. Cinema folded into the Image
+// composer's Camera menu and survives as an alias below.
+export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'lipsync', 'restore'];
 export const HUB_PAGES = {
   planner: 'create',
   canvas: 'canvas',
@@ -52,6 +83,9 @@ export const HUB_PAGES = {
   providers: 'providers',
   machines: 'machines',
   passbook: 'passbook',
+  // Agents & API is a static docs page with no state of its own — it rides the
+  // hub layer rather than the studio mount registry.
+  'mcp-cli': 'agents',
 };
 
 // Retired pages that still resolve. A page key is a wire contract — old links,
@@ -62,6 +96,9 @@ export const PAGE_ALIASES = {
   cinema: { page: 'image', menu: 'camera' },
 };
 
+// Own keys only: a plain lookup answered yes for 'constructor' and every other
+// Object.prototype name, and ?page=constructor then routed into the hub layer.
 export function isKnownPage(page) {
-  return Boolean(PAGE_ALIASES[page]) || STUDIO_PAGES.includes(page) || Boolean(HUB_PAGES[page]);
+  if (typeof page !== 'string' || !page) return false;
+  return Object.hasOwn(PAGE_ALIASES, page) || STUDIO_PAGES.includes(page) || Object.hasOwn(HUB_PAGES, page);
 }

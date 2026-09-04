@@ -372,7 +372,7 @@ export function HistoryView({ active }) {
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker={zh() ? '私有存档' : 'Private archive'} title={zh() ? '历史' : 'History'}>
+      <HubToolbar kicker={zh() ? '私有存档' : 'Private archive'} title={zh() ? '作品库' : 'Library'}>
         {refreshing ? <Spinner size={14} className="text-honey" /> : null}
         {s.apiOnline === false ? (
           <Pill tone="warn" dot title={zh() ? '工作室未响应上一次轮询' : 'The studio did not answer the latest poll'}>

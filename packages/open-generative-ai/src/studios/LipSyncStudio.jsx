@@ -849,6 +849,23 @@ export function LipSyncStudio({ active = true } = {}) {
     <div className="flex min-h-0 flex-1 flex-col">
       <StudioLayout panel={panel} panelTitle={zh() ? '唇语同步设置' : 'Lip sync settings'} composer={composer} composerDrop={composerDrop}>
         <div className="flex flex-col gap-4 p-4 md:p-5">
+          {/* Where this one runs, said before you attach a face rather than in the
+              consent dialog that appears once you already have. */}
+          <Card className="flex flex-wrap items-center justify-between gap-3 p-3">
+            <p className="min-w-[240px] flex-1 text-[13px] leading-relaxed text-ink2">
+              {zh()
+                ? '唇语同步在 MUAPI 上运行；你的图片、视频和音频会上传到那里。需要一个 MUAPI 账号。'
+                : 'Lip sync runs on MUAPI; your files are uploaded there. It needs a MUAPI account.'}
+            </p>
+            <Button
+              size="sm"
+              icon="key"
+              onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'passbook' } }))}
+            >
+              {zh() ? '管理密钥' : 'Manage keys'}
+            </Button>
+          </Card>
+
           {s.generating ? (
             <Card className="flex items-center gap-3 p-4">
               <Spinner size={16} className="text-honey" />

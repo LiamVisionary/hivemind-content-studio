@@ -1188,8 +1188,8 @@ export function GpuMachinesView({ active }) {
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
         kicker={zh() ? '自有算力' : 'Owner compute'}
-        title={zh() ? '机器' : 'Machines'}
-        subtitle={zh() ? '租用的 GPU · 运行时按秒计费' : 'Rented GPUs · billed per second while running'}
+        title={zh() ? '租用的 GPU' : 'Rented GPUs'}
+        subtitle={zh() ? '运行时按秒计费' : 'Billed per second while running'}
       />
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         {loadError && (

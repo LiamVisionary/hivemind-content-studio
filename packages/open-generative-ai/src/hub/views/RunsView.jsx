@@ -24,6 +24,7 @@ import {
   setWorkflow, useHub,
 } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
+import { TelemetryPanel } from './TelemetryView.jsx';
 import { Lightbox } from '../components/Lightbox.jsx';
 import { RunCard } from '../components/RunCard.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
@@ -142,8 +143,8 @@ function RunDetail({ run, operatorToken }) {
     return (
       <EmptyState
         icon="stack"
-        title={zh() ? '选择一个运行' : 'Select a run'}
-        hint={zh() ? '查看其场景、步骤、产物和下一步操作。' : 'Inspect its scenes, steps, artifacts, and next action.'}
+        title={zh() ? '选择一个制作' : 'Pick a production'}
+        hint={zh() ? '查看它做了什么、做出了什么，以及下一步。' : 'See what it did, what it made, and what happens next.'}
         className="flex-1"
       />
     );
@@ -289,13 +290,22 @@ export function RunsView({ active }) {
   const s = useHub();
   const runs = filteredRuns();
   const selected = s.runs.find((run) => run.run_id === s.selectedRunId);
+  // Activity used to be its own nav page that was empty for anyone who had not
+  // run the Planner. It is the same productions, counted — so it lives here.
+  const [tab, setTab] = useState('productions');
+  const tabs = [
+    { value: 'productions', label: zh() ? '制作' : 'Productions' },
+    { value: 'activity', label: zh() ? '活动' : 'Activity' },
+  ];
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker={zh() ? '持久化制作' : 'Durable production'} title={zh() ? '运行' : 'Runs'}>
-        <Segmented options={FILTERS} value={s.statusFilter} onChange={setStatusFilter} />
+      <HubToolbar kicker={zh() ? '持久化制作' : 'Durable production'} title={zh() ? '制作' : 'Productions'}>
+        <Segmented options={tabs} value={tab} onChange={setTab} />
+        {tab === 'productions' ? <Segmented options={FILTERS} value={s.statusFilter} onChange={setStatusFilter} /> : null}
       </HubToolbar>
 
+      {tab === 'activity' ? <TelemetryPanel /> : (
       <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(240px,320px)_1fr]">
         <div className="custom-scrollbar flex min-h-0 flex-col gap-2 overflow-y-auto border-b border-line1 p-3 md:border-b-0 md:border-r">
           <div className="flex items-center justify-between px-0.5 pb-1">
@@ -308,13 +318,14 @@ export function RunsView({ active }) {
           ) : (
             <EmptyState
               icon="stack"
-              title={zh() ? '没有匹配的运行' : 'No matching runs'}
+              title={zh() ? '没有匹配的制作' : 'No matching productions'}
               hint={zh() ? '创建一个制作，或更改筛选条件。' : 'Create a production or change the filter.'}
             />
           )}
         </div>
         <RunDetail run={selected} operatorToken={s.workflow.operatorToken} />
       </div>
+      )}
     </div>
   );
 }
