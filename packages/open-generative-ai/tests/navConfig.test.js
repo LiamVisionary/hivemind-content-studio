@@ -142,3 +142,19 @@ test('the pages that were renamed kept their keys', async () => {
         assert.ok(isKnownPage(page), `?page=${page} stopped resolving`);
     }
 });
+
+// Every routable page must be able to name itself. Found live on 2026-09-04:
+// Activity is a valid page reachable by URL and from inside Productions but is
+// deliberately not a nav row, and the title effect only knew nav rows — so the
+// tab kept whatever page you came FROM.
+test('every routable page has a title source, in the nav or beside it', async () => {
+  const { HUB_PAGES, NAV_ITEMS, OFF_NAV_PAGE_TITLES, STUDIO_PAGES } = await import('../src/app/navConfig.jsx');
+  const named = new Set([...NAV_ITEMS.map((item) => item.page), ...Object.keys(OFF_NAV_PAGE_TITLES)]);
+  const routable = [...STUDIO_PAGES, ...Object.keys(HUB_PAGES)];
+  const unnamed = routable.filter((page) => !named.has(page));
+  assert.deepEqual(unnamed, [], `routable pages with no title source: ${unnamed.join(', ')}`);
+  for (const [page, label] of Object.entries(OFF_NAV_PAGE_TITLES)) {
+    assert.equal(typeof label, 'function', `${page} title must be a function so the language applies`);
+    assert.ok(label().trim(), `${page} title must not be empty`);
+  }
+});

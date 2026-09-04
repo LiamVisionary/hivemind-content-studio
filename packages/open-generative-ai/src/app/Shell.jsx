@@ -9,7 +9,7 @@ import { Icon } from '../ui/icons.jsx';
 import { Button, CollapsibleSection, IconButton, Kbd, cx, openSection } from '../ui/kit.jsx';
 import { getExploreDock, subscribeExploreDock, toggleExploreDock } from './exploreDockStore.js';
 import { getNavBadges, subscribeNavBadges } from './navBadges.js';
-import { APP_NAME, NAV_ITEMS, NAV_SECTIONS } from './navConfig.jsx';
+import { APP_NAME, NAV_ITEMS, NAV_SECTIONS, OFF_NAV_PAGE_TITLES } from './navConfig.jsx';
 import { APP_VERSION, shortCommit, versionLabel } from '../lib/appVersion.js';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../ui/Menu.jsx';
 import { STUDIO_RESTART_COMMAND, apiOfflineSentence, apiStatusLabel, pingApiStatus, useApiStatus } from './statusStore.js';
@@ -379,8 +379,9 @@ export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, childre
   const badges = useNavBadges();
 
   useEffect(() => {
-    if (activeItem) document.title = `${activeItem.label()} — ${APP_NAME}`;
-  }, [activeItem]);
+    const label = activeItem ? activeItem.label() : OFF_NAV_PAGE_TITLES[page]?.();
+    if (label) document.title = `${label} — ${APP_NAME}`;
+  }, [activeItem, page]);
 
   // Two numbers, each on the group it belongs to: an approval an agent is waiting
   // on hints the closed Advanced header open, and a production still running is

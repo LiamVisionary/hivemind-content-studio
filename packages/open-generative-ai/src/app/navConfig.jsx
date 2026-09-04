@@ -79,6 +79,14 @@ export const APP_NAME = 'Hivemind Content Studio';
 // persist the same way once the hub layer exists. Cinema folded into the Image
 // composer's Camera menu and survives as an alias below.
 export const STUDIO_PAGES = ['image', 'video', 'sprite', 'story', 'lipsync', 'restore'];
+// Routable pages with no nav row of their own. The document title is derived
+// from the nav item, so without an entry here a page like Activity — reachable
+// by URL and from inside Productions, but deliberately not in the rail — leaves
+// the PREVIOUS page's title in the tab. Same strings the views themselves use.
+export const OFF_NAV_PAGE_TITLES = {
+  telemetry: () => (zh() ? '活动' : 'Activity'),
+};
+
 export const HUB_PAGES = {
   planner: 'create',
   canvas: 'canvas',
