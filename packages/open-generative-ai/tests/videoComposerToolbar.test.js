@@ -37,8 +37,11 @@ test('one trigger primitive, distinct icons, H3-only grammar chips, no chips on 
     // FrameSlotsPicker and ReferencesMenu triggers are ChipButtons now.
     assert.match(read('src/studios/video/FrameSlotsPicker.jsx'), /<ChipButton\s+icon="film"/);
     assert.match(read('src/studios/video/ReferencesMenu.jsx'), /<ChipButton\s+icon=\{persona\?\.name \? 'persona' : 'layers'\}/);
-    // The clip button is a labelled chip with an H3-specific title.
-    assert.match(studio, /<ChipButton\s+icon="video"\s+label=\{zh\(\) \? '片段' : 'Clip'\}/);
+    // The clip chip says which of its two meanings it carries, from the request
+    // plan: it CHAINS from a clip, or the clip is this run's source video.
+    assert.match(studio, /const clipChipContinues = videoRequestPlan\(s\.setup\)\.task === 'generate'/);
+    assert.match(studio, /\? \(zh\(\) \? '接续片段' : 'Continue from clip'\)\s*\n\s*: \(zh\(\) \? '源视频' : 'Source video'\)/);
+    assert.match(studio, /icon=\{continues \? 'film' : 'upload'\}/);
     assert.match(studio, /Continue from a clip/);
     // Camera is "Camera" with the camera icon; Style is the wand; Refine keeps sparkles as a VALUE.
     assert.match(read('src/studios/video/CameraMotionMenu.jsx'), /icon="camera"\s+label=\{zh\(\) \? '运镜' : 'Camera'\}/);
@@ -63,11 +66,11 @@ test('keyboard, confirms, and the canvas actions behave', () => {
     assert.doesNotMatch(back, /restoreGenerationContext/);
     // History cards and timeline tiles: Space activates, hover actions show on focus.
     assert.match(studio, /group-focus-within:opacity-100 group-hover:opacity-100/);
-    assert.match(read('src/studios/video/ChainTimeline.jsx'), /group-focus-within:opacity-100 group-hover:opacity-100/);
+    assert.match(read('src/studios/video/TimelineStrip.jsx'), /group-focus-within:opacity-100 group-hover:opacity-100/);
     assert.match(studio, /if \(e\.key !== 'Enter' && e\.key !== ' '\) return;/);
     // Strip tiles draw a poster <img>, not a <video> per entry.
     assert.match(studio, /function HistoryThumb\(\{ url \}\) \{\s*const \{ poster, resolved, pending \} = useMediaPoster\(url, \{ kind: 'video' \}\);/);
-    assert.match(read('src/studios/video/ChainTimeline.jsx'), /useMediaPoster\(url, \{ kind: 'video' \}\)/);
+    assert.match(read('src/studios/video/TimelineStrip.jsx'), /useMediaPoster\(url, \{ kind: 'video' \}\)/);
     // The failure callout offers Try again and says it once (no duplicate toast) —
     // and, since the failure is read through describeFailure, the repair it named.
     assert.match(studio, /s\.generateError = failure\.title \|\| \(zh\(\) \? '生成失败' : 'Generation failed'\);/);

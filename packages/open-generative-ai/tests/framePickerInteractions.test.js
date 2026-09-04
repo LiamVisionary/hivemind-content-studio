@@ -86,8 +86,8 @@ test('every reference kind rides one menu and routes to the reference workflow',
     assert.match(studio, /referenceWorkflowForHivemindModel\(s\.setup\.modelId\)/);
     assert.match(studio, /<ReferencesMenu/);
     // …sized from the slots the graph actually wired, never hardcoded…
-    assert.match(studio, /images: referenceEntry\.referenceSlots\?\.images \|\| 9/);
-    assert.match(studio, /videos: referenceEntry\.referenceSlots\?\.videos \|\| 3/);
+    assert.match(studio, /images: referenceEntry\?\.referenceSlots\?\.images \|\| 9/);
+    assert.match(studio, /videos: referenceEntry\?\.referenceSlots\?\.videos \|\| 3/);
     // …and attached refs reroute the submission to that workflow, all three kinds.
     assert.match(studio, /if \(plan\.sendReferenceImages\) \{/);
     assert.match(studio, /localParams\.referenceImages = \(setup\.referenceImageUrls \|\| \[\]\)\.filter\(Boolean\)/);

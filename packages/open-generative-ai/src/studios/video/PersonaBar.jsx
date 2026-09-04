@@ -483,8 +483,8 @@ export function PersonaBar({
           />
           <p className="mt-1.5 text-[11px] leading-relaxed text-ink3">
             {zh()
-              ? '演员表会把它写进 <Subject N> 的定义，代替占位空白。在镜头里的成员卡片上可以让助手看图生成。'
-              : "Written into <Subject N>'s definition by the cast instead of a blank. The member chip above the prompt can draft it from the pictures."}
+              ? '演员表会把它写进这个人的定义，代替占位空白。在镜头里的成员卡片上可以让助手看图生成。'
+              : "Written into this person's definition by the cast instead of a blank. The member chip above the prompt can draft it from the pictures."}
           </p>
         </div>
       </SaveNameModal>

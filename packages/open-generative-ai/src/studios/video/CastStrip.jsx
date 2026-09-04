@@ -220,7 +220,7 @@ function NumberBadge({ member, number }) {
         'grid h-5 w-5 shrink-0 place-items-center rounded-full font-mono text-[10px] font-bold',
         member?.kind === 'character' ? 'bg-bg3 text-ink1' : 'bg-honey text-bg0',
       )}
-      aria-label={`<Subject ${number}>`}
+      aria-label={zh() ? `第 ${number} 位` : `Person ${number}`}
     >
       {number}
     </span>
@@ -231,7 +231,12 @@ function MemberEditor({
   member, index, number, total, onChange, onRemove, onMove, onDraftLook, onAddMedia, referenceLane, close,
 }) {
   const [drafting, setDrafting] = useState(false);
+  // What this member is CALLED, in plain words, and what the model's grammar
+  // calls it — the second only ever as hover text and in the advanced fold.
   const subject = isScene(member)
+    ? (isStaging(member) ? (zh() ? '分镜方向' : 'staging direction') : (zh() ? '地点' : 'the place'))
+    : (zh() ? `第 ${number} 位` : `Person ${number}`);
+  const subjectToken = isScene(member)
     ? (isStaging(member) ? 'weak_reference' : 'attribute_transfer')
     : `<Subject ${number}>`;
   const draftLook = async () => {
@@ -252,7 +257,7 @@ function MemberEditor({
         <NumberBadge member={member} number={number} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[12px] font-semibold text-ink1">{memberName(member)}</span>
-          <span className="block truncate font-mono text-[10px] text-honey">{subject}</span>
+          <span className="block truncate text-[10px] text-honey" title={subjectToken}>{subject}</span>
         </span>
         <span className="flex shrink-0 items-center">
           <button
@@ -260,7 +265,7 @@ function MemberEditor({
             disabled={index === 0}
             onClick={() => onMove(index, -1)}
             aria-label={zh() ? '前移' : 'Move earlier'}
-            title={zh() ? '前移（顺序即 <Subject N> 的编号）' : 'Move earlier — cast order is the <Subject N> numbering'}
+            title={zh() ? '前移（顺序即编号）' : 'Move earlier — cast order is the numbering'}
             className="grid h-6 w-6 place-items-center rounded text-ink3 transition-colors hover:bg-bg3 hover:text-ink1 disabled:opacity-30"
           >
             <Icon name="arrowRight" size={11} className="rotate-180" />
@@ -336,9 +341,7 @@ function MemberEditor({
       ) : isPersonaLike(member) ? (
         <>
           <p className="text-[10px] leading-snug text-ink3">
-            {zh()
-              ? `${describeMember(member, { zh: true })} · 按真人实拍渲染`
-              : `${describeMember(member)} · rendered photoreal`}
+            {zh() ? describeMember(member, { zh: true }) : describeMember(member)}
           </p>
           {nameEditable(member) ? (
             <div className="flex flex-col gap-1">
@@ -679,8 +682,8 @@ export function CastStrip({
           <div className="flex flex-col gap-2">
             <p className="text-[10px] leading-snug text-ink3">
               {zh()
-                ? '顺序即编号：第一位是 <Subject 1>。提示词里用 <Subject N> 指代，换人也能用。'
-                : 'Order is the numbering — the first member is <Subject 1>. Prompts written against <Subject N> work with any cast.'}
+                ? '顺序即编号：第一位就是第 1 位。提示词按位置指代，换人也能用。'
+                : 'Order is the numbering — whoever is first is Person 1. Prompts refer to people by their place, so they work with any cast.'}
             </p>
             {referenceLane && !people.length ? (
               <button

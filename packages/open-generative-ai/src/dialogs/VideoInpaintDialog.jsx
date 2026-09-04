@@ -70,6 +70,10 @@ export function VideoInpaintDialog({
   // carrying references it cannot place rather than dropping them — so this is
   // said here, before Apply, instead of surfacing as a failed submit.
   otherReferences = null,
+  // Opens the References panel so the missing picture can be attached without
+  // losing the mask. Apply is gated on there being one, so the dialog has to
+  // carry the fix as well as the problem.
+  onAttachReference = null,
   initial = null,
   onClose,
   onApply,
@@ -425,9 +429,11 @@ export function VideoInpaintDialog({
   // The hosted route is an upgrade on top — for a lane that has no SAM3, or for
   // anyone who would rather see the mask decided before they spend a render on
   // it — so it never gates Apply.
-  const ready = Boolean(source && !busy && (mode === 'sam3' || hasPaint));
-
   const noReference = referenceCount < 1;
+  // The workflow REFUSES a head replacement with no reference picture — the
+  // mask says where, the pictures say who — so Apply must not arm a run that
+  // cannot run. It used to, and the refusal came back as a failed submit.
+  const ready = Boolean(source && !busy && !noReference && (mode === 'sam3' || hasPaint));
 
   const apply = () => {
     onApply?.({
@@ -473,7 +479,14 @@ export function VideoInpaintDialog({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button variant="ghost" onClick={onClose} disabled={Boolean(busy)}>Cancel</Button>
-            <Button variant="primary" onClick={apply} disabled={!ready}>Use this mask</Button>
+            <Button
+              variant="primary"
+              onClick={apply}
+              disabled={!ready}
+              title={noReference ? 'Attach a picture of the new head first — the workflow refuses a run without one.' : undefined}
+            >
+              Use this mask
+            </Button>
           </div>
         </div>
       )}
@@ -498,10 +511,16 @@ export function VideoInpaintDialog({
           {noReference ? (
             <div className="flex items-start gap-2 rounded-md border border-warn bg-warn-tint px-3 py-2 text-xs text-ink2">
               <Icon name="warning" size={13} className="mt-0.5 shrink-0 text-warn" />
-              <span>
-                Attach at least one reference picture of the new head in the references panel.
-                The mask says <em>where</em>; the pictures say <em>who</em>.
+              <span className="min-w-0 flex-1">
+                Attach at least one reference picture of the new head. The mask says
+                {' '}<em>where</em>; the pictures say <em>who</em>, and the workflow refuses a
+                run without one.
               </span>
+              {onAttachReference ? (
+                <Button size="sm" variant="neutral" icon="upload" className="shrink-0" onClick={onAttachReference}>
+                  Attach a picture
+                </Button>
+              ) : null}
             </div>
           ) : null}
 

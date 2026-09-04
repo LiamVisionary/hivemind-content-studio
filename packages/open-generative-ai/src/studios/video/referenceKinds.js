@@ -43,8 +43,8 @@ export const KIND_META = {
     tag: (index) => `<Video ${index + 1}>`,
     icon: 'film',
     hint: () => (zh()
-      ? '动作方式：手势幅度、体态、神情。提示词里 <Video N> 的 retention_analysis 决定是照搬动作还是只借用其举止。没有图片时，<Video 1> 同时也是角色参考。2-15 秒。'
-      : "How a body moves: gesture, posture, mannerisms, expressiveness. The <Video N> retention_analysis tag in your prompt decides whether the motion is copied or only its manner is borrowed. With no picture attached, <Video 1> is also the character reference. 2-15s."),
+      ? '动作方式：手势幅度、体态、神情。提示词决定是照搬动作还是只借用其举止。没有图片时，第一段动作参考同时也是角色参考。2-15 秒。'
+      : 'How a body moves: gesture, posture, mannerisms, expressiveness. Your prompt decides whether the motion is copied outright or only its manner is borrowed. With no picture attached, the first motion clip is also the character reference. 2-15s.'),
   },
   audios: {
     accept: 'audio/*',
@@ -57,6 +57,19 @@ export const KIND_META = {
       : 'Clones a voice — timbre and delivery. 2-15s each, 15s combined, and never the only reference.'),
   },
 };
+
+// The same reference, in the words a reader uses. `<Picture 3>` is the token the
+// model is told about; "Picture 3" is what the row is CALLED. Angle brackets are
+// grammar, and the grammar belongs in the advanced fold and in Prompt Check's
+// detail view — not on every row of the first panel a new user opens.
+export function plainReferenceLabel(tag) {
+  const match = /^<(Picture|Video|Audio)\s+(\d+)>$/.exec(String(tag || '').trim());
+  if (!match) return String(tag || '');
+  const [, kind, number] = match;
+  if (kind === 'Video') return zh() ? `动作 ${number}` : `Motion ${number}`;
+  if (kind === 'Audio') return zh() ? `声音 ${number}` : `Voice ${number}`;
+  return zh() ? `图片 ${number}` : `Picture ${number}`;
+}
 
 // One refused file, in one sentence: which file, and which of the three
 // unrelated reasons it was.

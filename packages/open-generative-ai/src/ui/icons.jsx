@@ -146,6 +146,7 @@ const PATHS = {
       <path d="M5 12h14" />
     </>
   ),
+  minus: <path d="M5 12h14" />,
   x: (
     <>
       <path d="M18 6 6 18" />

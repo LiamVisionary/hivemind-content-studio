@@ -1,5 +1,5 @@
 // One control for every MiniMax H3 reference kind: pictures (<Picture N>),
-// voice clips (<Audio N>) and motion clips (<Video N>). Each kind gets its own
+// voice clips and motion clips. Each kind gets its own
 // section with one ROW per attached reference — preview, what the model will
 // call it, and a remove button — under a dotted "Add …" card. Everything is
 // optional and the kinds mix freely; only audio may never be the sole
@@ -68,7 +68,7 @@ import { Icon } from '../../ui/icons.jsx';
 import { IconButton, SectionLabel, Spinner, cx } from '../../ui/kit.jsx';
 import { PersonaBar } from './PersonaBar.jsx';
 import { ReferenceThumb } from './ReferenceThumb.jsx';
-import { KIND_META, describeReferenceRejection } from './referenceKinds.js';
+import { KIND_META, describeReferenceRejection, plainReferenceLabel } from './referenceKinds.js';
 import { zh } from './videoLogic.js';
 import { toastFailure } from '../../ui/failureToast.jsx';
 
@@ -183,7 +183,7 @@ function ReferenceRow({
               url={url}
               posterUrl={posterUrl}
               kind={kind === 'videos' ? 'video' : 'image'}
-              alt={meta.tag(index)}
+              alt={plainReferenceLabel(meta.tag(index))}
               icon={meta.icon}
               onPosterCaptured={onPosterCaptured}
             />
@@ -207,9 +207,14 @@ function ReferenceRow({
           {/* A picture attached from the saved list carries no filename, so the
               model's label IS the row's name rather than being printed twice. */}
           {name ? <span className="block truncate text-[11px] font-semibold text-ink1">{name}</span> : null}
-          <span className={cx('block truncate font-mono text-honey', name ? 'text-[10px]' : 'text-[11px]')}>
-            {primaryTag}
-            {secondaryTag ? <span className="text-ink3">{` + ${secondaryTag}`}</span> : null}
+          {/* The row's NAME is plain words; the model's token for it is the
+              hover title, where somebody writing tags by hand can find it. */}
+          <span
+            className={cx('block truncate text-honey', name ? 'text-[10px]' : 'text-[11px]')}
+            title={[primaryTag, secondaryTag].filter(Boolean).join(' + ')}
+          >
+            {plainReferenceLabel(primaryTag)}
+            {secondaryTag ? <span className="text-ink3">{` + ${plainReferenceLabel(secondaryTag)}`}</span> : null}
             {soundOnly ? <span className="ml-1 font-sans text-ink3">{zh() ? '仅声音' : 'sound only'}</span> : null}
             {kind === 'scene' ? (
               <span className="ml-1 font-sans text-ink3">
@@ -218,7 +223,7 @@ function ReferenceRow({
                   : (zh() ? '地点' : 'the place')}
               </span>
             ) : null}
-            {!soundOnly && item?.compact && !compactLocked ? <span className="ml-1 font-sans text-ink3">{zh() ? '紧凑' : 'compact'}</span> : null}
+            {!soundOnly && item?.compact && !compactLocked ? <span className="ml-1 font-sans text-ink3">{zh() ? '小尺寸' : 'small'}</span> : null}
           </span>
         </span>
         {/* Motion rows carry their switches on a strip of their own below;
@@ -249,8 +254,8 @@ function ReferenceRow({
       ) : null}
       {kind === 'videos' ? (
         <div className="hive-edge-fade flex items-center gap-1 overflow-x-auto pl-11">
-          {/* What of the clip is used. MOTION is its movement (<Video N>);
-              SOUND is its soundtrack (<Audio N>). Both on = the clip with its
+          {/* What of the clip is used. MOTION is its movement;
+              SOUND is its soundtrack. Both on = the clip with its
               own sound; sound alone = a voice reference whose pixels are never
               sent; one of the two always stays on. */}
           <RowSwitch
@@ -258,11 +263,11 @@ function ReferenceRow({
             onClick={onToggleMotion}
             title={motionOn
               ? (zh()
-                ? '使用该片段的动作（<Video N>）。关闭后只使用声音：片段成为音色参考（<Audio N>），画面不会发送。'
-                : "Use this clip's movement (<Video N>). Switch off for sound only: the clip becomes a voice reference (<Audio N>) and its pixels are never sent.")
+                ? '使用该片段的动作。关闭后只使用声音：片段成为音色参考，画面不会发送。'
+                : "Use this clip's movement. Switch off for sound only: the clip becomes a voice reference and its pixels are never sent.")
               : (zh()
-                ? '重新使用该片段的动作（<Video N>）'
-                : "Use this clip's movement again (<Video N>)")}
+                ? '重新使用该片段的动作'
+                : "Use this clip's movement again")}
           >
             {zh() ? '动作' : 'Motion'}
           </RowSwitch>
@@ -271,11 +276,11 @@ function ReferenceRow({
             onClick={onToggleAudio}
             title={soundOnly
               ? (zh()
-                ? '仅声音：该片段的原声是音色参考（<Audio N>）。关闭后恢复为动作参考。'
-                : "Sound only: this clip's soundtrack is a voice reference (<Audio N>). Switch off to go back to motion.")
+                ? '仅声音：该片段的原声是音色参考。关闭后恢复为动作参考。'
+                : "Sound only: this clip's soundtrack is a voice reference. Switch off to go back to motion.")
               : (zh()
-                ? '同时使用该片段自带的声音（会额外占用一个 <Audio N> 标签）'
-                : "Also condition on this clip's own soundtrack — it takes an <Audio N> label of its own")}
+                ? '同时使用该片段自带的声音（会额外占用一个声音位）'
+                : "Also condition on this clip's own soundtrack — it takes a voice slot of its own")}
           >
             {zh() ? '声音' : 'Sound'}
           </RowSwitch>
@@ -299,7 +304,7 @@ function ReferenceRow({
                   ? '以小尺寸（384 px）送入该片段——动作相同，开销约为三分之一。片段作为角色参考时不可用。'
                   : 'Stage this clip small (384 px) — same motion, 3x cheaper. Off when the clip is the character reference.')}
           >
-            {zh() ? '紧凑' : 'Compact'}
+            {zh() ? '小尺寸（更省）' : 'Small (cheaper)'}
           </RowSwitch>
           <span className="flex-1" />
           {onPrep ? (
@@ -473,6 +478,15 @@ export function ReferencesMenu({
   // A counter the studio bumps to open the panel from elsewhere (the cast
   // strip's "Pictures or clips of a person").
   openRequest = 0,
+  // A per-model reference kind that is not one of H3's rows: the LTX graph's
+  // reference VIEWS, which get stitched into one sheet. It used to be a whole
+  // section of the settings panel with a jump button pointing at it, so "use
+  // this person" was a chip on one model and a panel section on another.
+  // Rendered inside this panel as its own kind so there is ONE control.
+  views = null,
+  // Some models have views and no H3 rows at all; then the rows, the persona
+  // bar and the H3 budget have nothing to say and the panel is just the views.
+  viewsOnly = false,
 }) {
   const [panelOpen, setPanelOpen] = useState(false);
   useEffect(() => { if (openRequest) setPanelOpen(true); }, [openRequest]);
@@ -772,9 +786,13 @@ export function ReferencesMenu({
         disabled={disabled}
         aria-expanded={panelOpen}
         onClick={() => setPanelOpen((open) => !open)}
-        title={zh()
-          ? '参考：角色图片、声音片段、动作片段——附加任意一种即切换到参考模式（取代首尾帧）'
-          : 'References — pictures of a person, voice clips, motion clips. Attaching any switches the run to Reference mode, which replaces the start/end frames'}
+        title={viewsOnly
+          ? (zh()
+            ? '参考：这个人的多个视角，会拼接成一张参考图'
+            : 'References — several views of the same person or thing, stitched into one reference sheet')
+          : (zh()
+            ? '参考：角色图片、声音片段、动作片段——附加任意一种即切换到参考模式（取代首尾帧）'
+            : 'References — pictures of a person, voice clips, motion clips. Attaching any switches the run to Reference mode, which replaces the start/end frames')}
       />
 
       {panelOpen ? (
@@ -806,10 +824,13 @@ export function ReferencesMenu({
             dragDepthRef.current ? 'border-honey/60' : 'border-line1',
           )}
         >
+          {views}
+
           {/* The character these rows add up to, above the rows themselves. */}
           {/* A persona is a PERSON. Its pictures are the character half of the
               row; a location plate saved into somebody's identity is a plate
               that follows them into every later clip. */}
+          {viewsOnly ? null : (
           <PersonaBar
             images={characterImages}
             videos={videos}
@@ -830,8 +851,9 @@ export function ReferencesMenu({
               emit('audios', next.audios);
             }}
           />
+          )}
 
-          {KINDS.map((kind) => (
+          {(viewsOnly ? [] : KINDS).map((kind) => (
             <ReferenceSection
               key={kind}
               kind={kind}
@@ -938,8 +960,8 @@ export function ReferencesMenu({
             // told so — the exclusion advice below is for the picture+clip case.
             <p className="rounded-md border border-line1 px-2 py-1.5 text-[10px] leading-snug text-ink3">
               {zh()
-                ? '没有附加图片：<Video 1> 就是角色参考——片中人物的长相、发型、服装与动作方式会带入成片。附加图片后，视频仅作动作参考。'
-                : "No picture attached: <Video 1> is the character reference — its performer's face, hair, wardrobe and manner carry into the clip. Attach a picture and the clip becomes motion-only."}
+                ? '没有附加图片：第一段动作参考就是角色参考——片中人物的长相、发型、服装与动作方式会带入成片。附加图片后，视频仅作动作参考。'
+                : "No picture attached: the first motion clip is the character reference — its performer's face, hair, wardrobe and manner carry into the clip. Attach a picture and the clip becomes motion-only."}
             </p>
           ) : null}
           {motionWarning ? (
