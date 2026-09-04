@@ -11,6 +11,7 @@ to its 98% cap and sat there until the client's own wall clock gave up.
 from __future__ import annotations
 
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -58,25 +59,48 @@ def _unresponsive_at_once(monkeypatch) -> None:
     monkeypatch.setattr(control_api, "_VIDEO_RECORD_PROBE_SECONDS", 0.0)
 
 
+def _polled_until_landed(client, job_id: str, timeout: float = 20.0) -> dict:
+    """Poll until the job reports its clip, the way the studio's own poller does.
+
+    One request is not a promise: the finalize runs partly on worker threads, so
+    which poll carries the finished clip back is a scheduling question and not a
+    behavioural one. Asking again is what the studio does too.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        body = client.get(f"/api/media-studio/video/job/{job_id}").json()
+        if body.get("url") or body.get("ok") is False or time.monotonic() >= deadline:
+            return body
+        time.sleep(0.05)
+
+
 def test_a_poll_after_a_restart_readopts_the_job_and_lands_the_clip(client, monkeypatch) -> None:
     state = dict(RUNNING)
     monkeypatch.setattr(control_api, "run_media_studio_video_record",
                         lambda _job_id, **_kwargs: {"id": "job-live", "status": "running"})
     monkeypatch.setattr(control_api, "run_media_studio_video_check", lambda _job_id, **_kwargs: dict(state))
-    monkeypatch.setattr(
-        control_api, "run_media_studio_video_finish",
-        lambda job_id, **_kwargs: {"job_id": job_id, "gateway_output": "clip.mp4", "qa": {"ok": True}},
-    )
 
     # No registry entry: this process did not start the job. The gateway still
     # has it, so the poll re-adopts rather than reporting a failure.
-    first = client.get("/api/media-studio/video/job/job-live").json()
+    #
+    # The finisher is parked for this poll and only this poll. Re-adoption arms
+    # it, and an unparked finisher that returns a clip races the answer it was
+    # armed by: on an idle machine the route wins and the poll says "running",
+    # on a loaded one the finisher can land the job first and the same correct
+    # behaviour reads as a broken re-adoption. What this asserts is the poll's
+    # answer, so the finisher is held still rather than out-run.
+    with _finisher_parked(monkeypatch):
+        first = client.get("/api/media-studio/video/job/job-live").json()
     assert first["ok"] is True and first["status"] == "running"
 
     # ...and the re-armed finisher still does the work the dead process owed:
     # the finished clip comes back with its URL instead of being abandoned.
     state["video_url"] = "http://gateway.invalid/output/clip.mp4"
-    landed = client.get("/api/media-studio/video/job/job-live").json()
+    monkeypatch.setattr(
+        control_api, "run_media_studio_video_finish",
+        lambda job_id, **_kwargs: {"job_id": job_id, "gateway_output": "clip.mp4", "qa": {"ok": True}},
+    )
+    landed = _polled_until_landed(client, "job-live")
     assert landed["ok"] is True
     assert landed["url"] == "/api/media-studio/gateway/clip.mp4"
 

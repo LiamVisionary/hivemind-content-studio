@@ -34,7 +34,8 @@ def _write_vault(path, public_key):
     c = sqlite3.connect(path)
     c.execute("CREATE TABLE vault_identity (id INTEGER PRIMARY KEY, identity_json TEXT NOT NULL, created_at TEXT, updated_at TEXT)")
     c.execute("INSERT INTO vault_identity VALUES (1, ?, 'x', 'x')", (json.dumps({"public_key": _b64url(spki)}),))
-    c.commit(); c.close()
+    c.commit()
+    c.close()
 
 
 def _make_zenc_file(path, plaintext, password, iters, tmp):

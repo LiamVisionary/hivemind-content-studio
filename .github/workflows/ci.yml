@@ -37,11 +37,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --python 3.11
 
-      # `src` is the product: the control plane every studio talks to and the
-      # clipping engine. Linting only the inherited faceless engine is how an
-      # undefined `sys` sat in the Machines route's never-crash handler.
+      # The whole tree, not a list. `src` is the product — the control plane
+      # every studio talks to and the clipping engine — and linting only the
+      # inherited faceless engine is how an undefined `sys` sat in the Machines
+      # route's never-crash handler; but a hand-kept list is its own hole, and
+      # this one had never included packages/ or scripts/, where four errors sat
+      # unread. Everything vendored is excluded by name in pyproject's
+      # [tool.ruff] with a reason attached, so this passing means zero.
       - name: Lint Python sources
-        run: uv run --no-sync ruff check app cli.py archive/moneyprinterturbo test src
+        run: uv run --no-sync ruff check .
 
   tests:
     name: Python ${{ matrix.python-version }} tests

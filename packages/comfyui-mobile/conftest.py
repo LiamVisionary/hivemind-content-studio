@@ -1,5 +1,4 @@
 import sys
-from types import ModuleType
 from unittest.mock import MagicMock
 
 # Stub out ComfyUI-specific modules (and optional runtime deps that the backend

@@ -1,4 +1,3 @@
-print("[Mobile Frontend] Loading custom node...")
 import asyncio
 import mimetypes
 import os
@@ -6,10 +5,15 @@ import shutil
 import server
 from aiohttp import web
 import folder_paths
-import json
 from PIL import Image
 from importlib import import_module as _import_module
 import sys as _sys
+
+# The load banner sits under the imports, not over them: ComfyUI prints it while
+# scanning custom nodes either way, and a statement above the import block makes
+# every import below it read as misplaced to the lint gate.
+print("[Mobile Frontend] Loading custom node...")
+
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 _file_utils = _import_module('file_utils')
 _mobile_metadata = _import_module('mobile_metadata')
@@ -527,7 +531,7 @@ def setup_mobile_route():
                 None, _render_image_thumbnail, file_path
             )
             return web.Response(body=body, content_type=content_type, headers=cache_headers)
-        except Exception as e:
+        except Exception:
             return web.Response(status=500, headers=no_store)
 
     async def api_get_preview(request):
@@ -1263,7 +1267,7 @@ def setup_mobile_route():
     server.PromptServer.instance.app.on_startup.append(_mobile_push.on_startup)
     server.PromptServer.instance.app.on_cleanup.append(_mobile_push.on_cleanup)
 
-    print(f"[\033[34mMobile Frontend\033[0m] Mobile UI enabled at: \033[34m/mobile\033[0m")
+    print("[\033[34mMobile Frontend\033[0m] Mobile UI enabled at: \033[34m/mobile\033[0m")
 
 # Execute the setup
 setup_mobile_route()

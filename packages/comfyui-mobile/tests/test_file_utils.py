@@ -1,5 +1,4 @@
 import os
-import tempfile
 import pytest
 from file_utils import entry_matches_name_or_path, is_within_dir, list_files, safe_join
 

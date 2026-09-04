@@ -66,7 +66,6 @@ def build_editor_graph(api_graph: dict, object_info: dict, extra: dict) -> dict:
     nodes = []
     links = []
     link_id = 0
-    incoming: dict[str, list[tuple[str, int, int, int]]] = {}
     outgoing: dict[tuple[str, int], list[int]] = {}
 
     ordered = sorted(api_graph.items(), key=lambda item: int(item[0]))

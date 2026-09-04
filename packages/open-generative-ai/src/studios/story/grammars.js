@@ -92,12 +92,10 @@ export function placePhrase(story) {
 /** The beats as timed lines, each with the emotional result attached. */
 export function beatLines(story, { anchor = 'range' } = {}) {
   const beats = (story?.motion?.beats || []).filter((beat) => text(beat?.action));
-  let at = 0;
   return beats.map((beat, index) => {
     const body = clean(beat.emotion) ? `${clean(beat.action)} — ${clean(beat.emotion)}` : clean(beat.action);
     const from = sec(beat.from);
     const to = sec(beat.to);
-    at = to;
     if (anchor === 'shots') return index === 0 ? `[Shot 1] ${body}.` : `[Shot ${index + 1}] At ${timecode(from)}, ${body}.`;
     if (anchor === 'none') return `${body}.`;
     return `${from}-${to}s: ${body}.`;

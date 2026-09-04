@@ -163,7 +163,11 @@ function Unlocks({ access, busy, onUnlock, onLock }) {
 
 function AccessModes({ access, keys, busy, onSetMode }) {
     const copy = MODE_COPY();
-    const [app, setApp] = useState('hivemind-content-studio');
+    // This panel governs THIS app's access to the shared store, so the app is
+    // fixed rather than picked: PassBook's own UI is where another app's rules
+    // are edited, and a picker here would offer to change a rule this studio
+    // cannot then show the effect of.
+    const app = 'hivemind-content-studio';
     if (!access?.available) {
         return <p className="text-xs text-ink3">{access?.detail || 'Not installed.'}</p>;
     }

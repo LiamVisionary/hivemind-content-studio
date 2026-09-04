@@ -276,9 +276,20 @@ def test_patience_is_time_not_a_count(server, tmp_path: Path) -> None:
     text = _err(dest).read_text().strip()
     match = re.fullmatch(r"part 5: curl 18 http 206 via \S* in [\d.]+s after (\d+) tries/(\d+)s", text)
     assert match, text
-    assert int(match[1]) >= 3, "kept trying well past a handful of attempts"
+    # Two numbers here used to describe the MACHINE rather than the library, and
+    # both went red under parallel load (2026-09-04): "at least 3 attempts" and
+    # "under 30 seconds of wall clock". How many attempts fit inside a 2-second
+    # patience window, and how long the whole fetch takes, are functions of how
+    # fast curl and bash fork today — on a busy box each attempt costs more, so
+    # the SAME window holds fewer of them and the fetch takes longer, which is
+    # exactly the behaviour patience exists to allow. What is the library's own
+    # and no load can move: it retried after the first failure, it gave up only
+    # once the patience clock had run out, and the 1000-attempt cap is not what
+    # ended it. A run the cap ended would say 1000 tries; a hang is the per-test
+    # pytest-timeout deadline's business, not this assertion's.
+    assert int(match[1]) >= 2, "one failure is not a verdict; it tried again"
     assert int(match[2]) >= 2 and elapsed >= 2, "gave up on the clock, not the count"
-    assert elapsed < 30, "…and not much past it"
+    assert int(match[1]) < 20, "stopped on its patience, nowhere near the 1000-attempt cap"
 
 
 def test_a_stream_never_outlives_the_phase_deadline(server, tmp_path: Path) -> None:

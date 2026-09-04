@@ -515,16 +515,19 @@ export async function referenceToLocalImageInput(source) {
     return { image_base64: await mediaSourceToDataUrl(value, 'image') };
 }
 
+// The last local video workflow a session hand-picked, LEGACY ONLY: the explore
+// dock's "Local video workflow" select was the one writer and it was retired
+// (it duplicated the Video studio's own picker), so in a session started since
+// then this reads null and its two callers — VideoStudio's boot restore and
+// defaultTextToVideoModelFor — fall through to the LTX default. It stays
+// because a tab opened before that change still carries the key, and the
+// owner-lock scrub still clears it.
 export function getSavedHivemindVideoSelection() {
     try {
         return JSON.parse(sessionStorage.getItem(VIDEO_SELECTION_KEY) || 'null');
     } catch {
         return null;
     }
-}
-
-function saveHivemindVideoSelection(selection) {
-    sessionStorage.setItem(VIDEO_SELECTION_KEY, JSON.stringify(selection));
 }
 
 async function ingredientImagesToRequest(items) {

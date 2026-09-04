@@ -40,10 +40,15 @@ served page *is* the studio.
 ## 2. The lint gate
 
 ```bash
-.venv/bin/ruff check app cli.py main.py webui test src scripts
-cd packages/open-generative-ai && npx eslint src        # 0 errors
+.venv/bin/ruff check .                                  # 0 errors, whole tree
+cd packages/open-generative-ai && npm run lint          # 0 errors, 0 warnings
 cd packages/comfyui-mobile && npx tsc --noEmit -p tsconfig.app.json
 ```
+
+The ruff line used to name a path list, and two of its entries (`main.py`,
+`webui`) moved under `archive/moneyprinterturbo/` — so the documented gate had
+been answering `E902 No such file or directory` instead of linting. It is the
+whole tree now; the vendored trees are excluded by name in `pyproject.toml`.
 
 `npm run build:mobile` runs `tsc -b` first, so a type error here is a release
 that cannot be built at all.

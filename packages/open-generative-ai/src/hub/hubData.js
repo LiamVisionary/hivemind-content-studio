@@ -1293,17 +1293,6 @@ export function canvasEntryModelLabel(entry) {
   return '—';
 }
 
-function selectMatchingCanvasModel(entry, setup) {
-  const kind = entry.media_type?.startsWith('video/') ? 'video' : 'image';
-  const wanted = new Set((setup.models || []).flatMap((value) => [String(value).toLowerCase(), String(value).split(/[\\/]/).pop().toLowerCase()]));
-  for (const provider of hubState.simpleCatalog?.media?.[kind] || []) {
-    const model = provider.models.find((candidate) => wanted.has(String(candidate.id).toLowerCase()) || wanted.has(String(candidate.id).split(/[\\/]/).pop().toLowerCase()));
-    if (!model) continue;
-    setRouteValue(kind, routeValue(provider.id, model.id));
-    return;
-  }
-}
-
 // Last path segment of a media URL/path, query- and hash-stripped — used to match a
 // dropped output file back to its canvas-history entry (drag-to-restore, tier 3).
 function outputBasename(url) {
