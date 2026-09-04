@@ -34,6 +34,11 @@ const VIDEO_ADVANCED_EXCLUDED_INPUTS = new Set([
 
 export const VIDEO_PREFERENCES_KEY = 'video_generation_preferences';
 
+// An advanced input whose name says it takes prose. Its value never reaches the
+// plaintext settings blob (see normalizeVideoPreferences); the control itself is
+// untouched. Exported so the guard test states the rule rather than re-deriving it.
+export const PROMPT_LIKE_INPUT_NAME = /prompt|negative|caption|descri|text|script|dialog|subtitle|lyric|query|instruct/i;
+
 /* ---------------- a model's advanced inputs ---------------- */
 
 export function getAdvancedVideoInputs(model) {
@@ -91,8 +96,16 @@ export function normalizeVideoPreferences(value) {
     const duration = Number(value.duration);
     const stringValue = (candidate) => typeof candidate === 'string' ? candidate.trim() : '';
     const advancedValues = value.advancedValues && typeof value.advancedValues === 'object' && !Array.isArray(value.advancedValues)
-        ? Object.fromEntries(Object.entries(value.advancedValues).filter(([, candidate]) => (
-            ['string', 'number', 'boolean'].includes(typeof candidate) && (typeof candidate !== 'number' || Number.isFinite(candidate))
+        ? Object.fromEntries(Object.entries(value.advancedValues).filter(([name, candidate]) => (
+            ['string', 'number', 'boolean'].includes(typeof candidate)
+            && (typeof candidate !== 'number' || Number.isFinite(candidate))
+            // A model's advanced inputs are its own knobs, and a workflow is
+            // free to declare one that takes a sentence — `negative_prompt`,
+            // `caption`, a per-shot `description`. The control still renders and
+            // still ships with the run; the words are simply not written down
+            // here, because this blob is plaintext. All we have to go on is the
+            // input's NAME, which is why this is a name rule.
+            && !PROMPT_LIKE_INPUT_NAME.test(name)
         )))
         : {};
     const loraSelections = {};
@@ -116,8 +129,13 @@ export function normalizeVideoPreferences(value) {
             });
         });
     }
-    const ingredientSelections = normalizeVideoIngredientSelections(value.ingredientSelections);
-    const ingredientSheets = normalizeVideoIngredientSelections(value.ingredientSheets);
+    // SELECTION ONLY. A reference's description is a sentence somebody wrote
+    // about a picture of their own life ("my daughter at the beach"), so it is
+    // prompt text by every definition that matters and follows the negative
+    // prompt into the encrypted composer section. What stays here is which
+    // reference, in which order — opaque same-origin pointers, no words.
+    const ingredientSelections = withoutVideoIngredientDescriptions(value.ingredientSelections);
+    const ingredientSheets = withoutVideoIngredientDescriptions(value.ingredientSheets);
     const ingredientSelectedSheet = normalizeSelectedVideoIngredientSheet(
         value.ingredientSelectedSheet,
         ingredientSelections,
@@ -227,6 +245,37 @@ export function normalizeVideoIngredientSelections(value) {
         }
     }
     return normalized;
+}
+
+/** The same list with every description removed — what localStorage is allowed
+ *  to hold. Separate from the normalizer above because the IN-MEMORY list, the
+ *  sealed generation context and the sheet preview all still carry the words;
+ *  it is only the plaintext settings blob that may not. */
+export function withoutVideoIngredientDescriptions(value) {
+    return normalizeVideoIngredientSelections(value).map(({ url }) => ({ url }));
+}
+
+/** The descriptions on their own, keyed by the reference they belong to. This is
+ *  what rides in the encrypted composer section; an empty one is not stored, so
+ *  a person who never wrote a caption has nothing written down about them. */
+export function videoIngredientDescriptions(...lists) {
+    const descriptions = {};
+    for (const list of lists) {
+        for (const item of normalizeVideoIngredientSelections(list)) {
+            if (item.description) descriptions[item.url] = item.description;
+        }
+    }
+    return descriptions;
+}
+
+/** Put the descriptions back on a selection list after the composer hydrates. */
+export function withVideoIngredientDescriptions(list, descriptions) {
+    const source = descriptions && typeof descriptions === 'object' && !Array.isArray(descriptions) ? descriptions : {};
+    return (Array.isArray(list) ? list : []).map((item) => {
+        const saved = source[item?.url];
+        if (!item?.url || item.description || typeof saved !== 'string' || !saved) return item;
+        return { ...item, description: saved.slice(0, 1000) };
+    });
 }
 
 export function normalizeSelectedVideoIngredientSheet(value, ingredientSelections, ingredientSheets) {

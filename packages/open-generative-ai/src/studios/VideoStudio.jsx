@@ -158,6 +158,7 @@ import {
   selectHivemindWorkflowTransition, newPromptTransition, extendTransition, withServedModel,
   getAdvancedVideoInputs, getAdvancedVideoPayload,
   normalizeVideoPreferences, normalizeVideoIngredientSelections, normalizeSelectedVideoIngredientSheet,
+  videoIngredientDescriptions, withVideoIngredientDescriptions,
   normalizeVideoGenerationProgress, normalizeSamplerSteps, classifyVideoGenerationStage, formatVideoGenerationElapsed,
   computeSmoothProgress, supportsSpectrum, supportsFastHighRes, supportsQualitySteps,
   closestVideoAspectRatio, imageDimensions, redactPrivateHistoryEntry,
@@ -169,6 +170,7 @@ import {
 export {
   getAdvancedVideoInputs, getAdvancedVideoPayload, normalizeVideoPreferences,
   normalizeVideoIngredientSelections, normalizeSelectedVideoIngredientSheet,
+  videoIngredientDescriptions, withVideoIngredientDescriptions,
   normalizeVideoGenerationProgress, classifyVideoGenerationStage, formatVideoGenerationElapsed,
   closestVideoAspectRatio,
 } from './video/videoLogic.js';
@@ -291,6 +293,9 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     sharedIngredientSelections,
     sharedIngredientSheets,
     selectedIngredientSheet,
+    // True once the encrypted composer section has been read, which is what
+    // gates writing reference descriptions back into it.
+    composerHydrated: false,
     ingredientUploadMessage: '',
     ingredientSheetPreviewRequest: 0,
     ingredientSheetPreview: {
@@ -628,6 +633,18 @@ export function VideoStudio({
     if (!tabActiveRef.current) return;
     s.persistedVideoPreferences = prefs;
     try { localStorage.setItem(VIDEO_PREFERENCES_KEY, JSON.stringify(prefs)); } catch { /* quota */ }
+    // The blob above carries the reference SELECTION and none of the words: a
+    // description is a sentence about a picture of somebody's own life, so it
+    // follows the negative prompt into the encrypted composer section. Written
+    // only once the composer has hydrated — before that the cache is still
+    // empty and this would race the restore below to nothing.
+    if (s.composerHydrated) {
+      updateComposerSection('video', {
+        ingredientDescriptions: videoIngredientDescriptions(
+          s.sharedIngredientSelections, s.sharedIngredientSheets,
+        ),
+      });
+    }
   };
   const persistRef = useRef(persistVideoPreferences);
   persistRef.current = persistVideoPreferences;
@@ -3507,12 +3524,33 @@ export function VideoStudio({
     // module-level cache so every tab may await it, but only the original tab
     // ADOPTS the draft — a new/duplicated tab already knows what it is.
     void hydrateComposerState().then(() => {
+      s.composerHydrated = true;
       if (!isPrimaryTab) return;
       const saved = getComposerSection('video');
+      // Reference descriptions come back from the encrypted section and are put
+      // back on the selection localStorage restored — the settings blob knows
+      // WHICH pictures, this knows what was written about them.
+      const withDescriptions = withVideoIngredientDescriptions(
+        s.sharedIngredientSelections, saved.ingredientDescriptions,
+      );
+      const sheetsWithDescriptions = withVideoIngredientDescriptions(
+        s.sharedIngredientSheets, saved.ingredientDescriptions,
+      );
       const savedPrompt = saved.prompt;
       const savedNegative = saved.negativePrompt;
       const next = { ...s.setup };
       let changed = false;
+      // Descriptions are not part of `setup`, so they get their own flag: they
+      // must not drag the setup/cast restore below through a re-derive.
+      let ingredientsChanged = false;
+      if (JSON.stringify(withDescriptions) !== JSON.stringify(s.sharedIngredientSelections)) {
+        s.sharedIngredientSelections = withDescriptions;
+        ingredientsChanged = true;
+      }
+      if (JSON.stringify(sheetsWithDescriptions) !== JSON.stringify(s.sharedIngredientSheets)) {
+        s.sharedIngredientSheets = sheetsWithDescriptions;
+        ingredientsChanged = true;
+      }
       if (typeof savedPrompt === 'string' && savedPrompt && !s.setup.prompt.trim()) {
         next.prompt = savedPrompt;
         changed = true;
@@ -3557,6 +3595,15 @@ export function VideoStudio({
         s.setup = next;
         syncCast();
         bump();
+      } else if (ingredientsChanged) {
+        bump();
+      }
+      // The stitched sheet DRAWS the descriptions onto it, but its signature is
+      // built from urls alone — so descriptions arriving a beat after the
+      // selection (which is the whole point of keeping them encrypted) would
+      // leave a reloaded sheet captionless until the next edit. Redraw once.
+      if (ingredientsChanged && s.sharedIngredientSelections.length) {
+        void refreshIngredientSheetPreview({ force: true });
       }
     });
 

@@ -47,6 +47,23 @@ export const DEFAULT_PREFS = Object.freeze({
 
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
+// A filter blob is a shape you like, and it is remembered. The free-text boxes
+// INSIDE one are something you typed — the Discover search box, the Inspo
+// creator box — and typed text does not go into plaintext browser storage, so
+// those fields are session-only: they live in the view's own React state for as
+// long as the tab is open and are dropped on the way into the document.
+const FILTER_TEXT_FIELDS = new Set(['query', 'search', 'q', 'text', 'prompt', 'username', 'creator']);
+
+function filtersWithoutTypedText(value) {
+  if (!isPlainObject(value)) return null;
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (FILTER_TEXT_FIELDS.has(key)) continue;
+    out[key] = entry;
+  }
+  return out;
+}
+
 /** Every read goes through this: a corrupted or half-written document degrades
  *  field by field instead of throwing away everything the person had. */
 export function normalizePrefs(raw) {
@@ -71,8 +88,8 @@ export function normalizePrefs(raw) {
     promptHelperModel: typeof source.promptHelperModel === 'string' ? source.promptHelperModel : '',
     modelUse: counts,
     sections,
-    inspoFilters: isPlainObject(source.inspoFilters) ? { ...source.inspoFilters } : null,
-    discoverFilters: isPlainObject(source.discoverFilters) ? { ...source.discoverFilters } : null,
+    inspoFilters: filtersWithoutTypedText(source.inspoFilters),
+    discoverFilters: filtersWithoutTypedText(source.discoverFilters),
   };
 }
 

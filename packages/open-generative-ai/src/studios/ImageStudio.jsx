@@ -86,7 +86,7 @@ import { AuthModal } from '../dialogs/AuthModal.jsx';
 import { computeSmoothProgress, formatElapsed, estimateGenerationSeconds, recordGenerationSeconds } from '../lib/genProgress.js';
 import {
   IMAGE_PREFERENCES_KEY, STYLE_PRESETS,
-  applyStylePreset, imageTimingProfile, normalizeImagePreferences,
+  applyStylePreset, imageTimingProfile, normalizeImagePreferences, persistedImageSettings,
   referenceRolesNeedRewrite, restoredReferenceLimit, startFreshPatch,
 } from './image/imagePrefs.js';
 import { applyUgcFirstFrame, hasUgcFirstFrame, ugcVariantAt } from '../lib/ugcMode.js';
@@ -767,18 +767,7 @@ export function ImageStudio({
     // (Krea) on every reload. The negative prompt is prompt text, so it stays in
     // the encrypted composer section only (restored on hydrate).
     try {
-      const stripNegative = ({ negativePrompt: _neg, ...rest }) => rest;
-      const settings = stripNegative(preferences);
-      if (settings.modelSettings && typeof settings.modelSettings === 'object') {
-        // The per-model tuning cache also holds each model's negative prompt — strip
-        // those too, so no prompt text lands in plaintext localStorage.
-        settings.modelSettings = Object.fromEntries(
-          Object.entries(settings.modelSettings).map(([key, entry]) => [
-            key, entry && typeof entry === 'object' ? stripNegative(entry) : entry,
-          ]),
-        );
-      }
-      localStorage.setItem(IMAGE_PREFERENCES_KEY, JSON.stringify(settings));
+      localStorage.setItem(IMAGE_PREFERENCES_KEY, JSON.stringify(persistedImageSettings(preferences)));
     } catch { /* quota */ }
   };
   // Set when a handoff was claimed before any machine list had arrived, so the

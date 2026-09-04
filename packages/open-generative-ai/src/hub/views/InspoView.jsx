@@ -31,6 +31,10 @@ import { Modal } from '../../ui/Modal.jsx';
 import { Button, EmptyState, NativeSelect, Segmented, Spinner, TextInput, cx } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 
+// The FILTERS are remembered; the creator box is not. A search box is something
+// a person typed, and typed text does not go into plaintext browser storage —
+// the same rule the composer and the Discover tab follow. lib/prefs.js drops it
+// on the way into the document, so it lives in this view's state and no longer.
 function readSaved() {
   const saved = pref('inspoFilters');
   return saved ? { ...DEFAULT_INSPO_FILTERS, ...saved } : null;
