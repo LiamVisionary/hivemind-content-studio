@@ -15,12 +15,13 @@
 // wants the hosted one, and getting that backwards is what costs money.
 import { Icon } from '../../ui/icons.jsx';
 import {
-  Button, Card, Field, NativeSelect, SectionLabel, Segmented, Slider, Toggle, cx,
+  Button, Card, CollapsibleSection, Field, NativeSelect, SectionLabel, Segmented, Slider, Toggle, cx,
 } from '../../ui/kit.jsx';
 import { remedyFor } from '../../lib/textModels.js';
 import {
   CLOUD_LANE, COLOR_CORRECTIONS, RESOLUTION_PRESETS, RESTORE_MODELS,
-  describeChunkPlan, describeCloudPrice, describeLane, describePrice, describeTensorRt, laneHasTensorRt,
+  advancedSummary, describeChunkPlan, describeCloudPrice, describeLane, describePrice,
+  describeTensorRt, laneHasTensorRt,
 } from '../../lib/videoRestore.js';
 
 // Two local lanes both called "This computer" is a picker nobody can use, so
@@ -169,6 +170,18 @@ export function RestoreSettings({
           {RESOLUTION_PRESETS.find((item) => item.id === settings.resolution)?.hint}
           {plan?.width ? ` This clip comes out ${plan.width}x${plan.height}.` : ''}
         </p>
+        {/* The plan stays out here with the size it belongs to: "14 chunks of
+            about 4.0s" is the shape of the wait, not an advanced dial. */}
+        {plan?.chunks?.length ? (
+          <p className="text-[11px] text-ink3">{describeChunkPlan(plan)}</p>
+        ) : null}
+      </div>
+
+      {/* Three decisions above, thirteen dials below. A consumer opening
+          Restore met a control room; the defaults are good and the fold keeps
+          every one of them a single click away, with a summary on the closed
+          header so nothing that IS set can hide in here. */}
+      <CollapsibleSection title="Advanced" hint={advancedSummary(settings)} storageKey="restore.advanced">
         <Field label="Cap the long edge" hint="0 leaves it alone. Useful on very wide footage, where the short-edge target makes the width enormous.">
           <Slider
             value={settings.maxResolution}
@@ -177,9 +190,7 @@ export function RestoreSettings({
             format={(value) => (value ? `${value}px` : 'off')}
           />
         </Field>
-      </div>
 
-      <div className="flex flex-col gap-3">
         <SectionLabel>How it is cut up</SectionLabel>
         <Field
           label="Temporal batch"
@@ -209,12 +220,7 @@ export function RestoreSettings({
             format={(value) => (value ? `${value} frames` : 'hard cut')}
           />
         </Field>
-        {plan?.chunks?.length ? (
-          <p className="text-[11px] text-ink3">{describeChunkPlan(plan)}</p>
-        ) : null}
-      </div>
 
-      <div className="flex flex-col gap-3">
         <SectionLabel>Colour and seed</SectionLabel>
         <NativeSelect value={settings.colorCorrection} onChange={(event) => set('colorCorrection')(event.target.value)}>
           {COLOR_CORRECTIONS.map((item) => (
@@ -227,9 +233,7 @@ export function RestoreSettings({
         <Field label="Seed" hint="One seed for every chunk of a project. Two chunks denoised from different noise are two slightly different grades meeting at a seam.">
           <Slider value={settings.seed} min={0} max={99999} step={1} onChange={set('seed')} />
         </Field>
-      </div>
 
-      <div className="flex flex-col gap-3">
         <SectionLabel>Memory and speed</SectionLabel>
         <Toggle
           checked={settings.tiledVae}
@@ -241,7 +245,7 @@ export function RestoreSettings({
             (CompatibleDiT does not support len()), so there is no setting of it
             that helps a chunked render. Offering a switch the gateway refuses
             would be worse than not offering one. */}
-      </div>
+      </CollapsibleSection>
 
       {source ? (
         <Card className="p-3 text-[11px] leading-snug text-ink3">

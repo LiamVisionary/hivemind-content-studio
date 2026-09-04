@@ -26,7 +26,7 @@ import { Icon } from '../ui/icons.jsx';
 import { toastFailure } from '../ui/failureToast.jsx';
 import { runFailureRemedy } from '../lib/failureRemedy.js';
 import {
-  Button, Card, EmptyState, Pill, ProgressBar, SectionLabel, Slider, StudioLayout, cx,
+  Button, Card, EmptyState, FailureCallout, Pill, ProgressBar, Slider, StudioLayout, cx,
 } from '../ui/kit.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { useMediaSrc } from '../hooks/hooks.js';
@@ -34,9 +34,10 @@ import { downloadMedia } from '../lib/downloadMedia.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
 import {
   CLOUD_LANE, FINISH_DEFAULTS, RESTORE_DEFAULTS,
-  approvedSpendUsd, chunkOutputUrls, deleteRestoreProject, describeEta, estimatePrice,
-  fetchRestorePlan, fetchRestoreProject, fetchRestoreProjects, fileToBase64, finishRestore,
-  measureClip, planRestore, rentalForLane, restoreCapabilities, startRestore, stopRestore,
+  approvedSpendUsd, chunkOutputUrls, deleteRestoreProject, describeEta, describeRestoreFailure,
+  describeRetention, estimatePrice, fetchRestorePlan, fetchRestoreProject, fetchRestoreProjects,
+  finishRestore, measureClip, planRestore, rentalForLane, restoreCapabilities, restoreFailureLine,
+  sourceTooLargeAdvice, startRestore, stopRestore, uploadRestoreSource,
 } from '../lib/videoRestore.js';
 import { RestoreCompare } from './restore/RestoreCompare.jsx';
 import { RestoreFinish } from './restore/RestoreFinish.jsx';
@@ -63,6 +64,10 @@ function hostedPrice(quote) {
 
 export function RestoreStudio({ active = true }) {
   const [lanes, setLanes] = useState([]);
+  // The whole capabilities payload, not just its lanes: it also carries the
+  // size this machine will take and how long it keeps working files, and both
+  // are things the studio has to say BEFORE somebody waits rather than after.
+  const [capabilities, setCapabilities] = useState(null);
   const [lane, setLane] = useState('');
   const [rental, setRental] = useState(null);
   // `undefined` while it is being fetched, `null` when it could not be priced.
@@ -84,6 +89,9 @@ export function RestoreStudio({ active = true }) {
   const [busy, setBusy] = useState('');
   const [previewAt, setPreviewAt] = useState(0);
   const [joining, setJoining] = useState(false);
+  // 0..1 while the source is streaming up, null when nothing is uploading. A
+  // several-minute upload with no bar is indistinguishable from a hang.
+  const [uploadPct, setUploadPct] = useState(null);
   const [joinedUrl, setJoinedUrl] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
   const objectUrlRef = useRef('');
@@ -125,6 +133,7 @@ export function RestoreStudio({ active = true }) {
       const data = await restoreCapabilities();
       if (cancelled) return;
       const usable = (data.lanes || []).filter((item) => item.available);
+      setCapabilities(data);
       setLanes(data.lanes || []);
       // The free one first when it can do the job: a paid default is a bill
       // nobody chose.
@@ -215,7 +224,7 @@ export function RestoreStudio({ active = true }) {
       }
     } catch (error) {
       // A project that vanished stops the poll rather than looping on a 404.
-      toast.error(error?.message || 'Lost track of that restoration.');
+      toast.error(restoreFailureLine(error));
       return true;
     }
     return false;
@@ -230,9 +239,15 @@ export function RestoreStudio({ active = true }) {
 
   // --- starting ---------------------------------------------------------------
 
+  // The ceiling, before the wait rather than after it. The capabilities payload
+  // carries the real number; this turns it into the sentence the picker shows
+  // beside the file, with the fix in it.
+  const tooLarge = file ? sourceTooLargeAdvice(file, capabilities) : '';
+
   const start = useCallback(async ({ preview = false, projectId = '' } = {}) => {
     if (!lane) { toast.error('No machine here can restore video yet.'); return; }
     if (!projectId && !file) { toast.error('Load a clip first.'); return; }
+    if (!projectId && tooLarge) { toast.error(tooLarge); return; }
     // Nothing is sent to a paid service without a price on screen first. The
     // figure the panel SHOWED is what goes back as the ceiling, so a price that
     // moved between the quote and the start is refused rather than charged.
@@ -243,9 +258,17 @@ export function RestoreStudio({ active = true }) {
     }
     setBusy(preview ? 'preview' : 'render');
     try {
-      const videoBase64 = projectId ? '' : await fileToBase64(file);
+      // Streamed straight off disk to the gateway — nothing is copied into this
+      // tab's memory, and the bar below is the real byte count crossing the
+      // wire. A resume sends no source at all: the project already has one.
+      let sourceId = '';
+      if (!projectId) {
+        setUploadPct(0);
+        const staged = await uploadRestoreSource(file, { onProgress: setUploadPct });
+        sourceId = staged.source_id;
+      }
       const started = await startRestore({
-        videoBase64,
+        sourceId,
         settings,
         // A resume continues the plan it started with; only the machine can
         // still change. See restoreRequestBody.
@@ -263,9 +286,10 @@ export function RestoreStudio({ active = true }) {
       // credits), so the toast carries the button rather than the sentence.
       toastFailure(error, { operation: 'Starting the restoration' });
     } finally {
+      setUploadPct(null);
       setBusy('');
     }
-  }, [lane, laneInfo, rental, file, settings, source, previewAt, poll, cloudQuote, previewQuote]);
+  }, [lane, laneInfo, rental, file, settings, source, previewAt, poll, cloudQuote, previewQuote, tooLarge]);
 
   const stop = useCallback(async () => {
     if (!project?.id) return;
@@ -274,7 +298,7 @@ export function RestoreStudio({ active = true }) {
       toast.success(result.message || 'Stopping.');
       void poll(project.id);
     } catch (error) {
-      toast.error(error?.message || 'Could not stop that render.');
+      toast.error(restoreFailureLine(error));
     }
   }, [project, poll]);
 
@@ -294,13 +318,20 @@ export function RestoreStudio({ active = true }) {
         blobs.push(await (await fetch(await resolveMediaSrc(url))).blob());
       }
       const joined = urls.length === 1 ? { blob: blobs[0] } : await joinClips(blobs);
-      const base64 = await fileToBase64(new File([joined.blob], 'joined.mp4', { type: 'video/mp4' }));
-      await finishRestore(project.id, finish, base64);
+      // The joined master is the biggest file this feature ever moves, so it
+      // goes up the same streamed route the source does rather than as base64.
+      setUploadPct(0);
+      const staged = await uploadRestoreSource(
+        new File([joined.blob], 'joined.mp4', { type: 'video/mp4' }),
+        { onProgress: setUploadPct },
+      );
+      await finishRestore(project.id, finish, staged.source_id);
       toast.success('Joined and finished — the master is in History.');
       await poll(project.id);
     } catch (error) {
-      toast.error(error?.message || 'Could not join those chunks.');
+      toast.error(restoreFailureLine(error));
     } finally {
+      setUploadPct(null);
       setJoining(false);
     }
   }, [project, finish, poll]);
@@ -314,7 +345,7 @@ export function RestoreStudio({ active = true }) {
       toast.success('Re-finished from the chunks already on disk.');
       await poll(project.id);
     } catch (error) {
-      toast.error(error?.message || 'That finish could not be applied.');
+      toast.error(restoreFailureLine(error));
     } finally {
       setBusy('');
     }
@@ -373,7 +404,7 @@ export function RestoreStudio({ active = true }) {
         });
       }
     } catch (error) {
-      toast.error(error?.message || 'That project could not be opened.');
+      toast.error(restoreFailureLine(error));
     }
   }, []);
 
@@ -384,7 +415,7 @@ export function RestoreStudio({ active = true }) {
       await refreshProjects();
       toast.success('Project deleted. Any master it produced stays in History.');
     } catch (error) {
-      toast.error(error?.message || 'That project could not be deleted.');
+      toast.error(restoreFailureLine(error));
     } finally {
       setConfirmDelete(null);
     }
@@ -402,6 +433,14 @@ export function RestoreStudio({ active = true }) {
   const spentUsd = Number(project?.spend?.charged_usd) || 0;
   const running = project && !TERMINAL.has(project.status);
   const needsJoin = project?.status === 'awaiting_assembly';
+  // One reading of the failure, shared by the card here and the row in the
+  // project list, so the two never say different things about the same render.
+  const failure = project?.status === 'error' && project.error
+    ? describeRestoreFailure(project.error)
+    : null;
+  // How long this machine keeps the intermediates. Said beside the render
+  // rather than only in the service log, which is where it used to live.
+  const retentionLine = describeRetention(capabilities);
 
   const panel = (
     <RestoreSettings
@@ -441,7 +480,7 @@ export function RestoreStudio({ active = true }) {
             icon="eye"
             onClick={() => start({ preview: true })}
             loading={busy === 'preview'}
-            disabled={Boolean(busy) || !file}
+            disabled={Boolean(busy) || !file || Boolean(tooLarge)}
             title="One chunk, from wherever the marker is — the cheap way to find out whether this model helps this footage"
           >
             Test {PREVIEW_SECONDS}s{hostedPrice(previewQuote)}
@@ -451,7 +490,7 @@ export function RestoreStudio({ active = true }) {
             icon="wand"
             onClick={() => start({})}
             loading={busy === 'render'}
-            disabled={Boolean(busy) || !file}
+            disabled={Boolean(busy) || !file || Boolean(tooLarge)}
           >
             Restore {plan?.chunks?.length ? `${plan.chunks.length} chunks` : ''}{hostedPrice(cloudQuote)}
           </Button>
@@ -518,6 +557,27 @@ export function RestoreStudio({ active = true }) {
               </Card>
             ) : null}
 
+            {/* The ceiling, stated on the card BEFORE the wait rather than as a
+                refusal after it — and with the fix in the same sentence, which
+                is the whole rule. */}
+            {tooLarge ? (
+              <FailureCallout title={tooLarge} />
+            ) : null}
+
+            {uploadPct !== null ? (
+              <Card className="flex flex-col gap-2 p-3">
+                <div className="flex items-center gap-2">
+                  <Pill tone="honey" dot>Uploading</Pill>
+                  <span className="text-xs text-ink2">{Math.round(uploadPct * 100)}% of the clip sent</span>
+                </div>
+                <ProgressBar value={uploadPct} />
+                <p className="text-[11px] leading-snug text-ink3">
+                  Streamed straight to the machine that will render it — nothing is copied into this tab, so
+                  the size of the film is not the size of this page.
+                </p>
+              </Card>
+            ) : null}
+
             {progress && running ? (
               <Card className="flex flex-col gap-2 p-3">
                 <div className="flex items-center gap-2">
@@ -544,6 +604,7 @@ export function RestoreStudio({ active = true }) {
                 <p className="text-[11px] leading-snug text-ink3">
                   Each finished chunk is saved before the next one starts, so stopping — or closing this tab —
                   costs you the chunk in flight and nothing else.
+                  {retentionLine ? ` ${retentionLine}` : ''}
                 </p>
               </Card>
             ) : null}
@@ -562,16 +623,19 @@ export function RestoreStudio({ active = true }) {
               </Card>
             ) : null}
 
-            {project?.status === 'error' && project.error ? (
-              <Card className="flex flex-col gap-2 border-danger/40 p-3">
-                <span className="text-sm font-medium text-danger">That render stopped</span>
-                <p className="text-[11px] leading-snug text-ink2">{project.error}</p>
-                <div>
-                  <Button size="sm" icon="play" onClick={() => start({ projectId: project.id })}>
-                    Resume from chunk {(project.progress?.chunks_done ?? 0) + 1}
-                  </Button>
-                </div>
-              </Card>
+            {/* The one time somebody needs help — a two-hour render died — they
+                used to get whatever `str(exc)` was: a CUDA allocator dump, an
+                ffmpeg stderr tail. This says what happened and what to change,
+                keeps the machine's own words behind Details, and the way out is
+                the same Resume that keeps every finished chunk. */}
+            {failure ? (
+              <FailureCallout
+                title={failure.action ? `${failure.title} ${failure.action}` : failure.title}
+                detail={failure.detail}
+                onRetry={() => start({ projectId: project.id })}
+                retryLabel={`Resume from chunk ${(project.progress?.chunks_done ?? 0) + 1}`}
+                retryDisabled={Boolean(busy)}
+              />
             ) : null}
 
             {/* The comparison IS the screen. Inside a scrolling column `flex-1`
@@ -606,6 +670,7 @@ export function RestoreStudio({ active = true }) {
             onResume={(summary) => start({ projectId: summary.id })}
             onDelete={setConfirmDelete}
             busy={Boolean(busy) || Boolean(running)}
+            retention={retentionLine}
           />
         </div>
       </div>

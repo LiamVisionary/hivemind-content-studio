@@ -5,8 +5,9 @@
 // here keeps its finished chunks, so the row's action is "resume" rather than
 // "start again" — and the row says how far it got, because "6 of 14 chunks"
 // is the difference between resuming and giving up.
-import { Button, Card, EmptyState, Pill, SectionLabel, cx } from '../../ui/kit.jsx';
+import { Button, Card, EmptyState, FailureCallout, Pill, SectionLabel, cx } from '../../ui/kit.jsx';
 import { Icon } from '../../ui/icons.jsx';
+import { describeRestoreFailure } from '../../lib/videoRestore.js';
 
 const TONE = {
   complete: 'ok',
@@ -31,7 +32,7 @@ function when(value) {
   try { return new Date(value).toLocaleString(); } catch { return ''; }
 }
 
-export function RestoreProjects({ projects, activeId, onOpen, onResume, onDelete, busy }) {
+export function RestoreProjects({ projects, activeId, onOpen, onResume, onDelete, busy, retention = '' }) {
   if (!projects.length) {
     return (
       <EmptyState
@@ -44,6 +45,10 @@ export function RestoreProjects({ projects, activeId, onOpen, onResume, onDelete
   return (
     <div className="flex flex-col gap-2">
       <SectionLabel>Projects</SectionLabel>
+      {/* How long these survive. The reaper's behaviour is right — a project is
+          gigabytes of intermediates — but until it was said here a project that
+          aged out simply vanished with nothing to read. */}
+      {retention ? <p className="m-0 text-[11px] leading-snug text-ink3">{retention}</p> : null}
       {projects.map((project) => {
         const done = project.progress?.chunks_done ?? 0;
         const total = project.progress?.chunks_total ?? 0;
@@ -68,9 +73,19 @@ export function RestoreProjects({ projects, activeId, onOpen, onResume, onDelete
               {project.sink === 'clip' ? ' — rendered on a rented machine' : ''}
               {when(project.updated_at) ? ` · ${when(project.updated_at)}` : ''}
             </div>
-            {project.error ? (
-              <div className="rounded bg-danger-tint px-2 py-1 text-[11px] leading-snug text-danger">{project.error}</div>
-            ) : null}
+            {/* The reading, not the exception. A row is the smallest place a
+                failure appears, so it gets the sentence and the action; the
+                machine's own words stay behind Details, where they are evidence
+                rather than the message. */}
+            {project.error ? (() => {
+              const failure = describeRestoreFailure(project.error);
+              return (
+                <FailureCallout
+                  title={failure.action ? `${failure.title} ${failure.action}` : failure.title}
+                  detail={failure.detail}
+                />
+              );
+            })() : null}
             <div className="flex flex-wrap gap-2">
               <Button size="sm" icon="eye" onClick={() => onOpen(project)}>Open</Button>
               {unfinished ? (

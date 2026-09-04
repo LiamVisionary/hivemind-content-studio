@@ -5053,6 +5053,54 @@ def build_control_app(
         except video_restore.RestoreError as exc:
             raise _restore_error(exc) from None
 
+    @app.post("/api/restore/upload", dependencies=[Depends(require_owner)])
+    async def upload_restore_source(request: Request) -> dict[str, Any]:
+        """The source clip, streamed through to the gateway and never held.
+
+        Nothing about this request is buffered: the ASGI body arrives in
+        chunks, each chunk is handed to a StreamedBody that the blocking
+        urllib POST is reading from in a worker thread, and the gateway writes
+        them to disk as they land. A two-gigabyte source therefore costs this
+        process a few hundred kilobytes at a time — where the old inline-base64
+        body cost a full copy in the browser, a second one in this process, and
+        a third on the way out.
+
+        Returns the staged id `/api/restore` then references."""
+        length = int(request.headers.get("content-length") or 0)
+        if length <= 0:
+            raise HTTPException(status_code=411, detail={
+                "error": "That upload arrived without a length, so it cannot be streamed.",
+                "message": "That upload arrived without a length, so it cannot be streamed.",
+            })
+        body = video_restore.StreamedBody()
+        sending = asyncio.create_task(
+            asyncio.to_thread(video_restore.client().upload_source, body, length)
+        )
+        try:
+            async for chunk in request.stream():
+                if sending.done():
+                    # The gateway already refused (too large, no disk). Stop
+                    # reading and let the await below report its own words.
+                    break
+                if not body.offer(chunk):
+                    # Only under backpressure — the sender is behind, so wait
+                    # for it in a worker rather than on the loop.
+                    await asyncio.to_thread(body.feed, chunk)
+            else:
+                await asyncio.to_thread(body.finish)
+        except video_restore.StreamedBody.Stopped:
+            pass
+        except BaseException:
+            body.stop()
+            sending.cancel()
+            raise
+        try:
+            return await sending
+        except video_restore.RestoreError as exc:
+            raise _restore_error(exc) from None
+        finally:
+            body.stop()
+
     @app.post("/api/restore", dependencies=[Depends(require_owner)])
     async def start_restore(body: dict[str, Any]) -> dict[str, Any]:
         """Start a restoration, or resume one.
@@ -5158,15 +5206,35 @@ def build_control_app(
             raise HTTPException(status_code=400, detail="Between 1 and 12 ingredient reference images are required")
         sources: list[Path] = []
         output: Path | None = None
+
+        def _stage_all() -> list[Path]:
+            """Decode, transcode and decrypt twelve references — off the loop.
+
+            Every step in here is synchronous and slow on purpose: base64 of a
+            full-size photo, HEIC transcoding, and the keychain cipher on a
+            saved reference. Run inline on an async route it froze every other
+            request in the process — job polls, the session middleware, the
+            catalog — for as long as it took. The sibling routes already stage
+            in a thread (start_media_studio_video); this is the same move.
+            """
+            staged: list[Path] = []
+            try:
+                for index, item in enumerate(body.ingredient_images):
+                    if item.image_base64:
+                        staged.append(_write_inline_image(item.image_base64, media_studio_input_root))
+                    elif item.image_reference:
+                        staged.append(stage_media_studio_reference(item.image_reference))
+                    else:
+                        raise ValueError(f"Ingredient reference {index + 1} has no image")
+            except BaseException:
+                # Whatever landed before the failure is still a file on disk.
+                for path in staged:
+                    path.unlink(missing_ok=True)
+                raise
+            return staged
+
         try:
-            for index, item in enumerate(body.ingredient_images):
-                if item.image_base64:
-                    source = _write_inline_image(item.image_base64, media_studio_input_root)
-                elif item.image_reference:
-                    source = stage_media_studio_reference(item.image_reference)
-                else:
-                    raise ValueError(f"Ingredient reference {index + 1} has no image")
-                sources.append(source)
+            sources = await asyncio.to_thread(_stage_all)
             if not ingredients_sheet_compositor.is_file():
                 raise RuntimeError("Ingredients sheet compositor is unavailable")
             media_studio_input_root.mkdir(parents=True, exist_ok=True)
@@ -5204,7 +5272,9 @@ def build_control_app(
             except (json.JSONDecodeError, TypeError):
                 layout = {}
             return Response(
-                content=output.read_bytes(),
+                # A composed sheet is megabytes; reading it is one more thing
+                # the loop has no business doing.
+                content=await asyncio.to_thread(output.read_bytes),
                 media_type="image/png",
                 headers={
                     "Cache-Control": "private, no-store",

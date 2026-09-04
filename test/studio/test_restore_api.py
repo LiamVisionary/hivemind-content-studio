@@ -43,6 +43,26 @@ class _FakeGateway:
             raise self.error
         return b"\x00\x00\x00\x18ftypisom", "video/mp4"
 
+    def upload_source(self, body, length, *, path="/api/restore/upload", timeout=None):
+        """Drain the streamed body the way urllib would, in blocks.
+
+        Recording the block SIZES is the point: a proxy that buffered the clip
+        and handed it over in one piece would read as a single block here, and
+        that is precisely the behaviour this route exists to not have."""
+        self.calls.append(("POST", path, {"length": length}))
+        if self.error:
+            raise self.error
+        self.blocks = []
+        received = bytearray()
+        while True:
+            block = body.read(8192)
+            if not block:
+                break
+            self.blocks.append(len(block))
+            received += block
+        self.uploaded = bytes(received)
+        return {"ok": True, "source_id": "u0001", "bytes": len(received)}
+
 
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch):
@@ -109,6 +129,7 @@ def test_every_restore_route_is_behind_the_owner_gate(tmp_path: Path, monkeypatc
         ("GET", "/api/restore/project/p1"),
         ("GET", "/api/restore/source/p1"),
         ("POST", "/api/restore"),
+        ("POST", "/api/restore/upload"),
         ("POST", "/api/restore/plan"),
         ("POST", "/api/restore/finish"),
         ("POST", "/api/restore/cancel/p1"),
@@ -297,3 +318,150 @@ def test_a_connected_account_leaves_the_hosted_lane_as_the_gateway_reported_it(m
     assert lane["available"] is True
     assert lane["connected"] is True
     assert lane["metered"] == "per-render"
+
+
+def test_the_source_streams_through_rather_than_being_held(client, monkeypatch) -> None:
+    """The whole point of /api/restore/upload.
+
+    A restore source is routinely hundreds of megabytes. It used to arrive as
+    base64 inside a JSON body: a copy in the browser a third larger than the
+    file, a second one when FastAPI parsed the body here, a third when this
+    process re-serialised it for the gateway. Now the bytes cross this process
+    in blocks and land on the gateway's disk as they arrive.
+    """
+    gateway = _install(monkeypatch, _FakeGateway())
+    payload = bytes(range(256)) * 2048  # 512KB, enough to be several blocks
+
+    response = client.post(
+        "/api/restore/upload",
+        content=payload,
+        headers={"content-type": "application/octet-stream"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["source_id"] == "u0001"
+    # Byte for byte, and the length went across as a header rather than being
+    # discovered by buffering.
+    assert gateway.uploaded == payload
+    assert gateway.calls[0] == ("POST", "/api/restore/upload", {"length": len(payload)})
+    # Streamed: more than one block, none of them the whole file.
+    assert len(gateway.blocks) > 1
+    assert max(gateway.blocks) < len(payload)
+
+
+def test_an_upload_without_a_length_is_refused_before_anything_is_sent(client, monkeypatch) -> None:
+    gateway = _install(monkeypatch, _FakeGateway())
+    response = client.post(
+        "/api/restore/upload",
+        content=b"",
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert response.status_code == 411
+    assert gateway.calls == []
+
+
+def test_a_clip_past_the_gateways_ceiling_keeps_its_own_words(client, monkeypatch) -> None:
+    """413 with the sentence that names both numbers and the fix.
+
+    The studio checks the ceiling before it uploads, from the capabilities
+    payload — this is the second line of defence, and it has to arrive as a
+    refusal a person can act on rather than "that could not be started"."""
+    _install(monkeypatch, _FakeGateway(error=video_restore.RestoreError(
+        "that clip is 5000MB and this machine takes up to 4096MB — trim it, or restore it in two halves",
+        status_code=413,
+    )))
+    response = client.post(
+        "/api/restore/upload",
+        content=b"x" * 4096,
+        headers={"content-type": "application/octet-stream"},
+    )
+    assert response.status_code == 413
+    said = response.json()["detail"]["error"]
+    assert "takes up to" in said
+    assert "trim it" in said
+
+
+def test_a_start_references_the_staged_source_rather_than_carrying_it(client, monkeypatch) -> None:
+    gateway = _install(monkeypatch, _FakeGateway(answers={
+        "/api/restore": {"id": "j1", "project_id": "p1"},
+    }))
+    client.post("/api/restore", json={"source_id": "u0001", "batch_size": 5})
+    method, path, body = gateway.calls[-1]
+    assert (method, path) == ("POST", "/api/restore")
+    assert body["source_id"] == "u0001"
+    # No copy of the film in the JSON body, which is the whole change.
+    assert "video_base64" not in body
+
+
+def test_the_upload_really_goes_out_as_a_measured_stream(tmp_path: Path) -> None:
+    """The one thing only a real socket can show.
+
+    urllib will happily send a file-like body as `Transfer-Encoding: chunked`
+    when Content-Length is not set by the caller — and the media gateway is a
+    plain http.server that does not decode chunked, so the source would arrive
+    as zero bytes with no error anywhere. This drives the real client against a
+    loopback server and asserts the wire: one declared length, no chunking, and
+    the body read in blocks rather than in one piece.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen: dict = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - http.server's name
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            seen["length"] = length
+            seen["encoding"] = self.headers.get("Transfer-Encoding")
+            seen["authorized"] = bool(self.headers.get("Authorization"))
+            reads = 0
+            got = 0
+            while got < length:
+                block = self.rfile.read(min(65536, length - got))
+                if not block:
+                    break
+                reads += 1
+                got += len(block)
+            seen["got"] = got
+            seen["reads"] = reads
+            payload = b'{"ok": true, "source_id": "u9", "bytes": %d}' % got
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        token_file = tmp_path / "zimg-token"
+        token_file.write_text("t" * 32, encoding="utf-8")
+        gateway = video_restore.RestoreGatewayClient(
+            base_url=f"http://127.0.0.1:{server.server_address[1]}", token_file=token_file)
+        clip = bytes(range(256)) * 2048  # 512KB
+        body = video_restore.StreamedBody()
+        answer: dict = {}
+
+        sender = threading.Thread(
+            target=lambda: answer.update(gateway.upload_source(body, len(clip))))
+        sender.start()
+        for offset in range(0, len(clip), 65536):
+            block = clip[offset:offset + 65536]
+            if not body.offer(block):
+                body.feed(block)
+        body.finish()
+        sender.join(30)
+    finally:
+        server.shutdown()
+
+    assert answer["source_id"] == "u9"
+    assert seen["got"] == len(clip)
+    assert seen["length"] == len(clip)
+    # Chunked would arrive as a zero-length body on the gateway's reader.
+    assert seen["encoding"] is None
+    assert seen["reads"] > 1
+    # And the gateway token rode along — it is what the browser must never see.
+    assert seen["authorized"] is True

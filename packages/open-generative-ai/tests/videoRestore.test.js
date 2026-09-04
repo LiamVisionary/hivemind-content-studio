@@ -269,3 +269,128 @@ test('the approved ceiling travels with a start AND with a resume', async () => 
     // gateway would have to interpret.
     assert.ok(!('max_spend_usd' in restoreRequestBody({ model: 'm' }, {})));
 });
+
+// --- what a failed render says -------------------------------------------------
+//
+// Every one of these strings is a real thing the gateway or a lane has put in
+// `project.error`, and every one of them used to be the whole message on the
+// project card and in the toast. The rule is that the sentence is written here
+// and the machine's own words are evidence behind a disclosure.
+
+test('a card that ran out of memory names the dial to move, not the allocator', async () => {
+    const { describeRestoreFailure } = await lib();
+    const raw = 'the lane could not restore this chunk: CUDA error: out of memory. Tried to allocate 4.20 GiB';
+    const read = describeRestoreFailure(raw);
+    assert.match(read.title, /ran out of memory/);
+    // The action has to be one the panel can actually perform.
+    assert.match(read.action, /temporal batch|output size/i);
+    // The raw text survives — as evidence, never as the sentence.
+    assert.equal(read.detail, raw);
+    assert.ok(!read.title.includes('CUDA'));
+});
+
+test('a stop reads as a stop, with the chunks it kept', async () => {
+    const { describeRestoreFailure } = await lib();
+    const read = describeRestoreFailure('Stopped. The chunks already finished are kept — resume continues from the next one.');
+    assert.match(read.title, /Stopped/);
+    assert.match(read.action, /Resume/);
+});
+
+test('the classes that need different repairs get different sentences', async () => {
+    const { describeRestoreFailure } = await lib();
+    const cases = [
+        ['failed to download seedvr2_ema_7b_fp16.safetensors', /download/i],
+        ['<urlopen error [Errno 61] Connection refused>', /stopped answering/i],
+        ['the rented machine did not finish this chunk', /rented machine/i],
+        ["this project's source clip is gone — upload it again to resume", /source clip/i],
+        ['this render has spent the $4.00 you approved.', /approved/i],
+    ];
+    for (const [raw, expected] of cases) {
+        const read = describeRestoreFailure(raw);
+        assert.match(read.title, expected, raw);
+        assert.ok(read.action, `no action offered for: ${raw}`);
+        assert.equal(read.detail, raw);
+    }
+});
+
+test('an unrecognised failure still gets a sentence rather than the traceback', async () => {
+    const { describeRestoreFailure, restoreFailureLine } = await lib();
+    const raw = 'Traceback (most recent call last):\n  File "app.py", line 1, in <module>\nKeyError: 3';
+    const read = describeRestoreFailure(raw);
+    assert.equal(read.title, 'That render stopped.');
+    assert.equal(read.detail, raw);
+    // The one-line form for a toast carries the sentence and the action, never
+    // the raw text.
+    assert.ok(!restoreFailureLine(raw).includes('Traceback'));
+});
+
+test('a failure with nothing to say still offers the way out', async () => {
+    const { describeRestoreFailure } = await lib();
+    const read = describeRestoreFailure('');
+    assert.ok(read.title);
+    assert.match(read.action, /Resume/i);
+    assert.equal(read.detail, '');
+});
+
+// --- the ceiling, before the wait ----------------------------------------------
+
+test('the size ceiling comes from the machine and the advice comes with it', async () => {
+    const { maxSourceBytes, sourceTooLargeAdvice, DEFAULT_MAX_SOURCE_BYTES } = await lib();
+    // Whatever the capabilities payload advertises wins; the constant is only
+    // what to reason with while that request is still in flight.
+    assert.equal(maxSourceBytes({ max_source_bytes: 123 }), 123);
+    assert.equal(maxSourceBytes({ retention: { max_source_bytes: 456 } }), 456);
+    assert.equal(maxSourceBytes(null), DEFAULT_MAX_SOURCE_BYTES);
+
+    const capabilities = { max_source_bytes: 100 * 1024 * 1024 };
+    assert.equal(sourceTooLargeAdvice({ size: 50 * 1024 * 1024 }, capabilities), '');
+    const advice = sourceTooLargeAdvice({ size: 300 * 1024 * 1024 }, capabilities);
+    // Both numbers and the fix, in the sentence the picker shows BEFORE the
+    // upload rather than as a refusal after it.
+    assert.match(advice, /300MB/);
+    assert.match(advice, /100MB/);
+    assert.match(advice, /Trim it/);
+});
+
+test('retention is said only when the machine reported it', async () => {
+    const { describeRetention } = await lib();
+    assert.equal(describeRetention(null), '');
+    assert.equal(describeRetention({ retention: { project_ttl_days: 0 } }), '');
+    assert.match(describeRetention({ retention: { project_ttl_days: 30 } }), /30 days/);
+});
+
+test('a start references the staged source and never carries a clip', async () => {
+    const { restoreRequestBody } = await lib();
+    const body = restoreRequestBody({}, { projectId: 'p1' });
+    assert.equal(body.project_id, 'p1');
+    assert.ok(!('video_base64' in body));
+    assert.ok(!('source_id' in body), 'the id rides beside the dials, not inside them');
+});
+
+test('the collapsed Advanced header names only what actually differs', async () => {
+    const { advancedSummary, RESTORE_DEFAULTS } = await lib();
+    // Defaults are the reason the fold is safe: nothing to announce.
+    assert.equal(advancedSummary({ ...RESTORE_DEFAULTS }), '');
+    assert.equal(advancedSummary({}), '');
+    // Anything that IS set has to show on the closed header, or the fold turns
+    // a control into invisible state.
+    const summary = advancedSummary({
+        ...RESTORE_DEFAULTS, batchSize: 9, seamFrames: 0, tiledVae: true, maxResolution: 2560,
+    });
+    assert.match(summary, /batch 9/);
+    assert.match(summary, /hard cuts/);
+    assert.match(summary, /tiled VAE/);
+    assert.match(summary, /cap 2560px/);
+    // A changed colour space is named by its label, not its id.
+    assert.match(advancedSummary({ ...RESTORE_DEFAULTS, colorCorrection: 'wavelet' }), /Wavelet/);
+});
+
+test('a project the reaper took reads as the retention rule, not as a failed render', async () => {
+    const { describeRestoreFailure } = await lib();
+    const read = describeRestoreFailure('no such restoration project');
+    assert.match(read.title, /no longer on this machine/);
+    // Resume would be a dead end — there is nothing left to resume from — so
+    // the action is the rule and where the film went.
+    assert.doesNotMatch(read.action, /Resume/);
+    assert.match(read.action, /History/);
+});
