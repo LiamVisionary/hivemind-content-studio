@@ -1,312 +1,110 @@
 # Hivemind Content Studio
 
-One agent-facing repository for the full social-content lifecycle:
-
-```text
-brief/source
-  -> script + scene plan
-  -> local/cloud media generation
-  -> faceless render or animation assembly
-  -> long-form clipping
-  -> render QA + rights approval
-  -> Postiz or Upload-Post publish
-  -> performance + monetization loop
-```
-
-It consolidates three owned systems without making three parallel pipelines:
-
-- **MoneyPrinterTurbo** is the faceless rendering engine: scripts, stock/local media, LocalTTS, subtitles, and FFmpeg/MoviePy assembly.
-- **Auto Clipper** is the long-form ingestion and clipping engine: transcripts, clip candidates, LLM re-rank and hook generation, rights gates, approvals, Postiz planning, and monetization matching.
-- **AI Animation Factory** is the animation planning contract: briefs, scenes, image/motion prompts, voice lines, music briefs, and reproducible run artifacts.
-- **Hivemind Content Studio** is the only orchestration, provider, manifest, approval, and publishing layer.
-
-The current Upload-Post and Postiz API shapes are implemented once in `hivemind_content_studio.publishing`. MoneyPrinterTurbo never auto-publishes at the end of a render.
-
-## Unified studio
-
-The durable run engine is the product surface. The browser studio, CLI, and MCP are adapters over the same SQLite state machine and versioned manifest:
-
-```text
-execute run -> inspect next_actions -> route intent -> request/consume approval
-            -> execute provider -> attach provenance -> evaluate -> publish -> ingest outcomes
-```
-
-Every run exposes status, current step, bounded retries, budget/spend, immutable artifact metadata, provider/job evidence, and precise next actions. Agents ask for capabilities such as `generate_keyframes` or `animate_scenes`; the router selects a ready provider under the run's privacy, allowlist, and budget policy. Paid work uses an HMAC-signed, exact-scope, one-time operator receipt. Run-associated generation attempts also emit local privacy-safe telemetry: success/failure, provider/model, media kind, duration, artifact count, and charged amount. Prompts, media, credentials, provider payloads, and raw error messages are excluded. Arbitrary shell commands and operator approval decisions are not exposed over MCP.
-
-The browser opens as one **Hivemind Content Studio** with Create, Edit, Animate, Restore, Workflow, Explore, Canvas, and Models. Create, Edit, and Animate share one HivemindOS-style composer, up to 30 ordered reference images, the same model router, prompt history, and durable runs. Workflow reveals the detailed brief-first production form. Explore embeds the complete Open Generative AI catalog and local-inference UI; Canvas embeds the complete ComfyUI Mobile workflow editor; Models is a native manager for the local workflows, the installed weights on disk, and Civitai installs. Image and video routes default to Automatic but can be pinned to a provider/model. Prompt Helper is on by default; Walk-through makes the brain ask questions and wait for confirmation before creating the run. The browser receives only safe model/capability metadata. HivemindOS keeps API keys and OAuth tokens server-side.
-
-The Workflow mode exposes all seven lanes, scene direction, provider overrides, voice and captions, distribution, faceless-video controls, privacy, budget, and protected operator actions with progressive disclosure. Every mode creates the same canonical manifest and SQLite-backed durable run.
-
-**Restore** is local video restoration and upscaling with SeedVR2 — a free, open
-alternative to the commercial restoration tools. Load a clip, render a
-two-second test, compare it against the original frame by frame with a wipe or
-side by side, then commit to the whole film. Long renders are cut into chunks
-and every finished chunk is a checkpoint, so an interruption resumes where it
-stopped rather than at frame zero; sharpening, grain, flat-detail softening and
-reframing are applied afterwards from the saved chunks, so changing your mind
-costs one pass rather than another render. It runs three places: free on your
-own ComfyUI, on an attached rented GPU at that machine's hourly rate, or on a
-hosted serverless GPU charged per render in the credits you already have —
-nothing rented, nothing running between renders, and the price quoted and shown
-on the button before anything is sent. The panel says which is which and what
-follows from each. See [docs/RESTORE_STUDIO.md](docs/RESTORE_STUDIO.md).
-
-### Unified monorepo application
-
-All owned image-studio source now lives in this repository. The shell presents
-embedded tools as product modes rather than repository launchers, while the
-canonical Python package remains the only run, asset, provenance, approval,
-publishing, and metrics owner:
-
-- `packages/media-gateway` supplies the local Media Studio gateway, generation API,
-  model manager, ComfyUI proxy, and Media Studio MCP behind provider-neutral
-  routes.
-- `packages/comfyui-mobile` is the embedded workflow editor, queue, model manager,
-  and output browser used by Canvas.
-- `packages/open-generative-ai` is the embedded image, video, cinema, lip-sync,
-  agent, workflow, model-catalog, and local-inference UI used by Explore.
-- `engines/flux-2-swift-mlx` and `engines/z-image-swift` are native Apple Silicon engines
-  behind the local gateway; users select capabilities and models, not sidecars.
-
-`GET /api/runtime` is an internal, secret-free diagnostic: one native Studio
-surface, bounded engine health, and donor/upstream provenance. It is not used to
-construct repository launchers. On 2026-07-15, Open Generative AI upstream
-`7c8df61` was confirmed to be the fork's merge-base; the Liam fork `0ab564b` is
-2 commits ahead and 0 behind, so there were no upstream commits to merge before
-assimilation continued.
-
-## Production lanes
-
-| Lane | Input | Primary local path | Cloud/BYOK alternatives |
-|---|---|---|---|
-| Animation | YAML scene brief | ComfyUI + Media Studio MCP + Universal TTS + ACE-Step | HivemindOS hosted credits, MUAPI, and other configured providers |
-| First-frame animation ad | Script/scene brief | General agent runtime + ComfyUI + Media Studio MCP + FFmpeg | GPT Image, xAI Imagine image/video, HivemindOS hosted credits, MUAPI, Higgsfield Cloud, Higgsfield consumer/Kling |
-| Stickman performance ad | Script/scene brief | Deterministic black-line renderer + Universal TTS + FFmpeg | ElevenLabs, Higgsfield product/UGC cut-ins, MUAPI |
-| Static text ad | One headline/subtext per scene | Deterministic 4:5/9:16/1:1 renderer | Generated product or UGC cut-ins when explicitly requested |
-| Faceless short | Topic/script/search terms | Embedded MoneyPrinterTurbo + stock/local media + Universal TTS | Pexels, Pixabay, configured LLMs |
-| Clipping | Long video URL/file | Embedded Auto Clipper + Podcli/FFmpeg | MUAPI AI clipping |
-| Social post | Approved final media | Self-hosted Postiz | Upload-Post |
-
-The optional `clueso-mcp` provider adds 90 agent-discoverable workflows for
-motion graphics, demos, training, editing, localization, repurposing, and
-video-derived documentation. The workflows are namespaced behind the canonical
-studio router: Clueso is never silently preferred over local or hosted paths,
-and connecting its MCP or uploading media remains an explicit remote action.
-
-HivemindOS **Media Studio** is the image-to-video MCP already used by HivemindOS chat. The studio discovers its `mcpVideo` descriptor dynamically from `~/.hivemindos/app-preferences.json` (or portable environment overrides), stages input images through the configured upload base, calls `media_generate_video`, polls `media_get_job`, downloads the result, and runs technical QA. It never bakes a Tailnet hostname, token, or transient app ID into the repo.
-
-HivemindOS **hosted media** is the zero-provider-key cloud path. The studio calls the authenticated local `/api/hivemindos/media` route, obtains the live quote, verifies the official 25% markup and the run's maximum debit, then lets the HivemindOS-controlled gateway reserve shared hosted credits and own the provider job. Company freeze, budget, and approval policy remain authoritative in HivemindOS. The studio never reads or receives the hosted MUAPI key. Configure only `HIVEMINDOS_URL`, `HIVEMINDOS_DASHBOARD_DEVICE_TOKEN`, and the company agent identity `HIVEMINDOS_CONTENT_STUDIO_AGENT_ID` through the shared environment.
-
-Palmier Pro remains a separate optional local timeline/editor MCP. It is not the Media Studio generation backend.
-
-## Production templates
-
-The typed template catalog in `src/hivemind_content_studio/template_catalog.py` loads frontmatter-markdown templates from `src/hivemind_content_studio/templates/catalog/<category>/`. Each template is a composer-ready production prompt with `[SLOT]` placeholders plus safe metadata (lane hint, aspect ratio, duration, tags, provenance). Three categories ship today:
+A desktop studio for making pictures, video and finished social clips — on your
+own Mac by default, on a rented or hosted GPU when you ask for one. It is one
+app rather than a launcher: the same prompt box, the same encrypted library, and
+the same "where does this run and what does it cost" answer in every studio.
+
+**Using the app?** → **[The guide](docs/GUIDE.md)** · **[Troubleshooting](docs/TROUBLESHOOTING.md)**
+**Running it from this checkout?** → **[Operations](docs/OPERATIONS.md)**
+**Everything else** → **[docs/](docs/README.md)**
+
+---
+
+## What it looks like
+
+A left sidebar in three tiers, and one workspace beside it.
+
+**Create** — **Image**, **Video**, **Story**, **Restore**, with a folded **Labs**
+group holding **Sprite** and **Lip sync**. Each is a canvas with a prompt bar
+along the bottom and a settings panel down the side. The prompt bar is five
+things: attach references, load a starter, improve the prompt, choose where it
+runs, and **Generate**. The **Runs on** chip reads out the answer before you
+press — *"This Mac · Z-Image Turbo — free, stays here"*, or a rented card's name
+and its hourly price — and defaults to **Automatic**, which prefers free and
+local and says why it chose what it chose.
+
+**Produce** — **Planner** (say what you want in words; a brain plans it and you
+confirm before anything is spent), **Library** (everything you have made, sealed
+with your key), **Productions** (the durable runs, with their steps, artifacts
+and one bounded next action), **Inspo** (Civitai's gallery, with a button that
+loads a prompt straight into the studio it belongs in) and **Models** (install,
+inspect and remove local weights — the only door to doing so).
+
+**Advanced**, collapsed — **Rented GPUs**, **Providers**, **PassBook**,
+**Canvas** (the node workflow editor), **Agents & API**, **Settings**, **About**.
+
+First launch is two steps at the machine: name the studio and choose a
+passphrase, then keep the vault recovery key it shows once. There is no
+compiled-in password, and no server-side copy of yours.
+
+## Install and run
+
+**From this checkout** — the path that works today. Four install commands and a
+stack start, listed in full under
+[Developer quick start](docs/OPERATIONS.md#developer-quick-start). Then open the
+studio at the loopback address the supervisor prints, and follow
+[the guide](docs/GUIDE.md) from the setup card onward.
+
+**The packaged app** is a signed macOS DMG carrying its own Python, Node and
+ffmpeg, supervised by the Rust shell in `desktop/src-tauri`: it reserves a port,
+starts the sidecars, shows a boot screen with an action per failure, and opens
+the studio once it is ready. ComfyUI, the Swift MLX engines and rented boxes stay
+attach-only — the app finds them and never starts or kills them.
+[`docs/RELEASE.md`](docs/RELEASE.md) is the specification for what that download
+contains and names exactly what is still unbuilt, so read it before assuming a
+build exists.
+
+## What is inside
+
+The canonical Python package owns every run, asset, provenance, approval,
+publishing and metrics decision. Everything else is an adapter over it.
+
+| Package | What it is |
+|---|---|
+| `src/hivemind_content_studio` | The control plane: durable runs, the manifest, routing, approvals, publishing, telemetry, the browser API |
+| `packages/open-generative-ai` | The React studio — Image, Video, Story, Restore, Sprite, Lip sync, the hub pages |
+| `packages/media-gateway` | The local generation gateway, model manager, ComfyUI proxy and Media Studio MCP |
+| `packages/comfyui-mobile` | The embedded node workflow editor behind Canvas |
+| `engines/flux-2-swift-mlx`, `engines/z-image-swift` | Native Apple Silicon engines behind the gateway |
+| `desktop/src-tauri` | The Rust shell that supervises the sidecars and shows a boot screen with an action per failure |
+| `src/auto_clipper`, `app/` | The clipping engine and the faceless-render engine, embedded rather than orchestrated |
+
+Runs are durable: SQLite is authoritative for run, step, event and budget state;
+a versioned manifest is authoritative for the brief, provider selections,
+artifacts, provenance, approvals and receipts. Agents ask for capabilities
+(`generate_keyframes`, `animate_scenes`); the router picks a ready provider under
+the run's privacy, allowlist and budget policy. Paid work uses an HMAC-signed,
+exact-scope, one-time operator receipt, and rendering never implies publishing.
+
+Prompts, media, workflows and generation parameters stay on the client. Provider
+secrets live in [PassBook](https://github.com/LiamVisionary/passbook), the
+machine's shared credential store, and never enter the browser or a catalog
+response.
+
+## Documentation
+
+| | |
+|---|---|
+| [Guide](docs/GUIDE.md) | For the person using the app: first run, first image, first video, every studio |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Every failure the app can show, keyed to its own words |
+| [Operations](docs/OPERATIONS.md) | Ports, processes, the stack script, health endpoints, the CLI, the publishing gate, agent access |
+| [Architecture](docs/ARCHITECTURE.md) | How the run engine, router and manifest fit together |
+| [Settings](docs/SETTINGS.md) | Every key, its default, and the variable that overrides it |
+| [End-to-end encryption](docs/E2E_ENCRYPTION_DESIGN.md) | What is sealed with which key, and why nothing can reset a passphrase |
+| [Restore Studio](docs/RESTORE_STUDIO.md) | The SeedVR2 restoration rail in depth |
+| [Monetization](docs/MONETIZATION.md) | The revenue loop the runs feed |
+| [Release](docs/RELEASE.md) · [Release checklist](docs/RELEASE_CHECKLIST.md) | What the download contains; what must be green before a build is dispatched |
+| [Tests](test/README.md) | The five suites and their prerequisites |
+| [Security](.github/SECURITY.md) | What listens where, and how to report a vulnerability privately |
+| [History](docs/history/README.md) | Assimilation and migration records, kept for provenance |
+
+## Licensing
+
+Auto Clipper is AGPL-3.0-or-later, so the combined work is AGPL-3.0-or-later.
+Read [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) before distributing.
+The app's own **About** page carries the version, the licence, the no-warranty
+line, the third-party notices and the offer of Corresponding Source.
 
-- **ugc** — the hyper-real AI UGC system: a character reference photo prompt (named imperfections, lived-in environment, phone-camera language, the load-bearing negative) and the 8-beat 15-second product ad with character/outfit/environment/product/voice locks.
-- **formats** — eight proven viral ad formats (shocked reaction + demo, product-as-gameplay, notification punchline, mascot engine, "what worked for me" note, spot-the-AI split screen, accidental discovery, trend-template volume), each as a runnable beat plan.
-- **animation** — the brand-explainer arc built on the existing animation scaffolds.
-
-Templates surface in three places: the Simple composer's **Templates** menu (inserts the prompt for the brain to expand), `GET /api/templates` (and the `templates` key of `/api/simple/catalog`), and `content-studio templates [template-id]`. Adding a template is dropping a new `.md` file with valid frontmatter into the catalog directory — the loader validates lane ids, unique ids, and that every declared slot appears in the prompt body.
-
-## Quick start
-
-Credentials come from [PassBook](https://github.com/LiamVisionary/passbook), the machine's shared credential store — `$HIVE_HOME`, else `~/.hivemindos/.env`. The studio joins that store at startup and fills only the server-side variables that are missing; an explicit process or project value always wins. Provider secrets never enter the browser or the provider catalog response.
-
-`passbook run --` puts the store in front of a command and records which key was read and who asked. The studio does not need it — it asks PassBook directly — but it is what you want for anything that does not. `hive-env-run --` is the older shim over the same store and still works.
-
-Add `--extra faceless-webui` to the sync below only if you want the Streamlit
-WebUI, the MoneyPrinterTurbo HTTP API, the Redis task backend, or the Azure and
-DashScope providers. The stack starts none of them, and the desktop build ships
-without them (`docs/RELEASE.md`). The donor's Streamlit shell itself is archived
-under `archive/moneyprinterturbo/`; its README says how to run it against the
-engine in `app/`.
-
-```bash
-uv sync --extra dev --extra mcp
-npm --prefix packages/open-generative-ai ci
-npm --prefix packages/comfyui-mobile ci
-npm --prefix packages/media-gateway ci
-npm run build:embedded
-passbook run -- uv run content-studio doctor
-passbook run -- uv run content-studio providers
-```
-
-Start the complete local stack:
-
-```bash
-uv run content-studio stack start
-```
-
-Then visit `http://127.0.0.1:8765`. First launch is two steps and is described in [First launch and recovery](#first-launch-and-recovery) below; a headless or fleet box that nobody sits in front of can skip step one by seeding the owner with `CONTENT_STUDIO_OWNER_PASSWORD_HASH` (the SHA-256 hex digest of the passphrase) and `CONTENT_STUDIO_OWNER_NAME`. The supervisor starts the Content Studio API, embedded OpenGen local-inference bridge, media gateway, ComfyUI lanes, ComfyUI Mobile, MCP, and optional native MLX sidecar. Use `uv run content-studio stack status|stop|restart|url` for lifecycle control. Run `python3 scripts/bootstrap_unified_studio.py --install-links` only when intentionally replacing the stable legacy launcher link; it archives the previous launcher and prints its rollback path.
-
-### First launch and recovery
-
-**Step 1 — name your studio.** The first screen on a fresh install is a setup
-card: a studio name and a passphrase, chosen at the machine. There is no
-compiled-in password. The name is what the sign-in screen shows; the passphrase
-both signs you in and encrypts your library, and nobody — not the app, not the
-owner of the machine — can reset it for you.
-
-**Step 2 — keep the recovery key.** Setup then creates your encrypted vault and
-shows its recovery key exactly once, as step two of setup rather than as a
-surprise later. It is the only thing that opens your sealed media and drafts if
-the passphrase is ever lost. Copy it into a password manager, or save it as a
-file — in the packaged desktop app that opens a real save dialog. The studio
-cannot show it again.
-
-After that, sign-in is a passkey if the machine offers one (the app enrols it
-right after the first password sign-in). A studio with one workspace and a
-passkey goes straight to the Touch ID prompt on every launch, with "Choose a
-different workspace" still on the card.
-
-**What is encrypted with which key** — Settings > Privacy spells this out in the
-app, and it is not one rule: your library, generated media, references and
-personas are sealed to your key and cannot be opened from another workspace on
-the same Mac; run files (the brief, the script, the prompt lists) are encrypted
-with a key in this Mac's keychain, so any program running as you can read them
-and the owner can see runs from every workspace.
-
-Losing both the passphrase and the recovery key means the sealed media stays
-sealed; see [Recovery and rollback](docs/OPERATIONS.md#recovery-and-rollback).
-
-Private runtime state is outside Git under `~/.hivemindos/media-studio`. Existing gateway history and settings are migrated there by `scripts/migrate_media_state.py`. ComfyUI models, workflows, custom nodes, generated outputs, and caches remain under the configured ComfyUI/private model directories; deleting donor source checkouts does not remove them.
-
-Start a durable run. It advances deterministic work and stops with structured `next_actions` when an agent, provider, evaluator, or operator is needed:
-
-```bash
-passbook run -- uv run content-studio run execute examples/briefs/first-frame-animation-ad.yaml --privacy local-first --max-cost-usd 10
-passbook run -- uv run content-studio run list
-passbook run -- uv run content-studio run get <run-id>
-```
-
-SQLite is authoritative for run/step/event/budget state. The versioned manifest is authoritative for the brief, provider selections, artifacts, provenance, approval, publish drafts, and receipts.
-
-Scripts are agent-runtime neutral. Any command that consumes the run request JSON on stdin and writes Markdown on stdout can be used, or an already-running HivemindOS agent can attach its finished script through CLI/MCP:
-
-```bash
-uv run content-studio script run <manifest.json> --runtime <operator-registered-runtime-id> --confirm AGENT_GENERATE
-uv run content-studio script attach <manifest.json> <script.md> --runtime hermes
-```
-
-Route intents before execution. The result explains the selected implementation, fallbacks, readiness evidence, and every rejected provider:
-
-```bash
-uv run content-studio intent route <run-id> generate_keyframes --estimated-cost-usd 1.25
-uv run content-studio intent execute <run-id> generate_keyframes --estimated-cost-usd 1.25
-uv run content-studio telemetry generations
-```
-
-Direct paid-provider execution returns `awaiting_approval`. An operator decides that exact request through the authenticated control API or `content-studio approval decide`; the agent retries with the returned one-time `--approval-token`. Spend is debited atomically only after the registered executor succeeds. MUAPI requires an explicit live-discovered endpoint and payload template under `provider_options.muapi`; model-specific schemas are never guessed.
-
-For `hivemindos-hosted-media`, first discover the hosted catalog/schema and put the explicit model/payload template under `provider_options.hivemindos-hosted-media.<keyframe|motion>`. Pass the quoted retail amount as `--estimated-cost-usd`. This provider delegates authorization to the HivemindOS company policy instead of creating a second studio approval: an autonomous company inside its budget proceeds, while a frozen company, exhausted budget, low hosted balance, or HivemindOS approval threshold stops before provider spend.
-
-Higgsfield Cloud and the consumer CLI are separate providers. The studio never silently switches between their independent credentials or sessions.
-
-OpenAI GPT Image has two explicit providers. `openai-gpt-image` uses `OPENAI_API_KEY` with the official Image API. `openai-gpt-image-oauth` reuses the HivemindOS ChatGPT/Codex sign-in through the beta Codex Responses `image_generation` surface; it never presents that OAuth token to the public Image API. xAI Imagine similarly supports separate `XAI_API_KEY` and HivemindOS-brokered OAuth routes for image and video generation. The studio's OAuth controls start and inspect the existing HivemindOS sessions; access and refresh tokens never enter this process or the browser.
-
-Stickman ads can remain entirely local until product cut-ins or premium generation are requested:
-
-```bash
-uv run content-studio render-stickman <manifest.json>
-uv run content-studio intent execute <run-id> generate_voice --provider elevenlabs --estimated-cost-usd <estimate> --approval-token <one-time-token>
-uv run content-studio assemble <manifest.json>
-uv run content-studio capcut-handoff <manifest.json>
-```
-
-FFmpeg assembly is the zero-human default. The CapCut command emits a portable asset/timing CSV and instructions rather than writing CapCut's unstable private project database.
-
-Palmier discovery is read-only:
-
-```bash
-uv run content-studio mcp-tools
-```
-
-Media Studio discovery is also read-only:
-
-```bash
-passbook run -- uv run content-studio media-studio status
-passbook run -- uv run content-studio media-studio tools
-```
-
-Media Studio is also available through the `animate_scenes` intent. Its local/fleet generation never implies approval to publish the result.
-
-An actual Palmier project/tool mutation requires explicit confirmation:
-
-```bash
-uv run content-studio mcp-call <tool> --arguments '{"project_id":"..."}' --confirm MCP_WRITE
-```
-
-## Publishing gate
-
-Rendering and publishing are separate. Setup never enables auto-upload.
-
-```bash
-uv run content-studio publish prepare <manifest.json> \
-  --video <final.mp4> \
-  --title "..." \
-  --caption "..." \
-  --platforms youtube,tiktok,instagram \
-  --provider upload-post
-
-uv run content-studio publish dry-run <manifest.json>
-uv run content-studio approval request-run <manifest.json>
-uv run content-studio approval decide <approval-id> --decision approve --decided-by <name>
-uv run content-studio approve <manifest.json> --reviewer <name> --rights-note "Owned/approved media and claims reviewed." --approval-token <one-time-token>
-```
-
-Live publishing additionally requires both `CONTENT_STUDIO_ENABLE_LIVE_PUBLISH=true` and `--confirm LIVE_PUBLISH`. Use `passbook run --` so credentials stay in the shared store and every read is recorded.
-
-After distribution, attach platform outcomes to the same run:
-
-```bash
-uv run content-studio metrics record <manifest.json> --platform youtube --views 1000 --completed-views 620 --clicks 35 --conversions 4 --revenue 80
-uv run content-studio metrics summary <manifest.json>
-```
-
-## Agent access
-
-Two MCP servers are included. `content-studio-mcp` is the primary agent contract and exposes high-level run, intent, asset, evaluation, experiment, metric, and publishing tools plus these discoverable resources:
-
-- `studio://capabilities`
-- `studio://providers`
-- `studio://telemetry/generations`
-- `studio://runs/{run_id}`
-- `studio://runs/{run_id}/artifacts`
-- `studio://runs/{run_id}/next-actions`
-
-- `content-studio-mcp`: unified durable workflows; it can request approval but cannot approve or deny its own request.
-- `auto-clipper-mcp`: focused compatibility surface for existing clipping agents. Its `render` tool takes an
-  optional `category` (`business`, `knowledge`, `opinion`, `speech`, `entertainment`, `experience`,
-  `content_review`) that selects a scoring-prompt overlay from `presets/prompts/`, and returns
-  `semantics_status` alongside the run id.
-
-After Podcli renders, an LLM pass scores each candidate and writes its hook and caption
-(`clips.llm_score`, `llm_reason`, `hook_title`, `caption`); the Obsidian run note lists clips best-first so
-the reviewer reads them in ranked order. The pass **ranks but never deletes** — the approval gate remains
-the only filter — and it fails open, so a missing model costs a render nothing. Set `AUTO_CLIPPER_LLM` to
-`auto` (default: an already-loaded local model, else the cloud provider), `local`, `cloud`, or `off`.
-
-Podcli's own AI clip selection is **off** by default. Stock Podcli hands the whole transcript to any
-`claude` or `codex` binary on PATH; `patches/podcli-ai-select-default-off.patch` makes that an explicit
-`--ai-select` opt-in, and `auto-clipper doctor` fails an install that is missing the gate.
-
-The optional operator console is secondary and starts locally with `passbook run -- uv run content-studio-api`. It reads the same state store; authenticated mutations require `CONTENT_STUDIO_CONTROL_TOKEN`.
-
-The repository also snapshots the relevant Shared Brain skills under `skills/shared/` and vendors the audited Clueso workflow shelf under `skills/vendor/clueso-ai/`. `skills/hivemind-content-studio/SKILL.md` is linked into `.agents/skills/` as the canonical entry skill; provider adapters are operational references, not duplicate implementations.
-
-## Safety and licensing
-
-- No credential values belong in this repository. `.env.example` contains key names only.
-- Remote media is untrusted input and is validated before rendering/publishing.
-- Remote URL ingestion and generated-media downloads enforce public HTTPS/SSRF, byte-size, MIME, and decode checks. Private generation URLs are disabled by default.
-- Agent runtimes are registered by operator-owned environment keys; agents submit a runtime id, not an argv array.
-- Paid generation and run approval use one-time exact-scope receipts. Editor mutation and public publishing retain separate gates.
-- Auto Clipper is declared AGPL-3.0-or-later. The combined work is therefore configured as AGPL-3.0-or-later; see `THIRD_PARTY_NOTICES.md` before distribution.
-
-See [Architecture](docs/ARCHITECTURE.md), [Operations](docs/OPERATIONS.md), [Migration Map](docs/MIGRATION_MAP.md), and [Monetization](docs/MONETIZATION.md).
-
-Shipping: [Release](docs/RELEASE.md) is what the download contains and why;
-[Release checklist](docs/RELEASE_CHECKLIST.md) is what has to be green before a
-build is dispatched, and [test/README.md](test/README.md) is the five test suites
-and their prerequisites.
+No credential values belong in this repository; `.env.example` contains key names
+only.

@@ -2,7 +2,7 @@
 
 > **Superseded on 2026-07-15:** The composite workspace/iframe approach was
 > rejected in favor of the native all-in-one plan in
-> `docs/plans/2026-07-15-native-unified-media-studio-implementation-plan.md`.
+> `docs/history/2026-07-15-native-unified-media-studio-implementation-plan.md`.
 
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 

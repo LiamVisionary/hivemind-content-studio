@@ -1,5 +1,8 @@
 # Native Unified Media Studio Implementation Plan
 
+> **History.** This plan was executed; the app it describes exists. It is kept
+> for provenance, not as a task list. Its original working note follows.
+
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
 **Goal:** Turn Hivemind Content Studio into one seamless first-party application that assimilates the useful capabilities of every listed repository without exposing separate apps, workspace cards, or iframes.

@@ -8,10 +8,11 @@ body:
   - type: markdown
     attributes:
       value: |
-        Before filing: `docs/OPERATIONS.md` covers starting, stopping and
-        checking the stack, and `README.md` covers first-run setup. If the
-        studio is up but a generation failed, the control API log named in the
-        error message usually says why.
+        Before filing: `docs/TROUBLESHOOTING.md` lists the failures the app can
+        show with the fix for each, `docs/GUIDE.md` covers first run and the
+        studios, and `docs/OPERATIONS.md` covers starting, stopping and checking
+        the stack. If the studio is up but a generation failed, open **Details**
+        on the failure callout — that raw text is what to paste here.
 
         Please do not paste API keys, tokens, or the contents of
         `~/.hivemindos/.env` into this issue.
