@@ -29,8 +29,12 @@ SEEDVR2_TRT_NODE="$STUDIO_ROOT/packages/comfyui-custom-nodes/hivemind-seedvr2-tr
 OPEN_GEN="$STUDIO_ROOT/packages/open-generative-ai"
 CONTENT_STUDIO="$STUDIO_ROOT"
 TAILSCALE_CLI="/Applications/Tailscale.app/Contents/MacOS/tailscale"
-TAILSCALE_HTTPS_PROXY="$APP/tailscale-https-proxy.js"
+# The retired hand-rolled HTTPS proxy's port. Nothing starts it any more; the
+# number stays so `stop` still reaps one left running by an older build.
 TAILSCALE_HTTPS_PORT="8789"
+# What `tailscale serve` publishes on when the studio's remote-access switch is
+# on. Must match DEFAULT_TAILNET_HTTPS_PORT in remote_access.py.
+TAILNET_HTTPS_PORT="${CONTENT_STUDIO_TAILNET_PORT:-8765}"
 MEDIA_STUDIO_MCP_PORT="${MEDIA_STUDIO_MCP_PORT:-8796}"
 FLUX2_SERVER_DIR="$STUDIO_ROOT/engines/flux-2-swift-mlx"
 FLUX2_SERVER_BIN="$FLUX2_SERVER_DIR/.build/arm64-apple-macosx/release/Flux2Server"
@@ -111,14 +115,11 @@ COMFY_DEFAULT_ASFP8_INT8_EXT="${COMFY_DEFAULT_ASFP8_INT8_EXT:-$ZIMG_DEFAULT_ASFP
 COMFY_DEFAULT_ASFP8_FP8_EXT="${COMFY_DEFAULT_ASFP8_FP8_EXT:-$ZIMG_DEFAULT_ASFP8_FP8_EXT}"
 COMFY_DEFAULT_ASFP8_TRACE_OPS="${COMFY_DEFAULT_ASFP8_TRACE_OPS:-$ZIMG_DEFAULT_ASFP8_TRACE_OPS}"
 COMFY_DEFAULT_ASFP8_PROFILE="${COMFY_DEFAULT_ASFP8_PROFILE:-$ZIMG_DEFAULT_ASFP8_PROFILE}"
-TLS_DIR="$PRIV/tls"
-TLS_CERT="$TLS_DIR/zimage-tailscale.crt"
-TLS_KEY="$TLS_DIR/zimage-tailscale.key"
 LOG_DIR="$HOME/Library/Logs"
 SUP_LOG="$LOG_DIR/zimage-stack-supervisor.log"
 LOCK_DIR="$PRIV/zimage-stack-supervise.lock"
 
-mkdir -p "$PRIV/output" "$PRIV/z_image_outputs" "$PRIV/debug_outputs" "$PRIV/input" "$PRIV/temp" "$PRIV/temp-anima" "$PRIV/temp-ltx" "$LOG_DIR" "$TLS_DIR" "$MEDIA_STATE_ROOT/state/media-gateway" "$MEDIA_STATE_ROOT/secure"
+mkdir -p "$PRIV/output" "$PRIV/z_image_outputs" "$PRIV/debug_outputs" "$PRIV/input" "$PRIV/temp" "$PRIV/temp-anima" "$PRIV/temp-ltx" "$LOG_DIR" "$MEDIA_STATE_ROOT/state/media-gateway" "$MEDIA_STATE_ROOT/secure"
 touch "$PRIV/.metadata_never_index" "$PRIV/output/.metadata_never_index" "$PRIV/z_image_outputs/.metadata_never_index" "$PRIV/debug_outputs/.metadata_never_index"
 chmod -R go-rwx "$PRIV" 2>/dev/null || true
 chflags hidden "$PRIV" 2>/dev/null || true
@@ -170,68 +171,48 @@ wait_http() {
   return 0
 }
 
-tailscale_ip() {
-  local ip=""
-  if [ -x "$TAILSCALE_CLI" ]; then
-    ip="$($TAILSCALE_CLI ip -4 2>/dev/null | head -1 || true)"
-    # The Tailscale CLI can report the account/device IP even when the backend is
-    # stopped and the address is not actually bound locally. Only use it if the
-    # interface is present; otherwise binding proxies to it fails with EADDRNOTAVAIL.
-    if [ -n "$ip" ] && ifconfig 2>/dev/null | grep -q "inet $ip "; then
-      printf '%s\n' "$ip"
-      return 0
-    fi
-  fi
-  ifconfig 2>/dev/null | awk '/inet 100\./ {print $2; exit}'
-}
-
+# tailscale_ip() lived here. Nothing binds a proxy to the tailnet address any
+# more, so the only question left is the MagicDNS name a served URL is built on.
 tailscale_dns() {
   if [ -x "$TAILSCALE_CLI" ]; then
     "$TAILSCALE_CLI" status --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("Self") or {}).get("DNSName","").rstrip("."))' 2>/dev/null || true
   fi
 }
 
-ensure_tls_cert() {
-  local ts_ip="$1"
+# The published tailnet URL, or empty when remote access is switched off.
+# Read from `tailscale serve`, which is the only thing that publishes anything
+# now — so this reports what is actually true rather than what a boot-time
+# proxy would have made.
+tailnet_studio_url() {
   local ts_dns
-  [ -n "$ts_ip" ] || return 1
+  [ -x "$TAILSCALE_CLI" ] || return 0
   ts_dns="$(tailscale_dns || true)"
-  if [ -s "$TLS_CERT" ] && [ -s "$TLS_KEY" ] && openssl x509 -checkend 604800 -noout -in "$TLS_CERT" >/dev/null 2>&1; then
-    if [ -z "$ts_dns" ] || openssl x509 -noout -subject -in "$TLS_CERT" 2>/dev/null | grep -q "$ts_dns" || openssl x509 -noout -text -in "$TLS_CERT" 2>/dev/null | grep -q "DNS:$ts_dns"; then
-      return 0
-    fi
-  fi
-  if [ -n "$ts_dns" ] && "$TAILSCALE_CLI" cert --cert-file "$TLS_CERT" --key-file "$TLS_KEY" "$ts_dns" >/dev/null 2>&1; then
-    chmod 600 "$TLS_KEY" "$TLS_CERT"
-    return 0
-  fi
-  cat > "$TLS_DIR/openssl-tailscale.cnf" <<EOF
-[req]
-default_bits = 2048
-prompt = no
-default_md = sha256
-distinguished_name = dn
-x509_extensions = v3_req
-
-[dn]
-CN = $ts_ip
-
-[v3_req]
-subjectAltName = @alt_names
-keyUsage = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
-
-[alt_names]
-IP.1 = $ts_ip
-DNS.1 = localhost
-IP.2 = 127.0.0.1
-EOF
-  openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
-    -keyout "$TLS_KEY" \
-    -out "$TLS_CERT" \
-    -config "$TLS_DIR/openssl-tailscale.cnf" >/dev/null 2>&1
-  chmod 600 "$TLS_KEY" "$TLS_CERT"
+  [ -n "$ts_dns" ] || return 0
+  "$TAILSCALE_CLI" serve status --json 2>/dev/null | TS_DNS="$ts_dns" TS_PORT="$TAILNET_HTTPS_PORT" TS_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" python3 -c '
+import json, os, sys
+try:
+    served = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+host = os.environ["TS_DNS"] + ":" + os.environ["TS_PORT"]
+entry = (served.get("Web") or {}).get(host) or {}
+root = (entry.get("Handlers") or {}).get("/") or {}
+if root.get("Proxy") == os.environ["TS_TARGET"]:
+    print("https://" + host + "/")
+' 2>/dev/null || true
 }
+
+# The tailnet URL is not made here any more.
+#
+# This used to bind a hand-rolled Node HTTPS proxy to the Tailscale address at
+# every boot, in front of the Canvas port (8788), which authenticated nothing —
+# so every device on the tailnet could queue ComfyUI graphs and read the
+# library. When `tailscale cert` was unavailable it generated a SELF-SIGNED
+# certificate with openssl, which is a full-screen browser warning the person
+# reading it cannot fix. Remote access is now an explicit switch in the studio
+# (Rented GPUs > Open on my other devices) that runs `tailscale serve` — a real
+# certificate, no proxy process — and publishes ONLY this API's port. See
+# src/hivemind_content_studio/remote_access.py.
 
 children=()
 start_children() {
@@ -262,7 +243,10 @@ start_children() {
   roll_log "$PRIV/z-image-frontend.log"
   roll_log "$PRIV/hivemind-content-studio.log"
   roll_log "$PRIV/media-studio-mcp.log"
-  roll_log "$PRIV/z-image-tailscale-https-proxy.log"
+  # The tailnet HTTPS proxy no longer starts here — remote access is an opt-in
+  # toggle that publishes the control API through `tailscale serve` — so there
+  # is no proxy log to roll. The kill_port calls below stay, to clear a stale
+  # one left by an older build.
   # Custom nodes only ever go into the checkout this stack runs. Nothing here
   # touches a ComfyUI the app did not start.
   if comfy_available; then
@@ -590,12 +574,15 @@ PY
 	  COMFY_LANES="$comfy_lanes" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
+  HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" \
   with_credentials z-image-frontend npm run start >> "$PRIV/z-image-frontend.log" 2>&1 &
   pid="$!"
   children+=("$pid")
   log "Z-Image browser frontend child pid=$pid"
 
-  if ! wait_http http://127.0.0.1:8788/ 45; then
+  # /healthz, not /: the Canvas port now refuses anonymous callers, and the one
+  # thing a supervisor is owed is whether the child is alive.
+  if ! wait_http http://127.0.0.1:8788/healthz 45; then
     log "Z-Image frontend did not become healthy in time"
     return 1
   fi
@@ -640,25 +627,17 @@ PY
     return 1
   fi
 
-  local ts_ip
-  local ts_dns
-  local media_studio_public_url
-  ts_ip="$(tailscale_ip || true)"
-  if [ -n "$ts_ip" ]; then
-    ts_dns="$(tailscale_dns || true)"
-    if [ -n "$ts_dns" ]; then
-      media_studio_public_url="https://$ts_dns:$TAILSCALE_HTTPS_PORT"
-    else
-      media_studio_public_url="https://$ts_ip:$TAILSCALE_HTTPS_PORT"
-    fi
-  fi
-
+  # MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL is loopback, always. It used to be the
+  # 8789 proxy's address, which published the Canvas port to the whole tailnet;
+  # that proxy is gone. The tailnet URL the remote-access switch makes belongs
+  # to the CONTROL API, and the studio there resolves media through its own
+  # account-gated routes.
   cd "$APP" || return 1
   MEDIA_STUDIO_MCP_HOST="127.0.0.1" \
   MEDIA_STUDIO_MCP_PORT="$MEDIA_STUDIO_MCP_PORT" \
   MEDIA_STUDIO_MCP_BACKEND_URL="http://127.0.0.1:8787" \
   MEDIA_STUDIO_MCP_STUDIO_URL="http://127.0.0.1:8788" \
-  MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL="${media_studio_public_url:-http://127.0.0.1:8788}" \
+  MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL="http://127.0.0.1:8788" \
   HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
   MEDIA_STUDIO_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
   MEDIA_STUDIO_E2E_PUB_FILE="${MEDIA_STUDIO_E2E_PUB_FILE:-$MEDIA_STATE_ROOT/secure/agent-e2e-pub}" \
@@ -682,16 +661,10 @@ PY
     return 1
   fi
 
-  if [ -n "$ts_ip" ] && [ -f "$TAILSCALE_HTTPS_PROXY" ] && ensure_tls_cert "$ts_ip"; then
-    cd "$APP" || return 1
-    TAILSCALE_IP="$ts_ip" TAILSCALE_HTTPS_PORT="$TAILSCALE_HTTPS_PORT" ZIMAGE_TLS_CERT="$TLS_CERT" ZIMAGE_TLS_KEY="$TLS_KEY" ZIMAGE_TARGET="http://127.0.0.1:8788" HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" MEDIA_STUDIO_MCP_TARGET="http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT" CONTENT_STUDIO_PROXY_SECRET="$CONTENT_STUDIO_PROXY_SECRET" \
-      node "$TAILSCALE_HTTPS_PROXY" >> "$PRIV/z-image-tailscale-https-proxy.log" 2>&1 &
-    pid="$!"
-    children+=("$pid")
-    log "Tailscale HTTPS proxy child pid=$pid url=https://$ts_ip:$TAILSCALE_HTTPS_PORT"
-  else
-    log "Tailscale HTTPS proxy/cert unavailable; tailnet URL disabled"
-  fi
+  # No tailnet proxy is started here. A cold start binds loopback and nothing
+  # else; the tailnet URL is made only when someone turns the switch on in the
+  # studio, and `tailscale serve` needs no child of ours to hold it open.
+  log "tailnet publishing is off at boot; turn it on in the studio if you want it"
 }
 
 stop_children() {
@@ -728,7 +701,7 @@ healthy() {
   curl -fsS --max-time 5 http://127.0.0.1:8787/health >/dev/null || return 1
   curl -fsS --max-time 5 "http://127.0.0.1:$CONTENT_STUDIO_PORT/api/runtime" >/dev/null || return 1
   curl -fsS --max-time 5 "http://127.0.0.1:$OPEN_GEN_PORT/health" >/dev/null || return 1
-  if curl -fsS --max-time 10 http://127.0.0.1:8788/ >/dev/null; then
+  if curl -fsS --max-time 10 http://127.0.0.1:8788/healthz >/dev/null; then
     ZIMG_FRONTEND_HEALTH_SOFT_FAILS=0
   else
     ZIMG_FRONTEND_HEALTH_SOFT_FAILS=$(( ${ZIMG_FRONTEND_HEALTH_SOFT_FAILS:-0} + 1 ))
@@ -826,8 +799,13 @@ launch_start() {
   launchctl kickstart -k "$DOMAIN/$LABEL" 2>/dev/null || true
   echo "Hivemind Content Studio starting as one managed app."
   echo "Local URL: http://127.0.0.1:$CONTENT_STUDIO_PORT"
-  ts_ip="$(tailscale_ip || true)"
-  [ -n "$ts_ip" ] && { ts_dns="$(tailscale_dns || true)"; [ -n "$ts_dns" ] && echo "App URL: https://$ts_dns:$TAILSCALE_HTTPS_PORT" || echo "App URL: https://$ts_ip:$TAILSCALE_HTTPS_PORT"; }
+  local tailnet_url
+  tailnet_url="$(tailnet_studio_url || true)"
+  if [ -n "$tailnet_url" ]; then
+    echo "Tailnet URL: $tailnet_url (published; turn it off in the studio to stop)"
+  else
+    echo "Tailnet URL: not published. Turn on remote access in the studio to open it on your other devices."
+  fi
 }
 
 launch_stop() {
@@ -871,15 +849,14 @@ status() {
     if [ -n "$pids" ]; then echo "  :$port pid(s): $pids"; else echo "  :$port not listening"; fi
   done
   echo
-  local ts_ip
-  ts_ip="$(tailscale_ip || true)"
-  if [ -n "$ts_ip" ]; then
-    local ts_dns
-    ts_dns="$(tailscale_dns || true)"
-    [ -n "$ts_dns" ] && echo "App URL: https://$ts_dns:$TAILSCALE_HTTPS_PORT" || echo "App URL: https://$ts_ip:$TAILSCALE_HTTPS_PORT"
-    echo "Plain HTTP fallback: http://$ts_ip:8788"
+  local tailnet_url
+  echo "Local URL: http://127.0.0.1:$CONTENT_STUDIO_PORT"
+  tailnet_url="$(tailnet_studio_url || true)"
+  if [ -n "$tailnet_url" ]; then
+    echo "Tailnet URL: $tailnet_url"
+    echo "  Reachable by every device signed in to this tailnet. The Canvas port is NOT published."
   else
-    echo "App URL: Tailscale IP not found"
+    echo "Tailnet URL: not published (remote access is off)"
   fi
 }
 
@@ -890,9 +867,8 @@ case "${1:-status}" in
   restart) launch_stop; sleep 2; launch_start ;;
   status) status ;;
   url)
-    ts_ip="$(tailscale_ip || true)"
-    ts_dns="$(tailscale_dns || true)"
-    if [ -n "$ts_dns" ]; then echo "https://$ts_dns:$TAILSCALE_HTTPS_PORT"; elif [ -n "$ts_ip" ]; then echo "https://$ts_ip:$TAILSCALE_HTTPS_PORT"; else echo "http://127.0.0.1:$CONTENT_STUDIO_PORT"; fi
+    tailnet_url="$(tailnet_studio_url || true)"
+    if [ -n "$tailnet_url" ]; then echo "$tailnet_url"; else echo "http://127.0.0.1:$CONTENT_STUDIO_PORT"; fi
     ;;
   *) echo "Usage: zimage-stack {start|stop|restart|status|url|supervise}" >&2; exit 2 ;;
 esac

@@ -14,6 +14,7 @@ import { api, humanize } from '../hubData.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, requestRentedMode } from '../../lib/rentedMachines.js';
 import { ConnectComfyCard } from '../components/ConnectComfyCard.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
+import { RemoteAccessCard } from '../components/RemoteAccessCard.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
 
 // Money and a NaN must never meet: an unmanaged/external row may carry no
@@ -1361,6 +1362,11 @@ export function GpuMachinesView({ active }) {
             </section>
           </div>
         )}
+        {/* Remote machines and remote access are the same question asked twice:
+            this page is where "reach my studio from somewhere else" lives. */}
+        <div className="mt-6">
+          <RemoteAccessCard />
+        </div>
       </div>
       <ConfirmModal
         open={Boolean(pendingDestroy)}

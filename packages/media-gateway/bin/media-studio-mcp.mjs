@@ -887,11 +887,24 @@ function stageBase64Video(value) {
   return stageVideoBuffer(decoded.buffer, { mime: decoded.mime });
 }
 
+// The Canvas port and the gateway both authenticate now, so a URL that points
+// at one of OUR loopback services has to carry the token this agent already
+// holds. Anything else stays a plain fetch: never send the token off-machine.
+function stagingHeaders(source, accept) {
+  const headers = { Accept: accept };
+  const url = source.toString();
+  if (sameOrigin(url, localStudioBase) || sameOrigin(url, backendBase)) {
+    const token = backendToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 async function stageImageUrl(value) {
   const source = new URL(String(value || '').trim());
   if (!['http:', 'https:'].includes(source.protocol)) throw new Error('image_url must be http or https');
   const response = await fetch(source, {
-    headers: { Accept: 'image/*' },
+    headers: stagingHeaders(source, 'image/*'),
     signal: AbortSignal.timeout(60000),
   });
   if (!response.ok) throw new Error(`image_url fetch failed: HTTP ${response.status}`);
@@ -908,7 +921,7 @@ async function stageVideoUrl(value) {
   const source = new URL(String(value || '').trim());
   if (!['http:', 'https:'].includes(source.protocol)) throw new Error('video_url must be http or https');
   const response = await fetch(source, {
-    headers: { Accept: 'video/*,application/octet-stream' },
+    headers: stagingHeaders(source, 'video/*,application/octet-stream'),
     signal: AbortSignal.timeout(120000),
   });
   if (!response.ok) throw new Error(`video_url fetch failed: HTTP ${response.status}`);
@@ -1059,7 +1072,7 @@ async function stageAudioUrl(value) {
   const source = new URL(String(value || '').trim());
   if (!['http:', 'https:'].includes(source.protocol)) throw new Error('audio_url must be http or https');
   const response = await fetch(source, {
-    headers: { Accept: 'audio/*,application/octet-stream' },
+    headers: stagingHeaders(source, 'audio/*,application/octet-stream'),
     signal: AbortSignal.timeout(60000),
   });
   if (!response.ok) throw new Error(`audio_url fetch failed: HTTP ${response.status}`);
