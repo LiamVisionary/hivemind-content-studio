@@ -47,22 +47,82 @@ import { muapi } from './muapi.js';
  * 2026-08-24 its KEY lives on this machine like every other provider's, and the
  * client proxies through /api/muapi. Transport and credential are separate
  * questions; only the second one moved.
+ *
+ * ── placeLabel ────────────────────────────────────────────────────────────
+ *
+ * `label` names the TRANSPORT, which is the right answer to "how does this
+ * run" and the wrong answer to "where does this run and who pays". Every
+ * picker was asking the second question and printing the first, so a consumer
+ * met "API", "Hivemind local", "OpenAI · GPT Image OAuth" and "cloud" for
+ * things that are, to them, three places: this Mac, HivemindOS credits, and an
+ * account they already pay for.
+ *
+ * So each provider also declares a PLACE (one of three, mirroring the text
+ * producer's sections, which have been grouped by bill since they shipped) and
+ * the sentence a person reads for it. Nothing else may compose a place label:
+ * a registry id, a transport name or a family slug reaching a label is the bug
+ * this field exists to close.
  */
+export const PLACE_THIS_MAC = 'this-mac';
+export const PLACE_HIVEMINDOS = 'hivemindos';
+export const PLACE_ACCOUNTS = 'accounts';
+
 export const PROVIDER_TRANSPORTS = Object.freeze({
-  'openai-gpt-image': { transport: 'studio', label: 'OpenAI GPT Image (API key)' },
-  'openai-gpt-image-oauth': { transport: 'studio', label: 'OpenAI GPT Image (ChatGPT sign-in)' },
-  'xai-imagine-api': { transport: 'studio', label: 'xAI Imagine (API key)' },
-  'xai-imagine-oauth': { transport: 'studio', label: 'xAI Imagine (sign-in)' },
-  'higgsfield-consumer': { transport: 'studio', label: 'Higgsfield' },
-  'higgsfield-cloud': { transport: 'studio', label: 'Higgsfield Cloud' },
-  'hivemindos-hosted-media': { transport: 'studio', label: 'HivemindOS hosted' },
-  'media-studio-mcp': { transport: 'studio', label: 'this machine’s studio' },
-  comfyui: { transport: 'studio', label: 'this machine’s studio' },
-  muapi: { transport: 'muapi', label: 'MUAPI' },
+  'openai-gpt-image': {
+    transport: 'studio', label: 'OpenAI GPT Image (API key)', place: PLACE_ACCOUNTS, placeLabel: 'Your OpenAI account',
+  },
+  'openai-gpt-image-oauth': {
+    transport: 'studio', label: 'OpenAI GPT Image (ChatGPT sign-in)', place: PLACE_ACCOUNTS, placeLabel: 'Your OpenAI account',
+  },
+  'xai-imagine-api': {
+    transport: 'studio', label: 'xAI Imagine (API key)', place: PLACE_ACCOUNTS, placeLabel: 'Your xAI account',
+  },
+  'xai-imagine-oauth': {
+    transport: 'studio', label: 'xAI Imagine (sign-in)', place: PLACE_ACCOUNTS, placeLabel: 'Your xAI account',
+  },
+  'higgsfield-consumer': {
+    transport: 'studio', label: 'Higgsfield', place: PLACE_ACCOUNTS, placeLabel: 'Your Higgsfield account',
+  },
+  'higgsfield-cloud': {
+    transport: 'studio', label: 'Higgsfield Cloud', place: PLACE_ACCOUNTS, placeLabel: 'Your Higgsfield account',
+  },
+  'hivemindos-hosted-media': {
+    transport: 'studio', label: 'HivemindOS hosted', place: PLACE_HIVEMINDOS, placeLabel: 'HivemindOS credits',
+  },
+  'media-studio-mcp': {
+    transport: 'studio', label: 'this machine’s studio', place: PLACE_THIS_MAC, placeLabel: 'This Mac',
+  },
+  comfyui: {
+    transport: 'studio', label: 'this machine’s studio', place: PLACE_THIS_MAC, placeLabel: 'This Mac',
+  },
+  muapi: { transport: 'muapi', label: 'MUAPI', place: PLACE_ACCOUNTS, placeLabel: 'MUAPI account' },
   // Browser-side catalogs the server has never heard of.
-  sdcpp: { transport: 'local', label: 'this machine' },
-  wan2gp: { transport: 'local', label: 'a Wan2GP server you run' },
+  sdcpp: { transport: 'local', label: 'this machine', place: PLACE_THIS_MAC, placeLabel: 'This Mac' },
+  wan2gp: {
+    transport: 'local', label: 'a Wan2GP server you run', place: PLACE_THIS_MAC, placeLabel: 'This Mac',
+  },
 });
+
+/**
+ * Which of the three places a row runs in, and the sentence for it.
+ *
+ * A `source: 'local'` row is on this Mac whatever its provider calls itself —
+ * that catalog IS the local inventory, the same rule transportFor applies.
+ * An unknown provider is NOT guessed into a place: it gets the empty place, so
+ * a picker leaves it out of the grouped list rather than filing it under a bill
+ * nobody has decided it belongs to.
+ */
+export function placeFor(row) {
+  if (row?.source === 'local') return PLACE_THIS_MAC;
+  return PROVIDER_TRANSPORTS[String(row?.provider || '')]?.place || '';
+}
+
+/** The label a person reads for that place. '' when the place is unknown — a
+ *  caller that prints this must print nothing rather than the provider id. */
+export function placeLabelFor(row) {
+  if (row?.source === 'local') return 'This Mac';
+  return PROVIDER_TRANSPORTS[String(row?.provider || '')]?.placeLabel || '';
+}
 
 /** Providers that render something other than a generated image — a text card,
  *  a stick figure. Real routes, but never what a studio picker means by a model. */

@@ -11,6 +11,7 @@
 // src/hivemind_content_studio/capability_matrix.py. Nothing here holds an
 // opinion about which model suits which feature.
 import { EVIDENCE_LABELS, RATING_LABELS } from '../lib/capabilityMatrix.js';
+import { placeLabelFor } from '../lib/modelRunner.js';
 import { Button, Pill, cx } from '../ui/kit.jsx';
 
 /** Rating to badge colour. Ordered the same way the matrix ranks them. */
@@ -41,7 +42,10 @@ export function ModelOption({ row, selected, onSelect, readiness = null, onFixRe
       </span>
       <span className="text-[11px] leading-snug text-ink3">{row.reason}</span>
       <span className="text-[10px] uppercase tracking-wide text-ink3/70">
-        {row.providerLabel ? `${row.providerLabel} · ` : ''}
+        {/* WHERE it runs and who pays, never the registry's own name for the
+            provider: "Your OpenAI account", not "OpenAI · GPT Image OAuth". One
+            table answers that for every picker (modelRunner.PROVIDER_TRANSPORTS). */}
+        {placeLabelFor(row) ? `${placeLabelFor(row)} · ` : ''}
         {EVIDENCE_LABELS[row.evidence] || row.evidence}
       </span>
       {/* The state of the account, and the button that repairs it, ON the row

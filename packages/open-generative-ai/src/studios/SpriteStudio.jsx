@@ -27,7 +27,7 @@ import { getComposerSection, hydrateComposerState, updateComposerSection } from 
 import { saveBytes } from '../lib/downloadMedia.js';
 import { isHivemindStudioEnabled, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
 import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
-import { needsBrowserKey, runImage, runVideo, transportFor } from '../lib/modelRunner.js';
+import { needsBrowserKey, placeLabelFor, runImage, runVideo, transportFor } from '../lib/modelRunner.js';
 import { useLocalImageCatalog } from '../lib/useLocalCatalog.js';
 import { promoteOutputToReference } from '../lib/outputToReference.js';
 import { registerPromptInserter } from '../app/promptTarget.js';
@@ -261,7 +261,6 @@ export function SpriteStudio({ active = true } = {}) {
       id: model.id,
       label: model.name || model.id,
       provider: model.provider || 'sdcpp',
-      providerLabel: 'On this machine',
       family: model.family || '',
       accepts: model.accepts,
       available: isLocalAIAvailable(),
@@ -271,7 +270,6 @@ export function SpriteStudio({ active = true } = {}) {
       ...row,
       id: row.model,
       label: row.model_label,
-      providerLabel: row.provider_label,
       source: 'cloud',
     }));
     // A row also has to be one this studio can route — see modelRunner.js.
@@ -287,7 +285,7 @@ export function SpriteStudio({ active = true } = {}) {
     // row — see spriteRouting.js. A cloud row the stage cannot send the sprite
     // to is shown with its reason, not offered as a job that fails locally.
     return animationChoices(rankModels(matrix, 'sprite_animation', serverRows(matrix, 'sprite_animation')
-      .map((row) => ({ ...row, id: row.model, label: row.model_label, providerLabel: row.provider_label, source: 'cloud' }))));
+      .map((row) => ({ ...row, id: row.model, label: row.model_label, source: 'cloud' }))));
   }, [matrix]);
 
   // The row's own reason, on the row. The image picker keeps its readiness
@@ -798,7 +796,7 @@ export function SpriteStudio({ active = true } = {}) {
                       </div>
                       <p className="mt-1 text-[11px] leading-snug text-ink3">{row.reason}</p>
                       <p className="mt-1 text-[10px] uppercase tracking-wide text-ink3/70">
-                        {row.providerLabel ? `${row.providerLabel} · ` : ''}
+                        {placeLabelFor(row) ? `${placeLabelFor(row)} · ` : ''}
                         {EVIDENCE_LABELS[row.evidence] || row.evidence}
                         {row.available === false ? ' · offline right now' : ''}
                       </p>

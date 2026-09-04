@@ -66,6 +66,11 @@ test('image preferences retain provider, dropdown, advanced, and per-model LoRA 
         characterSheetMode: false,
         characterSheetPreset: 'turnaround',
         regionMode: false,
+        // Which ACCOUNT a cloud model is on: the catalog lists the same model
+        // id under three providers on three different bills, so the id alone
+        // cannot route. '' is the MUAPI account, where every cloud selection
+        // written before the Image studio could reach the others lived.
+        providerId: '',
         rentedOnly: false,
         rentedMachineId: '',
         sampler: '',
@@ -114,6 +119,7 @@ test('image preferences reject missing models and recover safe defaults', async 
         characterSheetMode: false,
         characterSheetPreset: 'turnaround',
         regionMode: false,
+        providerId: '',
         rentedOnly: false,
         rentedMachineId: '',
         sampler: '',

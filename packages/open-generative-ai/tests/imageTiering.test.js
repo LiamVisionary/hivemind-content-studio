@@ -72,7 +72,10 @@ test('nothing gates a control on a ?dev=1 URL any more', () => {
 test('the default panel is Model, Aspect, Style, How many and LoRAs — the rest is behind two disclosures', () => {
     const panel = read(PANEL);
     const basic = panel.slice(0, panel.indexOf('<CollapsibleSection'));
-    assert.match(basic, /<ModelMenu/, 'Model is always visible');
+    // One control names the place AND the model: the segmented Local / API /
+    // Rented triad and the model menu beside it asked the same question twice.
+    assert.match(basic, /<RunOnPicker/, 'Runs on — place and model — is always visible');
+    assert.doesNotMatch(panel, /<Segmented[\s\S]{0,120}image\.local/, 'the source triad is gone');
     assert.match(basic, /<AspectRatioPicker/, 'Aspect is always visible');
     assert.match(basic, /\{t\('image\.stylePreset'\)\}/, 'Style is always visible');
     assert.match(basic, /'How many'/, 'the batch count is always visible');
@@ -127,7 +130,7 @@ test('the composer is five chips and one door for improving a prompt', () => {
     assert.match(composer, /label: zh\(\) \? '起点' : 'Starters'/);
     assert.match(row, /label=\{zh\(\) \? '润色' : 'Improve'\}/);
     assert.match(row, /label=\{t\('common\.startFresh'\)\}/);
-    assert.match(row, /<ModelMenu/);
+    assert.match(row, /<RunOnPicker/);
     // The three separate "make my prompt better" doors are one menu now.
     assert.doesNotMatch(row, /<UgcMenu/);
     assert.doesNotMatch(row, /<ReferenceRolesMenu[\s\S]{0,80}\/>\s*<Menu/);

@@ -244,10 +244,20 @@ test('the studios send the tab pin as run_on only in Rented mode, persist it, an
   // Both persist it alongside rentedOnly…
   assert.match(image.match(/const currentImagePreferences = [\s\S]*?\n  \};/)[0], /rentedMachineId: s\.rentedMachineId/);
   assert.match(video.match(/const currentVideoPreferences = [\s\S]*?\n  \}\);/)[0], /rentedMachineId: s\.setup\.rentedMachineId/);
-  // …and hand the panel the value + the writer, so the picker edits THIS tab.
-  assert.match(read('src/studios/image/ImageSettingsPanel.jsx'), /<RentedSourceStatus engine=\{s\} page="image" pinned=\{s\.rentedMachineId \|\| ''\} onPin=\{onPinMachine\} \/>/);
-  assert.match(image, /onPinMachine=\{pinMachine\}/);
-  assert.match(video, /<RentedSourceStatus engine=\{s\} page="video" pinned=\{s\.setup\.rentedMachineId \|\| ''\} onPin=\{pinMachine\} \/>/);
+  // …and hand the picker the value + the writer, so the machine list edits THIS
+  // tab. The rented card lives INSIDE the Runs-on list now — a rental is a
+  // property of This Mac, not a mode of its own — so both studios hand the pin
+  // to RunOnPicker and it mounts the panel under the This Mac group.
+  assert.match(
+    read('src/components/RunOnPicker.jsx'),
+    /<RentedSourceStatus engine=\{engine\} page=\{page\} pinned=\{pinned\} onPin=\{onPin\} \/>/,
+  );
+  for (const [file, page] of [['src/studios/image/ImageSettingsPanel.jsx', 'image'],
+    ['src/studios/image/ImageComposer.jsx', 'image'], ['src/studios/VideoStudio.jsx', 'video']]) {
+    assert.match(read(file), new RegExp(`page="${page}"\\n\\s+pinned=\\{runOn\\.pinned\\}\\n\\s+onPin=\\{runOn\\.onPin\\}`));
+  }
+  assert.match(image, /onPin: pinMachine,/);
+  assert.match(video, /onPin: pinMachine,/);
 
   const { IMAGE_TAB_FIELDS } = await import('../src/lib/studioTabs.js');
   assert.ok(IMAGE_TAB_FIELDS.includes('rentedMachineId'), 'a duplicated image tab keeps its machine');

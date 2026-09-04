@@ -489,14 +489,13 @@ export function StoryStudio({ active = true } = {}) {
       id: model.id,
       label: model.name || model.id,
       provider: model.provider || 'sdcpp',
-      providerLabel: 'On this machine',
       family: model.family || '',
       accepts: model.accepts,
       available: isLocalAIAvailable(),
       source: 'local',
     }));
     const cloud = serverRows(matrix, featureId).map((row) => ({
-      ...row, id: row.model, label: row.model_label, providerLabel: row.provider_label, source: 'cloud',
+      ...row, id: row.model, label: row.model_label, source: 'cloud',
     }));
     // `available` from the matrix means the PROVIDER answered its probe. A row
     // also has to be one this studio can actually route, or the picker offers a

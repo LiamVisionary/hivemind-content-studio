@@ -17,7 +17,7 @@ import { VIDEO_PREFERENCES_KEY, normalizeVideoPreferences } from '../../lib/vide
 import {
   isHivemindStudioEnabled, loadHivemindStudioContext, referenceWorkflowForHivemindModel,
 } from '../../lib/hivemindStudio.js';
-import { rentedMachinesState, servedByAnyMachine } from '../../lib/rentedMachines.js';
+import { rentedMachinesState, routingLeaderFor } from '../../lib/rentedMachines.js';
 import { deliveryPlan } from '../../lib/videoDelivery.js';
 import { isLocalAIAvailable } from '../../lib/localInferenceClient.js';
 import {
@@ -27,16 +27,18 @@ import {
 
 const EMPTY_MACHINES = { live: [], idle: [], broken: [], provisioning: [] };
 
-/** The models a source offers — the same list, filtered the same way, that the
- *  studio's own model menu shows for that source. */
-export function videoModelsForSource(source, { setup, catalogs, machines = EMPTY_MACHINES, hasSourceToggle = true }) {
+/** The models a place offers — the same list the studio's own Runs-on picker
+ *  shows for that place.
+ *
+ *  There is no served-by-a-machine filter here any more. It was the third copy
+ *  of a rule the media gateway already owns (its lane needles decide what runs
+ *  remotely), and three implementations of one rule is three answers to one
+ *  question. What a machine serves is now said on the row it serves, once. */
+export function videoModelsForSource(source, { setup, catalogs, hasSourceToggle = true }) {
   const localMode = source !== 'api';
-  const rentedOnly = source === 'rented';
-  const live = machines.live || [];
-  const probe = { ...setup, localMode, rentedOnly };
+  const probe = { ...setup, localMode, rentedOnly: false };
   return generationModelsFor(probe, catalogs)
-    .filter((model) => !hasSourceToggle || isLocalVideoModel(model.id) === localMode)
-    .filter((model) => !(rentedOnly && live.length) || servedByAnyMachine(live, model));
+    .filter((model) => !hasSourceToggle || isLocalVideoModel(model.id) === localMode);
 }
 
 /**
@@ -55,30 +57,21 @@ export function videoSourceDescriptor(source, {
   const unavailable = (reason) => ({
     available: false, modelId: '', modelName: '', plan: null, switches: false, note: '', reason,
   });
-  let note = '';
-  if (source === 'rented') {
-    const live = (machines.live || []).length;
-    const idle = (machines.idle || []).length;
-    const broken = (machines.broken || []).length;
-    const provisioning = (machines.provisioning || []).length;
-    if (!live && !idle && !broken && !provisioning) {
-      return unavailable(zh ? '还没有租用机器' : 'No machine rented yet');
-    }
-    if (!live) {
-      note = broken
-        ? (zh ? '连接已断开——在“来源”面板重新连接' : 'connection lost — reconnect in the Source panel')
-        : idle
-          ? (zh ? '尚未接入本工作室——点“用于本工作室”' : 'not connected to this studio yet — "Use it here"')
-          : (zh ? '仍在上线中' : 'still coming online');
-    }
-  }
-  const offered = videoModelsForSource(source, { setup, catalogs, machines, hasSourceToggle });
+  const offered = videoModelsForSource(source, { setup, catalogs, hasSourceToggle });
   const chosen = offered.find((model) => model.id === setup?.modelId) || offered[0] || null;
   if (!chosen) {
-    return unavailable(note
-      ? `${zh ? '租用机器' : 'Rented machine'} — ${note}`
-      : (zh ? '这个来源暂无视频模型' : 'No video model on this source'));
+    return unavailable(zh ? '这里暂无视频模型' : 'No video model here');
   }
+  // A rental is a property of This Mac, said on the row rather than offered as
+  // a place of its own: this is the box the work would actually land on.
+  const machine = source === 'local'
+    ? routingLeaderFor([...(machines.live || [])], { id: chosen.id, name: chosen.name })
+    : null;
+  const note = machine
+    ? (zh
+      ? `在 ${machine.gpu || 'GPU'} 上运行（约 $${(machine.usd_per_hour || 0).toFixed(2)}/小时）`
+      : `on your ${machine.gpu || 'GPU'} · $${(machine.usd_per_hour || 0).toFixed(2)}/hr`)
+    : '';
   const entry = resolveVideoModel(chosen.id, catalogs) || chosen;
   return {
     available: true,
@@ -102,9 +95,9 @@ export function videoSourceDescriptor(source, {
   };
 }
 
-export const VIDEO_SOURCES = Object.freeze(['local', 'api', 'rented']);
+export const VIDEO_SOURCES = Object.freeze(['local', 'api']);
 
-/** All three sources for one setup. */
+/** Both places for one setup. */
 export const videoSourceDescriptors = (options) => Object.fromEntries(
   VIDEO_SOURCES.map((source) => [source, videoSourceDescriptor(source, options)]),
 );
@@ -157,7 +150,7 @@ export async function resolveVideoSendTargets() {
     index: tab.id,
     label: `Tab ${tab.id}`,
     active: tab.id === activeId,
-    current: setup.rentedOnly ? 'rented' : setup.localMode ? 'local' : 'api',
+    current: setup.localMode ? 'local' : 'api',
     sources: videoSourceDescriptors({
       setup, catalogs, machines: machines || EMPTY_MACHINES, hasSourceToggle,
     }),

@@ -23,7 +23,7 @@ import { CompletionPingToggle } from '../../ui/CompletionPingToggle.jsx';
 import { UploadPicker } from '../UploadPicker.jsx';
 import { CameraMenu } from './CameraMenu.jsx';
 import { ReferenceRolesMenu } from './ReferenceRolesMenu.jsx';
-import { ModelMenu } from './ImageModelMenu.jsx';
+import { RunOnPicker } from '../../components/RunOnPicker.jsx';
 
 // The Starters popover carries the whole shipped prompt library — the animation
 // shelf, the cast/persona prompts and the H3 character notes — which made it by
@@ -56,9 +56,7 @@ export function ImageComposer({
   onClosePromptHelper,
   onUsePromptHelperResult,
   // ---- model ----
-  modelLabel,
-  onSelectLocalModel,
-  onSelectApiModel,
+  runOn,
   // ---- starters ----
   captureContext,
   onRestoreContext,
@@ -385,15 +383,22 @@ export function ImageComposer({
               onClick={onNewPrompt}
             />
 
-            {/* The model reads out here too, so it can be changed on a narrow
-                window without opening the settings panel. */}
-            <ModelMenu
+            {/* Where it runs and on what reads out here too, so it can be
+                changed on a narrow window without opening the settings panel.
+                The same control and the same list as the panel's — a second
+                model menu with its own vocabulary is what this replaced. */}
+            <RunOnPicker
+              compact
+              targets={runOn.targets}
+              value={runOn.value}
+              onChange={runOn.onChange}
+              automatic={runOn.automatic}
+              onAutomatic={runOn.onAutomatic}
+              isAutomatic={runOn.isAutomatic}
               engine={s}
-              modelLabel={modelLabel}
-              hasRefs={refCount > 0}
-              onSelectLocal={onSelectLocalModel}
-              onSelectApi={onSelectApiModel}
-              className=""
+              page="image"
+              pinned={runOn.pinned}
+              onPin={runOn.onPin}
             />
           </div>
 

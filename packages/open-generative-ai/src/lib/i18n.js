@@ -145,7 +145,6 @@ const translations = {
         'image.placeholder': 'Describe the image you want to create',
         'image.placeholderTransform': 'Describe how to transform this image (optional)',
         'image.generateTooltip': 'Generate AI image from prompt',
-        'image.modelTooltip': 'Select AI generation model',
         'image.multiImageNote': 'images selected — describe the transformation (optional)',
         'ar.square': 'Square',
         'ar.portrait': 'Portrait',
@@ -155,9 +154,6 @@ const translations = {
         'ar.cinema': 'Cinema',
         'ar.custom': 'Custom',
         'image.qualityTooltip': 'Set output quality',
-        'image.local': 'Local',
-        'image.rented': 'Rented',
-        'image.api': 'Cloud',
         'image.generatingLocally': 'Generating locally...',
         'image.quickStarters': 'Quick starters',
         'image.promptEnhancer': 'Prompt enhancer',
@@ -199,7 +195,6 @@ const translations = {
         'video.progress.elapsed': 'Elapsed',
         // Real sampler counters off the executing backend, not an estimate.
         'video.progress.step': (step, total) => `Step ${step} of ${total}`,
-        'video.videoTools': 'Video tools',
 
         // Lip Sync Studio
         'lipsync.input': 'Input',
@@ -303,7 +298,6 @@ const translations = {
         'image.placeholder': '描述您想创建的图像',
         'image.placeholderTransform': '描述您想如何转换此图像（可选）',
         'image.generateTooltip': '根据提示词生成 AI 图像',
-        'image.modelTooltip': '选择 AI 生成模型',
         'image.multiImageNote': '张图片已选择——描述要做的变化（可选）',
         'ar.square': '方形',
         'ar.portrait': '竖版',
@@ -313,9 +307,6 @@ const translations = {
         'ar.cinema': '影院宽幅',
         'ar.custom': '自定义',
         'image.qualityTooltip': '设置输出质量',
-        'image.local': '本地',
-        'image.rented': '租用',
-        'image.api': '云端',
         'image.generatingLocally': '本地生成中...',
         'image.quickStarters': '快速启动',
         'image.promptEnhancer': '提示词增强器',
@@ -356,7 +347,6 @@ const translations = {
         'video.progress.inProgress': '进行中',
         'video.progress.elapsed': '已用时间',
         'video.progress.step': (step, total) => `第 ${step} / ${total} 步`,
-        'video.videoTools': '视频工具',
 
         // Lip Sync Studio
         'lipsync.input': '输入',

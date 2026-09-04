@@ -97,6 +97,12 @@ export function normalizeImagePreferences(value) {
 
     return {
         modelId,
+        // Which ACCOUNT the cloud model belongs to. The catalog lists
+        // gpt-image-2 under three providers on three different bills, so a
+        // saved model id alone cannot say which one was chosen; '' means the
+        // MUAPI account, which is where every cloud model lived before the
+        // Image studio could reach the rest.
+        providerId: stringValue(value.providerId).slice(0, 64),
         imageMode: Boolean(value.imageMode),
         useLocalModel: Boolean(value.useLocalModel),
         rentedOnly: Boolean(value.rentedOnly),

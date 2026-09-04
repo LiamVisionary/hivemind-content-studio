@@ -3,7 +3,10 @@
 // Lifted out of ImageStudio.jsx verbatim in behaviour, re-tiered by WHO NEEDS A
 // CONTROL rather than by where its value is sent:
 //
-//   Basic (always visible) — Source, Model, Aspect, Style, How many, LoRAs.
+//   Basic (always visible) — Runs on (place + model), Aspect, Style, How many,
+//                            LoRAs. "Runs on" is one control: the segmented
+//                            Local / API / Rented triad and the model menu
+//                            beside it asked the same question twice.
 //   Advanced (collapsed)   — Steps, Guidance, Seed, Sampler/Scheduler, Negative
 //                            prompt, Resolution, custom W×H.
 //   Modes (collapsed)      — Region boxes, Couple, Character sheet, Strength Hunt.
@@ -22,11 +25,10 @@ import { t, aspectRatioName, zh } from '../../lib/i18n.js';
 import { EDIT_SHORT_SIDES, editBudgetForShortSide } from '../../lib/editResolution.js';
 import { AUTO_SAMPLER_LOW_STEP_THRESHOLD, STYLE_PRESETS, parseSeedInput } from './imagePrefs.js';
 import { LocalCatalogNotice } from '../LocalCatalogNotice.jsx';
-import { RentedSourceStatus } from '../RentedSourceStatus.jsx';
 import { LaneMemoryNotice } from '../LaneMemoryNotice.jsx';
 import { RegionBoxEditor } from './RegionBoxEditor.jsx';
 import { LoraSection } from './LoraSection.jsx';
-import { ModelMenu } from './ImageModelMenu.jsx';
+import { RunOnPicker } from '../../components/RunOnPicker.jsx';
 
 
 // Short-side resolutions offered for local workflows. 0 = the workflow's own
@@ -38,9 +40,7 @@ export function ImageSettingsPanel({
   bump,
   persist,
   // ---- derived, computed once in the studio's render ----
-  localAvailable,
   activeLocalModel,
-  modelLabel,
   aspectRatios,
   resolutions,
   resolvedDims,
@@ -69,12 +69,12 @@ export function ImageSettingsPanel({
   selectedArNumber,
   tabActive,
   loraProps,
+  // The whole Runs-on readout: joined targets, the Automatic pick, this tab's
+  // choice and its machine pin. One prop, because it is one control.
+  runOn,
   // ---- handlers ----
   onSetSource,
-  onPinMachine,
   onDiscoverLocalCatalog,
-  onSelectLocalModel,
-  onSelectApiModel,
 }) {
   const advancedHint = [
     Number(s.steps) ? `${s.steps} steps` : '',
@@ -95,34 +95,29 @@ export function ImageSettingsPanel({
 
   return (
     <>
-      {localAvailable ? (
-        <div className="flex flex-col gap-2">
-          <SectionLabel>{zh() ? '来源' : 'Source'}</SectionLabel>
-          <Segmented
-            value={s.rentedOnly ? 'rented' : s.useLocalModel ? 'local' : 'api'}
-            onChange={(v) => onSetSource(v !== 'api', v === 'rented')}
-            options={[
-              { value: 'local', label: t('image.local') },
-              { value: 'api', label: t('image.api') },
-              { value: 'rented', label: t('image.rented') },
-            ]}
-          />
-          {s.rentedOnly
-            ? <RentedSourceStatus engine={s} page="image" pinned={s.rentedMachineId || ''} onPin={onPinMachine} />
-            : null}
-          {/* Only ever visible when another local mode finished and is still
-              sitting on real memory — see LaneMemoryNotice. Local work is the
-              only work it can affect, so it stays out of the cloud lane. */}
-          {s.useLocalModel && !s.rentedOnly ? <LaneMemoryNotice active={tabActive} /> : null}
-        </div>
-      ) : null}
-
       {rentedBlocked ? null : (
         <>
+          {/* One readout for the question four controls used to ask four ways.
+              It names the place, the model and the bill in one line, opens ONE
+              list grouped by who pays, and carries the rented-machine card
+              (pin, attach, reconnect, rent) inside This Mac — where a rental
+              actually belongs. Where the segmented Local / API / Rented control
+              and a second model menu used to be. */}
           <div className="flex flex-col gap-2">
-            <SectionLabel>{zh() ? '模型' : 'Model'}</SectionLabel>
-            {/* A menu of models that cannot run is worse than no menu: it reads as
-                a working studio right up to the press. When the local source has
+            <RunOnPicker
+              targets={runOn.targets}
+              value={runOn.value}
+              onChange={runOn.onChange}
+              automatic={runOn.automatic}
+              onAutomatic={runOn.onAutomatic}
+              isAutomatic={runOn.isAutomatic}
+              engine={s}
+              page="image"
+              pinned={runOn.pinned}
+              onPin={runOn.onPin}
+            />
+            {/* A list that cannot run anything is worse than no list: it reads
+                as a working studio right up to the press. When this machine has
                 nothing to offer, the section says why and carries the one action
                 that changes it. */}
             {s.useLocalModel && !s.localImageModels.length && s.localCatalogStatus !== 'ready' ? (
@@ -131,15 +126,11 @@ export function ImageSettingsPanel({
                 onCheckAgain={() => { void onDiscoverLocalCatalog(); }}
                 onSwitchToCloud={() => onSetSource(false)}
               />
-            ) : (
-              <ModelMenu
-                engine={s}
-                modelLabel={modelLabel}
-                hasRefs={refCount > 0}
-                onSelectLocal={onSelectLocalModel}
-                onSelectApi={onSelectApiModel}
-              />
-            )}
+            ) : null}
+            {/* Only ever visible when another local mode finished and is still
+                sitting on real memory — see LaneMemoryNotice. Local work is the
+                only work it can affect, so it stays out of the cloud lane. */}
+            {s.useLocalModel ? <LaneMemoryNotice active={tabActive} /> : null}
           </div>
 
           <div className="flex flex-col gap-3">
