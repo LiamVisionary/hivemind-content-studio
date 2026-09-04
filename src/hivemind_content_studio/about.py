@@ -14,9 +14,14 @@ the two things that need files rather than constants:
   headlines: they are plain sentences about what changed for the person using
   the app, while the bodies below them are engineering notes full of file paths.
 
-Both files are found next to the package in a packaged build and at the
-repository root in a checkout; `CONTENT_STUDIO_DOCS_DIR` overrides both, so the
-Tauri shell can point at whatever it laid down in the bundle.
+* **The licence documents themselves.** `LICENSE` and `THIRD_PARTY_NOTICES.md`,
+  served as text so the About panel can show them instead of naming two files a
+  user has no way to open — and so a build that did not carry one says exactly
+  that rather than claiming it is there.
+
+All of these are found next to the package in a packaged build and at the
+repository root in a checkout; `CONTENT_STUDIO_DOCS_DIR` overrides them all, so
+the Tauri shell can point at whatever it laid down in the bundle.
 """
 
 from __future__ import annotations
@@ -59,6 +64,41 @@ def notices() -> dict:
     if not isinstance(loaded, dict):
         return {"available": False, "python": {"packages": []}, "npm": {}, "unresolved": []}
     return {"available": True, **loaded}
+
+
+# The two documents the About panel used to NAME and never show: it said "the
+# full licence text ships with the app (LICENSE)" and pointed at
+# THIRD_PARTY_NOTICES.md, while neither file's text was reachable from any
+# surface — so a build that did not carry them made the sentence false and
+# nothing in the app could tell you. They are served instead, from the same
+# `docs_root()` the notices come from, and a build without one says so rather
+# than asserting it is there.
+LICENCE_DOCUMENTS: dict[str, str] = {
+    "licence": "LICENSE",
+    "notices": "THIRD_PARTY_NOTICES.md",
+}
+
+# The AGPL is ~34 KB and the notices ~16 KB. The cap is here to refuse a
+# pathological file, not to bound either of those.
+_MAX_DOCUMENT_BYTES = 512_000
+
+
+def licence_document(name: str) -> dict:
+    """One named licence document's text, or an honest "not in this build"."""
+    key = str(name or "").strip().lower()
+    filename = LICENCE_DOCUMENTS.get(key)
+    if not filename:
+        return {"available": False, "name": key, "filename": "", "text": ""}
+    try:
+        text = (docs_root() / filename).read_text(encoding="utf-8")
+    except OSError:
+        return {"available": False, "name": key, "filename": filename, "text": ""}
+    return {
+        "available": True,
+        "name": key,
+        "filename": filename,
+        "text": text[:_MAX_DOCUMENT_BYTES],
+    }
 
 
 def whats_new(limit: int = WHATS_NEW_LIMIT) -> list[dict[str, str]]:

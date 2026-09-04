@@ -12,9 +12,11 @@ import { isSoundOnlyReference, referenceVideoCanvas } from './h3References.js';
 // Re-exported so the id format keeps one import path for existing callers.
 export { isHivemindVideoModelId, workflowIdFromHivemindModelId };
 
+// Both retired with the explore dock's own controls — the video select in
+// 8cab977, the option switches on 2026-09-03. Nothing writes either any more and
+// nothing reads them; the keys stay named here only so owner lock still scrubs
+// what a tab left open before those changes is carrying.
 const VIDEO_SELECTION_KEY = 'hivemind.explore.videoSelection';
-// Retired 2026-09-03 with the explore dock's generation-option switches. The key
-// is still scrubbed on owner lock so a tab left open before the change is cleaned.
 const OPTIONS_KEY = 'hivemind.explore.options';
 const PENDING_JOBS_KEY = 'muapi_pending_jobs';
 const MEDIA_STUDIO_REFERENCE_PREFIX = '/api/media-studio/references/';
@@ -513,21 +515,6 @@ export async function referenceToLocalImageInput(source) {
     if (value.startsWith('data:')) return { image_base64: value };
     if (/^https?:\/\//i.test(value)) return { image_url: value };
     return { image_base64: await mediaSourceToDataUrl(value, 'image') };
-}
-
-// The last local video workflow a session hand-picked, LEGACY ONLY: the explore
-// dock's "Local video workflow" select was the one writer and it was retired
-// (it duplicated the Video studio's own picker), so in a session started since
-// then this reads null and its two callers — VideoStudio's boot restore and
-// defaultTextToVideoModelFor — fall through to the LTX default. It stays
-// because a tab opened before that change still carries the key, and the
-// owner-lock scrub still clears it.
-export function getSavedHivemindVideoSelection() {
-    try {
-        return JSON.parse(sessionStorage.getItem(VIDEO_SELECTION_KEY) || 'null');
-    } catch {
-        return null;
-    }
 }
 
 async function ingredientImagesToRequest(items) {

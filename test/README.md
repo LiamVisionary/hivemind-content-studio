@@ -111,9 +111,28 @@ cd packages/comfyui-mobile && npx tsc --noEmit -p tsconfig.app.json
 ## What CI runs
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs all five on every
-push and pull request, plus `ruff check app cli.py main.py webui test src` as its
-own job — a lint job that is a step inside a test job stops the tests from
-reporting at all.
+push and pull request, plus:
+
+* `ruff check .` — the whole tree, as its own job. A lint job that is a step
+  inside a test job stops the tests from reporting at all.
+* `npm run lint` in `packages/open-generative-ai` (`--max-warnings 0`).
+* the studio vite build, because four control-plane tests assert the page served
+  at `/` *is* the studio.
+* `pytest -q packages/comfyui-mobile/tests` — the Canvas package's Python half,
+  which neither `testpaths = ["test"]` nor `npx vitest run` collects.
+* `cargo test` for the desktop shell, on `ubuntu-22.04` with the Tauri system
+  packages, plus `scripts/check_updater_config.py`.
+* `npx tsc --noEmit -p tsconfig.app.json` in `packages/comfyui-mobile`.
+* a Windows smoke job over five service tests.
+
+What CI deliberately does **not** run, and why:
+
+| Gate | Where a human runs it | Why not in CI |
+|---|---|---|
+| `npx eslint .` in `packages/comfyui-mobile` | not in the checklist | 28 pre-existing errors; it would be red on the day it was added, which is a gate nobody can read |
+| `npm run build:embedded` (Canvas dist, gateway Next build) | `RELEASE_CHECKLIST.md` §3 | the release workflow builds both, and the type gate above catches the class of break that matters on a push |
+| `scripts/generate_notices.py --check` | `RELEASE_CHECKLIST.md` §4 | it compares against the *installed* dependency set, so it answers "out of date" on any runner whose resolution differs from the developer's |
+| `hivemind_content_studio.identity --write && git diff --exit-code` | `RELEASE_CHECKLIST.md` §4 | the version comes from `git describe`, and `actions/checkout` fetches no tags by default |
 
 The desktop release workflows are dispatch-only and run none of this; the gate
 before dispatching one is `docs/RELEASE_CHECKLIST.md`.

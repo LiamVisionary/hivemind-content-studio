@@ -24,6 +24,7 @@ import {
   isPaidCloudModel, modelsForAccount, modelsForTab, rateLine, recommendedId,
   rememberModelUse, remedyFor, rowFor, SECTIONS, sectionLine, sourceState, tabCounts,
 } from '../lib/textModels.js';
+import { t } from '../lib/i18n.js';
 import { Button, Pill, TextInput, cx } from '../ui/kit.jsx';
 
 // Enough rows to browse without turning the picker into a page of its own.
@@ -359,7 +360,7 @@ export function ModelSourcePicker({
                       className="text-[11px] font-semibold text-honey hover:underline"
                       onClick={() => setConnectOpen((open) => !open)}
                     >
-                      Connect account
+                      {t('failure.connectAccount')}
                     </button>
                   ) : null}
                   {section.id === HIVEMINDOS && state.available && connected ? (

@@ -54,7 +54,11 @@ export const SECTIONS = Object.freeze([
   },
   {
     id: HIVEMINDOS,
-    label: 'HivemindOS',
+    // The SAME key RUN_PLACES uses. This heading read "HivemindOS" while every
+    // other picker in the app said "HivemindOS credits" — one hardcoded string
+    // is exactly the drift the key table exists to stop, and a section is a
+    // bill, so the heading has to name the bill.
+    label: t('place.hivemindos'),
     blurb: 'One balance of HivemindOS credits: the house tiers, the free model, and every model HivemindOS can reach.',
     privacy: 'The story is sent to HivemindOS to answer, and the answer is charged to your HivemindOS credits.',
   },

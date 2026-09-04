@@ -359,7 +359,9 @@ Collapsed by default, because none of it is needed to make something.
   value came from, so a value pinned elsewhere on the machine is visible rather
   than mysterious. Turning a local engine off *"is a working studio with one
   fewer local lane, never an error."*
-* **About** — version, licence, source and third-party notices.
+* **About** — version, licence, source and third-party notices. **Licence text**
+  and **Donor and component provenance** open the two documents in place; a
+  build that did not carry one says so and links the source instead.
 
 ---
 

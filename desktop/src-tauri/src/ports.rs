@@ -57,6 +57,24 @@ pub fn loopback_origin(port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Every test here asks the OS for an ephemeral port and then reasons about
+    /// that exact number. Cargo runs them on threads of one binary, so two of
+    /// them racing for `bind(0)` is how
+    /// `the_preferred_port_is_taken_when_it_is_free` once failed with
+    /// `left: 57241, right: 57240` — the neighbour port, claimed in the gap
+    /// between proving one free and reserving it. Serialising them removes the
+    /// only racer this binary controls; the retry below covers the rest of the
+    /// machine.
+    static EPHEMERAL_PORTS: Mutex<()> = Mutex::new(());
+
+    fn one_at_a_time() -> MutexGuard<'static, ()> {
+        // A panic in one test must not make every later one fail on a poisoned
+        // lock: the guard protects a port number, not shared state anyone can
+        // corrupt.
+        EPHEMERAL_PORTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn a_port_nobody_holds() -> u16 {
         let listener = TcpListener::bind((LOOPBACK, 0)).expect("ephemeral bind");
@@ -67,12 +85,27 @@ mod tests {
 
     #[test]
     fn the_preferred_port_is_taken_when_it_is_free() {
-        let free = a_port_nobody_holds();
-        assert_eq!(reserve_port(free, free).expect("reserve"), free);
+        let _serialised = one_at_a_time();
+        // Anything else on the runner can still take the port in the gap, so a
+        // single disagreement is inconclusive; five in a row is the bug.
+        let mut last = (0, 0);
+        for _ in 0..5 {
+            let free = a_port_nobody_holds();
+            let reserved = reserve_port(free, free).expect("reserve");
+            if reserved == free {
+                return;
+            }
+            last = (free, reserved);
+        }
+        panic!(
+            "a free preferred port was never returned: asked for {}, got {}",
+            last.0, last.1
+        );
     }
 
     #[test]
     fn an_occupied_preferred_port_is_stepped_around_not_evicted() {
+        let _serialised = one_at_a_time();
         let held = TcpListener::bind((LOOPBACK, 0)).expect("hold a port");
         let occupied = held.local_addr().expect("local addr").port();
 
@@ -86,6 +119,7 @@ mod tests {
 
     #[test]
     fn a_fully_occupied_range_falls_back_to_an_ephemeral_port() {
+        let _serialised = one_at_a_time();
         let held = TcpListener::bind((LOOPBACK, 0)).expect("hold a port");
         let occupied = held.local_addr().expect("local addr").port();
 

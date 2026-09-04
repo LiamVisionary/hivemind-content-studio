@@ -80,7 +80,6 @@ import { primeCompletionPing, playCompletionPing } from '../lib/completionPing.j
 import {
   cancelHivemindVideoJob,
   deleteHivemindStudioUpload,
-  getSavedHivemindVideoSelection,
   hivemindStudioContextCached,
   isHivemindStudioEnabled,
   isHivemindVideoModelId,
@@ -269,7 +268,6 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
   if (restored) setup = restored;
 
   const engine = {
-    bootSource: boot,
     persistedVideoPreferences: persisted,
     catalogs,
     setup,
@@ -3489,11 +3487,8 @@ export function VideoStudio({
     if (restored) {
       s.setup = restored;
     } else {
-      // A NEW tab opens on the workflow default; only the tab that restores
-      // preferences also restores the session's last hand-picked workflow.
-      const saved = s.bootSource === 'persisted' ? getSavedHivemindVideoSelection() : null;
-      const preferredModelId = saved?.modelId
-        || hivemindI2V.find((m) => m.workflowId === 'ltx23-eros-fast')?.id
+      // Every tab with no restored preferences opens on the workflow default.
+      const preferredModelId = hivemindI2V.find((m) => m.workflowId === 'ltx23-eros-fast')?.id
         || hivemindI2V[0]?.id;
       if (preferredModelId && isHivemindStudioEnabled()) {
         const target = s.catalogs.allI2V.find((m) => m.id === preferredModelId);

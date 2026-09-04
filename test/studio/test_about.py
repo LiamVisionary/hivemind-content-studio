@@ -79,6 +79,60 @@ def test_a_build_without_generated_notices_still_answers(tmp_path: Path, monkeyp
     assert payload["license"] == "AGPL-3.0-or-later"
 
 
+def test_the_licence_documents_are_served_as_text_not_just_named() -> None:
+    # The page used to assert "the full licence text ships with the app
+    # (LICENSE)" and offer no way to read it. Both documents are readable now.
+    licence = about.licence_document("licence")
+    notices = about.licence_document("notices")
+
+    assert licence["available"] is True
+    assert licence["filename"] == "LICENSE"
+    assert "GNU AFFERO GENERAL PUBLIC LICENSE" in licence["text"]
+    assert notices["available"] is True
+    assert notices["filename"] == "THIRD_PARTY_NOTICES.md"
+    assert notices["text"].strip()
+
+
+def test_a_build_without_the_licence_files_says_so_rather_than_claiming_them(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CONTENT_STUDIO_DOCS_DIR", str(tmp_path))
+
+    answer = about.licence_document("licence")
+
+    assert answer["available"] is False
+    # The filename survives, because the honest sentence names the file the
+    # build did not carry.
+    assert answer["filename"] == "LICENSE"
+    assert answer["text"] == ""
+
+
+def test_only_the_two_named_documents_are_readable() -> None:
+    # `name` is a lookup in a fixed table, never a path: a caller cannot walk
+    # out of docs_root() with it.
+    for probe in ("../../etc/passwd", "CHANGELOG.md", "", "notices.json"):
+        answer = about.licence_document(probe)
+        assert answer["available"] is False
+        assert answer["filename"] == ""
+
+
+def test_the_licence_document_route_answers_the_two_names(tmp_path: Path, monkeypatch) -> None:
+    from test_control_api import _client  # noqa: PLC0415 — the shared harness
+
+    client, _, _ = _client(tmp_path, monkeypatch)
+
+    for name in ("licence", "notices"):
+        response = client.get(f"/api/about/document/{name}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["available"] is True
+        assert body["text"].strip()
+
+    unknown = client.get("/api/about/document/anything-else")
+    assert unknown.status_code == 200
+    assert unknown.json()["available"] is False
+
+
 def test_about_route_answers_before_sign_in(tmp_path: Path, monkeypatch) -> None:
     from test_control_api import _client  # noqa: PLC0415 — the shared harness
 
