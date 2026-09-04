@@ -3,7 +3,7 @@
 // the hosted customer billing gateway). Tier presets, prices, and expected
 // speeds come from the server; this view only renders and confirms.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import {
@@ -14,8 +14,6 @@ import { api, humanize } from '../hubData.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, requestRentedMode } from '../../lib/rentedMachines.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 // Money and a NaN must never meet: an unmanaged/external row may carry no
 // usd_per_hour at all, and "$NaN/hr" (or a thrown toFixed) was the result.

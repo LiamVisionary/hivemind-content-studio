@@ -27,7 +27,7 @@ import {
   loadStudioGenerationHistory,
 } from '../lib/hivemindStudio.js';
 import { resetVaultSession } from '../lib/vaultSession.js';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { SectionLabel, cx } from '../ui/kit.jsx';
 
@@ -36,8 +36,6 @@ const LIST_LIMIT = 8;
 // The pages whose studio registers a prompt inserter while it is on screen
 // (registerPromptInserter in each studio's `active` effect).
 const PROMPT_PAGES = new Set(['image', 'video', 'lipsync']);
-
-const zh = () => getLang() === 'zh-CN';
 
 function PromptItemButton({ label, text, onInsert }) {
   return (

@@ -11,7 +11,7 @@
 // else's uploader after a 700 MB round trip.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import {
   CIVITAI_LIMITS, CIVITAI_UPLOAD_URL, canHandOffDirectly, dropCivitaiPost, formatBytes,
   normalizeTags, postMetaFromEntry, prepareCivitaiPost, stageCivitaiPost,
@@ -19,8 +19,6 @@ import {
 import { Icon } from '../ui/icons.jsx';
 import { Modal } from '../ui/Modal.jsx';
 import { Button, Field, Spinner, TextArea, TextInput, cx } from '../ui/kit.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 export function CivitaiPostDialog({ url, entry, filename, onClose }) {
   const [prepared, setPrepared] = useState(null);

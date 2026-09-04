@@ -9,12 +9,10 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { subscribeRecoveryKey, clearBufferedRecoveryKey } from './recoveryKeyBuffer.js';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 export function VaultRecoveryModal() {
   const [recoveryKey, setRecoveryKey] = useState(null);

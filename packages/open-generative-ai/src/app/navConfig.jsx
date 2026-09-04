@@ -1,7 +1,5 @@
 // Navigation model — page keys are a wire contract (?page=, 'navigate' events).
-import { getLang, t } from '../lib/i18n.js';
-
-const zh = () => getLang() === 'zh-CN';
+import { t, zh } from '../lib/i18n.js';
 
 export const NAV_SECTIONS = [
   {

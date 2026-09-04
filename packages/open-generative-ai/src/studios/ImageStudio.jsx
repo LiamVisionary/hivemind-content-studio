@@ -33,7 +33,7 @@ import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
 import { RentedSourceStatus } from './RentedSourceStatus.jsx';
 import { LaneMemoryNotice } from './LaneMemoryNotice.jsx';
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../lib/promptUtils.js';
-import { t, aspectRatioName, getLang } from '../lib/i18n.js';
+import { t, aspectRatioName, zh } from '../lib/i18n.js';
 import {
   savePendingJob, removePendingJob, getPendingJobs, pendingJobsForTab,
 } from '../lib/pendingJobs.js';
@@ -113,8 +113,6 @@ import { angleDialectForModel, angleLabel, editAnglePrompt } from '../lib/editAn
 
 // Re-export the pure normalizer — tests and other callers import it from here.
 export { normalizeImagePreferences };
-
-const zh = () => getLang() === 'zh-CN';
 
 // Cloud catalog capability flags: an API model "supports" references when it
 // has an image-to-image configuration; models only in the editing catalog

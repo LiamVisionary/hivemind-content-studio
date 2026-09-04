@@ -15,11 +15,10 @@ import toast from 'react-hot-toast';
 import { loadStudioSetup } from './promptTarget.js';
 import { basenameOf, resolveGenerationSetup, warmGenerationSetupLookup } from '../lib/generationSetupStore.js';
 import { HIVEMIND_OUTPUT_DRAG_TYPE } from '../lib/referenceDrop.js';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import { Spinner, cx } from '../ui/kit.jsx';
 
 const CUSTOM_TYPE = HIVEMIND_OUTPUT_DRAG_TYPE;
-const zh = () => getLang() === 'zh-CN';
 
 // Only an in-app output drag or an image/video FILE can restore anything, so
 // only those light the overlay: a .pdf used to get "Drop to restore its

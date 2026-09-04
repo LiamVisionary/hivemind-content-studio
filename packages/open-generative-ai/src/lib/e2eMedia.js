@@ -195,6 +195,19 @@ export function revokeResolvedMedia(url) {
     }
 }
 
+/**
+ * Forget every "this tab cannot open it" verdict, keeping the decrypted blobs.
+ *
+ * An in-app unlock (VaultUnlockModal) changes the answer for every URL that was
+ * recorded as sealed — but the verdicts are cached for the page load, which is
+ * why unlocking used to need a reload to make sealed tiles resolve. Clearing
+ * only the failures leaves already-decrypted media on screen untouched;
+ * subscribers are notified per URL, so the tiles re-resolve in place.
+ */
+export function clearMediaSealFailures() {
+    for (const url of [...sealFailures.keys()]) noteSealFailure(url, null);
+}
+
 export function clearResolvedMediaCache() {
     for (const blobUrl of blobCache.values()) URL.revokeObjectURL(blobUrl);
     blobCache.clear();

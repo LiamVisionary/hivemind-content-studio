@@ -9,15 +9,13 @@
 // use, or replace a key another app may be relying on without being asked. The
 // API enforces all three; the UI is written so they are also obvious.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { MUAPI_CREDENTIAL } from '../../lib/muapiKey.js';
 import { muapi } from '../../lib/muapi.js';
 import { refreshMuapiKeyLocation } from '../../lib/providerReadiness.js';
 import { Button, Card, Field, Pill, SectionLabel, Spinner, TextInput } from '../../ui/kit.jsx';
 import { api } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 function relative(iso) {
     const then = Date.parse(iso);

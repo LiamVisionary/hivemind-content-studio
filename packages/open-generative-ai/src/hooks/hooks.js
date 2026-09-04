@@ -5,6 +5,7 @@ import { getRentalLoras, refreshRentalLoras, subscribeRentalLoras } from '../lib
 import { mediaSealFailure, peekResolvedMediaSrc, resolveMediaSrc, subscribeMediaSealFailures } from '../lib/e2eMedia.js';
 import { captureImagePoster, captureVideoPoster, peekMediaPoster } from '../lib/mediaPoster.js';
 import { ensureLibraryLoaded, isLibraryLoaded, isLibraryUnreadable, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
+import { VAULT_UNLOCKED_EVENT } from '../lib/vaultSession.js';
 import { getLang, setLang, t, tf } from '../lib/i18n.js';
 
 // Same-origin API media is served as an E2E envelope (ciphertext JSON). Pointing
@@ -45,11 +46,21 @@ function initialMediaSrc(url) {
   return peekResolvedMediaSrc(url) || (needsDecryptResolve(url) ? '' : url);
 }
 
+// Bumped when the vault opens in this tab (VaultUnlockModal). Every media hook
+// keys its resolve effect on it, so what was drawn as a locked tile re-resolves
+// in place — the reason unlocking no longer has to reload the page.
+export function useVaultUnlockNonce() {
+  const [nonce, setNonce] = useState(0);
+  useWindowEvent(VAULT_UNLOCKED_EVENT, useCallback(() => setNonce((n) => n + 1), []));
+  return nonce;
+}
+
 // E2E-transparent media source: sync cache hit when possible, async decrypt otherwise.
 // Fail-open — resolveMediaSrc returns the raw URL on any failure. Returns '' while
 // a same-origin encrypted media URL is still decrypting (render a skeleton for it).
 export function useMediaSrc(url) {
   const [src, setSrc] = useState(() => initialMediaSrc(url));
+  const unlocked = useVaultUnlockNonce();
   useEffect(() => {
     if (!url) {
       setSrc(url);
@@ -72,7 +83,7 @@ export function useMediaSrc(url) {
     return () => {
       alive = false;
     };
-  }, [url]);
+  }, [url, unlocked]);
   return src;
 }
 
@@ -85,12 +96,13 @@ export function useMediaSrc(url) {
 // would keep showing a dead player. The subscription is what guarantees the flip.
 export function useMediaSealFailure(url) {
   const [reason, setReason] = useState(() => mediaSealFailure(url));
+  const unlocked = useVaultUnlockNonce();
   useEffect(() => {
     setReason(mediaSealFailure(url));
     return subscribeMediaSealFailures((changed) => {
       if (changed === url) setReason(mediaSealFailure(url));
     });
-  }, [url]);
+  }, [url, unlocked]);
   return reason;
 }
 
@@ -134,16 +146,20 @@ export function useMediaPoster(url, { kind = 'video' } = {}) {
   return { poster, resolved, pending };
 }
 
-// i18n — language switch keeps its page-reload behavior (setLang default), so no
-// reactive re-render plumbing is needed; this is a convenience bundle.
+// i18n — a language change re-renders instead of reloading the page: setLang
+// emits 'og_lang_change' when it is told not to reload, and this is the
+// subscriber that was missing. Nothing switches language today (LANGS_ENABLED
+// is ['en']), but the plumbing is what lets zh-CN come back without the shell
+// throwing away every mounted studio to do it.
 export function useLang() {
-  const lang = getLang();
+  const [lang, setLangState] = useState(getLang);
+  useWindowEvent('og_lang_change', useCallback(() => setLangState(getLang()), []));
   return {
     lang,
     zh: lang === 'zh-CN',
     t,
     tf,
-    toggle: () => setLang(lang === 'zh-CN' ? 'en' : 'zh-CN'),
+    toggle: () => setLang(lang === 'zh-CN' ? 'en' : 'zh-CN', { reload: false }),
   };
 }
 
@@ -240,6 +256,11 @@ export function useSavedLibrary(library) {
     if (!isLibraryLoaded(library)) read();
     return () => { aliveRef.current = false; off(); };
   }, [library, read]);
+
+  // A library that read as `locked` is exactly what an in-app unlock repairs —
+  // and a locked read caches nothing, so this is the same retry the message's
+  // own button offers, taken automatically the moment the vault opens.
+  useWindowEvent(VAULT_UNLOCKED_EVENT, read);
 
   return { ...state, retry: read };
 }

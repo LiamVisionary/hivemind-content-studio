@@ -12,15 +12,13 @@
 // Reusable on purpose — this is the shape any studio handing work to another
 // one needs, and the Story studio is simply the first.
 import { useEffect, useMemo, useState } from 'react';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import { Menu, MenuHeading } from '../ui/Menu.jsx';
 import { Button, cx } from '../ui/kit.jsx';
 import { Icon } from '../ui/icons.jsx';
 import {
   SEND_SOURCES, SOURCE_LABELS, listSendTargets, mergeSendTargets, selectSendTarget, subscribeSendTargets,
 } from '../lib/studioTargets.js';
-
-const zh = () => getLang() === 'zh-CN';
 
 /**
  * Every place work can be sent — mounted or not.

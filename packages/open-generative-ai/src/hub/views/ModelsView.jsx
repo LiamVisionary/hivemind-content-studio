@@ -14,7 +14,7 @@
 // manual reload.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mapHivemindWorkflowModels } from '../../lib/hivemindStudio.js';
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { localAI } from '../../lib/localInferenceClient.js';
 import { Button, IconButton, Segmented, Spinner } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
@@ -23,8 +23,6 @@ import { AssetDetail } from './models/AssetDetail.jsx';
 import { CivitaiBrowser } from './models/CivitaiBrowser.jsx';
 import { InstalledAssets } from './models/InstalledAssets.jsx';
 import { RunnableModels } from './models/RunnableModels.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 const TABS = () => [
   { value: 'models', label: zh() ? '模型' : 'Models' },

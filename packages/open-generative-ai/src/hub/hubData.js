@@ -12,11 +12,16 @@ import { loadStudioSetup } from '../app/promptTarget.js';
 import { updateComposerSection } from '../lib/composerState.js';
 import { basenameOf, resolveGenerationSetup } from '../lib/generationSetupStore.js';
 import { describeFailure } from '../lib/describeFailure.js';
+import { VAULT_UNLOCKED_EVENT } from '../lib/vaultSession.js';
 
 // Prompt fields sealed to the owner vault arrive as "vseal:v1:{envelope}". The
 // server holds no key — decrypt them in-browser for display. Fail-soft so a
 // locked/failed vault never breaks the prompts list.
 const VAULT_TEXT_PREFIX = 'vseal:v1:';
+// What a prompt reads as when this tab cannot open it. A plain sentence, not a
+// padlock glyph: the lock is an Icon and the repair is a button, both rendered
+// by the card (HistoryView PromptCard) — a string cannot carry either.
+export const SEALED_PROMPT_TEXT = 'Sealed prompt — unlock your vault to read it.';
 async function decryptVaultText(value) {
   if (typeof value !== 'string' || !value.startsWith(VAULT_TEXT_PREFIX)) return value;
   try {
@@ -24,7 +29,7 @@ async function decryptVaultText(value) {
     const buf = await decryptMedia(env.ciphertext, env.wrapped_dek);
     return new TextDecoder().decode(buf);
   } catch {
-    return '🔒 Sealed prompt (unlock the vault to view)';
+    return SEALED_PROMPT_TEXT;
   }
 }
 async function decryptPromptEntry(entry) {
@@ -2073,6 +2078,18 @@ function bindEvents() {
   // itself reloads History when that view is showing — a second loadPrompts
   // here used to run two prompt fetches + decrypts per click.
   window.addEventListener('hivemind-hub-refresh', () => { void pollTick({ quiet: false }); });
+  // The vault just opened in this tab, so prompts fetched while it was locked
+  // are holding SEALED_PROMPT_TEXT — and the history signature (ids, timestamps,
+  // favourites) cannot see that, so a plain reload would keep the placeholder.
+  // Re-fetch the prompts and publish them unconditionally.
+  window.addEventListener(VAULT_UNLOCKED_EVENT, () => {
+    // This module read the passphrase once, at import — before this unlock. Pick
+    // up whatever the gate left and re-arm the mounted tool surfaces, which is
+    // the other half of what the reload used to do for them.
+    ownerPassphrase = readOwnerPassphrase();
+    surfaceFrames.forEach((frame) => { void postOwnerAccess(frame, 'hivemind-owner-unlock'); });
+    void reloadPromptsAfterUnlock();
+  });
   window.addEventListener('hivemind-owner-lock-broadcast', () => {
     surfaceFrames.forEach((frame) => { void postOwnerAccess(frame, 'hivemind-owner-lock'); });
     ownerPassphrase = '';
@@ -2080,6 +2097,15 @@ function bindEvents() {
   });
 
   document.addEventListener('visibilitychange', () => { if (!document.hidden && hubRootEl?.isConnected) void pollTick({ quiet: true }); });
+}
+
+async function reloadPromptsAfterUnlock() {
+  if (!hubState.prompts.some((entry) => entry.prompt === SEALED_PROMPT_TEXT)) return;
+  try {
+    const payload = await api('/api/simple/prompts');
+    hubState.prompts = await Promise.all((payload.prompts || []).map(decryptPromptEntry));
+    notifyHub();
+  } catch { /* the list keeps what it has; the topbar Refresh is still there */ }
 }
 
 // One refresh at a time. A slow or hung control API used to stack a new

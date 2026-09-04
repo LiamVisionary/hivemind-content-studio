@@ -14,9 +14,7 @@ import toast from 'react-hot-toast';
 
 import { startCreditTopUp } from './localProducer.js';
 import { startOAuthLogin } from './providerReadiness.js';
-import { getLang } from './i18n.js';
-
-const zh = () => getLang() === 'zh-CN';
+import { zh } from './i18n.js';
 
 function openPage(page) {
   try {

@@ -12,8 +12,8 @@ import {
   cameraMotionPhrase,
   normalizeCameraMotions,
 } from '../../lib/cameraMotion.js';
-// i18n.js exports getLang/t/tf but not `zh`; the video studio's own helper is
-// the one every sibling here uses (see IngredientsPanel.jsx).
+// `zh` lives in lib/i18n.js; videoLogic re-exports it, which is the import every
+// sibling panel here uses (see IngredientsPanel.jsx).
 import { zh } from './videoLogic.js';
 import { ChipButton, Menu } from '../../ui/Menu.jsx';
 import { Button, cx } from '../../ui/kit.jsx';

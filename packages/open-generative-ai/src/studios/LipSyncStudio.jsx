@@ -41,7 +41,7 @@ import { formatElapsed } from '../lib/genProgress.js';
 import { loadStudioGenerationHistory, saveStudioGenerationHistory } from '../lib/hivemindStudio.js';
 import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
 import { toastMuapiError, toastMuapiKeyNeeded } from './lipsync/muapiErrorToast.jsx';
-import { getLang, t } from '../lib/i18n.js';
+import { t, zh } from '../lib/i18n.js';
 
 import { useMediaSrc } from '../hooks/hooks.js';
 import { registerPromptInserter } from '../app/promptTarget.js';
@@ -59,8 +59,6 @@ import { LIPSYNC_PREFERENCES_KEY, normalizeLipSyncPreferences } from '../lib/stu
 
 const LIPSYNC_HISTORY_KEY = 'lipsync_history';
 const LIPSYNC_HISTORY_LIMIT = 30;
-
-const zh = () => getLang() === 'zh-CN';
 
 function createEngine() {
   let persisted = null;

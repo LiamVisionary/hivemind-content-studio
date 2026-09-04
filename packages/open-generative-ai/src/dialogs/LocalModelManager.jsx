@@ -4,14 +4,12 @@
 // wan2gp config probe, per-model download/delete with progress subscriptions
 // that always unsubscribe on success AND error.
 import { useCallback, useEffect, useState } from 'react';
-import { getLang, t, tf } from '../lib/i18n.js';
+import { t, tf, zh } from '../lib/i18n.js';
 import { isLocalAIAvailable, localAI } from '../lib/localInferenceClient.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, EmptyState, Field, Pill, ProgressBar, SectionLabel, Spinner, TextInput, cx } from '../ui/kit.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { toastFailure } from '../ui/failureToast.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 function fmtGB(gb) {
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(gb * 1024).toFixed(0)} MB`;

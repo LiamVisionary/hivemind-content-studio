@@ -6,11 +6,9 @@
 import { useEffect, useState } from 'react';
 import { Button, Spinner } from '../ui/kit.jsx';
 import { Icon } from '../ui/icons.jsx';
-import { getLang } from '../lib/i18n.js';
+import { zh } from '../lib/i18n.js';
 import { api } from '../hub/hubData.js';
 import { isRoutingLeader, notifyRentedMachinesChanged, withPin } from '../lib/rentedMachines.js';
-
-const zh = () => getLang() === 'zh-CN';
 
 const openMachines = () => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'machines' } }));
 

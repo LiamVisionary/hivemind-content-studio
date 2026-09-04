@@ -6,12 +6,11 @@
 // module-singleton owner/lock/bridge plumbing can reach it. Reload re-arms only
 // the iframe, never the React tree.
 import { useCallback, useEffect, useState } from 'react';
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { Button, EmptyState, IconButton, Spinner } from '../../ui/kit.jsx';
 import { registerToolSurfaceFrame, reloadToolSurface, toolSurfaceUrl } from '../hubData.js';
 import { HubToolbar } from './HubToolbar.jsx';
 
-const zh = () => getLang() === 'zh-CN';
 // The iframe's load event also fires for the browser's own connection-error
 // page, and never fires at all for a gateway that hangs; past this the overlay
 // says so instead of spinning forever.

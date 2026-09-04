@@ -2,13 +2,11 @@
 // media, credentials, or provider payloads). Baseline for the phase-2 agent.
 // Summary tiles, per-provider routing evidence, and recent attempts, all from
 // the /api/telemetry/generations shape via hubData formatters.
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { Card, EmptyState, Pill, SectionLabel, Spinner } from '../../ui/kit.jsx';
 import { formatTelemetryDuration, humanize, providerLabel, useHub } from '../hubData.js';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 function Tile({ label, value, detail }) {
   return (

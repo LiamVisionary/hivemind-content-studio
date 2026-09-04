@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { registerPromptInserter } from '../../app/promptTarget.js';
 import { useMediaSrc } from '../../hooks/hooks.js';
-import { getLang } from '../../lib/i18n.js';
+import { zh } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../../ui/Menu.jsx';
 import { runFailureRemedy } from '../../lib/failureRemedy.js';
@@ -31,8 +31,6 @@ import {
 } from '../hubData.js';
 import { GenerationCard } from '../components/GenerationCard.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
-
-const zh = () => getLang() === 'zh-CN';
 
 const MODE_OPTIONS = Object.entries(STUDIO_MODES).map(([value, mode]) => ({ value, label: mode.label }));
 
