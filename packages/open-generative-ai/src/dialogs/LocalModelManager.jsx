@@ -1,5 +1,5 @@
 // Local model manager panel (React port of the retired vanilla studio).
-// Embedded by SettingsModal (its only consumer, matching the old factory usage).
+// Embedded by the Models page's Engine tab (its only consumer).
 // All localAI flows preserved: binary install, aux downloads (__llm__/__vae__),
 // wan2gp config probe, per-model download/delete with progress subscriptions
 // that always unsubscribe on success AND error.

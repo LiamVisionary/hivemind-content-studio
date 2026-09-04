@@ -10,7 +10,6 @@ and its own media roots:
 
     <state>/accounts/<id>/vault.sqlite3
                          /prompt-history.sqlite3
-                         /studio-state.sqlite3
                          /canvas-history.sqlite3
                          /uploads/media-studio-references/
                          /generated/media-studio/
@@ -50,7 +49,6 @@ from .accounts import Account, AccountStore
 from .canvas_history import CanvasHistoryStore, logical_output_name
 from .private_access import PrivateFieldCipher, read_vault_public_key
 from .prompt_history import PromptHistoryStore
-from .studio_state import StudioStateStore
 from .vault_store import VaultStore
 
 # The legacy single-owner layout, and where each piece lands inside account 1.
@@ -59,6 +57,9 @@ from .vault_store import VaultStore
 LEGACY_LAYOUT: tuple[tuple[str, str], ...] = (
     ("owner-vault.sqlite3", "vault.sqlite3"),
     ("prompt-history.sqlite3", "prompt-history.sqlite3"),
+    # Retired: the server-side composer store the browser stopped calling once
+    # composerState moved to the vault blob route. It still travels with the
+    # account so deleting a workspace still deletes its ciphertext.
     ("studio-state.sqlite3", "studio-state.sqlite3"),
     ("canvas-history.sqlite3", "canvas-history.sqlite3"),
     ("uploads/media-studio-references", "uploads/media-studio-references"),
@@ -75,7 +76,6 @@ class AccountPaths:
     root: Path
     vault_db: Path
     prompt_history_db: Path
-    studio_state_db: Path
     canvas_history_db: Path
     references_root: Path
     outputs_root: Path
@@ -88,7 +88,6 @@ class AccountPaths:
             root=root,
             vault_db=root / "vault.sqlite3",
             prompt_history_db=root / "prompt-history.sqlite3",
-            studio_state_db=root / "studio-state.sqlite3",
             canvas_history_db=root / "canvas-history.sqlite3",
             references_root=root / "uploads" / "media-studio-references",
             outputs_root=root / "generated" / "media-studio",
@@ -125,7 +124,6 @@ class AccountWorkspaces:
         self._lock = threading.Lock()
         self._vaults: dict[int, VaultStore] = {}
         self._prompt_history: dict[int, PromptHistoryStore] = {}
-        self._studio_state: dict[int, StudioStateStore] = {}
         self._canvas_history: dict[int, CanvasHistoryStore] = {}
 
     def paths(self, account_id: int) -> AccountPaths:
@@ -159,14 +157,6 @@ class AccountWorkspaces:
                 self._prompt_history[scoped] = store
         return store
 
-    def studio_state(self, account_id: int) -> StudioStateStore:
-        with self._lock:
-            store = self._studio_state.get(int(account_id))
-            if store is None:
-                store = StudioStateStore(self.paths(account_id).studio_state_db, cipher=self.cipher)
-                self._studio_state[int(account_id)] = store
-        return store
-
     def canvas_history(self, account_id: int) -> CanvasHistoryStore:
         with self._lock:
             store = self._canvas_history.get(int(account_id))
@@ -184,7 +174,7 @@ class AccountWorkspaces:
         racing SQLite for those files.
         """
         with self._lock:
-            for cache in (self._vaults, self._prompt_history, self._studio_state, self._canvas_history):
+            for cache in (self._vaults, self._prompt_history, self._canvas_history):
                 store = cache.pop(int(account_id), None)
                 if store is None:
                     continue

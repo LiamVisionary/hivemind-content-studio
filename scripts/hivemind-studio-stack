@@ -713,6 +713,23 @@ healthy() {
   return 0
 }
 
+# The app's own settings document, exported for the children.
+#
+# The gateway, the bridge and ComfyUI read environment variables and nothing
+# else, so a person who moves their models folder on the Settings page needs
+# that choice to reach five processes that will never open a JSON file. It is
+# the same document the control API reads (settings.py), it emits only the keys
+# it actually sets, and the exporter shell-quotes every value — so what is
+# eval'd here is a list of `export NAME=value` lines, not arbitrary shell.
+load_studio_settings_env() {
+  [ -x "$STUDIO_PYTHON" ] || return 0
+  local exports=""
+  exports="$("$STUDIO_PYTHON" -m hivemind_content_studio.settings --env 2>/dev/null)" || return 0
+  [ -n "$exports" ] || return 0
+  eval "$exports"
+  log "settings document applied ($(printf '%s\n' "$exports" | grep -c '^export ') key(s))"
+}
+
 # Local stack overrides, dot-sourced the same way as the rental lanes overlay.
 # The supervisor runs under launchd with a FIXED inherited environment, so an
 # exported shell var never reaches the children — `FOO=1 zimage-stack restart`
@@ -720,6 +737,9 @@ healthy() {
 # restart. Machine-local on purpose: never put secrets here (that is the shared
 # hive env's job) and never anything that should replicate across the fleet.
 load_stack_local_env() {
+  # Settings first, the hand-written overlay second: stack-local.env stays the
+  # developer escape hatch, so it has to win over the app's own document.
+  load_studio_settings_env
   local overlay="$MEDIA_STATE_ROOT/stack-local.env"
   if [ -f "$overlay" ]; then
     # shellcheck disable=SC1090

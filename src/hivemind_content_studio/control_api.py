@@ -158,8 +158,8 @@ from .observability import (
     record_incident,
     remedy_text,
 )
+from .settings import SettingsError, apply as apply_settings, describe as describe_settings, settings as studio_settings
 from .studio_drafts import StudioRunDraft
-from .studio_state import StudioStateStore
 from .vault_store import VaultStore
 from .template_catalog import template_report
 from .unified_runtime import unified_runtime_snapshot
@@ -371,8 +371,12 @@ class CanvasProvenanceBody(BaseModel):
     seeds: list[dict[str, Any]] = []
 
 
-class StudioStateBody(BaseModel):
-    state: dict[str, Any]
+class SettingsBody(BaseModel):
+    # An allow-list on the way in as well as on the way out: settings.py refuses
+    # a key it does not know, so a typo is a sentence rather than a stray row in
+    # the document.
+    values: dict[str, Any] = {}
+    reset: list[str] = []
 
 
 class VaultIdentityBody(BaseModel):
@@ -1573,9 +1577,6 @@ def build_control_app(
 
     def prompt_history() -> PromptHistoryStore:
         return workspaces.prompt_history(scoped_account_id())
-
-    def studio_state() -> StudioStateStore:
-        return workspaces.studio_state(scoped_account_id())
 
     def canvas_store() -> CanvasHistoryStore:
         return canvas_history or workspaces.canvas_history(scoped_account_id())
@@ -2798,7 +2799,7 @@ def build_control_app(
         # callers that pass parameters (e.g. /local-ai/loras/<id>?baseModels=…, which
         # is how workflows the bridge cannot see in its own registry get resolved).
         query = str(request.url.query or "")[:2048]
-        upstream_url = f"http://127.0.0.1:8794/{path}" + (f"?{query}" if query else "")
+        upstream_url = f"{studio_settings().network.bridge_url}/{path}" + (f"?{query}" if query else "")
 
         def forward() -> tuple[bytes, int, str]:
             proxy_request = urllib.request.Request(
@@ -3940,27 +3941,28 @@ def build_control_app(
         record_prompt(body, source="advanced", run_id=run["run_id"])
         return owner_visible(request, run)
 
-    @app.get("/api/studio-state/{state_key}", dependencies=[Depends(require_owner)])
-    def get_studio_state(state_key: str) -> dict:
-        try:
-            return {"ok": True, "state": studio_state().get(state_key)}
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
+    # ── this machine's settings (never a secret: settings.py refuses one) ──
+    @app.get("/api/settings", dependencies=[Depends(require_owner)])
+    def get_settings() -> dict:
+        return {"ok": True, **describe_settings()}
 
-    @app.put("/api/studio-state/{state_key}", dependencies=[Depends(require_owner)])
-    def put_studio_state(state_key: str, body: StudioStateBody) -> dict:
+    @app.put("/api/settings", dependencies=[Depends(require_owner)])
+    def put_settings(body: SettingsBody) -> dict:
         try:
-            studio_state().put(state_key, body.state)
-        except ValueError as exc:
+            result = apply_settings(body.values, reset=tuple(body.reset))
+        except SettingsError as exc:
+            # The message names the value and what would have been acceptable,
+            # so it is shown as written rather than translated into "invalid".
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        return {"ok": True}
-
-    @app.delete("/api/studio-state/{state_key}", dependencies=[Depends(require_owner)])
-    def delete_studio_state(state_key: str) -> dict:
-        try:
-            return {"ok": True, "removed": studio_state().delete(state_key)}
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "The studio could not save that setting.",
+                    "remedy": f"Check that {studio_settings().paths.data_dir} is writable.",
+                },
+            ) from exc
+        return {"ok": True, **result}
 
     # ── owner vault (client-side E2E; server stores only ciphertext/wrapped keys) ──
     @app.get("/api/vault/identity", dependencies=[Depends(require_owner)])

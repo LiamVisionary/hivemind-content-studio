@@ -2,6 +2,16 @@
 
 ## Configuration
 
+This machine's settings — where models and output live, which optional engines run,
+the loopback addresses, output encryption, the rental reaper — are one typed document
+that a person edits in the app (**Settings**, in the Advanced group, or ⌘,) and that the
+supervisor exports for the servers that only read environment variables.
+[`SETTINGS.md`](SETTINGS.md) is generated from that schema and lists every key, its
+default, whether it needs a restart, and the variable that overrides it. Environment
+variables still win over the document, and the Settings page names the one that is
+winning rather than letting a saved value quietly do nothing.
+
+
 Run with shared credentials without copying secrets:
 
 ```bash

@@ -52,6 +52,9 @@ export const NAV_SECTIONS = [
       { page: 'passbook', icon: 'key', label: () => 'PassBook' },
       { page: 'canvas', icon: 'nodes', label: () => (zh() ? '画布' : 'Canvas') },
       { page: 'mcp-cli', icon: 'terminal', label: () => t('nav.mcpcli') },
+      // Still opened by ⌘, — it is a page now rather than a dialog, because a
+      // packaged app's machine-level settings do not fit in a modal.
+      { page: 'settings', icon: 'settings', label: () => t('settings.title') },
       // Version, licence, source and third-party notices. AGPL §5(d) asks an
       // interactive program to show these; the topbar version chip is the other
       // door to the same page.
@@ -91,6 +94,7 @@ export const HUB_PAGES = {
   // hub layer rather than the studio mount registry. About does the same: one
   // fetch of /api/about on first open, then nothing.
   'mcp-cli': 'agents',
+  settings: 'settings',
   about: 'about',
 };
 

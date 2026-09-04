@@ -14,6 +14,7 @@ import {
   describeCivitaiDownload, startCivitaiDownload,
 } from '../../../lib/civitaiDownloadStore.js';
 import { localAI } from '../../../lib/localInferenceClient.js';
+import { pref, setPrefs } from '../../../lib/prefs.js';
 import {
   CIVITAI_PERIODS, CIVITAI_SORTS, CIVITAI_TYPES, DEFAULT_CIVITAI_FILTERS,
   civitaiSearchParams, formatBytes, formatCount, isCivitaiResultInstalled, mergeCivitaiResults,
@@ -21,19 +22,13 @@ import {
 import { Icon } from '../../../ui/icons.jsx';
 import { Button, EmptyState, NativeSelect, Pill, ProgressBar, Spinner, TextInput, cx } from '../../../ui/kit.jsx';
 
-const SEARCH_STORAGE = 'models_discover_search_v1';
-
+// The FILTERS are remembered; the query is not. A search box is something a
+// person typed, and typed text does not go into plaintext browser storage —
+// same rule the composer follows. (lib/prefs.js drops the query when it
+// migrates the old `models_discover_search_v1` key.)
 function readSaved() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(SEARCH_STORAGE) || 'null');
-    if (!saved || typeof saved !== 'object') return null;
-    return {
-      query: typeof saved.query === 'string' ? saved.query : '',
-      filters: { ...DEFAULT_CIVITAI_FILTERS, ...(saved.filters && typeof saved.filters === 'object' ? saved.filters : {}) },
-    };
-  } catch {
-    return null;
-  }
+  const saved = pref('discoverFilters');
+  return saved ? { query: '', filters: { ...DEFAULT_CIVITAI_FILTERS, ...saved } } : null;
 }
 
 // Failed / finished download controls shared by result cards and URL cards:
@@ -184,10 +179,8 @@ export function CivitaiBrowser({ onInstalled, baseModelOptions }) {
   const searchable = localAI.supportsCivitaiSearch();
 
   useEffect(() => {
-    try {
-      localStorage.setItem(SEARCH_STORAGE, JSON.stringify({ query, filters }));
-    } catch { /* quota */ }
-  }, [query, filters]);
+    setPrefs({ discoverFilters: filters });
+  }, [filters]);
 
   const setFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
 

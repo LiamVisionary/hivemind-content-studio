@@ -4,6 +4,7 @@ import { createContext, useContext, useId, useLayoutEffect, useRef, useState } f
 import { createPortal } from 'react-dom';
 import { STUDIO_RESTART_COMMAND, apiOfflineSentence, pingApiStatus, useApiStatus } from '../app/statusStore.js';
 import { zh as zhUi } from '../lib/i18n.js';
+import { sectionOpen, setSectionOpen } from '../lib/prefs.js';
 import { Icon } from './icons.jsx';
 
 const FieldIdContext = createContext(undefined);
@@ -403,27 +404,18 @@ export function SectionLabel({ children, className = '' }) {
 }
 
 // Whether a collapsible section was left open. A boolean about panel chrome —
-// no prompt or media data — so plain localStorage is safe here.
+// no prompt or media data — so it rides in the preferences document with the
+// other small non-sensitive settings (lib/prefs.js, which migrated the old
+// `hive.section.*` keys).
 // Force a section open from outside it — a deep link that lands on a page inside
-// a collapsed group has to show where you are. Writes the same key the header
+// a collapsed group has to show where you are. Writes the same field the header
 // does, so the group then stays open the way your own click would have left it.
 // True when it actually changed something (the caller re-mounts on that).
 export function openSection(storageKey) {
-  if (!storageKey) return false;
-  try {
-    if (window.localStorage?.getItem(`hive.section.${storageKey}`) === '1') return false;
-    window.localStorage?.setItem(`hive.section.${storageKey}`, '1');
-    return true;
-  } catch { return false; }
+  return setSectionOpen(storageKey, true);
 }
 
-const readSectionOpen = (storageKey, fallback) => {
-  if (!storageKey) return fallback;
-  try {
-    const stored = window.localStorage?.getItem(`hive.section.${storageKey}`);
-    return stored === null || stored === undefined ? fallback : stored === '1';
-  } catch { return fallback; }
-};
+const readSectionOpen = (storageKey, fallback) => sectionOpen(storageKey, fallback);
 
 /**
  * A titled section that hides its body until asked for. Collapsed unless
@@ -444,9 +436,7 @@ export function CollapsibleSection({
   const toggle = () => {
     const next = !open;
     setOpen(next);
-    if (storageKey) {
-      try { window.localStorage?.setItem(`hive.section.${storageKey}`, next ? '1' : '0'); } catch { /* quota */ }
-    }
+    setSectionOpen(storageKey, next);
   };
   return (
     <div className={cx('flex flex-col gap-3', className)}>

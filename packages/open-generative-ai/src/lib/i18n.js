@@ -1,4 +1,9 @@
-const LANG_KEY = 'og_lang';
+import { pref, setPrefs } from './prefs.js';
+
+// The stored choice moved into the one preferences document (lib/prefs.js),
+// which migrates the old `og_lang` key on first load. Everything else about
+// this module is unchanged: the choice is canonicalised, never overwritten
+// with the shipping language, and LANGS_ENABLED is still the switch.
 
 // The languages this build actually ships.
 //
@@ -34,26 +39,22 @@ export const zh = () => getLang() === 'zh-CN';
 // way to tell it had ever been set.
 function rememberCanonical(raw) {
     const canonical = canonicalLang(raw);
-    if (canonical !== raw) {
-        try { localStorage.setItem(LANG_KEY, canonical); } catch { /* storage unavailable */ }
-    }
+    if (canonical !== raw) setPrefs({ lang: canonical });
     return normalizeLang(canonical);
 }
 
 /** Detect browser locale on first visit; migrates stored `zh` → `zh-CN`. */
 export function initLocale() {
-    if (typeof localStorage === 'undefined') return 'en';
-    const stored = localStorage.getItem(LANG_KEY);
+    const stored = pref('lang');
     if (stored) return rememberCanonical(stored);
     const detected = typeof navigator !== 'undefined' ? navigator.language : 'en';
     const canonical = canonicalLang(detected);
-    localStorage.setItem(LANG_KEY, canonical);
+    setPrefs({ lang: canonical });
     return normalizeLang(canonical);
 }
 
 export function getLang() {
-    if (typeof localStorage === 'undefined') return 'en';
-    const stored = localStorage.getItem(LANG_KEY);
+    const stored = pref('lang');
     if (!stored) return initLocale();
     return rememberCanonical(stored);
 }
@@ -73,7 +74,7 @@ export function applyDocumentLang(lang = getLang()) {
 export function setLang(lang, { reload = true } = {}) {
     const chosen = canonicalLang(lang);
     const normalized = normalizeLang(chosen);
-    localStorage.setItem(LANG_KEY, chosen);
+    setPrefs({ lang: chosen });
     applyDocumentLang(normalized);
     if (reload && typeof location !== 'undefined') {
         location.reload();

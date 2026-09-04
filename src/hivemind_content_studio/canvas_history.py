@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .private_access import PrivateFieldCipher
+from .settings import settings
 from .sqlite_migrations import migrate
 
 
@@ -432,13 +433,13 @@ class CanvasGatewayClient:
     def __init__(
         self,
         *,
-        base_url: str = "http://127.0.0.1:8787",
+        base_url: str = "",
         token_file: str | Path | None = None,
         output_roots: list[str | Path] | None = None,
         history_file: str | Path | None = None,
     ):
         state_root = Path(os.environ.get("HIVEMIND_MEDIA_STATE_DIR", Path.home() / ".hivemindos/media-studio"))
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or settings().network.gateway_url).rstrip("/")
         self.token_file = Path(token_file or os.environ.get("ZIMG_TOKEN_FILE", state_root / "secure/zimg-token")).expanduser().resolve()
         self.history_file = Path(history_file or state_root / "state/media-gateway/history.jsonl").expanduser().resolve()
         private_root = Path(os.environ.get("COMFY_PRIVATE_ROOT", Path.home() / ".comfy-private.noindex"))

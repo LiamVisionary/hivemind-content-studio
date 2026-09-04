@@ -41,23 +41,36 @@ test('only English ships, and a stored zh-CN choice renders English', async () =
   assert.equal(canonicalLang('en-GB'), 'en');
 });
 
-test('a stored og_lang is read, never overwritten with the shipping language', async () => {
+test('a stored language choice is read, never overwritten with the shipping language', async () => {
+  // The choice moved into the one preferences document (lib/prefs.js), which
+  // migrates the old `og_lang` key. Both halves are asserted here: the legacy
+  // key is adopted and removed, and the choice inside the document survives
+  // every read.
   const { getLang } = await import('../src/lib/i18n.js');
+  const { forgetPrefsCache, migrateLegacyPrefs, PREFS_KEY } = await import('../src/lib/prefs.js');
   const store = new Map([['og_lang', 'zh-CN']]);
   const original = globalThis.localStorage;
   globalThis.localStorage = {
     getItem: (key) => (store.has(key) ? store.get(key) : null),
     setItem: (key, value) => store.set(key, String(value)),
     removeItem: (key) => store.delete(key),
+    key: (index) => [...store.keys()][index] ?? null,
+    get length() { return store.size; },
   };
+  const lang = () => JSON.parse(store.get(PREFS_KEY) || '{}').lang;
   try {
+    forgetPrefsCache();
+    migrateLegacyPrefs();
+    assert.equal(store.has('og_lang'), false, 'the old key is emptied, not left as a second copy');
     assert.equal(getLang(), 'en', 'the app renders English');
-    assert.equal(store.get('og_lang'), 'zh-CN', 'the stored choice survives the read');
+    assert.equal(lang(), 'zh-CN', 'the stored choice survives the read');
     // A legacy tag is still canonicalised in place.
-    store.set('og_lang', 'zh');
+    store.set(PREFS_KEY, JSON.stringify({ lang: 'zh' }));
+    forgetPrefsCache();
     assert.equal(getLang(), 'en');
-    assert.equal(store.get('og_lang'), 'zh-CN');
+    assert.equal(lang(), 'zh-CN');
   } finally {
+    forgetPrefsCache();
     if (original === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = original;
   }
@@ -65,7 +78,7 @@ test('a stored og_lang is read, never overwritten with the shipping language', a
 
 test('no language toggle is left in the chrome', () => {
   const shell = read('app/Shell.jsx');
-  const settings = read('dialogs/SettingsModal.jsx');
+  const settings = read('hub/views/SettingsView.jsx');
   const code = (source) => source.split('\n').filter((line) => {
     const trimmed = line.trim();
     return !(trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*') || trimmed.startsWith('{/*'));
@@ -74,11 +87,11 @@ test('no language toggle is left in the chrome', () => {
   // The two Shell buttons rendered '中文'/'EN' and warned that the page reloads.
   assert.doesNotMatch(code(shell), /web\.switchTo(En|Zh)/, 'Shell renders no language toggle');
   assert.doesNotMatch(code(shell), /'中文'/, 'Shell renders no language toggle');
-  // The Settings segmented control was the third copy of the same setting.
+  // The Settings segmented control was the third copy of the same setting. The
+  // page that replaced the dialog shows the one shipping language and nothing
+  // that would change it.
   assert.doesNotMatch(code(settings), /setLang\s*\(/, 'Settings has no language control');
   assert.doesNotMatch(code(settings), /Segmented/, 'Settings has no language control');
-  // The comment saying where it went stays, so the next reader knows why.
-  assert.match(settings, /LANGS_ENABLED/, 'Settings says where the control went');
 });
 
 test('`zh` has exactly one home', () => {
