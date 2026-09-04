@@ -940,6 +940,10 @@ export async function pollHivemindVideoJob(jobId, { onProgress, estimateSeconds 
                     // a precision we do not have.
                     step: Number(payload.progress_step) || null,
                     stepTotal: Number(payload.progress_total) || null,
+                    // This machine has one GPU and it is busy with someone
+                    // else's render: how many are ahead of this one. Present
+                    // only while waiting, so it clears itself when work starts.
+                    queuePosition: Number(payload.queue_position) || null,
                 });
             }
             continue;

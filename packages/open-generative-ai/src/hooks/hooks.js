@@ -2,7 +2,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCivitaiDownloads, subscribeCivitaiDownloads } from '../lib/civitaiDownloadStore.js';
 import { getRentalLoras, refreshRentalLoras, subscribeRentalLoras } from '../lib/rentalLoras.js';
-import { mediaSealFailure, peekResolvedMediaSrc, resolveMediaSrc, subscribeMediaSealFailures } from '../lib/e2eMedia.js';
+import {
+  mediaSealFailure, peekResolvedMediaSrc, releaseResolvedMedia, resolveMediaSrc,
+  retainResolvedMedia, subscribeMediaSealFailures,
+} from '../lib/e2eMedia.js';
 import { captureImagePoster, captureVideoPoster, peekMediaPoster } from '../lib/mediaPoster.js';
 import { ensureLibraryLoaded, isLibraryLoaded, isLibraryUnreadable, peekLibrary, subscribeLibrary } from '../lib/savedLibraryStore.js';
 import { VAULT_UNLOCKED_EVENT } from '../lib/vaultSession.js';
@@ -67,22 +70,26 @@ export function useMediaSrc(url) {
       return undefined;
     }
     let alive = true;
+    // This mount is a consumer of the decrypted bytes for as long as it holds
+    // them on screen. The cache evicts by least-recently-used above a byte
+    // budget, and a retained URL is the one thing it will not take back — which
+    // is what stops a scroll from revoking an object URL a live <img> is using.
+    retainResolvedMedia(url);
+    const done = () => { alive = false; releaseResolvedMedia(url); };
     const cached = peekResolvedMediaSrc(url);
     if (cached) {
       setSrc(cached);
-      return () => { alive = false; };
+      return done;
     }
     if (cannotBeSealed(url)) {
       setSrc(url); // render directly; no probe possible or needed
-      return () => { alive = false; };
+      return done;
     }
     setSrc(needsDecryptResolve(url) ? '' : url);
     resolveMediaSrc(url).then((resolved) => {
       if (alive && resolved) setSrc(resolved);
     });
-    return () => {
-      alive = false;
-    };
+    return done;
   }, [url, unlocked]);
   return src;
 }

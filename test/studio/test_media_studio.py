@@ -267,6 +267,32 @@ def test_step_counters_surface_only_when_the_backend_measures_them(monkeypatch) 
     assert "progress_step" not in media_studio.check_video("p4")
 
 
+def test_a_job_waiting_for_the_gpu_reports_how_many_are_ahead_of_it(monkeypatch) -> None:
+    """One GPU, two tabs: the second is a queue, and the studio has to say so.
+
+    Without this the poller sees a running job with no progress for as long as
+    the first render takes, which is indistinguishable from a hang.
+    """
+    from hivemind_content_studio import media_studio
+
+    monkeypatch.setattr(media_studio, "_required_descriptor", _descriptor_for_check)
+    monkeypatch.setattr(media_studio, "_client", lambda descriptor, *_pub: type("C", (), {"call_tool": lambda *a, **k: None})())
+    monkeypatch.setattr(media_studio, "_result_json", lambda _call: {"ok": False, "status": 404})
+
+    monkeypatch.setattr(
+        media_studio, "_private_json",
+        lambda descriptor, path, *_pub: {
+            "status": "queued", "queue_position": 1, "progress_phase": "waiting for the GPU",
+        },
+    )
+    assert media_studio.check_video("q1")["queue_position"] == 1
+
+    # Nothing ahead of it means it is rendering, not waiting — the studio must
+    # not keep showing a queue line once the GPU is its own.
+    monkeypatch.setattr(media_studio, "_private_json", lambda descriptor, path, *_pub: {"status": "running"})
+    assert "queue_position" not in media_studio.check_video("q2")
+
+
 def test_finished_remote_job_resolves_the_sealed_output_url(monkeypatch) -> None:
     from hivemind_content_studio import media_studio
 

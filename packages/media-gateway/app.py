@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import binascii
+import contextlib
 import getpass
 import hashlib
 import html
@@ -187,6 +188,18 @@ LTX2_MLX_VARIANT_ALIASES = {
     "eros-dev-ic": "regular-q8-dev-ic",
 }
 HISTORY_FILE = GATEWAY_STATE_DIR / "history.jsonl"
+# The generation before the last rotation. Kept, not deleted — and purged
+# alongside the live file whenever an output is deleted.
+HISTORY_PREVIOUS_FILE = GATEWAY_STATE_DIR / "history.1.jsonl"
+HISTORY_ROTATE_BYTES = 8 * 1024 * 1024
+# How many records stay in the live file when it rotates. Comfortably more than
+# the largest limit any reader asks for (500), so a rotation never blanks the
+# History tab or hides a job a poll is still looking for.
+HISTORY_KEEP_ON_ROTATE = 2000
+# The seek margin per record wanted, for the tail read. A record is a few
+# hundred bytes; this is deliberately generous so one seek is normally enough.
+HISTORY_TAIL_BYTES_PER_RECORD = 4096
+history_write_lock = threading.Lock()
 PREVIEW_CACHE_ROOTS = [
     Path.home() / ".comfy-private.noindex/preview-cache",
     Path(os.environ.get("COMFY_TEMP_DIR", str(Path.home() / ".comfy-private.noindex/temp"))) / "mobile_video_thumbs",
@@ -901,6 +914,11 @@ jobs_lock = threading.Lock()
 # check on top of this shared scheduler.
 studio_generation_lanes = {}
 studio_generation_lanes_lock = threading.Lock()
+# Above the lanes: how many jobs may hold the accelerator at once, across every
+# tab and both media types. See gpu_slot_capacity().
+gpu_slot_condition = threading.Condition()
+gpu_slots_in_use = 0
+gpu_slot_waiters = []  # job ids, arrival order — the queue position shown to the studio
 klein_inflight_jobs = {}
 klein_memory_condition = threading.Condition()
 klein_reserved_memory_bytes = 0
@@ -2541,13 +2559,13 @@ def _record_without_output(record, name):
     return result, changed
 
 
-def _rewrite_gateway_history_without_output(name):
-    if not HISTORY_FILE.exists():
+def _rewrite_one_history_file_without_output(path, name):
+    if not path.exists():
         return 0
     records = []
     changed = 0
     try:
-        with HISTORY_FILE.open("r", encoding="utf-8") as handle:
+        with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 try:
                     record = json.loads(line)
@@ -2558,10 +2576,19 @@ def _rewrite_gateway_history_without_output(name):
                 if isinstance(cleaned, dict):
                     records.append(cleaned)
         if changed:
-            _atomic_write_jsonl(HISTORY_FILE, records)
+            _atomic_write_jsonl(path, records)
     except OSError as exc:
         raise RuntimeError("failed to purge durable generation history") from exc
     return changed
+
+
+def _rewrite_gateway_history_without_output(name):
+    # Both generations: rotation keeps the older log, and a delete that skipped
+    # it would leave the reference it promises to remove sitting on disk.
+    return sum(
+        _rewrite_one_history_file_without_output(path, name)
+        for path in (HISTORY_FILE, HISTORY_PREVIOUS_FILE)
+    )
 
 
 def _rewrite_workflow_index_without_output(name):
@@ -2977,16 +3004,74 @@ def append_history(rec):
     # Do not persist prompts at rest. ComfyUI receives the prompt for execution,
     # but the wrapper history only keeps status, image paths, timestamps, errors,
     # and selected LoRA metadata.
-    with HISTORY_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(private_rec(rec), ensure_ascii=False) + "\n")
+    with history_write_lock:
+        with HISTORY_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(private_rec(rec), ensure_ascii=False) + "\n")
+        _rotate_history_if_large()
+
+
+def _rotate_history_if_large():
+    """Move everything but the recent tail into the cold log, once it is large.
+
+    Caller holds history_write_lock. Every reader wants the tail, so the live
+    file only has to hold recent work — but it must never be emptied outright,
+    or /api/history would go blank until the next generation. What is moved out
+    is appended to history.1.jsonl rather than deleted, and that file is purged
+    alongside the live one whenever an output is deleted.
+    """
+    try:
+        if HISTORY_FILE.stat().st_size < HISTORY_ROTATE_BYTES:
+            return
+        lines = HISTORY_FILE.read_bytes().splitlines()
+    except OSError:
+        return
+    if len(lines) <= HISTORY_KEEP_ON_ROTATE:
+        return  # a few enormous records; moving them would leave nothing to read
+    keep = lines[-HISTORY_KEEP_ON_ROTATE:]
+    older = lines[:-HISTORY_KEEP_ON_ROTATE]
+    staged = HISTORY_FILE.parent / f"{HISTORY_FILE.name}.rotating"
+    with contextlib.suppress(OSError):
+        with HISTORY_PREVIOUS_FILE.open("ab") as handle:
+            handle.write(b"\n".join(older) + b"\n")
+        staged.write_bytes(b"\n".join(keep) + b"\n")
+        staged.replace(HISTORY_FILE)
+
+
+def _tail_lines(path, want, size):
+    """The last `want` lines, read from the end instead of from the start.
+
+    Every caller of load_history asks for the most recent 100-500 records, and
+    reading the whole file to serve them made a job poll for an unknown id cost
+    the entire history — which only grows. This seeks to a whole-record margin
+    before the end, drops whatever partial line that landed in, and widens the
+    window only if the file's records turned out to be smaller than the margin.
+    """
+    window = min(size, max(1, want) * HISTORY_TAIL_BYTES_PER_RECORD)
+    with path.open("rb") as handle:
+        while True:
+            start = max(0, size - window)
+            handle.seek(start)
+            chunk = handle.read()
+            if start:
+                cut = chunk.find(b"\n")
+                chunk = chunk[cut + 1:] if cut >= 0 else b""
+            lines = chunk.splitlines()
+            if len(lines) >= want or start == 0:
+                return lines
+            window = min(size, window * 4)
 
 
 def load_history(limit=100):
     if not HISTORY_FILE.exists():
         return []
-    lines = HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    want = max(1, int(limit))
+    try:
+        size = HISTORY_FILE.stat().st_size
+        lines = _tail_lines(HISTORY_FILE, want, size)
+    except OSError:
+        return []
     recs = []
-    for line in lines[-limit:]:
+    for line in lines[-want:]:
         try:
             recs.append(json.loads(line))
         except Exception:
@@ -8577,6 +8662,89 @@ def _studio_generation_lane_key(media_type, options=None):
     return hashlib.sha256(scoped.encode('utf-8', errors='replace')).hexdigest()
 
 
+def gpu_slot_capacity():
+    """How many generations may hold the accelerator at once.
+
+    Lanes are per app tab on purpose, so one tab's queue never blocks another's
+    — but nothing above them limited how many models were loaded at the same
+    time, and two tabs generating at once on unified memory is a stall or an
+    out-of-memory rather than parallelism. One slot is the honest default for a
+    machine with one GPU; `lanes.gpu_slots` in the settings document raises it
+    for someone with the headroom.
+    """
+    raw = str(os.environ.get('ZIMG_GPU_SLOTS', '') or '').strip()
+    try:
+        value = int(raw) if raw else 1
+    except ValueError:
+        value = 1
+    return max(1, min(value, 8))
+
+
+def _set_job_queue_state(job_id, position):
+    """Say, on the job record, that this one is waiting for the accelerator.
+
+    `queue_position` is how many renders are ahead of it, so the studio can show
+    "Waiting behind 1 render" instead of a bar that never moves. Only a job that
+    has not started is touched — a runner that has already claimed the record
+    owns its own status from then on.
+    """
+    if not job_id:
+        return
+    with jobs_lock:
+        rec = jobs.get(job_id)
+        if not isinstance(rec, dict) or rec.get('status') not in (None, 'queued'):
+            return
+        updated = dict(rec)
+        updated['status'] = 'queued'
+        updated['queue_position'] = int(position)
+        updated['progress_phase'] = 'waiting for the GPU'
+        jobs[job_id] = updated
+
+
+def _clear_job_queue_state(job_id):
+    if not job_id:
+        return
+    with jobs_lock:
+        rec = jobs.get(job_id)
+        if not isinstance(rec, dict) or 'queue_position' not in rec:
+            return
+        updated = dict(rec)
+        updated.pop('queue_position', None)
+        if updated.get('progress_phase') == 'waiting for the GPU':
+            updated.pop('progress_phase', None)
+        jobs[job_id] = updated
+
+
+def _acquire_gpu_slot(job_id):
+    """Wait for a free accelerator slot, reporting the wait on the job record."""
+    global gpu_slots_in_use
+    # A ticket rather than the job id: identity has to be unique even for a
+    # caller that had no job id to give.
+    ticket = object()
+    with gpu_slot_condition:
+        gpu_slot_waiters.append(ticket)
+        try:
+            while True:
+                ahead = gpu_slot_waiters.index(ticket)
+                if ahead == 0 and gpu_slots_in_use < gpu_slot_capacity():
+                    gpu_slots_in_use += 1
+                    break
+                _set_job_queue_state(job_id, gpu_slots_in_use + ahead)
+                gpu_slot_condition.wait(timeout=2.0)
+        finally:
+            with contextlib.suppress(ValueError):
+                gpu_slot_waiters.remove(ticket)
+        gpu_slot_condition.notify_all()
+    _clear_job_queue_state(job_id)
+
+
+def _release_gpu_slot():
+    global gpu_slots_in_use
+    with gpu_slot_condition:
+        gpu_slots_in_use = max(0, gpu_slots_in_use - 1)
+        gpu_slot_condition.notify_all()
+
+
 def _drain_studio_generation_lane(lane_key):
     """Run one tab's submitted jobs in FIFO order, then discard the lane."""
     while True:
@@ -8586,6 +8754,10 @@ def _drain_studio_generation_lane(lane_key):
                 studio_generation_lanes.pop(lane_key, None)
                 return
             runner, args = lane['pending'].pop(0)
+        # Every caller passes the job id first; without one the slot is still
+        # taken, the wait just cannot be reported anywhere.
+        job_id = args[0] if args and isinstance(args[0], str) else ''
+        _acquire_gpu_slot(job_id)
         try:
             runner(*args)
         except Exception as error:
@@ -8596,6 +8768,8 @@ def _drain_studio_generation_lane(lane_key):
                 f"[studio-queue] {getattr(runner, '__name__', 'generation')} failed: {error}",
                 file=sys.stderr,
             )
+        finally:
+            _release_gpu_slot()
 
 
 def start_studio_generation_thread(media_type, options, runner, args):

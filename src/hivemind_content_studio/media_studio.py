@@ -665,6 +665,13 @@ def check_video(job_id: str, *, requester_pub: str = "") -> dict[str, Any]:
     step, total = _job_step_counts(private_job())
     if step is not None and total:
         state["progress_step"], state["progress_total"] = step, total
+    # Waiting for the machine's one GPU slot rather than rendering. Passed on so
+    # the studio can say how many renders are ahead instead of showing a bar
+    # that never moves.
+    with contextlib.suppress(TypeError, ValueError):
+        position = private_job().get("queue_position")
+        if position is not None and int(position) > 0:
+            state["queue_position"] = int(position)
     return state
 
 

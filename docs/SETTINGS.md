@@ -32,6 +32,7 @@ Secrets are not here and cannot be: keys, tokens and passwords live in PassBook,
 | `lanes.ltx` | `off` | yes | `COMFY_ENABLE_LTX_LANE` | Run the dedicated LTX video lane on this machine. |
 | `lanes.flux2_server` | `off` | yes | `ZIMG_ENABLE_FLUX2_SERVER` | Keep the Swift/MLX Flux 2 image server warm. |
 | `lanes.apple_silicon_optimizations` | `on` | yes | `ZIMG_ENABLE_APPLE_SILICON_OPTIMIZATIONS` | Use the Apple Silicon tuning for the local lanes. |
+| `lanes.gpu_slots` | `1` | yes | `ZIMG_GPU_SLOTS` | How many renders may hold the GPU at once. One is right for one card — a second tab waits instead of loading a second model into the same memory. |
 
 ## Network (`network`)
 
