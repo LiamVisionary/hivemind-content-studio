@@ -11,7 +11,7 @@
 //   click/input/change listener trick the old code used (scoped to this studio's
 //   root, not window), plus explicit persist calls on portal-hosted actions.
 // - alert() → toast.error() with identical abort semantics.
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
@@ -43,7 +43,6 @@ import {
 } from '../lib/hivemindStudio.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { resolveMediaSrc } from '../lib/e2eMedia.js';
-import { CivitaiPostDialog } from '../components/CivitaiPostDialog.jsx';
 import { civitaiResourcesFromLoras } from '../lib/civitaiPost.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { referencesNeedingApproval, resolveCloudReferences } from '../lib/cloudReferenceUpload.js';
@@ -83,8 +82,6 @@ import { ImageSettingsPanel } from './image/ImageSettingsPanel.jsx';
 import { ImageComposer } from './image/ImageComposer.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
-import { CivitaiDownloadDialog } from '../dialogs/CivitaiDownloadDialog.jsx';
-import { PromptHelperDialog } from '../dialogs/PromptHelperDialog.jsx';
 
 import { computeSmoothProgress, formatElapsed, estimateGenerationSeconds, recordGenerationSeconds } from '../lib/genProgress.js';
 import {
@@ -103,6 +100,25 @@ import { MaskEditorDialog } from './image/MaskEditorDialog.jsx';
 import { AngleVariationsDialog } from './image/AngleVariationsDialog.jsx';
 import { SequenceEditDialog } from './image/SequenceEditDialog.jsx';
 import { angleDialectForModel, angleLabel, editAnglePrompt } from '../lib/editAngles.js';
+
+// Dialogs that are shut on arrival. Statically imported they were part of the
+// landing payload of the app's DEFAULT page: the prompt helper alone drags in
+// the model-source picker, the cast/persona tables and the H3 character notes,
+// and the Civitai poster its whole resource mapper. Loaded at their open sites
+// instead, so the cost is paid by whoever opens them.
+const CivitaiDownloadDialogLazy = lazy(() => import('../dialogs/CivitaiDownloadDialog.jsx').then((m) => ({ default: m.CivitaiDownloadDialog })));
+const CivitaiPostDialogLazy = lazy(() => import('../components/CivitaiPostDialog.jsx').then((m) => ({ default: m.CivitaiPostDialog })));
+const PromptHelperDialogLazy = lazy(() => import('../dialogs/PromptHelperDialog.jsx').then((m) => ({ default: m.PromptHelperDialog })));
+
+// While a dialog's chunk is in flight: the same scrim the modal itself lands on,
+// so opening one never flashes the studio unlit and then relights it.
+function DialogLoading() {
+  return (
+    <div className="fixed inset-0 z-[100] grid place-items-center bg-scrim" aria-busy="true">
+      <Spinner size={22} className="text-ink2" />
+    </div>
+  );
+}
 
 // Re-export the pure normalizer — tests and other callers import it from here.
 export { normalizeImagePreferences };
@@ -794,7 +810,13 @@ export function ImageStudio({
       const wanted = pending ? 8000 : 30000;
       if (timer?.every !== wanted) {
         if (timer) clearInterval(timer.id);
-        timer = { every: wanted, id: setInterval(() => sync(false), wanted) };
+        // A hidden window is a window nobody is reading. Skipping the beat
+        // matters more here than for most polls: /api/gpu-rentals lists every
+        // configured marketplace and probes each box, so a backgrounded studio
+        // was doing that every 30s (every 8s while a box provisions) forever.
+        // The wake handler below asks the moment the window comes back, so
+        // nothing is stale by the time it is on screen.
+        timer = { every: wanted, id: setInterval(() => { if (!document.hidden) sync(false); }, wanted) };
       }
     };
     // Rented stays selected even with no machine (the panel then offers to
@@ -832,11 +854,14 @@ export function ImageStudio({
     // setting the handoff, and waiting for the fetch is what made the switch
     // arrive late.
     const onChanged = () => { claimRentedHandoff(); sync(true); };
+    const onVisible = () => { if (!document.hidden) sync(false); };
     window.addEventListener(RENTED_CHANGED_EVENT, onChanged);
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       alive = false;
       if (timer) clearInterval(timer.id);
       window.removeEventListener(RENTED_CHANGED_EVENT, onChanged);
+      document.removeEventListener('visibilitychange', onVisible);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -3051,12 +3076,14 @@ export function ImageStudio({
       ) : null}
 
       {s.civitaiPost ? (
-        <CivitaiPostDialog
-          url={s.civitaiPost.url}
-          entry={s.civitaiPost.entry}
-          filename={imageDownloadName(s.civitaiPost.entry?.model, s.civitaiPost.entry?.id)}
-          onClose={() => { s.civitaiPost = null; bump(); }}
-        />
+        <Suspense fallback={<DialogLoading />}>
+          <CivitaiPostDialogLazy
+            url={s.civitaiPost.url}
+            entry={s.civitaiPost.entry}
+            filename={imageDownloadName(s.civitaiPost.entry?.model, s.civitaiPost.entry?.id)}
+            onClose={() => { s.civitaiPost = null; bump(); }}
+          />
+        </Suspense>
       ) : null}
 
       {s.expandEntry ? (
@@ -3140,29 +3167,38 @@ export function ImageStudio({
         />
       ) : null}
 
-      <PromptHelperDialog
-        open={Boolean(s.localPromptHelperOpen)}
-        onClose={() => { s.localPromptHelperOpen = false; bump(); }}
-        idea={s.prompt}
-        targetModel={s.useLocalModel ? s.selectedLocalModel : s.selectedModel}
-        mediaType="image"
-        // UGC first frames are judged on looking un-produced, which is the
-        // opposite of what the default image guidance optimises for.
-        ugc={hasUgcFirstFrame(s.prompt)}
-        onUse={(prompt) => { setPromptValue(prompt); persistImagePreferences(); }}
-      />
+      {/* Gated on the flag rather than handed `open={false}`: the dialog already
+          rendered nothing while shut, and this keeps its chunk out of the
+          landing payload entirely. */}
+      {s.localPromptHelperOpen ? (
+        <Suspense fallback={<DialogLoading />}>
+          <PromptHelperDialogLazy
+            open
+            onClose={() => { s.localPromptHelperOpen = false; bump(); }}
+            idea={s.prompt}
+            targetModel={s.useLocalModel ? s.selectedLocalModel : s.selectedModel}
+            mediaType="image"
+            // UGC first frames are judged on looking un-produced, which is the
+            // opposite of what the default image guidance optimises for.
+            ugc={hasUgcFirstFrame(s.prompt)}
+            onUse={(prompt) => { setPromptValue(prompt); persistImagePreferences(); }}
+          />
+        </Suspense>
+      ) : null}
 
       {s.civitaiOpen ? (
-        <CivitaiDownloadDialog
-          api={localAI}
-          onComplete={finishLoraDownload}
-          // The progress lives on a card in the LoRA grid, so open the panel it is in.
-          onStarted={() => {
-            if (!s.loraOpen) { s.loraOpen = true; void loadLorasForCurrentModel(); }
-            bump();
-          }}
-          onClose={() => { s.civitaiOpen = false; bump(); }}
-        />
+        <Suspense fallback={<DialogLoading />}>
+          <CivitaiDownloadDialogLazy
+            api={localAI}
+            onComplete={finishLoraDownload}
+            // The progress lives on a card in the LoRA grid, so open the panel it is in.
+            onStarted={() => {
+              if (!s.loraOpen) { s.loraOpen = true; void loadLorasForCurrentModel(); }
+              bump();
+            }}
+            onClose={() => { s.civitaiOpen = false; bump(); }}
+          />
+        </Suspense>
       ) : null}
 
       {s.resumeRemaining > 0

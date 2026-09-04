@@ -82,10 +82,11 @@ import {
   cancelHivemindVideoJob,
   deleteHivemindStudioUpload,
   getSavedHivemindVideoSelection,
+  hivemindStudioContextCached,
   isHivemindStudioEnabled,
   isHivemindVideoModelId,
-  loadStudioGenerationHistory,
   loadHivemindStudioContext,
+  loadStudioGenerationHistory,
   pollHivemindVideoJob,
   previewHivemindIngredientSheet,
   referenceWorkflowForHivemindModel,
@@ -504,7 +505,13 @@ export function VideoStudio({
       const wanted = pending ? 8000 : 30000;
       if (timer?.every !== wanted) {
         if (timer) clearInterval(timer.id);
-        timer = { every: wanted, id: setInterval(() => sync(false), wanted) };
+        // A hidden window is a window nobody is reading. Skipping the beat
+        // matters more here than for most polls: /api/gpu-rentals lists every
+        // configured marketplace and probes each box, so a backgrounded studio
+        // was doing that every 30s (every 8s while a box provisions) forever.
+        // The wake handler below asks the moment the window comes back, so
+        // nothing is stale by the time it is on screen.
+        timer = { every: wanted, id: setInterval(() => { if (!document.hidden) sync(false); }, wanted) };
       }
     };
     // Rented stays selected even with no machine (the panel offers to rent
@@ -541,11 +548,14 @@ export function VideoStudio({
     // setting the handoff, and waiting for the fetch is what made the switch
     // arrive late.
     const onChanged = () => { claimRentedHandoff(); sync(true); };
+    const onVisible = () => { if (!document.hidden) sync(false); };
     window.addEventListener(RENTED_CHANGED_EVENT, onChanged);
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       alive = false;
       if (timer) clearInterval(timer.id);
       window.removeEventListener(RENTED_CHANGED_EVENT, onChanged);
+      document.removeEventListener('visibilitychange', onVisible);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -3435,9 +3445,16 @@ export function VideoStudio({
   const refreshHivemindWorkflows = async ({ force = false } = {}) => {
     // `force` is the user pressing Refresh: the module-level context is cached,
     // so without it a stale-but-non-empty catalog would answer from memory.
+    const cachedBefore = hivemindStudioContextCached();
     let context = await loadHivemindStudioContext({ refresh: force });
-    // Owner unlock and backend startup can race the iframe's first request.
-    if (!context.videoModels?.length) context = await loadHivemindStudioContext({ refresh: true });
+    // Owner unlock and backend startup can race the iframe's first request — so
+    // an EMPTY answer that came out of the module cache is worth asking again.
+    // One that this call just fetched is not: re-asking discarded the promise it
+    // had only now resolved and put a second /api/simple/catalog on the wire at
+    // every mount, which is the most expensive route the studio has.
+    if (!context.videoModels?.length && (force || cachedBefore)) {
+        context = await loadHivemindStudioContext({ refresh: true });
+    }
     applyHivemindWorkflows(context);
     // The catalogue is the other thing a pending handoff was waiting on.
     finishRentedHandoff();

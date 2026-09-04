@@ -117,8 +117,14 @@ test('the composer is five chips and one door for improving a prompt', () => {
     // Attach, Starters, Improve, Start fresh, Model.
     assert.match(row, /<UploadPicker/);
     assert.match(row, /label=\{zh\(\) \? '附加' : 'Attach'\}/);
-    assert.match(row, /<SavedPromptsMenu/);
-    assert.match(row, /label: zh\(\) \? '起点' : 'Starters'/);
+    // Starters is loaded on press (its shipped prompt library is the heaviest
+    // thing on this page), so the row holds the lazy component plus the chip
+    // that stands in for it while the chunk arrives — both named by the same
+    // descriptor, so the two can never drift apart.
+    assert.match(row, /<SavedPromptsMenuLazy/);
+    assert.match(row, /chip=\{startersChip\}/);
+    assert.match(row, /\{\.\.\.startersChip\}/);
+    assert.match(composer, /label: zh\(\) \? '起点' : 'Starters'/);
     assert.match(row, /label=\{zh\(\) \? '润色' : 'Improve'\}/);
     assert.match(row, /label=\{t\('common\.startFresh'\)\}/);
     assert.match(row, /<ModelMenu/);

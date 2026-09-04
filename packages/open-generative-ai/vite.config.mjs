@@ -22,6 +22,25 @@ export default defineConfig({
     optimizeDeps: {
         include: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime', 'react-hot-toast'],
     },
+    build: {
+        rollupOptions: {
+            output: {
+                // React and the toaster change when we upgrade them, not when we
+                // edit the app. Left inlined they rode in index-<hash>.js, whose
+                // hash moves on every release — so the immutable-cache header the
+                // control API sets on /assets was never able to help, and every
+                // update re-downloaded the framework. Split out, the vendor hash
+                // survives an app-only rebuild and comes straight from cache.
+                // `react-dom/client` is listed alongside `react-dom` on purpose:
+                // the app imports the client entry, which pulls
+                // react-dom-client.production.js — a different file from the one
+                // `react-dom` (index.js) reaches. Name only the package and the
+                // 180 KB half of React stays in the app chunk, which is the
+                // whole thing this split exists to move.
+                manualChunks: { vendor: ['react', 'react-dom', 'react-dom/client', 'react-hot-toast'] },
+            },
+        },
+    },
     server: {
         proxy: {
             // Dev-only: forward studio API calls to the local control API so

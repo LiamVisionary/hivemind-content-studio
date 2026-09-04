@@ -2441,7 +2441,16 @@ def build_control_app(
         the model is any good at the thing — with the provenance of each
         verdict attached, so the UI can tell a measured run from an inference.
         """
-        return {"ok": True, **capability_matrix()}
+        # Built against the CACHED media catalog when there is one. Left to build
+        # its own, this route ran the full provider readiness sweep — including a
+        # subprocess (`higgsfield account status`) and a 5s hosted-media call —
+        # on every Story and Sprite mount, which is exactly what the sibling
+        # /api/simple/catalog cache exists to stop.
+        cached = simple_catalog_cache["payload"]
+        media = (cached or {}).get("media") if isinstance(cached, dict) else None
+        if cached is not None and time.time() - simple_catalog_cache["at"] > SIMPLE_CATALOG_TTL_SECONDS:
+            _kick_simple_catalog_refresh()
+        return {"ok": True, **capability_matrix(catalog=media if isinstance(media, dict) else None)}
 
     @app.get("/api/surfaces")
     def surfaces() -> dict:
@@ -2760,10 +2769,41 @@ def build_control_app(
         simple_catalog_refreshing.set()
         threading.Thread(target=_refresh_simple_catalog, name="simple-catalog-refresh", daemon=True).start()
 
+    def _pending_simple_catalog() -> dict:
+        """The catalog while the boot build is still running.
+
+        Building inline here duplicated work the warm thread had already
+        started and made the very first model picker of a session wait on it —
+        an 8s HivemindOS call plus a 3s probe and a 30s registry read. The
+        brains list is the local one (free, no network), the media block is
+        empty and `pending` says so, so a client can retry rather than treat an
+        empty list as the answer. Media Studio's registry-live flag is the
+        client's existing retry signal and it reads `pending` the same way.
+        """
+        return {
+            "ok": True,
+            "pending": True,
+            "brains": local_brain_catalog()["providers"],
+            "brain_error": "",
+            "media": {"image": [], "video": []},
+            # Local files behind an lru_cache — free, and a client that lost its
+            # template list would degrade for no reason.
+            "templates": template_report(),
+            "attachment_intake_limit": 30,
+            "attachment_note": "The studio can retain up to 30 ordered references. Each selected provider/model receives only roles allowed by its capability schema.",
+        }
+
     @app.get("/api/simple/catalog")
-    def simple_catalog() -> dict:
+    def simple_catalog(response: Response) -> dict:
         cached = simple_catalog_cache["payload"]
         if cached is None:
+            if simple_catalog_refreshing.is_set():
+                # The boot warm-up owns this build already. Answer now and say
+                # when to come back rather than joining a call that can take
+                # tens of seconds — the model picker is the first thing a new
+                # session looks at, and a hang there reads as a broken app.
+                response.headers["Retry-After"] = "2"
+                return _pending_simple_catalog()
             payload = _build_simple_catalog()
             simple_catalog_cache.update(payload=payload, at=time.time())
             return payload
@@ -2930,16 +2970,59 @@ def build_control_app(
     # local generation wait (or, at the gateway's admission check, time out), so
     # the studios surface it and offer Comfy's own /free. Owner-gated: this
     # reaches into the machine's running services.
+    # Every open studio polls this every 20s, and a build is not cheap: per lane
+    # an `lsof -ti :port` and a `ps`, an HTTP /queue with a 3s ceiling, and then
+    # a `vm_stat`. One snapshot serves every poller for ten seconds, and the
+    # rebuild happens on a background thread so no request waits for the process
+    # spawning — the same serve-stale-and-refresh shape as the catalog above.
+    # Deliberately kicked BY a request rather than run on a timer: a machine
+    # nobody is watching should be spawning nothing at all.
+    lanes_memory_cache: dict[str, Any] = {"payload": None, "at": 0.0}
+    lanes_memory_refreshing = threading.Event()
+    LANES_MEMORY_TTL_SECONDS = 10.0
+
+    def _build_lanes_memory() -> dict:
+        return {"ok": True, **comfy_lanes.snapshot()}
+
+    def _refresh_lanes_memory() -> None:
+        try:
+            lanes_memory_cache.update(payload=_build_lanes_memory(), at=time.time())
+        except Exception as exc:  # noqa: BLE001 — a hint is not worth a 500
+            log.warning("lane memory refresh failed: %s", sanitize_error_detail(str(exc)))
+            lanes_memory_cache["at"] = time.time()
+        finally:
+            lanes_memory_refreshing.clear()
+
+    def _kick_lanes_memory_refresh() -> None:
+        if lanes_memory_refreshing.is_set() or shutting_down.is_set():
+            return
+        lanes_memory_refreshing.set()
+        threading.Thread(target=_refresh_lanes_memory, name="lane-memory-refresh", daemon=True).start()
+
     @app.get("/api/lanes/memory", dependencies=[Depends(require_owner)])
     def lanes_memory() -> dict:
-        return {"ok": True, **comfy_lanes.snapshot()}
+        cached = lanes_memory_cache["payload"]
+        if cached is None:
+            payload = _build_lanes_memory()
+            lanes_memory_cache.update(payload=payload, at=time.time())
+            return payload
+        if time.time() - lanes_memory_cache["at"] > LANES_MEMORY_TTL_SECONDS:
+            _kick_lanes_memory_refresh()
+        return lanes_memory_cache["payload"] or cached
 
     @app.post("/api/lanes/free", dependencies=[Depends(require_owner)])
     def lanes_free(body: LaneFreeBody) -> dict:
         try:
-            return comfy_lanes.free_lane(body.lane)
+            freed = comfy_lanes.free_lane(body.lane)
         except comfy_lanes.LaneError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # free_lane already carries a fresh snapshot; stamping it here stops the
+        # next poll from reporting the memory this call just gave back.
+        lanes_memory_cache.update(
+            payload={"ok": True, **{k: v for k, v in freed.items() if k not in ("lane", "freedBytes")}},
+            at=time.time(),
+        )
+        return freed
 
     @app.post("/api/prompt-helper/unload", dependencies=[Depends(require_owner)])
     def prompt_helper_unload(body: PromptHelperUnloadBody) -> dict:
@@ -3492,11 +3575,23 @@ def build_control_app(
     def generation_telemetry(limit: int = 100) -> dict:
         return generation_telemetry_snapshot(runs.store, limit=limit)
 
+    # `unified_runtime_snapshot()` probes all three engines live, each with a
+    # 1.5s ceiling, and this is a POLLED route — the supervisor asks it for
+    # readiness and the shell's status views ask it too, so several callers a
+    # second could each pay three probes for an answer that cannot have changed.
+    # Same {payload, at} shape as the catalog cache above.
+    runtime_cache: dict[str, Any] = {"payload": None, "at": 0.0}
+    RUNTIME_TTL_SECONDS = 5.0
+
     @app.get("/api/runtime")
     def runtime() -> dict:
         # The build number rides along so a bug report names one: this is the
         # route the supervisor and the shell already poll.
-        return {**unified_runtime_snapshot(), "version": app_version}
+        cached = runtime_cache["payload"]
+        if cached is None or time.time() - runtime_cache["at"] > RUNTIME_TTL_SECONDS:
+            cached = unified_runtime_snapshot()
+            runtime_cache.update(payload=cached, at=time.time())
+        return {**cached, "version": app_version}
 
     @app.get("/api/diagnostics/bundle", dependencies=[Depends(require_owner)])
     def diagnostics_zip() -> Response:

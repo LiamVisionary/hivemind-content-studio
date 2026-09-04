@@ -38,8 +38,17 @@ export function LaneMemoryNotice({ active = true }) {
   useEffect(() => {
     if (!active) return undefined;
     refresh();
-    const timer = setInterval(refresh, POLL_MS);
-    return () => clearInterval(timer);
+    // Skipped while the window is hidden: /api/lanes/memory spawns an `lsof` and
+    // a `ps` per lane, asks each one's queue over HTTP and then runs `vm_stat`.
+    // That is a lot of process spawning for a panel nobody is looking at — and
+    // the answer it produces is about right now, so it is asked on wake instead.
+    const beat = () => { if (!document.hidden) refresh(); };
+    const timer = setInterval(beat, POLL_MS);
+    document.addEventListener('visibilitychange', beat);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', beat);
+    };
   }, [active, refresh]);
 
   const notice = laneNotice(snapshot);

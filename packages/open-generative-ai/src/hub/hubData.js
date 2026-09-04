@@ -168,7 +168,6 @@ export function useHub() {
 /* Module singletons (survive any React churn)                        */
 /* ------------------------------------------------------------------ */
 
-let hubRootEl = null;
 let canvasBridgeReady = false;
 let canvasBridgeWaiters = [];
 const canvasBridgeRequests = new Map();
@@ -184,9 +183,10 @@ const surfaceWanted = new Set();
 const focusHooks = new Map(); // 'prompt' | 'workflowTitle' -> fn
 let threadScroller = null;
 
-export function setHubRootEl(el) { hubRootEl = el; }
 // HubLayer reports whether the hub is the page on screen (false while a studio
-// shows). Polls that only serve a visible view read this.
+// shows). Polls that only serve a visible view read this — it replaced a
+// root.isConnected gate that was true for the whole session, because the hub
+// layer mounts once and is only ever display-toggled.
 export function setHubVisible(visible) {
   const next = Boolean(visible);
   if (hubState.hubVisible === next) return;
@@ -2069,6 +2069,8 @@ export async function refreshAll({ quiet = false } = {}) {
 // six times a minute forever.
 export const POLL_BASE_MS = 10000;
 export const POLL_MAX_MS = 60000;
+// The cadence while a studio is on screen: only the sidebar badges are reading.
+export const POLL_BACKGROUND_MS = 60000;
 export function nextPollDelay(current, ok) {
   if (ok) return POLL_BASE_MS;
   const base = Number.isFinite(current) && current >= POLL_BASE_MS ? current : POLL_BASE_MS;
@@ -2134,7 +2136,7 @@ function bindEvents() {
     try { sessionStorage.removeItem(OWNER_PASSPHRASE_STORAGE_KEY); } catch { /* non-critical */ }
   });
 
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && hubRootEl?.isConnected) void pollTick({ quiet: true }); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) void pollTick({ quiet: true }); });
 }
 
 async function reloadPromptsAfterUnlock() {
@@ -2164,6 +2166,23 @@ function anyRunningGenerationCard() {
   });
 }
 
+// How long to keep asking for a catalog the server is still building. Matches
+// the server's own Retry-After and gives up rather than polling forever: a build
+// that has not landed in half a minute is a broken provider, not a slow one, and
+// the topbar Refresh is still there.
+const PENDING_CATALOG_RETRY_MS = [2000, 4000, 8000, 16000];
+
+async function refetchPendingCatalog(attempt = 0) {
+  if (!hubState.simpleCatalog?.pending || attempt >= PENDING_CATALOG_RETRY_MS.length) return;
+  await new Promise((resolve) => { setTimeout(resolve, PENDING_CATALOG_RETRY_MS[attempt]); });
+  try {
+    const payload = await api('/api/simple/catalog');
+    hubState.simpleCatalog = payload;
+    notifyHub();
+  } catch { /* the pill already says the API is down; keep the last answer */ }
+  await refetchPendingCatalog(attempt + 1);
+}
+
 let bootStarted = false;
 
 async function boot() {
@@ -2183,6 +2202,11 @@ async function boot() {
     hubState.selectedLane = hubState.catalog.lanes[0].id;
     setSelectedLane(hubState.selectedLane);
     notifyHub();
+    // The control API answers immediately with `pending` while its own catalog
+    // build is still running at boot (it used to hold the request open for tens
+    // of seconds instead). The media block is empty in that answer, so the model
+    // routes would stay empty for the session unless something asks again.
+    void refetchPendingCatalog();
     await refreshAll({ quiet: true });
     await loadPrompts({ quiet: true });
     restoreLatestRunInComposer();
@@ -2194,20 +2218,35 @@ async function boot() {
   }
   // Self-scheduling poll (not setInterval): the next tick is armed only after
   // the previous settles, at a delay that backs off while the API is down.
+  //
+  // Two cadences, because two different things read this loop. While the hub is
+  // the page on screen it is a live view and 10s is what it costs. While a
+  // STUDIO is on screen the only thing still reading it is the sidebar's
+  // badges — an agent waiting on a PassBook approval, a production still
+  // running — and one ask a minute is enough for those. The gate used to be the
+  // hub root element still being in the document, which is true for the whole
+  // session (the layer mounts once and is only display-toggled), so the full
+  // four-request tick ran behind every studio forever, failing all the way
+  // through on a locked vault.
+  //
+  // And never while the window itself is hidden: nobody is reading anything.
+  // visibilitychange above asks once on the way back.
   let pollDelay = POLL_BASE_MS;
   const schedulePoll = () => {
+    const wait = hubState.hubVisible ? pollDelay : Math.max(pollDelay, POLL_BACKGROUND_MS);
     setTimeout(async () => {
-      if (!document.hidden && hubRootEl?.isConnected) {
+      if (!document.hidden) {
         const ok = await pollTick({ quiet: true });
         pollDelay = nextPollDelay(pollDelay, ok !== false);
       }
       schedulePoll();
-    }, pollDelay);
+    }, wait);
   };
   schedulePoll();
-  setInterval(() => {
-    if (!document.hidden && hubRootEl?.isConnected && anyRunningGenerationCard()) notifyHub();
-  }, 1000);
+  // The per-second running ticker used to live here as a whole-hub notifyHub(),
+  // which re-rendered every History card and every thumbnail once a second for
+  // the sake of one elapsed-time string. Each running GenerationCard now owns
+  // its own tick (hub/components/GenerationCard.jsx).
 }
 
 // Idempotent — HubLayer calls this on mount; boot runs exactly once per session.

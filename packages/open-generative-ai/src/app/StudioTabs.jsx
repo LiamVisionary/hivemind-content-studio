@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 import { useMediaPoster } from '../hooks/hooks.js';
 import { zh } from '../lib/i18n.js';
+import { getPendingJobs, pendingJobsForTab } from '../lib/pendingJobs.js';
 import { publishTabLabels, tabChipLabel } from '../lib/studioTabLabel.js';
 import {
   addTab, closeTab, consumeSeed, insertTabAfter, loadTabState, saveTabState, selectTab,
@@ -60,6 +61,10 @@ const TEXT = {
   closeAnyway: () => (zh() ? '关闭' : 'Close tab'),
   cancel: () => (zh() ? '取消' : 'Cancel'),
   busyDot: () => (zh() ? '正在生成' : 'Generating'),
+  // A restored tab nobody has opened yet: the strip knows its position, not
+  // what is in it, because the studio behind it has not booted. One click and
+  // it says what it really is.
+  sleeping: () => (zh() ? '点击打开此标签' : 'Click to open this tab'),
   tooMany: () => (zh() ? `最多打开 ${MAX_TABS} 个标签 — 先关闭一个。` : `Up to ${MAX_TABS} tabs can be open — close one first.`),
 };
 
@@ -78,7 +83,7 @@ function TabThumb({ url, kind }) {
   );
 }
 
-function TabChip({ index, on, busy, label, preview, onSelect, onDuplicate, onClose, closable, chipRef, onKeyDown }) {
+function TabChip({ index, on, busy, label, preview, asleep = false, onSelect, onDuplicate, onClose, closable, chipRef, onKeyDown }) {
   return (
     <div
       ref={chipRef}
@@ -97,7 +102,9 @@ function TabChip({ index, on, busy, label, preview, onSelect, onDuplicate, onClo
         tabIndex={on ? 0 : -1}
         onClick={onSelect}
         onKeyDown={onKeyDown}
-        title={`${TEXT.tab(index + 1)} — ${label}${busy ? ` · ${TEXT.busyDot()}` : ''}`}
+        title={asleep
+          ? `${TEXT.tab(index + 1)} — ${TEXT.sleeping()}`
+          : `${TEXT.tab(index + 1)} — ${label}${busy ? ` · ${TEXT.busyDot()}` : ''}`}
         className="flex h-full max-w-[190px] items-center gap-1.5 pl-1.5 pr-1 text-xs font-semibold"
       >
         {busy ? (
@@ -157,6 +164,25 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
   // tab that was rendering can reclaim its run. Without this only Tab 1 survived and
   // every other tab's generation was orphaned mid-flight.
   const [state, setState] = useState(() => loadTabState(studioType));
+  // Which tabs are actually MOUNTED. A restored strip can be 24 tabs deep and a
+  // tab is a whole studio: its model list, its saved-library reads, its
+  // rented-machine timer, its composer hydration. Mounting all of them put
+  // dozens of requests in front of the one tab the user is looking at. So: the
+  // front tab, plus any tab that owns a generation still in flight — that one
+  // has to be alive to reclaim its run (and the first tab additionally adopts
+  // the ownerless ones, which is what pendingJobsForTab's `primary` means).
+  // Every other tab boots the first time it is fronted, from the same persisted
+  // preferences it would have booted from at reload.
+  const [mounted, setMounted] = useState(() => {
+    const jobs = getPendingJobs().filter((job) => String(job?.studioType || '') === studioType);
+    const openTabIds = state.tabs.map((tab) => tab.id);
+    const live = new Set([state.activeId]);
+    state.tabs.forEach((tab, index) => {
+      const owned = pendingJobsForTab(jobs, tab.id, { primary: index === 0 && !tab.seed, openTabIds });
+      if (owned.length) live.add(tab.id);
+    });
+    return live;
+  });
   const [closeConfirm, setCloseConfirm] = useState(null); // id of a busy tab awaiting confirmation
   // What each tab is: whether it is generating, what to call it, and the last
   // thing it made. Polled — the studios expose chip()/isBusy() on their api
@@ -168,6 +194,8 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
   // Per-tab api handles, keyed by the (never-reused) tab id.
   const apisRef = useRef(new Map());
   const chipRefs = useRef(new Map());
+  // Duplicate pressed on a tab that had not booted: the id to copy once it has.
+  const duplicateWhenReadyRef = useRef(null);
   // Latest keyboard handler, so the window listener below is bound once.
   const shortcutRef = useRef(null);
   // Held for the life of the browser tab, not the life of this mount: a resumed
@@ -179,6 +207,13 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
     if (!apisRef.current.has(id)) apisRef.current.set(id, { current: null });
     return apisRef.current.get(id);
   };
+
+  // Fronting a tab is what boots it. Never unmounted again: a studio that has
+  // started a render must keep running while it is in the background, which is
+  // the whole point of the strip.
+  useEffect(() => {
+    setMounted((prev) => (prev.has(state.activeId) ? prev : new Set(prev).add(state.activeId)));
+  }, [state.activeId]);
 
   // The studio consumes its seed on first render; drop it afterwards so a
   // duplicate's reference images aren't retained twice for the session.
@@ -216,10 +251,15 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
         const api = apisRef.current.get(tab.id)?.current;
         let info = null;
         try { info = api?.chip?.() || null; } catch { info = null; }
+        // A tab that has not booted has nothing to describe itself with, and
+        // "New tab" would be a lie about a tab that is full of settings. It is
+        // named by its position until the click that opens it.
+        const asleep = !mounted.has(tab.id);
         next.set(tab.id, {
           index,
+          asleep,
           busy: Boolean(api?.isBusy?.()),
-          label: tabChipLabel(info, { fallback: TEXT.emptyTab() }),
+          label: asleep ? TEXT.tab(index + 1) : tabChipLabel(info, { fallback: TEXT.emptyTab() }),
           previewUrl: String(info?.previewUrl || ''),
           previewKind: info?.previewKind === 'image' ? 'image' : 'video',
         });
@@ -243,16 +283,36 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
         })) return prev;
         return next;
       });
+
+      // Duplicate pressed on a tab that had not booted yet: it was fronted so it
+      // would, and this is the first poll where it has an api to copy.
+      const wanted = duplicateWhenReadyRef.current;
+      if (wanted != null) {
+        const snapshot = apisRef.current.get(wanted)?.current?.snapshot?.();
+        if (snapshot) {
+          duplicateWhenReadyRef.current = null;
+          setState((prev) => insertTabAfter(prev, wanted, { boot: 'clone', snapshot }));
+        }
+      }
     };
     poll();
     const id = window.setInterval(poll, BUSY_POLL_MS);
     return () => window.clearInterval(id);
-  }, [state.tabs, studioType, active]);
+  }, [state.tabs, studioType, active, mounted]);
 
   const duplicate = (id) => {
     const snapshot = apisRef.current.get(id)?.current?.snapshot?.();
-    if (!snapshot) return; // studio hasn't published its api yet — nothing to copy
-    setState((prev) => insertTabAfter(prev, id, { boot: 'clone', snapshot }));
+    if (snapshot) {
+      setState((prev) => insertTabAfter(prev, id, { boot: 'clone', snapshot }));
+      return;
+    }
+    if (!state.tabs.some((tab) => tab.id === id)) return;
+    // Not booted yet (a restored tab nobody has opened). Front it — which is what
+    // mounts it — and take the copy on the poll where its api appears. Returning
+    // silently here is what a lazily mounted strip would otherwise do to every
+    // Duplicate press on a background tab.
+    duplicateWhenReadyRef.current = id;
+    setState((prev) => selectTab(prev, id));
   };
 
   const forget = (id) => {
@@ -336,7 +396,8 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
             index={index}
             on={tab.id === state.activeId}
             busy={Boolean(chips.get(tab.id)?.busy)}
-            label={chips.get(tab.id)?.label || TEXT.emptyTab()}
+            label={chips.get(tab.id)?.label || TEXT.tab(index + 1)}
+            asleep={Boolean(chips.get(tab.id)?.asleep)}
             preview={{ url: chips.get(tab.id)?.previewUrl || '', kind: chips.get(tab.id)?.previewKind || 'video' }}
             closable={state.tabs.length > 1}
             chipRef={(node) => { if (node) chipRefs.current.set(tab.id, node); else chipRefs.current.delete(tab.id); }}
@@ -357,7 +418,7 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
         </button>
       </div>
 
-      {state.tabs.map((tab) => {
+      {state.tabs.filter((tab) => mounted.has(tab.id)).map((tab) => {
         const front = tab.id === state.activeId;
         return (
           <div key={tab.id} className={front ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>

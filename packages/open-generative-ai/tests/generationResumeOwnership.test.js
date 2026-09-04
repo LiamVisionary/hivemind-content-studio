@@ -96,3 +96,66 @@ test('a studio with unfinished work is mounted at boot, whatever page you land o
     assert.match(app, /getPendingJobs\(\)/, 'boot consults the pending-job registry');
     assert.match(app, /STUDIO_LOADERS\[studio\]/, 'and loads the studio that owns the work');
 });
+
+
+test('a lazily mounted strip still mounts every tab that owns a run', () => {
+    // Mounting all 24 restorable tabs put dozens of boot requests in front of the
+    // one tab the user is looking at, so only the front tab boots. The exception
+    // is the whole point of the strip: a tab with a render in flight has to be
+    // alive to reclaim it, so the mount set is seeded from the same
+    // pendingJobsForTab the studios use — `primary` and all, which is what
+    // adopts a job whose tab is gone.
+    const tabs = readSource('src/app/StudioTabs.jsx');
+    assert.match(tabs, /const \[mounted, setMounted\] = useState\(/);
+    assert.match(tabs, /pendingJobsForTab\(jobs, tab\.id, \{ primary: index === 0 && !tab\.seed, openTabIds \}\)/);
+    assert.match(tabs, /new Set\(\[state\.activeId\]\)/, 'the front tab always boots');
+    assert.match(tabs, /state\.tabs\.filter\(\(tab\) => mounted\.has\(tab\.id\)\)\.map/,
+        'and only mounted tabs render a studio');
+    // Fronting a tab boots it, and nothing is ever unmounted again — a render
+    // must keep running when its tab goes to the background.
+    assert.match(tabs, /setMounted\(\(prev\) => \(prev\.has\(state\.activeId\) \? prev : new Set\(prev\)\.add\(state\.activeId\)\)\)/);
+    // Duplicate on a tab that has not booted is not a no-op: it fronts it and
+    // takes the copy once the studio publishes its api.
+    assert.match(tabs, /duplicateWhenReadyRef/);
+});
+
+test('the landing studio starts loading before React does, and its dialogs do not', () => {
+    const app = readSource('src/app/App.jsx');
+    // Module scope, not inside the component: the studio chunk's fetch has to
+    // overlap React's boot rather than follow it.
+    assert.match(app, /const landing = STUDIO_LOADERS\[initialPage\(\)\];/);
+    // The heavy dialogs and the shipped prompt library are shut on arrival, so
+    // they are not part of what the default page downloads.
+    const studio = readSource('src/studios/ImageStudio.jsx');
+    for (const name of ['PromptHelperDialog', 'CivitaiPostDialog', 'CivitaiDownloadDialog']) {
+        assert.doesNotMatch(studio, new RegExp(`^import \\{ ${name} \\}`, 'm'), `${name} is imported eagerly`);
+        assert.match(studio, new RegExp(`const ${name}Lazy = lazy\\(`), `${name} has no lazy binding`);
+    }
+    const composer = readSource('src/studios/image/ImageComposer.jsx');
+    assert.doesNotMatch(composer, /^import \{ SavedPromptsMenu \}/m);
+    assert.match(composer, /const SavedPromptsMenuLazy = lazy\(/);
+});
+
+test('no studio poll keeps running while the window is hidden', () => {
+    for (const relative of ['src/studios/ImageStudio.jsx', 'src/studios/VideoStudio.jsx']) {
+        const source = readSource(relative);
+        // The rented-machine poll reaches /api/gpu-rentals, which lists every
+        // marketplace and probes every box.
+        assert.match(source, /setInterval\(\(\) => \{ if \(!document\.hidden\) sync\(false\); \}, wanted\)/, relative);
+        assert.match(source, /const onVisible = \(\) => \{ if \(!document\.hidden\) sync\(false\); \};/, relative);
+    }
+    // Lane memory spawns lsof/ps/vm_stat per lane.
+    const lanes = readSource('src/studios/LaneMemoryNotice.jsx');
+    assert.match(lanes, /const beat = \(\) => \{ if \(!document\.hidden\) refresh\(\); \};/);
+    // The hub's own loop gates on the flag HubLayer maintains, not on a root
+    // element that stays connected for the whole session.
+    const hub = readSource('src/hub/hubData.js');
+    assert.match(hub, /const wait = hubState\.hubVisible \? pollDelay : Math\.max\(pollDelay, POLL_BACKGROUND_MS\);/);
+    assert.match(hub, /setTimeout\(async \(\) => \{\n\s+if \(!document\.hidden\) \{/);
+    assert.doesNotMatch(hub, /export function setHubRootEl/);
+    assert.doesNotMatch(hub, /hubRootEl\?\.isConnected/);
+    // The whole-hub one-second ticker is gone; the card that needs it owns it.
+    assert.doesNotMatch(hub, /setInterval\(/);
+    assert.match(readSource('src/hub/components/GenerationCard.jsx'),
+        /const beat = \(\) => \{ if \(!document\.hidden\) tick\(\(n\) => n \+ 1\); \};/);
+});

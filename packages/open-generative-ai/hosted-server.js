@@ -10,7 +10,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const { loadHostedImageModels, loadHostedWorkflowModels, missingWeightFiles } = require('./hosted-local-models');
-const { discoverAutoImageWorkflows } = require('./auto-workflow-discovery');
+const { defaultAutoWorkflowDirs, discoverAutoImageWorkflows } = require('./auto-workflow-discovery');
 // Generated from src/hivemind_content_studio/identity.py.
 const identity = require('./electron/identity.json');
 
@@ -218,7 +218,30 @@ function arToDimensions(ar, modelType, base) {
   return map[ar] || [base, base];
 }
 
+// The registry file is re-read and the drop-in folders re-scanned on every call,
+// and /local-ai/models is asked by every studio tab at boot plus every model
+// picker afterwards. Keyed on what those reads actually depend on — the registry
+// file's mtime and size, and the same for each auto-workflow directory — so a
+// workflow added or edited still lands on the very next request, and a boot with
+// several tabs open reads the disk once.
+let modelsCache = { key: '', models: null };
+
+function modelSourceStamp() {
+  const parts = [];
+  for (const target of [WORKFLOW_REGISTRY, ...defaultAutoWorkflowDirs()]) {
+    try {
+      const stat = fs.statSync(target);
+      parts.push(`${target}:${stat.mtimeMs}:${stat.size}`);
+    } catch {
+      parts.push(`${target}:missing`);
+    }
+  }
+  return parts.join('|');
+}
+
 function listModels() {
+  const key = modelSourceStamp();
+  if (modelsCache.models && modelsCache.key === key) return modelsCache.models;
   let registryModels = [];
   try {
     registryModels = loadHostedImageModels(WORKFLOW_REGISTRY);
@@ -233,7 +256,9 @@ function listModels() {
   } catch (error) {
     console.error(`[open-generative-ai-hosted] auto-workflow discovery failed: ${error.message}`);
   }
-  return [...registryModels, ...autoModels];
+  const models = [...registryModels, ...autoModels];
+  modelsCache = { key, models };
+  return models;
 }
 
 // ── Is anything actually runnable right now? ─────────────────────────────

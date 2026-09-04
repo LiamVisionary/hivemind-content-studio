@@ -2912,23 +2912,33 @@ def _probe_instances(instances: list[Instance]) -> list[dict]:
         return list(pool.map(lambda i: _instance_dto(i, probe=True), instances))
 
 
-def list_rentals() -> dict:
+def list_rentals(*, settle: bool = True) -> dict:
+    """The Machines view's payload.
+
+    `settle` carries the BOOKKEEPING half — destroying a box that failed to
+    provision, and marking a warm volume stocked. Both destroy machines, and
+    both used to run inside the GET that every mounted studio polls. They now
+    belong to the snapshot refresher (register_gpu_rental_routes), which is a
+    background thread: a read stays a read, and a request that has to build its
+    own snapshot cold does not reap on the way past.
+    """
     raw = _all_instances()
     instances = _probe_instances(raw)
-    # A stocking box that reports ready has filled its warm volume: mark the
-    # volume stocked and destroy the box. Free — the DTOs are in hand.
-    try:
-        _settle_warm_volumes(instances)
-    except Exception as exc:  # never let bookkeeping take the Machines view down
-        print(f"[gpu-rentals] warm volume settle failed: {exc}", file=sys.stderr)
-    # Free: the DTOs are already in hand, so the box that failed provisioning
-    # goes away on the same poll that noticed it rather than billing until
-    # someone reads the screen.
-    reaped = {entry["rental_id"] for entry in reap_failed_rentals(instances)
-              if not entry.get("destroy_error")}
-    if reaped:
-        instances = [dto for dto in instances if dto["rental_id"] not in reaped]
-        raw = [i for i in raw if str(i.ref) not in reaped]
+    if settle:
+        # A stocking box that reports ready has filled its warm volume: mark the
+        # volume stocked and destroy the box. Free — the DTOs are in hand.
+        try:
+            _settle_warm_volumes(instances)
+        except Exception as exc:  # never let bookkeeping take the Machines view down
+            print(f"[gpu-rentals] warm volume settle failed: {exc}", file=sys.stderr)
+        # Free: the DTOs are already in hand, so the box that failed provisioning
+        # goes away on the same sweep that noticed it rather than billing until
+        # someone reads the screen.
+        reaped = {entry["rental_id"] for entry in reap_failed_rentals(instances)
+                  if not entry.get("destroy_error")}
+        if reaped:
+            instances = [dto for dto in instances if dto["rental_id"] not in reaped]
+            raw = [i for i in raw if str(i.ref) not in reaped]
     # Never let a balance hiccup take down the machine list — it is the view
     # that tells the user what they are paying for.
     try:
@@ -4224,6 +4234,38 @@ def _remember_rental(request_id: str, result: dict) -> None:
         _rental_requests[request_id] = (time.monotonic(), dict(result))
 
 
+# How long one machine-list snapshot serves every poller. Each mounted studio
+# asks every 30s (8s while a box provisions) and the Machines view asks too, and
+# a build lists every configured marketplace and probes every box (1.5s beacon +
+# 1.5s tunnel ceilings). Ten seconds is under the fastest poll, so a stale answer
+# is never what anybody is looking at.
+RENTALS_SNAPSHOT_TTL_SECONDS = 10.0
+
+
+def _rental_state_fingerprint() -> tuple:
+    """What the DTOs read off disk: paused boxes, failure notices, attachments.
+
+    A snapshot may only be reused while these are unchanged. Pausing a box,
+    resuming it, attaching a lane or dismissing a failure has to show on the
+    very NEXT poll — a ten-second-old answer to "did my click land" is a bug
+    report, not a cache hit. Named files rather than a listing of the whole
+    state directory, which the media gateway also writes to: unrelated churn
+    there would defeat the cache without changing a single machine.
+    """
+    stamped = []
+    for path in (
+        _failure_state_path(), _paused_state_path(), _warm_volumes_path(),
+        _attach_registry_path(), _overlay_env_path(), _tunnel_dir(),
+    ):
+        try:
+            stat = path.stat()
+        except OSError:
+            stamped.append((path.name, None, None))
+            continue
+        stamped.append((path.name, stat.st_mtime_ns, stat.st_size))
+    return tuple(stamped)
+
+
 def register_gpu_rental_routes(app, require_owner) -> None:
     """Attach the owner-gated rental routes to the control API app."""
     from fastapi import Body, Depends, HTTPException
@@ -4283,11 +4325,56 @@ def register_gpu_rental_routes(app, require_owner) -> None:
     def gpu_rental_account() -> dict:
         return _guard(account_state)
 
+    # One snapshot for every poller, per app instance (an embedding host — and
+    # each test — starts with an empty one). Refreshed on a background thread so
+    # no request ever waits on the marketplace round trips, and the reap/settle
+    # bookkeeping rides that thread rather than the GET. Kicked BY a request
+    # rather than run on a timer: nobody watching means nothing to refresh, and
+    # the standing reaper thread already covers the money side on its own clock.
+    rentals_snapshot: dict[str, Any] = {"payload": None, "at": 0.0, "state": ()}
+    rentals_refreshing = threading.Event()
+
+    def _store_rentals_snapshot(payload: dict) -> dict:
+        rentals_snapshot.update(payload=payload, at=time.monotonic(), state=_rental_state_fingerprint())
+        return payload
+
+    def _refresh_rentals_snapshot() -> None:
+        try:
+            _store_rentals_snapshot(list_rentals())
+        except Exception as exc:  # noqa: BLE001 — a stale list beats no Machines view
+            print(f"[gpu-rentals] snapshot refresh failed: {exc}", file=sys.stderr)
+            rentals_snapshot["at"] = time.monotonic()
+        finally:
+            rentals_refreshing.clear()
+
+    def _kick_rentals_refresh() -> None:
+        stopping = getattr(app.state, "shutting_down", None)
+        if rentals_refreshing.is_set() or (isinstance(stopping, threading.Event) and stopping.is_set()):
+            return
+        rentals_refreshing.set()
+        threading.Thread(target=_refresh_rentals_snapshot, name="gpu-rental-snapshot", daemon=True).start()
+
+    def _rentals_payload() -> dict:
+        cached = rentals_snapshot["payload"]
+        # Nothing to serve yet, or the state the DTOs are built from has moved:
+        # build HERE, so a pause, a resume or a dismissed failure is answered by
+        # the request that follows it rather than ten seconds later. Without the
+        # bookkeeping though — a page load must never be the thing that destroys
+        # a machine.
+        if cached is None or rentals_snapshot["state"] != _rental_state_fingerprint():
+            return _store_rentals_snapshot(list_rentals(settle=False))
+        if time.monotonic() - rentals_snapshot["at"] > RENTALS_SNAPSHOT_TTL_SECONDS:
+            # Only the marketplace's own view can have gone stale. Serve the
+            # previous answer and rebuild behind it, on the thread that also
+            # does the reaping and the warm-volume settling.
+            _kick_rentals_refresh()
+        return rentals_snapshot["payload"] or cached
+
     @app.get("/api/gpu-rentals", dependencies=[Depends(require_owner)])
     def gpu_rentals_index() -> dict:
         # ok:true like the rest of the studio API (additive; the list is
         # under its own keys).
-        return {"ok": True, **_guard(list_rentals)}
+        return {"ok": True, **_guard(_rentals_payload)}
 
     # The rental-LoRA routes come before the {rental_id} ones: Starlette
     # matches in registration order, and a literal "loras" segment must never

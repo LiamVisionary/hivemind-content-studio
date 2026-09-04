@@ -3,8 +3,11 @@
 // live in hubData (buildRunGenerationCards etc.); this only renders them. Media
 // flows through useMediaSrc so E2E-encrypted artifacts keep decrypting client
 // side, and the 1s running-ticker re-renders via React state instead of the old
-// innerHTML churn — so a playing <video> preview is never restarted.
-import { memo, useState } from 'react';
+// innerHTML churn — so a playing <video> preview is never restarted. The ticker
+// lives HERE, on the one card that needs it: it used to be a hub-wide notifyHub()
+// every second, which re-rendered every History card and thumbnail in the app for
+// the sake of one elapsed-time string, and ran whether or not anyone was looking.
+import { memo, useEffect, useState } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { Icon } from '../../ui/icons.jsx';
 import { Button, ProgressBar, cx } from '../../ui/kit.jsx';
@@ -65,6 +68,23 @@ function SourceThumb({ run, artifact, onOpen }) {
 
 export const GenerationCard = memo(function GenerationCard({ run, card, onOpenRun }) {
   const [preview, setPreview] = useState(null);
+  // "elapsed 1m 12s" and the estimated progress bar are both measured against
+  // Date.now(), so a running card has to re-render once a second to stay true.
+  // Only while it IS running, and only while the window is on screen: a hidden
+  // tab counting seconds nobody can read is pure battery.
+  const [, tick] = useState(0);
+  const running = card.status === 'running';
+  useEffect(() => {
+    if (!running) return undefined;
+    const beat = () => { if (!document.hidden) tick((n) => n + 1); };
+    const timer = window.setInterval(beat, 1000);
+    // Coming back to the tab must not wait out the rest of the second.
+    document.addEventListener('visibilitychange', beat);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', beat);
+    };
+  }, [running]);
   const progress = generationProgressPct(card);
   const headerIcon = card.status === 'running' ? 'sparkles' : card.kind === 'video' ? 'video' : 'image';
 
