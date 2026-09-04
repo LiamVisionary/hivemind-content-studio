@@ -8,12 +8,15 @@
 // the licence, a link to the tagged source, the no-warranty line, and the
 // generated third-party notices.
 //
-// One fetch of /api/about on first open, which is unauthenticated on purpose:
-// the licence has to be readable before anyone signs in.
+// One fetch of /api/about on first open, plus one per licence document the
+// reader actually opens — the licence text alone is 34 KB, and a page that
+// names a file it cannot show is the defect this replaced.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { APP_VERSION, shortCommit, versionLabel } from '../../lib/appVersion.js';
 import { describeFailure } from '../../lib/describeFailure.js';
-import { Button, Card, FailureCallout, Pill, SectionLabel, Spinner } from '../../ui/kit.jsx';
+import {
+  Button, Card, CollapsibleSection, FailureCallout, Pill, SectionLabel, Spinner,
+} from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 import { t, tf } from '../../lib/i18n.js';
 
@@ -89,6 +92,81 @@ function LicenseGroup({ group }) {
         </button>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * One of the two licence documents, fetched when its section is opened.
+ *
+ * This page used to say "the full licence text ships with the app (LICENSE)"
+ * and give no way to read it — a claim about a file, made by a build that could
+ * not check whether the file was there. Now it reads the file: present, the
+ * text is on the page; absent, the page says which build shipped without it and
+ * points at the tagged source, which is where the AGPL's offer actually lives.
+ *
+ * Mounted only while the section is open (CollapsibleSection renders no closed
+ * children), so 34 KB of licence text is never fetched by a page nobody opened.
+ */
+function LicenceDocument({ name, sourceUrl }) {
+  const [doc, setDoc] = useState(null);
+  const [failure, setFailure] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setFailure(null);
+    try {
+      const response = await fetch(`/api/about/document/${name}`, { headers: { Accept: 'application/json' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setDoc(await response.json());
+    } catch (error) {
+      setFailure(describeFailure(error, { operation: 'reading the licence' }));
+    } finally {
+      setLoading(false);
+    }
+  }, [name]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  if (failure) {
+    return (
+      <FailureCallout
+        title={failure.title}
+        detail={failure.detail}
+        onRetry={load}
+        retryDisabled={loading}
+        retryLabel={t('common.tryAgain')}
+      />
+    );
+  }
+  if (!doc) {
+    return (
+      <Card className="flex items-center gap-2 p-4 text-[13px] text-ink3">
+        <Spinner size={14} />
+      </Card>
+    );
+  }
+  if (!doc.available) {
+    return (
+      <Card className="flex flex-wrap items-center justify-between gap-3 p-4 text-[13px] text-ink2">
+        <span className="min-w-[240px] flex-1">{tf('about.documentMissing', doc.filename || name)}</span>
+        <a
+          href={sourceUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="text-[13px] font-semibold text-honey hover:underline"
+        >
+          {t('about.viewSource')}
+        </a>
+      </Card>
+    );
+  }
+  return (
+    <Card className="p-0">
+      <pre className="custom-scrollbar m-0 max-h-[420px] overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[11px] leading-relaxed text-ink2">
+        {doc.text}
+      </pre>
+    </Card>
   );
 }
 
@@ -210,6 +288,12 @@ export function AboutView({ active }) {
               {t('about.licenceShips')}
             </p>
           </Card>
+          <CollapsibleSection title={t('about.licenceText')} storageKey="about.licenceText">
+            <LicenceDocument name="licence" sourceUrl={taggedSource} />
+          </CollapsibleSection>
+          <CollapsibleSection title={t('about.donorProvenance')} storageKey="about.donorProvenance">
+            <LicenceDocument name="notices" sourceUrl={taggedSource} />
+          </CollapsibleSection>
         </section>
 
         <section className="flex flex-col gap-2">

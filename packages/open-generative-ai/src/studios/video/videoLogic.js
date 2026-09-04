@@ -21,7 +21,6 @@ import {
 } from '../../lib/cloudCatalog.js';
 import {
   getHivemindVideoModelById,
-  getSavedHivemindVideoSelection,
   isHivemindStudioEnabled,
   isHivemindVideoModelId,
 } from '../../lib/hivemindStudio.js';
@@ -666,15 +665,12 @@ export function startFrameSelectedTransition(prev, url, c) {
 // default even while Local is selected — "+ New" after an H3 run left the Model
 // chip naming Seedance Lite with a cloud icon, the picker (filtered to local
 // models) not listing it, and Generate opening the API-key modal. Local lands on
-// the session's last hand-picked local workflow, else the LTX default, else the
-// first local workflow; cloud lands on the first cloud model.
+// the LTX default, else the first local workflow; cloud lands on the first cloud
+// model.
 export function defaultTextToVideoModelFor(s, c) {
   if (s?.localMode) {
     const local = c.hivemindI2V || [];
-    let saved = null;
-    try { saved = getSavedHivemindVideoSelection(); } catch { /* no session store */ }
-    const preferred = (saved?.modelId && local.find((m) => m.id === saved.modelId))
-      || local.find((m) => m.workflowId === 'ltx23-eros-fast')
+    const preferred = local.find((m) => m.workflowId === 'ltx23-eros-fast')
       || local[0]
       || c.allT2V.find((m) => isLocalVideoModel(m.id));
     if (preferred) return preferred;

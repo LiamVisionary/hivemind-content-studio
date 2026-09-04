@@ -309,6 +309,24 @@ export function SpriteStudio({ active = true } = {}) {
   const imageModel = imageChoice || imageAuto.target;
   const videoModel = videoChoice || videoAuto.target;
 
+  // What the card at the top of the page is allowed to say about stage 2.
+  //
+  // It used to assert "Animation needs a rented GPU" while the picker one card
+  // below read "This Mac · MiniMax H3 — free, stays on this Mac". Both cannot
+  // be true, and the picker is the one that knows: the stage hands the lane a
+  // start frame sealed to this machine's vault, so every reachable row is a
+  // Media Studio lane row and its place is always This Mac (spriteRouting.js).
+  // A rental is a PROPERTY of that lane — the box this Mac's work lands on —
+  // which `runTargetsFromRows` already resolves into `target.machine`. So the
+  // card reads the same rows the picker does, and the "Rent a GPU" button
+  // appears only when nothing can run at all, which is the one case where it is
+  // the fix rather than an upsell.
+  const animationLane = useMemo(() => {
+    const ready = videoChoices.filter((target) => target.ready);
+    const machine = videoModel?.machine || ready.find((target) => target.machine)?.machine || null;
+    return { ready: ready.length > 0, machine };
+  }, [videoChoices, videoModel]);
+
   // Why a row cannot run is on the row itself now — the picker prints
   // `target.reason` under any row it will not let you press — so this stage no
   // longer needs a readiness adapter of its own to say it a second time.
@@ -565,10 +583,12 @@ export function SpriteStudio({ active = true } = {}) {
 
       <div>
         <SectionLabel>Sheet</SectionLabel>
-        <Field label="Columns" hint="0 lays a short cycle out as one strip and wraps a long one.">
+        {/* The hints name what the slider READS at its leftmost stop — "auto",
+            "native" — not the 0 underneath it, which is never displayed. */}
+        <Field label="Columns" hint="auto lays a short cycle out as one strip and wraps a long one.">
           <Slider value={columns} min={0} max={12} step={1} onChange={setColumns} format={(value) => (value ? String(value) : 'auto')} />
         </Field>
-        <Field label="Cell size" hint="0 keeps the sprite's own size. A fixed square cell is what tile-indexed importers expect.">
+        <Field label="Cell size" hint="native keeps the sprite's own size. A fixed square cell is what tile-indexed importers expect.">
           <Slider value={cellSize} min={0} max={256} step={16} onChange={setCellSize} format={(value) => (value ? `${value}px` : 'native')} />
         </Field>
         <Field label="Cycle rate" hint="How fast the sheet plays back — the poses are the animation, so this is unrelated to the clip's own frame rate.">
@@ -595,16 +615,26 @@ export function SpriteStudio({ active = true } = {}) {
             the top rather than discovered four minutes into the pipeline. */}
         <Card className="flex flex-wrap items-center justify-between gap-3 p-3">
           <p className="min-w-[240px] flex-1 text-[13px] leading-relaxed text-ink2">
-            Animation needs a rented GPU, and the cut-out runs SAM3 on this computer — its
-            first cut-out downloads a 3.45&nbsp;GB checkpoint. Everything else is local.
+            {animationLane.machine
+              ? `Animation runs through this machine's studio, on the attached ${animationLane.machine.gpu || 'rented GPU'} right now.`
+              : animationLane.ready
+                ? 'Animation runs through this machine’s studio — it lands on an attached rented GPU when one serves the model, and stays here when none is.'
+                : 'No animation model can run here yet — attach or rent a GPU that serves one, and stage 2 picks it up.'}
+            {' '}The cut-out runs SAM3 on this computer; its first cut-out downloads a
+            3.45&nbsp;GB checkpoint.
           </p>
-          <Button
-            size="sm"
-            icon="cpu"
-            onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'machines' } }))}
-          >
-            Rent a GPU
-          </Button>
+          {/* Only when the page has no answer of its own: a "Rent a GPU" button
+              beside a picker that already reads "This Mac" is what made this
+              card contradict the studio. */}
+          {!animationLane.ready ? (
+            <Button
+              size="sm"
+              icon="cpu"
+              onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'machines' } }))}
+            >
+              Rent a GPU
+            </Button>
+          ) : null}
         </Card>
 
         {/* ── 1. Sprite ─────────────────────────────────────────────── */}

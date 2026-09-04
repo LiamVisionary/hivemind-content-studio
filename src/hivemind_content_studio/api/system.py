@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 
-from ..about import about_payload
+from ..about import about_payload, licence_document
 from ..doctor import collect_report as doctor_report
 from ..generation_telemetry import generation_telemetry_snapshot
 from ..identity import version_payload
@@ -106,6 +106,14 @@ def register(app, ctx) -> None:
         # recent changelog headlines to the same payload so the About page is one
         # request rather than three.
         return about_payload()
+
+    @router.get("/api/about/document/{name}")
+    def about_document(name: str) -> dict:
+        # The licence text and the donor provenance, fetched only when someone
+        # opens them — 50 KB of text does not belong in the payload every About
+        # open pays for. `name` is looked up in a fixed two-entry table, so this
+        # reads two known files and never a path a caller chose.
+        return licence_document(name)
 
     @router.get("/api/providers")
     def providers() -> dict:
