@@ -56,3 +56,12 @@ vendor/
 
 # Ad-hoc "just in case" snapshots next to a live file. Git history is the rollback.
 *.rollback-*
+
+# The desktop build's own outputs. The frozen Python environment, the vendored
+# wheels and the static ffmpeg pair are built by
+# scripts/build_desktop_python.py (they are hundreds of megabytes and are
+# reproducible from uv.lock); the Rust target directory and the no-updater
+# config overlay belong to a build, not to the repository.
+/src-tauri/target/
+/src-tauri/resources/desktop-python/
+/src-tauri/no-updater.conf.json

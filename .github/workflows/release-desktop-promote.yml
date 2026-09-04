@@ -1,0 +1,201 @@
+# Publish a build that has already been made, and only then move the updater.
+#
+# docs/RELEASE.md §4: a build produces artifacts, and a human promotes them. That
+# separation is what makes a failed smoke test cost nothing — the candidate is
+# never delivered — and what makes rollback editing one JSON file rather than
+# un-shipping a build. So this workflow is dispatch-only, takes the run id of a
+# candidate it did not build, and refuses anything unsigned.
+#
+# Two things it will not do: promote a build that carries the UNSIGNED label, and
+# move `latest.json` for a pre-release. A pre-release is downloadable and is
+# never delivered to an existing install.
+name: Release desktop (promote)
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: "Run ID of the successful 'Release desktop (build only)' run to publish."
+        required: true
+        type: string
+      approval:
+        description: "Type promote-<candidate run ID> to confirm. Publication is not undoable."
+        required: true
+        type: string
+      prerelease:
+        description: "Publish as a pre-release. Downloadable, but latest.json is NOT moved and no existing install updates."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# Publication is a globally exclusive act: two promotions racing would leave the
+# release and the update channel describing different builds. Never cancelled —
+# a promotion mid-upload must finish.
+concurrency:
+  group: release-desktop-promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Verify and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # A protected environment, so promotion can require a reviewer even when the
+    # dispatcher is the owner. Configure it in repository settings; the workflow
+    # does not assume who that reviewer is.
+    environment: desktop-release
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Check the approval matches the candidate
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          APPROVAL: ${{ inputs.approval }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "The candidate run ID must be numeric." >&2
+            exit 1
+          fi
+          if [ "$APPROVAL" != "promote-${CANDIDATE_RUN_ID}" ]; then
+            echo "Approval must read exactly promote-${CANDIDATE_RUN_ID}. Retyping the run id is the confirmation." >&2
+            exit 1
+          fi
+
+      - name: Check the candidate is a successful build run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}")"
+          conclusion="$(jq -r '.conclusion // ""' <<<"$run_json")"
+          event="$(jq -r '.event // ""' <<<"$run_json")"
+          path="$(jq -r '.path // ""' <<<"$run_json")"
+          if [ "$conclusion" != "success" ] || [ "$event" != "workflow_dispatch" ] || [ "$path" != ".github/workflows/release-desktop.yml" ]; then
+            echo "Run ${CANDIDATE_RUN_ID} is not a successful manual desktop build of this repository." >&2
+            exit 1
+          fi
+          jq -r '.head_sha' <<<"$run_json" > /tmp/candidate-sha
+
+      - name: Download the candidate artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hivemind-content-studio-*
+          path: release-assets
+          merge-multiple: true
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Refuse an unsigned candidate
+        id: candidate
+        run: |
+          set -euo pipefail
+          build="release-assets/build.json"
+          if [ ! -f "$build" ]; then
+            echo "The candidate has no build.json, so what it is cannot be established. Re-run the build workflow." >&2
+            exit 1
+          fi
+          if [ -f release-assets/UNSIGNED.txt ] || [ "$(jq -r '.signed' "$build")" != "true" ]; then
+            echo "This candidate is UNSIGNED. macOS would refuse to open it, so it is never published." >&2
+            echo "Configure APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD and APPLE_SIGNING_IDENTITY and build again." >&2
+            exit 1
+          fi
+          if [ "$(jq -r '.notarized' "$build")" != "true" ]; then
+            echo "This candidate was signed but not notarized, so a first launch would still be blocked." >&2
+            echo "Configure APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID and build again." >&2
+            exit 1
+          fi
+          version="$(jq -r '.version' "$build")"
+          tag="$(jq -r '.tag' "$build")"
+          commit="$(jq -r '.commit' "$build")"
+          if [ "$commit" != "$(cat /tmp/candidate-sha)" ]; then
+            echo "build.json names a different commit than the run that produced it." >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "updater=$(jq -r '.updater_artifacts' "$build")" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the exact candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.candidate.outputs.commit }}
+          fetch-depth: 0
+
+      - name: The updater must be able to verify what it delivers
+        run: python3 scripts/check_updater_config.py --require-key
+
+      - name: Build the update manifest
+        if: ${{ !inputs.prerelease }}
+        env:
+          VERSION: ${{ steps.candidate.outputs.version }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+          UPDATER: ${{ steps.candidate.outputs.updater }}
+        run: |
+          set -euo pipefail
+          if [ "$UPDATER" != "true" ]; then
+            echo "The candidate carries no signed updater artifacts, so no update can be delivered from it." >&2
+            exit 1
+          fi
+          bundle="$(ls release-assets/*.app.tar.gz | head -1)"
+          signature_file="${bundle}.sig"
+          if [ ! -f "$signature_file" ]; then
+            echo "No signature next to $(basename "$bundle"). An unsigned update is never published." >&2
+            exit 1
+          fi
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/$(basename "$bundle")"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg signature "$(cat "$signature_file")" \
+            --arg url "$url" \
+            '{version: $version, pub_date: $pub_date, platforms: {"darwin-aarch64": {signature: $signature, url: $url}}}' \
+            > latest.json
+          cat latest.json
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+          COMMIT: ${{ steps.candidate.outputs.commit }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # The tag is the source archive the AGPL offer points at, so it is
+          # created here at the exact commit and never moved afterwards.
+          notes="Hivemind Content Studio ${VERSION} (macOS, Apple Silicon)."
+          if [ "$PRERELEASE" = "true" ]; then
+            notes="${notes}"$'\n\n''Pre-release: downloadable, but the automatic-update channel is unchanged. Existing installs stay where they are.'
+          fi
+          flags=(--title "Hivemind Content Studio ${VERSION}" --notes "$notes" --target "$COMMIT")
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" "${flags[@]}"
+          shopt -s nullglob
+          assets=(release-assets/*.dmg release-assets/*.app.tar.gz release-assets/*.sig)
+          gh release upload "$TAG" "${assets[@]}"
+
+      # Last, and only for a real release: this is the step that actually
+      # delivers. Until it runs, the build is only an artifact.
+      - name: Move the update channel
+        if: ${{ !inputs.prerelease }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" latest.json
+          echo "latest.json published on ${TAG}. Existing installs will offer this update." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Say what was not moved
+        if: ${{ inputs.prerelease }}
+        run: |
+          echo "Pre-release published. **latest.json was not written**, so no existing install updates." >> "$GITHUB_STEP_SUMMARY"
