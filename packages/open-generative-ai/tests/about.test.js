@@ -75,7 +75,7 @@ test('notice packages group by licence, biggest first, unstated last', async () 
     assert.equal(groups[groups.length - 1].license, 'Unstated', 'unstated last');
 });
 
-test('the notices payload flattens python and every npm lockfile', async () => {
+test('the notices payload flattens python, npm, the Rust crates and the bundled binaries', async () => {
     const { allNoticePackages } = await importSrc('src/hub/views/AboutView.jsx');
     const all = allNoticePackages({
         python: { packages: [{ name: 'fastapi', version: '1', license: 'MIT' }] },
@@ -83,8 +83,12 @@ test('the notices payload flattens python and every npm lockfile', async () => {
             'packages/open-generative-ai': [{ name: 'react', version: '19', license: 'MIT' }],
             'packages/media-gateway': [{ name: 'next', version: '15', license: 'MIT' }],
         },
+        // Statically linked into the shipped binary, so their notices have to
+        // travel with it — and this page is where they travel.
+        rust: { packages: [{ name: 'tauri', version: '2', license: 'Apache-2.0 OR MIT' }] },
+        bundled: [{ name: 'Node.js', version: '22', license: 'MIT' }],
     });
-    assert.deepEqual(all.map((p) => p.name), ['fastapi', 'react', 'next']);
+    assert.deepEqual(all.map((p) => p.name), ['fastapi', 'react', 'next', 'tauri', 'Node.js']);
     // A build with no generated notices must produce an empty list, not a throw.
     assert.deepEqual(allNoticePackages(null), []);
     assert.deepEqual(allNoticePackages({}), []);

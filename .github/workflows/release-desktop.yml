@@ -107,7 +107,16 @@ jobs:
       - name: Identity must not have drifted
         run: |
           uv run --no-sync python -m hivemind_content_studio.identity --write
-          git diff --exit-code packages/open-generative-ai/electron/identity.json
+          # `--` so a future rename fails as a diff rather than as an argument
+          # parsing error. The path is the one identity.py writes; the Electron
+          # shell it used to name went with the Electron shell itself, and
+          # test/studio/test_identity.py is what keeps this from drifting again.
+          git diff --exit-code -- packages/open-generative-ai/identity.json
+
+      - name: The three version literals must agree with the dispatched version
+        env:
+          RELEASE_VERSION: ${{ steps.check.outputs.version }}
+        run: python3 scripts/check_version.py --expect "$RELEASE_VERSION"
 
   macos:
     name: macOS (Apple Silicon)
@@ -186,6 +195,13 @@ jobs:
           tar -xJf /tmp/ffmpeg-static.tar.xz -C "$target" --strip-components=1
           chmod +x "$target/ffmpeg" "$target/ffprobe"
           file "$target/ffmpeg"
+
+      # Which ffmpeg this is decides the licence of the whole download: a
+      # --enable-gpl build puts a source obligation on the DMG. The notices file
+      # has to name the build that is actually being staged, and this is the step
+      # that refuses rather than leaving it to a human to remember.
+      - name: The staged ffmpeg must be the one the notices describe
+        run: python3 scripts/generate_notices.py --check-ffmpeg vendor/ffmpeg/darwin-arm64/ffmpeg
 
       # PassBook is a git dependency. The wheel is vendored so the build needs no
       # VCS access; the checkout is fetched here at the exact commit uv.lock pins.
@@ -315,6 +331,7 @@ jobs:
       # both, tauri-action looks for an npm `tauri` script at projectPath and
       # fails on every platform with "Missing script: tauri".
       - name: Build the app
+        id: build
         uses: tauri-apps/tauri-action@v0
         env:
           APPLE_SIGNING_IDENTITY: ${{ steps.signing.outputs.signed == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
@@ -337,12 +354,49 @@ jobs:
             --target aarch64-apple-darwin
             ${{ steps.signing.outputs.updater == 'true' && ' ' || '--config src-tauri/no-updater.conf.json' }}
 
+      # cargo builds into the directory that holds src-tauri, which is `desktop/`
+      # here — not the repository root. Rather than repeat that path in three
+      # steps (where it silently rotted once already, when the shell moved out of
+      # the root and every step below kept looking in a directory that no longer
+      # existed), ask tauri-action where it actually put the bundles: every
+      # artifact it reports lives under `<target>/release/bundle/<kind>/`.
+      - name: Locate the bundle
+        env:
+          ARTIFACT_PATHS: ${{ steps.build.outputs.artifactPaths }}
+        run: |
+          set -euo pipefail
+          bundle="$(python3 - <<'PY'
+          import json, os, pathlib
+          try:
+              paths = json.loads(os.environ.get("ARTIFACT_PATHS") or "[]")
+          except ValueError:
+              paths = []
+          for item in paths if isinstance(paths, list) else []:
+              for parent in pathlib.PurePath(str(item)).parents:
+                  if parent.name == "bundle":
+                      print(parent)
+                      raise SystemExit(0)
+          PY
+          )"
+          if [ -z "$bundle" ]; then
+            # tauri-action reported nothing it could parse. Fall back to where
+            # this build is configured to put it, and let the check below fail
+            # loudly if that is wrong too.
+            bundle="desktop/src-tauri/target/aarch64-apple-darwin/release/bundle"
+          fi
+          if [ ! -d "$bundle" ]; then
+            echo "No bundle directory at ${bundle}. The build step's artifactPaths output is the authority on where it built; read it in the log above." >&2
+            exit 1
+          fi
+          echo "Bundle: ${bundle}"
+          echo "BUNDLE_DIR=${bundle}" >> "$GITHUB_ENV"
+
       - name: Staple the notarization ticket
         if: steps.signing.outputs.notarize == 'true'
         run: |
           set -euo pipefail
-          app="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)"
-          dmg="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' | head -1)"
+          app="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' | head -1)"
+          dmg="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' | head -1)"
           # tauri-action already submitted the app to notarytool; stapling is
           # what makes it launch on a machine that is offline.
           xcrun stapler staple "$app"
@@ -354,7 +408,7 @@ jobs:
         if: steps.signing.outputs.notarize == 'true'
         run: |
           set -euo pipefail
-          app="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)"
+          app="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' | head -1)"
           xcrun stapler validate "$app"
           # The assessment the user's Mac performs on first launch. Never
           # disabled: `--no-assess` is how an unopenable build ships.
@@ -371,8 +425,7 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/release-assets"
           mkdir -p "$out"
-          bundle="src-tauri/target/aarch64-apple-darwin/release/bundle"
-          find "$bundle" -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp {} "$out/" \;
+          find "$BUNDLE_DIR" -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp {} "$out/" \;
           label="signed"
           if [ "$SIGNED" != "true" ]; then
             label="UNSIGNED"

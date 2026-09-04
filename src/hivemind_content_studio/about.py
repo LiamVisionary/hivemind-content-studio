@@ -26,6 +26,7 @@ the Tauri shell can point at whatever it laid down in the bundle.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -39,6 +40,18 @@ from .identity import version_payload
 _CHANGELOG_HEADING = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})[^—\n]*—\s*(.+?)\s*$")
 
 WHATS_NEW_LIMIT = 5
+
+# The shape the panel reads when there is no generated file: every section the
+# generator writes, empty. Same keys, so the page renders "no dependency list"
+# rather than throwing on a missing one.
+_NO_NOTICES = {
+    "available": False,
+    "python": {"packages": []},
+    "npm": {},
+    "rust": {"packages": []},
+    "bundled": [],
+    "unresolved": [],
+}
 
 
 def docs_root() -> Path:
@@ -60,9 +73,9 @@ def notices() -> dict:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"available": False, "python": {"packages": []}, "npm": {}, "unresolved": []}
+        return copy.deepcopy(_NO_NOTICES)
     if not isinstance(loaded, dict):
-        return {"available": False, "python": {"packages": []}, "npm": {}, "unresolved": []}
+        return copy.deepcopy(_NO_NOTICES)
     return {"available": True, **loaded}
 
 

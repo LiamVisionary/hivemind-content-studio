@@ -22,20 +22,26 @@ the editable install points at.
 
 | # | Suite | Command | Expected |
 |---|---|---|---|
-| 1 | Studio frontend | `cd packages/open-generative-ai && node --test tests/*.test.js` | 1216 pass |
+| 1 | Studio frontend | `cd packages/open-generative-ai && node --test tests/*.test.js` | 1392 pass |
 | 2 | Canvas (comfyui-mobile) | `cd packages/comfyui-mobile && npx vitest run` | 945 pass, 129 files |
-| 3 | Studio control plane | `PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q test/studio` | 1218 pass |
-| 4 | Faceless engine | `PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q test --ignore=test/studio` | 634 pass, 9 skipped |
-| 5 | Media gateway | `cd packages/media-gateway && ../../.venv/bin/python -m pytest -q .` | 423 pass, 1 skipped |
+| 3 | Studio control plane | `PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q test/studio` | 1356 pass, 1 skipped |
+| 4 | Faceless engine | `PYTHONPATH=$PWD/src .venv/bin/python -m pytest -q test --ignore=test/studio` | 554 pass, 9 skipped |
+| 5 | Media gateway | `cd packages/media-gateway && ../../.venv/bin/python -m pytest -q .` | 459 pass, 1 skipped |
 
-Counts as of 2026-09-04. They are here so a suite that silently stops collecting
-is visible: "green" with 300 fewer tests is not green.
+Measured on this checkout on 2026-09-04. They are here so a suite that silently
+stops collecting is visible: "green" with 300 fewer tests is not green. Re-measure
+them when you change one, and say in the commit why a row moved.
+
+Row 4 moved **down** since the first version of this table, from 634 to 554, and
+that is accounted for: the Streamlit WebUI was deleted, and the seven
+`test_webui_*.py` files, `test_main.py` and `test_mpt_agent_skill.py` went with
+it (commit `630754b`).
 
 Two of these need something built or installed first — see
 [`../test/README.md`](../test/README.md) for the prerequisites and the
-environment-dependent skips. In particular, suite 3 fails four tests unless the
-studio frontend has been built (step 3 below), because those tests assert the
-served page *is* the studio.
+environment-dependent skips in rows 3-5. In particular, suite 3 fails four tests
+unless the studio frontend has been built (step 3 below), because those tests
+assert the served page *is* the studio.
 
 ## 2. The lint gate
 
@@ -61,21 +67,44 @@ npm run build:embedded    # studio dist/, Canvas dist/, gateway Next build
 
 Then re-run suite 3: the owner-gate and static-asset tests read the built bundle.
 
-## 4. Notices, identity and the updater
+## 4. Notices, identity, the version and the updater
 
 ```bash
-python3 scripts/generate_notices.py --check
-python3 -m hivemind_content_studio.identity --write && git diff --exit-code \
-  packages/open-generative-ai/electron/identity.json
-python3 scripts/check_updater_config.py             # config + plugin present
-python3 scripts/build_desktop_python.py            # dependency split + size
+.venv/bin/python scripts/generate_notices.py --check
+PYTHONPATH=$PWD/src .venv/bin/python -m hivemind_content_studio.identity --write \
+  && git diff --exit-code -- packages/open-generative-ai/identity.json
+.venv/bin/python scripts/check_version.py
+.venv/bin/python scripts/check_updater_config.py    # config + plugin present
+.venv/bin/python scripts/generate_gate_css.py --check   # sign-in gate stylesheet
+.venv/bin/python scripts/build_desktop_python.py   # dependency split + size
 ```
 
-`THIRD_PARTY_NOTICES.md` must carry no open distribution gate. The build script
-prints the desktop dependency set, what the `faceless-webui` split leaves out,
-and the size of each; it exits non-zero if `streamlit`, `streamlit-tour`,
-`azure-cognitiveservices-speech`, `dashscope` or `redis` has crept back into the
-bundled set.
+The interpreter is the project's, not whatever `python3` resolves to — these
+read `uv.lock` through `uv` and import the package.
+
+`generate_notices.py` describes the bundle from lockfiles: the `--extra desktop`
+set out of `uv.lock`, the three npm lockfiles, every crate in
+`desktop/src-tauri/Cargo.lock` (statically linked into the shipped binary), and
+the hand-written block for the three binaries no lockfile knows about. Licences
+are carried forward from the committed file and looked up afresh only for an
+entry it does not already carry, so `--check` answers the same here as it does
+in the preflight job, and a version bump is what forces a new lookup. Anything
+it could not resolve is listed in `unresolved` and shown on the About page —
+if a new package lands there, run the plain command (no `--check`) in a synced
+venv, with a cargo registry populated (`cargo fetch --manifest-path
+desktop/src-tauri/Cargo.toml`) for a new crate. `THIRD_PARTY_NOTICES.md` must carry no
+open distribution gate.
+
+`check_version.py` holds `desktop/src-tauri/Cargo.toml` and
+`desktop/src-tauri/tauri.conf.json` to `[project] version` in `pyproject.toml`.
+Bump all three together: preflight runs it with the version being dispatched and
+refuses a build whose bundle would be stamped with a version its tag does not
+carry.
+
+The build script prints the desktop dependency set, what the `faceless-webui`
+split leaves out, and the size of each; it exits non-zero if `streamlit`,
+`streamlit-tour`, `azure-cognitiveservices-speech`, `dashscope` or `redis` has
+crept back into the bundled set.
 
 ## 5. Cold boot to the sign-in gate
 
@@ -114,34 +143,41 @@ No suite can do these, because they are about what a person sees.
 
 ## 7. Packaging
 
-1. Dispatch **Release desktop (build only)** with the version (semver, no
+1. Bump `[project] version` in `pyproject.toml`, `desktop/src-tauri/Cargo.toml`
+   and `desktop/src-tauri/tauri.conf.json` to the version being released, and
+   merge that first — the build workflow builds the default branch as it stands
+   and writes no version into it.
+2. Dispatch **Release desktop (build only)** with the version (semver, no
    prefix — the tag it names is `studio-v<version>`). Preflight refuses a tag
-   that already exists, a stale notices file, a drifted identity, an updater
-   config that disagrees with `tauri.conf.json` or describes a plugin that is not
-   in the build, and a desktop dependency set that carries the Streamlit stack.
-   The macOS job then stages the bundle's resources and runs
+   that already exists, a version the three files disagree with, a stale notices
+   file, a drifted identity, an updater config that disagrees with
+   `tauri.conf.json` or describes a plugin that is not in the build, and a
+   desktop dependency set that carries the Streamlit stack. The macOS job then
+   stages the bundle's resources and runs
    `scripts/stage_desktop_resources.py --verify`, which refuses to bundle the
-   committed placeholders instead of the real runtimes.
-2. Download the artifact. Its name ends in `signed` or `UNSIGNED`; an
+   committed placeholders instead of the real runtimes, and refuses a staged
+   `ffmpeg` whose licence `docs/notices.json` does not record.
+3. Download the artifact. Its name ends in `signed` or `UNSIGNED`; an
    `UNSIGNED.txt` inside says which secrets were absent
    (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`
    for signing; `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` for notarization;
    `TAURI_SIGNING_PRIVATE_KEY` for the updater). Unsigned builds are for the
    person who built them: macOS refuses to open one, and promotion rejects it.
-3. Smoke-test the DMG on a **second** machine — install, launch, sign in, one
-   hosted generation, one restore, quit — and check again that no ComfyUI
-   process was killed on quit. **Press Download on a result and confirm a native
-   save sheet appears and the file is on disk afterwards.** This one is blocking,
-   not advisory: when the dialog/fs plugins are unreachable the browser fallback
-   reports success and writes nothing, and the one-time vault recovery key goes
-   through the same function (`docs/RELEASE.md` §2.5).
-4. Dispatch **Release desktop (promote)** with the build's run id and the
+4. Smoke-test the DMG on a **second** machine — install, launch, sign in, one
+   hosted generation, one restore, then **press Download on the result and
+   confirm a native save sheet appears and the file is on disk afterwards**
+   ([`RELEASE.md`](RELEASE.md) §2.5), quit, and check again that no ComfyUI
+   process was killed on quit. The Download check is blocking, not advisory:
+   when the dialog/fs plugins are unreachable the browser fallback reports
+   success and writes nothing, and the one-time vault recovery key goes through
+   the same function.
+5. Dispatch **Release desktop (promote)** with the build's run id and the
    approval string `promote-<run id>`. It refuses an unsigned or un-notarized
    candidate, publishes the release at the tag, and only then writes
    `latest.json`.
-5. A **pre-release** publishes a downloadable build and does **not** write
+6. A **pre-release** publishes a downloadable build and does **not** write
    `latest.json`. No existing install updates from it. That is the whole point:
-   a candidate that fails step 3 was never delivered to anyone.
+   a candidate that fails step 4 was never delivered to anyone.
 
 Rollback is editing `latest.json` on the release — one file, not un-shipping a
 build. The tag itself is the AGPL source offer and is never moved or deleted.
@@ -160,7 +196,7 @@ of them is ever printed, written into an artifact, or committed in any form.
 | `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The signed update manifest | No updater artifacts; nothing can be delivered to an install |
 
 The updater's **public** key is a config value in
-[`../src-tauri/updater.json`](../src-tauri/updater.json) and ships inside the
+[`desktop/src-tauri/updater.json`](../desktop/src-tauri/updater.json) and ships inside the
 app; `tauri.conf.json` must agree with it, which
 `scripts/check_updater_config.py` enforces. Get the pair from
 `cargo tauri signer generate`, commit only the public half, and store the

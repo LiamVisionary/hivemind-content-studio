@@ -302,8 +302,14 @@ Three gates, because this failed silently once:
 
 **v1 is macOS 14+ on Apple Silicon only.** That is what the engines assume: MLX
 is Apple Silicon, the ComfyUI lanes are tuned for MPS, and every performance
-number in this repository was measured on an M-series machine. An Intel Mac gets
-a clear refusal at install time, not a slow app.
+number in this repository was measured on an M-series machine.
+
+A DMG is drag-to-Applications with no installer, so **nothing refuses an Intel
+Mac at install time**: the build is single-arch `aarch64-apple-darwin`, the copy
+succeeds, and macOS itself refuses it at launch. `minimumSystemVersion` is an OS
+gate, not an architecture one. What states the requirement is the release
+itself — `release-desktop-promote.yml` titles it "(macOS, Apple Silicon)" and
+every asset is named `darwin-aarch64`.
 
 Windows and Linux are **not built**. Their electron-builder targets (NSIS,
 deb/AppImage) went with the Electron shell; Tauri can produce both, and the
@@ -333,21 +339,33 @@ two disagree, and if the bundle id is typed anywhere else.
 
 **Signing**: Developer ID Application, hardened runtime, `--timestamp`, then
 `notarytool submit --wait` and `stapler staple` on the `.dmg`. The bundled Python
-and Node binaries and every native wheel are signed as part of the deep sign;
-this is the step most likely to fail late, so it runs in CI on every tag, not
-only on release tags.
+and Node binaries and every native wheel are signed as part of the deep sign.
+It runs in `release-desktop.yml`, which is dispatch-only — there is no tag
+trigger and `ci.yml` signs nothing — so an unsigned dispatch is how you prove
+the bundle assembles before a certificate exists.
 
 **Updates**: `tauri-plugin-updater` against a signed `latest.json` on the release
-host. Promotion is a **separate, manual step** from tagging: a tag builds and
-signs artifacts, and a human then promotes `latest.json` to point at them. A
-release that fails smoke-testing is therefore never delivered to anyone, and
-rollback is editing one JSON file rather than un-shipping a build. The updater's
-public key lives in `tauri.conf.json`; its private key never enters the repo and
-is read from the signing environment.
+host. Promotion is a **separate, manual step**, and it is the step that both
+tags and delivers: `release-desktop.yml` only produces artifacts, and a human
+then dispatches `release-desktop-promote.yml`, which creates the tag at the
+built commit, publishes the release and finally moves `latest.json`. A build
+that fails smoke-testing is therefore never tagged and never delivered to
+anyone, and rollback is editing one JSON file rather than un-shipping a build.
+The updater's public key and endpoint live in `desktop/src-tauri/updater.json`,
+which `scripts/check_updater_config.py` holds `tauri.conf.json` to; the private
+key never enters the repo and is read from the signing environment.
 
-**Notices**: `python3 scripts/generate_notices.py` regenerates `docs/notices.json`
-(runtime Python distributions plus the three npm lockfiles) and
-`--check` fails the build when it is stale. `docs/notices.json`,
+**Notices**: `scripts/generate_notices.py` regenerates `docs/notices.json` and
+`--check` fails the build when it is stale. Every set in it is read from a
+committed lockfile rather than from the machine that ran it — the `--extra
+desktop` set out of `uv.lock`, the three npm lockfiles, and every crate in
+`desktop/src-tauri/Cargo.lock`, which are statically linked into the shipped
+binary and whose MIT and Apache-2.0 notices therefore have to travel with it —
+plus a hand-written block for the three binaries no lockfile knows about (the
+python-build-standalone interpreter, Node, and the static ffmpeg pair). The
+ffmpeg build decides the licence of the whole download, so
+`--check-ffmpeg <path>` runs in the macOS lane and refuses to stage a pair
+`docs/notices.json` does not describe. `docs/notices.json`,
 `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md` and `LICENSE` ship inside the bundle
 (`CONTENT_STUDIO_DOCS_DIR` points the app at wherever they land). The About page
 — nav key `about`, and the version chip in the topbar — renders them from
@@ -357,11 +375,19 @@ headlines. That page is what satisfies the AGPL's interactive notice and its
 offer of source, and `test/studio/test_repo_contract.py` fails the build if the
 notices file still carries an open distribution gate.
 
-The version itself has exactly one home: `[project] version` in `pyproject.toml`.
-Python reads it through package metadata; the JavaScript side reads the same line
-through `packages/open-generative-ai/scripts/projectVersion.cjs`, which vite
-(`__APP_VERSION__`), electron-builder and the .deb packager all use. The four
-package.json files no longer carry versions of their own. `app.__version__` is
+The version has one home and two mirrors. The home is `[project] version` in
+`pyproject.toml`: Python reads it through package metadata, and the JavaScript
+side reads the same line through
+`packages/open-generative-ai/scripts/projectVersion.cjs`, which vite
+(`__APP_VERSION__`) uses. The four package.json files carry no versions of their
+own. The mirrors exist because cargo and Tauri each read their own file —
+`desktop/src-tauri/Cargo.toml` and `desktop/src-tauri/tauri.conf.json`, whose
+`version` wins over Cargo's — and `scripts/check_version.py` is what holds them
+to pyproject. Preflight runs it with the version being dispatched, so a release
+of 0.2.0 from a tree that still says 0.1.0 stops before anything is built: the
+workflow writes no version into the tree, and a bundle stamped with a version its
+tag does not carry would make the About page's source offer point at a tag that
+was never created. `app.__version__` is
 the exception and stays: it is the embedded MoneyPrinterTurbo engine's version
 and the marker the upstream sync compares against.
 
@@ -434,18 +460,23 @@ them.
 
 ## 7. Release checklist
 
-The full list, with the exact command and expected count for each of the five
-suites, the lint gate, the manual owner-gate and vault smoke, and the packaging
-and promotion steps, is [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md). It is one
-list, so it does not drift from a second copy here. The shape of it:
+The list is [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) — the exact command
+and expected count for each of the five suites, the lint gate, the notices,
+identity, version and updater gates, the manual owner-gate and vault smoke, and
+the packaging and promotion steps. It is one list, and this section deliberately
+does not restate it: the summary that used to live here had drifted into telling
+you to tag before building, which every dispatch would have refused (preflight
+fails when the tag already exists, and `release-desktop-promote.yml` is what
+creates it, after the smoke test).
 
-1. `uv run pytest test` and `uv run pytest test/studio` green; `npm run test:embedded` green; `cd packages/comfyui-mobile && npx vitest run` green.
-2. `python3 scripts/generate_notices.py --check` clean, and `THIRD_PARTY_NOTICES.md` carries no open distribution gate. (It carries none as of 2026-09-03; the donor-checkout retirement gates in [`OPERATIONS.md`](OPERATIONS.md) are the older list.)
-3. `python -m hivemind_content_studio.identity --write` produces no diff — identity has not drifted from the generated JSON, and `python3 scripts/generate_gate_css.py --check` is clean — the sign-in gate's stylesheet still matches the design tokens.
-4. A cold start of the packaged app on a machine with no repository checkout, no `uv`, no Node and no ComfyUI reaches the studio, signs in with a passkey, and shows the local lanes as "not set up" rather than as errors.
-5. Tag `studio-v0.x`, build, sign, notarize, staple.
-6. Smoke-test the built DMG on a second machine: install, launch, sign in, one hosted generation, one restore, **press Download on the result and confirm a native save sheet appears and writes the file** (§2.5 — blocking, not advisory: the anchor fallback reports success while writing nothing), quit — and confirm no ComfyUI process was killed on quit.
-7. Promote `latest.json`. This is the step that ships it; until it runs, the tag is only an artifact.
+Two things worth knowing before you open it:
+
+* **Bump the version first.** Nothing in the workflows writes it. The three
+  literals in §4 have to be merged at the version you are about to dispatch, or
+  preflight stops the build.
+* **Building is not releasing.** `release-desktop.yml` produces an artifact and
+  nothing else — no tag, no release, no `latest.json`. Promotion is a separate
+  dispatch by a human, and it is the step that ships.
 
 ## 8. Still open
 
@@ -454,6 +485,6 @@ Named here rather than left implicit:
 * **Nothing here has been launched as a `.app`.** `cargo check` and `cargo test` pass and the supervisor's logic is unit-tested, but the shell has never been built into a bundle and double-clicked. Step 4 of the checklist is the first time that happens.
 * **The bundled interpreter is not yet relocatable.** `bundle.resources` now names every part of §1's table and `scripts/stage_desktop_resources.py` assembles them (§2.6), but the release workflow calls `scripts/build_desktop_python.py` with no `--python`, so `uv venv` picks the runner's own interpreter and `venv/bin/python` symlinks a path that does not exist on a user's machine. A python-build-standalone 3.12 arm64 interpreter has to be downloaded on the runner and passed to `--python`, and the interpreter itself copied into the staged tree. `--verify` catches the dangling symlink (a broken link does not `exist()`), so this fails the build rather than shipping.
 * A release also needs a static arm64 ffmpeg/ffprobe pair on the runner — repository variable `DESKTOP_FFMPEG_ARCHIVE_URL`, or `vendor/ffmpeg/darwin-arm64` locally. Neither is a secret; both are public download URLs.
-* **No updater key pair has been generated** (`cargo tauri signer generate` — the owner's step, and the private half never enters this repository), so `src-tauri/updater.json` carries an empty `pubkey` and the build lane produces UNSIGNED artifacts. The plugin itself is now in the build: `tauri-plugin-updater` is a dependency, registered in `lib.rs`, and granted `updater:default` in the capability, and `check_updater_config.py` asserts all three — it used to compare two JSON files and call a configuration with no plugin behind it healthy. `scripts/check_updater_config.py --require-key` is the gate that keeps such a build from being promoted, and it holds `tauri.conf.json` to that same one source for the updater endpoint and public key.
+* **No updater key pair has been generated** (`cargo tauri signer generate` — the owner's step, and the private half never enters this repository), so `desktop/src-tauri/updater.json` carries an empty `pubkey` and the build lane produces UNSIGNED artifacts. The plugin itself is now in the build: `tauri-plugin-updater` is a dependency, registered in `lib.rs`, and granted `updater:default` in the capability, and `check_updater_config.py` asserts all three — it used to compare two JSON files and call a configuration with no plugin behind it healthy. `scripts/check_updater_config.py --require-key` is the gate that keeps such a build from being promoted, and it holds `tauri.conf.json` to that same one source for the updater endpoint and public key.
 * The frontend still hard-codes `:8788` for the Canvas iframe and `:8796` for the MCP page. The shell prefers those ports and attaches to whatever already answers on them, so a collision degrades one panel rather than boot — but the discovery half of finding `startup-08` is unwritten.
 * The packaged app's configuration surface (the ~dozen env names and five hard-coded loopback ports the control API resolves by convention) still has no single settings object; see finding `cp-config-surface-for-packaging`.* Windows and Linux need bundled runtimes and a signing chain before their lanes can be re-enabled.

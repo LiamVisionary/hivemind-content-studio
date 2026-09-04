@@ -14,9 +14,14 @@ turned into. Read §2 there before changing any of the three decisions below.
    packaged app coexists with a hand-started `scripts/hivemind-studio-stack`
    instead of starting a second copy. If a stranger holds the port, the shell
    steps around it to the next free port in 8766–8785, and never signals it.
-2. **Starts five sidecars** with an explicit environment each: the control API
-   and the media gateway (Python), the Canvas frontend, the local-inference
-   bridge and the agent MCP (Node). The names in those env blocks are the ones
+2. **Starts three sidecars** with an explicit environment each: the control API
+   and the media gateway (Python), and one Node process (`node-services.mjs`)
+   that serves all three Node surfaces — the Canvas frontend, the
+   local-inference bridge and the agent MCP — under `/canvas`, `/bridge` and
+   `/agent`, while still answering on their old ports 8788, 8794 and 8796.
+   `service_plans` in `src/services.rs` is that list, and
+   `the_three_node_surfaces_are_one_child_that_keeps_the_old_ports` is what
+   holds it to three. The names in those env blocks are the ones
    `scripts/hivemind-studio-stack` already passes, so the packaged app and the
    developer stack describe the same process tree.
 3. **Shows a boot screen** (`splash/index.html`) listing every service with its

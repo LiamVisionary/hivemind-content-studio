@@ -53,10 +53,16 @@ export function groupByLicense(packages) {
   });
 }
 
+// Everything the bundle carries, in one flat list: the pinned Python set, each
+// npm lockfile, the Rust crates statically linked into the shell, and the
+// binaries the DMG carries that no lockfile knows about. A crate whose notice is
+// not shown here is a crate whose notice does not ship.
 export function allNoticePackages(notices) {
   const python = notices?.python?.packages || [];
   const npm = Object.values(notices?.npm || {}).flat();
-  return [...python, ...npm];
+  const rust = notices?.rust?.packages || [];
+  const bundled = notices?.bundled || [];
+  return [...python, ...npm, ...rust, ...bundled];
 }
 
 function Row({ label, children }) {
