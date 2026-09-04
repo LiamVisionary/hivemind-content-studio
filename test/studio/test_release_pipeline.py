@@ -309,3 +309,99 @@ def test_the_test_readme_describes_this_project() -> None:
     # The environment-dependent ones, so a red run is read correctly.
     for gate in ("MPT_RUN_INTEGRATION_TESTS", "MPT_TEST_REDIS_HOST", "ffmpeg"):
         assert gate in readme, gate
+
+
+def test_every_path_a_preflight_gate_checks_exists_in_the_tree() -> None:
+    """Preflight refused every dispatch by checking a file that was deleted.
+
+    The identity gate named `packages/open-generative-ai/electron/identity.json`
+    and exited 128 with "unknown revision or path not in the working tree" — the
+    Electron shell went, and that path went with it, so the gate failed for a
+    reason that had nothing to do with identity drifting. Any path a gate names
+    has to exist, and the `--` separator has to be there so a future rename
+    fails as a diff rather than as an argument-parsing error.
+    """
+    import re
+
+    text = BUILD_WORKFLOW.read_text(encoding="utf-8")
+    named = re.findall(r"diff --exit-code(?: --)? ([^\s\\]+)", text)
+    assert named, "no identity gate in the build workflow at all"
+    for path in named:
+        assert (ROOT / path).exists(), f"the preflight checks {path}, which is not in the tree"
+    assert "diff --exit-code -- " in text, "add `--` before the path"
+    assert "electron" not in text, "the Electron shell is gone; nothing may name it"
+
+
+def test_the_macos_lane_reads_the_bundle_where_tauri_action_builds_it() -> None:
+    """cargo builds into `desktop/src-tauri/target`, not `src-tauri/target`.
+
+    Three steps looked at the repository root, where there is no `src-tauri` at
+    all, so a signed run failed at stapling and an unsigned one collected no
+    artifact. The path is derived from tauri-action's own `artifactPaths` output
+    now, in one step, rather than written out three times.
+    """
+    steps = _steps(_load_workflow(BUILD_WORKFLOW), "macos")
+    build = [i for i, step in enumerate(steps) if step.get("uses", "").startswith("tauri-apps/tauri-action")]
+    assert build, "no tauri-action step"
+    assert steps[build[0]].get("id") == "build", "the action needs an id for its outputs to be readable"
+
+    locate = [i for i, step in enumerate(steps) if "BUNDLE_DIR=" in (step.get("run") or "")]
+    assert locate, "nothing resolves the bundle directory"
+    assert min(locate) > build[0], "the bundle is located before it is built"
+    assert "steps.build.outputs.artifactPaths" in json.dumps(steps[locate[0]].get("env") or {})
+
+    consumers = {step.get("name") for step in steps if "$BUNDLE_DIR" in (step.get("run") or "")}
+    assert {"Staple the notarization ticket", "Ask Gatekeeper", "Collect the artifacts"} <= consumers, consumers
+
+    # Nothing may reach for a root-relative src-tauri: there is none.
+    assert not (ROOT / "src-tauri").exists(), "if this ever exists, revisit the assertion below"
+    for step in steps:
+        for line in (step.get("run") or "").splitlines():
+            stripped = line.strip().strip('"')
+            assert not stripped.startswith("src-tauri/target"), f"{step.get('name')}: {line.strip()}"
+            assert "=src-tauri/target" not in stripped, f"{step.get('name')}: {line.strip()}"
+            assert '"src-tauri/target' not in stripped, f"{step.get('name')}: {line.strip()}"
+            assert " src-tauri/target" not in stripped, f"{step.get('name')}: {line.strip()}"
+
+
+def test_the_version_gate_runs_before_anything_is_built() -> None:
+    """A bundle stamped 0.1.0 cannot be shipped as 0.2.0.
+
+    The workflow writes no version into the tree, so the only safe thing it can
+    do is refuse when the dispatched version and the three literals disagree.
+    """
+    steps = _steps(_load_workflow(BUILD_WORKFLOW), "preflight")
+    gate = [step for step in steps if "check_version.py" in (step.get("run") or "")]
+    assert gate, "preflight never checks the version it was asked to build"
+    assert "--expect" in gate[0]["run"]
+
+    checker = _module("scripts/check_version.py")
+    assert checker.check() == [], checker.check()
+    assert checker.check(expect="99.0.0"), "the gate accepts a version the tree does not carry"
+    assert set(checker.mirrors().values()) == {checker.source_version()}
+
+
+def test_the_staged_ffmpeg_must_be_the_one_the_notices_describe() -> None:
+    """The archive URL is a repository variable; the licence rides with it."""
+    steps = _steps(_load_workflow(BUILD_WORKFLOW), "macos")
+    stage = [i for i, step in enumerate(steps) if "FFMPEG_ARCHIVE_URL" in json.dumps(step.get("env") or {})]
+    gate = [i for i, step in enumerate(steps) if "--check-ffmpeg" in (step.get("run") or "")]
+    assert stage and gate, "ffmpeg is staged with no licence gate behind it"
+    assert min(gate) > min(stage)
+
+
+def test_the_release_documents_link_to_files_that_exist() -> None:
+    """A checklist whose links resolve to nothing is a checklist nobody follows.
+
+    The updater link pointed at `../src-tauri/updater.json`, which from `docs/`
+    is the repository root — where there is no `src-tauri`.
+    """
+    import re
+
+    for relative in ("docs/RELEASE.md", "docs/RELEASE_CHECKLIST.md", "desktop/README.md"):
+        document = ROOT / relative
+        for target in re.findall(r"\]\(([^)#\s]+)\)", document.read_text(encoding="utf-8")):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            resolved = (document.parent / target.split("#", 1)[0]).resolve()
+            assert resolved.exists(), f"{relative} links to {target}, which resolves to nothing"

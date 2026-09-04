@@ -95,3 +95,29 @@ def test_version_payload_names_the_product_its_licence_and_its_source() -> None:
     assert set(payload) == {"product", "version", "commit", "license", "source_url", "build_date"}
     # No machine names, no paths, no tokens: this route is unauthenticated.
     assert "/Users/" not in json.dumps(payload)
+
+
+def test_the_desktop_shells_version_literals_agree_with_pyproject() -> None:
+    """One version, three files that each have to carry it.
+
+    Tauri reads `version` from tauri.conf.json (which wins over Cargo's), cargo
+    reads its own, and everything Python and JavaScript reads pyproject through
+    package metadata. Nothing bound them together, so a release dispatched as
+    0.2.0 would have produced a bundle stamped 0.1.0 and an About page offering
+    source at a tag that was never created. `scripts/check_version.py` is the
+    gate; the release workflow runs it with the dispatched version.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_version", ROOT / "scripts" / "check_version.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.check() == []
+    source = module.source_version()
+    assert source, "pyproject.toml must carry the version"
+    for path, found in module.mirrors().items():
+        assert found == source, f"{path} says {found}, pyproject says {source}"
+    # The gate has to actually refuse a disagreement, or it is decoration.
+    assert module.check(expect="99.99.99")

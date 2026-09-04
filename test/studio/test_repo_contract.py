@@ -95,7 +95,7 @@ def test_every_bundled_font_has_a_licence_row_in_its_notices_file() -> None:
 
 
 def test_the_notices_file_has_no_unresolved_distribution_gate() -> None:
-    """`docs/RELEASE.md` §7 step 2 is a release gate; this is that check, in code.
+    """`docs/RELEASE_CHECKLIST.md` §4 is a release gate; this is that check, in code.
 
     The notices file used to end three entries with "confirm before making this
     repository public" and "review before commercial redistribution". Those are

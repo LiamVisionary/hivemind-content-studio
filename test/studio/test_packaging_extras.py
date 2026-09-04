@@ -133,18 +133,123 @@ def test_release_document_names_every_shipped_process_and_the_three_decisions() 
     assert "scripts/generate_notices.py" in release
 
 
-def test_notices_bundle_exists_and_covers_the_three_npm_packages() -> None:
-    # Not an equality check against a fresh run: the Python half describes
-    # whichever interpreter generated it, so a dev box and CI legitimately
-    # differ. `scripts/generate_notices.py --check` is the release-time gate
-    # (docs/RELEASE.md §7); this asserts the shape the About panel will read.
+def test_notices_bundle_covers_every_ecosystem_the_bundle_carries() -> None:
+    # The shape the About panel reads. Every set here is lockfile-derived, so it
+    # is the same on any machine — it used to enumerate the running interpreter's
+    # installed distributions, which meant the release gate
+    # (`scripts/generate_notices.py --check`, RELEASE_CHECKLIST §4) could not be
+    # green locally and in CI at once, and the panel over-reported the bundle by
+    # a third.
     import json
 
     notices = json.loads((ROOT / "docs" / "notices.json").read_text(encoding="utf-8"))
-    assert notices["schema_version"] == 1
+    assert notices["schema_version"] == 2
     assert notices["scope"] == "runtime"
     assert notices["project"]["license"] == "AGPL-3.0-or-later"
     assert notices["python"]["packages"], "no Python distributions recorded"
+    assert "uv.lock" in notices["python"]["source"], "the Python set must come from the lock, not the machine"
     for relative in ("packages/open-generative-ai", "packages/comfyui-mobile", "packages/media-gateway"):
         assert notices["npm"][relative], relative
+    # The crates are statically linked into the shipped binary, and MIT and
+    # Apache-2.0 both ask for their notices to travel with it.
+    assert notices["rust"]["source"].endswith("Cargo.lock")
+    assert len(notices["rust"]["packages"]) > 100, "regenerate: Cargo.lock has hundreds of crates"
+    assert all(row["name"] and row["version"] for row in notices["rust"]["packages"])
+    # The three binaries the DMG carries that are in no lockfile at all.
+    bundled = {row["name"] for row in notices["bundled"]}
+    assert any("CPython" in name for name in bundled), bundled
+    assert any("Node" in name for name in bundled), bundled
+    assert any("ffmpeg" in name for name in bundled), bundled
     assert isinstance(notices["unresolved"], list)
+
+
+def test_the_python_notices_are_the_set_the_bundle_installs() -> None:
+    """Not the developer's venv: the packages `--extra desktop` pins.
+
+    `scripts/build_desktop_python.py` freezes that same set into the bundle, so
+    the two have to agree or the About panel is describing a different app than
+    the one the user downloaded.
+    """
+    import json
+
+    notices = json.loads((ROOT / "docs" / "notices.json").read_text(encoding="utf-8"))
+    recorded = {row["name"] for row in notices["python"]["packages"]}
+    # The dev-only tools are the tell: they are installed on every developer
+    # machine and ship in nothing.
+    assert not recorded & {"pytest", "ruff", "coverage"}, "dev tools are not part of the bundle"
+    # And the five the faceless-webui extra holds back.
+    assert not recorded & {"streamlit", "dashscope", "redis"}, "the Streamlit stack is not in the desktop set"
+    assert "fastapi" in recorded and "uvicorn" in recorded
+
+
+def _generate_notices():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("generate_notices", ROOT / "scripts" / "generate_notices.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_notices_file_is_the_same_on_any_machine() -> None:
+    """`--check` has to be able to be green locally and in CI at once.
+
+    It could not be while the Python half enumerated installed distributions:
+    the developer venv answered 128 packages and a CI sync answered ~101, so the
+    committed file was stale for whichever machine did not write it. The sets
+    come from lockfiles now and the licences are carried forward from the
+    committed file, so regenerating changes nothing until a lock does.
+    """
+    import json
+    import shutil
+
+    if shutil.which("uv") is None:
+        import pytest
+
+        pytest.skip("uv is not on PATH; the Python set is read from uv.lock through it")
+
+    module = _generate_notices()
+    fresh = module.build_notices()
+    committed = json.loads((ROOT / "docs" / "notices.json").read_text(encoding="utf-8"))
+    for key in fresh:
+        if key == "generated_at":  # moves every day; not a staleness signal
+            continue
+        assert fresh[key] == committed.get(key), f"docs/notices.json is stale in {key}"
+
+
+def test_a_bundled_binary_cannot_be_staged_without_a_licence(tmp_path: Path) -> None:
+    """The ffmpeg pair is fetched from a repository variable, not from this tree.
+
+    Which build it is decides the licence of the whole DMG, so the release
+    workflow asks this before staging it rather than leaving it to a human.
+    """
+    import json
+
+    module = _generate_notices()
+    notices = json.loads((ROOT / "docs" / "notices.json").read_text(encoding="utf-8"))
+    binary = tmp_path / "ffmpeg"
+    binary.write_text("#!/bin/sh\necho 'configuration: --enable-gpl --enable-libx264'\n", encoding="utf-8")
+    binary.chmod(0o755)
+
+    unrecorded = tmp_path / "notices-unrecorded.json"
+    unrecorded.write_text(json.dumps(notices), encoding="utf-8")
+    problems = module.check_ffmpeg(binary, unrecorded)
+    assert problems and "no licence" in problems[0], problems
+
+    lgpl = json.loads(json.dumps(notices))
+    for row in lgpl["bundled"]:
+        if "ffmpeg" in row["name"]:
+            row["license"] = "LGPL-2.1-or-later"
+    recorded = tmp_path / "notices-lgpl.json"
+    recorded.write_text(json.dumps(lgpl), encoding="utf-8")
+    problems = module.check_ffmpeg(binary, recorded)
+    assert problems and "--enable-gpl" in problems[0], problems
+
+    gpl = json.loads(json.dumps(lgpl))
+    for row in gpl["bundled"]:
+        if "ffmpeg" in row["name"]:
+            row["license"] = "GPL-3.0-or-later"
+    agrees = tmp_path / "notices-gpl.json"
+    agrees.write_text(json.dumps(gpl), encoding="utf-8")
+    assert module.check_ffmpeg(binary, agrees) == []

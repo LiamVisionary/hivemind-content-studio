@@ -170,7 +170,10 @@ jobs:
           set -euo pipefail
           # The tag is the source archive the AGPL offer points at, so it is
           # created here at the exact commit and never moved afterwards.
-          notes="Hivemind Content Studio ${VERSION} (macOS, Apple Silicon)."
+          # The DMG cannot refuse an Intel Mac or an older macOS itself — it is
+          # drag-to-Applications, and the refusal is macOS's at first launch. So
+          # the requirement is stated where somebody reads it before downloading.
+          notes="Hivemind Content Studio ${VERSION} — macOS 14 or later, Apple Silicon only. It will not run on an Intel Mac."
           if [ "$PRERELEASE" = "true" ]; then
             notes="${notes}"$'\n\n''Pre-release: downloadable, but the automatic-update channel is unchanged. Existing installs stay where they are.'
           fi
