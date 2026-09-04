@@ -12,8 +12,8 @@ import tempfile
 import uuid
 import shutil
 from pathlib import Path
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+from urllib.request import Request
+from urllib.error import HTTPError
 
 from gateway import config, graphs as _graphs, history as _history, jobs, lanes, loras as _loras, media, models, net, promptroutes, util, workflow_index
 

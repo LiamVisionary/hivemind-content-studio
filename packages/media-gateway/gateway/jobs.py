@@ -12,7 +12,7 @@ import time
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, urlencode, unquote
+from urllib.parse import urlparse
 
 from gateway import config, history, lanes, media as _media, native_mlx, net, promptroutes, util, workflow_index
 

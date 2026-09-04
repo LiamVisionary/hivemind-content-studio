@@ -9,7 +9,7 @@ import sys
 import zlib
 import shutil
 from pathlib import Path
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from gateway import config, history, jobs, lanes, loras as _loras, native_mlx, net, util
 
@@ -1513,7 +1513,8 @@ def _ltx_snap_render_dimensions(width, height, *, single_stage=False):
     on one agreed size.
     """
     modulus = 32 if single_stage else 64
-    snap = lambda value: max(modulus, (int(value) // modulus) * modulus)
+    def snap(value):
+        return max(modulus, (int(value) // modulus) * modulus)
     return snap(width), snap(height)
 
 
@@ -2009,7 +2010,6 @@ def embed_workflow_text_chunk(png_path, workflow):
         pos = data.rfind(b'IEND')
         if pos < 4:
             return False
-        chunk_start = pos - 4
         # Replace an existing workflow tEXt chunk if present; otherwise insert before IEND.
         off = len(signature)
         out = bytearray(signature)

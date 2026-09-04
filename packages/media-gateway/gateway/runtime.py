@@ -5,7 +5,7 @@ import signal
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 
 from gateway import config, history, http, jobs, media, promptroutes, restore, util, workflow_index
 

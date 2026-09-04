@@ -10,8 +10,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, urlencode, unquote
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qs, urlparse, urlencode
+from urllib.request import Request
 from urllib.error import HTTPError, URLError
 
 from gateway import config, history, loras as _loras, net, util
@@ -418,14 +418,22 @@ def validate_civitai_expected_type(version, expected_type=None):
 def comfy_dir_for_civitai(model_type, file_name=''):
     mt = (model_type or '').lower().replace(' ', '')
     name = (file_name or '').lower()
-    if 'lora' in mt or 'lycoris' in mt: return config.COMFY / 'models' / 'loras'
-    if 'checkpoint' in mt: return config.COMFY / 'models' / 'checkpoints'
-    if 'textualinversion' in mt or 'embedding' in mt: return config.COMFY / 'models' / 'embeddings'
-    if mt == 'vae' or 'vae' in name: return config.COMFY / 'models' / 'vae'
-    if 'controlnet' in mt or 'control' in mt: return config.COMFY / 'models' / 'controlnet'
-    if 'upscaler' in mt or 'upscale' in mt or 'esrgan' in name: return config.COMFY / 'models' / 'upscale_models'
-    if 'motion' in mt or 'animatediff' in mt: return config.COMFY / 'models' / 'animatediff_models'
-    if 'clip' in mt or 'textencoder' in mt: return config.COMFY / 'models' / 'text_encoders'
+    if 'lora' in mt or 'lycoris' in mt:
+        return config.COMFY / 'models' / 'loras'
+    if 'checkpoint' in mt:
+        return config.COMFY / 'models' / 'checkpoints'
+    if 'textualinversion' in mt or 'embedding' in mt:
+        return config.COMFY / 'models' / 'embeddings'
+    if mt == 'vae' or 'vae' in name:
+        return config.COMFY / 'models' / 'vae'
+    if 'controlnet' in mt or 'control' in mt:
+        return config.COMFY / 'models' / 'controlnet'
+    if 'upscaler' in mt or 'upscale' in mt or 'esrgan' in name:
+        return config.COMFY / 'models' / 'upscale_models'
+    if 'motion' in mt or 'animatediff' in mt:
+        return config.COMFY / 'models' / 'animatediff_models'
+    if 'clip' in mt or 'textencoder' in mt:
+        return config.COMFY / 'models' / 'text_encoders'
     return config.COMFY / 'models' / util.safe_name(model_type or 'civitai')
 
 
@@ -439,9 +447,12 @@ def current_base_models():
         # is "ZImageTurbo". The human-facing spelling "Z-Image" only returns
         # a tiny older slice of results.
         vals += ['ZImageTurbo']
-    if 'flux' in names: vals += ['Flux.1 D', 'Flux.1 Dev', 'Flux.1 Schnell', 'Flux']
-    if 'sd_xl' in names or 'sdxl' in names or 'illustrious' in names: vals += ['SDXL 1.0', 'Illustrious', 'Pony']
-    if 'sd15' in names or 'v1-5' in names or '1.5' in names: vals += ['SD 1.5']
+    if 'flux' in names:
+        vals += ['Flux.1 D', 'Flux.1 Dev', 'Flux.1 Schnell', 'Flux']
+    if 'sd_xl' in names or 'sdxl' in names or 'illustrious' in names:
+        vals += ['SDXL 1.0', 'Illustrious', 'Pony']
+    if 'sd15' in names or 'v1-5' in names or '1.5' in names:
+        vals += ['SD 1.5']
     if not vals:
         vals = ['ZImageTurbo']
     # Civitai uses inconsistent spellings for this base in different places.
@@ -544,10 +555,10 @@ def local_loras():
         rel = str(p.relative_to(root))
         out.append({'id': rel, 'name': p.name, 'path': str(p), 'baseModel': base or 'Unknown/local', 'metadata': meta, 'selected': False, 'strength': 1.0})
     selected = {x.get('id'): x for x in load_selected_loras()}
-    for l in out:
-        if l['id'] in selected:
-            l['selected'] = True
-            l['strength'] = float(selected[l['id']].get('strength', 1.0))
+    for lora in out:
+        if lora['id'] in selected:
+            lora['selected'] = True
+            lora['strength'] = float(selected[lora['id']].get('strength', 1.0))
     out.sort(key=lambda x: (not x['selected'], x['name'].lower()))
     return out
 
@@ -559,7 +570,7 @@ def load_selected_loras():
         items = json.loads(SELECTED_LORAS_FILE.read_text())
     except Exception:
         return []
-    valid = {l['id']: l for l in local_loras_unfiltered()}
+    valid = {lora['id']: lora for lora in local_loras_unfiltered()}
     out=[]
     for item in items:
         lid = item.get('id')
@@ -571,9 +582,11 @@ def load_selected_loras():
 def local_loras_unfiltered():
     root = config.COMFY / 'models' / 'loras'
     out=[]
-    if not root.exists(): return out
+    if not root.exists():
+        return out
     for p in root.rglob('*'):
-        if not p.is_file() or p.suffix.lower() not in {'.safetensors','.ckpt','.pt','.pth'}: continue
+        if not p.is_file() or p.suffix.lower() not in {'.safetensors','.ckpt','.pt','.pth'}:
+            continue
         meta = read_model_metadata(p)
         base = meta.get('baseModel') or meta.get('base_model') or meta.get('modelVersion',{}).get('baseModel') or ''
         out.append({'id': str(p.relative_to(root)), 'name': p.name, 'path': str(p), 'baseModel': base, 'metadata': meta})
@@ -1018,7 +1031,8 @@ def download_civitai_version(version_id, file_id=None, progress_cb=None, token_o
                         cancelled = True
                         break
                     chunk = r.read(1024*1024)
-                    if not chunk: break
+                    if not chunk:
+                        break
                     f.write(chunk)
                     done += len(chunk)
                     if progress_cb:
@@ -1120,7 +1134,8 @@ def ram_info():
             vals = {}
             for line in out.splitlines():
                 if ':' in line:
-                    k,v=line.split(':',1); vals[k]=int(re.sub(r'[^0-9]','',v) or 0)
+                    k,v=line.split(':',1)
+                    vals[k]=int(re.sub(r'[^0-9]','',v) or 0)
             free = (vals.get('Pages free',0)+vals.get('Pages inactive',0)+vals.get('Pages speculative',0))*page
             total = int(subprocess.check_output(['sysctl','-n','hw.memsize'], text=True).strip())
         except Exception:
@@ -1137,31 +1152,44 @@ def model_category(folder, name):
         return 'Video generation'
     # ComfyUI text_encoders are components for image/video workflows, not chat LLMs.
     # Check this before name-based LLM detection so qwen_3_4b stays with Z-Image parts.
-    if any(x in f for x in ['text_encoders', 'clip', 'bert', 't5']): return 'Text encoders'
+    if any(x in f for x in ['text_encoders', 'clip', 'bert', 't5']):
+        return 'Text encoders'
     if any(x in f for x in ['llm', 'gguf']) or any(x in n for x in ['llama', 'qwen', 'mistral', 'gemma', 'deepseek', 'phi-']):
         return 'LLM / text'
-    if any(x in f for x in ['vae']): return 'VAE'
-    if any(x in f for x in ['lora']): return 'LoRA / adapters'
-    if any(x in f for x in ['controlnet']): return 'Control / conditioning'
-    if any(x in f for x in ['upscale', 'esrgan']): return 'Upscalers'
-    if any(x in f for x in ['audio', 'music', 'svae']): return 'Audio generation'
+    if any(x in f for x in ['vae']):
+        return 'VAE'
+    if any(x in f for x in ['lora']):
+        return 'LoRA / adapters'
+    if any(x in f for x in ['controlnet']):
+        return 'Control / conditioning'
+    if any(x in f for x in ['upscale', 'esrgan']):
+        return 'Upscalers'
+    if any(x in f for x in ['audio', 'music', 'svae']):
+        return 'Audio generation'
     return 'Image generation'
 
 
 def estimate_ram(size, folder, name):
     factor = 1.25
-    if model_category(folder, name) in {'Text encoders','LLM / text'}: factor = 1.15
-    if model_category(folder, name) == 'LoRA / adapters': factor = 1.05
+    if model_category(folder, name) in {'Text encoders','LLM / text'}:
+        factor = 1.15
+    if model_category(folder, name) == 'LoRA / adapters':
+        factor = 1.05
     return int(size * factor + 512*1024**2)
 
 
 def model_role(folder, name):
-    f, n = folder.lower(), name.lower()
-    if f in {'diffusion_models', 'unet', 'checkpoints'}: return 'primary'
-    if f in {'animatediff_models'}: return 'video_motion'
-    if f in {'text_encoders', 'clip'}: return 'text_encoder'
-    if f == 'vae': return 'vae'
-    if f == 'loras': return 'adapter'
+    f = folder.lower()
+    if f in {'diffusion_models', 'unet', 'checkpoints'}:
+        return 'primary'
+    if f in {'animatediff_models'}:
+        return 'video_motion'
+    if f in {'text_encoders', 'clip'}:
+        return 'text_encoder'
+    if f == 'vae':
+        return 'vae'
+    if f == 'loras':
+        return 'adapter'
     return 'aux'
 
 
@@ -1198,16 +1226,17 @@ def scan_civitai_downloads():
         if vid:
             installed['byVersion'][vid] = rec
             if vid not in seen_versions:
-                installed['versionIds'].append(vid); seen_versions.add(vid)
+                installed['versionIds'].append(vid)
+                seen_versions.add(vid)
         if fid:
             installed['byFile'][fid] = rec
             if fid not in seen_files:
-                installed['fileIds'].append(fid); seen_files.add(fid)
+                installed['fileIds'].append(fid)
+                seen_files.add(fid)
     return installed
 
 
 def scan_models():
-    roots = [config.COMFY/'models']
     exts = {'.safetensors','.ckpt','.pt','.pth','.bin','.gguf','.onnx'}
     models = []
     base = config.COMFY/'models'
@@ -1340,13 +1369,16 @@ def normalize_tags(meta):
     model = civ.get('model') or {}
     if isinstance(model.get('tags'), list):
         tags = list(tags) + model.get('tags')
-    out=[]; seen=set()
+    out=[]
+    seen=set()
     for t in tags:
-        if not t: continue
+        if not t:
+            continue
         tt=str(t).strip()
         k=tt.lower()
         if k not in seen:
-            out.append(tt); seen.add(k)
+            out.append(tt)
+            seen.add(k)
     return out[:24]
 
 
@@ -1354,13 +1386,17 @@ def trigger_words(meta):
     words=[]
     for src in [meta.get('civitai') or {}, meta.get('modelVersion') or {}, meta]:
         vals = src.get('trainedWords') or src.get('trigger_words') or []
-        if isinstance(vals, str): vals = [x.strip() for x in vals.split(',') if x.strip()]
-        if isinstance(vals, list): words += [str(x) for x in vals if x]
-    out=[]; seen=set()
+        if isinstance(vals, str):
+            vals = [x.strip() for x in vals.split(',') if x.strip()]
+        if isinstance(vals, list):
+            words += [str(x) for x in vals if x]
+    out=[]
+    seen=set()
     for w in words:
         k=w.lower()
         if k not in seen:
-            out.append(w); seen.add(k)
+            out.append(w)
+            seen.add(k)
     return out[:20]
 
 
@@ -1376,8 +1412,10 @@ def library_item_from_model(m):
     modified = meta.get('modified') or path.stat().st_mtime
     usage = meta.get('usage_tips') or {}
     if isinstance(usage, str):
-        try: usage = json.loads(usage)
-        except Exception: usage = {'text': usage} if usage else {}
+        try:
+            usage = json.loads(usage)
+        except Exception:
+            usage = {'text': usage} if usage else {}
     return {
         **m,
         'displayName': display,
@@ -1406,10 +1444,14 @@ def scan_library():
     for m in models:
         folder = (m.get('folder') or '').lower()
         role = (m.get('role') or '').lower()
-        if 'lora' in folder or role == 'adapter': buckets['loras'].append(m)
-        elif folder in {'checkpoints', 'diffusion_models', 'unet'} or role == 'primary': buckets['checkpoints'].append(m)
-        elif 'embedding' in folder or 'textualinversion' in folder: buckets['embeddings'].append(m)
-        else: buckets['other'].append(m)
+        if 'lora' in folder or role == 'adapter':
+            buckets['loras'].append(m)
+        elif folder in {'checkpoints', 'diffusion_models', 'unet'} or role == 'primary':
+            buckets['checkpoints'].append(m)
+        elif 'embedding' in folder or 'textualinversion' in folder:
+            buckets['embeddings'].append(m)
+        else:
+            buckets['other'].append(m)
     for arr in buckets.values():
         arr.sort(key=lambda x: (not x.get('favorite'), x.get('displayName','').lower()))
     recipes = scan_recipes(models)
@@ -1421,7 +1463,8 @@ def top_values(models, key, limit=80):
     counts = {}
     for m in models:
         vals = m.get(key) or []
-        if not isinstance(vals, list): vals=[vals]
+        if not isinstance(vals, list):
+            vals=[vals]
         for v in vals:
             if v:
                 counts[str(v)] = counts.get(str(v), 0) + 1
@@ -1433,7 +1476,8 @@ def scan_recipes(models):
     # Treat saved generation history with selected LoRAs as lightweight recipes.
     for rec in history.load_history(300):
         loras = rec.get('loras') or []
-        if not loras: continue
+        if not loras:
+            continue
         recipes.append({
             'id': rec.get('id'),
             'title': 'Private recipe',
@@ -1479,7 +1523,8 @@ def model_bundles(models=None):
     by_id = {m['id']: m for m in models}
     bundles = {}
     def add(primary, label, deps=None, replaces_roles=None, source='manifest'):
-        if primary not in by_id: return
+        if primary not in by_id:
+            return
         deps = [d for d in (deps or []) if d in by_id]
         bundles[primary] = {
             'primary': primary,
@@ -1512,7 +1557,8 @@ def save_equipped(items):
 def equip_model(mid):
     models_list = scan_models()
     models = {m['id']: m for m in models_list}
-    if mid not in models: return False, 'Model not found'
+    if mid not in models:
+        return False, 'Model not found'
     bundles = model_bundles(models_list)
     bundle = bundles.get(mid)
     equipped = load_equipped()
@@ -1532,10 +1578,13 @@ def equip_model(mid):
         added = [models[i]['name'] for i in bundle['all'] if i not in eq_by_id]
         removed = [models.get(m.get('id'), m).get('name') for m in equipped if role_of(m) in bundle['replaces_roles'] and m.get('id') not in desired_ids]
         msg = f"Equipped {bundle['label']}"
-        if added: msg += f"; added {', '.join(added)}"
-        if removed: msg += f"; replaced {', '.join(removed)}"
+        if added:
+            msg += f"; added {', '.join(added)}"
+        if removed:
+            msg += f"; replaced {', '.join(removed)}"
     else:
-        if any(m.get('id') == mid for m in equipped): return True, 'Already equipped'
+        if any(m.get('id') == mid for m in equipped):
+            return True, 'Already equipped'
         new_equipped = equipped + [models[mid]]
         msg = 'Equipped'
     ram = ram_info()

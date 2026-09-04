@@ -130,10 +130,13 @@ def bool_option(options, key, default):
 
 
 def human_bytes(n):
-    try: n = float(n)
-    except Exception: return '0 B'
+    try:
+        n = float(n)
+    except Exception:
+        return '0 B'
     units = ['B','KB','MB','GB','TB']
     i = 0
     while n >= 1024 and i < len(units)-1:
-        n /= 1024; i += 1
+        n /= 1024
+        i += 1
     return f"{n:.1f} {units[i]}" if i else f"{int(n)} B"

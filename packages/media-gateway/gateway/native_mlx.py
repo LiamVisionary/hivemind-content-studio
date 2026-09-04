@@ -12,8 +12,8 @@ import tempfile
 import uuid
 import shutil
 from pathlib import Path
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+from urllib.request import Request
+from urllib.error import HTTPError
 
 from gateway import config, graphs, history as _history, jobs, loras, media as _media, net, runners, util
 
@@ -74,7 +74,6 @@ def run_mlx_klein3_edit(job_id, prompt, image_path, options=None, workflow=None)
     steps = graphs.normalize_biglove_klein3_steps(options.get('steps', 4))
     guidance = util.float_quality_option(options, 'guidance', 1.0)
     seed = config.resolve_seed_option(options)
-    cache_gb = util.int_option(options, 'mlx_cache_limit_gb', 64, 8, 96)
     native_loras = loras._dedupe_lora_requests(options.get('loras') or [])
     reference_images = []
     for item in (options.get('image_paths') if isinstance(options.get('image_paths'), list) else [image_path]):

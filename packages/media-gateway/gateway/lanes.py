@@ -8,8 +8,8 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlparse, urlencode, unquote
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import Request
 
 from gateway import config, graphs, net
 

@@ -10,13 +10,13 @@ import email.policy
 import io
 import uuid
 import shutil
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlencode, unquote
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+from urllib.request import Request
+from urllib.error import HTTPError
 
-from gateway import config, graphs, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, promptroutes, restore, runners, util, workflow_index
+from gateway import config, graphs, history, jobs, lanes as _lanes, loras as _loras, media, models as _models, native_mlx, net, promptroutes, restore, routes, runners, util, workflow_index
 
 
 class _MultipartPart:
@@ -109,7 +109,7 @@ def render_job_page(rec):
   <header class="top"><div class="brand"><div class="orb"></div><div><div class="eyebrow">Generation detail</div><h1>Media Studio</h1></div></div><a class="pill" href="/">← Back to history</a></header>
   <main class="hero">
     <section class="glass live"><div class="live-head"><h3>Job {rid}</h3>{status_chip(status)}</div><div class="preview">{img}</div><div class="jobmeta">{util.h(util.nice_time(r.get('finished_at') or r.get('created_at')))} · <code>{rid}</code></div></section>
-    <section class="glass composer"><h2>{'Rendering…' if active else 'Result'}</h2><p class="sub">{h(util.h.get('prompt'))}</p>{err}</section>
+    <section class="glass composer"><h2>{'Rendering…' if active else 'Result'}</h2><p class="sub">{util.h(r.get('prompt'))}</p>{err}</section>
   </main>
 </div></body></html>'''
 
@@ -301,7 +301,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(e.code)
             self.send_header("Content-Type", e.headers.get("Content-Type", "text/plain"))
             self.send_header("Content-Length", str(len(data)))
-            self.end_headers(); self.wfile.write(data)
+            self.end_headers()
+            self.wfile.write(data)
         except Exception as e:
             self.send_text(f"Next.js frontend proxy error: {e}\n", 502, "text/plain")
 
@@ -513,7 +514,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(e.code)
             self.send_header("Content-Type", e.headers.get("Content-Type", "text/plain"))
             self.send_header("Content-Length", str(len(data)))
-            self.end_headers(); self.wfile.write(data)
+            self.end_headers()
+            self.wfile.write(data)
         except Exception as e:
             self.send_text(f"Comfy proxy error: {e}\n", 502, "text/plain")
 
@@ -556,7 +558,8 @@ class Handler(BaseHTTPRequestHandler):
             while b"\r\n\r\n" not in handshake:
                 data = sock.recv(4096)
                 if not data:
-                    sock.close(); return
+                    sock.close()
+                    return
                 self.connection.sendall(data)
                 handshake += data
             # Two blocking pump threads. The previous non-blocking select loop called
@@ -613,824 +616,850 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def do_GET(self):
+        return self.dispatch("GET")
+
+    def do_POST(self):
+        return self.dispatch("POST")
+
+    def do_DELETE(self):
+        return self.dispatch("DELETE")
+
+    def dispatch(self, method):
+        """The route table decides what runs. Nothing else does.
+
+        Order is the contract: the table is matched top down, exactly as the
+        if-chain this replaced was read, so a broad prefix still cannot take a
+        path an exact route above it claims.
+        """
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
-        if parsed.path in ["/healthz", "/health"]:
-            # `ok` is about THIS process; the lanes are reported separately.
-            # /health used to say ok:true while every ComfyUI was down, so the
-            # supervisor, the MCP status tool and the studio's catalog all
-            # believed the engine was there and the user found out on the first
-            # 502 — after composing a prompt. The lane URLs stay behind the
-            # token: an unauthenticated caller learns that a lane is degraded,
-            # not where a rented machine lives.
-            _lanes.refresh_comfy_lanes()
-            authed = self.authed(qs)
-            lanes = {
-                lane: {**({"url": _lanes.COMFY_LANES.get(lane) or ""} if authed else {}), **health}
-                for lane, health in _lanes.comfy_lane_health_snapshot().items()
-            }
-            return self.send_json({
-                "ok": True,
-                "version": config.GATEWAY_VERSION,
-                "comfy": str(config.COMFY),
-                "runner": config.RUNNER.exists(),
-                "ui": "v2",
-                "accelerator_profile": config.accelerator_profile(),
-                "native_mlx_ltx": config.supports_native_mlx_ltx_route(),
-                "lanes": lanes,
-                "degraded": [lane for lane, state in lanes.items() if not state.get("alive")],
-            })
+        index, route = routes.match(method, parsed.path)
+        if route is not None and not route.auth:
+            return getattr(self, route.handler)(parsed, qs)
         if not self.authed(qs):
-            return self.send_text("Unauthorized. Add ?token=... or Authorization: Bearer ***", 401, "text/plain")
-        # One stat() per request; picks up an attach/detach without a restart.
+            return routes.unauthorized(self, method)
+        if routes.REFRESHES_LANES[method]:
+            # One stat() per request; picks up an attach/detach without a restart.
+            _lanes.refresh_comfy_lanes()
+        while route is not None:
+            answer = getattr(self, route.handler)(parsed, qs)
+            if answer is not routes.NEXT:
+                return answer
+            index, route = routes.match(method, parsed.path, start=index + 1)
+        return routes.not_found(self, method)
+
+    def get_health(self, parsed, qs):
         _lanes.refresh_comfy_lanes()
-        if parsed.path == "/workflow-key":
-            # Deprecated: old builds exposed a backend-derived workflow metadata
-            # key. ComfyUI Mobile now uses a user-only browser unlock key kept
-            # only in loaded-tab memory, so the backend must not return a
-            # decrypt key.
-            return self.send_json({"error": "workflow key endpoint disabled; unlock in the browser"}, status=410)
-        if parsed.path == "/api/e2e/vault-identity":
-            identity = media.vault_identity_json()
-            return self.send_json({"ok": True, "exists": identity is not None, "identity": identity})
-        if parsed.path == "/workflow-for-output":
-            name = util.safe_name(qs.get('filename', [''])[0])
-            envelope = workflow_index.workflow_envelope_for_filename(name) if name else None
-            if envelope:
-                return self.send_json({"workflow": envelope})
-            return self.send_json({"error": "no workflow recorded for this output"}, 404)
-        if parsed.path == "/ws":
-            return self.proxy_websocket_to_comfy(parsed)
-        if parsed.path in ["/", "/history", "/models", "/workbench"] or parsed.path.startswith("/_next/") or parsed.path in ["/favicon.ico"]:
-            return self.proxy_to_frontend(parsed)
-        if parsed.path == "/api/models":
-            models = _models.scan_models()
-            return self.send_json({"models": models, "bundles": _models.model_bundles(models), "equipped": _models.load_equipped(), "ram": _models.ram_info(), "civitaiInstalled": _models.scan_civitai_downloads()})
-        if parsed.path == "/api/library":
-            return self.send_json(_models.scan_library())
-        if parsed.path == "/api/model-preview":
-            target = qs.get('path', [''])[0]
-            p = Path(target).resolve()
-            allowed = [config.COMFY.resolve(), config.BASE.resolve(), config.OUT_DIR.resolve()]
-            if not any(str(p).startswith(str(a)) for a in allowed) or not p.exists() or not p.is_file():
-                return self.send_text("not found\n", 404, "text/plain")
-            ctype = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
-            data = p.read_bytes()
-            self.send_response(200); self.cors_headers(); self.send_header("Content-Type", ctype); self.send_header("Cache-Control", "public, max-age=86400"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
-        if parsed.path == "/api/loras/preview":
-            lora_id = qs.get('id', [''])[0]
-            item = next((value for value in _models.local_loras_unfiltered() if value.get('id') == lora_id), None)
-            if not item:
-                return self.send_text("not found\n", 404, "text/plain")
-            source = _models.lora_preview_source(item['path'], item.get('metadata') or {})
-            if not source:
-                return self.send_text("not found\n", 404, "text/plain")
-            try:
-                if source.startswith(('http://', 'https://')):
-                    # Civitai-hosted card art: fetched once, then served from the
-                    # encrypted cache until this LoRA file changes or goes away.
-                    cached = _loras.cached_lora_preview(item, source)
-                    if cached:
-                        data, ctype = cached
-                    else:
-                        preview_request = Request(source, headers={'User-Agent': 'HivemindContentStudio/1.0'})
-                        with net.urlopen(preview_request, timeout=30) as upstream:
-                            data = upstream.read()
-                            ctype = upstream.headers.get('Content-Type', 'image/jpeg').split(';', 1)[0]
-                        _loras.cache_lora_preview(item, source, data, ctype)
+        authed = self.authed(qs)
+        lanes = {
+            lane: {**({"url": _lanes.COMFY_LANES.get(lane) or ""} if authed else {}), **health}
+            for lane, health in _lanes.comfy_lane_health_snapshot().items()
+        }
+        return self.send_json({
+            "ok": True,
+            "version": config.GATEWAY_VERSION,
+            "comfy": str(config.COMFY),
+            "runner": config.RUNNER.exists(),
+            "ui": "v2",
+            "accelerator_profile": config.accelerator_profile(),
+            "native_mlx_ltx": config.supports_native_mlx_ltx_route(),
+            "lanes": lanes,
+            "degraded": [lane for lane, state in lanes.items() if not state.get("alive")],
+        })
+
+    def get_workflow_key(self, parsed, qs):
+        return self.send_json({"error": "workflow key endpoint disabled; unlock in the browser"}, status=410)
+
+    def get_api_e2e_vault_identity(self, parsed, qs):
+        identity = media.vault_identity_json()
+        return self.send_json({"ok": True, "exists": identity is not None, "identity": identity})
+
+    def get_workflow_for_output(self, parsed, qs):
+        name = util.safe_name(qs.get('filename', [''])[0])
+        envelope = workflow_index.workflow_envelope_for_filename(name) if name else None
+        if envelope:
+            return self.send_json({"workflow": envelope})
+        return self.send_json({"error": "no workflow recorded for this output"}, 404)
+
+    def get_ws(self, parsed, qs):
+        return self.proxy_websocket_to_comfy(parsed)
+
+    def get_frontend(self, parsed, qs):
+        return self.proxy_to_frontend(parsed)
+
+    def get_api_models(self, parsed, qs):
+        models = _models.scan_models()
+        return self.send_json({"models": models, "bundles": _models.model_bundles(models), "equipped": _models.load_equipped(), "ram": _models.ram_info(), "civitaiInstalled": _models.scan_civitai_downloads()})
+
+    def get_api_library(self, parsed, qs):
+        return self.send_json(_models.scan_library())
+
+    def get_api_model_preview(self, parsed, qs):
+        target = qs.get('path', [''])[0]
+        p = Path(target).resolve()
+        allowed = [config.COMFY.resolve(), config.BASE.resolve(), config.OUT_DIR.resolve()]
+        if not any(str(p).startswith(str(a)) for a in allowed) or not p.exists() or not p.is_file():
+            return self.send_text("not found\n", 404, "text/plain")
+        ctype = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+        data = p.read_bytes()
+        self.send_response(200)
+        self.cors_headers()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        return
+
+    def get_api_loras_preview(self, parsed, qs):
+        lora_id = qs.get('id', [''])[0]
+        item = next((value for value in _models.local_loras_unfiltered() if value.get('id') == lora_id), None)
+        if not item:
+            return self.send_text("not found\n", 404, "text/plain")
+        source = _models.lora_preview_source(item['path'], item.get('metadata') or {})
+        if not source:
+            return self.send_text("not found\n", 404, "text/plain")
+        try:
+            if source.startswith(('http://', 'https://')):
+                # Civitai-hosted card art: fetched once, then served from the
+                # encrypted cache until this LoRA file changes or goes away.
+                cached = _loras.cached_lora_preview(item, source)
+                if cached:
+                    data, ctype = cached
                 else:
-                    preview_path = Path(source).resolve()
-                    lora_root = (config.COMFY / 'models' / 'loras').resolve()
-                    if not preview_path.exists() or not preview_path.is_file() or not util._is_under(preview_path, lora_root):
-                        return self.send_text("not found\n", 404, "text/plain")
-                    data = preview_path.read_bytes()
-                    ctype = mimetypes.guess_type(str(preview_path))[0] or 'application/octet-stream'
-                self.send_response(200)
-                self.cors_headers()
-                self.send_header("Content-Type", ctype)
-                self.send_header("Cache-Control", "private, max-age=3600")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-                return
-            except Exception:
-                return self.send_text("not found\n", 404, "text/plain")
-        if parsed.path == "/api/loras":
-            requested_bases = []
-            for raw in qs.get('baseModels', []):
-                requested_bases.extend(value.strip() for value in raw.split(',') if value.strip())
-            if qs.get('compact', [''])[0].lower() in {'1', 'true', 'yes'}:
-                base_models = requested_bases or _models.current_base_models()
-                return self.send_json({"baseModels": base_models, "loras": _models.local_lora_catalog(base_models)})
-            return self.send_json({"baseModels": _models.current_base_models(), "loras": _models.local_loras(), "selected": _models.load_selected_loras()})
-        if parsed.path == "/api/civitai/lora-updates":
-            requested_bases = []
-            for raw in qs.get('baseModels', []):
-                requested_bases.extend(value.strip() for value in raw.split(',') if value.strip())
-            force = qs.get('refresh', [''])[0] in {'1', 'true', 'yes'}
-            try:
-                updates = _models.civitai_lora_updates(requested_bases or _models.current_base_models(), force=force)
-                return self.send_json({"updates": updates})
-            except Exception as e:
-                return self.send_json({"error": str(e)}, 502)
-        if parsed.path == "/api/civitai/base-models":
-            force = qs.get('refresh', [''])[0] in {'1', 'true', 'yes'}
-            return self.send_json({"baseModels": _models.civitai_base_model_options(force=force), "currentBaseModels": _models.current_base_models()})
-        if parsed.path == "/api/civitai/images":
-            params = {k: qs.get(k, [None])[0] for k in ['username', 'sort', 'period', 'cursor', 'limit', 'postId', 'modelId', 'modelVersionId']}
-            # Civitai's own vocabulary, echoed back rather than trusted: an
-            # unknown `type` is dropped instead of forwarded, so a stray value
-            # cannot turn into a 400 the finder has to explain.
-            kind = qs.get('type', [None])[0]
-            if kind in {'image', 'video'}:
-                params['type'] = kind
-            nsfw = qs.get('nsfw', [None])[0]
-            if nsfw in {'true', 'false', 'None', 'Soft', 'Mature', 'X'}:
-                params['nsfw'] = nsfw
-            bases = qs.get('baseModels', [])
-            if bases:
-                params['baseModels'] = ','.join(bases)
-            if not params.get('limit'):
-                params['limit'] = '24'
-            try:
-                data = _models.civitai_search_images(params)
-                return self.send_json({
-                    "items": [_models.summarize_civitai_image(i) for i in data.get('items', [])],
-                    "metadata": data.get('metadata', {}),
-                    "baseModelOptions": _models.civitai_base_model_options(),
-                })
-            except Exception as e:
-                # Civitai 503s under load often enough to matter (seen on a
-                # plain baseModels query, fine on retry), so the finder gets the
-                # reason and offers a retry rather than an empty grid.
-                return self.send_json({"error": str(e)}, 502)
-        if parsed.path == "/api/civitai/search":
-            params = {k: qs.get(k, [None])[0] for k in ['query','tag','username','sort','period','supportsGeneration','fromPlatform','earlyAccess','primaryFileOnly','cursor','page','limit']}
-            nsfw = qs.get('nsfw', [None])[0]
-            if nsfw in {'true', 'false'}:
-                params['nsfw'] = nsfw
-            checkpoint_type = qs.get('checkpointType', [None])[0]
-            if checkpoint_type in {'Trained', 'Merge'}:
-                params['checkpointType'] = checkpoint_type
-            for multi in ['types','baseModels']:
-                vals = qs.get(multi, [])
-                if vals:
-                    params[multi] = ','.join(vals)
-            if not params.get('limit'):
-                params['limit'] = '24'
-            try:
-                data = _models.civitai_search_models(params)
-                return self.send_json({"items": [_models.summarize_civitai_item(i) for i in data.get('items', [])], "metadata": data.get('metadata', {}), "baseModels": _models.current_base_models(), "baseModelOptions": _models.civitai_base_model_options(), "installed": _models.scan_civitai_downloads()})
-            except Exception as e:
-                return self.send_json({"error": str(e)}, 502)
-        if parsed.path.startswith("/api/civitai/download/"):
-            jid = parsed.path.rsplit("/", 1)[-1]
-            with history.download_jobs_lock:
-                rec = history.download_jobs.get(jid)
-            return self.send_json(_models.public_download_job(rec) if rec else {"error": "not found"}, 200 if rec else 404)
-        if parsed.path.startswith("/api/comfy/prompt-by-client/"):
-            # Hand a submitter back the prompt id it never received. Staging a
-            # reference job's inputs on a remote lane happens inside the submit
-            # request, so a caller can time out while the job goes on to queue,
-            # run and be harvested with nobody holding its id. Scoped the same
-            # way history is: the requester key that submitted it may read it.
-            client_id = unquote(parsed.path.rsplit("/", 1)[-1])
-            prompt_id, route = promptroutes.comfy_prompt_id_for_client(client_id)
-            if not prompt_id:
-                return self.send_json({"error": "no prompt recorded for this client id"}, 404)
-            if not promptroutes.requester_may_read_prompt(route, self.headers.get(promptroutes.REQUESTER_PUB_HEADER)):
-                return self.send_json({"error": "not found"}, 404)
-            return self.send_json({
-                "prompt_id": prompt_id,
-                "lane": route.get("lane"),
-                "remote": bool(route.get("remote")),
-                "status": route.get("status"),
-                "created_at": route.get("created_at"),
-            })
-        if parsed.path in ["/comfy/view", "/view"]:
-            name = util.safe_name(qs.get('filename', [''])[0])
-            p = media.find_output_logical_path(name)
-            if p:
-                try:
-                    media.send_output_file(self, p)
-                    return
-                except Exception as e:
-                    print(f"[output-encryption] failed to serve {name}: {e}", file=sys.stderr)
+                    preview_request = Request(source, headers={'User-Agent': 'HivemindContentStudio/1.0'})
+                    with net.urlopen(preview_request, timeout=30) as upstream:
+                        data = upstream.read()
+                        ctype = upstream.headers.get('Content-Type', 'image/jpeg').split(';', 1)[0]
+                    _loras.cache_lora_preview(item, source, data, ctype)
+            else:
+                preview_path = Path(source).resolve()
+                lora_root = (config.COMFY / 'models' / 'loras').resolve()
+                if not preview_path.exists() or not preview_path.is_file() or not util._is_under(preview_path, lora_root):
                     return self.send_text("not found\n", 404, "text/plain")
-            # If this is not one of our native/private outputs, let ComfyUI answer normally.
-        if parsed.path == "/output":
-            p = media.find_exact_output_logical_path(qs.get('path', [''])[0])
-            if not p:
-                return self.send_text("not found\n", 404, "text/plain")
-            try:
-                media.send_output_file(self, p)
-            except Exception as e:
-                print(f"[output-encryption] failed to serve exact output: {e}", file=sys.stderr)
-                return self.send_text("not found\n", 404, "text/plain")
-            return
-        if parsed.path in ["/mobile", "/mobile/"] or parsed.path.startswith(("/mobile/", "/assets/", "/comfy/")):
-            return self.proxy_to_comfy(parsed, "GET")
-        if parsed.path == "/api/restore/projects":
-            return self.send_json({
-                "ok": True,
-                "projects": restore.restore_projects_summary(int(qs.get("limit", ["50"])[0] or 50)),
-            })
-        if parsed.path == "/api/restore/capabilities":
-            # Which machines can restore, and which of them costs money. The
-            # studio needs both to offer "free, on this Mac" and "paid, on the
-            # rented box" as the same button with a different price.
-            lanes = []
-            for lane_name, lane_url in sorted(_lanes.COMFY_LANES.items()):
-                capability = restore.lane_restore_capability(lane_url)
-                remote = _lanes.comfy_lane_is_remote(lane_name)
-                lanes.append({
-                    "lane": lane_name,
-                    "remote": remote,
-                    # A rented machine bills by the hour whether it is restoring
-                    # or idle, so a restore on one is the paid rail by
-                    # definition; a local lane is the free one.
-                    "paid": remote,
-                    "available": capability.get("available"),
-                    "missing": capability.get("missing") or [],
-                    "models": capability.get("models") or [],
-                    "devices": capability.get("devices") or [],
-                    "attention_modes": capability.get("attention_modes") or [],
-                    # Only a local lane can be assembled by the gateway; a
-                    # rented one is joined in the browser, which the studio has
-                    # to know before it starts rather than after.
-                    "assembles_here": not remote,
-                })
-            # And the machine nobody owns. Listed last on purpose: it is the
-            # paid one, and a paid lane above a free one that can do the job is
-            # a bill somebody did not choose.
-            hosted = config.cloud_restore.status()
-            lanes.append({
-                "lane": config.video_restore.CLOUD_LANE,
-                "remote": True,
-                "paid": True,
-                # The one that changes what the panel says about money: an
-                # hourly lane is metered by the box, this one is metered by the
-                # render and quoted before it starts.
-                "metered": "per-render",
-                "available": bool(hosted.get("available")),
-                "missing": [] if hosted.get("available") else ["hosted service"],
-                "reason": hosted.get("reason") or "",
-                "models": list(config.video_restore.CLOUD_MODELS),
-                "devices": [],
-                "attention_modes": ["sdpa"],
-                # It CAN be assembled here: a hosted chunk comes back as
-                # ordinary bytes, unlike a rented one. That is why this lane
-                # keeps seam dissolves and re-finishing, and the panel says so.
-                "assembles_here": True,
-            })
-            return self.send_json({
-                "ok": True,
-                "lanes": lanes,
-                "models": list(config.video_restore.DIT_MODELS),
-                "color_corrections": list(config.video_restore.COLOR_CORRECTIONS),
-                "resolutions": config.video_restore.RESOLUTION_PRESETS,
-                "any": any(lane["available"] for lane in lanes),
-                # The two facts the studio cannot work out for itself and has to
-                # state BEFORE the wait: how big a source this machine takes,
-                # and how long its working files are kept. Both are configured
-                # here and were, until now, announced only in the service log.
-                "retention": restore.restore_retention(),
-                "max_source_bytes": restore.RESTORE_MAX_SOURCE_BYTES,
-            })
-        if parsed.path.startswith("/api/restore/project/"):
-            project_id = util.safe_name(parsed.path.rsplit("/", 1)[-1])
-            try:
-                manifest = restore.restore_manifest_path(project_id)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            if not manifest.is_file():
-                return self.send_json({"error": "no such restoration project"}, 404)
-            project = config.video_restore.read_project(manifest)
-            return self.send_json({
-                "ok": True,
-                "project": project,
-                "progress": config.video_restore.project_progress(project),
-                "resume_from": config.video_restore.first_unfinished_chunk(project),
-                "assembly": config.video_restore.assembly_steps(project.get("plan") or {}),
-            })
-        if parsed.path.startswith("/api/restore/source/"):
-            # The original, for the compare view when a project is REOPENED and
-            # the browser no longer holds the file the owner first picked.
-            # Whole-body, no ranges: every other clip in this app reaches the
-            # page as a blob too, and adding a second serving convention for one
-            # route would be the one place seeking silently behaves differently.
-            project_id = util.safe_name(parsed.path.rsplit("/", 1)[-1])
-            try:
-                source = restore.restore_project_dir(project_id) / "source.mp4"
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            if not source.is_file():
-                return self.send_json({"error": "this project has no staged source"}, 404)
-            body = source.read_bytes()
+                data = preview_path.read_bytes()
+                ctype = mimetypes.guess_type(str(preview_path))[0] or 'application/octet-stream'
             self.send_response(200)
             self.cors_headers()
-            self.send_header("Content-Type", "video/mp4")
-            self.send_header("Cache-Control", "private, no-store, max-age=0")
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "private, max-age=3600")
+            self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            return self.wfile.write(body)
-        if parsed.path == "/api/history":
-            return self.send_json({"history": [history.public_record(r) for r in jobs.all_records(200)]})
-        if parsed.path.startswith("/api/job/"):
-            jid = parsed.path.rsplit("/", 1)[-1]
-            rec = self.find_job(jid)
-            if rec:
-                return self.send_json(history.public_record(rec), 200)
-            # A prompt routed to a remote lane has no local wrapper job, so this
-            # used to 404 for its whole life - which is exactly how a finished
-            # remote generation left the studio spinning: the trusted
-            # server-side channel had no record to report completion (or
-            # progress) from. Serve the route record in job shape instead.
-            routed = promptroutes.remote_comfy_job_record(jid)
-            return self.send_json(routed or {"error": "not found"}, 200 if routed else 404)
-        if parsed.path.startswith("/job/"):
-            jid = parsed.path.rsplit("/", 1)[-1]
-            rec = self.find_job(jid)
-            if not rec:
-                return self.send_text("job not found\n", 404, "text/plain")
-            return self.send_text(render_job_page(rec))
-        if parsed.path.startswith("/image/"):
-            name = util.safe_name(parsed.path.rsplit("/", 1)[-1])
-            p = media.find_output_logical_path(name)
-            if not p:
-                return self.send_text("not found\n", 404, "text/plain")
+            self.wfile.write(data)
+            return
+        except Exception:
+            return self.send_text("not found\n", 404, "text/plain")
+
+    def get_api_loras(self, parsed, qs):
+        requested_bases = []
+        for raw in qs.get('baseModels', []):
+            requested_bases.extend(value.strip() for value in raw.split(',') if value.strip())
+        if qs.get('compact', [''])[0].lower() in {'1', 'true', 'yes'}:
+            base_models = requested_bases or _models.current_base_models()
+            return self.send_json({"baseModels": base_models, "loras": _models.local_lora_catalog(base_models)})
+        return self.send_json({"baseModels": _models.current_base_models(), "loras": _models.local_loras(), "selected": _models.load_selected_loras()})
+
+    def get_api_civitai_lora_updates(self, parsed, qs):
+        requested_bases = []
+        for raw in qs.get('baseModels', []):
+            requested_bases.extend(value.strip() for value in raw.split(',') if value.strip())
+        force = qs.get('refresh', [''])[0] in {'1', 'true', 'yes'}
+        try:
+            updates = _models.civitai_lora_updates(requested_bases or _models.current_base_models(), force=force)
+            return self.send_json({"updates": updates})
+        except Exception as e:
+            return self.send_json({"error": str(e)}, 502)
+
+    def get_api_civitai_base_models(self, parsed, qs):
+        force = qs.get('refresh', [''])[0] in {'1', 'true', 'yes'}
+        return self.send_json({"baseModels": _models.civitai_base_model_options(force=force), "currentBaseModels": _models.current_base_models()})
+
+    def get_api_civitai_images(self, parsed, qs):
+        params = {k: qs.get(k, [None])[0] for k in ['username', 'sort', 'period', 'cursor', 'limit', 'postId', 'modelId', 'modelVersionId']}
+        # Civitai's own vocabulary, echoed back rather than trusted: an
+        # unknown `type` is dropped instead of forwarded, so a stray value
+        # cannot turn into a 400 the finder has to explain.
+        kind = qs.get('type', [None])[0]
+        if kind in {'image', 'video'}:
+            params['type'] = kind
+        nsfw = qs.get('nsfw', [None])[0]
+        if nsfw in {'true', 'false', 'None', 'Soft', 'Mature', 'X'}:
+            params['nsfw'] = nsfw
+        bases = qs.get('baseModels', [])
+        if bases:
+            params['baseModels'] = ','.join(bases)
+        if not params.get('limit'):
+            params['limit'] = '24'
+        try:
+            data = _models.civitai_search_images(params)
+            return self.send_json({
+                "items": [_models.summarize_civitai_image(i) for i in data.get('items', [])],
+                "metadata": data.get('metadata', {}),
+                "baseModelOptions": _models.civitai_base_model_options(),
+            })
+        except Exception as e:
+            # Civitai 503s under load often enough to matter (seen on a
+            # plain baseModels query, fine on retry), so the finder gets the
+            # reason and offers a retry rather than an empty grid.
+            return self.send_json({"error": str(e)}, 502)
+
+    def get_api_civitai_search(self, parsed, qs):
+        params = {k: qs.get(k, [None])[0] for k in ['query','tag','username','sort','period','supportsGeneration','fromPlatform','earlyAccess','primaryFileOnly','cursor','page','limit']}
+        nsfw = qs.get('nsfw', [None])[0]
+        if nsfw in {'true', 'false'}:
+            params['nsfw'] = nsfw
+        checkpoint_type = qs.get('checkpointType', [None])[0]
+        if checkpoint_type in {'Trained', 'Merge'}:
+            params['checkpointType'] = checkpoint_type
+        for multi in ['types','baseModels']:
+            vals = qs.get(multi, [])
+            if vals:
+                params[multi] = ','.join(vals)
+        if not params.get('limit'):
+            params['limit'] = '24'
+        try:
+            data = _models.civitai_search_models(params)
+            return self.send_json({"items": [_models.summarize_civitai_item(i) for i in data.get('items', [])], "metadata": data.get('metadata', {}), "baseModels": _models.current_base_models(), "baseModelOptions": _models.civitai_base_model_options(), "installed": _models.scan_civitai_downloads()})
+        except Exception as e:
+            return self.send_json({"error": str(e)}, 502)
+
+    def get_api_civitai_download(self, parsed, qs):
+        jid = parsed.path.rsplit("/", 1)[-1]
+        with history.download_jobs_lock:
+            rec = history.download_jobs.get(jid)
+        return self.send_json(_models.public_download_job(rec) if rec else {"error": "not found"}, 200 if rec else 404)
+
+    def get_api_comfy_prompt_by_client(self, parsed, qs):
+        client_id = unquote(parsed.path.rsplit("/", 1)[-1])
+        prompt_id, route = promptroutes.comfy_prompt_id_for_client(client_id)
+        if not prompt_id:
+            return self.send_json({"error": "no prompt recorded for this client id"}, 404)
+        if not promptroutes.requester_may_read_prompt(route, self.headers.get(promptroutes.REQUESTER_PUB_HEADER)):
+            return self.send_json({"error": "not found"}, 404)
+        return self.send_json({
+            "prompt_id": prompt_id,
+            "lane": route.get("lane"),
+            "remote": bool(route.get("remote")),
+            "status": route.get("status"),
+            "created_at": route.get("created_at"),
+        })
+
+    def get_comfy_view(self, parsed, qs):
+        name = util.safe_name(qs.get('filename', [''])[0])
+        p = media.find_output_logical_path(name)
+        if p:
             try:
                 media.send_output_file(self, p)
+                return
             except Exception as e:
                 print(f"[output-encryption] failed to serve {name}: {e}", file=sys.stderr)
                 return self.send_text("not found\n", 404, "text/plain")
-            return
-        return self.send_text("not found\n", 404, "text/plain")
+        # If this is not one of our native/private outputs, let ComfyUI answer normally.
+        # Not one of our own outputs: hand the path to the /comfy/ route
+        # below, which proxies it to ComfyUI.
+        return routes.NEXT
 
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        if not self.authed(qs):
-            return self.send_json({"error": "unauthorized"}, 401)
-        # One stat() per request; picks up an attach/detach without a restart.
-        _lanes.refresh_comfy_lanes()
-        if parsed.path.startswith("/api/job/") and parsed.path.endswith("/cancel"):
-            jid = parsed.path[len("/api/job/"):-len("/cancel")].strip("/")
-            return self.send_json(jobs.cancel_generation_job(jid))
-        if parsed.path.startswith("/api/cancel/"):
-            return self.send_json(jobs.cancel_generation_job(parsed.path.rsplit("/", 1)[-1]))
-        if parsed.path == "/api/delete-output":
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-                if data.get("confirm") is not True:
-                    return self.send_json({"error": "permanent deletion requires confirm=true"}, 400)
-                result = jobs.delete_output_everywhere(str(data.get("filename") or ""))
-                return self.send_json(result)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except RuntimeError as exc:
-                return self.send_json({"error": str(exc)}, 500)
-        if parsed.path == "/api/lanes/resolve":
-            # Which lane a graph would route to, and what that lane's ComfyUI
-            # was launched with. The MCP's motion-reference guard asks this
-            # before pricing a reference job: its budget was measured with
-            # --vram-headroom, and a lane without the flag is held to the
-            # registry's smaller ceiling (comfy_lane_vram_headroom). Answered
-            # here, not in the MCP, because only the gateway knows the lanes —
-            # the same first-match rules that will route the submission.
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-            except (ValueError, json.JSONDecodeError) as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            graph = data.get("graph") if isinstance(data, dict) else None
-            if not isinstance(graph, dict):
-                return self.send_json({"error": "graph (a ComfyUI API prompt graph) is required"}, 400)
-            try:
-                lane = _lanes.comfy_lane_for_prompt_body(
-                    json.dumps({"prompt": graph}).encode("utf-8"), run_on=data.get("run_on"),
-                )
-            except _lanes.ComfyLanePinError as exc:
-                return self.send_json({"error": str(exc), "operational": True}, 409)
-            return self.send_json({"ok": True, **_lanes.comfy_lane_vram_headroom(lane)})
-        if parsed.path == "/api/delete-input":
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-                return self.send_json({"ok": True, "deleted": media.delete_private_input(data.get("filename"))})
-            except (json.JSONDecodeError, ValueError) as exc:
-                return self.send_json({"error": str(exc)}, 400)
-        if parsed.path == "/api/interpolate":
-            try:
-                data = json.loads((self.read_body(max_bytes=runners.INTERPOLATE_MAX_BODY_BYTES) or b"{}").decode("utf-8"))
-                staged = runners.stage_inline_video_base64(data.get("video_base64"))
-                if staged is None:
-                    return self.send_json({"error": "video_base64 is required"}, 400)
-                factor = 4 if str(data.get("factor")) == "4" else 2
-                job_id = uuid.uuid4().hex[:12]
-                with jobs.jobs_lock:
-                    jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "rife-interpolation", "mode": f"{factor}x", "options": {"factor": factor}}
-                t = threading.Thread(target=runners.run_video_interpolation, args=(job_id, staged, {"factor": factor}), daemon=True)
-                t.start()
-                return self.send_json({
-                    "id": job_id,
-                    "status": "queued",
-                    "backend": "rife-interpolation",
-                    "mode": f"{factor}x",
-                    "job_url": f"/api/job/{job_id}",
-                    "page_url": f"/job/{job_id}",
-                    "history_url": "/api/history",
-                }, 202)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except Exception as exc:
-                return self.send_json({"error": str(exc)}, 500)
-        if parsed.path == "/api/smart-mask":
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-                staged = media.stage_inline_image_base64(data.get("image_base64"))
-                if staged is None:
-                    return self.send_json({"error": "image_base64 is required"}, 400)
-                options = {
-                    "prompt": str(data.get("prompt") or "")[:400],
-                    "points": data.get("points"),
-                    "confidence": data.get("confidence"),
-                }
-                if not options["prompt"].strip() and not options["points"]:
-                    return self.send_json({"error": "describe an object or tap the image"}, 400)
-                job_id = uuid.uuid4().hex[:12]
-                with jobs.jobs_lock:
-                    jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "sam3-smart-mask"}
-                threading.Thread(
-                    target=runners.run_sam3_smart_mask, args=(job_id, staged, options), daemon=True,
-                ).start()
-                return self.send_json({
-                    "id": job_id,
-                    "status": "queued",
-                    "backend": "sam3-smart-mask",
-                    "job_url": f"/api/job/{job_id}",
-                }, 202)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except Exception as exc:
-                return self.send_json({"error": str(exc)}, 500)
-        if parsed.path == "/api/ltx-director":
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-                project = data.get("project")
-                if not isinstance(project, dict):
-                    return self.send_json({"error": "project is required"}, 400)
-                options = {
-                    "width": data.get("width"),
-                    "height": data.get("height"),
-                    "seed": data.get("seed"),
-                    "loras": data.get("loras"),
-                }
-                options = {k: v for k, v in options.items() if v is not None}
-                # Validate before queueing so a malformed timeline answers the
-                # caller directly instead of failing inside a background job.
-                config.build_ltx_director_prompt(project, options)
-                job_id = uuid.uuid4().hex[:12]
-                with jobs.jobs_lock:
-                    jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "ltx-director"}
-                threading.Thread(
-                    target=runners.run_ltx_director, args=(job_id, project, options), daemon=True,
-                ).start()
-                return self.send_json({
-                    "id": job_id,
-                    "status": "queued",
-                    "backend": "ltx-director",
-                    "job_url": f"/api/job/{job_id}",
-                }, 202)
-            except config.DirectorProjectError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except Exception as exc:
-                return self.send_json({"error": str(exc)}, 500)
-        if parsed.path == "/api/episode":
-            try:
-                data = json.loads((self.read_body(max_bytes=runners.INTERPOLATE_MAX_BODY_BYTES) or b"{}").decode("utf-8"))
-                staged = runners.stage_inline_video_base64(data.get("video_base64"))
-                if staged is None:
-                    return self.send_json({"error": "video_base64 is required"}, 400)
-                shots = util.int_option(data, "shots", 0, 0, 512)
-                job_id = uuid.uuid4().hex[:12]
-                with jobs.jobs_lock:
-                    jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "episode-join", "options": {"shots": shots}}
-                threading.Thread(
-                    target=runners.run_episode_save, args=(job_id, staged, {"shots": shots}), daemon=True,
-                ).start()
-                return self.send_json({
-                    "id": job_id,
-                    "status": "queued",
-                    "backend": "episode-join",
-                    "job_url": f"/api/job/{job_id}",
-                    "page_url": f"/job/{job_id}",
-                    "history_url": "/api/history",
-                }, 202)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except Exception as exc:
-                return self.send_json({"error": str(exc)}, 500)
-        if parsed.path == "/api/upscale":
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-                staged = media.stage_inline_image_base64(data.get("image_base64"))
-                if staged is None:
-                    return self.send_json({"error": "image_base64 is required"}, 400)
-                options = {
-                    "mode": data.get("mode"),
-                    "scale": data.get("scale"),
-                    "prompt": data.get("prompt"),
-                    "negative_prompt": data.get("negative_prompt"),
-                    "refine_steps": data.get("refine_steps"),
-                    "refine_denoise": data.get("refine_denoise"),
-                    "seed": data.get("seed"),
-                    "run_on": data.get("run_on"),
-                }
-                # A stale "Run on" pin is refused here, before a job exists to
-                # fail, so the studio hears the reason instead of a dead job.
-                try:
-                    _lanes.comfy_lane_for_pin(options.get("run_on"))
-                except _lanes.ComfyLanePinError as exc:
-                    return self.send_json({"error": str(exc), "operational": True}, 409)
-                job_id = uuid.uuid4().hex[:12]
-                mode = "max" if str(data.get("mode") or "fast").lower() == "max" else "fast"
-                with jobs.jobs_lock:
-                    jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "comfy-upscale", "mode": mode, "options": {"mode": mode}}
-                t = threading.Thread(target=runners.run_comfy_upscale, args=(job_id, staged, options), daemon=True)
-                t.start()
-                return self.send_json({
-                    "id": job_id,
-                    "status": "queued",
-                    "backend": "comfy-upscale",
-                    "mode": mode,
-                    "job_url": f"/api/job/{job_id}",
-                    "page_url": f"/job/{job_id}",
-                    "history_url": "/api/history",
-                }, 202)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except Exception as exc:
-                return self.send_json({"error": str(exc)}, 500)
-        if parsed.path == "/api/restore/upload":
-            # The source, as raw bytes, written straight to disk in blocks.
-            #
-            # No JSON, no base64, no copy in memory anywhere along the way: the
-            # start request that follows names the id this hands back. This is
-            # the route that makes a multi-hundred-megabyte restore possible at
-            # all — the old inline-base64 transport cost three full copies and
-            # simply refused past a few hundred megabytes, which is the size of
-            # the footage this studio exists for.
-            restore.reap_restore_uploads()
-            source_id = f"u{uuid.uuid4().hex[:16]}"
-            try:
-                written = self.stream_body_to_file(
-                    restore.restore_upload_path(source_id), restore.RESTORE_MAX_SOURCE_BYTES)
-            except restore.RestoreTooLarge as exc:
-                return self.send_json({
-                    "error": str(exc), "operational": True,
-                    "max_source_bytes": exc.max_bytes, "bytes": exc.size_bytes,
-                }, 413)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except OSError as exc:
-                return self.send_json({"error": f"that upload could not be written: {exc}"}, 507)
-            return self.send_json({
-                "ok": True, "source_id": source_id, "bytes": written,
-                **restore.restore_retention(),
-            }, 201)
-        if parsed.path == "/api/restore":
-            # Start a restoration, or resume one. The same route for both: a
-            # resume is a start that already has finished chunks, and making it
-            # a second endpoint would be two ways to get the plan wrong.
-            try:
-                # The ordinary JSON cap now, not a 768MB one: the body is a
-                # set of dials and a staged id. It still leaves room for the
-                # small inline clip an older client might send.
-                data = json.loads((self.read_body(max_bytes=config.MAX_JSON_BODY_BYTES) or b"{}").decode("utf-8"))
-                project_id = util.safe_name(str(data.get("project_id") or ""))
-                staged = restore._claim_restore_source(data)
-                if staged is None and not project_id:
-                    return self.send_json({"error": "a source clip is required to start a restoration"}, 400)
-                options = {
-                    key: data.get(key) for key in (
-                        "model", "resolution", "max_resolution", "batch_size", "chunk_seconds",
-                        "context_frames", "seam_frames", "temporal_overlap", "color_correction",
-                        "seed", "preview_frames", "preview_start_frame", "device", "offload_device",
-                        "attention_mode", "cache_models", "tiled_vae", "tile_size", "torch_compile",
-                        "run_on", "max_spend_usd",
-                    ) if data.get(key) is not None
-                }
-                if isinstance(data.get("finish"), dict):
-                    options["finish"] = data["finish"]
-                # The hosted lane's two extras, read SEPARATELY from the options
-                # above because `options` is written into the project manifest
-                # verbatim. The token belongs in memory for the life of one
-                # render and nowhere else; it is attached by the control API,
-                # which is the only side that can read the owner's account.
-                credit_token = str(data.get("credit_token") or "")
-                if credit_token:
-                    options["credit_token"] = credit_token
-                # Settled HERE rather than inside the runner, so the 202 can
-                # name the project the studio is about to poll. Without it the
-                # studio would have to guess, or poll the whole project list.
-                project_id = project_id or f"r{uuid.uuid4().hex[:10]}"
-                options["project_id"] = project_id
-                pin_error = restore.restore_pin_error(options)
-                if pin_error:
-                    if staged is not None:
-                        staged.unlink(missing_ok=True)
-                    return self.send_json({"error": pin_error, "operational": True}, 409)
-                job_id = uuid.uuid4().hex[:12]
-                with jobs.jobs_lock:
-                    jobs.jobs[job_id] = {
-                        "id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued",
-                        "created_at": util.now_iso(), "backend": "seedvr2-restore",
-                    }
-                threading.Thread(
-                    target=restore.run_video_restore, args=(job_id, staged, options), daemon=True,
-                ).start()
-                return self.send_json({
-                    "id": job_id,
-                    "status": "queued",
-                    "backend": "seedvr2-restore",
-                    "project_id": project_id,
-                    "job_url": f"/api/job/{job_id}",
-                    "project_url": f"/api/restore/project/{project_id}",
-                    "history_url": "/api/history",
-                }, 202)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except Exception as exc:
-                return self.send_json({"error": str(exc)}, 500)
-        if parsed.path == "/api/restore/plan":
-            # What a render WOULD be, before a byte is uploaded: chunk count,
-            # output size, and which machine would run it. The studio mirrors
-            # this arithmetic to keep its own dials honest; this is the copy
-            # that decides, so the two are compared rather than trusted.
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-                plan = config.video_restore.restore_plan(
-                    frames=int(data.get("frames") or 0),
-                    fps=float(data.get("fps") or 24.0),
-                    width=int(data.get("width") or 0),
-                    height=int(data.get("height") or 0),
-                    options=data.get("options") if isinstance(data.get("options"), dict) else {},
-                )
-                lane = None
-                try:
-                    lane_name, lane_url, capability = restore._resolve_restore_lane(plan, data.get("options") or {})
-                    # The same two questions the runner asks, so the plan the
-                    # panel shows is the plan the render will run: a sealed
-                    # sink cannot dissolve, and a lane with no machine of the
-                    # owner's is the paid one whether or not it is "remote".
-                    sink = restore._restore_sink_for_lane(lane_name)
-                    remote = _lanes.comfy_lane_is_remote(lane_name)
-                    if not config.video_restore.sink_supports_seams(sink):
-                        plan["seam_frames"] = 0
-                    lane = {
-                        "lane": lane_name,
-                        "remote": remote or lane_name == config.video_restore.CLOUD_LANE,
-                        "paid": remote or lane_name == config.video_restore.CLOUD_LANE,
-                        "assembles_here": config.video_restore.sink_assembles_locally(sink),
-                        "models": capability.get("models") or [],
-                        "devices": capability.get("devices") or [],
-                        "attention_modes": capability.get("attention_modes") or [],
-                    }
-                    if lane_name == config.video_restore.CLOUD_LANE:
-                        # The price, before a byte is uploaded, for THIS plan.
-                        # One round trip for the whole render rather than one
-                        # per chunk — and the studio sends the figure back as
-                        # the approved ceiling, so a price that moved between
-                        # the quote and the start is refused rather than
-                        # quietly charged.
-                        lane["metered"] = "per-render"
-                        try:
-                            lane["quote"] = config.cloud_restore.quote(config.video_restore.cloud_quote_request(plan))
-                        except config.cloud_restore.CloudRestoreError as exc:
-                            # A lane that cannot be priced is not offered as
-                            # free — it is offered as unpriced, and the studio
-                            # says which.
-                            lane["quote_error"] = str(exc)
-                except (RuntimeError, _lanes.ComfyLanePinError) as exc:
-                    lane = {"error": str(exc)}
-                return self.send_json({"ok": True, "plan": plan, "lane": lane})
-            except config.video_restore.RestoreError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except (TypeError, ValueError) as exc:
-                return self.send_json({"error": str(exc)}, 400)
-        if parsed.path == "/api/restore/finish":
-            # Re-finish, without re-restoring. The expensive half is already on
-            # disk; sharpening, grain, softening and the reframe are one ffmpeg
-            # pass over it.
-            try:
-                data = json.loads((self.read_body(max_bytes=config.MAX_JSON_BODY_BYTES) or b"{}").decode("utf-8"))
-                project_id = util.safe_name(str(data.get("project_id") or ""))
-                if not project_id or not restore.restore_manifest_path(project_id).is_file():
-                    return self.send_json({"error": "no such restoration project"}, 404)
-                finish = data.get("finish") if isinstance(data.get("finish"), dict) else {}
-                # A project whose chunks are sealed is finished from the clip the
-                # BROWSER joined — the gateway cannot read those chunks, so the
-                # assembled master has to arrive from the side that can. It
-                # arrives the same way a source does: streamed to disk first,
-                # named here by its id.
-                assembled = restore._claim_restore_source(data)
-                job_id = uuid.uuid4().hex[:12]
-                with jobs.jobs_lock:
-                    jobs.jobs[job_id] = {
-                        "id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued",
-                        "created_at": util.now_iso(), "backend": "seedvr2-finish",
-                    }
-                threading.Thread(
-                    target=restore.run_restore_finish, args=(job_id, project_id, finish, assembled), daemon=True,
-                ).start()
-                return self.send_json({
-                    "id": job_id, "status": "queued", "backend": "seedvr2-finish",
-                    "project_id": project_id,
-                    "job_url": f"/api/job/{job_id}",
-                    "project_url": f"/api/restore/project/{project_id}",
-                }, 202)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            except Exception as exc:
-                return self.send_json({"error": str(exc)}, 500)
-        if parsed.path.startswith("/api/restore/cancel/"):
-            project_id = util.safe_name(parsed.path.rsplit("/", 1)[-1])
-            if not project_id:
-                return self.send_json({"error": "which project?"}, 400)
-            restore.request_restore_cancel(project_id)
-            # Not an error and not a silent no-op: the chunks already finished
-            # are the reason resume is worth offering.
-            return self.send_json({
-                "ok": True,
-                "stopping": True,
-                "message": "Stopping after the chunk in flight. Finished chunks are kept.",
+    def get_output(self, parsed, qs):
+        p = media.find_exact_output_logical_path(qs.get('path', [''])[0])
+        if not p:
+            return self.send_text("not found\n", 404, "text/plain")
+        try:
+            media.send_output_file(self, p)
+        except Exception as e:
+            print(f"[output-encryption] failed to serve exact output: {e}", file=sys.stderr)
+            return self.send_text("not found\n", 404, "text/plain")
+        return
+
+    def get_mobile_app(self, parsed, qs):
+        return self.proxy_to_comfy(parsed, "GET")
+
+    def get_api_restore_projects(self, parsed, qs):
+        return self.send_json({
+            "ok": True,
+            "projects": restore.restore_projects_summary(int(qs.get("limit", ["50"])[0] or 50)),
+        })
+
+    def get_api_restore_capabilities(self, parsed, qs):
+        lanes = []
+        for lane_name, lane_url in sorted(_lanes.COMFY_LANES.items()):
+            capability = restore.lane_restore_capability(lane_url)
+            remote = _lanes.comfy_lane_is_remote(lane_name)
+            lanes.append({
+                "lane": lane_name,
+                "remote": remote,
+                # A rented machine bills by the hour whether it is restoring
+                # or idle, so a restore on one is the paid rail by
+                # definition; a local lane is the free one.
+                "paid": remote,
+                "available": capability.get("available"),
+                "missing": capability.get("missing") or [],
+                "models": capability.get("models") or [],
+                "devices": capability.get("devices") or [],
+                "attention_modes": capability.get("attention_modes") or [],
+                # Only a local lane can be assembled by the gateway; a
+                # rented one is joined in the browser, which the studio has
+                # to know before it starts rather than after.
+                "assembles_here": not remote,
             })
-        if parsed.path.startswith("/api/restore/delete/"):
-            project_id = util.safe_name(parsed.path.rsplit("/", 1)[-1])
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-            except ValueError:
-                data = {}
+        # And the machine nobody owns. Listed last on purpose: it is the
+        # paid one, and a paid lane above a free one that can do the job is
+        # a bill somebody did not choose.
+        hosted = config.cloud_restore.status()
+        lanes.append({
+            "lane": config.video_restore.CLOUD_LANE,
+            "remote": True,
+            "paid": True,
+            # The one that changes what the panel says about money: an
+            # hourly lane is metered by the box, this one is metered by the
+            # render and quoted before it starts.
+            "metered": "per-render",
+            "available": bool(hosted.get("available")),
+            "missing": [] if hosted.get("available") else ["hosted service"],
+            "reason": hosted.get("reason") or "",
+            "models": list(config.video_restore.CLOUD_MODELS),
+            "devices": [],
+            "attention_modes": ["sdpa"],
+            # It CAN be assembled here: a hosted chunk comes back as
+            # ordinary bytes, unlike a rented one. That is why this lane
+            # keeps seam dissolves and re-finishing, and the panel says so.
+            "assembles_here": True,
+        })
+        return self.send_json({
+            "ok": True,
+            "lanes": lanes,
+            "models": list(config.video_restore.DIT_MODELS),
+            "color_corrections": list(config.video_restore.COLOR_CORRECTIONS),
+            "resolutions": config.video_restore.RESOLUTION_PRESETS,
+            "any": any(lane["available"] for lane in lanes),
+            # The two facts the studio cannot work out for itself and has to
+            # state BEFORE the wait: how big a source this machine takes,
+            # and how long its working files are kept. Both are configured
+            # here and were, until now, announced only in the service log.
+            "retention": restore.restore_retention(),
+            "max_source_bytes": restore.RESTORE_MAX_SOURCE_BYTES,
+        })
+
+    def get_api_restore_project(self, parsed, qs):
+        project_id = util.safe_name(parsed.path.rsplit("/", 1)[-1])
+        try:
+            manifest = restore.restore_manifest_path(project_id)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        if not manifest.is_file():
+            return self.send_json({"error": "no such restoration project"}, 404)
+        project = config.video_restore.read_project(manifest)
+        return self.send_json({
+            "ok": True,
+            "project": project,
+            "progress": config.video_restore.project_progress(project),
+            "resume_from": config.video_restore.first_unfinished_chunk(project),
+            "assembly": config.video_restore.assembly_steps(project.get("plan") or {}),
+        })
+
+    def get_api_restore_source(self, parsed, qs):
+        project_id = util.safe_name(parsed.path.rsplit("/", 1)[-1])
+        try:
+            source = restore.restore_project_dir(project_id) / "source.mp4"
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        if not source.is_file():
+            return self.send_json({"error": "this project has no staged source"}, 404)
+        body = source.read_bytes()
+        self.send_response(200)
+        self.cors_headers()
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Cache-Control", "private, no-store, max-age=0")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        return self.wfile.write(body)
+
+    def get_api_history(self, parsed, qs):
+        return self.send_json({"history": [history.public_record(r) for r in jobs.all_records(200)]})
+
+    def get_api_job(self, parsed, qs):
+        jid = parsed.path.rsplit("/", 1)[-1]
+        rec = self.find_job(jid)
+        if rec:
+            return self.send_json(history.public_record(rec), 200)
+        # A prompt routed to a remote lane has no local wrapper job, so this
+        # used to 404 for its whole life - which is exactly how a finished
+        # remote generation left the studio spinning: the trusted
+        # server-side channel had no record to report completion (or
+        # progress) from. Serve the route record in job shape instead.
+        routed = promptroutes.remote_comfy_job_record(jid)
+        return self.send_json(routed or {"error": "not found"}, 200 if routed else 404)
+
+    def get_job(self, parsed, qs):
+        jid = parsed.path.rsplit("/", 1)[-1]
+        rec = self.find_job(jid)
+        if not rec:
+            return self.send_text("job not found\n", 404, "text/plain")
+        return self.send_text(render_job_page(rec))
+
+    def get_image(self, parsed, qs):
+        name = util.safe_name(parsed.path.rsplit("/", 1)[-1])
+        p = media.find_output_logical_path(name)
+        if not p:
+            return self.send_text("not found\n", 404, "text/plain")
+        try:
+            media.send_output_file(self, p)
+        except Exception as e:
+            print(f"[output-encryption] failed to serve {name}: {e}", file=sys.stderr)
+            return self.send_text("not found\n", 404, "text/plain")
+        return
+
+    def post_job_cancel(self, parsed, qs):
+        jid = parsed.path[len("/api/job/"):-len("/cancel")].strip("/")
+        return self.send_json(jobs.cancel_generation_job(jid))
+
+    def post_api_cancel(self, parsed, qs):
+        return self.send_json(jobs.cancel_generation_job(parsed.path.rsplit("/", 1)[-1]))
+
+    def post_api_delete_output(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
             if data.get("confirm") is not True:
                 return self.send_json({"error": "permanent deletion requires confirm=true"}, 400)
+            result = jobs.delete_output_everywhere(str(data.get("filename") or ""))
+            return self.send_json(result)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except RuntimeError as exc:
+            return self.send_json({"error": str(exc)}, 500)
+
+    def post_api_lanes_resolve(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+        except (ValueError, json.JSONDecodeError) as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        graph = data.get("graph") if isinstance(data, dict) else None
+        if not isinstance(graph, dict):
+            return self.send_json({"error": "graph (a ComfyUI API prompt graph) is required"}, 400)
+        try:
+            lane = _lanes.comfy_lane_for_prompt_body(
+                json.dumps({"prompt": graph}).encode("utf-8"), run_on=data.get("run_on"),
+            )
+        except _lanes.ComfyLanePinError as exc:
+            return self.send_json({"error": str(exc), "operational": True}, 409)
+        return self.send_json({"ok": True, **_lanes.comfy_lane_vram_headroom(lane)})
+
+    def post_api_delete_input(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            return self.send_json({"ok": True, "deleted": media.delete_private_input(data.get("filename"))})
+        except (json.JSONDecodeError, ValueError) as exc:
+            return self.send_json({"error": str(exc)}, 400)
+
+    def post_api_interpolate(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body(max_bytes=runners.INTERPOLATE_MAX_BODY_BYTES) or b"{}").decode("utf-8"))
+            staged = runners.stage_inline_video_base64(data.get("video_base64"))
+            if staged is None:
+                return self.send_json({"error": "video_base64 is required"}, 400)
+            factor = 4 if str(data.get("factor")) == "4" else 2
+            job_id = uuid.uuid4().hex[:12]
+            with jobs.jobs_lock:
+                jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "rife-interpolation", "mode": f"{factor}x", "options": {"factor": factor}}
+            t = threading.Thread(target=runners.run_video_interpolation, args=(job_id, staged, {"factor": factor}), daemon=True)
+            t.start()
+            return self.send_json({
+                "id": job_id,
+                "status": "queued",
+                "backend": "rife-interpolation",
+                "mode": f"{factor}x",
+                "job_url": f"/api/job/{job_id}",
+                "page_url": f"/job/{job_id}",
+                "history_url": "/api/history",
+            }, 202)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self.send_json({"error": str(exc)}, 500)
+
+    def post_api_smart_mask(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            staged = media.stage_inline_image_base64(data.get("image_base64"))
+            if staged is None:
+                return self.send_json({"error": "image_base64 is required"}, 400)
+            options = {
+                "prompt": str(data.get("prompt") or "")[:400],
+                "points": data.get("points"),
+                "confidence": data.get("confidence"),
+            }
+            if not options["prompt"].strip() and not options["points"]:
+                return self.send_json({"error": "describe an object or tap the image"}, 400)
+            job_id = uuid.uuid4().hex[:12]
+            with jobs.jobs_lock:
+                jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "sam3-smart-mask"}
+            threading.Thread(
+                target=runners.run_sam3_smart_mask, args=(job_id, staged, options), daemon=True,
+            ).start()
+            return self.send_json({
+                "id": job_id,
+                "status": "queued",
+                "backend": "sam3-smart-mask",
+                "job_url": f"/api/job/{job_id}",
+            }, 202)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self.send_json({"error": str(exc)}, 500)
+
+    def post_api_ltx_director(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            project = data.get("project")
+            if not isinstance(project, dict):
+                return self.send_json({"error": "project is required"}, 400)
+            options = {
+                "width": data.get("width"),
+                "height": data.get("height"),
+                "seed": data.get("seed"),
+                "loras": data.get("loras"),
+            }
+            options = {k: v for k, v in options.items() if v is not None}
+            # Validate before queueing so a malformed timeline answers the
+            # caller directly instead of failing inside a background job.
+            config.build_ltx_director_prompt(project, options)
+            job_id = uuid.uuid4().hex[:12]
+            with jobs.jobs_lock:
+                jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "ltx-director"}
+            threading.Thread(
+                target=runners.run_ltx_director, args=(job_id, project, options), daemon=True,
+            ).start()
+            return self.send_json({
+                "id": job_id,
+                "status": "queued",
+                "backend": "ltx-director",
+                "job_url": f"/api/job/{job_id}",
+            }, 202)
+        except config.DirectorProjectError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self.send_json({"error": str(exc)}, 500)
+
+    def post_api_episode(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body(max_bytes=runners.INTERPOLATE_MAX_BODY_BYTES) or b"{}").decode("utf-8"))
+            staged = runners.stage_inline_video_base64(data.get("video_base64"))
+            if staged is None:
+                return self.send_json({"error": "video_base64 is required"}, 400)
+            shots = util.int_option(data, "shots", 0, 0, 512)
+            job_id = uuid.uuid4().hex[:12]
+            with jobs.jobs_lock:
+                jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "episode-join", "options": {"shots": shots}}
+            threading.Thread(
+                target=runners.run_episode_save, args=(job_id, staged, {"shots": shots}), daemon=True,
+            ).start()
+            return self.send_json({
+                "id": job_id,
+                "status": "queued",
+                "backend": "episode-join",
+                "job_url": f"/api/job/{job_id}",
+                "page_url": f"/job/{job_id}",
+                "history_url": "/api/history",
+            }, 202)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self.send_json({"error": str(exc)}, 500)
+
+    def post_api_upscale(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            staged = media.stage_inline_image_base64(data.get("image_base64"))
+            if staged is None:
+                return self.send_json({"error": "image_base64 is required"}, 400)
+            options = {
+                "mode": data.get("mode"),
+                "scale": data.get("scale"),
+                "prompt": data.get("prompt"),
+                "negative_prompt": data.get("negative_prompt"),
+                "refine_steps": data.get("refine_steps"),
+                "refine_denoise": data.get("refine_denoise"),
+                "seed": data.get("seed"),
+                "run_on": data.get("run_on"),
+            }
+            # A stale "Run on" pin is refused here, before a job exists to
+            # fail, so the studio hears the reason instead of a dead job.
             try:
-                directory = restore.restore_project_dir(project_id)
-            except ValueError as exc:
-                return self.send_json({"error": str(exc)}, 400)
-            if not directory.is_dir():
+                _lanes.comfy_lane_for_pin(options.get("run_on"))
+            except _lanes.ComfyLanePinError as exc:
+                return self.send_json({"error": str(exc), "operational": True}, 409)
+            job_id = uuid.uuid4().hex[:12]
+            mode = "max" if str(data.get("mode") or "fast").lower() == "max" else "fast"
+            with jobs.jobs_lock:
+                jobs.jobs[job_id] = {"id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued", "created_at": util.now_iso(), "backend": "comfy-upscale", "mode": mode, "options": {"mode": mode}}
+            t = threading.Thread(target=runners.run_comfy_upscale, args=(job_id, staged, options), daemon=True)
+            t.start()
+            return self.send_json({
+                "id": job_id,
+                "status": "queued",
+                "backend": "comfy-upscale",
+                "mode": mode,
+                "job_url": f"/api/job/{job_id}",
+                "page_url": f"/job/{job_id}",
+                "history_url": "/api/history",
+            }, 202)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self.send_json({"error": str(exc)}, 500)
+
+    def post_api_restore_upload(self, parsed, qs):
+        restore.reap_restore_uploads()
+        source_id = f"u{uuid.uuid4().hex[:16]}"
+        try:
+            written = self.stream_body_to_file(
+                restore.restore_upload_path(source_id), restore.RESTORE_MAX_SOURCE_BYTES)
+        except restore.RestoreTooLarge as exc:
+            return self.send_json({
+                "error": str(exc), "operational": True,
+                "max_source_bytes": exc.max_bytes, "bytes": exc.size_bytes,
+            }, 413)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except OSError as exc:
+            return self.send_json({"error": f"that upload could not be written: {exc}"}, 507)
+        return self.send_json({
+            "ok": True, "source_id": source_id, "bytes": written,
+            **restore.restore_retention(),
+        }, 201)
+
+    def post_api_restore(self, parsed, qs):
+        try:
+            # The ordinary JSON cap now, not a 768MB one: the body is a
+            # set of dials and a staged id. It still leaves room for the
+            # small inline clip an older client might send.
+            data = json.loads((self.read_body(max_bytes=config.MAX_JSON_BODY_BYTES) or b"{}").decode("utf-8"))
+            project_id = util.safe_name(str(data.get("project_id") or ""))
+            staged = restore._claim_restore_source(data)
+            if staged is None and not project_id:
+                return self.send_json({"error": "a source clip is required to start a restoration"}, 400)
+            options = {
+                key: data.get(key) for key in (
+                    "model", "resolution", "max_resolution", "batch_size", "chunk_seconds",
+                    "context_frames", "seam_frames", "temporal_overlap", "color_correction",
+                    "seed", "preview_frames", "preview_start_frame", "device", "offload_device",
+                    "attention_mode", "cache_models", "tiled_vae", "tile_size", "torch_compile",
+                    "run_on", "max_spend_usd",
+                ) if data.get(key) is not None
+            }
+            if isinstance(data.get("finish"), dict):
+                options["finish"] = data["finish"]
+            # The hosted lane's two extras, read SEPARATELY from the options
+            # above because `options` is written into the project manifest
+            # verbatim. The token belongs in memory for the life of one
+            # render and nowhere else; it is attached by the control API,
+            # which is the only side that can read the owner's account.
+            credit_token = str(data.get("credit_token") or "")
+            if credit_token:
+                options["credit_token"] = credit_token
+            # Settled HERE rather than inside the runner, so the 202 can
+            # name the project the studio is about to poll. Without it the
+            # studio would have to guess, or poll the whole project list.
+            project_id = project_id or f"r{uuid.uuid4().hex[:10]}"
+            options["project_id"] = project_id
+            pin_error = restore.restore_pin_error(options)
+            if pin_error:
+                if staged is not None:
+                    staged.unlink(missing_ok=True)
+                return self.send_json({"error": pin_error, "operational": True}, 409)
+            job_id = uuid.uuid4().hex[:12]
+            with jobs.jobs_lock:
+                jobs.jobs[job_id] = {
+                    "id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued",
+                    "created_at": util.now_iso(), "backend": "seedvr2-restore",
+                }
+            threading.Thread(
+                target=restore.run_video_restore, args=(job_id, staged, options), daemon=True,
+            ).start()
+            return self.send_json({
+                "id": job_id,
+                "status": "queued",
+                "backend": "seedvr2-restore",
+                "project_id": project_id,
+                "job_url": f"/api/job/{job_id}",
+                "project_url": f"/api/restore/project/{project_id}",
+                "history_url": "/api/history",
+            }, 202)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self.send_json({"error": str(exc)}, 500)
+
+    def post_api_restore_plan(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            plan = config.video_restore.restore_plan(
+                frames=int(data.get("frames") or 0),
+                fps=float(data.get("fps") or 24.0),
+                width=int(data.get("width") or 0),
+                height=int(data.get("height") or 0),
+                options=data.get("options") if isinstance(data.get("options"), dict) else {},
+            )
+            lane = None
+            try:
+                lane_name, lane_url, capability = restore._resolve_restore_lane(plan, data.get("options") or {})
+                # The same two questions the runner asks, so the plan the
+                # panel shows is the plan the render will run: a sealed
+                # sink cannot dissolve, and a lane with no machine of the
+                # owner's is the paid one whether or not it is "remote".
+                sink = restore._restore_sink_for_lane(lane_name)
+                remote = _lanes.comfy_lane_is_remote(lane_name)
+                if not config.video_restore.sink_supports_seams(sink):
+                    plan["seam_frames"] = 0
+                lane = {
+                    "lane": lane_name,
+                    "remote": remote or lane_name == config.video_restore.CLOUD_LANE,
+                    "paid": remote or lane_name == config.video_restore.CLOUD_LANE,
+                    "assembles_here": config.video_restore.sink_assembles_locally(sink),
+                    "models": capability.get("models") or [],
+                    "devices": capability.get("devices") or [],
+                    "attention_modes": capability.get("attention_modes") or [],
+                }
+                if lane_name == config.video_restore.CLOUD_LANE:
+                    # The price, before a byte is uploaded, for THIS plan.
+                    # One round trip for the whole render rather than one
+                    # per chunk — and the studio sends the figure back as
+                    # the approved ceiling, so a price that moved between
+                    # the quote and the start is refused rather than
+                    # quietly charged.
+                    lane["metered"] = "per-render"
+                    try:
+                        lane["quote"] = config.cloud_restore.quote(config.video_restore.cloud_quote_request(plan))
+                    except config.cloud_restore.CloudRestoreError as exc:
+                        # A lane that cannot be priced is not offered as
+                        # free — it is offered as unpriced, and the studio
+                        # says which.
+                        lane["quote_error"] = str(exc)
+            except (RuntimeError, _lanes.ComfyLanePinError) as exc:
+                lane = {"error": str(exc)}
+            return self.send_json({"ok": True, "plan": plan, "lane": lane})
+        except config.video_restore.RestoreError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except (TypeError, ValueError) as exc:
+            return self.send_json({"error": str(exc)}, 400)
+
+    def post_api_restore_finish(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body(max_bytes=config.MAX_JSON_BODY_BYTES) or b"{}").decode("utf-8"))
+            project_id = util.safe_name(str(data.get("project_id") or ""))
+            if not project_id or not restore.restore_manifest_path(project_id).is_file():
                 return self.send_json({"error": "no such restoration project"}, 404)
-            restore.request_restore_cancel(project_id)
-            shutil.rmtree(directory, ignore_errors=True)
-            # The master is an ordinary output and stays where it is; deleting a
-            # project throws away the working files, not the film.
-            return self.send_json({"ok": True, "deleted": project_id})
-        if parsed.path in ["/api/models/equip", "/api/models/unequip"]:
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-                mid = str(data.get("id", ""))
-                if parsed.path.endswith("/equip"):
-                    ok, msg = _models.equip_model(mid)
-                    return self.send_json({"ok": ok, "message": msg, "equipped": _models.load_equipped(), "selected": _models.load_selected_loras(), "ram": _models.ram_info()}, 200 if ok else 409)
-                changed = _models.unequip_model(mid)
-                return self.send_json({"ok": True, "changed": changed, "equipped": _models.load_equipped(), "selected": _models.load_selected_loras(), "ram": _models.ram_info()})
-            except Exception as e:
-                return self.send_json({"error": str(e)}, 500)
-        if parsed.path == "/api/loras/select":
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-                selected = _models.save_selected_loras(data.get('loras', []))
-                return self.send_json({"ok": True, "selected": selected, "loras": _models.local_loras()})
-            except Exception as e:
-                return self.send_json({"error": str(e)}, 500)
-        if parsed.path == "/api/civitai/download":
-            try:
-                data = json.loads((self.read_body() or b"{}").decode("utf-8"))
-                civitai_key = data.get('civitai_key') or data.get('civitai_token') or data.get('civitaiToken') or data.get('civitaiApiKey')
-                if data.get('url'):
-                    resolved = _models.resolve_civitai_url(data.get('url'))
-                    _models.validate_civitai_expected_type(resolved.get('version') or {}, data.get('expectedType'))
-                    job = _models.start_civitai_download_job(
-                        resolved.get('versionId'),
-                        data.get('fileId') or resolved.get('fileId'),
-                        token_override=civitai_key,
-                        name=_models.civitai_version_display_name(resolved.get('version') or {}),
-                        replace_id=data.get('replaceId') or data.get('replace_id'),
-                    )
-                    job['resolved'] = {'versionId': resolved.get('versionId'), 'fileId': data.get('fileId') or resolved.get('fileId')}
-                    return self.send_json(job, 202)
-                job = _models.start_civitai_download_job(data.get('versionId') or data.get('modelVersionId'), data.get('fileId'), token_override=civitai_key)
+            finish = data.get("finish") if isinstance(data.get("finish"), dict) else {}
+            # A project whose chunks are sealed is finished from the clip the
+            # BROWSER joined — the gateway cannot read those chunks, so the
+            # assembled master has to arrive from the side that can. It
+            # arrives the same way a source does: streamed to disk first,
+            # named here by its id.
+            assembled = restore._claim_restore_source(data)
+            job_id = uuid.uuid4().hex[:12]
+            with jobs.jobs_lock:
+                jobs.jobs[job_id] = {
+                    "id": job_id, "prompt": history.PRIVATE_PROMPT_LABEL, "status": "queued",
+                    "created_at": util.now_iso(), "backend": "seedvr2-finish",
+                }
+            threading.Thread(
+                target=restore.run_restore_finish, args=(job_id, project_id, finish, assembled), daemon=True,
+            ).start()
+            return self.send_json({
+                "id": job_id, "status": "queued", "backend": "seedvr2-finish",
+                "project_id": project_id,
+                "job_url": f"/api/job/{job_id}",
+                "project_url": f"/api/restore/project/{project_id}",
+            }, 202)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self.send_json({"error": str(exc)}, 500)
+
+    def post_api_restore_cancel(self, parsed, qs):
+        project_id = util.safe_name(parsed.path.rsplit("/", 1)[-1])
+        if not project_id:
+            return self.send_json({"error": "which project?"}, 400)
+        restore.request_restore_cancel(project_id)
+        # Not an error and not a silent no-op: the chunks already finished
+        # are the reason resume is worth offering.
+        return self.send_json({
+            "ok": True,
+            "stopping": True,
+            "message": "Stopping after the chunk in flight. Finished chunks are kept.",
+        })
+
+    def post_api_restore_delete(self, parsed, qs):
+        project_id = util.safe_name(parsed.path.rsplit("/", 1)[-1])
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+        except ValueError:
+            data = {}
+        if data.get("confirm") is not True:
+            return self.send_json({"error": "permanent deletion requires confirm=true"}, 400)
+        try:
+            directory = restore.restore_project_dir(project_id)
+        except ValueError as exc:
+            return self.send_json({"error": str(exc)}, 400)
+        if not directory.is_dir():
+            return self.send_json({"error": "no such restoration project"}, 404)
+        restore.request_restore_cancel(project_id)
+        shutil.rmtree(directory, ignore_errors=True)
+        # The master is an ordinary output and stays where it is; deleting a
+        # project throws away the working files, not the film.
+        return self.send_json({"ok": True, "deleted": project_id})
+
+    def post_api_models_equip_or_unequip(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            mid = str(data.get("id", ""))
+            if parsed.path.endswith("/equip"):
+                ok, msg = _models.equip_model(mid)
+                return self.send_json({"ok": ok, "message": msg, "equipped": _models.load_equipped(), "selected": _models.load_selected_loras(), "ram": _models.ram_info()}, 200 if ok else 409)
+            changed = _models.unequip_model(mid)
+            return self.send_json({"ok": True, "changed": changed, "equipped": _models.load_equipped(), "selected": _models.load_selected_loras(), "ram": _models.ram_info()})
+        except Exception as e:
+            return self.send_json({"error": str(e)}, 500)
+
+    def post_api_loras_select(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            selected = _models.save_selected_loras(data.get('loras', []))
+            return self.send_json({"ok": True, "selected": selected, "loras": _models.local_loras()})
+        except Exception as e:
+            return self.send_json({"error": str(e)}, 500)
+
+    def post_api_civitai_download(self, parsed, qs):
+        try:
+            data = json.loads((self.read_body() or b"{}").decode("utf-8"))
+            civitai_key = data.get('civitai_key') or data.get('civitai_token') or data.get('civitaiToken') or data.get('civitaiApiKey')
+            if data.get('url'):
+                resolved = _models.resolve_civitai_url(data.get('url'))
+                _models.validate_civitai_expected_type(resolved.get('version') or {}, data.get('expectedType'))
+                job = _models.start_civitai_download_job(
+                    resolved.get('versionId'),
+                    data.get('fileId') or resolved.get('fileId'),
+                    token_override=civitai_key,
+                    name=_models.civitai_version_display_name(resolved.get('version') or {}),
+                    replace_id=data.get('replaceId') or data.get('replace_id'),
+                )
+                job['resolved'] = {'versionId': resolved.get('versionId'), 'fileId': data.get('fileId') or resolved.get('fileId')}
                 return self.send_json(job, 202)
-            except Exception as e:
-                return self.send_json({"error": str(e)}, 502)
-        if parsed.path.startswith("/api/civitai/cancel-download/"):
-            jid = parsed.path.rsplit("/", 1)[-1]
-            rec = _models.cancel_civitai_download_job(jid)
-            return self.send_json(_models.public_download_job(rec) if rec else {"error": "not found"}, 200 if rec else 404)
-        if parsed.path.startswith("/comfy/") or parsed.path.startswith("/mobile/"):
-            return self.proxy_to_comfy(parsed, "POST")
-        if parsed.path not in ["/generate", "/api/generate"]:
-            return self.send_json({"error": "not found"}, 404)
+            job = _models.start_civitai_download_job(data.get('versionId') or data.get('modelVersionId'), data.get('fileId'), token_override=civitai_key)
+            return self.send_json(job, 202)
+        except Exception as e:
+            return self.send_json({"error": str(e)}, 502)
+
+    def post_api_civitai_cancel_download(self, parsed, qs):
+        jid = parsed.path.rsplit("/", 1)[-1]
+        rec = _models.cancel_civitai_download_job(jid)
+        return self.send_json(_models.public_download_job(rec) if rec else {"error": "not found"}, 200 if rec else 404)
+
+    def post_comfy(self, parsed, qs):
+        return self.proxy_to_comfy(parsed, "POST")
+
+    def post_generate(self, parsed, qs):
         try:
             ctype = self.headers.get("Content-Type", "")
             data = {}
@@ -1728,11 +1757,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"id": job_id, "status": "queued", "job_url": f"/api/job/{job_id}", "page_url": f"/job/{job_id}", "history_url": "/api/history"}, 202)
         except Exception as e:
             return self.send_json({"error": str(e)}, 500)
-    def do_DELETE(self):
-        parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        if not self.authed(qs):
-            return self.send_json({"error": "unauthorized"}, 401)
-        if parsed.path.startswith("/comfy/") or parsed.path.startswith("/mobile/"):
-            return self.proxy_to_comfy(parsed, "DELETE")
-        return self.send_json({"error": "not found"}, 404)
+
+    def delete_comfy(self, parsed, qs):
+        return self.proxy_to_comfy(parsed, "DELETE")

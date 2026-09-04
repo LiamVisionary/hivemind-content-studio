@@ -34,6 +34,7 @@ from gateway import (  # noqa: E402  (sys.path above is what makes this import w
     native_mlx,
     http,
     net,
+    routes,
     runtime,
 )
 from gateway.runtime import main  # noqa: E402
@@ -56,6 +57,7 @@ __all__ = [
     "native_mlx",
     "http",
     "net",
+    "routes",
     "runtime",
 ]
 
