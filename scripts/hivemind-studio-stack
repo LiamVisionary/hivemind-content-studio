@@ -48,6 +48,15 @@ OPEN_GEN_PORT="8794"
 # and the agent MCP on this port, and keeps 8788, $OPEN_GEN_PORT and
 # $MEDIA_STUDIO_MCP_PORT answering as compatibility ports.
 NODE_SERVICES_PORT="${HIVEMIND_NODE_SERVICES_PORT:-8793}"
+# 90 seconds, not the 45 this gate carried through the 2026-09-04 boot loop.
+# The Node child has to reach a Next.js PRODUCTION build before /healthz can
+# answer, and it starts AFTER up to three ComfyUI lanes have loaded — each of
+# which pins several GB and saturates the disk on its way in. 45s is plenty on
+# a warm machine and is not obviously enough on a cold or busy one. Being wrong
+# the tight way costs a boot loop; being wrong the loose way costs 45 extra
+# seconds on a boot that was going to fail anyway, and the log now says which
+# of the two it was. Override with HIVEMIND_NODE_SERVICES_TIMEOUT.
+NODE_SERVICES_TIMEOUT="${HIVEMIND_NODE_SERVICES_TIMEOUT:-90}"
 ZIMG_TOKEN_FILE="${ZIMG_TOKEN_FILE:-$MEDIA_STATE_ROOT/secure/zimg-token}"
 
 # Start a service with the machine's shared credentials loaded.
@@ -165,14 +174,133 @@ comfy_available() {
   [ -f "$COMFY/main.py" ] && [ -x "$COMFY/.venv/bin/python" ]
 }
 
+# ── Health gates that say what actually failed ───────────────────────────────
+#
+# On 2026-09-04 this stack boot-looped for an hour and the log said only
+# "Z-Image frontend did not become healthy in time". The frontend was fine: it
+# bound its port and logged "listening" on all 29 attempts, and a hand-run
+# `curl -fsS --max-time 5 http://127.0.0.1:8788/healthz` answered 200 in 0.02s
+# within about four seconds of each child starting. The old message was
+# byte-identical whether the server never bound, bound and answered, or the
+# supervisor's own curl could not be executed — so an hour went into telling
+# those apart by hand.
+#
+# wait_http now records WHY the last probe failed and the gate beside it logs
+# that. These are globals because a bash function returns a status, not a
+# record, and printing a line to parse would be worse.
+WAIT_HTTP_URL=""
+WAIT_HTTP_CURL_EXIT=""
+WAIT_HTTP_STATUS=""
+WAIT_HTTP_ELAPSED=0
+WAIT_HTTP_PROBE_TIMEOUT=5
+# How long ONE probe may take by default. Separate from the gate's overall
+# budget, and overridable per call as wait_http's third argument.
+WAIT_HTTP_DEFAULT_PROBE_TIMEOUT="${WAIT_HTTP_DEFAULT_PROBE_TIMEOUT:-5}"
+
+# wait_http <url> [budget_seconds] [probe_seconds]
+# A budget of 0 makes this a single recorded probe, which is how the liveness
+# check gets a reason to log without duplicating any of this.
 wait_http() {
-  local url="$1" timeout="${2:-120}" elapsed=0
-  until curl -fsS --max-time 5 "$url" >/dev/null 2>&1; do
-    elapsed=$((elapsed + 2))
-    [ "$elapsed" -ge "$timeout" ] && return 1
+  local url="$1" timeout="${2:-120}" status="" rc=0 started=$SECONDS
+  WAIT_HTTP_URL="$url"
+  WAIT_HTTP_CURL_EXIT=""
+  WAIT_HTTP_STATUS=""
+  WAIT_HTTP_ELAPSED=0
+  WAIT_HTTP_PROBE_TIMEOUT="${3:-$WAIT_HTTP_DEFAULT_PROBE_TIMEOUT}"
+  while :; do
+    # No -f. `-f` collapses every 4xx and 5xx into exit 22 and throws the
+    # status away, so "the app is up and returning 503 while it warms" and
+    # "the app returns 404 because the route moved" were the same failure.
+    # Ask for the status and judge it here: both halves survive.
+    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time "$WAIT_HTTP_PROBE_TIMEOUT" "$url" 2>/dev/null)"
+    rc=$?
+    WAIT_HTTP_CURL_EXIT="$rc"
+    WAIT_HTTP_STATUS="$status"
+    WAIT_HTTP_ELAPSED=$((SECONDS - started))
+    # Healthy is what -f called healthy: a 2xx or 3xx curl actually received.
+    case "$rc:$status" in
+      0:2??|0:3??) return 0 ;;
+    esac
+    # 127 is not a transient condition — curl is not on this PATH, and no
+    # amount of waiting changes that. Sitting in the loop would only delay the
+    # report by the whole budget, and if curl is missing `sleep` may be too, in
+    # which case the loop below spins hot. Give up on the first one.
+    [ "$rc" -eq 127 ] && return 1
+    [ "$WAIT_HTTP_ELAPSED" -ge "$timeout" ] && return 1
     sleep 2
   done
-  return 0
+}
+
+# The last probe's verdict in the words of a bug report. The four that matter:
+# 7 is nothing listening, 28 is something listening that will not answer, 127
+# is curl itself failing to run (a PATH problem in this supervisor, not a child
+# problem at all), and exit 0 with a status the old -f would have rejected.
+wait_http_reason() {
+  case "${WAIT_HTTP_CURL_EXIT:-}" in
+    '') printf 'no probe was made' ;;
+    0) printf 'HTTP %s' "${WAIT_HTTP_STATUS:-000}" ;;
+    6) printf 'could not resolve host' ;;
+    7) printf 'connection refused' ;;
+    22) printf 'HTTP %s' "${WAIT_HTTP_STATUS:-000}" ;;
+    28) printf 'timed out after %ss with no reply' "$WAIT_HTTP_PROBE_TIMEOUT" ;;
+    35|60) printf 'TLS handshake failed' ;;
+    52) printf 'empty reply from server' ;;
+    56) printf 'connection reset' ;;
+    127) printf 'curl exited 127 (curl could not be executed; check PATH)' ;;
+    *) printf 'curl exited %s' "${WAIT_HTTP_CURL_EXIT}" ;;
+  esac
+}
+
+# Whoever holds a port right now, as a space-separated pid list (empty if free).
+port_listeners() {
+  local pids=""
+  pids="$(lsof -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null)" || pids=""
+  # Unquoted on purpose: word splitting is what collapses lsof's newlines.
+  # shellcheck disable=SC2086
+  echo $pids
+}
+
+# The port out of a URL, using only shell builtins. A diagnosis that needs sed
+# to run is one more thing that can be missing at the moment it is wanted —
+# which is exactly the class of failure this whole block exists to name.
+url_port() {
+  local rest="${1#*://}"
+  rest="${rest%%/*}"
+  local port="${rest##*:}"
+  case "$port" in
+    ''|*[!0-9]*) printf '' ;;
+    *) printf '%s' "$port" ;;
+  esac
+}
+
+# The suffix every "did not become healthy in time" line now carries: the last
+# probe's verdict, whether anything holds the port at the moment we gave up,
+# and whether the child we started is still alive. A child that died before it
+# ever bound is the common case, and the old log never said so.
+wait_http_why() {
+  local pid="${1:-}" port="" listeners="" out=""
+  port="$(url_port "$WAIT_HTTP_URL")"
+  out="last probe after ${WAIT_HTTP_ELAPSED}s: $(wait_http_reason)"
+  if [ -n "$port" ]; then
+    if ! command -v lsof >/dev/null 2>&1; then
+      out="$out; cannot tell who holds :$port (no lsof)"
+    else
+      listeners="$(port_listeners "$port")"
+      if [ -n "$listeners" ]; then
+        out="$out; :$port held by pid(s) $listeners"
+      else
+        out="$out; nothing listening on :$port"
+      fi
+    fi
+  fi
+  if [ -n "$pid" ]; then
+    if kill -0 "$pid" 2>/dev/null; then
+      out="$out; child pid=$pid still alive"
+    else
+      out="$out; child pid=$pid is gone"
+    fi
+  fi
+  printf '%s' "$out"
 }
 
 # tailscale_ip() lived here. Nothing binds a proxy to the tailnet address any
@@ -340,7 +468,7 @@ PY
 	      log "Flux2 persistent server is optional; not restarting whole stack if it exits"
 	    fi
     if ! wait_http "http://127.0.0.1:$FLUX2_SERVER_PORT/health" 45; then
-      log "Flux2 persistent server did not become healthy in time"
+      log "Flux2 persistent server did not become healthy in time; $(wait_http_why "$pid")"
       return 1
     fi
     local warm_input="$PRIV/input/mlx_test_selfie.jpg"
@@ -442,7 +570,7 @@ PY
     # holding the control API back over it is what made a machine without
     # ComfyUI unable to open the app at all. The studio comes up, reports the
     # lane as unreachable, and cloud and rented work carries on.
-    log "ComfyUI default lane did not become healthy in time; continuing without it"
+    log "ComfyUI default lane did not become healthy in time; $(wait_http_why "$pid"); continuing without it"
   fi
 
   local comfy_warm_input="$PRIV/input/mlx_test_selfie.jpg"
@@ -508,7 +636,7 @@ PY
 	    log "ComfyUI LTX lane child pid=$pid port=$COMFY_LTX_PORT gpu_only=1 lora_bypass_mps=1"
 	
 	    if ! wait_http "http://127.0.0.1:$COMFY_LTX_PORT/system_stats" 150; then
-	      log "ComfyUI LTX lane did not become healthy in time; continuing without it"
+	      log "ComfyUI LTX lane did not become healthy in time; $(wait_http_why "$pid"); continuing without it"
 	    fi
 	  else
 	    log "ComfyUI LTX lane disabled; non-Apple-Silicon path uses default Comfy lane"
@@ -538,7 +666,7 @@ PY
   log "ComfyUI Anima lane child pid=$pid port=$COMFY_ANIMA_PORT"
 
   if ! wait_http "http://127.0.0.1:$COMFY_ANIMA_PORT/system_stats" 150; then
-    log "ComfyUI Anima lane did not become healthy in time; continuing without it"
+    log "ComfyUI Anima lane did not become healthy in time; $(wait_http_why "$pid"); continuing without it"
   fi
   fi
   # ---- End of the optional local lanes --------------------------------------
@@ -570,7 +698,7 @@ PY
   log "Z-Image API child pid=$pid"
 
   if ! wait_http http://127.0.0.1:8787/health 45; then
-    log "Z-Image API did not become healthy in time"
+    log "Z-Image API did not become healthy in time; $(wait_http_why "$pid"); see $PRIV/z-image-api.log"
     return 1
   fi
 
@@ -643,8 +771,8 @@ PY
 
   # One wait, not three. /healthz on the shared port is 200 only when all three
   # surfaces came up; it names the one that did not when they did not.
-  if ! wait_http "http://127.0.0.1:$NODE_SERVICES_PORT/healthz" 45; then
-    log "Node services did not become healthy in time; see $PRIV/hivemind-node-services.log"
+  if ! wait_http "http://127.0.0.1:$NODE_SERVICES_PORT/healthz" "$NODE_SERVICES_TIMEOUT"; then
+    log "Node services did not become healthy in time; $(wait_http_why "$pid"); see $PRIV/hivemind-node-services.log"
     return 1
   fi
 
@@ -669,7 +797,7 @@ PY
   # up" and "the engines are up" used to be one answer. /readyz turns true only
   # once the accounts bootstrap and the catalog warm have both run.
   if ! wait_http "http://127.0.0.1:$CONTENT_STUDIO_PORT/readyz" 60; then
-    log "Hivemind Content Studio did not become healthy in time"
+    log "Hivemind Content Studio did not become healthy in time; $(wait_http_why "$pid"); see $PRIV/hivemind-content-studio.log"
     return 1
   fi
 
@@ -683,6 +811,15 @@ PY
   log "tailnet publishing is off at boot; turn it on in the studio if you want it"
 }
 
+# Recorded pids, never a name pattern.
+#
+# The other half of the 2026-09-04 incident: an agent cleaning up its own test
+# servers ran `pkill -f "hosted-server.js"` and the pattern matched the owner's
+# running child, because hosted-server.js is one of the three surfaces this
+# supervisor's Node child loads. Nothing in this repo may reap by name — every
+# stop goes through a pid this script wrote down, or through kill_port, which
+# asks lsof who actually holds one of OUR ports. test_supervisor_diagnosis.py
+# fails the build if a `pkill -f` or `killall` reappears anywhere in the tree.
 stop_children() {
   log "stopping studio stack children"
   for pid in "${children[@]:-}"; do
@@ -722,11 +859,13 @@ healthy() {
   # this child miss a short deadline, and killing the stack mid-generation is
   # worse than a slow health answer. Child-pid supervision still catches a real
   # crash.
-  if curl -fsS --max-time 10 "http://127.0.0.1:$NODE_SERVICES_PORT/healthz" >/dev/null; then
+  # A budget of 0 is one recorded probe, so the soft-fail line below can name
+  # the cause the same way the boot gates do rather than only that it failed.
+  if wait_http "http://127.0.0.1:$NODE_SERVICES_PORT/healthz" 0 10; then
     ZIMG_FRONTEND_HEALTH_SOFT_FAILS=0
   else
     ZIMG_FRONTEND_HEALTH_SOFT_FAILS=$(( ${ZIMG_FRONTEND_HEALTH_SOFT_FAILS:-0} + 1 ))
-    log "node services health soft-failed ($ZIMG_FRONTEND_HEALTH_SOFT_FAILS/6); keeping Comfy lanes alive"
+    log "node services health soft-failed ($ZIMG_FRONTEND_HEALTH_SOFT_FAILS/6); $(wait_http_why); keeping Comfy lanes alive"
     if [ "$ZIMG_FRONTEND_HEALTH_SOFT_FAILS" -eq 6 ]; then
       log "node services remained unresponsive during a possible accelerator-heavy render; child-pid supervision stays active and the generation stack will not be restarted"
     fi

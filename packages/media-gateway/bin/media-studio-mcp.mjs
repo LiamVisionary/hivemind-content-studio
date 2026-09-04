@@ -584,6 +584,15 @@ function baseFromMcpEndpoint(value) {
   }
 }
 
+function isHttpUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function runtimePublicStudioBase() {
   const runtime = runtimeManifest();
   const entrypoints = runtime?.entrypoints || {};
@@ -594,7 +603,11 @@ function runtimePublicStudioBase() {
     entrypoints.remote,
   ]) {
     const base = String(value || '').includes('/mcp') ? baseFromMcpEndpoint(value) : String(value || '').replace(/\/+$/, '');
-    if (base) return base;
+    // Only a real http(s) origin. `tailnetMcp` in the shipped manifest reads
+    // "configured by the local supervisor", which is a note to a person and
+    // used to be returned as the public base — so an MCP started without
+    // MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL built every media URL on a sentence.
+    if (base && isHttpUrl(base)) return base;
   }
   return '';
 }
