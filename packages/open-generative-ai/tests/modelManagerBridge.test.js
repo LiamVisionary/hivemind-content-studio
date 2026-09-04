@@ -72,3 +72,43 @@ test('the models surface is native: no iframe, no gateway surface entry', () => 
     assert.doesNotMatch(hubData, /models: \{ gateway_path/);
     assert.doesNotMatch(hubData, /\['canvas', 'models'\]/);
 });
+
+// ── one manager ────────────────────────────────────────────────────────────
+// Installing a model used to be three doors: this page, a Settings tab holding
+// a second copy of the same manager, and the Canvas editor's own button into an
+// external LoRA UI in a new tab. These assert the two that were closed.
+
+const settingsView = fs.readFileSync(path.join(__dirname, '../src/hub/views/SettingsView.jsx'), 'utf8');
+const localModelManager = fs.readFileSync(path.join(__dirname, '../src/dialogs/LocalModelManager.jsx'), 'utf8');
+const canvasMenu = fs.readFileSync(
+    path.join(__dirname, '../../comfyui-mobile/src/components/AppMenu/MenuModelManagerSection.tsx'), 'utf8');
+
+test('the model manager is mounted on the Models page and nowhere else', () => {
+    assert.match(modelsView, /import \{ LocalModelManager \}/);
+    assert.match(modelsView, /value: 'engine'/);
+    assert.doesNotMatch(settingsView, /LocalModelManager/);
+    // Settings still SAYS where they live — a removed tab must not read as a
+    // removed feature.
+    assert.match(settingsView, /page: 'models'/);
+});
+
+test('a store card says what the model is for and whether this machine can run it', () => {
+    assert.match(localModelManager, /from '\.\.\/lib\/modelStore\.js'/);
+    assert.match(localModelManager, /<FitLine fit=\{fit\} \/>/);
+    assert.match(localModelManager, /modelPurpose\(model\)/);
+    assert.match(localModelManager, /capabilityBadges\(matrix, model\)/);
+    // "Try it" hands the model AND a starter prompt to the studio through the
+    // existing open-in-studio handoff.
+    assert.match(localModelManager, /openModelInStudio\(model, \{ prompt: starterPromptFor\(model\) \}\)/);
+});
+
+test('the Canvas editor asks the shell for the Models page instead of a second tab', () => {
+    assert.match(canvasMenu, /requestStudioPage\('models'\)/);
+    // The external UI stays as the standalone fallback, not as the embedded path.
+    assert.match(canvasMenu, /if \(requestStudioPage\('models'\)\) return;\s*\n\s+openLoraManagerUiInNewTab\(\);/);
+    // The shell accepts that message only from the canvas frame, at its origin,
+    // and only for a page on an allow-list.
+    assert.match(hubData, /CANVAS_NAVIGABLE_PAGES = new Set\(\['models', 'history'\]\)/);
+    assert.match(hubData, /event\.data\?\.type !== 'hivemind-navigate'/);
+    assert.match(hubData, /event\.origin !== canvasFrameOrigin\(\)/);
+});

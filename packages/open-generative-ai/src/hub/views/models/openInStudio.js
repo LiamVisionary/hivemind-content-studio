@@ -45,7 +45,7 @@ function navigate(page) {
   window.dispatchEvent(new CustomEvent('navigate', { detail: { page } }));
 }
 
-export function openLocalImageModel(modelId) {
+export function openLocalImageModel(modelId, { prompt = '' } = {}) {
   const current = normalizeImagePreferences(
     getComposerSection('image').preferences || readJson(IMAGE_PREFERENCES_KEY),
   );
@@ -57,7 +57,12 @@ export function openLocalImageModel(modelId) {
     useLocalModel: true,
     localModelId: String(modelId),
   };
-  updateComposerSection('image', { preferences });
+  // A starter prompt is prompt text, so it travels the ONE way prompt text is
+  // allowed to travel: the encrypted composer section the studio hydrates from.
+  // It never reaches the localStorage copy below (stripPromptText), and the
+  // studio only adopts it when its own box is still empty.
+  const draft = String(prompt || '').trim();
+  updateComposerSection('image', { preferences, ...(draft ? { prompt: draft } : {}) });
   writeJson(IMAGE_PREFERENCES_KEY, stripPromptText(preferences));
   navigate('image');
 }
@@ -68,8 +73,8 @@ export function openLocalVideoModel(modelId) {
   navigate('video');
 }
 
-export function openModelInStudio(model) {
+export function openModelInStudio(model, { prompt = '' } = {}) {
   if (!model?.id) return;
   if (String(model.type || '').toLowerCase() === 'video') openLocalVideoModel(model.id);
-  else openLocalImageModel(model.id);
+  else openLocalImageModel(model.id, { prompt });
 }

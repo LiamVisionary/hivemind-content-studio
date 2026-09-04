@@ -111,7 +111,7 @@ function ModelCard({ model }) {
   );
 }
 
-export function RunnableModels({ models, loading }) {
+export function RunnableModels({ models, loading, onOpenStore = null }) {
   const [type, setType] = useState('all');
   const [query, setQuery] = useState('');
 
@@ -169,7 +169,12 @@ export function RunnableModels({ models, loading }) {
               ? undefined
               : type === 'video' && !counts.video
                 ? 'Video models come from the studio catalog and run in the Video studio — open it to see what is installed.'
-                : 'Nothing installed yet. If you build your own, drop a ComfyUI workflow in the auto folder and it shows up here.'}
+                // An empty machine used to be told to hand-write a workflow file
+                // into a folder. The answer to "nothing installed" is the store.
+                : 'Nothing installed yet. The Engine tab lists what this machine can run and installs it for you.'}
+            action={!loading && onOpenStore && !(type === 'video' && !counts.video)
+              ? <Button size="sm" variant="primary" icon="download" onClick={onOpenStore}>Browse models to install</Button>
+              : undefined}
           />
         )}
       </div>

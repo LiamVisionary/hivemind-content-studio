@@ -6,13 +6,20 @@
 // tabs on the same design system as the rest of the hub, talking to the /local-ai
 // bridge directly:
 //   Models     — local workflows the studios can generate with, and a way into them
+//   Engine     — the store: the inference engine and the models you can install
 //   Installed  — every weight file on disk, searchable
 //   Discover   — Civitai search and install
+//
+// The Engine tab is why this page is now the ONLY door to installing a model.
+// The same manager used to be a Settings tab as well, and the Canvas editor had
+// a third button that opened a separate tab into an external LoRA UI. Settings
+// is API keys and language; the Canvas button navigates here.
 //
 // Data loads on first activation (the hub keeps every view mounted forever) and
 // refreshes after a download lands, so a newly installed model appears without a
 // manual reload.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { LocalModelManager } from '../../dialogs/LocalModelManager.jsx';
 import { mapHivemindWorkflowModels } from '../../lib/hivemindStudio.js';
 import { zh } from '../../lib/i18n.js';
 import { localAI } from '../../lib/localInferenceClient.js';
@@ -26,6 +33,7 @@ import { RunnableModels } from './models/RunnableModels.jsx';
 
 const TABS = () => [
   { value: 'models', label: zh() ? '模型' : 'Models' },
+  { value: 'engine', label: zh() ? '引擎' : 'Engine' },
   { value: 'installed', label: zh() ? '已安装' : 'Installed' },
   { value: 'discover', label: zh() ? '发现' : 'Discover' },
 ];
@@ -101,7 +109,11 @@ export function ModelsView({ active }) {
       ) : null}
 
       {tab === 'models' ? (
-        <RunnableModels models={runnableModels} loading={loading} />
+        <RunnableModels models={runnableModels} loading={loading} onOpenStore={() => setTab('engine')} />
+      ) : tab === 'engine' ? (
+        <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
+          <LocalModelManager />
+        </div>
       ) : tab === 'installed' ? (
         <InstalledAssets assets={library.assets} onOpenAsset={setSelected} />
       ) : (

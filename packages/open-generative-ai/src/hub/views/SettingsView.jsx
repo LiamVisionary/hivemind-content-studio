@@ -10,8 +10,9 @@
 // **Settings is never the only door.** Nothing a first-time user needs lives
 // only on this page:
 // - the MUAPI key is asked for by AuthModal at the moment a generation needs it;
-// - local models are managed on the Models page (this page embeds the same
-//   manager for continuity with the old dialog, not as their only home);
+// - local models are installed and deleted on the Models page and NOWHERE else.
+//   This page used to embed a second copy of the manager, which made Settings
+//   one of three doors to "install a model"; it now points at the one door;
 // - the completion chime has its toggle in every studio (CompletionPingToggle);
 // - a missing ComfyUI is a setup card on the Models page, not a hunt for a URL.
 // What this page adds is one place to SEE all of it, and the only place some of
@@ -33,7 +34,6 @@ import {
   STUDIO_PREFERENCE_KEYS, exportPrefs, importPrefs, prefsWereUnreadable, resetPrefs,
   resetStudioPreferences, setPrefs, subscribePrefs, pref,
 } from '../../lib/prefs.js';
-import { LocalModelManager } from '../../dialogs/LocalModelManager.jsx';
 import { Icon } from '../../ui/icons.jsx';
 import { ConfirmModal } from '../../ui/Modal.jsx';
 import {
@@ -445,8 +445,25 @@ export function SettingsView({ active, initialSettings = null, initialSection = 
                 </div>
               </Group>
               {hasLocalAI ? (
-                <Group title={t('settings.localModels')} hint={zh() ? '模型页是它们的主场；这里是同一个管理器。' : 'The Models page is their home; this is the same manager.'}>
-                  <LocalModelManager />
+                <Group
+                  title={zh() ? '本地模型' : 'Local models'}
+                  hint={zh() ? '模型页是它们唯一的主场。' : 'Installing, inspecting and deleting a model all happen on the Models page.'}
+                >
+                  <div className="flex items-center justify-between gap-3 pt-1">
+                    <p className="min-w-0 text-xs leading-relaxed text-ink3">
+                      {zh()
+                        ? '在模型页的“引擎”标签中安装推理引擎和模型。'
+                        : 'The Engine tab on the Models page installs the inference engine and the models, and says whether each one fits this machine.'}
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="neutral"
+                      className="shrink-0"
+                      onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'models' } }))}
+                    >
+                      {zh() ? '打开模型页' : 'Open Models'}
+                    </Button>
+                  </div>
                 </Group>
               ) : null}
             </>

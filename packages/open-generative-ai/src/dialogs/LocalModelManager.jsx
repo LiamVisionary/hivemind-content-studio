@@ -3,9 +3,21 @@
 // All localAI flows preserved: binary install, aux downloads (__llm__/__vae__),
 // wan2gp config probe, per-model download/delete with progress subscriptions
 // that always unsubscribe on success AND error.
+//
+// It is also the STORE: the only place in the app that installs a model. Each
+// card says what the model is for, what the server's capability matrix rates it
+// good at, what it costs to download, and — from /api/doctor — whether this
+// particular machine can run it. A model already on disk offers "Try it",
+// which opens the Image studio on that model with a starter prompt in the box,
+// so an empty machine reaches its first picture without a studio menu.
 import { useCallback, useEffect, useState } from 'react';
+import { fetchCapabilityMatrix } from '../lib/capabilityMatrix.js';
 import { t, tf, zh } from '../lib/i18n.js';
 import { isLocalAIAvailable, localAI } from '../lib/localInferenceClient.js';
+import {
+  capabilityBadges, fetchDoctor, modelFit, modelPurpose, recommendedModelId, starterPromptFor,
+} from '../lib/modelStore.js';
+import { openModelInStudio } from '../hub/views/models/openInStudio.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, EmptyState, Field, Pill, ProgressBar, SectionLabel, Spinner, TextInput, cx } from '../ui/kit.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
@@ -288,6 +300,41 @@ function AuxRow({ label, auxKey, status, onStateChange }) {
   );
 }
 
+/* ---------------- Hardware fit ---------------- */
+
+// "Fits your 36 GB Mac." / "Too big for your 16 GB Mac — needs a rented GPU."
+// A blocked verdict always carries the way out beside it: the fit line is the
+// only place in the app that tells someone their machine is not enough, so it
+// cannot be the place that leaves them there.
+function FitLine({ fit }) {
+  if (!fit) return null;
+  const tone = {
+    ok: 'text-ok',
+    warn: 'text-warn',
+    blocked: 'text-danger',
+    unknown: 'text-ink3',
+  }[fit.tone] || 'text-ink3';
+  const icon = { ok: 'check', warn: 'warning', blocked: 'warning' }[fit.tone] || 'cpu';
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className={cx('flex min-w-0 items-center gap-1.5 text-[11px]', tone)}>
+        <Icon name={icon} size={12} className="shrink-0" />
+        <span className="min-w-0 truncate" title={fit.text}>{fit.text}</span>
+      </span>
+      {fit.action ? (
+        <Button
+          size="sm"
+          variant="neutral"
+          className="shrink-0"
+          onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { page: fit.action.page } }))}
+        >
+          {fit.action.label}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 /* ---------------- Model cards ---------------- */
 
 function Wan2gpModelCard({ model }) {
@@ -319,7 +366,7 @@ function Wan2gpModelCard({ model }) {
   );
 }
 
-function ModelCard({ model, onStateChange }) {
+function ModelCard({ model, onStateChange, hardware = null, matrix = null, recommended = false }) {
   const [phase, setPhase] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -332,6 +379,8 @@ function ModelCard({ model, onStateChange }) {
   const auxStatus = model.auxiliaryStatus || {};
   const auxReady = !model.requiresAuxiliary || (auxStatus.llm === 'downloaded' && auxStatus.vae === 'downloaded');
   const fullyReady = isDownloaded && auxReady;
+  const fit = modelFit(model, hardware);
+  const badges = capabilityBadges(matrix, model);
 
   const download = async () => {
     setBusy(true);
@@ -379,13 +428,20 @@ function ModelCard({ model, onStateChange }) {
         <div className="flex min-w-0 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-[13px] font-medium text-ink1">{model.name}</span>
-            {model.featured ? <Pill tone="honey">{t('localModels.featured')}</Pill> : null}
+            {recommended ? <Pill tone="honey">{zh() ? '从这里开始' : 'Start here'}</Pill> : null}
+            {model.featured && !recommended ? <Pill tone="honey">{t('localModels.featured')}</Pill> : null}
             {fullyReady ? <Icon name="check" size={13} className="text-ok" /> : null}
           </div>
+          {/* What it is FOR, then what it is. The second line is the catalog's
+              own description and stays as the detail behind the headline. */}
+          <p className="text-xs font-medium leading-relaxed text-ink2">{modelPurpose(model)}</p>
           <p className="text-xs leading-relaxed text-ink3">{model.description}</p>
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <Tag>{model.type.toUpperCase()}</Tag>
             <Tag>{fmtGB(model.sizeGB)}</Tag>
+            {/* Rated GOOD by the server's capability matrix — never a second
+                table of opinions written in the browser. */}
+            {badges.map((badge) => <Tag key={badge}>{badge}</Tag>)}
             {(model.tags || [])
               .filter((tag) => tag !== 'featured')
               .map((tag) => (
@@ -395,14 +451,37 @@ function ModelCard({ model, onStateChange }) {
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {isDownloaded ? (
-            <Button variant="danger" size="sm" icon="trash" onClick={() => setConfirmOpen(true)} aria-label={`Delete ${model.name}`} />
+            <>
+              {/* The whole point of installing one: a first picture, without
+                  opening a studio and hunting through its model menu. */}
+              <Button
+                variant="primary"
+                size="sm"
+                icon="sparkles"
+                disabled={!auxReady}
+                title={auxReady ? 'Open the Image studio on this model' : 'Get the required components first'}
+                onClick={() => openModelInStudio(model, { prompt: starterPromptFor(model) })}
+              >
+                {zh() ? '试一下' : 'Try it'}
+              </Button>
+              <Button variant="danger" size="sm" icon="trash" onClick={() => setConfirmOpen(true)} aria-label={`Delete ${model.name}`} />
+            </>
           ) : (
-            <Button variant="neutral" size="sm" icon="download" onClick={download} loading={busy}>
+            <Button
+              variant={recommended ? 'primary' : 'neutral'}
+              size="sm"
+              icon="download"
+              onClick={download}
+              loading={busy}
+              disabled={Boolean(fit.blocksInstall)}
+              title={fit.blocksInstall ? fit.text : undefined}
+            >
               {error ? t('common.retry') : busy ? t('localModels.starting') : t('localModels.download')}
             </Button>
           )}
         </div>
       </div>
+      <FitLine fit={fit} />
       {error ? <div className="font-mono text-[11px] text-danger">Error: {error}</div> : null}
       {phase && !error ? <MiniProgress progress={phase.progress} label={phase.label} /> : null}
       {model.requiresAuxiliary ? (
@@ -428,11 +507,22 @@ function ModelCard({ model, onStateChange }) {
 
 /* ---------------- Main panel ---------------- */
 
-export function LocalModelManager() {
+// `initialModels` / `initialHardware` / `initialMatrix` are the test seam, the
+// same one SettingsView carries: a card only exists once the bridge and
+// /api/doctor have answered, and effects do not run under the static render the
+// tests use — so without a way in, the store card would be unrendered code. The
+// app passes none of them.
+export function LocalModelManager({ initialModels = null, initialHardware = null, initialMatrix = null }) {
   const available = isLocalAIAvailable();
-  const [models, setModels] = useState(null); // null = loading
+  const [models, setModels] = useState(initialModels); // null = loading
   const [listError, setListError] = useState(null);
   const [storage, setStorage] = useState({ text: t('localModels.checkingStorage'), title: undefined });
+  // What this machine is, and what the server rates each model good at. Both
+  // are decoration on a card: a probe that never answers must leave the store
+  // usable, so neither has an error state — the fit line simply says it is
+  // still checking, and the badges are absent rather than wrong.
+  const [hardware, setHardware] = useState(initialHardware);
+  const [matrix, setMatrix] = useState(initialMatrix);
 
   const refreshModels = useCallback(async () => {
     setListError(null);
@@ -466,7 +556,14 @@ export function LocalModelManager() {
         setStorage({ text: t('localModels.storedDefault'), title: undefined });
       }
     })();
+    fetchDoctor().then((report) => setHardware(report?.hardware || null)).catch(() => {});
+    fetchCapabilityMatrix().then(setMatrix).catch(() => {});
   }, [available, refreshModels]);
+
+  // One model wears "Start here" — on Apple Silicon that is Z-Image Turbo,
+  // 3.4 GB and eight steps, the shortest road from an empty machine to a
+  // picture. A machine with everything installed recommends nothing.
+  const recommended = recommendedModelId(models || [], hardware);
 
   if (!available) {
     return (
@@ -515,7 +612,16 @@ export function LocalModelManager() {
               className="py-8"
             />
           ) : (
-            models.map((model) => <ModelCard key={model.id} model={model} onStateChange={refreshModels} />)
+            models.map((model) => (
+              <ModelCard
+                key={model.id}
+                model={model}
+                onStateChange={refreshModels}
+                hardware={hardware}
+                matrix={matrix}
+                recommended={model.id === recommended}
+              />
+            ))
           )}
         </div>
       </div>
