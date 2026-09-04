@@ -18,7 +18,9 @@
 //   studioLane — opaque per-app/per-tab id used only for local generation queues.
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
+import { useMediaPoster } from '../hooks/hooks.js';
 import { zh } from '../lib/i18n.js';
+import { publishTabLabels, tabChipLabel } from '../lib/studioTabLabel.js';
 import {
   addTab, closeTab, consumeSeed, insertTabAfter, loadTabState, saveTabState, selectTab,
   studioInstanceId, studioLaneId,
@@ -34,23 +36,49 @@ const MAX_TABS = 24;
 // How often a background tab is asked whether it is still generating. A dot on
 // the chip is the only sign a hidden tab has a run out.
 const BUSY_POLL_MS = 1500;
+// Shown once, ever: the first time a generation starts in a studio that still has
+// only one tab. The whole point of tabs is that a four-minute render does not
+// stop you working, and nothing else in the app says so.
+const TABS_HINT_KEY = 'studio.tabsHintShown';
 
 const TEXT = {
   tab: (n) => (zh() ? `标签 ${n}` : `Tab ${n}`),
-  newTab: () => (zh() ? '新建标签（默认设置）' : 'New tab — default settings, empty prompt'),
+  emptyTab: () => (zh() ? '新标签' : 'New tab'),
+  tabsHint: () => {
+    const key = typeof navigator !== 'undefined' && navigator.platform?.startsWith('Mac') ? '⌘T' : 'Ctrl+T';
+    return zh()
+      ? `再开一个标签（${key}），渲染的同时继续工作。`
+      : `Open another tab (${key}) to keep working while this renders`;
+  },
+  newTab: () => (zh() ? '新建标签（默认设置）— ⌘T' : 'New tab — default settings, empty prompt (⌘T)'),
   duplicate: () => (zh() ? '复制此标签（含全部设置与提示词）' : 'Duplicate this tab with all its settings'),
-  close: () => (zh() ? '关闭标签' : 'Close tab'),
+  close: () => (zh() ? '关闭标签（⌘W）' : 'Close tab (⌘W)'),
   busyTitle: () => (zh() ? '此标签正在生成' : 'This tab is still generating'),
   busyBody: () => (zh()
-    ? '关闭后此次生成的结果将无法在工作室中显示。仍要关闭吗？'
-    : 'Closing it drops the result from the studio — the run itself keeps going on the backend. Close anyway?'),
+    ? '渲染会继续进行，文件仍会保存——只是不会出现在这个标签里。仍要关闭吗？'
+    : "The render keeps going and the file is still saved — you just won't see it land in this tab. Close anyway?"),
   closeAnyway: () => (zh() ? '关闭' : 'Close tab'),
   cancel: () => (zh() ? '取消' : 'Cancel'),
   busyDot: () => (zh() ? '正在生成' : 'Generating'),
   tooMany: () => (zh() ? `最多打开 ${MAX_TABS} 个标签 — 先关闭一个。` : `Up to ${MAX_TABS} tabs can be open — close one first.`),
 };
 
-function TabChip({ index, on, busy, onSelect, onDuplicate, onClose, closable, chipRef, onKeyDown }) {
+// The last thing this tab made, at 20px. A poster (one decoded frame) rather
+// than a <video>: the strip is always on screen, and a live media element per
+// chip would hold a decoder for a thumbnail.
+function TabThumb({ url, kind }) {
+  const { poster } = useMediaPoster(url, { kind: kind === 'image' ? 'image' : 'video' });
+  if (!poster) return null;
+  return (
+    <img
+      src={poster}
+      alt=""
+      className="h-5 w-5 shrink-0 rounded-sm border border-line1 bg-bg0 object-cover"
+    />
+  );
+}
+
+function TabChip({ index, on, busy, label, preview, onSelect, onDuplicate, onClose, closable, chipRef, onKeyDown }) {
   return (
     <div
       ref={chipRef}
@@ -69,17 +97,18 @@ function TabChip({ index, on, busy, onSelect, onDuplicate, onClose, closable, ch
         tabIndex={on ? 0 : -1}
         onClick={onSelect}
         onKeyDown={onKeyDown}
-        title={busy ? TEXT.busyDot() : undefined}
-        className="flex h-full items-center gap-1.5 pl-2.5 pr-1 text-xs font-semibold"
+        title={`${TEXT.tab(index + 1)} — ${label}${busy ? ` · ${TEXT.busyDot()}` : ''}`}
+        className="flex h-full max-w-[190px] items-center gap-1.5 pl-1.5 pr-1 text-xs font-semibold"
       >
         {busy ? (
           <span
-            className="hive-motion-keep h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-honey"
+            className="hive-motion-keep ml-1 h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-honey"
             role="img"
             aria-label={TEXT.busyDot()}
           />
         ) : null}
-        {TEXT.tab(index + 1)}
+        {preview?.url ? <TabThumb url={preview.url} kind={preview.kind} /> : null}
+        <span className="min-w-0 truncate">{label}</span>
       </button>
       {/* Duplicate stays on the active chip; on the others it appears on hover
           so a long strip is not a row of copy icons. */}
@@ -111,18 +140,36 @@ function TabChip({ index, on, busy, onSelect, onDuplicate, onClose, closable, ch
   );
 }
 
+// The hint that makes tabs visible: shown the first time a render starts in a
+// studio that still has one tab, and never again on this machine.
+function showTabsHint() {
+  try {
+    if (localStorage.getItem(TABS_HINT_KEY)) return;
+    localStorage.setItem(TABS_HINT_KEY, '1');
+  } catch {
+    return; // storage disabled — better silent than shown on every render
+  }
+  toast(TEXT.tabsHint(), { duration: 7000 });
+}
+
 export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
   // Restored from sessionStorage, so a reload brings the whole strip back and every
   // tab that was rendering can reclaim its run. Without this only Tab 1 survived and
   // every other tab's generation was orphaned mid-flight.
   const [state, setState] = useState(() => loadTabState(studioType));
   const [closeConfirm, setCloseConfirm] = useState(null); // id of a busy tab awaiting confirmation
-  // Which tabs are generating right now (polled — the studios expose isBusy()
-  // on their api handle, they do not push changes).
-  const [busyIds, setBusyIds] = useState(() => new Set());
+  // What each tab is: whether it is generating, what to call it, and the last
+  // thing it made. Polled — the studios expose chip()/isBusy() on their api
+  // handle, they do not push changes.
+  const [chips, setChips] = useState(() => new Map());
+  // Was anything generating on the previous poll? The one-time "open another
+  // tab" hint fires on the false → true edge, not on every poll while busy.
+  const wasBusyRef = useRef(false);
   // Per-tab api handles, keyed by the (never-reused) tab id.
   const apisRef = useRef(new Map());
   const chipRefs = useRef(new Map());
+  // Latest keyboard handler, so the window listener below is bound once.
+  const shortcutRef = useRef(null);
   // Held for the life of the browser tab, not the life of this mount: a resumed
   // generation must keep the scheduler lane it was submitted on.
   const instanceIdRef = useRef(null);
@@ -164,19 +211,43 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
 
   useEffect(() => {
     const poll = () => {
-      const next = new Set();
-      state.tabs.forEach((tab) => {
-        if (apisRef.current.get(tab.id)?.current?.isBusy?.()) next.add(tab.id);
+      const next = new Map();
+      state.tabs.forEach((tab, index) => {
+        const api = apisRef.current.get(tab.id)?.current;
+        let info = null;
+        try { info = api?.chip?.() || null; } catch { info = null; }
+        next.set(tab.id, {
+          index,
+          busy: Boolean(api?.isBusy?.()),
+          label: tabChipLabel(info, { fallback: TEXT.emptyTab() }),
+          previewUrl: String(info?.previewUrl || ''),
+          previewKind: info?.previewKind === 'image' ? 'image' : 'video',
+        });
       });
-      setBusyIds((prev) => {
-        if (prev.size === next.size && [...next].every((id) => prev.has(id))) return prev;
+
+      // The command palette lists the tabs of the page you are on; this is where
+      // it reads their names from (lib/studioTabLabel.js).
+      publishTabLabels(studioType, [...next].map(([id, chip]) => ({
+        id, index: chip.index, label: chip.label, busy: chip.busy,
+      })));
+
+      const busyNow = [...next.values()].some((chip) => chip.busy);
+      if (active && busyNow && !wasBusyRef.current && state.tabs.length === 1) showTabsHint();
+      wasBusyRef.current = busyNow;
+
+      setChips((prev) => {
+        if (prev.size === next.size && [...next].every(([id, chip]) => {
+          const before = prev.get(id);
+          return before && before.busy === chip.busy && before.label === chip.label
+            && before.previewUrl === chip.previewUrl && before.index === chip.index;
+        })) return prev;
         return next;
       });
     };
     poll();
     const id = window.setInterval(poll, BUSY_POLL_MS);
     return () => window.clearInterval(id);
-  }, [state.tabs]);
+  }, [state.tabs, studioType, active]);
 
   const duplicate = (id) => {
     const snapshot = apisRef.current.get(id)?.current?.snapshot?.();
@@ -199,17 +270,55 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
     setState((prev) => addTab(prev, { boot: 'fresh' }));
   };
 
-  // ArrowLeft/Right move between tabs (roving focus lands on the selected chip).
-  const onChipKeyDown = (event, index) => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-    event.preventDefault();
+  const focusTabAt = (index) => {
     const count = state.tabs.length;
-    const nextIndex = (index + (event.key === 'ArrowRight' ? 1 : -1) + count) % count;
-    const next = state.tabs[nextIndex];
+    if (!count) return;
+    const next = state.tabs[((index % count) + count) % count];
     setState((prev) => selectTab(prev, next.id));
     window.requestAnimationFrame(() => {
       chipRefs.current.get(next.id)?.querySelector('[role="tab"]')?.focus();
     });
+  };
+
+  const cycleTab = (delta) => {
+    const at = state.tabs.findIndex((tab) => tab.id === state.activeId);
+    focusTabAt((at < 0 ? 0 : at) + delta);
+  };
+
+  // ⌘T new, ⌘W close, ⌘⇧[ / ⌘⇧] cycle. Returns true when it handled the event,
+  // so both callers below can stop it. ⇧ makes the bracket a { or } on most
+  // layouts, hence the code fallback.
+  const handleTabShortcut = (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) return false;
+    const key = String(event.key || '').toLowerCase();
+    if (!event.shiftKey && key === 't') { openNewTab(); return true; }
+    if (!event.shiftKey && key === 'w') {
+      if (state.tabs.length > 1) requestClose(state.activeId);
+      return true;
+    }
+    if (event.shiftKey && (key === ']' || key === '}' || event.code === 'BracketRight')) { cycleTab(1); return true; }
+    if (event.shiftKey && (key === '[' || key === '{' || event.code === 'BracketLeft')) { cycleTab(-1); return true; }
+    return false;
+  };
+
+  // The strip's shortcuts work from anywhere in the studio, not only from a
+  // focused chip — the composer is where the hands are. The handler goes through
+  // a ref so the listener is bound once per activation while still seeing the
+  // current strip.
+  shortcutRef.current = handleTabShortcut;
+  useEffect(() => {
+    if (!active) return undefined;
+    const onKey = (event) => { if (shortcutRef.current?.(event)) event.preventDefault(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [active]);
+
+  // ArrowLeft/Right move between tabs (roving focus lands on the selected chip).
+  const onChipKeyDown = (event, index) => {
+    if (handleTabShortcut(event)) { event.preventDefault(); return; }
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    focusTabAt(index + (event.key === 'ArrowRight' ? 1 : -1));
   };
 
   const openTabIds = state.tabs.map((tab) => tab.id);
@@ -226,7 +335,9 @@ export function StudioTabs({ Studio, studioType = 'studio', active = true }) {
             key={tab.id}
             index={index}
             on={tab.id === state.activeId}
-            busy={busyIds.has(tab.id)}
+            busy={Boolean(chips.get(tab.id)?.busy)}
+            label={chips.get(tab.id)?.label || TEXT.emptyTab()}
+            preview={{ url: chips.get(tab.id)?.previewUrl || '', kind: chips.get(tab.id)?.previewKind || 'video' }}
             closable={state.tabs.length > 1}
             chipRef={(node) => { if (node) chipRefs.current.set(tab.id, node); else chipRefs.current.delete(tab.id); }}
             onKeyDown={(event) => onChipKeyDown(event, index)}

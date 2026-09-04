@@ -14,9 +14,18 @@ test('the chips wrap as a group and Generate is a pinned sibling', () => {
     const row = studio.slice(studio.indexOf('<div className="flex items-end gap-2">'), studio.indexOf('/* ---------------- canvas ---------------- */'));
     assert.match(row, /<div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">/, 'the chip group wraps');
     assert.match(row, /<div className="ml-auto flex shrink-0 items-center gap-2">\s*<Button\s+variant="primary"/, 'Generate sits in a pinned sibling group');
-    // Generate is the ONE primary in the view: Download in the result row is neutral.
-    const result = studio.slice(studio.indexOf('{s.resultUrl ? ('), studio.indexOf('{/* The episode, above its shots'));
-    assert.doesNotMatch(result, /variant="primary"/);
+    // ONE primary per view REGION (DESIGN.md): Generate owns the composer, and the
+    // result row owns exactly one leading next step — Continue scene where the
+    // model can chain, New where it cannot. Download and the rest stay neutral,
+    // and the rarer actions live in a More menu rather than as more grey buttons.
+    const result = studio.slice(studio.indexOf('{s.resultUrl ? ('), studio.indexOf('{/* The manual timeline'));
+    // Two occurrences in the source, one on screen: they are the two branches of
+    // the same ternary, so exactly one leading action ever renders.
+    assert.equal(result.match(/variant="primary"/g).length, 2, 'the leading action is one ternary, not a row of primaries');
+    assert.match(result, /\{canContinue \? \(\s*<Button\s+variant="primary"\s+icon="arrowRight"[\s\S]*?Continue scene[\s\S]*?\) : \(\s*<Button variant="primary" icon="plus" onClick=\{newPrompt\}/);
+    assert.match(result, /variant="neutral"\s+icon="download"/);
+    assert.match(result, /<MenuItem[\s\S]*?Post to Civitai/, 'publishing moved under More');
+    assert.match(result, /meta=\{zh\(\) \? '离开本机' : 'leaves device'\}/, 'and says it leaves the device');
 });
 
 test('one trigger primitive, distinct icons, H3-only grammar chips, no chips on a disabled prompt', () => {

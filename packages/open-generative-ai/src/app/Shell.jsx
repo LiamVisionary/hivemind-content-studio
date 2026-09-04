@@ -5,7 +5,7 @@ import { isHivemindStudioEnabled } from '../lib/hivemindStudio.js';
 import { t, zh as zhUi } from '../lib/i18n.js';
 import { clearOwnerHandoff, ensureVaultReady, requestVaultUnlock, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
-import { Button, IconButton, cx } from '../ui/kit.jsx';
+import { Button, IconButton, Kbd, cx } from '../ui/kit.jsx';
 import { getExploreDock, subscribeExploreDock, toggleExploreDock } from './exploreDockStore.js';
 import { APP_NAME, NAV_ITEMS, NAV_SECTIONS } from './navConfig.jsx';
 import { Menu } from '../ui/Menu.jsx';
@@ -217,7 +217,26 @@ function NavEntry({ item, active, onNavigate }) {
   );
 }
 
-export function Shell({ page, onNavigate, onOpenSettings, children }) {
+// The command palette's own doorway. A shortcut nobody can see is a shortcut
+// nobody uses, so ⌘K sits beside the page title and is also clickable.
+function PaletteHint({ onOpen }) {
+  const mac = typeof navigator !== 'undefined' && navigator.platform?.startsWith('Mac');
+  const label = zhUi() ? '搜索页面、标签、提示词、模型' : 'Search pages, tabs, prompts and models';
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title={label}
+      aria-label={label}
+      className="hidden items-center gap-1.5 rounded-md border border-line1 bg-bg2 px-2 py-1 text-ink3 transition-colors hover:border-line2 hover:text-ink2 sm:inline-flex"
+    >
+      <Icon name="search" size={13} />
+      <Kbd>{mac ? '⌘K' : 'Ctrl K'}</Kbd>
+    </button>
+  );
+}
+
+export function Shell({ page, onNavigate, onOpenSettings, onOpenPalette, children }) {
   const { zh } = useLang();
   const activeItem = NAV_ITEMS.find((i) => i.page === page);
 
@@ -274,6 +293,7 @@ export function Shell({ page, onNavigate, onOpenSettings, children }) {
               <Icon name="logo" size={17} />
             </span>
             <h1 className="truncate text-[14px] font-semibold text-ink1">{activeItem?.label() || APP_NAME}</h1>
+            {onOpenPalette ? <PaletteHint onOpen={onOpenPalette} /> : null}
             <span className="hidden truncate text-xs text-ink3 md:inline">{APP_NAME}</span>
           </div>
           <div className="flex shrink-0 items-center gap-2">

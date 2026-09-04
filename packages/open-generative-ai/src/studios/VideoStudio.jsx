@@ -217,6 +217,14 @@ function HistoryThumb({ url }) {
   );
 }
 
+// The strip scrolls itself to the clip that just landed. Stable identity on
+// purpose: as a ref callback it then runs when the tile mounts (a new render is
+// prepended) or when the active tile changes, not on every re-render.
+function scrollTileIntoView(node) {
+  if (!node || typeof node.scrollIntoView !== 'function') return;
+  try { node.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* older engines */ }
+}
+
 function ProgressPreview({ url }) {
   const src = useMediaSrc(url);
   return <img src={src} alt="" className="absolute inset-0 h-full w-full object-cover opacity-60" />;
@@ -3801,6 +3809,14 @@ export function VideoStudio({
         persistedVideoPreferences: currentVideoPreferences(),
       }),
       isBusy: () => Boolean(s.generating || generationQueueRef.current.pending),
+      // Cheap enough to call on the strip's poll (snapshot() deep-copies the
+      // whole setup): what this tab is called, and the last clip it made.
+      chip: () => ({
+        prompt: s.setup?.prompt,
+        model: s.setup?.modelName || s.setup?.modelId,
+        previewUrl: s.resultUrl || s.generationHistory[0]?.url || '',
+        previewKind: 'video',
+      }),
     };
     return () => { apiRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5236,102 +5252,137 @@ export function VideoStudio({
           ) : null}
 
           {s.resultUrl ? (
-            <div className="flex flex-col items-center gap-3">
-              <ResultVideo
-                key={s.resultUrl}
-                url={s.resultUrl}
-                unmuted={Boolean(s.resultUnmuted)}
-                // H3 renders audio with every clip; other lanes are silent
-                // unless a join carried sound through.
-                hasAudio={/minimax/.test(String(s.resultModel || ''))
-                  || (s.chainCombined?.url === s.resultUrl && Boolean(s.chainCombined?.audioJoined))
-                  || (s.timelineCombined?.url === s.resultUrl && Boolean(s.timelineCombined?.audioJoined))}
-              />
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                <Button variant="neutral" icon="chevronLeft" onClick={backToSetup}>{t('video.backToSetup')}</Button>
-                <Button variant="neutral" icon="refresh" onClick={regenerate}>{t('video.regenerate')}</Button>
-                {isSeedanceResult ? (
-                  <Button variant="neutral" icon="arrowRight" onClick={extend} title={zh() ? '使用 Seedance 2.0 延长此视频' : 'Extend this video using Seedance 2.0 Extend'}>
-                    {t('video.extend')}
-                  </Button>
-                ) : null}
-                {chainCapableEntryFor(s.resultModel) ? (
-                  <Button
-                    variant="neutral"
-                    icon="arrowRight"
-                    onClick={() => continueSceneFrom(s.resultUrl, s.resultModel)}
-                    title={zh()
-                      ? '下一个镜头将从这段视频的结尾继续（画面与环境音无缝衔接）'
-                      : 'The next shot picks up exactly where this clip ends — motion and room tone carry across the cut'}
-                  >
-                    {zh() ? '接续场景' : 'Continue scene'}
-                  </Button>
-                ) : null}
-                {isLocalAIAvailable() ? (
-                  <Button
-                    variant="neutral"
-                    icon="film"
-                    loading={s.smoothingClip}
-                    onClick={() => void smoothClip(s.resultUrl, s.resultModel, 2)}
-                    title={zh()
-                      ? '真 RIFE 插帧（本地 MLX）：帧率翻倍，音频保持不变'
-                      : 'Real RIFE interpolation (local MLX): doubles the frame rate; audio passes through untouched'}
-                  >
-                    {zh() ? 'RIFE 平滑 2×' : 'Smooth 2×'}
-                  </Button>
-                ) : null}
-                {(() => {
-                  const currentEntry = s.generationHistory.find((e) => e.url === s.resultUrl);
-                  const chainLength = currentEntry ? collectChainClips(currentEntry, s.generationHistory).length : 0;
-                  return chainLength >= 2 ? (
-                    <Button
-                      variant="neutral"
-                      icon="layers"
-                      loading={s.joiningChain}
-                      onClick={() => void joinChainFrom(currentEntry)}
-                      title={zh()
-                        ? '在本机把整条接续镜头无损拼接成一个 MP4（内容不离开这台设备）'
-                        : 'Join the whole chained episode into one MP4, losslessly, on this device — the clips never leave it'}
-                    >
-                      {zh() ? `拼接 ${chainLength} 段` : `Join ${chainLength} shots`}
-                    </Button>
-                  ) : null;
-                })()}
-                <Button
-                  variant="neutral"
-                  icon="download"
-                  onClick={() => {
-                    const entry = s.generationHistory.find((e) => e.url === s.resultUrl);
-                    downloadFile(s.resultUrl, videoDownloadName(entry?.model || s.resultModel, entry?.id));
-                  }}
-                >
-                  {t('video.download')}
-                </Button>
-                <Button
-                  variant="neutral"
-                  icon="upload"
-                  onClick={() => {
-                    const entry = s.generationHistory.find((e) => e.url === s.resultUrl);
-                    // Same rule as the Image studio: the LoRAs recorded against
-                    // THIS clip's context, never the composer's current pick.
-                    const made = s.contextStore.recall(s.resultUrl);
-                    s.civitaiPost = {
-                      url: s.resultUrl,
-                      entry: {
-                        ...(entry || { model: s.resultModel }),
-                        civitaiResources: civitaiResourcesFromLoras(made?.loras, s.availableVideoLoras),
-                      },
-                    };
-                    bump();
-                  }}
-                  title={zh()
-                    ? '把这段视频未加密地发布到 Civitai'
-                    : 'Publish this clip to Civitai — it leaves this device unencrypted'}
-                >
-                  {zh() ? '发布到 Civitai' : 'Post to Civitai'}
-                </Button>
-                <Button variant="neutral" icon="plus" onClick={newPrompt}>{t('video.new')}</Button>
+            // Keyed on the clip, so a landing render scales in: the moment the
+            // whole app exists for should look like something arrived.
+            <div key={s.resultUrl} className="hive-scale-in flex flex-col items-center gap-3">
+              <div className="rounded-lg ring-1 ring-honey/40">
+                <ResultVideo
+                  key={s.resultUrl}
+                  url={s.resultUrl}
+                  unmuted={Boolean(s.resultUnmuted)}
+                  // H3 renders audio with every clip; other lanes are silent
+                  // unless a join carried sound through.
+                  hasAudio={/minimax/.test(String(s.resultModel || ''))
+                    || (s.chainCombined?.url === s.resultUrl && Boolean(s.chainCombined?.audioJoined))
+                    || (s.timelineCombined?.url === s.resultUrl && Boolean(s.timelineCombined?.audioJoined))}
+                />
               </div>
+              {/* ONE next step leads, in the colour of the app: continuing the
+                  scene where the model can, a new clip where it cannot. Download
+                  sits beside it; everything rarer lives under More, so a finished
+                  clip is not answered with nine identical grey buttons. */}
+              {(() => {
+                const canContinue = Boolean(chainCapableEntryFor(s.resultModel));
+                const currentEntry = s.generationHistory.find((e) => e.url === s.resultUrl);
+                const chainLength = currentEntry ? collectChainClips(currentEntry, s.generationHistory).length : 0;
+                const download = () => {
+                  const entry = s.generationHistory.find((e) => e.url === s.resultUrl);
+                  downloadFile(s.resultUrl, videoDownloadName(entry?.model || s.resultModel, entry?.id));
+                };
+                const postToCivitai = () => {
+                  const entry = s.generationHistory.find((e) => e.url === s.resultUrl);
+                  // Same rule as the Image studio: the LoRAs recorded against
+                  // THIS clip's context, never the composer's current pick.
+                  const made = s.contextStore.recall(s.resultUrl);
+                  s.civitaiPost = {
+                    url: s.resultUrl,
+                    entry: {
+                      ...(entry || { model: s.resultModel }),
+                      civitaiResources: civitaiResourcesFromLoras(made?.loras, s.availableVideoLoras),
+                    },
+                  };
+                  bump();
+                };
+                return (
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    {canContinue ? (
+                      <Button
+                        variant="primary"
+                        icon="arrowRight"
+                        onClick={() => continueSceneFrom(s.resultUrl, s.resultModel)}
+                        title={zh()
+                          ? '下一个镜头将从这段视频的结尾继续（画面与环境音无缝衔接）'
+                          : 'The next shot picks up exactly where this clip ends — motion and room tone carry across the cut'}
+                      >
+                        {zh() ? '接续场景' : 'Continue scene'}
+                      </Button>
+                    ) : (
+                      <Button variant="primary" icon="plus" onClick={newPrompt}>{t('video.new')}</Button>
+                    )}
+                    <Button variant="neutral" icon="download" onClick={download}>{t('video.download')}</Button>
+                    <Button variant="neutral" icon="refresh" onClick={regenerate}>{t('video.regenerate')}</Button>
+                    <Button variant="ghost" icon="chevronLeft" onClick={backToSetup}>{t('video.backToSetup')}</Button>
+                    <Menu
+                      align="end"
+                      width="w-[260px]"
+                      trigger={(open, toggle) => (
+                        <Button
+                          variant="neutral"
+                          icon="more"
+                          onClick={toggle}
+                          aria-expanded={open}
+                          aria-haspopup="menu"
+                        >
+                          {zh() ? '更多' : 'More'}
+                        </Button>
+                      )}
+                    >
+                      {(close) => (
+                        <>
+                          {canContinue ? (
+                            <MenuItem icon="plus" onClick={() => { close(); newPrompt(); }}>{t('video.new')}</MenuItem>
+                          ) : null}
+                          {isSeedanceResult ? (
+                            <MenuItem
+                              icon="arrowRight"
+                              onClick={() => { close(); extend(); }}
+                              title={zh() ? '使用 Seedance 2.0 延长此视频' : 'Extend this video using Seedance 2.0 Extend'}
+                            >
+                              {t('video.extend')}
+                            </MenuItem>
+                          ) : null}
+                          {isLocalAIAvailable() ? (
+                            <MenuItem
+                              icon="film"
+                              disabled={s.smoothingClip}
+                              onClick={() => { close(); void smoothClip(s.resultUrl, s.resultModel, 2); }}
+                              title={zh()
+                                ? '真 RIFE 插帧（本地 MLX）：帧率翻倍，音频保持不变'
+                                : 'Real RIFE interpolation (local MLX): doubles the frame rate; audio passes through untouched'}
+                            >
+                              {zh() ? 'RIFE 平滑 2×' : 'Smooth 2×'}
+                            </MenuItem>
+                          ) : null}
+                          {chainLength >= 2 ? (
+                            <MenuItem
+                              icon="layers"
+                              disabled={s.joiningChain}
+                              onClick={() => { close(); void joinChainFrom(currentEntry); }}
+                              title={zh()
+                                ? '在本机把整条接续镜头无损拼接成一个 MP4（内容不离开这台设备）'
+                                : 'Join the whole chained episode into one MP4, losslessly, on this device — the clips never leave it'}
+                            >
+                              {zh() ? `拼接 ${chainLength} 段` : `Join ${chainLength} shots`}
+                            </MenuItem>
+                          ) : null}
+                          {/* Publishing is the one action here that sends the clip
+                              off this machine in the clear, so the row says so. */}
+                          <MenuItem
+                            icon="upload"
+                            meta={zh() ? '离开本机' : 'leaves device'}
+                            onClick={() => { close(); postToCivitai(); }}
+                            title={zh()
+                              ? '把这段视频未加密地发布到 Civitai'
+                              : 'Publish this clip to Civitai — it leaves this device unencrypted'}
+                          >
+                            {zh() ? '发布到 Civitai' : 'Post to Civitai'}
+                          </MenuItem>
+                        </>
+                      )}
+                    </Menu>
+                  </div>
+                );
+              })()}
             </div>
           ) : null}
 
@@ -5434,6 +5485,7 @@ export function VideoStudio({
                   return (
                     <div
                       key={entry.id || `${entry.url}-${idx}`}
+                      ref={active ? scrollTileIntoView : undefined}
                       className={cx(
                         'group relative cursor-pointer overflow-hidden rounded-lg border bg-bg2 transition-colors duration-150',
                         active ? 'border-honey' : 'border-line1 hover:border-line2',

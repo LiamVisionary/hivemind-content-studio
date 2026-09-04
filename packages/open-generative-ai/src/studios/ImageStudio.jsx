@@ -2444,6 +2444,14 @@ export function ImageStudio({
         persistedImagePreferences: currentImagePreferences(),
       }),
       isBusy: () => Boolean(s.generating || generationQueueRef.current.pending),
+      // Cheap enough to call on the strip's poll (snapshot() deep-copies the
+      // references): what this tab is called, and the last thing it made.
+      chip: () => ({
+        prompt: s.prompt,
+        model: s.useLocalModel ? s.selectedLocalModel : (s.selectedModelName || s.selectedModel),
+        previewUrl: s.history[0]?.url || '',
+        previewKind: 'image',
+      }),
     };
     return () => { apiRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
