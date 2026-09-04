@@ -308,7 +308,7 @@ test('on the cloud source the inert Advanced controls are hidden and the seed ri
     // Steps / guidance / how-many / negative are local-only now.
     assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('image\.steps'\)\}/);
     assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('image\.guidanceScale'\)\}/);
-    assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label="How many"/);
+    assert.match(panel, /\{s\.useLocalModel \? \(\s*<Field label=\{t\('imagePanel\.howMany'\)\}/);
     assert.match(panel, /\{s\.useLocalModel && supportsNegativePrompt \? \(/);
     // The reference-strength slider is gone, and so is the dead value behind it.
     assert.doesNotMatch(panel, /t\('image\.refStrength'\)/);

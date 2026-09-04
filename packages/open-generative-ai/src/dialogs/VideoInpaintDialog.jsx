@@ -43,6 +43,7 @@ import {
 import { Button, CollapsibleSection, Field, SectionLabel, Segmented, Slider, Spinner, TextInput, cx } from '../ui/kit.jsx';
 import { Icon } from '../ui/icons.jsx';
 import { Modal } from '../ui/Modal.jsx';
+import { t, tf } from '../lib/i18n.js';
 
 const BRUSH_MIN = 16;
 const BRUSH_MAX = 320;
@@ -354,8 +355,8 @@ export function VideoInpaintDialog({
       });
       setHostedMask(result);
       toast.success(result.chargedUsd
-        ? `Tracked — ${describeHostedPrice(result.chargedUsd)}`
-        : 'Tracked');
+        ? tf('inpaint.trackedFor', describeHostedPrice(result.chargedUsd))
+        : t('inpaint.tracked'));
     } catch (error) {
       setSam3Error(error?.message || 'hosted masking failed');
     } finally {
@@ -414,7 +415,7 @@ export function VideoInpaintDialog({
         setCoverage([...tiles]);
       }
     } catch (error) {
-      toast.error(error?.message || 'Could not read frames for the coverage check.');
+      toast.error(error?.message || t('inpaint.coverageFailed'));
     } finally {
       setBusy('');
     }
@@ -464,7 +465,7 @@ export function VideoInpaintDialog({
       open={open}
       onClose={busy ? undefined : onClose}
       dismissable={!busy}
-      title="Replace head"
+      title={t('inpaint.title')}
       size="xl"
       footer={(
         <div className="flex w-full items-center justify-between gap-3">
@@ -473,19 +474,19 @@ export function VideoInpaintDialog({
               <>
                 {source.width}×{source.height}
                 {' · '}{clock(usable.seconds)} of {clock(source.duration)}
-                {usable.trimmed ? ' · trimmed to H3’s frame grid' : ''}
+                {usable.trimmed ? ` · ${t('inpaint.trimmedToGrid')}` : ''}
               </>
-            ) : 'Reading clip…'}
+            ) : t('clipPrep.readingClip')}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <Button variant="ghost" onClick={onClose} disabled={Boolean(busy)}>Cancel</Button>
+            <Button variant="ghost" onClick={onClose} disabled={Boolean(busy)}>{t('common.cancel')}</Button>
             <Button
               variant="primary"
               onClick={apply}
               disabled={!ready}
-              title={noReference ? 'Attach a picture of the new head first — the workflow refuses a run without one.' : undefined}
+              title={noReference ? t('inpaint.needsReferenceTitle') : undefined}
             >
-              Use this mask
+              {t('inpaint.useThisMask')}
             </Button>
           </div>
         </div>
@@ -494,14 +495,14 @@ export function VideoInpaintDialog({
       {loadError ? (
         <div className="flex items-start gap-3 rounded-md border border-danger bg-danger-tint px-3.5 py-3">
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-ink1">Couldn&apos;t read that clip</div>
+            <div className="text-sm font-medium text-ink1">{t('clipPrep.readFailed')}</div>
             <div className="mt-0.5 break-words font-mono text-xs text-danger">{loadError}</div>
           </div>
-          <Button size="sm" variant="neutral" icon="refresh" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>
+          <Button size="sm" variant="neutral" icon="refresh" onClick={() => setAttempt((n) => n + 1)}>{t('common.retry')}</Button>
         </div>
       ) : !source ? (
         <div className="flex items-center gap-3 py-2 text-sm text-ink3">
-          <Spinner /> Decrypting and reading the clip on this device…
+          <Spinner /> {t('clipPrep.decrypting')}
         </div>
       ) : (
         <div className="flex flex-col gap-4">
@@ -512,13 +513,14 @@ export function VideoInpaintDialog({
             <div className="flex items-start gap-2 rounded-md border border-warn bg-warn-tint px-3 py-2 text-xs text-ink2">
               <Icon name="warning" size={13} className="mt-0.5 shrink-0 text-warn" />
               <span className="min-w-0 flex-1">
-                Attach at least one reference picture of the new head. The mask says
-                {' '}<em>where</em>; the pictures say <em>who</em>, and the workflow refuses a
-                run without one.
+                {/* Two <em>s split this sentence, so the table holds the three
+                    pieces they leave rather than markup inside a value. */}
+                {t('inpaint.needsReferenceA')}
+                {' '}<em>{t('inpaint.needsReferenceWhere')}</em>{t('inpaint.needsReferenceB')} <em>{t('inpaint.needsReferenceWho')}</em>{t('inpaint.needsReferenceC')}
               </span>
               {onAttachReference ? (
                 <Button size="sm" variant="neutral" icon="upload" className="shrink-0" onClick={onAttachReference}>
-                  Attach a picture
+                  {t('inpaint.attachAPicture')}
                 </Button>
               ) : null}
             </div>
@@ -528,9 +530,7 @@ export function VideoInpaintDialog({
             <div className="flex items-start gap-2 rounded-md border border-line1 bg-bg2 px-3 py-2 text-xs text-ink2">
               <Icon name="info" size={13} className="mt-0.5 shrink-0 text-ink3" />
               <span>
-                While this is armed, your other motion and voice references are not sent.
-                The movement and the voice both come from this clip — its soundtrack is kept
-                untouched, which is what the new head lip-syncs to.
+                {t('inpaint.othersNotSent')}
               </span>
             </div>
           ) : null}
@@ -585,7 +585,7 @@ export function VideoInpaintDialog({
               value={Math.min(at, usable.seconds)}
               onChange={(event) => scrubTo(Number(event.target.value))}
               className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-bg3 accent-honey"
-              aria-label="Scrub the clip"
+              aria-label={t('inpaint.scrubTheClip')}
             />
             <span className="w-24 shrink-0 text-right font-mono text-[11px] text-ink3">
               {clock(at)} / {clock(usable.seconds)}
@@ -596,18 +596,15 @@ export function VideoInpaintDialog({
             value={mode}
             onChange={setMode}
             options={[
-              { value: 'manual', label: 'Paint the area' },
-              { value: 'sam3', label: 'Track with SAM3' },
+              { value: 'manual', label: t('inpaint.paintTheArea') },
+              { value: 'sam3', label: t('inpaint.trackWithSam3') },
             ]}
           />
 
           {mode === 'manual' ? (
             <div className="flex flex-col gap-3">
               <p className="text-xs leading-relaxed text-ink3">
-                Paint over the head, generously. This one region applies to every frame,
-                which is usually right — the model paints the head consistently on its own,
-                and a loose area lets it place a differently-shaped head naturally.
-                The only thing to get right is that the head stays inside it for the whole clip.
+                {t('inpaint.paintBlurb')}
               </p>
               <div className="flex flex-wrap items-center gap-3">
                 <div className="min-w-[180px] flex-1">
@@ -616,7 +613,7 @@ export function VideoInpaintDialog({
                     min={BRUSH_MIN}
                     max={BRUSH_MAX}
                     onChange={setBrush}
-                    format={(value) => `${value}px brush`}
+                    format={(value) => tf('inpaint.brushSize', value)}
                   />
                 </div>
                 <Button
@@ -624,9 +621,9 @@ export function VideoInpaintDialog({
                   variant={erasing ? 'primary' : 'neutral'}
                   onClick={() => setErasing((value) => !value)}
                 >
-                  Erase
+                  {t('inpaint.erase')}
                 </Button>
-                <Button size="sm" variant="ghost" onClick={clearMask} disabled={!hasPaint}>Clear</Button>
+                <Button size="sm" variant="ghost" onClick={clearMask} disabled={!hasPaint}>{t('common.clearReferences')}</Button>
                 <Button
                   size="sm"
                   variant="neutral"
@@ -635,28 +632,25 @@ export function VideoInpaintDialog({
                   loading={busy === 'coverage'}
                   disabled={!hasPaint || Boolean(busy)}
                 >
-                  Check coverage
+                  {t('inpaint.checkCoverage')}
                 </Button>
               </div>
             </div>
           ) : (
             <div className="flex flex-col gap-3">
               <p className="text-xs leading-relaxed text-ink3">
-                SAM3 follows the subject frame by frame inside the render. Use it when the
-                shot moves so much that a single covering region would swallow most of the
-                frame. The preview below runs on the frame you are scrubbed to — enough to
-                confirm it is selecting the right thing.
+                {t('inpaint.sam3Blurb')}
               </p>
               <div className="flex flex-wrap items-end gap-3">
-                <Field label="What to track" className="min-w-[200px] flex-1">
+                <Field label={t('inpaint.whatToTrack')} className="min-w-[200px] flex-1">
                   <TextInput
                     value={sam3Prompt}
                     onChange={(event) => setSam3Prompt(event.target.value)}
-                    placeholder="head"
+                    placeholder={t('inpaint.trackPlaceholder')}
                   />
                 </Field>
                 <div className="min-w-[160px] flex-1">
-                  <Field label="Detection threshold">
+                  <Field label={t('inpaint.detectionThreshold')}>
                     <Slider
                       value={sam3Threshold}
                       min={0.05}
@@ -675,7 +669,7 @@ export function VideoInpaintDialog({
                   loading={busy === 'sam3'}
                   disabled={Boolean(busy)}
                 >
-                  Preview on this frame
+                  {t('inpaint.previewOnFrame')}
                 </Button>
                 {/* The hosted route. Offered only when it is reachable, switched
                     on AND paid for — a button that cannot work is worse than no
@@ -690,7 +684,7 @@ export function VideoInpaintDialog({
                     loading={busy === 'hosted'}
                     disabled={Boolean(busy)}
                   >
-                    {hostedMask ? 'Tracked · redo' : `Track the whole clip · ${describeHostedPrice(hostedPrice.priceUsd)}`}
+                    {hostedMask ? t('inpaint.trackedRedo') : tf('inpaint.trackWholeClip', describeHostedPrice(hostedPrice.priceUsd))}
                   </Button>
                 ) : null}
               </div>
@@ -698,23 +692,18 @@ export function VideoInpaintDialog({
                 <div className="flex items-start gap-2 rounded-md border border-line1 bg-bg2 px-3 py-2 text-xs text-ink2">
                   <Icon name="check" size={13} className="mt-0.5 shrink-0 text-honey" />
                   <span>
-                    This clip is tracked. The mask travels with the run, so the render lane
-                    does not need SAM3 of its own.
+                    {t('inpaint.clipIsTracked')}
                   </span>
                 </div>
               ) : hosted?.available && hostedPrice ? (
                 <p className="text-[11px] leading-relaxed text-ink3">
-                  Your render lane tracks this itself when it carries the SAM3 checkpoint —
-                  that costs nothing and is the default. Track it here instead when the lane
-                  has no SAM3, or to settle the mask before spending a render on it.
-                  The clip is uploaded to HivemindOS for this, and only for this.
+                  {t('inpaint.laneTracksItself')}
                 </p>
               ) : null}
               {sam3Error ? (
                 <div className="rounded-md border border-line1 bg-bg2 px-3 py-2 text-xs text-ink2">
-                  <span className="font-medium text-ink1">Preview unavailable.</span>{' '}
-                  {sam3Error} The render itself still tracks with SAM3 on the lane —
-                  only this preview needs SAM3 reachable from here.
+                  <span className="font-medium text-ink1">{t('inpaint.previewUnavailable')}</span>{' '}
+                  {sam3Error} {t('inpaint.laneStillTracks')}
                 </div>
               ) : null}
             </div>
@@ -726,7 +715,7 @@ export function VideoInpaintDialog({
               <div className="grid grid-cols-6 gap-1.5">
                 {coverage.map((tile) => (
                   <div key={tile.at} className="relative overflow-hidden rounded border border-line1 bg-bg0">
-                    <img src={tile.url} alt={`Frame at ${clock(tile.at)}`} className="block w-full" />
+                    <img src={tile.url} alt={tf('clipPrep.frameAt', clock(tile.at))} className="block w-full" />
                     {maskUrl ? (
                       <img
                         src={maskUrl}
@@ -744,14 +733,12 @@ export function VideoInpaintDialog({
             </div>
           ) : null}
 
-          <CollapsibleSection title="Framing and cost" storageKey="inpaint-framing">
+          <CollapsibleSection title={t('inpaint.framingAndCost')} storageKey="inpaint-framing">
             <div className="flex flex-col gap-3 rounded-md border border-line1 bg-bg2 p-3">
               <p className="text-xs leading-relaxed text-ink3">
-                The model renders a WINDOW around the masked subject, not the whole frame,
-                and the window is resampled to the size below — that, times the clip&apos;s
-                frames, is what the card&apos;s memory budget is spent on.
+                {t('inpaint.windowBlurb')}
               </p>
-              <Field label="Window">
+              <Field label={t('inpaint.window')}>
                 <Segmented
                   value={cropMode}
                   onChange={setCropMode}
@@ -759,34 +746,34 @@ export function VideoInpaintDialog({
                   options={CROP_MODES.map((entry) => ({ value: entry.id, label: entry.label }))}
                 />
               </Field>
-              <Field label="Window size" hint={CROP_MODES.find((entry) => entry.id === cropMode)?.hint || ''}>
+              <Field label={t('inpaint.windowSize')} hint={CROP_MODES.find((entry) => entry.id === cropMode)?.hint || ''}>
                 <Slider
                   value={cropScale}
                   min={1}
                   max={3}
                   step={0.05}
                   onChange={setCropScale}
-                  format={(value) => `${value.toFixed(2)}× the subject`}
+                  format={(value) => tf('inpaint.timesSubject', value.toFixed(2))}
                 />
               </Field>
-              <Field label="Render size">
+              <Field label={t('inpaint.renderSize')}>
                 <Slider
                   value={cropMegapixels}
                   min={0.2}
                   max={1.6}
                   step={0.1}
                   onChange={setCropMegapixels}
-                  format={(value) => `${value.toFixed(1)} MP`}
+                  format={(value) => tf('inpaint.megapixels', value.toFixed(1))}
                 />
               </Field>
-              <Field label="Grow the mask" hint="The model needs room beyond the head's own outline.">
+              <Field label={t('inpaint.growTheMask')} hint={t('inpaint.growTheMaskHint')}>
                 <Slider
                   value={maskExpand}
                   min={0}
                   max={120}
                   step={2}
                   onChange={setMaskExpand}
-                  format={(value) => `${value}px`}
+                  format={(value) => tf('inpaint.pixels', value)}
                 />
               </Field>
             </div>

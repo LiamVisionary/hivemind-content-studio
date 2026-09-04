@@ -11,6 +11,7 @@ import {
 import { EmptyState, NativeSelect, Pill, Segmented, TextInput, cx } from '../../../ui/kit.jsx';
 import { Icon } from '../../../ui/icons.jsx';
 import { AssetPreview } from './AssetPreview.jsx';
+import { t, tf } from '../../../lib/i18n.js';
 
 function AssetCard({ asset, onOpen }) {
   const [hover, setHover] = useState(false);
@@ -99,19 +100,19 @@ export function InstalledAssets({ assets, onOpenAsset }) {
           <TextInput
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search name, trigger word, creator…"
+            placeholder={t('assets.searchPlaceholder')}
             className="pl-8"
           />
         </div>
         <NativeSelect value={baseModel} onChange={(event) => setBaseModel(event.target.value)} className="w-[150px]">
-          <option value="">Any base model</option>
+          <option value="">{t('assets.anyBaseModel')}</option>
           {baseModels.map((value) => <option key={value} value={value}>{value}</option>)}
         </NativeSelect>
         <NativeSelect value={sort} onChange={(event) => setSort(event.target.value)} className="w-[140px]">
           {ASSET_SORTS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </NativeSelect>
         <Segmented
-          options={[{ value: 'grid', label: 'Grid' }, { value: 'list', label: 'List' }]}
+          options={[{ value: 'grid', label: t('assets.grid') }, { value: 'list', label: t('assets.list') }]}
           value={dense ? 'list' : 'grid'}
           onChange={(value) => setDense(value === 'list')}
           size="sm"
@@ -120,15 +121,15 @@ export function InstalledAssets({ assets, onOpenAsset }) {
 
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          <Pill tone="neutral" className="h-5 px-2 text-[10px]">{visible.length} of {summary.total} shown</Pill>
-          <Pill tone="neutral" className="h-5 px-2 text-[10px]">{formatBytes(summary.totalBytes)} on disk</Pill>
+          <Pill tone="neutral" className="h-5 px-2 text-[10px]">{tf('assets.shownOf', visible.length, summary.total)}</Pill>
+          <Pill tone="neutral" className="h-5 px-2 text-[10px]">{tf('assets.onDisk', formatBytes(summary.totalBytes))}</Pill>
           {baseModel || query || kind !== 'all' ? (
             <button
               type="button"
               onClick={() => { setQuery(''); setBaseModel(''); setKind('all'); }}
               className="text-[11px] font-medium text-ink3 transition-colors hover:text-ink1"
             >
-              Clear filters
+              {t('assets.clearFilters')}
             </button>
           ) : null}
         </div>
@@ -148,10 +149,10 @@ export function InstalledAssets({ assets, onOpenAsset }) {
         ) : (
           <EmptyState
             icon="database"
-            title={summary.total ? 'Nothing matches those filters' : 'No models installed yet'}
+            title={summary.total ? t('assets.nothingMatches') : t('assets.noneInstalled')}
             hint={summary.total
-              ? 'Widen the search, or clear the base-model filter.'
-              : 'Download a model from Discover and it lands in the ComfyUI models folder.'}
+              ? t('assets.widenTheSearch')
+              : t('assets.downloadFromDiscover')}
           />
         )}
       </div>

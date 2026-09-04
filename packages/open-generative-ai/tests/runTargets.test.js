@@ -126,8 +126,8 @@ test('the readout is a place, a model and a reason', async () => {
   const targets = await build();
   const zimage = targets.find((target) => target.id === 'z-image-turbo');
   assert.equal(
-    readoutText(runOnReadout(zimage, { reason: 'free, stays on this Mac', automatic: true })),
-    'This Mac · Z-Image Turbo — free, stays on this Mac',
+    readoutText(runOnReadout(zimage, { reason: 'free, stays here', automatic: true })),
+    'This Mac · Z-Image Turbo — free, stays here',
   );
   const rented = (await build({ machines: { live: [machine()], idle: [], broken: [] } }))
     .find((target) => target.id === 'z-image-turbo');
@@ -148,7 +148,9 @@ test('the ladder runs local → HivemindOS credits → a connected account → a
   // 1. A model that runs here wins: free, private, and it answers now.
   let chosen = await pick(all, { hivemindosCredits: true, connectedProviders: ['openai-gpt-image-oauth'], keyedProviders: ['muapi'] });
   assert.equal(chosen.target.id, 'z-image-turbo');
-  assert.equal(chosen.reason, 'free, stays on this Mac');
+  // One phrasing, not two: the Automatic reason and the manual readout used to
+  // say the same thing in different words on the same chip.
+  assert.equal(chosen.reason, 'free, stays here');
 
   // 2. Nothing local: the house default, but only when its credits are configured.
   chosen = await pick(cloudOnly, { hivemindosCredits: true, connectedProviders: [], keyedProviders: [] });

@@ -11,6 +11,7 @@ import { localAI, isLocalAIAvailable } from '../../../lib/localInferenceClient.j
 import { Button, EmptyState, Pill, Segmented, TextInput } from '../../../ui/kit.jsx';
 import { Icon } from '../../../ui/icons.jsx';
 import { openModelInStudio } from './openInStudio.js';
+import { t, tf } from '../../../lib/i18n.js';
 
 // Holding a model in memory (or handing the memory back) is housekeeping for
 // THIS MACHINE, not a setting for the picture about to be made — it sat at the
@@ -36,24 +37,24 @@ function MachineMemory() {
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-line1 px-4 py-2.5 md:px-5">
       <span className="text-xs text-ink3">
-        Loading a model takes a few seconds — warm it before you start, or give the memory back when you are done.
+        {t('runnable.warmBlurb')}
       </span>
       <div className="ml-auto flex items-center gap-2">
         <Button
           size="sm"
           loading={busy === 'warm'}
-          onClick={() => void run('warm', () => localAI.warmIdeogram4(), 'Model is warm.', 'Warm failed')}
+          onClick={() => void run('warm', () => localAI.warmIdeogram4(), t('runnable.modelIsWarm'), t('runnable.warmFailed'))}
         >
-          Warm up
+          {t('runnable.warmUp')}
         </Button>
         {/* Unloading is housekeeping, not destruction — neutral, not danger. */}
         <Button
           size="sm"
           variant="neutral"
           loading={busy === 'unload'}
-          onClick={() => void run('unload', () => localAI.unloadIdeogram4(), 'Model unloaded.', 'Unload failed')}
+          onClick={() => void run('unload', () => localAI.unloadIdeogram4(), t('runnable.modelUnloaded'), t('runnable.unloadFailed'))}
         >
-          Free memory
+          {t('runnable.freeMemory')}
         </Button>
       </div>
     </div>
@@ -76,7 +77,7 @@ function ModelCard({ model }) {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-1.5">
             <h3 className="min-w-0 truncate text-[13px] font-semibold text-ink1">{model.name}</h3>
-            {model.featured ? <Pill tone="honey">Featured</Pill> : null}
+            {model.featured ? <Pill tone="honey">{t('localModels.featured')}</Pill> : null}
           </div>
           <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-ink3">{model.description}</p>
         </div>
@@ -85,7 +86,7 @@ function ModelCard({ model }) {
             offline one lost its type. */}
         <div className="flex shrink-0 items-center gap-1.5">
           <Pill tone="neutral">{modelTypeLabel(model)}</Pill>
-          <Pill tone={unavailable ? 'warn' : 'ok'} dot>{unavailable ? 'Offline' : 'Ready'}</Pill>
+          <Pill tone={unavailable ? 'warn' : 'ok'} dot>{unavailable ? t('providers.offline') : t('common.ready')}</Pill>
         </div>
       </div>
 
@@ -102,9 +103,9 @@ function ModelCard({ model }) {
           icon={isVideo ? 'video' : 'image'}
           disabled={unavailable}
           onClick={() => openModelInStudio(model)}
-          title={isVideo ? 'Open in the Video studio' : 'Open in the Image studio'}
+          title={isVideo ? t('runnable.openInVideo') : t('runnable.openInImage')}
         >
-          Open
+          {t('runnable.open')}
         </Button>
       </div>
     </div>
@@ -135,9 +136,9 @@ export function RunnableModels({ models, loading, onOpenStore = null }) {
         <Segmented
           options={[
             // A count of 0 is not a count worth advertising on a filter chip.
-            { value: 'all', label: counts.all ? `All ${counts.all}` : 'All' },
-            { value: 'image', label: counts.image ? `Image ${counts.image}` : 'Image' },
-            { value: 'video', label: counts.video ? `Video ${counts.video}` : 'Video' },
+            { value: 'all', label: counts.all ? tf('runnable.countedFilter', t('runs.filterAll'), counts.all) : t('runs.filterAll') },
+            { value: 'image', label: counts.image ? tf('runnable.countedFilter', t('nav.image'), counts.image) : t('nav.image') },
+            { value: 'video', label: counts.video ? tf('runnable.countedFilter', t('common.video'), counts.video) : t('common.video') },
           ]}
           value={type}
           onChange={setType}
@@ -148,7 +149,7 @@ export function RunnableModels({ models, loading, onOpenStore = null }) {
           <TextInput
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search workflows…"
+            placeholder={t('runnable.searchPlaceholder')}
             className="pl-8"
           />
         </div>
@@ -163,17 +164,17 @@ export function RunnableModels({ models, loading, onOpenStore = null }) {
           <EmptyState
             icon={type === 'video' && !counts.video ? 'video' : 'cpu'}
             title={loading
-              ? 'Reading the local model catalog…'
-              : type === 'video' && !counts.video ? 'No video models advertised here' : 'No matching models'}
+              ? t('runnable.readingCatalog')
+              : type === 'video' && !counts.video ? t('runnable.noVideoModels') : t('runnable.noMatchingModels')}
             hint={loading
               ? undefined
               : type === 'video' && !counts.video
-                ? 'Video models come from the studio catalog and run in the Video studio — open it to see what is installed.'
+                ? t('runnable.videoModelsHint')
                 // An empty machine used to be told to hand-write a workflow file
                 // into a folder. The answer to "nothing installed" is the store.
-                : 'Nothing installed yet. The Engine tab lists what this machine can run and installs it for you.'}
+                : t('runnable.nothingInstalledHint')}
             action={!loading && onOpenStore && !(type === 'video' && !counts.video)
-              ? <Button size="sm" variant="primary" icon="download" onClick={onOpenStore}>Browse models to install</Button>
+              ? <Button size="sm" variant="primary" icon="download" onClick={onOpenStore}>{t('runnable.browseModels')}</Button>
               : undefined}
           />
         )}

@@ -23,7 +23,7 @@ import {
   AspectRatioPicker, CollapsibleSection, Field, IconButton, NativeSelect,
   SectionLabel, Segmented, Slider, TextArea, TextInput, Toggle, cx,
 } from '../../ui/kit.jsx';
-import { t, aspectRatioName } from '../../lib/i18n.js';
+import { t, tf, aspectRatioName } from '../../lib/i18n.js';
 import { EDIT_SHORT_SIDES, editBudgetForShortSide } from '../../lib/editResolution.js';
 import { AUTO_SAMPLER_LOW_STEP_THRESHOLD, STYLE_PRESETS, parseSeedInput } from './imagePrefs.js';
 import { LocalCatalogNotice } from '../LocalCatalogNotice.jsx';
@@ -142,15 +142,15 @@ export function ImageSettingsPanel({
           </div>
 
           <div className="flex flex-col gap-3">
-            <SectionLabel>Format</SectionLabel>
+            <SectionLabel>{t('common.format')}</SectionLabel>
             {referenceDrivesAspect ? (
-              <Field label="Aspect ratio">
+              <Field label={t('imagePanel.aspectRatio')}>
                 <div className="rounded-md border border-line1 bg-bg2 px-3 py-2 text-xs leading-relaxed text-ink3">
-                  Matches your reference image — the edit keeps its proportions.
+                  {t('imagePanel.aspectFromReference')}
                 </div>
               </Field>
             ) : (
-              <Field label="Aspect ratio" hint={etaLabel ? `About ${etaLabel} per image` : undefined}>
+              <Field label={t('imagePanel.aspectRatio')} hint={etaLabel ? tf('imagePanel.aboutPerImage', etaLabel) : undefined}>
                 <AspectRatioPicker
                   options={aspectRatios}
                   value={customDimsActive ? 'custom' : s.selectedAr}
@@ -179,7 +179,7 @@ export function ImageSettingsPanel({
               </Field>
             )}
             {resolutions.length > 0 ? (
-              <Field label="Resolution">
+              <Field label={t('imagePanel.resolution')}>
                 <NativeSelect
                   title={t('image.qualityTooltip')}
                   value={s.selectedResolution}
@@ -221,7 +221,7 @@ export function ImageSettingsPanel({
           {/* "How many" — the batch reaches the local payload only, so on the
               cloud source there is nothing to choose. */}
           {s.useLocalModel ? (
-            <Field label="How many" hint="Pictures per press — each one costs the same time again">
+            <Field label={t('imagePanel.howMany')} hint={t('imagePanel.howManyHint')}>
               <Segmented
                 value={String(s.batchCount || 1)}
                 onChange={(v) => { s.batchCount = Number(v) || 1; persist(); bump(); }}
@@ -240,20 +240,20 @@ export function ImageSettingsPanel({
                 quality, seed }, so on the API source those controls would be
                 dead and are not shown. Seed rides on both. */}
             {s.useLocalModel ? (
-              <Field label={t('image.steps')} hint="More detail, more time — every step is another pass over the picture">
+              <Field label={t('image.steps')} hint={t('imagePanel.stepsHint')}>
                 <Slider min={1} max={50} step={1} value={s.steps}
                   onChange={(v) => { s.steps = v; repaint(); }}
                   onCommit={() => bump()} />
               </Field>
             ) : null}
             {s.useLocalModel ? (
-              <Field label={t('image.guidanceScale')} hint="How literally the model follows your words — high sticks to the prompt, low invents (CFG)">
+              <Field label={t('image.guidanceScale')} hint={t('imagePanel.guidanceHint')}>
                 <Slider min={1} max={20} step={0.5} value={s.guidanceScale}
                   onChange={(v) => { s.guidanceScale = v; repaint(); }}
                   onCommit={() => bump()} />
               </Field>
             ) : null}
-            <Field label={t('image.seed')} hint="The same seed and the same settings make the same picture again — leave it at -1 for a new one every press">
+            <Field label={t('image.seed')} hint={t('imagePanel.seedHint')}>
               <div className="flex items-center gap-1.5">
                 <TextInput
                   type="number"
@@ -274,32 +274,32 @@ export function ImageSettingsPanel({
             {showSampler ? (
               <>
                 <Field
-                  label="Sampler"
+                  label={t('imagePanel.sampler')}
                   hint={s.sampler
                     ? undefined
                     : krea2Selected
                       ? (s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD
-                        ? 'Auto — clean at 2–5 steps, but not a speed win (deis_3m, ~2.7 model evals a step)'
-                        : 'Auto — tuned for 8–10 steps, one pass each (euler_ancestral)')
-                      : 'Auto — the workflow picks a pair to match the step count'}
+                        ? t('imagePanel.samplerAutoLowSteps')
+                        : t('imagePanel.samplerAutoTuned'))
+                      : t('imagePanel.samplerAutoPair')}
                 >
                   <NativeSelect
                     value={s.sampler}
                     onChange={(e) => { s.sampler = e.target.value; persist(); bump(); }}
                   >
-                    <option value="">Auto (match steps)</option>
+                    <option value="">{t('imagePanel.autoMatchSteps')}</option>
                     {samplerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
                   </NativeSelect>
                 </Field>
                 <Field
-                  label="Scheduler"
-                  hint={s.scheduler || !krea2Selected ? undefined : `Auto — ${s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD ? 'bong_tangent' : 'beta'} for this step count`}
+                  label={t('imagePanel.scheduler')}
+                  hint={s.scheduler || !krea2Selected ? undefined : tf('imagePanel.schedulerAuto', s.steps <= AUTO_SAMPLER_LOW_STEP_THRESHOLD ? 'bong_tangent' : 'beta')}
                 >
                   <NativeSelect
                     value={s.scheduler}
                     onChange={(e) => { s.scheduler = e.target.value; persist(); bump(); }}
                   >
-                    <option value="">Auto (match steps)</option>
+                    <option value="">{t('imagePanel.autoMatchSteps')}</option>
                     {schedulerChoices.map((name) => <option key={name} value={name}>{name}</option>)}
                   </NativeSelect>
                 </Field>
@@ -322,15 +322,15 @@ export function ImageSettingsPanel({
               // The field is gone, but text saved under another model is not: explain
               // why it stopped applying rather than dropping it silently.
               <p className="text-[11px] leading-relaxed text-ink3">
-                {t('image.negPromptUnsupported')(negativePromptUnsupportedBy || 'This workflow')}
+                {tf('image.negPromptUnsupported', negativePromptUnsupportedBy || t('imagePanel.thisWorkflow'))}
               </p>
             ) : null}
             {editBudget ? (
               <Field
-                label="Resolution"
+                label={t('imagePanel.resolution')}
                 hint={editOutput
-                  ? `${editOutput.width} × ${editOutput.height} for this reference — ${editBudget.megapixels.toFixed(1)} MP of canvas; sampling time scales with pixel count`
-                  : `${editBudget.megapixels.toFixed(1)} MP of canvas, shaped like your reference — sampling time scales with pixel count`}
+                  ? tf('imagePanel.editResolutionHint', editOutput.width, editOutput.height, editBudget.megapixels.toFixed(1))
+                  : tf('imagePanel.editResolutionShapedHint', editBudget.megapixels.toFixed(1))}
               >
                 <NativeSelect
                   value={String(editBudget.shortSide)}
@@ -340,7 +340,7 @@ export function ImageSettingsPanel({
                     const budget = editBudgetForShortSide(size);
                     return (
                       <option key={size} value={size}>
-                        {`${budget.megapixels.toFixed(1)} MP${budget.native ? ' — the model’s native canvas' : ''}`}
+                        {`${tf('inpaint.megapixels', budget.megapixels.toFixed(1))}${budget.native ? ` — ${t('imagePanel.nativeCanvas')}` : ''}`}
                       </option>
                     );
                   })}
@@ -349,12 +349,12 @@ export function ImageSettingsPanel({
             ) : null}
             {s.useLocalModel && resolvedDims && !referenceDrivesAspect ? (
               <Field
-                label="Resolution"
+                label={t('imagePanel.resolution')}
                 // The ETA comes from measured runs of THIS setup — no model's
                 // hard-coded timings pretending to describe every workflow.
                 hint={resolvedDims.custom
-                  ? `${resolvedDims.width} × ${resolvedDims.height} — set by the Custom aspect ratio above`
-                  : `${resolvedDims.width} × ${resolvedDims.height}${etaLabel ? ` — about ${etaLabel} at these settings` : ' — sampling time scales with pixel count'}`}
+                  ? tf('imagePanel.customResolutionHint', resolvedDims.width, resolvedDims.height)
+                  : `${resolvedDims.width} × ${resolvedDims.height}${etaLabel ? tf('imagePanel.aboutAtTheseSettings', etaLabel) : t('imagePanel.scalesWithPixels')}`}
               >
                 <NativeSelect
                   value={String(s.baseSize || 0)}
@@ -363,7 +363,7 @@ export function ImageSettingsPanel({
                 >
                   {LOCAL_BASE_SIZES.map((size) => (
                     <option key={size} value={size}>
-                      {size === 0 ? `Workflow default (${activeLocalModel?.defaultWidth || 1024})` : `${size} short side`}
+                      {size === 0 ? tf('imagePanel.workflowDefault', activeLocalModel?.defaultWidth || 1024) : tf('imagePanel.shortSide', size)}
                     </option>
                   ))}
                 </NativeSelect>
@@ -371,15 +371,15 @@ export function ImageSettingsPanel({
             ) : null}
             {showRuntimeMode ? (
               <Field
-                label="Memory"
-                hint="Keep loaded makes the next picture start faster; One-off gives the memory back after each one."
+                label={t('imagePanel.memory')}
+                hint={t('imagePanel.memoryHint')}
               >
                 <Segmented
                   value={s.localRuntimeMode}
                   onChange={(v) => { s.localRuntimeMode = v; persist(); bump(); }}
                   options={[
-                    { value: 'one-off', label: 'One-off' },
-                    { value: 'persistent', label: 'Keep loaded' },
+                    { value: 'one-off', label: t('imagePanel.oneOff') },
+                    { value: 'persistent', label: t('imagePanel.keepLoaded') },
                   ]}
                 />
               </Field>
@@ -400,24 +400,24 @@ export function ImageSettingsPanel({
             ) : null}
           </CollapsibleSection>
 
-          <CollapsibleSection title="Modes" hint={modesHint} storageKey="image.modes">
+          <CollapsibleSection title={t('imagePanel.modes')} hint={modesHint} storageKey="image.modes">
             <div className="flex flex-col gap-2.5">
               <div className="flex items-center justify-between gap-2">
-                <SectionLabel>Region boxes</SectionLabel>
+                <SectionLabel>{t('imagePanel.regionBoxes')}</SectionLabel>
                 <Toggle
-                  label="Region boxes"
+                  label={t('imagePanel.regionBoxes')}
                   checked={s.regionMode}
                   onChange={(v) => { s.regionMode = v; persist(); bump(); }}
                 />
               </div>
               <p className="text-xs leading-relaxed text-ink3">
-                Say what goes where: each box becomes a placement sentence appended to your prompt. Works with every model — no extra nodes. Box text stays in this session only.
+                {t('imagePanel.regionBoxesBlurb')}
               </p>
               {s.regionMode ? (
                 <>
                   {coupleOn ? (
                     <p className="text-xs leading-relaxed text-warn">
-                      Couple mode owns the prompt while it is on, so regions stand down.
+                      {t('imagePanel.coupleOwnsPrompt')}
                     </p>
                   ) : null}
                   <RegionBoxEditor
@@ -433,51 +433,51 @@ export function ImageSettingsPanel({
             {coupleCapable ? (
               <div className="flex flex-col gap-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <SectionLabel>Couple mode</SectionLabel>
+                  <SectionLabel>{t('imagePanel.coupleMode')}</SectionLabel>
                   <Toggle
-                    label="Couple mode"
+                    label={t('imagePanel.coupleMode')}
                     checked={s.coupleMode}
                     onChange={(v) => { s.coupleMode = v; persist(); bump(); }}
                   />
                 </div>
                 <p className="text-xs leading-relaxed text-ink3">
-                  Two-character mode: one prompt per character with a canvas split. Character text stays in this session only.
+                  {t('imagePanel.coupleModeBlurb')}
                 </p>
                 {coupleOn ? (
                   <div className="flex flex-col gap-3">
-                    <Field label="Shared scene (optional)">
+                    <Field label={t('imagePanel.sharedScene')}>
                       <TextInput
-                        placeholder="e.g. sitting by a bonfire at night"
+                        placeholder={t('imagePanel.sharedScenePlaceholder')}
                         value={s.coupleShared}
                         onChange={(e) => { s.coupleShared = e.target.value; bump(); }}
                       />
                     </Field>
-                    <Field label={s.couplePair === 'mixed' ? 'Character A (girl)' : 'Character A'}>
-                      <TextArea rows={2} placeholder="e.g. haruno sakura, pink hair, smiling"
+                    <Field label={s.couplePair === 'mixed' ? t('imagePanel.characterAGirl') : t('imagePanel.characterA')}>
+                      <TextArea rows={2} placeholder={t('imagePanel.characterAPlaceholder')}
                         value={s.coupleA}
                         onChange={(e) => { s.coupleA = e.target.value; bump(); }} />
                     </Field>
-                    <Field label={s.couplePair === 'mixed' ? 'Character B (boy)' : 'Character B'}>
-                      <TextArea rows={2} placeholder="e.g. black hair, green eyes, crossed arms"
+                    <Field label={s.couplePair === 'mixed' ? t('imagePanel.characterBBoy') : t('imagePanel.characterB')}>
+                      <TextArea rows={2} placeholder={t('imagePanel.characterBPlaceholder')}
                         value={s.coupleB}
                         onChange={(e) => { s.coupleB = e.target.value; bump(); }} />
                     </Field>
-                    <Field label="Pair">
+                    <Field label={t('imagePanel.pair')}>
                       <Segmented size="sm" value={s.couplePair}
                         onChange={(v) => { s.couplePair = v; persist(); bump(); }}
                         options={[
-                          { value: 'girls', label: 'Two girls' },
-                          { value: 'mixed', label: 'Girl & boy' },
-                          { value: 'boys', label: 'Two boys' },
+                          { value: 'girls', label: t('imagePanel.twoGirls') },
+                          { value: 'mixed', label: t('imagePanel.girlAndBoy') },
+                          { value: 'boys', label: t('imagePanel.twoBoys') },
                         ]}
                       />
                     </Field>
-                    <Field label="Layout">
+                    <Field label={t('imagePanel.layout')}>
                       <Segmented size="sm" value={s.coupleDirection}
                         onChange={(v) => { s.coupleDirection = v; persist(); bump(); }}
                         options={[
-                          { value: 'horizontal', label: 'Side by side' },
-                          { value: 'vertical', label: 'Stacked' },
+                          { value: 'horizontal', label: t('imagePanel.sideBySide') },
+                          { value: 'vertical', label: t('imagePanel.stacked') },
                         ]}
                       />
                     </Field>
@@ -505,18 +505,18 @@ export function ImageSettingsPanel({
             {characterSheetCapable ? (
               <div className="flex flex-col gap-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <SectionLabel>Character sheet</SectionLabel>
+                  <SectionLabel>{t('imagePanel.characterSheet')}</SectionLabel>
                   <Toggle
-                    label="Character sheet"
+                    label={t('imagePanel.characterSheet')}
                     checked={s.characterSheetMode}
                     onChange={(v) => { s.characterSheetMode = v; persist(); bump(); }}
                   />
                 </div>
                 <p className="text-xs leading-relaxed text-ink3">
-                  Multi-view sheet from your reference: each view is its own edit with a shared seed, composited into one labeled sheet. The prompt box is optional extra styling.
+                  {t('imagePanel.characterSheetBlurb')}
                 </p>
                 {sheetOn ? (
-                  <Field label="Views">
+                  <Field label={t('imagePanel.views')}>
                     <Segmented size="sm" value={s.characterSheetPreset}
                       onChange={(v) => { s.characterSheetPreset = v; persist(); bump(); }}
                       options={characterSheetPresets}
@@ -528,11 +528,11 @@ export function ImageSettingsPanel({
 
             {strengthHuntCapable ? (
               <div className="flex flex-col gap-1.5">
-                <SectionLabel>Strength Hunt</SectionLabel>
+                <SectionLabel>{t('imagePanel.strengthHunt')}</SectionLabel>
                 <p className="text-xs leading-relaxed text-ink3">
                   {huntArmedCount
-                    ? `Armed on ${huntArmedCount} LoRA${huntArmedCount === 1 ? '' : 's'} — one press sweeps each from 0 to its weight and adds a labeled comparison sheet.`
-                    : 'Try one LoRA at every weight in a single press. Arm it on a LoRA with the grid button in the list above.'}
+                    ? tf('imagePanel.strengthHuntArmed', huntArmedCount)
+                    : t('imagePanel.strengthHuntIdle')}
                 </p>
               </div>
             ) : null}

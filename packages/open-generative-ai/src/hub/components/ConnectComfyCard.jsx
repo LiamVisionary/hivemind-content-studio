@@ -164,7 +164,7 @@ export function ConnectComfyCard({ state = null, enabled = true, className = '' 
         <div className="flex items-center gap-2">
           <TextInput
             value={url}
-            placeholder="http://127.0.0.1:8188"
+            placeholder={t('setup.comfyUrlPlaceholder')}
             onChange={(event) => setUrl(event.target.value)}
             onKeyDown={(event) => { if (event.key === 'Enter' && url.trim()) { void attach(); } }}
           />

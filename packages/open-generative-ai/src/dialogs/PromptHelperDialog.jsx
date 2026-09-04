@@ -33,6 +33,7 @@ import { useModelSources } from '../lib/useModelSources.js';
 import { LOCAL, needsLoad, PROMPT_USAGE, rowFor, startingModelId, statusLine, tabOf } from '../lib/textModels.js';
 import { referenceToLocalImageInput } from '../lib/hivemindStudio.js';
 import { videoContactSheet } from '../lib/contactSheet.js';
+import { t, tf } from '../lib/i18n.js';
 import { characterNoteLines, charactersMentionedIn } from '../lib/h3Characters.js';
 
 async function api(path, body) {
@@ -177,17 +178,17 @@ export function PromptHelperDialog({
         // Silence here reads as a dead button. Both of these are reachable —
         // no model is selected when nothing is loaded on a fresh open.
         if (!selectedModel) {
-            setError('Pick a model first.');
+            setError(t('promptHelper.pickModelFirst'));
             setPickerOpen(true);
             return;
         }
         const refineBase = refine ? (result || idea || '').trim() : '';
         if (refine && !refineBase) {
-            setError('Write a prompt before refining it.');
+            setError(t('promptHelper.writeBeforeRefine'));
             return;
         }
         if (!refine && !(idea || '').trim()) {
-            setError('Write something in the composer before using the helper.');
+            setError(t('promptHelper.writeBeforeHelper'));
             return;
         }
         const ticket = ++requestRef.current;
@@ -218,10 +219,10 @@ export function PromptHelperDialog({
             // prompt is actually about. An armed chain counts — the shot this
             // one continues is the thing the new prompt has to keep matching.
             const sourceClip = videoUrl || continuingFromUrl;
-            const sourceLabel = videoUrl ? 'source clip' : continuingFromUrl ? 'previous shot' : 'start frame';
+            const sourceLabel = videoUrl ? t('promptHelper.sourceClip') : continuingFromUrl ? t('promptHelper.previousShot') : t('promptHelper.startFrame');
             let image = '';
             if (selectedModel.vision && (sourceClip || imageUrl)) {
-                setBusy(sourceClip ? `Watching the ${sourceLabel}…` : 'Reading the start frame…');
+                setBusy(sourceClip ? tf('promptHelper.watching', sourceLabel) : t('promptHelper.readingStartFrame'));
                 try {
                     // The vision projector only reads stills, so a clip goes in
                     // as a contact sheet.
@@ -232,8 +233,8 @@ export function PromptHelperDialog({
                 if (ticket !== requestRef.current) return;
             }
             setBusy(refine
-                ? 'Refining your prompt…'
-                : image ? `Writing prompt from your ${sourceLabel}…` : 'Writing prompt…');
+                ? t('promptHelper.refining')
+                : image ? tf('promptHelper.writingFrom', sourceLabel) : t('promptHelper.writing'));
             // H3 identifies characters through their source (name, casting,
             // work, year). When the idea names ones the studio's catalog
             // knows, ship the verified facts so the local model cannot
@@ -317,7 +318,7 @@ export function PromptHelperDialog({
     // finished. Without this the picker could only report that a model did not
     // fit; now it can do something about it.
     const freeComfy = async () => {
-        setBusy('Freeing ComfyUI memory…');
+        setBusy(t('promptHelper.freeingComfy'));
         setError('');
         try {
             const data = await api('/api/prompt-helper/free-comfy', {});
@@ -331,7 +332,7 @@ export function PromptHelperDialog({
     };
 
     const unload = async (modelId) => {
-        setBusy('Unloading…');
+        setBusy(t('promptHelper.unloading'));
         try {
             setSnapshot(await api('/api/prompt-helper/unload', { modelId }));
         } catch (exc) {
@@ -369,44 +370,45 @@ export function PromptHelperDialog({
                     <Spinner size={13} /> {busy}
                 </span>
             ) : null}
-            <Button variant="ghost" onClick={onClose} disabled={Boolean(busy)}>Cancel</Button>
+            <Button variant="ghost" onClick={onClose} disabled={Boolean(busy)}>{t('common.cancel')}</Button>
             {/* Called with no argument on purpose: run() takes an options
                 object, and a click handler would otherwise hand it an event. */}
             <Button onClick={() => run()} disabled={!idea.trim() || Boolean(busy)}>
-                {result ? 'Rewrite from idea' : 'Write prompt'}
+                {result ? t('promptHelper.rewriteFromIdea') : t('promptHelper.writePrompt')}
             </Button>
             <Button
                 icon="sparkles"
                 onClick={refineNow}
                 disabled={!draft.trim() || Boolean(busy)}
-                title="Rewrite this prompt into the model's perfect shape and fill in the craft details. The controls below steer how far it goes."
+                title={t('promptHelper.refineTitle')}
             >
-                Refine
+                {t('composer.refine')}
             </Button>
             <Button
                 variant="primary"
                 disabled={!draft.trim() || Boolean(busy)}
                 onClick={accept}
-                title="Put this prompt in the composer (⌘/Ctrl+Enter)"
+                title={t('promptHelper.useThisTitle')}
             >
-                Use this prompt
+                {t('common.usePrompt')}
             </Button>
         </>
     );
 
     return (
-        <Modal open={open} onClose={onClose} title="Prompt helper" size="lg" footer={footer}>
+        <Modal open={open} onClose={onClose} title={t('image.promptHelper')} size="lg" footer={footer}>
             <div className="flex flex-col gap-4">
                 {unavailable ? (
                     <Card className="flex flex-wrap items-center gap-x-3 gap-y-1.5 p-3 text-xs text-ink2">
-                        <span>No <code>llama-server</code> found on this machine. Install llama.cpp to use the prompt helper.</span>
+                        {/* A <code> element splits the sentence; the table holds the two halves. */}
+                        <span>{t('promptHelper.noLlamaBefore')} <code>llama-server</code> {t('promptHelper.noLlamaAfter')}</span>
                         <a
                             href="https://github.com/ggml-org/llama.cpp/releases"
                             target="_blank"
                             rel="noreferrer"
                             className="inline-flex items-center gap-1 font-medium text-honey hover:underline"
                         >
-                            Get llama.cpp <Icon name="external" size={11} />
+                            {t('promptHelper.getLlamaCpp')} <Icon name="external" size={11} />
                         </a>
                     </Card>
                 ) : null}
@@ -416,7 +418,7 @@ export function PromptHelperDialog({
                 {writingFor ? (
                     <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-ink2">
                         <Icon name="persona" size={12} className="mt-px shrink-0 text-ink3" />
-                        <span><span className="text-ink3">Writing for:</span> {writingFor}</span>
+                        <span><span className="text-ink3">{t('promptHelper.writingFor')}</span> {writingFor}</span>
                     </p>
                 ) : null}
 
@@ -432,10 +434,10 @@ export function PromptHelperDialog({
                         className="-mx-1 flex w-full min-w-0 items-center gap-1.5 rounded-sm px-1 py-0.5 text-left text-ink3 transition-colors hover:text-ink1"
                     >
                         <Icon name="chevronRight" size={13} className={cx('shrink-0 transition-transform', pickerOpen && 'rotate-90')} />
-                        <SectionLabel>Model</SectionLabel>
+                        <SectionLabel>{t('common.model')}</SectionLabel>
                         {!pickerOpen ? (
                             snapshot === null ? (
-                                <span className="flex items-center gap-1.5 text-[11px] normal-case text-ink3"><Spinner size={11} /> checking…</span>
+                                <span className="flex items-center gap-1.5 text-[11px] normal-case text-ink3"><Spinner size={11} /> {t('promptHelper.checking')}</span>
                             ) : selectedModel ? (
                                 <span className="min-w-0 truncate text-[11px] font-medium normal-case tracking-normal text-ink2">
                                     {selectedModel.name}
@@ -449,7 +451,7 @@ export function PromptHelperDialog({
                                         : null}
                                 </span>
                             ) : (
-                                <span className="text-[11px] font-medium normal-case tracking-normal text-honey">pick a model</span>
+                                <span className="text-[11px] font-medium normal-case tracking-normal text-honey">{t('promptHelper.pickAModel')}</span>
                             )
                         ) : null}
                     </button>
@@ -463,35 +465,35 @@ export function PromptHelperDialog({
                     "0 GB free" beside it is a warning about the wrong thing. */}
                 {pickerTab !== LOCAL ? null : snapshot === null ? (
                     <Card className="flex items-center gap-2 p-3 text-xs text-ink3">
-                        <Spinner size={13} /> Checking this machine's RAM and models…
+                        <Spinner size={13} /> {t('promptHelper.checkingRam')}
                     </Card>
                 ) : (
                 <Card className="flex flex-wrap items-center gap-x-4 gap-y-2 p-3 text-xs">
                     <span className="text-ink2">
-                        <span className="font-semibold text-ink1">{formatBytes(snapshot?.availableBytes)}</span> free
-                        {snapshot?.totalBytes ? <span className="text-ink3"> of {formatBytes(snapshot.totalBytes)}</span> : null}
+                        <span className="font-semibold text-ink1">{formatBytes(snapshot?.availableBytes)}</span> {t('promptHelper.free')}
+                        {snapshot?.totalBytes ? <span className="text-ink3"> {tf('promptHelper.ofTotal', formatBytes(snapshot.totalBytes))}</span> : null}
                     </span>
                     {snapshot?.reclaimableBytes ? (
-                        <span className="text-ink3">+{formatBytes(snapshot.reclaimableBytes)} reclaimable by unloading</span>
+                        <span className="text-ink3">{tf('promptHelper.reclaimable', formatBytes(snapshot.reclaimableBytes))}</span>
                     ) : null}
                     {held ? (
                         // A sentence, not a pill: a fixed-height pill overflowed
                         // the card on narrow widths. Wraps instead.
                         <span className="flex min-w-0 items-start gap-1.5 text-[11px] font-semibold leading-snug text-warn">
                             <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
-                            <span>{held.count} model{held.count > 1 ? 's' : ''} held by LM Studio — unload there to free that RAM</span>
+                            <span>{tf('promptHelper.heldByLmStudio', held.count)}</span>
                         </span>
                     ) : null}
-                    {freed ? <Pill tone="ok">freed {formatBytes(freed)}</Pill> : null}
+                    {freed ? <Pill tone="ok">{tf('promptHelper.freed', formatBytes(freed))}</Pill> : null}
                     <Button
                         size="sm"
                         variant="ghost"
                         className="ml-auto"
                         disabled={Boolean(busy)}
-                        title="Asks ComfyUI to unload its models. The queue, the open workflow and cached node results are untouched."
+                        title={t('promptHelper.freeComfyTitle')}
                         onClick={freeComfy}
                     >
-                        Free ComfyUI memory
+                        {t('promptHelper.freeComfy')}
                     </Button>
                 </Card>
                 )}
@@ -506,11 +508,11 @@ export function PromptHelperDialog({
                             control that does nothing. */}
                         {pickerTab === LOCAL ? (
                             <span className="flex items-center gap-2 text-[11px] text-ink2">
-                                Unload others first
+                                {t('promptHelper.unloadOthers')}
                                 <Toggle
                                     checked={unloadOthers}
                                     onChange={setUnloadOthers}
-                                    label="Unload other models before loading"
+                                    label={t('promptHelper.unloadOthersLabel')}
                                     disabled={Boolean(busy)}
                                 />
                             </span>
@@ -536,7 +538,7 @@ export function PromptHelperDialog({
                                 // An MTPLX slot is a server this app adopted rather
                                 // than a model it loaded, so "Unload" is the wrong
                                 // verb for what the button does to it.
-                                label={model.provider === 'mtplx' ? 'Stop the local helper' : `Unload ${model.name}`}
+                                label={model.provider === 'mtplx' ? t('promptHelper.stopLocalHelper') : tf('promptHelper.unloadModel', model.name)}
                                 onClick={(event) => { event.stopPropagation(); void unload(model.id); }}
                             />
                         ) : null)}
@@ -547,7 +549,7 @@ export function PromptHelperDialog({
                     {pickerTab === LOCAL && snapshot?.unavailable?.length ? (
                         <details className="mt-2">
                             <summary className="cursor-pointer text-[11px] text-ink3">
-                                {snapshot.unavailable.length} file{snapshot.unavailable.length > 1 ? 's' : ''} on disk cannot be used
+                                {tf('promptHelper.filesUnusable', snapshot.unavailable.length)}
                             </summary>
                             <ul className="mt-1 flex flex-col gap-0.5">
                                 {snapshot.unavailable.map((entry) => (
@@ -564,24 +566,23 @@ export function PromptHelperDialog({
                 {draft ? (
                     <div>
                         <div className="mb-2 flex items-center justify-between gap-3">
-                            <SectionLabel>{fromComposer ? 'Current prompt' : 'Suggested prompt'}</SectionLabel>
+                            <SectionLabel>{fromComposer ? t('promptHelper.currentPrompt') : t('promptHelper.suggestedPrompt')}</SectionLabel>
                             <span className="flex items-center gap-2">
                                 {changedLines ? (
-                                    <Pill tone="ok">{changedLines} line{changedLines > 1 ? 's' : ''} changed</Pill>
+                                    <Pill tone="ok">{tf('promptHelper.linesChanged', changedLines)}</Pill>
                                 ) : null}
                                 {sawImage ? (
-                                    <Pill tone="info">read your {videoUrl ? 'source clip' : 'start frame'}</Pill>
+                                    <Pill tone="info">{tf('promptHelper.readYour', videoUrl ? t('promptHelper.sourceClip') : t('promptHelper.startFrame'))}</Pill>
                                 ) : null}
                                 {durationSeconds ? (
-                                    <span className="text-[11px] text-ink3">{durationSeconds}s clip</span>
+                                    <span className="text-[11px] text-ink3">{tf('promptHelper.clipSeconds', durationSeconds)}</span>
                                 ) : null}
-                                {profileLabel ? <span className="text-[11px] text-ink3">Guidance: {profileLabel}</span> : null}
+                                {profileLabel ? <span className="text-[11px] text-ink3">{tf('promptHelper.guidanceIs', profileLabel)}</span> : null}
                             </span>
                         </div>
                         {fromComposer ? (
                             <p className="mb-2 text-[11px] text-ink3">
-                                This is what your composer holds now — edit it directly, hit Refine to
-                                knock it into shape, or rewrite it from your idea.
+                                {t('promptHelper.composerHolds')}
                             </p>
                         ) : null}
                         {/* A beat past the end of the clip never renders, so the
@@ -601,32 +602,32 @@ export function PromptHelperDialog({
                         {/* How far Refine may go. Closed, Refine still does its
                             base job — perfect structure, nothing lost, the
                             unwritten craft decisions filled in. */}
-                        <CollapsibleSection title="Refinement controls" className="mt-3" storageKey="promptHelper.refine">
+                        <CollapsibleSection title={t('promptHelper.refinementControls')} className="mt-3" storageKey="promptHelper.refine">
                             <div className="flex flex-col gap-3">
                                 <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
                                     <span className="flex items-center gap-2 text-[11px] text-ink2">
-                                        Detail
+                                        {t('promptHelper.detail')}
                                         <Segmented
                                             size="sm"
                                             value={refineDetail}
                                             onChange={setRefineDetail}
                                             options={[
-                                                { value: 'keep', label: 'Keep' },
-                                                { value: 'enrich', label: 'Add more' },
+                                                { value: 'keep', label: t('promptHelper.keep') },
+                                                { value: 'enrich', label: t('promptHelper.addMore') },
                                             ]}
                                         />
                                     </span>
                                     {mediaType === 'video' ? (
                                         <span className="flex items-center gap-2 text-[11px] text-ink2">
-                                            Shots
+                                            {t('promptHelper.shots')}
                                             <Segmented
                                                 size="sm"
                                                 value={refineShots}
                                                 onChange={setRefineShots}
                                                 options={[
-                                                    { value: 'keep', label: 'Keep' },
-                                                    { value: 'more', label: 'Add shots' },
-                                                    { value: 'single', label: 'Single still' },
+                                                    { value: 'keep', label: t('promptHelper.keep') },
+                                                    { value: 'more', label: t('promptHelper.addShots') },
+                                                    { value: 'single', label: t('promptHelper.singleStill') },
                                                 ]}
                                             />
                                         </span>
@@ -636,7 +637,7 @@ export function PromptHelperDialog({
                                     <TextArea
                                         rows={2}
                                         value={guidance}
-                                        placeholder="Steer it: focus more on…, add…, remove…, make … more subtle"
+                                        placeholder={t('promptHelper.guidancePlaceholder')}
                                         onChange={(e) => setGuidance(e.target.value)}
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && draft.trim()) {
@@ -646,7 +647,7 @@ export function PromptHelperDialog({
                                         }}
                                     />
                                     <p className="mt-1 text-[11px] text-ink3">
-                                        Your notes win over the toggles. Refine keeps every fact and line of dialogue either way.
+                                        {t('promptHelper.notesWin')}
                                     </p>
                                 </div>
                             </div>

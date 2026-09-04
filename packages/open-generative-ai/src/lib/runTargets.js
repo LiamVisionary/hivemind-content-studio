@@ -250,7 +250,7 @@ export function pickRunTarget(kind = 'image', { catalog = [], machines = null, r
   const onThisMac = ready.filter((target) => target.place === PLACE_THIS_MAC);
   const unrented = onThisMac.filter((target) => !target.machine);
   const localPick = unrented.find(wellRated);
-  if (localPick) return { target: localPick, reason: t('runOn.freeStaysOnThisMac') };
+  if (localPick) return { target: localPick, reason: t('runOn.freeStaysHere') };
 
   if (readiness?.hivemindosCredits) {
     const hosted = ready.find((target) => target.place === PLACE_HIVEMINDOS);
@@ -275,7 +275,7 @@ export function pickRunTarget(kind = 'image', { catalog = [], machines = null, r
   // with its state on it than an empty picker.
   const fallback = unrented[0] || ready[0];
   return fallback
-    ? { target: fallback, reason: fallback.place === PLACE_THIS_MAC ? t('runOn.freeStaysOnThisMac') : '' }
+    ? { target: fallback, reason: fallback.place === PLACE_THIS_MAC ? t('runOn.freeStaysHere') : '' }
     : none;
 }
 

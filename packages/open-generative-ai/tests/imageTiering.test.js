@@ -121,21 +121,21 @@ test('tuning is declared in Advanced, the meaning-changing modes in Modes, and t
     assert.doesNotMatch(panel, /<Segmented[\s\S]{0,120}image\.local/, 'the source triad is gone');
     assert.match(basic, /<AspectRatioPicker/, 'Aspect is always visible');
     assert.match(basic, /\{t\('image\.stylePreset'\)\}/, 'Style is always visible');
-    assert.match(basic, /label="How many"/, 'the batch count is always visible');
+    assert.match(basic, /label=\{t\('imagePanel\.howMany'\)\}/, 'the batch count is always visible');
     assert.match(basic, /<LoraSection \{\.\.\.loraProps\} \/>/, 'the adapters are always visible');
 
     const sections = panel.match(/<CollapsibleSection[\s\S]{0,220}?>/g) || [];
     assert.equal(sections.length, 2, 'one Advanced, one Modes — no third disclosure');
     assert.match(sections[0], /title=\{t\('common\.advanced'\)\} hint=\{advancedHint\}/);
-    assert.match(sections[1], /title="Modes" hint=\{modesHint\}/);
+    assert.match(sections[1], /title=\{t\('imagePanel\.modes'\)\} hint=\{modesHint\}/);
     // Tuning lives in Advanced; the modes that change what the composer MEANS
     // live in Modes.
-    const advanced = panel.slice(panel.indexOf('<CollapsibleSection'), panel.indexOf('title="Modes"'));
-    for (const control of [/t\('image\.steps'\)/, /t\('image\.guidanceScale'\)/, /t\('image\.seed'\)/, /label="Sampler"/, /label="Scheduler"/, /t\('image\.negPromptLabel'\)/, /LOCAL_BASE_SIZES/, /t\('image\.width'\)/]) {
+    const advanced = panel.slice(panel.indexOf('<CollapsibleSection'), panel.indexOf("title={t('imagePanel.modes')}"));
+    for (const control of [/t\('image\.steps'\)/, /t\('image\.guidanceScale'\)/, /t\('image\.seed'\)/, /t\('imagePanel\.sampler'\)/, /t\('imagePanel\.scheduler'\)/, /t\('image\.negPromptLabel'\)/, /LOCAL_BASE_SIZES/, /t\('image\.width'\)/]) {
         assert.match(advanced, control, `Advanced is missing ${control}`);
     }
-    const modes = panel.slice(panel.indexOf('title="Modes"'));
-    for (const control of [/Region boxes/, /Couple mode/, /Character sheet/, /Strength Hunt/]) {
+    const modes = panel.slice(panel.indexOf("title={t('imagePanel.modes')}"));
+    for (const control of [/imagePanel\.regionBoxes/, /imagePanel\.coupleMode/, /imagePanel\.characterSheet/, /imagePanel\.strengthHunt/]) {
         assert.match(modes, control, `Modes is missing ${control}`);
     }
     // Both hints read the live state rather than a stored flag.
@@ -144,10 +144,14 @@ test('tuning is declared in Advanced, the meaning-changing modes in Modes, and t
     assert.match(panel, /huntArmedCount \? `hunt ×\$\{huntArmedCount\}` : ''/);
 });
 
-test('the Krea-2 timing sentence is replaced by the measured ETA', () => {
+test('the Krea-2 timing sentence is replaced by the measured ETA', async () => {
     const panel = read(PANEL);
     assert.doesNotMatch(panel, /Krea 2 @ 8 steps/);
-    assert.match(panel, /about \$\{etaLabel\} at these settings/);
+    // The sentence is the table's now; the panel has to ASK for it, and the
+    // table has to still say it.
+    assert.match(panel, /tf\('imagePanel\.aboutAtTheseSettings', etaLabel\)/);
+    const { STRINGS } = await import('../src/lib/i18n.js');
+    assert.equal(STRINGS['imagePanel.aboutAtTheseSettings']('12s'), ' — about 12s at these settings');
     // The ETA comes from the same store the progress bar reads.
     const studio = read('src/studios/ImageStudio.jsx');
     assert.match(studio, /const etaLabel = \(\) => \{|const etaLabel = \(\(\) => \{/);

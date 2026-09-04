@@ -14,6 +14,7 @@ import { toast } from 'react-hot-toast';
 import { clearOwnerHandoff, resetVaultSession } from '../lib/vaultSession.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, SectionLabel } from '../ui/kit.jsx';
+import { t } from '../lib/i18n.js';
 
 function Row({ icon, tone, title, items }) {
   return (
@@ -53,47 +54,47 @@ export function PrivacyPanel({ onClose }) {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <SectionLabel>Sealed to your key vs. to this Mac</SectionLabel>
+        <SectionLabel>{t('privacy.twoKeys')}</SectionLabel>
         <p className="mt-1 text-xs leading-relaxed text-ink3">
-          Both happen on this machine, but they are locked with different keys — which is what decides what another workspace can see.
+          {t('privacy.twoKeysBlurb')}
         </p>
       </div>
 
       <Row
         icon="shield"
         tone="text-honey"
-        title="Sealed to your key"
+        title={t('privacy.sealedToYourKey')}
         items={[
-          'Your library: generated images and clips, uploaded references, saved personas.',
-          'Drafts and saved projects held in your vault.',
-          'Opened only by your passphrase or passkey — another workspace on this Mac cannot read them.',
+          t('privacy.yourKeyLibrary'),
+          t('privacy.yourKeyDrafts'),
+          t('privacy.yourKeyOnlyYou'),
         ]}
       />
 
       <Row
         icon="lock"
         tone="text-ink2"
-        title="Encrypted with this Mac’s key"
+        title={t('privacy.macKey')}
         items={[
-          'Run files: the brief, the script, the prompt lists a run writes as it works.',
-          'The key is in this Mac’s keychain, so any program running as you can read them.',
-          'The studio owner can see runs from every workspace, not only their own.',
+          t('privacy.macKeyRunFiles'),
+          t('privacy.macKeyKeychain'),
+          t('privacy.macKeyOwnerSees'),
         ]}
       />
 
       <p className="text-xs leading-relaxed text-ink3">
-        Neither leaves this computer in plain text. Only what you explicitly send to a cloud model does.
+        {t('privacy.neitherLeaves')}
       </p>
 
       <div className="flex items-start justify-between gap-3 rounded-md border border-line1 bg-bg2 px-3.5 py-3">
         <div className="min-w-0">
-          <SectionLabel>Workspaces</SectionLabel>
+          <SectionLabel>{t('privacy.workspaces')}</SectionLabel>
           <p className="mt-1 text-xs leading-relaxed text-ink3">
-            Each workspace has its own library and its own key. A new one is created on the sign-in screen, so this one is locked first.
+            {t('privacy.workspacesBlurb')}
           </p>
         </div>
         <Button variant="ghost" size="sm" className="shrink-0" onClick={addWorkspace}>
-          Add a workspace
+          {t('privacy.addWorkspace')}
         </Button>
       </div>
     </div>

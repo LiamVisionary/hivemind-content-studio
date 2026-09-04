@@ -153,7 +153,7 @@ function Wan2gpConfigBar({ onChange }) {
   const test = async () => {
     const trimmed = url.trim();
     if (!trimmed) {
-      setStatus({ text: 'Enter a URL first', kind: 'warn' });
+      setStatus({ text: t('localModels.enterUrlFirst'), kind: 'warn' });
       return;
     }
     setStatus({ text: t('localModels.probing'), kind: 'muted' });
@@ -162,12 +162,12 @@ function Wan2gpConfigBar({ onChange }) {
       const r = await localAI.probeWan2gp(trimmed);
       setStatus(
         r.ok
-          ? { text: `Reachable · Gradio ${r.version}`, kind: 'ok' }
-          : { text: `Unreachable: ${r.error}`, kind: 'err' },
+          ? { text: tf('localModels.reachable', r.version), kind: 'ok' }
+          : { text: tf('localModels.unreachable', r.error), kind: 'err' },
       );
     } catch (err) {
       // A throwing probe used to leave "Probing…" on screen for good.
-      setStatus({ text: err?.message || 'Could not probe that server', kind: 'err' });
+      setStatus({ text: err?.message || t('localModels.probeFailed'), kind: 'err' });
     } finally {
       setTesting(false);
     }
@@ -188,7 +188,7 @@ function Wan2gpConfigBar({ onChange }) {
       );
       onChange?.();
     } catch (err) {
-      setStatus({ text: err?.message || 'Could not save that URL', kind: 'err' });
+      setStatus({ text: err?.message || t('localModels.saveUrlFailed'), kind: 'err' });
     } finally {
       setSaving(false);
     }
@@ -199,37 +199,38 @@ function Wan2gpConfigBar({ onChange }) {
   return (
     <div className="flex flex-col gap-2.5 rounded-md border border-line1 bg-bg2 p-3">
       <div>
-        <div className="text-[13px] font-medium text-ink1">Wan2GP server (optional)</div>
+        <div className="text-[13px] font-medium text-ink1">{t('localModels.wan2gpTitle')}</div>
         <div className="mt-0.5 text-xs leading-relaxed text-ink3">
-          Run{' '}
+          {t('common.run')}{' '}
           <a
             href="https://github.com/deepbeepmeep/Wan2GP"
             target="_blank"
             rel="noreferrer"
             className="text-honey hover:underline"
           >
-            Wan2GP
+            {t('localModels.wan2gpName')}
           </a>{' '}
-          on a CUDA box (<code className="font-mono text-ink2">python wgp.py --listen --server-name 0.0.0.0</code>) to
-          unlock video models from this UI.
+          {/* A <code> element splits this sentence, so the table holds the two
+              halves the element leaves — never one string with markup in it. */}
+          {t('localModels.wan2gpOnCuda')}<code className="font-mono text-ink2">python wgp.py --listen --server-name 0.0.0.0</code>{t('localModels.wan2gpUnlocks')}
         </div>
       </div>
       <div className="flex items-end gap-2">
-        <Field label="Server URL" className="flex-1">
+        <Field label={t('localModels.serverUrl')} className="flex-1">
           <TextInput
             type="text"
-            placeholder="http://127.0.0.1:7860"
+            placeholder={t('localModels.urlPlaceholder')}
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             className="font-mono text-xs"
           />
         </Field>
         <Button onClick={test} loading={testing}>
-          Test
+          {t('common.test')}
         </Button>
         {/* Neutral: the panel's one primary is Install engine. */}
         <Button variant="neutral" onClick={save} loading={saving}>
-          Save
+          {t('common.save')}
         </Button>
       </div>
       <div className={cx('text-[11px]', statusColor)}>{status.text}</div>
@@ -416,7 +417,7 @@ function ModelCard({ model, onStateChange, hardware = null, matrix = null, recom
       setConfirmOpen(false);
       onStateChange?.();
     } catch (err) {
-      toastFailure(err, { operation: 'That model action' });
+      toastFailure(err, { operation: t('localModels.modelAction') });
     } finally {
       setDeleting(false);
     }
@@ -428,7 +429,7 @@ function ModelCard({ model, onStateChange, hardware = null, matrix = null, recom
         <div className="flex min-w-0 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-[13px] font-medium text-ink1">{model.name}</span>
-            {recommended ? <Pill tone="honey">Start here</Pill> : null}
+            {recommended ? <Pill tone="honey">{t('localModels.startHere')}</Pill> : null}
             {model.featured && !recommended ? <Pill tone="honey">{t('localModels.featured')}</Pill> : null}
             {fullyReady ? <Icon name="check" size={13} className="text-ok" /> : null}
           </div>
@@ -459,12 +460,12 @@ function ModelCard({ model, onStateChange, hardware = null, matrix = null, recom
                 size="sm"
                 icon="sparkles"
                 disabled={!auxReady}
-                title={auxReady ? 'Open the Image studio on this model' : 'Get the required components first'}
+                title={auxReady ? t('localModels.tryItTitle') : t('localModels.tryItNeedsAux')}
                 onClick={() => openModelInStudio(model, { prompt: starterPromptFor(model) })}
               >
-                Try it
+                {t('localModels.tryIt')}
               </Button>
-              <Button variant="danger" size="sm" icon="trash" onClick={() => setConfirmOpen(true)} aria-label={`Delete ${model.name}`} />
+              <Button variant="danger" size="sm" icon="trash" onClick={() => setConfirmOpen(true)} aria-label={tf('localModels.deleteLabel', model.name)} />
             </>
           ) : (
             <Button
@@ -487,18 +488,18 @@ function ModelCard({ model, onStateChange, hardware = null, matrix = null, recom
       {model.requiresAuxiliary ? (
         <div className="flex flex-col gap-1.5 border-t border-line1 pt-2.5">
           <SectionLabel>{t('localModels.requiredComponents')}</SectionLabel>
-          <AuxRow label="Qwen3-4B Text Encoder (2.4 GB)" auxKey="llm" status={auxStatus.llm} onStateChange={onStateChange} />
-          <AuxRow label="FLUX VAE (335 MB)" auxKey="vae" status={auxStatus.vae} onStateChange={onStateChange} />
+          <AuxRow label={t('localModels.auxTextEncoder')} auxKey="llm" status={auxStatus.llm} onStateChange={onStateChange} />
+          <AuxRow label={t('localModels.auxVae')} auxKey="vae" status={auxStatus.vae} onStateChange={onStateChange} />
         </div>
       ) : null}
       <ConfirmModal
         open={confirmOpen}
         onClose={() => setConfirmOpen(false)}
         onConfirm={doDelete}
-        title="Delete model?"
+        title={t('localModels.deleteTitle')}
         body={tf('localModels.deleteConfirm', model.name)}
-        confirmLabel="Delete"
-        cancelLabel="Cancel"
+        confirmLabel={t('common.delete')}
+        cancelLabel={t('common.cancel')}
         busy={deleting}
       />
     </div>
@@ -598,7 +599,7 @@ export function LocalModelManager({ initialModels = null, initialHardware = null
           ) : listError ? (
             <EmptyState
               icon="warning"
-              title="Couldn't list local models"
+              title={t('localModels.listFailed')}
               hint={<span className="font-mono text-xs text-danger">{listError}</span>}
               action={<Button size="sm" icon="refresh" onClick={refreshModels}>{t('common.retry')}</Button>}
               className="py-8"
@@ -606,8 +607,8 @@ export function LocalModelManager({ initialModels = null, initialHardware = null
           ) : models.length === 0 ? (
             <EmptyState
               icon="cpu"
-              title="No local models available yet"
-              hint="Install the inference engine and the downloadable models will be listed here."
+              title={t('localModels.noneYet')}
+              hint={t('localModels.noneYetHint')}
               action={<Button size="sm" icon="refresh" onClick={refreshModels}>{t('common.retry')}</Button>}
               className="py-8"
             />

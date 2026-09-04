@@ -237,7 +237,7 @@ test('PassBook waits to be opened before reading the store, and shows its toolba
     );
     // A failed load ends in a callout with a way back in, never a bare spinner.
     assert.match(source, /setFailed\(!store\)/);
-    assert.match(source, /bg-danger-tint[\s\S]{0,400}Try again/);
+    assert.match(source, /bg-danger-tint[\s\S]{0,400}t\('common\.tryAgain'\)/);
 
     // Per-pill semantics, on the kit Pill (StatusPill's status vocabulary has no
     // word for "stored" or "plaintext").

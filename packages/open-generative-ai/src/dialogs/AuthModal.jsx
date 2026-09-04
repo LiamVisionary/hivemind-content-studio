@@ -89,7 +89,7 @@ export function AuthModal({ onClose, onSaved }) {
             href="https://muapi.ai/access-keys"
             target="_blank"
             rel="noreferrer"
-            title="Opens muapi.ai in a new tab"
+            title={t('auth.opensInTab')}
             className="inline-flex items-center justify-center gap-1.5 py-1.5 text-center text-xs font-medium text-ink3 transition-colors hover:text-ink1"
           >
             {String(t('auth.createKey')).replace(/\s*→\s*$/, '')}

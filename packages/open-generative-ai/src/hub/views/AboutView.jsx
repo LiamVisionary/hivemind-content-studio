@@ -15,6 +15,7 @@ import { APP_VERSION, shortCommit, versionLabel } from '../../lib/appVersion.js'
 import { describeFailure } from '../../lib/describeFailure.js';
 import { Button, Card, FailureCallout, Pill, SectionLabel, Spinner } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
+import { t, tf } from '../../lib/i18n.js';
 
 // Only the licences worth a group of their own; everything else is counted under
 // "other" rather than producing a page of one-package headings.
@@ -22,7 +23,7 @@ const GROUP_MINIMUM = 2;
 
 function normalizeLicense(value) {
   const text = String(value || '').trim();
-  if (!text) return 'Unstated';
+  if (!text) return t('about.unstated');
   // "MIT License" and "MIT" are the same terms written by two packaging tools.
   return text.replace(/\s+License$/i, '').replace(/\s+/g, ' ');
 }
@@ -37,14 +38,14 @@ export function groupByLicense(packages) {
     groups.get(key).push(item);
   }
   const rows = [...groups.entries()].map(([license, items]) => ({ license, packages: items }));
-  const small = rows.filter((row) => row.packages.length < GROUP_MINIMUM && row.license !== 'Unstated');
+  const small = rows.filter((row) => row.packages.length < GROUP_MINIMUM && row.license !== t('about.unstated'));
   const kept = rows.filter((row) => !small.includes(row));
   if (small.length) {
-    kept.push({ license: 'Other', packages: small.flatMap((row) => row.packages) });
+    kept.push({ license: t('about.otherLicences'), packages: small.flatMap((row) => row.packages) });
   }
   return kept.sort((a, b) => {
-    if (a.license === 'Unstated') return 1;
-    if (b.license === 'Unstated') return -1;
+    if (a.license === t('about.unstated')) return 1;
+    if (b.license === t('about.unstated')) return -1;
     return b.packages.length - a.packages.length;
   });
 }
@@ -71,7 +72,7 @@ function LicenseGroup({ group }) {
     <div className="rounded-lg border border-line1 bg-bg2 p-3">
       <div className="flex items-center justify-between gap-3">
         <b className="text-[13px] font-semibold text-ink1">{group.license}</b>
-        <Pill tone={group.license === 'Unstated' ? 'warn' : 'neutral'}>{group.packages.length}</Pill>
+        <Pill tone={group.license === t('about.unstated') ? 'warn' : 'neutral'}>{group.packages.length}</Pill>
       </div>
       <p className="mt-1.5 break-words font-mono text-[11px] leading-relaxed text-ink3 [overflow-wrap:anywhere]">
         {shown.map((item) => `${item.name}@${item.version}`).join(', ')}
@@ -83,8 +84,8 @@ function LicenseGroup({ group }) {
           className="mt-1.5 text-[11px] font-medium text-honey hover:underline"
         >
           {open
-            ? 'Show fewer'
-            : `Show ${group.packages.length - shown.length} more`}
+            ? t('about.showFewer')
+            : tf('about.showMore', group.packages.length - shown.length)}
         </button>
       ) : null}
     </div>
@@ -134,9 +135,9 @@ export function AboutView({ active }) {
     // inside itself (DESIGN.md §2).
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
       <HubToolbar
-        kicker="About"
-        title={about?.product || 'Hivemind Content Studio'}
-        subtitle="The build running on this machine, the licence it is under, and everything it is made of."
+        kicker={t('nav.about')}
+        title={about?.product || t('app.name')}
+        subtitle={t('about.subtitle')}
         right={<Pill tone="neutral">{about?.license || 'AGPL-3.0-or-later'}</Pill>}
       />
       <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-4 md:p-5">
@@ -147,72 +148,72 @@ export function AboutView({ active }) {
             detail={failure.detail}
             onRetry={load}
             retryDisabled={loading}
-            retryLabel="Try again"
+            retryLabel={t('common.tryAgain')}
           />
         ) : null}
 
         <Card className="p-4">
-          <Row label="Version">
+          <Row label={t('about.version')}>
             <span className="font-mono">{versionLabel({ version: shownVersion, commit: about?.commit }) || (loading ? '…' : '—')}</span>
             {mismatch ? (
               <span className="ml-2 text-[11px] text-warn">
-                {`this page was built from ${APP_VERSION} — reload to catch up`}
+                {tf('about.builtFrom', APP_VERSION)}
               </span>
             ) : null}
           </Row>
-          <Row label="Built">
+          <Row label={t('about.built')}>
             <span className="font-mono">{about?.build_date ? String(about.build_date).slice(0, 10) : '—'}</span>
           </Row>
-          <Row label="Licence">
+          <Row label={t('about.licence')}>
             {about?.license || 'AGPL-3.0-or-later'}
           </Row>
-          <Row label="Source">
+          <Row label={t('common.source')}>
             <a
               href={taggedSource}
               target="_blank"
               rel="noreferrer"
               className="text-honey hover:underline"
             >
-              View source
+              {t('about.viewSource')}
             </a>
             <span className="ml-2 text-[11px] text-ink3">
               {about?.commit
-                ? `this build is commit ${shortCommit(about.commit)}`
-                : 'the complete corresponding source'}
+                ? tf('about.thisBuildIsCommit', shortCommit(about.commit))
+                : t('about.correspondingSource')}
             </span>
           </Row>
-          <Row label="Security">
+          <Row label={t('about.security')}>
             <a
               href={`${sourceUrl}/security/advisories/new`}
               target="_blank"
               rel="noreferrer"
               className="text-honey hover:underline"
             >
-              Report a vulnerability privately
+              {t('about.reportVulnerability')}
             </a>
             <span className="ml-2 text-[11px] text-ink3">
-              what listens where, and what authenticates it, is in .github/SECURITY.md
+              {t('about.securityDoc')}
             </span>
           </Row>
         </Card>
 
         <section className="flex flex-col gap-2">
-          <SectionLabel>Warranty</SectionLabel>
+          <SectionLabel>{t('about.warranty')}</SectionLabel>
           <Card className="p-4 text-[13px] leading-relaxed text-ink2">
             <p>
-              This program comes with ABSOLUTELY NO WARRANTY, to the extent permitted by applicable law — not even the implied warranty of merchantability or fitness for a particular purpose.
+              {t('about.noWarranty')}
             </p>
             <p className="mt-2">
-              This is free software, and you are welcome to redistribute and modify it under the terms of the GNU Affero General Public License, version 3 or later.
+              {t('about.freeSoftware')}
             </p>
             <p className="mt-2 text-ink3">
-              The full licence text ships with the app (LICENSE); the donor and component provenance is in THIRD_PARTY_NOTICES.md.
+              {t('about.licenceShips')}
             </p>
           </Card>
         </section>
 
         <section className="flex flex-col gap-2">
-          <SectionLabel>What's new</SectionLabel>
+          <SectionLabel>{t('about.whatsNew')}</SectionLabel>
           {about?.whats_new?.length ? (
             <Card className="p-4">
               <ul className="flex flex-col gap-2">
@@ -226,14 +227,14 @@ export function AboutView({ active }) {
             </Card>
           ) : (
             <Card className="p-4 text-[13px] text-ink3">
-              This build did not ship a changelog. The full history is in CHANGELOG.md in the source above.
+              {t('about.noChangelog')}
             </Card>
           )}
         </section>
 
         <section className="flex flex-col gap-2">
           <SectionLabel>
-            Third-party notices
+            {t('about.thirdPartyNotices')}
             {total ? <span className="ml-2 font-normal text-ink3">{total}</span> : null}
           </SectionLabel>
           {loading && !about ? (
@@ -244,17 +245,17 @@ export function AboutView({ active }) {
             // what is missing and how it comes back.
             <Card className="flex flex-col items-start gap-2 p-4">
               <p className="text-[13px] text-ink2">
-                This build shipped without the generated dependency licence list.
+                {t('about.noNotices')}
               </p>
               <p className="font-mono text-[11px] text-ink3">python3 scripts/generate_notices.py</p>
               <Button size="sm" variant="neutral" icon="refresh" onClick={load} disabled={loading}>
-                Try again
+                {t('common.tryAgain')}
               </Button>
             </Card>
           ) : groups.length ? (
             <>
               <p className="text-[12px] text-ink3">
-                Grouped by licence, generated at build time from the installed Python distributions and the three npm lockfiles.
+                {t('about.groupedByLicence')}
                 {about?.notices?.generated_at ? ` · ${about.notices.generated_at}` : ''}
               </p>
               <div className="grid gap-2 md:grid-cols-2">

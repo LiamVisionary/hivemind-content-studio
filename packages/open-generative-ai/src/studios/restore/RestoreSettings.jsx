@@ -19,6 +19,7 @@ import {
 import { RunOnPicker } from '../../components/RunOnPicker.jsx';
 import { runTargetsFromRows } from '../../lib/runTargets.js';
 import { remedyFor } from '../../lib/textModels.js';
+import { t, tf } from '../../lib/i18n.js';
 import {
   CLOUD_LANE, COLOR_CORRECTIONS, RESOLUTION_PRESETS, RESTORE_MODELS,
   advancedSummary, describeChunkPlan, describeCloudPrice, describePrice, restoreRunTargets,
@@ -42,7 +43,7 @@ export function RestoreSettings({
     const remedy = source?.remedy ? remedyFor(source.remedy) : null;
     return {
       state: 'unroutable',
-      label: 'Unavailable',
+      label: t('localModels.offline'),
       detail: '',
       action: remedy ? { ...remedy, kind: 'restore-remedy' } : null,
       blocks: true,
@@ -74,8 +75,8 @@ export function RestoreSettings({
               <p className="text-[11px] font-medium leading-snug text-ink2">
                 {describeCloudPrice(cloudQuote)
                   || (cloudQuote === undefined
-                    ? 'Pricing this render…'
-                    : 'This render could not be priced — nothing will be charged without a figure here.')}
+                    ? t('restorePanel.pricing')
+                    : t('restorePanel.notPriced'))}
               </p>
             ) : null}
             {selectedLane !== CLOUD_LANE && price ? (
@@ -84,27 +85,28 @@ export function RestoreSettings({
           </>
         ) : (
           <Card className="p-3 text-[11px] leading-snug text-ink3">
-            No machine here has the SeedVR2 nodes. Install
+            {/* A <code> element splits the sentence; the table holds both halves. */}
+            {t('restorePanel.noSeedVr2Before')}
             {' '}<code className="text-ink2">ComfyUI-SeedVR2_VideoUpscaler</code>{' '}
-            on this ComfyUI, or attach a rented machine that has it from the Machines page.
+            {t('restorePanel.noSeedVr2After')}
           </Card>
         )}
       </div>
 
       <div className="flex flex-col gap-3">
-        <SectionLabel>Model</SectionLabel>
+        <SectionLabel>{t('common.model')}</SectionLabel>
         <NativeSelect value={settings.model} onChange={(event) => set('model')(event.target.value)} disabled={busy}>
           {RESTORE_MODELS.map((item) => (
             <option key={item.id} value={item.id}>{item.label} — {item.size}</option>
           ))}
         </NativeSelect>
         <p className="text-[11px] leading-snug text-ink3">
-          {model.hint} A model this machine has not used before downloads on its first chunk.
+          {model.hint} {t('restorePanel.firstChunkDownload')}
         </p>
       </div>
 
       <div className="flex flex-col gap-3">
-        <SectionLabel>Output</SectionLabel>
+        <SectionLabel>{t('restorePanel.output')}</SectionLabel>
         <Segmented
           size="sm"
           options={RESOLUTION_PRESETS.map((item) => ({ value: item.id, label: item.label }))}
@@ -113,7 +115,7 @@ export function RestoreSettings({
         />
         <p className="text-[11px] leading-snug text-ink3">
           {RESOLUTION_PRESETS.find((item) => item.id === settings.resolution)?.hint}
-          {plan?.width ? ` This clip comes out ${plan.width}x${plan.height}.` : ''}
+          {plan?.width ? ` ${tf('restorePanel.comesOut', plan.width, plan.height)}` : ''}
         </p>
         {/* The plan stays out here with the size it belongs to: "14 chunks of
             about 4.0s" is the shape of the wait, not an advanced dial. */}
@@ -126,47 +128,47 @@ export function RestoreSettings({
           Restore met a control room; the defaults are good and the fold keeps
           every one of them a single click away, with a summary on the closed
           header so nothing that IS set can hide in here. */}
-      <CollapsibleSection title="Advanced" hint={advancedSummary(settings)} storageKey="restore.advanced">
-        <Field label="Cap the long edge" hint="0 leaves it alone. Useful on very wide footage, where the short-edge target makes the width enormous.">
+      <CollapsibleSection title={t('common.advanced')} hint={advancedSummary(settings)} storageKey="restore.advanced">
+        <Field label={t('restorePanel.capLongEdge')} hint={t('restorePanel.capLongEdgeHint')}>
           <Slider
             value={settings.maxResolution}
             min={0} max={7680} step={160}
             onChange={set('maxResolution')}
-            format={(value) => (value ? `${value}px` : 'off')}
+            format={(value) => (value ? tf('inpaint.pixels', value) : t('restorePanel.off'))}
           />
         </Field>
 
-        <SectionLabel>How it is cut up</SectionLabel>
+        <SectionLabel>{t('restorePanel.howItIsCut')}</SectionLabel>
         <Field
-          label="Temporal batch"
-          hint="Frames the model denoises together. More is steadier and needs more memory — not faster: measured on a 5090, going from 5 to 21 took 7% off the render and 52% more VRAM. Snapped to the model's 4n+1 lattice."
+          label={t('restorePanel.temporalBatch')}
+          hint={t('restorePanel.temporalBatchHint')}
         >
-          <Slider value={settings.batchSize} min={1} max={33} step={4} onChange={set('batchSize')} format={(value) => `${value} frames`} />
+          <Slider value={settings.batchSize} min={1} max={33} step={4} onChange={set('batchSize')} format={(value) => tf('restorePanel.frames', value)} />
         </Field>
-        <Field label="Chunk length" hint="Also the checkpoint interval — an interrupted render resumes at the last finished chunk.">
-          <Slider value={settings.chunkSeconds} min={1} max={20} step={0.5} onChange={set('chunkSeconds')} format={(value) => `${value}s`} />
+        <Field label={t('restorePanel.chunkLength')} hint={t('restorePanel.chunkLengthHint')}>
+          <Slider value={settings.chunkSeconds} min={1} max={20} step={0.5} onChange={set('chunkSeconds')} format={(value) => tf('restorePanel.seconds', value)} />
         </Field>
         <Field
-          label="Lead-in"
-          hint="Frames each chunk re-reads from the one before, so it starts having seen them. This is what stops a visible re-grade at every boundary — and it is extra render time."
+          label={t('restorePanel.leadIn')}
+          hint={t('restorePanel.leadInHint')}
         >
-          <Slider value={settings.contextFrames} min={0} max={20} step={1} onChange={set('contextFrames')} format={(value) => `${value} frames`} />
+          <Slider value={settings.contextFrames} min={0} max={20} step={1} onChange={set('contextFrames')} format={(value) => tf('restorePanel.frames', value)} />
         </Field>
         <Field
-          label="Seam dissolve"
+          label={t('restorePanel.seamDissolve')}
           hint={singleChunk
-            ? 'Nothing to dissolve — this clip is one chunk.'
-            : 'Frames to cross-dissolve where two chunks overlap. Replaces frames rather than inserting them, so the master stays exactly as long as the source.'}
+            ? t('restorePanel.seamSingleChunk')
+            : t('restorePanel.seamHint')}
         >
           <Slider
             value={settings.seamFrames}
             min={0} max={Math.max(0, settings.contextFrames)} step={1}
             onChange={set('seamFrames')}
-            format={(value) => (value ? `${value} frames` : 'hard cut')}
+            format={(value) => (value ? tf('restorePanel.frames', value) : t('restorePanel.hardCut'))}
           />
         </Field>
 
-        <SectionLabel>Colour and seed</SectionLabel>
+        <SectionLabel>{t('restorePanel.colourAndSeed')}</SectionLabel>
         <NativeSelect value={settings.colorCorrection} onChange={(event) => set('colorCorrection')(event.target.value)}>
           {COLOR_CORRECTIONS.map((item) => (
             <option key={item.id} value={item.id}>{item.label}</option>
@@ -175,15 +177,15 @@ export function RestoreSettings({
         <p className="text-[11px] leading-snug text-ink3">
           {COLOR_CORRECTIONS.find((item) => item.id === settings.colorCorrection)?.hint}
         </p>
-        <Field label="Seed" hint="One seed for every chunk of a project. Two chunks denoised from different noise are two slightly different grades meeting at a seam.">
+        <Field label={t('image.seed')} hint={t('restorePanel.seedHint')}>
           <Slider value={settings.seed} min={0} max={99999} step={1} onChange={set('seed')} />
         </Field>
 
-        <SectionLabel>Memory and speed</SectionLabel>
+        <SectionLabel>{t('restorePanel.memoryAndSpeed')}</SectionLabel>
         <Toggle
           checked={settings.tiledVae}
           onChange={set('tiledVae')}
-          label="Tiled VAE — less memory, slower, can leave faint tile edges on flat gradients"
+          label={t('restorePanel.tiledVae')}
         />
         {/* No "Compile the model" toggle. Measured on a rented RTX 5090: it
             makes the first chunk 47% slower and crashes the second
@@ -194,8 +196,8 @@ export function RestoreSettings({
 
       {source ? (
         <Card className="p-3 text-[11px] leading-snug text-ink3">
-          Source: {source.width}x{source.height}, {source.frames} frames at {source.fps.toFixed(2)}fps
-          {source.hasAudio ? ' — its soundtrack is carried over untouched.' : ' — no soundtrack.'}
+          {tf('restorePanel.sourceLine', source.width, source.height, source.frames, source.fps.toFixed(2))}
+          {source.hasAudio ? t('restorePanel.soundtrackKept') : t('restorePanel.noSoundtrack')}
         </Card>
       ) : null}
     </>

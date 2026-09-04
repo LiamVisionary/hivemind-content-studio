@@ -28,11 +28,12 @@ import { Lightbox } from '../components/Lightbox.jsx';
 import { RunCard } from '../components/RunCard.jsx';
 import { StatusPill } from '../components/StatusPill.jsx';
 import { toastFailure } from '../../ui/failureToast.jsx';
+import { t, tf } from '../../lib/i18n.js';
 
 const FILTERS = [
-  { value: '', label: 'All' },
-  { value: 'active', label: 'Active' },
-  { value: 'completed', label: 'Complete' },
+  { value: '', label: t('runs.filterAll') },
+  { value: 'active', label: t('common.active') },
+  { value: 'completed', label: t('runs.filterComplete') },
 ];
 
 const fmtTime = (value) => {
@@ -63,9 +64,9 @@ function ArtifactCard({ run, artifact, onOpen }) {
   const copyUrl = async () => {
     try {
       await navigator.clipboard.writeText(new URL(rawUrl, location.href).href);
-      toast('Copied artifact URL.');
+      toast(t('runs.copiedUrl'));
     } catch (error) {
-      toastFailure(error, { operation: 'That run action' });
+      toastFailure(error, { operation: t('runs.thatRunAction') });
     }
   };
 
@@ -98,8 +99,8 @@ function ArtifactCard({ run, artifact, onOpen }) {
         <button
           type="button"
           onClick={() => void downloadMedia(rawUrl, filename)}
-          aria-label={`Download ${humanize(artifact.role)}`}
-          title="Download"
+          aria-label={tf('runs.downloadNamed', humanize(artifact.role))}
+          title={t('common.download')}
           className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
         >
           <Icon name="download" size={15} />
@@ -107,8 +108,8 @@ function ArtifactCard({ run, artifact, onOpen }) {
         <button
           type="button"
           onClick={copyUrl}
-          aria-label={`Copy ${humanize(artifact.role)} URL`}
-          title="Copy URL"
+          aria-label={tf('runs.copyNamedUrl', humanize(artifact.role))}
+          title={t('runs.copyUrl')}
           className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink3 transition-colors hover:bg-bg3 hover:text-ink1"
         >
           <Icon name="copy" size={15} />
@@ -142,8 +143,8 @@ function RunDetail({ run, operatorToken }) {
     return (
       <EmptyState
         icon="stack"
-        title="Pick a production"
-        hint="See what it did, what it made, and what happens next."
+        title={t('runs.pickAProduction')}
+        hint={t('runs.pickAProductionHint')}
         className="flex-1"
       />
     );
@@ -166,14 +167,14 @@ function RunDetail({ run, operatorToken }) {
         <div className="min-w-0">
           {/* The lane is the kicker unless it is already the title (a brief with no title of its own). */}
           <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink3">
-            {runDisplayTitle(run) === laneLabel(run.lane) ? 'Production' : laneLabel(run.lane)}
+            {runDisplayTitle(run) === laneLabel(run.lane) ? t('runs.production') : laneLabel(run.lane)}
           </p>
           <h3 className="truncate text-[15px] font-semibold text-ink1">{runDisplayTitle(run)}</h3>
           <p className="mt-0.5 truncate font-mono text-[11px] text-ink3" title={run.run_id}>{run.run_id}</p>
           {created || updated ? (
             <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-ink3">
-              {created ? <span>created <span className="font-mono text-ink2">{created}</span></span> : null}
-              {updated ? <span>updated <span className="font-mono text-ink2">{updated}</span></span> : null}
+              {created ? <span>{t('runs.created')} <span className="font-mono text-ink2">{created}</span></span> : null}
+              {updated ? <span>{t('runs.updated')} <span className="font-mono text-ink2">{updated}</span></span> : null}
             </p>
           ) : null}
         </div>
@@ -181,7 +182,7 @@ function RunDetail({ run, operatorToken }) {
       </div>
 
       {action ? (
-        <Section title="Next action">
+        <Section title={t('runs.nextAction')}>
           <div className="rounded-lg border border-line1 bg-bg2 p-3">
             <b className="text-[13px] text-ink1">{humanize(action.intent)}</b>
             <p className="mt-0.5 text-[13px] leading-relaxed text-ink3">{action.reason}</p>
@@ -190,13 +191,13 @@ function RunDetail({ run, operatorToken }) {
       ) : null}
 
       {scenes.length ? (
-        <Section title="Scenes" right={<span className="font-mono text-[11px] text-ink3">{scenes.length}</span>}>
+        <Section title={t('runs.scenes')} right={<span className="font-mono text-[11px] text-ink3">{scenes.length}</span>}>
           <div className="flex flex-col gap-1">
             {scenes.map((scene, index) => (
               <div key={index} className="flex items-start gap-2.5 rounded-md border border-line1 bg-bg2 px-3 py-2">
                 <span className="mt-0.5 font-mono text-[11px] text-ink3">{String(index + 1).padStart(2, '0')}</span>
                 <span className="min-w-0 flex-1">
-                  <b className="block truncate text-[13px] text-ink1">{scene.title || scene.beat || `Scene ${index + 1}`}</b>
+                  <b className="block truncate text-[13px] text-ink1">{scene.title || scene.beat || tf('runs.sceneNumber', index + 1)}</b>
                   {scene.beat && scene.beat !== scene.title ? <small className="block truncate text-[11px] text-ink3">{scene.beat}</small> : null}
                 </span>
                 {scene.duration_seconds ? <span className="shrink-0 font-mono text-[11px] text-ink3">{scene.duration_seconds}s</span> : null}
@@ -206,7 +207,7 @@ function RunDetail({ run, operatorToken }) {
         </Section>
       ) : null}
 
-      <Section title="Workflow">
+      <Section title={t('runs.workflow')}>
         <div className="flex flex-col gap-1">
           {(run.steps || []).map((step) => (
             <div key={step.step_id} className="flex items-center gap-2.5 rounded-md border border-line1 bg-bg2 px-3 py-2">
@@ -217,7 +218,7 @@ function RunDetail({ run, operatorToken }) {
         </div>
       </Section>
 
-      <Section title="Artifacts">
+      <Section title={t('runs.artifacts')}>
         {run.artifact_records?.length ? (
           <div className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
             {run.artifact_records.map((artifact) => (
@@ -225,32 +226,32 @@ function RunDetail({ run, operatorToken }) {
             ))}
           </div>
         ) : (
-          <p className="text-xs text-ink3">No artifacts yet.</p>
+          <p className="text-xs text-ink3">{t('runs.noArtifacts')}</p>
         )}
       </Section>
 
-      <Section title="Actions">
+      <Section title={t('runs.actions')}>
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => loadRunIntoSimpleComposer(run.run_id)}>Use prompt &amp; settings</Button>
-          <Button size="sm" onClick={() => duplicateRun(run.run_id)}>Duplicate &amp; edit</Button>
+          <Button size="sm" onClick={() => loadRunIntoSimpleComposer(run.run_id)}>{t('runs.usePromptAndSettings')}</Button>
+          <Button size="sm" onClick={() => duplicateRun(run.run_id)}>{t('runs.duplicateAndEdit')}</Button>
           {run.current_step ? (
             <>
-              <Button size="sm" onClick={() => runAction('resume', run.run_id)}>Resume</Button>
-              <Button size="sm" onClick={() => runAction('retry', run.run_id, run.current_step)}>Retry step</Button>
+              <Button size="sm" onClick={() => runAction('resume', run.run_id)}>{t('runs.resume')}</Button>
+              <Button size="sm" onClick={() => runAction('retry', run.run_id, run.current_step)}>{t('runs.retryStep')}</Button>
             </>
           ) : null}
-          {canCancel ? <Button size="sm" variant="danger" onClick={() => setConfirmCancel(true)}>Cancel run</Button> : null}
+          {canCancel ? <Button size="sm" variant="danger" onClick={() => setConfirmCancel(true)}>{t('runs.cancelRun')}</Button> : null}
         </div>
         {canAuth ? (
           <Field
-            label="Operator token"
+            label={t('runs.operatorToken')}
             className="mt-1 max-w-sm"
-            hint="Held in memory only. Needed for resume, retry, and cancel — sent as a bearer token at action time."
+            hint={t('runs.operatorTokenHint')}
           >
             <TextInput
               type="password"
               autoComplete="off"
-              placeholder="••••••••"
+              placeholder={t('runs.tokenPlaceholder')}
               value={operatorToken}
               onChange={(e) => setWorkflow({ operatorToken: e.target.value })}
             />
@@ -272,10 +273,10 @@ function RunDetail({ run, operatorToken }) {
         onClose={() => (cancelling ? null : setConfirmCancel(false))}
         onConfirm={cancelRun}
         busy={cancelling}
-        title="Cancel this production?"
-        confirmLabel="Cancel production"
-        cancelLabel="Keep running"
-        body={`Running steps stop and "${runDisplayTitle(run)}" is marked cancelled. Artifacts already made stay in the run.`}
+        title={t('runs.cancelTitle')}
+        confirmLabel={t('runs.cancelConfirm')}
+        cancelLabel={t('runs.cancelKeep')}
+        body={tf('runs.cancelBody', runDisplayTitle(run))}
       />
     </div>
   );
@@ -293,13 +294,13 @@ export function RunsView({ active }) {
   // run the Planner. It is the same productions, counted — so it lives here.
   const [tab, setTab] = useState('productions');
   const tabs = [
-    { value: 'productions', label: 'Productions' },
-    { value: 'activity', label: 'Activity' },
+    { value: 'productions', label: t('nav.productions') },
+    { value: 'activity', label: t('nav.activity') },
   ];
 
   return (
     <div className={active ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
-      <HubToolbar kicker="Durable production" title="Productions">
+      <HubToolbar kicker={t('runs.kicker')} title={t('nav.productions')}>
         <Segmented options={tabs} value={tab} onChange={setTab} />
         {tab === 'productions' ? <Segmented options={FILTERS} value={s.statusFilter} onChange={setStatusFilter} /> : null}
       </HubToolbar>
@@ -308,7 +309,7 @@ export function RunsView({ active }) {
       <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(240px,320px)_1fr]">
         <div className="custom-scrollbar flex min-h-0 flex-col gap-2 overflow-y-auto border-b border-line1 p-3 md:border-b-0 md:border-r">
           <div className="flex items-center justify-between px-0.5 pb-1">
-            <Pill tone="neutral" className="h-5 px-2 text-[10px]">{runs.length} shown</Pill>
+            <Pill tone="neutral" className="h-5 px-2 text-[10px]">{tf('runs.shownCount', runs.length)}</Pill>
           </div>
           {runs.length ? (
             runs.map((run) => (
@@ -317,8 +318,8 @@ export function RunsView({ active }) {
           ) : (
             <EmptyState
               icon="stack"
-              title="No matching productions"
-              hint="Create a production or change the filter."
+              title={t('runs.noMatching')}
+              hint={t('runs.noMatchingHint')}
             />
           )}
         </div>
