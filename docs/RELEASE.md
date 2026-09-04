@@ -67,9 +67,9 @@ never started them. They now live behind the `faceless-webui` extra (§5).
 
 ---
 
-## 2. The three load-bearing Tauri decisions
+## 2. The load-bearing Tauri decisions
 
-These three are not preferences. Each of them breaks a shipped feature if it is
+These are not preferences. Each of them breaks a shipped feature if it is
 decided the other way, so they are written down before the scaffold exists.
 
 ### 2.1 The webview loads `http://127.0.0.1:<port>`, never `tauri://localhost`
@@ -173,6 +173,38 @@ Its port (8789) is still named by `trustedOwnerParent.ts`, `StudioRedirect.jsx`,
 `hubData.gatewayUrl`, `McpCliStudio.jsx` and the control API's
 `CONTENT_STUDIO_PROXY_SECRET` forwarded-header path; those are the last users to
 retire before the file goes.
+### 2.5 Saving a file needs the dialog and fs plugins
+
+Every "keep this" control in the studio — a generated clip, a restored master, a
+sprite sheet and its atlas, a persona export, the one-time vault recovery key —
+ends up in `saveBytes()` in `packages/open-generative-ai/src/lib/downloadMedia.js`.
+In a browser that is an `<a download>` click on a `blob:` URL. **A WKWebView does
+not carry that out on its own**, so without the branch below every Download
+button in the packaged app would click and do nothing, and the recovery-key
+screen would tell somebody their only key was saved to a file that does not
+exist.
+
+`saveBytes` therefore branches on `window.__TAURI__`, which means the shell must:
+
+* set `app.withGlobalTauri = true` in `tauri.conf.json` (the branch reads the
+  plugin APIs off the global rather than importing `@tauri-apps/api`, because the
+  frontend is built once and also served to browsers and the tailnet, where those
+  imports do not resolve);
+* add `tauri-plugin-dialog` and `tauri-plugin-fs`;
+* grant exactly `dialog:allow-save` and `fs:allow-write-file` in the window's
+  capability file, with **no** `fs:scope` beyond what the save dialog returns.
+  The user picks the path in a native sheet; the app never enumerates, reads or
+  writes a directory of its own, so a read permission or a broad scope would be
+  strictly more authority than the feature needs.
+
+The branch degrades in this order and never silently no-ops: native dialog →
+anchor download → clipboard (for text, which is what makes the recovery key
+survive a webview with no save path at all) → a tab the user can print. A
+cancelled save sheet is reported as `cancelled` and nothing else fires.
+
+`tests/saveBytes.test.js` pins both sides of the branch. It cannot pin the real
+webview; step 6 of the release checklist is where a Download button is pressed in
+the built app.
 
 ---
 
@@ -307,10 +339,10 @@ list, so it does not drift from a second copy here. The shape of it:
 
 1. `uv run pytest test` and `uv run pytest test/studio` green; `npm run test:embedded` green; `cd packages/comfyui-mobile && npx vitest run` green.
 2. `python3 scripts/generate_notices.py --check` clean, and `THIRD_PARTY_NOTICES.md` carries no open distribution gate. (It carries none as of 2026-09-03; the donor-checkout retirement gates in [`OPERATIONS.md`](OPERATIONS.md) are the older list.)
-3. `python -m hivemind_content_studio.identity --write` produces no diff — identity has not drifted from the generated JSON.
+3. `python -m hivemind_content_studio.identity --write` produces no diff — identity has not drifted from the generated JSON, and `python3 scripts/generate_gate_css.py --check` is clean — the sign-in gate's stylesheet still matches the design tokens.
 4. A cold start of the packaged app on a machine with no repository checkout, no `uv`, no Node and no ComfyUI reaches the studio, signs in with a passkey, and shows the local lanes as "not set up" rather than as errors.
 5. Tag `studio-v0.x`, build, sign, notarize, staple.
-6. Smoke-test the built DMG on a second machine: install, launch, sign in, one hosted generation, one restore, quit — and confirm no ComfyUI process was killed on quit.
+6. Smoke-test the built DMG on a second machine: install, launch, sign in, one hosted generation, one restore, **press Download on the result and confirm a native save sheet appears and writes the file** (§2.4), quit — and confirm no ComfyUI process was killed on quit.
 7. Promote `latest.json`. This is the step that ships it; until it runs, the tag is only an artifact.
 
 ## 8. Still open

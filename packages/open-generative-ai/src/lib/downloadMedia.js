@@ -68,6 +68,96 @@ export async function resolvePlaintextMedia(url) {
 }
 
 /**
+ * The desktop shell's save pair, or null in a browser.
+ *
+ * A WKWebView does not carry out `<a download>` of a `blob:` URL on its own, so
+ * in the packaged Tauri app every Download button in this studio would click and
+ * do nothing. Tauri exposes its plugin APIs on `window.__TAURI__` when the shell
+ * sets `app.withGlobalTauri` (see docs/RELEASE.md §2.4 for the plugins and the
+ * capability scope this expects); both halves are checked because the dialog
+ * without the write is a save sheet that saves nothing.
+ */
+function desktopSavePair() {
+  const tauri = typeof window === 'undefined' ? null : window.__TAURI__;
+  const save = tauri?.dialog?.save;
+  const write = tauri?.fs?.writeFile;
+  return typeof save === 'function' && typeof write === 'function' ? { save, write } : null;
+}
+
+function extensionFilters(name) {
+  const match = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || ''));
+  return match ? [{ name: match[1].toUpperCase(), extensions: [match[1].toLowerCase()] }] : [];
+}
+
+/**
+ * Last resort when neither a native dialog nor an anchor can write the file:
+ * put the bytes somewhere the user can still keep them. Text goes to the
+ * clipboard (a recovery key pasted into a password manager is a saved recovery
+ * key); anything else opens in a tab the user can print or save by hand. Doing
+ * nothing is the one outcome this function exists to prevent.
+ */
+async function keepSomehow(blob) {
+  const text = /^text\/|json|xml/i.test(blob?.type || '');
+  if (text && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(await blob.text());
+      return { ok: true, method: 'clipboard' };
+    } catch { /* fall through to a tab */ }
+  }
+  try {
+    const url = URL.createObjectURL(blob);
+    if (window.open(url, '_blank')) return { ok: true, method: 'window' };
+  } catch { /* nothing left to try */ }
+  return { ok: false, method: 'none' };
+}
+
+/**
+ * THE way this app puts bytes on the user's disk.
+ *
+ * Branches on the desktop shell because the two environments save differently
+ * and only one of them is a browser:
+ *   * Tauri → native save dialog, then a write. A cancelled dialog is a
+ *     deliberate "no", reported as `cancelled` so callers do not treat it as a
+ *     failure and open a tab over the user's decision.
+ *   * anywhere else → the `<a download>` an ordinary browser understands.
+ *   * neither worked → clipboard or a tab (`keepSomehow`).
+ *
+ * Returns `{ ok, method, cancelled? }`. Every explicit save in the studio —
+ * media downloads, the sprite sheet and atlas, a persona export, the vault
+ * recovery key — goes through here, so the desktop branch is written once.
+ */
+export async function saveBytes(blob, filename) {
+  const name = filename || '';
+  const native = desktopSavePair();
+  if (native) {
+    try {
+      const path = await native.save({ defaultPath: name || 'download', filters: extensionFilters(name) });
+      if (!path) return { ok: false, cancelled: true, method: 'tauri' };
+      await native.write(path, new Uint8Array(await blob.arrayBuffer()));
+      return { ok: true, method: 'tauri', path };
+    } catch {
+      // A shell that refused the write still has a webview; try the browser
+      // path rather than losing the file to a plugin misconfiguration.
+    }
+  }
+  let blobUrl = null;
+  try {
+    blobUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = blobUrl;
+    if (name) anchor.download = name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(blobUrl);
+    return { ok: true, method: 'anchor' };
+  } catch {
+    if (blobUrl) { try { URL.revokeObjectURL(blobUrl); } catch { /* already gone */ } }
+    return keepSomehow(blob);
+  }
+}
+
+/**
  * Save `url` to disk as `filename`. When no filename is given, the registered
  * model-derived name is used, so callers that don't know the model still get the
  * right one. Falls back to opening the media in a new tab, which is better than
@@ -85,22 +175,14 @@ export async function downloadMedia(url, filename) {
     }
     return resolved;
   }
-  try {
-    const blob = resolved.blob;
-    // Name the blob too: if anything downstream re-derives a name from this
-    // object rather than the anchor, it still agrees.
-    const payload = name ? new File([blob], name, { type: blob.type }) : blob;
-    const blobUrl = URL.createObjectURL(payload);
-    const anchor = document.createElement('a');
-    anchor.href = blobUrl;
-    if (name) anchor.download = name;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    URL.revokeObjectURL(blobUrl);
-    return { ok: true, blocked: false };
-  } catch {
-    window.open(url, '_blank');
-    return { ok: false, blocked: false };
-  }
+  const blob = resolved.blob;
+  // Name the blob too: if anything downstream re-derives a name from this
+  // object rather than the anchor, it still agrees.
+  const payload = name ? new File([blob], name, { type: blob.type }) : blob;
+  const saved = await saveBytes(payload, name);
+  if (saved.ok) return { ok: true, blocked: false };
+  // A cancelled save sheet is the user's answer, not a failure to route around.
+  if (saved.cancelled) return { ok: false, blocked: false, cancelled: true };
+  window.open(url, '_blank');
+  return { ok: false, blocked: false };
 }

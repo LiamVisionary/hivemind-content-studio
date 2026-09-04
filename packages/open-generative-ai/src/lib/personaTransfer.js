@@ -13,6 +13,7 @@ import {
   personaExportFilename,
   personaFromReferences,
 } from './personaId.js';
+import { saveBytes } from './downloadMedia.js';
 import { resolveMediaSrc } from './e2eMedia.js';
 
 /** Decrypt one reference and read it back as an inline data URL. */
@@ -65,17 +66,16 @@ export async function buildPersonaTransfer(name, personaData) {
   return { document, dropped, filename: personaExportFilename(name) };
 }
 
-/** Save the document to disk as a file the user can keep or send on. */
+/**
+ * Save the document to disk as a file the user can keep or send on.
+ *
+ * Through saveBytes, like every other save in the studio: an anchor click is
+ * inert in the packaged desktop shell, and this export is one of the paths a
+ * person would have believed had worked.
+ */
 export function downloadPersonaTransfer(document, filename) {
   const blob = new Blob([JSON.stringify(document, null, 2)], { type: 'application/json' });
-  const href = URL.createObjectURL(blob);
-  const anchor = window.document.createElement('a');
-  anchor.href = href;
-  anchor.download = filename;
-  window.document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  setTimeout(() => URL.revokeObjectURL(href), 2000);
+  return saveBytes(blob, filename);
 }
 
 /**

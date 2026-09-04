@@ -70,7 +70,11 @@ SCRYPT_DKLEN = 32
 
 # Tile colours for the picker. Index is stable per account id, so a workspace
 # keeps its colour for life rather than shuffling when a sibling is deleted.
-TILE_COLOURS = ("amber", "violet", "teal", "rose", "sky", "lime")
+# The honey accent and two neutrals: the design system allows one accent and
+# "never cyan/violet", and the six-gradient rainbow this used to be was the
+# loudest thing in the product. `scripts/generate_gate_css.py` defines the
+# matching classes; the gate falls back to amber for a colour stored earlier.
+TILE_COLOURS = ("amber", "sand", "stone", "slate")
 
 
 def _now() -> str:

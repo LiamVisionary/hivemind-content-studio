@@ -36,71 +36,39 @@ made people reuse a weak one.
 
 from __future__ import annotations
 
+import os
+
+from .gate_style import GATE_CSS
+
 # The PRF salt is fixed per account and derived from a constant label, so the
 # same passkey yields the same secret on every sign-in and on every device that
 # syncs it. Changing this string would strand every PRF-wrapped vault.
 PRF_SALT_LABEL = "hivemind-content-studio/vault-prf/v1"
 
-_STYLE = """
-:root{color-scheme:dark}
-*{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#0c0c0e;color:#f2f2f3;
-  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
-main{width:min(860px,100%);display:grid;gap:28px;justify-items:center}
-.mark{width:40px;height:40px;display:grid;place-items:center;border-radius:10px;background:rgba(246,178,27,.12);color:#f6b21b}
-.eyebrow{margin:0;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:#f6b21b;text-align:center}
-h1{margin:6px 0 0;font-size:28px;font-weight:650;letter-spacing:-0.02em;text-align:center}
-p.lede{margin:8px 0 0;color:#a3a3ac;font-size:13px;line-height:1.55;text-align:center;max-width:44ch}
-.tiles{display:flex;flex-wrap:wrap;gap:22px;justify-content:center;padding:0;margin:0;list-style:none}
-.tile{display:grid;gap:10px;justify-items:center;background:none;border:0;padding:0;cursor:pointer;font:inherit;color:inherit}
-.avatar{width:118px;height:118px;border-radius:14px;display:grid;place-items:center;font-size:40px;font-weight:600;
-  color:#0c0c0e;border:3px solid transparent;transition:border-color .16s,transform .16s}
-.tile:hover .avatar,.tile:focus-visible .avatar{border-color:#f2f2f3;transform:scale(1.05)}
-.avatar.add{background:#111114;border:3px dashed rgba(255,255,255,.22);color:#6f6f78;font-size:44px;font-weight:400}
-.tile:hover .avatar.add,.tile:focus-visible .avatar.add{border-color:#f2f2f3;color:#f2f2f3}
-.tile:focus-visible{outline:none}
-.tile-name{font-size:14px;color:#a3a3ac;transition:color .16s}
-.tile:hover .tile-name,.tile:focus-visible .tile-name{color:#f2f2f3}
-.badge{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#6f6f78}
-.c-amber{background:linear-gradient(140deg,#f6b21b,#d98a08)}
-.c-violet{background:linear-gradient(140deg,#a78bfa,#7c5cf0)}
-.c-teal{background:linear-gradient(140deg,#5eead4,#14b8a6)}
-.c-rose{background:linear-gradient(140deg,#fda4af,#f43f5e)}
-.c-sky{background:linear-gradient(140deg,#7dd3fc,#0ea5e9)}
-.c-lime{background:linear-gradient(140deg,#bef264,#84cc16)}
-.card{width:min(400px,100%);display:grid;gap:14px;padding:30px;border:1px solid rgba(255,255,255,.08);border-radius:14px;
-  background:#111114;box-shadow:0 24px 64px -24px rgba(0,0,0,.75)}
-.card h2{margin:0;font-size:19px;font-weight:640;letter-spacing:-0.01em}
-.card .who{display:flex;align-items:center;gap:12px}
-.card .who .avatar{width:46px;height:46px;border-radius:10px;font-size:19px;border-width:0}
-.card .who .avatar.add{border-width:2px;font-size:22px}
-button{min-height:46px;border:0;border-radius:10px;font:600 14px inherit;cursor:pointer;transition:background .15s,border-color .15s}
-.primary{background:#f6b21b;color:#1a1205;display:flex;align-items:center;justify-content:center;gap:9px}
-.primary:hover{background:#ffc94a}
-.primary:disabled{opacity:.55;cursor:default}
-.secondary{background:#17171b;color:#f2f2f3;border:1px solid rgba(255,255,255,.1)}
-.secondary:hover{border-color:rgba(255,255,255,.22)}
-.divider{display:flex;align-items:center;gap:12px;color:#6f6f78;font-size:11px;text-transform:uppercase;letter-spacing:.12em}
-.divider::before,.divider::after{content:"";flex:1;height:1px;background:rgba(255,255,255,.1)}
-form{display:grid;gap:10px}
-label{display:grid;gap:6px;font-size:12px;font-weight:500;color:#a3a3ac}
-input{width:100%;height:44px;padding:0 14px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:#17171b;
-  color:#f2f2f3;font:inherit;font-size:14px;outline:0;transition:border-color .15s}
-input:hover{border-color:rgba(255,255,255,.16)}
-input:focus{border-color:rgba(246,178,27,.6);box-shadow:0 0 0 3px rgba(246,178,27,.14)}
-.error{margin:0;color:#f26d5f;font-size:12px;line-height:1.5}
-.error:empty{display:none}
-.back{background:none;border:0;color:#6f6f78;font:inherit;font-size:12px;cursor:pointer;padding:4px;min-height:0}
-.back:hover{color:#a3a3ac}
-[hidden]{display:none !important}
-@media (prefers-reduced-motion:reduce){.avatar,.tile-name{transition:none}.tile:hover .avatar{transform:none}}
-"""
+# The env var the packaged desktop shell sets (docs/RELEASE.md). It changes two
+# things on this page and nothing else: a solo workspace goes straight to its
+# passkey, and adding a workspace moves behind Settings, because a desktop app
+# for one person should not open on a chooser with one thing to choose.
+DESKTOP_ENV = "CONTENT_STUDIO_DESKTOP"
+
+
+def desktop_shell() -> bool:
+    """True when this gate is being served inside the packaged desktop app."""
+    return os.environ.get(DESKTOP_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 _SCRIPT = r"""
 const PRF_SALT_LABEL = "__PRF_SALT_LABEL__";
 const HANDOFF_KEY = 'hivemind.ownerPassphrase.once';
 const VAULT_HINT_KEY = 'hivemind.vaultUnlock.once';
+const FIRST_RUN_KEY = 'hivemind.firstRun.once';
 const HANDOFF_MS = 24 * 60 * 60 * 1000;
+// Set by the packaged desktop shell (CONTENT_STUDIO_DESKTOP); false in a browser.
+const DESKTOP = document.documentElement.dataset.desktop === '1';
+// The whole avatar palette: the honey accent and two neutrals. A colour stored
+// by an older build (violet, teal, rose, sky, lime) resolves to amber rather
+// than to a class that does not exist, which used to paint a blank tile.
+const TILE_COLOURS = new Set(['amber', 'sand', 'stone', 'slate']);
+const tileClass = (colour) => (TILE_COLOURS.has(colour) ? colour : 'amber');
 
 const el = (id) => document.getElementById(id);
 const b64url = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer)))
@@ -264,7 +232,7 @@ function renderTiles() {
     tile.type = 'button';
     tile.setAttribute('aria-label', `Open ${account.name}`);
     const avatar = document.createElement('span');
-    avatar.className = `avatar c-${account.colour || 'amber'}`;
+    avatar.className = `avatar c-${tileClass(account.colour)}`;
     avatar.textContent = initial(account.name);
     const name = document.createElement('span');
     name.className = 'tile-name';
@@ -281,6 +249,11 @@ function renderTiles() {
   }
   // The dashed "add" tile. Creation is owner-approved server-side, so showing
   // the tile to an unauthenticated visitor gives away nothing they could use.
+  // Not in the desktop app: one person on one Mac meets a chooser with a second
+  // thing on it every launch for a workspace they will make once, if ever. It
+  // lives in Settings > Privacy > Workspaces there, which is also where the
+  // "Add a workspace" button comes back to this card from.
+  if (DESKTOP && !new URLSearchParams(location.search).has('workspace')) return;
   const add = document.createElement('button');
   add.className = 'tile';
   add.type = 'button';
@@ -328,7 +301,11 @@ async function setUpStudio(event) {
     return;
   }
   // Setup signed us in, which is exactly what enrolling a passkey needs — so
-  // fall into the same offer a first password sign-in gets.
+  // fall into the same offer a first password sign-in gets. The flag tells the
+  // app this reload is the second half of setup, so it creates the vault
+  // deliberately and shows the recovery key as step two instead of dropping it
+  // on top of whatever studio loaded first.
+  try { sessionStorage.setItem(FIRST_RUN_KEY, '1'); } catch {}
   chosen = payload.account;
   el('setup').hidden = true;
   if (window.PublicKeyCredential) {
@@ -344,7 +321,7 @@ async function setUpStudio(event) {
 // other workspace to choose.
 function offerPasskey(account, password, { fromSetup = false } = {}) {
   pendingPassword = password;
-  el('who-avatar').className = `avatar c-${account.colour || 'amber'}`;
+  el('who-avatar').className = `avatar c-${tileClass(account.colour)}`;
   el('who-avatar').textContent = initial(account.name);
   el('who-name').textContent = account.name;
   el('error').textContent = '';
@@ -360,7 +337,7 @@ function choose(account) {
   el('back').hidden = false;
   el('picker').hidden = true;
   el('signin').hidden = false;
-  el('who-avatar').className = `avatar c-${account.colour || 'amber'}`;
+  el('who-avatar').className = `avatar c-${tileClass(account.colour)}`;
   el('who-avatar').textContent = initial(account.name);
   el('who-name').textContent = account.name;
   el('error').textContent = '';
@@ -746,8 +723,17 @@ async function start() {
   }
   if (payload.setup_required) { showSetup(); return; }
   renderTiles();
-  // The picker always shows now — even with one workspace there is a real
-  // choice on it, because the "New workspace" tile sits beside the accounts.
+  // Settings > Workspaces sends people here to add one; the picker is where
+  // that lives, so open the create card rather than making them find it.
+  if (new URLSearchParams(location.search).has('workspace')) { showCreate(); return; }
+  // One workspace with a passkey has nothing to choose between: two clicks and
+  // a tile stood between the person and Touch ID on every single launch. Go
+  // straight to the prompt; "Choose a different workspace" stays on the card,
+  // and a cancelled prompt lands on that card with its password form.
+  if (accounts.length === 1 && accounts[0].has_passkey) {
+    choose(accounts[0]);
+    signInWithPasskey(accounts[0]);
+  }
 }
 
 el('setup-form').addEventListener('submit', setUpStudio);
@@ -784,17 +770,22 @@ _HIVE_GLYPH = (
 )
 
 
-def account_gate_html() -> str:
-    """The whole gate: picker, passkey-first sign-in, password underneath."""
+def account_gate_html(desktop: bool | None = None) -> str:
+    """The whole gate: picker, passkey-first sign-in, password underneath.
+
+    `desktop` defaults to the CONTENT_STUDIO_DESKTOP env var the packaged shell
+    sets; pass it explicitly in tests.
+    """
+    is_desktop = desktop_shell() if desktop is None else bool(desktop)
     return f"""<!doctype html>
-<html lang="en">
+<html lang="en" data-desktop="{'1' if is_desktop else '0'}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
   <meta name="robots" content="noindex,nofollow">
   <title>Hivemind Content Studio</title>
-  <style>{_STYLE}</style>
+  <style>{GATE_CSS}</style>
 </head>
 <body>
   <main>
@@ -803,8 +794,9 @@ def account_gate_html() -> str:
         <div class="mark" aria-hidden="true">{_HIVE_GLYPH}</div>
         <p class="eyebrow">Hivemind Content Studio</p>
         <h1>Who's working?</h1>
-        <p class="lede" id="lede">Each workspace keeps its own library, and its own encryption key.
-          Nothing in one can be opened from another.</p>
+        <p class="lede" id="lede">Your library and your clips are sealed to your own key —
+          another workspace on this Mac cannot open them. Working files live encrypted on this
+          computer. Settings &gt; Privacy says exactly which is which.</p>
       </div>
       <ul class="tiles" id="tiles"></ul>
     </div>

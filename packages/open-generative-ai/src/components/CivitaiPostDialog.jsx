@@ -11,6 +11,7 @@
 // else's uploader after a 700 MB round trip.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
+import { downloadMedia } from '../lib/downloadMedia.js';
 import { zh } from '../lib/i18n.js';
 import {
   CIVITAI_LIMITS, CIVITAI_UPLOAD_URL, canHandOffDirectly, dropCivitaiPost, formatBytes,
@@ -97,13 +98,9 @@ export function CivitaiPostDialog({ url, entry, filename, onClose }) {
       });
       // Same-origin download of the STAMPED copy, so the prompt travels inside
       // the file the way the Civitai extension (and their pending native
-      // support) expects to find it.
-      const anchor = document.createElement('a');
-      anchor.href = result.mediaUrl;
-      anchor.download = filename || 'creation';
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
+      // support) expects to find it. Through the studio's one save path, because
+      // a bare anchor click writes nothing in the packaged desktop shell.
+      await downloadMedia(result.mediaUrl, filename || 'creation');
       setPosted({ ...result, manual: true, intentUrl: CIVITAI_UPLOAD_URL });
       window.open(CIVITAI_UPLOAD_URL, '_blank', 'noopener,noreferrer');
     } catch (err) {

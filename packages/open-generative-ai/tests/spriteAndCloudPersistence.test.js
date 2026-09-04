@@ -107,10 +107,12 @@ test('the sprite studio persists the whole pipeline, and only after it has hydra
     ]) {
         assert.match(source, new RegExp(`saved\\.${field}`), `${field} rehydrates`);
     }
-    // One download path for the whole studio: the sheet and the atlas are blobs
-    // made in this browser, but they still go out through downloadMedia.
-    assert.match(source, /import \{ downloadMedia \} from '\.\.\/lib\/downloadMedia\.js'/);
-    assert.match(source, /async function saveBlob[\s\S]*await downloadMedia\(url, filename\)/);
+    // One save path for the whole studio: the sheet and the atlas are blobs made
+    // in this browser, and they go out through saveBytes like every other keep —
+    // which is what makes them save at all in the packaged desktop shell, where
+    // an anchor download of a blob: URL does nothing.
+    assert.match(source, /import \{ saveBytes \} from '\.\.\/lib\/downloadMedia\.js'/);
+    assert.match(source, /async function saveBlob[\s\S]*await saveBytes\(blob, filename\)/);
     assert.doesNotMatch(source, /link\.download = filename/, 'the hand-rolled anchor download is gone');
 });
 

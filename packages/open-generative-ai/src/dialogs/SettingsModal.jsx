@@ -19,6 +19,7 @@ import { browserMuapiKey, forgetBrowserMuapiKey, storeMuapiKey } from '../lib/mu
 import { Button, Field, SectionLabel, Tabs, TextInput } from '../ui/kit.jsx';
 import { Modal } from '../ui/Modal.jsx';
 import { LocalModelManager } from './LocalModelManager.jsx';
+import { PrivacyPanel } from './PrivacyPanel.jsx';
 import { PrivacyVaultPanel } from './PrivacyVaultPanel.jsx';
 
 export function SettingsModal({ onClose }) {
@@ -40,9 +41,12 @@ export function SettingsModal({ onClose }) {
   const tabs = [
     { value: 'api', label: t('settings.apiKey') },
     ...(hasLocalAI ? [{ value: 'local', label: t('settings.localModels') }] : []),
-    // The only place a signed-in person can change their password or mint a new
-    // recovery key. Before this existed, forgetting a password lost the library.
-    { value: 'vault', label: zh ? '隐私与保险库' : 'Privacy & vault' },
+    // One section, two halves. It answers "what is sealed to my key, and what is
+    // only encrypted on this Mac" — which the sign-in gate used to answer with a
+    // sentence stronger than the implementation — and it is the only place a
+    // signed-in person can change their password or mint a new recovery key.
+    // Before that existed, forgetting a password lost the library.
+    { value: 'privacy', label: zh ? '隐私与保险库' : 'Privacy & vault' },
   ];
 
   const hadKey = Boolean(browserMuapiKey());
@@ -84,20 +88,21 @@ export function SettingsModal({ onClose }) {
       title={t('settings.title')}
       size="lg"
       footer={
-        tab === 'api' ? (
+        tab === 'local' ? null : (
           <>
             <Button variant="ghost" onClick={onClose}>
-              {onMachine ? (zh ? '关闭' : 'Close') : t('common.cancel')}
+              {onMachine || tab !== 'api' ? (zh ? '关闭' : 'Close') : t('common.cancel')}
             </Button>
             {/* Nothing to save when the machine holds the key — the tab is a
-                status line, and PassBook is where it is changed or removed. */}
-            {onMachine ? null : (
+                status line, and PassBook is where it is changed or removed. The
+                Privacy tab has nothing to save at all: it reads. */}
+            {onMachine || tab !== 'api' ? null : (
               <Button variant="primary" type="submit" form="settings-api-form" disabled={saving}>
                 {t('common.save')}
               </Button>
             )}
           </>
-        ) : null
+        )
       }
     >
       {tabs.length > 1 ? <Tabs tabs={tabs} value={tab} onChange={setTab} className="-mt-1 mb-4" /> : null}
@@ -154,9 +159,14 @@ export function SettingsModal({ onClose }) {
         </div>
       ) : null}
 
-      {/* Mounted only while shown: it holds password fields, and there is no
-          in-flight work to keep alive across a tab switch. */}
-      {tab === 'vault' ? <PrivacyVaultPanel onDone={onClose} /> : null}
+      {/* Mounted only while shown: the lower half holds password fields, and
+          there is no in-flight work to keep alive across a tab switch. */}
+      {tab === 'privacy' ? (
+        <div className="flex flex-col gap-4">
+          <PrivacyPanel onClose={onClose} />
+          <PrivacyVaultPanel onDone={onClose} />
+        </div>
+      ) : null}
     </Modal>
   );
 }
