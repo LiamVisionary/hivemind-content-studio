@@ -1,8 +1,13 @@
-// The manual timeline strip: segment cards the user fills by generating,
-// dragging clips in, or reordering — plus the "+" card that opens the next
-// slot. The general-purpose sibling of ChainTimeline.jsx (which derives an
-// episode from chain lineage); this one is explicit state (lib/videoTimeline.js)
-// and works for any model.
+// The Scene strip: ONE sequence surface for the Video studio. Segment cards the
+// user fills by generating, dragging clips in, or reordering — plus the "+"
+// card that opens the next slot.
+//
+// It used to have a derived twin (ChainTimeline.jsx) that drew a chained
+// episode from its lineage and was shown INSTEAD of this one, so the same
+// episode appeared as two different strips depending on which was opened first.
+// That component is retired: this strip is seeded from the chain lineage on
+// open and on restore, and carries what the derived one had — per-shot export,
+// and a non-destructive drop-from-the-cut with a put-back.
 //
 // Drag rules, all resolved by timelineDropPlan in the lib:
 //   - a CARD dragged between its siblings moves (the gap indicator shows where)
@@ -74,6 +79,9 @@ export function TimelineStrip({
   canCombine = false, showCombined = false, combined = null, building = false, buildError = '',
   onToggleCombined, onExportCombined,
   onSelect, onAdd, onRemove, onClose, onDrop, promptFor,
+  // Carried over from the derived chain strip: export one shot, and drop a shot
+  // from the cut without losing it.
+  onExportSegment, onToggleExcluded,
 }) {
   // Transient drag paint state: which target the pointer is over, and which
   // card is being dragged (dimmed). Local — nothing outside the strip cares.
@@ -143,7 +151,7 @@ export function TimelineStrip({
         <div className="flex min-w-0 items-center gap-2">
           <Icon name="layers" size={13} className="text-honey" />
           <span className="text-[11px] font-semibold uppercase tracking-wide text-ink2">
-            {zh ? '时间线' : 'Timeline'}
+            {zh ? '场景' : 'Scene'}
           </span>
           <span className="font-mono text-[11px] text-ink3">
             {zh ? `${filled} 段` : `${filled} clip${filled === 1 ? '' : 's'}`}
@@ -205,7 +213,7 @@ export function TimelineStrip({
           <IconButton
             icon="x"
             size="sm"
-            label={zh ? '关闭时间线（片段会保留）' : 'Close the timeline (your segments are kept)'}
+            label={zh ? '关闭场景（片段会保留）' : 'Close the scene (your clips are kept)'}
             onClick={onClose}
           />
         </div>
@@ -249,7 +257,7 @@ export function TimelineStrip({
                   'hive-scale-in group relative w-[132px] shrink-0 cursor-pointer overflow-hidden rounded-lg border bg-bg2 transition-all duration-150 ease-swift',
                   seg.url ? '' : 'border-dashed',
                   selected ? 'border-honey' : 'border-line1 hover:border-line2',
-                  draggingId === seg.id && 'opacity-40',
+                  (draggingId === seg.id || seg.excluded) && 'opacity-40',
                   replaceHover && 'border-honey ring-2 ring-honey/40',
                   fillHover && 'border-honey bg-honey-tint/30',
                 )}
@@ -281,14 +289,41 @@ export function TimelineStrip({
                     {zh ? '替换这一段' : 'Replace this clip'}
                   </div>
                 ) : null}
+                {seg.excluded ? (
+                  <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-bg0/80 px-1.5 py-0.5 text-center text-[10px] text-ink2">
+                    {zh ? '已移出合成片' : 'Dropped from the cut'}
+                  </div>
+                ) : null}
                 {/* Visible on keyboard focus too, not only under a pointer. */}
-                <IconButton
-                  icon="x"
-                  size="xs"
-                  label={zh ? '移除这一段' : 'Remove this segment'}
-                  className="absolute right-1 top-1 border border-line1 bg-bg0/85 opacity-0 transition-opacity duration-150 hover:border-danger/40 focus:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100"
-                  onClick={(event) => { event.stopPropagation(); onRemove(seg); }}
-                />
+                <div className="absolute right-1 top-1 flex gap-0.5 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100">
+                  {seg.url && onExportSegment ? (
+                    <IconButton
+                      icon="download"
+                      size="xs"
+                      label={zh ? '导出这一段' : 'Export this shot'}
+                      className="border border-line1 bg-bg0/85 hover:border-line2"
+                      onClick={(event) => { event.stopPropagation(); onExportSegment(seg); }}
+                    />
+                  ) : null}
+                  {seg.url && onToggleExcluded ? (
+                    <IconButton
+                      icon={seg.excluded ? 'plus' : 'minus'}
+                      size="xs"
+                      label={seg.excluded
+                        ? (zh ? '放回合成片' : 'Put back in the cut')
+                        : (zh ? '从合成片中移除（不删除该视频）' : 'Drop from the cut — the clip is kept')}
+                      className="border border-line1 bg-bg0/85 hover:border-line2"
+                      onClick={(event) => { event.stopPropagation(); onToggleExcluded(seg); }}
+                    />
+                  ) : null}
+                  <IconButton
+                    icon="x"
+                    size="xs"
+                    label={zh ? '移除这一段' : 'Remove this segment'}
+                    className="border border-line1 bg-bg0/85 hover:border-danger/40"
+                    onClick={(event) => { event.stopPropagation(); onRemove(seg); }}
+                  />
+                </div>
               </div>
               <InsertBar active={overMatches(seg.id, 'after')} />
             </div>

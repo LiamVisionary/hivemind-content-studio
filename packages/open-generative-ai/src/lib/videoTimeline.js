@@ -17,7 +17,7 @@
 export function newTimelineSegment(url = '', model = '') {
   const id = globalThis.crypto?.randomUUID?.()
     || `seg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  return { id, url: String(url || ''), model: String(model || '') };
+  return { id, url: String(url || ''), model: String(model || ''), excluded: false };
 }
 
 // A runaway restore must not mount hundreds of poster decoders; no real
@@ -27,12 +27,48 @@ export const MAX_TIMELINE_SEGMENTS = 24;
 /** The segments that actually hold a clip, in order. */
 export const filledTimelineSegments = (segments) => (segments || []).filter((seg) => seg?.url);
 
+/**
+ * The segments the cut is built FROM: filled, minus the ones dropped from the
+ * cut. Dropping is non-destructive — the card stays in the scene and the file
+ * is untouched — which is the behaviour the derived chain strip had and the one
+ * surface has to keep.
+ */
+export const timelineCutSegments = (segments) => filledTimelineSegments(segments)
+  .filter((seg) => !seg.excluded);
+
 /** Identity of the cut: what a built combined clip was built FROM. */
-export const timelineCombineKey = (segments) => filledTimelineSegments(segments)
+export const timelineCombineKey = (segments) => timelineCutSegments(segments)
   .map((seg) => seg.url).join(' ');
 
 /** Joining is a concat: one clip is not a cut. */
-export const timelineCanCombine = (segments) => filledTimelineSegments(segments).length >= 2;
+export const timelineCanCombine = (segments) => timelineCutSegments(segments).length >= 2;
+
+/** Drop a clip from the cut, or put it back. The card and the file both stay. */
+export function toggleTimelineSegmentExcluded(segments, id) {
+  return (segments || []).map((seg) => (seg.id === id ? { ...seg, excluded: !seg.excluded } : seg));
+}
+
+/**
+ * The scene a chain lineage already describes, as strip segments.
+ *
+ * A chained episode is real state that outlives the browser session — the
+ * lineage lives in History and the sealed per-generation context — while the
+ * strip itself is per-session. So the strip is SEEDED from the lineage on open
+ * and on restore, which is what makes the one surface show a chained scene
+ * again after a restart instead of showing an empty strip beside a scene that
+ * still exists.
+ */
+export function timelineFromChainShots(shots) {
+  const segments = (shots || [])
+    .filter((shot) => shot && shot.url)
+    .slice(0, MAX_TIMELINE_SEGMENTS)
+    .map((shot) => ({ ...newTimelineSegment(shot.url, shot.model || ''), excluded: Boolean(shot.excluded) }));
+  if (!segments.length) return null;
+  // The scene continues at its END: the selected slot is the empty one after
+  // the last shot, which is exactly where "Continue scene" writes.
+  const tail = newTimelineSegment();
+  return { segments: [...segments, tail].slice(0, MAX_TIMELINE_SEGMENTS), selectedId: tail.id };
+}
 
 /**
  * Opening the timeline seeds it from what is on screen: the current result
@@ -200,7 +236,9 @@ export function serializeTimeline({ on, segments, selectedId, extend, showCombin
   return {
     on: Boolean(on),
     segments: (segments || []).slice(0, MAX_TIMELINE_SEGMENTS)
-      .map((seg) => ({ id: String(seg.id || ''), url: String(seg.url || ''), model: String(seg.model || '') })),
+      .map((seg) => ({
+        id: String(seg.id || ''), url: String(seg.url || ''), model: String(seg.model || ''), excluded: Boolean(seg.excluded),
+      })),
     selectedId: String(selectedId || ''),
     extend: Boolean(extend),
     showCombined: Boolean(showCombined),
@@ -214,7 +252,12 @@ export function reviveTimeline(raw) {
   const segments = Array.isArray(raw.segments)
     ? raw.segments
       .filter((seg) => seg && typeof seg === 'object' && typeof seg.id === 'string' && seg.id)
-      .map((seg) => ({ id: seg.id, url: typeof seg.url === 'string' ? seg.url : '', model: typeof seg.model === 'string' ? seg.model : '' }))
+      .map((seg) => ({
+        id: seg.id,
+        url: typeof seg.url === 'string' ? seg.url : '',
+        model: typeof seg.model === 'string' ? seg.model : '',
+        excluded: seg.excluded === true,
+      }))
       .slice(0, MAX_TIMELINE_SEGMENTS)
     : [];
   if (!segments.length) return null;

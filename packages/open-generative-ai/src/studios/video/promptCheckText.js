@@ -7,13 +7,16 @@
 // the part that tells someone whether to care.
 import { zh } from './videoLogic.js';
 
+// The six sections in plain words. H3 reads them positionally under their own
+// field names; a reader should not have to. The field name itself survives in
+// lib/castPrompt.js, which is what actually writes the document.
 const SECTION_NAMES = {
-  subject_definitions: () => (zh() ? '主体定义' : 'subject_definitions'),
-  summary: () => (zh() ? '摘要' : 'summary'),
-  retention_analysis: () => (zh() ? '保留分析' : 'retention_analysis'),
-  detailed_description: () => (zh() ? '镜头描述' : 'detailed_description'),
-  overall_soundscape: () => (zh() ? '整体声音' : 'overall_soundscape'),
-  non_diegetic_music: () => (zh() ? '配乐' : 'non_diegetic_music'),
+  subject_definitions: () => (zh() ? '主体定义' : 'who is in it'),
+  summary: () => (zh() ? '摘要' : 'the summary'),
+  retention_analysis: () => (zh() ? '保留分析' : 'what carries over'),
+  detailed_description: () => (zh() ? '镜头描述' : 'what happens'),
+  overall_soundscape: () => (zh() ? '整体声音' : 'the sound'),
+  non_diegetic_music: () => (zh() ? '配乐' : 'the music'),
 };
 
 const sectionName = (name) => (SECTION_NAMES[name] ? SECTION_NAMES[name]() : name);
@@ -85,7 +88,7 @@ export function describeCheckFinding(finding) {
     case 'no-soundscape':
       return zh()
         ? '没有写 overall_soundscape。H3 会连声音一起生成，没说就由它自己发挥。'
-        : 'No overall_soundscape. H3 renders the audio too — unsaid means invented.';
+        : 'Nothing says what this sounds like. H3 renders the audio too — unsaid means invented.';
 
     case 'shot-number':
       return zh()
@@ -150,8 +153,8 @@ export function describeCheckFinding(finding) {
       }
       if (finding.blank === 'write it out') {
         return zh()
-          ? `${where || '主体定义'} 里的 <Subject 1> 还是空白。H3 从文字里认人的程度不亚于从图片，所以描述里写的是谁，出来的就是谁——不是你挂的参考。`
-          : `<Subject 1> is still blank in ${where || 'subject_definitions'}. H3 takes identity from the words as much as from the pictures, so whoever the description describes is who you get — not the references you attached.`;
+          ? `${where || '主体定义'} 里的第 1 位还是空白。H3 从文字里认人的程度不亚于从图片，所以描述里写的是谁，出来的就是谁——不是你挂的参考。`
+          : `The first person is still blank in ${where || 'who is in it'}. H3 takes identity from the words as much as from the pictures, so whoever the description describes is who you get — not the references you attached.`;
       }
       return zh()
         ? `${where || '提示词'} 里还留着占位文字「${finding.blank}」，模型会照着它生成。`
@@ -159,12 +162,12 @@ export function describeCheckFinding(finding) {
     }
     case 'subject-not-in-scene':
       return zh()
-        ? `<Subject ${finding.subject}> 已定义，但摘要和镜头描述里都没有出现——模型会自行决定这个位置上是谁。用「织入」或让助手把他们写进场景。`
-        : `<Subject ${finding.subject}> is defined but never appears in the summary or description — the model decides who fills that slot. Weave, or ask the helper to write them into the scene.`;
+        ? `第 ${finding.subject} 位已定义，但摘要和镜头描述里都没有出现——模型会自行决定这个位置上是谁。用「织入」或让助手把他们写进场景。`
+        : `Person ${finding.subject} is defined but never appears in the summary or description — the model decides who fills that slot. Weave, or ask the helper to write them into the scene.`;
     case 'pictures-unnamed':
       return zh()
-        ? `挂了 ${finding.count} 张图片，但提示词里没有 <Picture N> 或 <Subject N>——模型不知道该拿它们做什么。`
-        : `${finding.count} picture${finding.count === 1 ? '' : 's'} attached, but the prompt names no <Picture N> or <Subject N> — the model is not told what to do with them.`;
+        ? `挂了 ${finding.count} 张图片，但提示词里没有指认它们——模型不知道该拿它们做什么。`
+        : `${finding.count} picture${finding.count === 1 ? '' : 's'} attached, but the prompt never refers to them — the model is not told what to do with them.`;
     case 'motion-unnamed':
       return zh()
         ? `${finding.labels.join('、')} 没有在提示词里出现。`

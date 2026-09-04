@@ -120,7 +120,10 @@ test('the persisted strip survives a round trip and a corrupt blob degrades to n
     const revived = reviveTimeline(JSON.parse(JSON.stringify(serializeTimeline(state))));
     assert.deepEqual(revived, {
         on: true,
-        segments: [{ id: 'a', url: 'u1', model: 'minimax-h3' }, { id: 'b', url: '', model: '' }],
+        segments: [
+            { id: 'a', url: 'u1', model: 'minimax-h3', excluded: false },
+            { id: 'b', url: '', model: '', excluded: false },
+        ],
         selectedId: 'b',
         extend: true,
         showCombined: true,

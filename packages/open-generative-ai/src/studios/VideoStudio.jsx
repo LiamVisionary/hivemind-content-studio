@@ -55,13 +55,13 @@ import { downloadMedia } from '../lib/downloadMedia.js';
 // mediabunny, which should not weigh down the studio chunk until a join runs.
 import { collectChainClips, missingChainParent } from '../lib/chainLineage.js';
 import { chainKey, chainTimelineModel } from '../lib/chainTimeline.js';
-import { ChainTimeline } from './video/ChainTimeline.jsx';
 import { TIMELINE_SEGMENT_DRAG_TYPE, TimelineStrip } from './video/TimelineStrip.jsx';
 import {
-  addTimelineSegment, captureIntoTimeline, filledTimelineSegments, fillTimelineSegment,
+  addTimelineSegment, captureIntoTimeline, fillTimelineSegment,
   insertTimelineSegment, loadTimelineState, moveTimelineSegment, newTimelineSegment,
   openTimeline, removeTimelineSegment, saveTimelineState, timelineCanCombine,
-  timelineCombineKey, timelineContinuationPlan, timelineDropPlan,
+  timelineCombineKey, timelineContinuationPlan, timelineCutSegments, timelineDropPlan,
+  timelineFromChainShots, toggleTimelineSegmentExcluded,
 } from '../lib/videoTimeline.js';
 import { ShotBuilderChip, ShotBuilderDialog, blankTimeline } from './video/ShotBuilder.jsx';
 import { PromptCheckMenu } from './video/PromptCheckMenu.jsx';
@@ -145,7 +145,6 @@ import {
   buildCatalogs, buildInitialSetup, adaptHivemindToVideoEntry, isLocalVideoModel, v2vModels,
   currentModel, generationModelsFor, resolveVideoModel, withSelectedModel,
   currentIngredientModel, frameSlotsVisible, activeIngredientSheetItems, ingredientSelectionSignature,
-  getIngredientsWorkflow,
   isMotionControlV2V, isHivemindVideoInputMode,
   activeVideoTask, headSwapReadiness, isLtxFamilyModel, isMinimaxFamilyModel, slotLabelsFor,
   sourceVideoSwitchCost, videoRequestPlan, videoTasksFor,
@@ -363,7 +362,6 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     // from the cut, and the built cut itself (an object URL — revoked when it
     // is replaced, so a rebuild never leaks the old one).
     chainAnchor: null,
-    chainExcluded: [],
     chainCombined: null,
     resolvingChain: false,
     // Shot sets already stored as an output, so rebuilding the same episode
@@ -2091,24 +2089,12 @@ export function VideoStudio({
     }
   };
 
+  // Dropping a shot from a cut is the Scene strip's job now (a card's "put
+  // back" toggle), so joining takes the whole lineage.
   const joinChainFrom = (entry) => {
     const chain = collectChainClips(entry, s.generationHistory);
-    const urls = chain.map((clip) => clip.url).filter((url) => !s.chainExcluded.includes(url));
+    const urls = chain.map((clip) => clip.url);
     return buildChainCut(urls, chainKey(urls));
-  };
-
-  const exportChainCut = async () => {
-    const cut = s.chainCombined;
-    if (!cut?.url) return;
-    const anchor = s.generationHistory.find((entry) => entry.url === s.chainAnchor);
-    await downloadFile(cut.url, videoDownloadName(`${anchor?.model || 'video'} joined`, anchor?.id || 'episode'));
-  };
-
-  const toggleChainShot = (url) => {
-    s.chainExcluded = s.chainExcluded.includes(url)
-      ? s.chainExcluded.filter((value) => value !== url)
-      : [...s.chainExcluded, url];
-    bump();
   };
 
   /* ---------------- generation context capture / restore ---------------- */
@@ -2279,28 +2265,22 @@ export function VideoStudio({
   // advances the chain onto the clip it just made.
   const chainCapableEntryFor = (modelId) => (s.catalogs.hivemindI2V || [])
     .find((entry) => entry.id === modelId && entry.supportsMotionContext) || null;
+  //
+  // ONE arming path. Continue scene does NOT write motionContextUrl itself: it
+  // opens the Scene strip on the clip with Auto-continue on and lets
+  // armTimelineContinuation do the arming, so a scene can never be armed two
+  // ways (the strip's Auto-continue and a stray Continue press used to write
+  // the same field from two places, on two different clips).
   const continueSceneFrom = (url, sourceModelId) => {
     const target = chainCapableEntryFor(sourceModelId);
     if (!url || !target) return;
-    let next = s.setup;
-    if (next.modelId !== target.id) next = selectHivemindWorkflowTransition(next, target, s.catalogs);
-    commit({
-      ...next,
-      imageUrl: null,
-      videoUrl: null,
-      videoName: null,
-      motionContextUrl: url,
-      motionContextIndex: 1,
-      // The pinned frames carry motion, not the scene: a chained prompt that
-      // stops describing the established subjects/style renders as a hard cut
-      // into an unrelated take (live-verified on the rental). Keep the shot's
-      // description in the composer and append the visible continuity scaffold
-      // for the user to finish with the next beat.
-      prompt: armChainPrompt(next.prompt),
-    });
+    if (s.setup.modelId !== target.id) {
+      commit(selectHivemindWorkflowTransition(s.setup, target, s.catalogs));
+    }
     // Keep the armed clip on screen — it IS this shot's opening. Blanking the
     // canvas here read as "my clip got erased" the moment Continue was pressed.
     showVideoInCanvas(url, target.id);
+    openSceneAt(url, target.id);
     focusPrompt();
   };
   const clearMotionContext = () => {
@@ -2341,16 +2321,65 @@ export function VideoStudio({
     return s.contextStore.recall(seg.url)?.prompt || seg.model || '';
   };
 
+  // The scene a chain lineage already describes, as strip segments — or null
+  // when nothing on record is chained.
+  //
+  // The strip is per-session state; the chain that produced it is not (it lives
+  // in History and the sealed per-generation context). Seeding from the lineage
+  // on open AND on restore is what makes an episode you chained yesterday show
+  // up in the one Scene surface today, instead of an empty strip beside a scene
+  // that plainly still exists.
+  const chainSceneSeed = () => {
+    const anchor = s.generationHistory.find((entry) => entry.url === s.chainAnchor)
+      || s.generationHistory[0];
+    if (!anchor) return null;
+    const model = chainTimelineModel(anchor, s.generationHistory);
+    if (!model || model.shots.length < 2) return null;
+    return timelineFromChainShots(model.shots);
+  };
+
+  const seedTimelineSegments = () => {
+    if (s.timelineSegments.length) return;
+    const seeded = chainSceneSeed() || openTimeline(s.resultUrl || '', s.resultModel || '');
+    s.timelineSegments = seeded.segments;
+    s.timelineSelectedId = seeded.selectedId;
+  };
+
   const openTimelineView = () => {
     if (s.timelineOn) return;
     s.timelineOn = true;
-    // First open seeds shot 1 from what is on screen — the timeline "starts
-    // with the existing shot"; with an empty canvas it opens on an empty slot.
-    if (!s.timelineSegments.length) {
-      const opened = openTimeline(s.resultUrl || '', s.resultModel || '');
-      s.timelineSegments = opened.segments;
-      s.timelineSelectedId = opened.selectedId;
+    // First open seeds the strip from a chain lineage where one exists, and
+    // otherwise from what is on screen — the scene "starts with the existing
+    // shot"; with an empty canvas it opens on an empty slot.
+    seedTimelineSegments();
+    afterTimelineChange();
+  };
+
+  // Open the Scene strip on a finished clip with the next slot selected and
+  // Auto-continue on. The single arming path: everything that continues a
+  // scene comes through here and then through armTimelineContinuation.
+  const openSceneAt = (url, modelId) => {
+    if (!s.timelineOn) {
+      s.timelineOn = true;
+      seedTimelineSegments();
     }
+    let index = s.timelineSegments.findIndex((seg) => seg.url === url);
+    if (index < 0) {
+      const captured = captureIntoTimeline(s.timelineSegments, s.timelineSelectedId, { url, model: modelId });
+      s.timelineSegments = captured.segments;
+      index = s.timelineSegments.findIndex((seg) => seg.id === captured.selectedId);
+    }
+    const after = s.timelineSegments[index + 1];
+    if (after && !after.url) {
+      s.timelineSelectedId = after.id;
+    } else {
+      const slot = newTimelineSegment();
+      s.timelineSegments = insertTimelineSegment(s.timelineSegments, index + 1, slot);
+      s.timelineSelectedId = slot.id;
+    }
+    s.timelineShowCombined = false;
+    s.timelineExtend = true;
+    armTimelineContinuation();
     afterTimelineChange();
   };
 
@@ -2510,7 +2539,7 @@ export function VideoStudio({
   // spinner on the toggle and the note when clips cannot be joined.
   const buildTimelineCut = async () => {
     if (!s.timelineOn) return;
-    const urls = filledTimelineSegments(s.timelineSegments).map((seg) => seg.url);
+    const urls = timelineCutSegments(s.timelineSegments).map((seg) => seg.url);
     const key = urls.join(' ');
     if (urls.length < 2) {
       dropTimelineCombined();
@@ -2605,7 +2634,7 @@ export function VideoStudio({
       });
       const saved = await localAI.saveEpisode({
         video_base64: dataUrl,
-        shots: filledTimelineSegments(s.timelineSegments).length,
+        shots: timelineCutSegments(s.timelineSegments).length,
       });
       if (saved?.url) {
         addToHistory({
@@ -2625,8 +2654,23 @@ export function VideoStudio({
   const exportTimelineCut = async () => {
     const cut = s.timelineCombined;
     if (!cut?.url) return;
-    await downloadFile(cut.url, videoDownloadName(timelineCutLabel(), `cut-${filledTimelineSegments(s.timelineSegments).length}`));
+    await downloadFile(cut.url, videoDownloadName(timelineCutLabel(), `cut-${timelineCutSegments(s.timelineSegments).length}`));
     void saveTimelineCutIfNeeded();
+  };
+
+  /* ---- one shot: export it, or drop it from the cut without losing it ---- */
+
+  const timelineExportSegment = async (seg) => {
+    if (!seg?.url) return;
+    await downloadFile(seg.url, videoDownloadName(seg.model || clipModelFor(seg.url), seg.id));
+  };
+
+  // Non-destructive, and the sibling of the "x" beside it: the card stays in the
+  // scene and the file is untouched — it just stops feeding the full cut.
+  const timelineToggleExcluded = (seg) => {
+    s.timelineSegments = toggleTimelineSegmentExcluded(s.timelineSegments, seg.id);
+    s.timelineShowCombined = false;
+    afterTimelineChange();
   };
 
   /* ---- removing a segment (and, if asked, the clip on disk) ---- */
@@ -2808,6 +2852,18 @@ export function VideoStudio({
       s.timelineShowCombined = false;
       bump();
       if (saved.on) scheduleTimelineBuild();
+    } else {
+      // Nothing saved — a new browser session. The chain lineage in History
+      // outlives the session, so a scene chained before the restart is seeded
+      // back into the one surface rather than vanishing with the strip.
+      const seeded = chainSceneSeed();
+      if (seeded) {
+        s.timelineOn = true;
+        s.timelineSegments = seeded.segments;
+        s.timelineSelectedId = seeded.selectedId;
+        bump();
+        scheduleTimelineBuild();
+      }
     }
     return () => {
       if (s.timelineBuildTimer) clearTimeout(s.timelineBuildTimer);
@@ -3340,7 +3396,7 @@ export function VideoStudio({
           // old one sat on screen for the rest of the session.
           toast(zh()
             ? '正在停止：租用机器需完成当前步骤才能释放，新的生成会排在其后。'
-            : 'Still stopping — the machine finishes its current step before it frees up. A new generation will queue behind it.', { duration: 6000 });
+            : 'Stopping… the machine finishes its current step before it frees up, and a new generation queues behind it.', { duration: 6000 });
         } else {
           toast.success(zh() ? '已取消生成。' : 'Generation cancelled.');
         }
@@ -4002,6 +4058,13 @@ export function VideoStudio({
     ? inpaintWorkflowForHivemindModel(s.setup.modelId)
     : null;
   const refsArmed = videoRequestPlan(s.setup).sendReferenceImages;
+  // Does attaching a clip CHAIN (its tail seeds the next shot's opening frames)
+  // or is the clip an INPUT to this run? Read from the request plan's task and
+  // the workflow's declared motion-context capability — never from the model's
+  // name — because that is the difference between "Continue from clip" and
+  // "Source video", and one chip saying "Clip" for both was unguessable.
+  const clipChipContinues = videoRequestPlan(s.setup).task === 'generate'
+    && Boolean(chainCapableEntryFor(s.setup.modelId));
   useEffect(() => {
     if (!endFrameVisible && s.setup.endImageUrl) {
       s.setup = { ...s.setup, endImageUrl: null };
@@ -4054,12 +4117,51 @@ export function VideoStudio({
       sheets: s.sharedIngredientSheets,
     }).length
     : 0;
+  // The Advanced tier now holds the seed, the refinement switch and the quality
+  // tier as well as the adapters, so the closed header names every one of them
+  // that is armed. A locked seed or a doubled render time is state that steers
+  // the run; hidden behind the disclosure is fine, unsaid is not.
+  const standardTierSelected = (() => {
+    const pair = tierPairFor(s.catalogs.hivemindI2V, s.setup.modelId);
+    return Boolean(pair && pair.lite.id !== s.setup.modelId);
+  })();
   const advancedHint = [
     activeVideoLoras ? `${activeVideoLoras} LoRA${activeVideoLoras === 1 ? '' : 's'}` : '',
-    String(s.setup.negativePrompt || '').trim() ? (zh() ? '负面' : 'negative') : '',
+    String(s.setup.negativePrompt || '').trim() ? (zh() ? '负面' : 'avoid list') : '',
     s.setup.detailerStrength ? (zh() ? '细节增强' : 'detailer') : '',
-    s.setup.spectrum === false ? (zh() ? '快速采样关' : 'Spectrum off') : '',
+    s.setup.spectrum === false ? (zh() ? '全步采样' : 'full sampling') : '',
+    standardTierSelected ? (zh() ? '最佳画质' : 'best quality') : '',
+    minimaxStepsAvailable && minimaxRefinement === 'high' ? (zh() ? '高细节' : 'high detail') : '',
+    Number(s.setup.seed) >= 0 ? (zh() ? `种子 ${s.setup.seed}` : `seed ${s.setup.seed}`) : '',
   ].filter(Boolean).join(' · ');
+
+  // "Use this person" is ONE control. The LTX graph's reference views — the
+  // ones stitched into a sheet — used to be a section of the settings panel
+  // with a jump button pointing at it, so the same intent was a chip on one
+  // model and a panel on another. It renders inside the References control now,
+  // as that model's own reference kind, with the stitched preview and the
+  // per-view captions unchanged.
+  const ingredientViews = ingredientModel ? (
+    <IngredientsPanel
+      model={ingredientModel}
+      selection={s.sharedIngredientSelections}
+      sheets={s.sharedIngredientSheets}
+      selectedSheet={s.selectedIngredientSheet}
+      preview={s.ingredientSheetPreview}
+      previewSignature={ingredientSignature}
+      uploadMessage={s.ingredientUploadMessage}
+      activeCount={activeIngredients}
+      onAddViews={addIngredientViews}
+      onAddSheets={addIngredientSheets}
+      onClear={clearIngredients}
+      onToggleSheet={toggleIngredientSheetSelection}
+      onRemoveSheet={removeIngredientSheet}
+      onRemoveView={removeIngredientView}
+      onViewDescription={updateIngredientViewDescription}
+      onSheetDescription={updateIngredientSheetDescription}
+      onRetryPreview={() => refreshIngredientSheetPreview({ force: true })}
+    />
+  ) : null;
 
   const arOptions = aspectRatiosFor(s.setup, s.setup.modelId);
   // "Use starting frame aspect ratio": only relevant for a Hivemind LTX start
@@ -4189,43 +4291,6 @@ export function VideoStudio({
           onSelectV2V={selectV2VModel}
         />
         <Pill tone="honey" className="w-fit">{modeLabel}</Pill>
-        {(() => {
-          // Lite/Standard for models that ship both a distilled and a full-step
-          // build. Only rendered when both are installed, and switching swaps the
-          // selected model so exactly one is ever active.
-          const pair = tierPairFor(s.catalogs.hivemindI2V, s.setup.modelId);
-          if (!pair) return null;
-          const active = pair.lite.id === s.setup.modelId ? 'lite' : 'standard';
-          return (
-            <Field
-              label={zh() ? '质量' : 'Quality'}
-              hint={active === 'lite'
-                ? (zh() ? '最快——画面略柔（蒸馏，约 8 步）' : 'Fastest — a little softer (distilled, ~8 steps)')
-                : (zh() ? '细节最好，约慢 3 倍（完整步数 + CFG）' : 'Best detail — about 3x slower (full-step CFG)')}
-            >
-              <Segmented
-                value={active}
-                onChange={(tier) => { if (pair[tier]) selectHiveModel(pair[tier]); }}
-                options={[
-                  { value: 'lite', label: zh() ? '精简' : 'Lite' },
-                  { value: 'standard', label: zh() ? '标准' : 'Standard' },
-                ]}
-              />
-            </Field>
-          );
-        })()}
-        {(() => {
-          // Quick jump to the LTX Ingredients workflow — LTX-family models
-          // only; it is meaningless from an H3 (or any non-LTX) workflow.
-          if (!isLtxFamilyModel(s.setup)) return null;
-          const workflow = getIngredientsWorkflow(s.setup, s.catalogs.hivemindI2V);
-          if (!workflow || workflow.id === s.setup.modelId) return null;
-          return (
-            <Button size="sm" icon="grid" className="w-fit" onClick={() => selectHiveModel(workflow)}>
-              {zh() ? '打开 LTX 配料参考' : 'Open LTX Ingredients'}
-            </Button>
-          );
-        })()}
       </div>
 
       {availableTasks.length > 1 ? (
@@ -4268,8 +4333,8 @@ export function VideoStudio({
                   value={s.setup.headSwapBackend === 'facefusion' ? 'facefusion' : 'bfs'}
                   onChange={(next) => commit({ ...s.setup, headSwapBackend: next })}
                   options={[
-                    { value: 'bfs', label: zh() ? 'BFS 重绘' : 'BFS (regenerate)' },
-                    { value: 'facefusion', label: zh() ? 'FaceFusion' : 'FaceFusion' },
+                    { value: 'bfs', label: zh() ? '重绘整帧' : 'Regenerate whole frame' },
+                    { value: 'facefusion', label: zh() ? '只换脸部' : 'Swap face only' },
                   ]}
                 />
               </Field>
@@ -4369,13 +4434,13 @@ export function VideoStudio({
                 hint={{
                   Standard: zh()
                     ? '草稿 · 0.3MP — 最快，适合先试想法再正式渲染。'
-                    : 'Draft · 0.3MP — fastest; try an idea cheaply before a real render.',
+                    : 'Fastest — try an idea cheaply before a real render (0.3MP).',
                   High: zh()
                     ? '高清 · 0.9MP — 速度与细节的均衡默认档。'
-                    : 'High · 0.9MP — the balanced default for speed and detail.',
+                    : 'The balanced default for speed and detail (0.9MP).',
                   Max: zh()
                     ? '原生 · 1.0MP — 模型的原生画布：细节、音频与画面文字最佳，渲染最慢。超过 1MP 模型会变得不稳定，因此以此为上限。'
-                    : "Native · 1.0MP — the model's own canvas: sharpest detail, audio and on-screen text; slowest. Above 1MP the model grows unstable, so this is the ceiling.",
+                    : "Best quality — the model's own canvas: sharpest detail, audio and on-screen text, and the slowest to render (1.0MP, its ceiling).",
                 }[s.setup.resolution] || undefined}
               >
                 <Segmented
@@ -4384,7 +4449,7 @@ export function VideoStudio({
                   options={[
                     { value: 'Standard', label: zh() ? '草稿' : 'Draft' },
                     { value: 'High', label: zh() ? '高清' : 'High' },
-                    { value: 'Max', label: zh() ? '原生' : 'Native' },
+                    { value: 'Max', label: zh() ? '最佳画质' : 'Best quality' },
                   ]}
                 />
               </Field>
@@ -4396,63 +4461,11 @@ export function VideoStudio({
               </Field>
             )
           ) : null}
-          {minimaxStepsAvailable ? (
-            <Field
-              label={zh() ? '精修' : 'Refinement'}
-              hint={minimaxRefinement === 'high'
-                ? (zh()
-                  ? '32 步采样 — 动作更流畅、手部面部更清晰、音频更干净；渲染时间约为两倍。'
-                  : '32 sampling passes — smoother motion, sharper hands and faces, cleaner audio. Roughly twice the render time.')
-                : (zh()
-                  ? `${Math.round(model?.defaultSteps || 15)} 步采样（模型默认）— 最快。`
-                  : `${Math.round(model?.defaultSteps || 15)} sampling passes (the model default) — quickest.`)}
-            >
-              <Segmented
-                value={minimaxRefinement}
-                onChange={(next) => commit({ ...s.setup, steps: next === 'high' ? 32 : null })}
-                options={[
-                  { value: 'standard', label: zh() ? '标准' : 'Standard' },
-                  { value: 'high', label: zh() ? '高细节' : 'High detail' },
-                ]}
-              />
-            </Field>
-          ) : null}
           {visibility.quality ? (
             <Field label={zh() ? '质量' : 'Quality'}>
               <NativeSelect value={s.setup.quality} onChange={(e) => setQuality(e.target.value)}>
                 {qualityOptions.map((q) => <option key={q} value={q}>{q}</option>)}
               </NativeSelect>
-            </Field>
-          ) : null}
-          {isHivemindVideoModelId(s.setup.modelId) ? (
-            <Field label={zh() ? '种子' : 'Seed'}>
-              <div className="flex items-center gap-1.5">
-                <TextInput
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={s.setup.seed >= 0 ? String(s.setup.seed) : ''}
-                  placeholder={zh() ? '随机' : 'Random'}
-                  onChange={(e) => setSeed(e.target.value === '' ? -1 : e.target.value)}
-                  className="flex-1"
-                />
-                <IconButton
-                  icon="refresh"
-                  label={zh() ? '随机种子' : 'Randomize seed'}
-                  title={zh() ? '每次生成使用随机种子' : 'Use a fresh random seed each generation'}
-                  active={s.setup.seed < 0}
-                  onClick={randomizeSeed}
-                />
-              </div>
-              {s.setup.seed < 0 && typeof s.lastSeed === 'number' ? (
-                <button
-                  type="button"
-                  onClick={lockLastSeed}
-                  className="mt-1 text-left text-xs text-ink3 hover:text-honey"
-                >
-                  {(zh() ? '上次种子：' : 'Last seed: ') + s.lastSeed + (zh() ? '（点击锁定）' : ' · click to lock')}
-                </button>
-              ) : null}
             </Field>
           ) : null}
           {visibility.mode ? (
@@ -4472,52 +4485,107 @@ export function VideoStudio({
         </div>
       ) : null}
 
-      {/* The LTX Ingredients workflow's ONLY input, as its own section — it used
-          to live inside the collapsed Advanced disclosure, so "Open LTX
-          Ingredients" showed a panel with no place to add any. */}
-      {ingredientModel ? (
-        <IngredientsPanel
-          model={ingredientModel}
-          selection={s.sharedIngredientSelections}
-          sheets={s.sharedIngredientSheets}
-          selectedSheet={s.selectedIngredientSheet}
-          preview={s.ingredientSheetPreview}
-          previewSignature={ingredientSignature}
-          uploadMessage={s.ingredientUploadMessage}
-          activeCount={activeIngredientSheetItems(ingredientModel, {
-            selectedSheet: s.selectedIngredientSheet,
-            selections: s.sharedIngredientSelections,
-            sheets: s.sharedIngredientSheets,
-          }).length}
-          onAddViews={addIngredientViews}
-          onAddSheets={addIngredientSheets}
-          onClear={clearIngredients}
-          onToggleSheet={toggleIngredientSheetSelection}
-          onRemoveSheet={removeIngredientSheet}
-          onRemoveView={removeIngredientView}
-          onViewDescription={updateIngredientViewDescription}
-          onSheetDescription={updateIngredientSheetDescription}
-          onRetryPreview={() => refreshIngredientSheetPreview({ force: true })}
-        />
-      ) : null}
-
       <CollapsibleSection title={zh() ? '高级' : 'Advanced'} hint={advancedHint} storageKey="video.advanced">
+        {/* The tuning bench, behind the ONE disclosure convention. Quality tier,
+            refinement and the seed steer every render, so the closed header
+            names whichever of them is armed (advancedHint) — hidden is fine,
+            invisible is not. */}
+        {(() => {
+          // Lite/Standard for models that ship both a distilled and a full-step
+          // build. Only rendered when both are installed, and switching swaps the
+          // selected model so exactly one is ever active.
+          const pair = tierPairFor(s.catalogs.hivemindI2V, s.setup.modelId);
+          if (!pair) return null;
+          const active = pair.lite.id === s.setup.modelId ? 'lite' : 'standard';
+          return (
+            <Field
+              label={zh() ? '画质档位' : 'Quality'}
+              hint={active === 'lite'
+                ? (zh() ? '最快——画面略柔（蒸馏，约 8 步）' : 'Fastest, with softer detail (distilled, ~8 steps)')
+                : (zh() ? '细节最好，约慢 3 倍（完整步数 + CFG）' : 'Best quality — about 3x slower (full-step CFG)')}
+            >
+              <Segmented
+                value={active}
+                onChange={(tier) => { if (pair[tier]) selectHiveModel(pair[tier]); }}
+                options={[
+                  { value: 'lite', label: zh() ? '更快' : 'Faster' },
+                  { value: 'standard', label: zh() ? '最佳画质' : 'Best quality' },
+                ]}
+              />
+            </Field>
+          );
+        })()}
+        {minimaxStepsAvailable ? (
+          <Field
+            label={zh() ? '精修' : 'Refinement'}
+            hint={minimaxRefinement === 'high'
+              ? (zh()
+                ? '动作更流畅、手部面部更清晰、音频更干净；渲染时间约为两倍（32 步采样）。'
+                : 'Smoother motion, sharper hands and faces, cleaner audio — roughly twice the render time (32 sampling passes).')
+              : (zh()
+                ? `最快，使用模型默认设置（${Math.round(model?.defaultSteps || 15)} 步采样）。`
+                : `Quickest, at the model's own default (${Math.round(model?.defaultSteps || 15)} sampling passes).`)}
+          >
+            <Segmented
+              value={minimaxRefinement}
+              onChange={(next) => commit({ ...s.setup, steps: next === 'high' ? 32 : null })}
+              options={[
+                { value: 'standard', label: zh() ? '标准' : 'Standard' },
+                { value: 'high', label: zh() ? '高细节' : 'High detail' },
+              ]}
+            />
+          </Field>
+        ) : null}
+        {isHivemindVideoModelId(s.setup.modelId) ? (
+          <Field
+            label={zh() ? '种子' : 'Seed'}
+            hint={zh() ? '锁定后同样的设置会给出同一条镜头。' : 'Lock one and the same settings give you the same take again.'}
+          >
+            <div className="flex items-center gap-1.5">
+              <TextInput
+                type="number"
+                min={0}
+                step={1}
+                value={s.setup.seed >= 0 ? String(s.setup.seed) : ''}
+                placeholder={zh() ? '随机' : 'Random'}
+                onChange={(e) => setSeed(e.target.value === '' ? -1 : e.target.value)}
+                className="flex-1"
+              />
+              <IconButton
+                icon="refresh"
+                label={zh() ? '随机种子' : 'Randomize seed'}
+                title={zh() ? '每次生成使用随机种子' : 'Use a fresh random seed each generation'}
+                active={s.setup.seed < 0}
+                onClick={randomizeSeed}
+              />
+            </div>
+            {s.setup.seed < 0 && typeof s.lastSeed === 'number' ? (
+              <button
+                type="button"
+                onClick={lockLastSeed}
+                className="mt-1 text-left text-xs text-ink3 hover:text-honey"
+              >
+                {(zh() ? '上次种子：' : 'Last seed: ') + s.lastSeed + (zh() ? '（点击锁定）' : ' · click to lock')}
+              </button>
+            ) : null}
+          </Field>
+        ) : null}
         {supportsSpectrum(model) ? (
           <Field
-            label={zh() ? '快速采样（Spectrum）' : 'Fast sampling (Spectrum)'}
+            label={zh() ? '更快，细节略柔' : 'Faster, softer detail'}
             hint={chainArmed
               ? (zh()
                 ? '场景接续期间强制关闭：步进预测会算错拼接处固定的画面行。'
                 : 'Forced off while chaining scenes: step forecasting mispredicts the pinned join frames.')
               : (zh()
                 ? '预测约一半的采样步而非全部计算：采样时间约减半，但细节会变柔、高光可能发散。追求最高画质时请关闭。'
-                : 'Predicts about half the sampling steps instead of computing them — roughly half the sampling time, but fine detail softens and highlights can bloom. Turn it off for maximum fidelity.')}
+                : 'About half the sampling time: roughly half the steps are predicted rather than computed, so fine detail softens and highlights can bloom. Turn it off for maximum fidelity (Spectrum).')}
           >
             <Toggle
               checked={!chainArmed && s.setup.spectrum !== false}
               disabled={chainArmed}
               onChange={(next) => commit({ ...s.setup, spectrum: next })}
-              label={zh() ? '快速采样' : 'Fast sampling'}
+              label={zh() ? '更快，细节略柔' : 'Faster, softer detail'}
             />
           </Field>
         ) : null}
@@ -4538,10 +4606,10 @@ export function VideoStudio({
         {denoiseAvailable ? (
           <>
             <Field
-              label={zh() ? '负面提示词' : 'Negative prompt'}
+              label={zh() ? '不要出现的东西' : 'Avoid these things'}
               hint={zh()
                 ? '要避开的东西。仅在“标准”质量下生效，快速与精简会忽略它。'
-                : 'What to keep out of the shot. Works on Standard quality; Fast and Lite ignore it.'}
+                : 'What to keep out of the shot. Works at best quality; the faster lanes ignore it.'}
             >
               <TextArea
                 rows={2}
@@ -4555,10 +4623,10 @@ export function VideoStudio({
             </Field>
             {String(s.setup.negativePrompt || '').trim() ? (
               <Field
-                label={zh() ? '负面引导强度' : 'Negative guidance'}
+                label={zh() ? '排除力度' : 'How hard to avoid them'}
                 hint={zh()
                   ? '把画面推离负面提示词的力度，约 +8% 生成时间。仍不听话就调高一档。'
-                  : 'How hard to push away from the negative prompt — adds about 8% time. Raise it if it is still not listening (NAG).'}
+                  : 'How hard to push the shot away from that list — adds about 8% to the render. Raise it if it is still not listening (NAG).'}
               >
                 <NativeSelect
                   value={String(s.setup.nagScale ?? '')}
@@ -5004,10 +5072,12 @@ export function VideoStudio({
               />
             )}
 
-            {referenceEntry ? (
-              // One control for all three reference kinds. The slot counts come
-              // from the workflow entry rather than being restated here, so the
-              // panel can never offer a slot the graph has not wired.
+            {referenceEntry || ingredientModel ? (
+              // One control for every reference kind this model has. The slot
+              // counts come from the workflow entry rather than being restated
+              // here, so the panel can never offer a slot the graph has not
+              // wired — and a model whose only reference kind is stitched views
+              // shows just those.
               <ReferencesMenu
                 images={Array.isArray(s.setup.referenceImageUrls) ? s.setup.referenceImageUrls : []}
                 audios={Array.isArray(s.setup.referenceAudios) ? s.setup.referenceAudios : []}
@@ -5019,10 +5089,12 @@ export function VideoStudio({
                 // is passed.)
                 durationSeconds={Number(s.setup.duration) || 0}
                 limits={{
-                  images: referenceEntry.referenceSlots?.images || 9,
-                  audios: referenceEntry.referenceSlots?.audios || 3,
-                  videos: referenceEntry.referenceSlots?.videos || 3,
+                  images: referenceEntry?.referenceSlots?.images || 9,
+                  audios: referenceEntry?.referenceSlots?.audios || 3,
+                  videos: referenceEntry?.referenceSlots?.videos || 3,
                 }}
+                views={ingredientViews}
+                viewsOnly={!referenceEntry}
                 scene={sceneUrls()}
                 sceneRoles={sceneRoleMap()}
                 onSceneRole={onSceneRole}
@@ -5071,30 +5143,36 @@ export function VideoStudio({
                 if (key && files.length) void attachFilesForMember(key, files);
               }}
             />
-            {/* A labelled chip like its neighbours. On H3 this arms scene
-                chaining (continueSceneFrom), not the LTX extension graph, so the
-                title says that rather than the generic slot hint. */}
-            <ChipButton
-              icon="video"
-              label={zh() ? '片段' : 'Clip'}
-              value={attachedClipUrl() ? (s.setup.videoName || (zh() ? '已附加' : 'attached')) : ''}
-              active={Boolean(attachedClipUrl())}
-              chevron={false}
-              disabled={s.videoUploading}
-              aria-label={attachedClipUrl()
-                ? `${s.setup.videoName || slotLabels.video} — ${zh() ? '点击清除' : 'click to clear'}`
-                : (chainCapableEntryFor(s.setup.modelId)
-                  ? (zh() ? '从一段片段接续' : 'Continue from a clip')
-                  : `${zh() ? '上传' : 'Upload'} ${slotLabels.video}`)}
-              title={attachedClipUrl()
-                ? `${s.setup.videoName || slotLabels.video} — ${zh() ? '点击清除' : 'click to clear'}`
-                : (chainCapableEntryFor(s.setup.modelId)
-                  ? (zh()
-                    ? '从一段片段接续：下一个镜头从它的结尾开始（画面与环境音衔接）'
-                    : 'Continue from a clip — the next shot picks up where it ends, motion and room tone carrying across')
-                  : `${zh() ? '上传' : 'Upload'} ${slotLabels.video}${slotLabels.videoHint ? ` — ${slotLabels.videoHint}` : ''}`)}
-              onClick={onVideoRefClick}
-            />
+            {/* One chip, two meanings, and the chip now SAYS which. The request
+                plan decides: where a clip seeds the next shot's opening frames
+                (motion context) it is "Continue from clip"; everywhere else a
+                clip is an INPUT to the run, so it is the source video. One icon
+                and the word "Clip" for both is what made it unpredictable. */}
+            {(() => {
+              const continues = clipChipContinues;
+              const label = continues
+                ? (zh() ? '接续片段' : 'Continue from clip')
+                : (zh() ? '源视频' : 'Source video');
+              const idle = continues
+                ? (zh()
+                  ? '从一段片段接续：下一个镜头从它的结尾开始（画面与环境音衔接）'
+                  : 'Continue from a clip — the next shot picks up where it ends, motion and room tone carrying across')
+                : `${zh() ? '上传' : 'Upload'}: ${slotLabels.video}${slotLabels.videoHint ? ` — ${slotLabels.videoHint}` : ''}`;
+              const attachedText = `${s.setup.videoName || label} — ${zh() ? '点击清除' : 'click to clear'}`;
+              return (
+                <ChipButton
+                  icon={continues ? 'film' : 'upload'}
+                  label={label}
+                  value={attachedClipUrl() ? (s.setup.videoName || (zh() ? '已附加' : 'attached')) : ''}
+                  active={Boolean(attachedClipUrl())}
+                  chevron={false}
+                  disabled={s.videoUploading}
+                  aria-label={attachedClipUrl() ? attachedText : `${label} — ${idle}`}
+                  title={attachedClipUrl() ? attachedText : idle}
+                  onClick={onVideoRefClick}
+                />
+              );
+            })()}
             {s.videoUploading ? <Spinner size={14} className="text-honey" /> : null}
 
             {/* The prompt-writing chips mean nothing on a tool whose prompt is
@@ -5412,9 +5490,9 @@ export function VideoStudio({
                               onClick={() => { close(); void smoothClip(s.resultUrl, s.resultModel, 2); }}
                               title={zh()
                                 ? '真 RIFE 插帧（本地 MLX）：帧率翻倍，音频保持不变'
-                                : 'Real RIFE interpolation (local MLX): doubles the frame rate; audio passes through untouched'}
+                                : 'Doubles the frame rate so motion reads smoother; the audio passes through untouched (RIFE interpolation, on this device)'}
                             >
-                              {zh() ? 'RIFE 平滑 2×' : 'Smooth 2×'}
+                              {zh() ? '平滑运动 2×' : 'Smooth motion 2×'}
                             </MenuItem>
                           ) : null}
                           {chainLength >= 2 ? (
@@ -5450,21 +5528,22 @@ export function VideoStudio({
             </div>
           ) : null}
 
-          {/* The manual timeline: segment cards under the player. One button
-              opens it; everything else — auto-insert, the quiet full-cut
-              build, drops, Auto-continue — hangs off lib/videoTimeline.js. */}
+          {/* The ONE sequence surface: segment cards under the player. One
+              button opens it; everything else — auto-insert, the quiet full-cut
+              build, drops, Auto-continue, and the chain lineage it is seeded
+              from — hangs off lib/videoTimeline.js. */}
           {(() => {
             if (!s.timelineOn) {
               return (
                 <div className="flex justify-end">
                   <ChipButton
                     icon="layers"
-                    value={zh() ? '时间线' : 'Timeline'}
+                    value={zh() ? '场景' : 'Scene'}
                     chevron={false}
                     onClick={openTimelineView}
                     title={zh()
-                      ? '把多段片段排成一条时间线：逐段生成、拖放片段、预览完整合成片'
-                      : 'Arrange clips into a sequence: generate shot by shot, drag clips in, preview the full cut'}
+                      ? '把多段片段排成一个场景：逐段生成、拖放片段、预览完整合成片'
+                      : 'Arrange clips into one scene: generate shot by shot, drag clips in, preview the full cut'}
                   />
                 </div>
               );
@@ -5495,44 +5574,8 @@ export function VideoStudio({
                 onClose={closeTimelineView}
                 onDrop={timelineHandleDrop}
                 promptFor={timelinePromptFor}
-              />
-            );
-          })()}
-
-          {/* The episode, above its shots: chaining produces one clip per shot,
-              so without this the finished cut was only ever a downloaded file. */}
-          {(() => {
-            // The manual timeline supersedes the derived chain strip while it
-            // is open — two rows of near-identical cards would fight over the
-            // same clicks.
-            if (s.timelineOn) return null;
-            const anchor = s.generationHistory.find((entry) => entry.url === s.chainAnchor);
-            const timeline = anchor
-              ? chainTimelineModel(anchor, s.generationHistory, {
-                excludedUrls: s.chainExcluded,
-                combined: s.chainCombined,
-                // Armed chain → the episode starts existing now, not once the
-                // second clip has rendered.
-                armedFromUrl: chainArmed ? (s.setup.motionContextUrl || '') : '',
-              })
-              : null;
-            if (!timeline) return null;
-            return (
-              <ChainTimeline
-                model={timeline}
-                activeUrl={s.resultUrl}
-                zh={zh()}
-                building={s.joiningChain}
-                // Previewing from the timeline never re-anchors it: the anchor
-                // is the episode's LAST shot, and clicking shot 1 (which has no
-                // ancestors) would otherwise collapse the timeline you are
-                // browsing. Only a generation or a pick from the strip below
-                // moves it.
-                onSelect={(url, model) => showVideoInCanvas(url, model, { anchorChain: false, userInitiated: true })}
-                onToggleExcluded={toggleChainShot}
-                onExport={(shot) => downloadFile(shot.url, videoDownloadName(shot.model, shot.id))}
-                onBuild={() => void buildChainCut(timeline.includedUrls, timeline.key)}
-                onExportCombined={() => void exportChainCut()}
+                onExportSegment={(seg) => void timelineExportSegment(seg)}
+                onToggleExcluded={timelineToggleExcluded}
               />
             );
           })()}
@@ -5705,6 +5748,13 @@ export function VideoStudio({
           initial={s.setup.inpaint?.url === s.setup.referenceVideos[s.inpaintOpenIndex].url
             ? s.setup.inpaint.settings
             : null}
+          // The fix for "no reference picture", in the dialog that raises it:
+          // close it and open the References panel on the picture rows.
+          onAttachReference={() => {
+            s.inpaintOpenIndex = null;
+            s.referencesOpenRequest = (s.referencesOpenRequest || 0) + 1;
+            bump();
+          }}
           onClose={() => { s.inpaintOpenIndex = null; bump(); }}
           onApply={(result) => {
             const clip = s.setup.referenceVideos[s.inpaintOpenIndex];

@@ -126,7 +126,7 @@ export function UgcMenu({
                 ? (zh()
                   ? '在 HOOK / BODY / CTA 三行的 ⟨…⟩ 处写下你的台词，然后交给提示词助手改写成目标模型格式。重新发牌会保留台词。'
                   : (subject
-                    ? 'Write your three lines where the ⟨…⟩ marks are — the brief is already in H3\'s reference format, with <Subject 1> bound to your pictures and your lines as (S1) dialogue. Re-dealing keeps your lines and changes the room, light and beats.'
+                    ? 'Write your three lines where the ⟨…⟩ marks are — the brief is already shaped the way the model reads it, with the first person bound to your pictures and your lines as their dialogue. Re-dealing keeps your lines and changes the room, light and beats.'
                     : 'Write your three lines where the ⟨…⟩ marks are, then hand it to the prompt helper to render into the model\'s format. Re-dealing keeps your lines.'))
                 : (zh()
                   ? '这段可直接用作首帧提示词。'

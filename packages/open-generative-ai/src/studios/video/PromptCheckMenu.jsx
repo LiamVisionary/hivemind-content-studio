@@ -123,8 +123,8 @@ export function PromptCheckMenu({
               className="flex items-center justify-center gap-1.5 rounded-md border border-honey bg-honey-tint px-2 py-1.5 text-[10px] font-medium text-ink1 hover:bg-bg2"
               onClick={() => { onWeave(); close(); }}
               title={zh()
-                ? '按已附加的参考和演员表重写主体定义与 retention_analysis，并把主体写进场景'
-                : 'Write the subject definitions and retention lines for whoever is attached, and bind the scene to them'}
+                ? '按已附加的参考和演员表重写“镜头里是谁”与“哪些会带过来”，并把他们写进场景'
+                : 'Write who is in it and what carries over for whoever is attached, and bind the scene to them'}
             >
               <Icon name="wand" size={11} className="text-honey" />
               {zh() ? '把参考织入提示词' : 'Weave references into the prompt'}
@@ -142,8 +142,8 @@ export function PromptCheckMenu({
             >
               <Icon name="sparkles" size={11} className="text-honey" />
               {zh()
-                ? `让助手把 ${unstaged.map((n) => `<Subject ${n}>`).join('、')} 写进场景`
-                : `Write ${unstaged.map((n) => `<Subject ${n}>`).join(', ')} into the scene with the helper`}
+                ? `让助手把${unstaged.map((n) => `第 ${n} 位`).join('、')}写进场景`
+                : `Write ${unstaged.map((n) => `Person ${n}`).join(', ')} into the scene with the helper`}
             </button>
           ) : null}
 

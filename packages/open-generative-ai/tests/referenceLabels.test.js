@@ -569,8 +569,8 @@ test('each video row carries a Compact switch beside its sound switch, held off 
     // no picture is attached and on a sound-only row (which sends no pixels).
     const motion = menu.indexOf("{zh() ? '动作' : 'Motion'}");
     const sound = menu.indexOf("{zh() ? '声音' : 'Sound'}");
-    const compact = menu.indexOf("{zh() ? '紧凑' : 'Compact'}");
-    assert.ok(motion > 0 && sound > motion && compact > sound, 'Compact sits beside the sound toggle on the video row');
+    const compact = menu.indexOf("{zh() ? '小尺寸（更省）' : 'Small (cheaper)'}");
+    assert.ok(motion > 0 && sound > motion && compact > sound, 'the size switch sits beside the sound toggle on the video row');
     assert.match(menu, /Stage this clip small \(384 px\) — same motion, 3x cheaper\. Off when the clip is the character reference\./);
     assert.match(menu, /Off while no picture is attached: this clip is the character reference, and identity needs pixels\./);
     assert.match(menu, /disabled=\{compactLocked \|\| !motionOn\}/);
