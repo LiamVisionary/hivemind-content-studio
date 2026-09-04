@@ -5,10 +5,12 @@ the Image, Video, Story, Sprite and Restore studios, the hub that frames them,
 and the local-inference bridge (`hosted-server.js`, port 8794) that lets the
 browser reach on-machine engines without ever seeing a token. It is served by
 the control API at `http://127.0.0.1:8765`, not opened as a file, and it is not
-a standalone product: on its own it has no backend to talk to. `electron/` is
-the developer shell that wraps that URL in a window; the shipped desktop shell
-is described in [`docs/RELEASE.md`](../../docs/RELEASE.md). Build it with
-`npm run vite:build`, test it with `node --test tests/*.test.js`.
+a standalone product: on its own it has no backend to talk to. The desktop
+shell that wraps that URL in a window lives in [`desktop/src-tauri`](../../desktop/src-tauri)
+and is described in [`docs/RELEASE.md`](../../docs/RELEASE.md); the Electron
+shell it replaced is gone, along with its main-process local-AI providers —
+`hosted-server.js` serves that surface over HTTP instead. Build this package
+with `npm run vite:build`, test it with `node --test tests/*.test.js`.
 
 Two documents govern changes here and are worth reading before the code.
 [`DESIGN.md`](DESIGN.md) is the design system — the token set, the `ui/kit.jsx`

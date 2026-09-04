@@ -33,7 +33,6 @@ def test_active_runtime_paths_do_not_depend_on_retired_checkouts() -> None:
         ROOT / "packages/media-gateway/server.js",
         ROOT / "packages/media-gateway/bin/image-gen-studio.mjs",
         ROOT / "packages/open-generative-ai/hosted-server.js",
-        ROOT / "packages/open-generative-ai/electron/lib/localInference.js",
     ]
     retired_paths = (
         "/comfy/z-image-api",

@@ -12,7 +12,7 @@ const { URL } = require('url');
 const { loadHostedImageModels, loadHostedWorkflowModels, missingWeightFiles } = require('./hosted-local-models');
 const { defaultAutoWorkflowDirs, discoverAutoImageWorkflows } = require('./auto-workflow-discovery');
 // Generated from src/hivemind_content_studio/identity.py.
-const identity = require('./electron/identity.json');
+const identity = require('./identity.json');
 
 const ROOT = __dirname;
 const DIST = path.join(ROOT, 'dist');

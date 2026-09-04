@@ -1,4 +1,7 @@
-// Frontend client for local inference — wraps window.localAI (Electron IPC).
+// Frontend client for local inference — wraps window.localAI, which the bridge
+// shim in browserLocalAI.js installs over postMessage to the hosted bridge. The
+// `isElectron` flag is the shim's own contract name, kept because the shim sets
+// it; there is no Electron process any more.
 // Two providers live behind the same surface:
 //   - sd.cpp: bundled engine, downloads weights to disk, runs locally
 //   - wan2gp: user-run Gradio server, generation is remote HTTP

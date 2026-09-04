@@ -1,8 +1,8 @@
 """The product's identity, in one place.
 
-Before this module the shipped shell carried the donor's name: an electron
-bundle id of `ai.generative.open`, a window titled "Open Generative AI", crash
-dialogs that named a different product than the window, and a support folder at
+Before this module the shipped shell carried the donor's name: a bundle id of
+`ai.generative.open`, a window titled "Open Generative AI", crash dialogs that
+named a different product than the window, and a support folder at
 `~/Library/Application Support/open-generative-ai`. Those strings are what macOS
 and the user see, so they cannot be spread across four files that drift.
 
@@ -10,10 +10,12 @@ Everything that needs to name the product reads it from here:
 
 * `unified_runtime.py` — the product row of the source-provenance catalog.
 * `control_api.py` — `GET /api/version`.
-* `packages/open-generative-ai/electron/identity.json` — generated from this
-  module (`python -m hivemind_content_studio.identity --write`) and required by
-  `electron/main.js`, `hosted-server.js` and `electron-builder.config.cjs`, so
-  the JavaScript side has no second copy of the bundle id to forget.
+* `packages/open-generative-ai/identity.json` — generated from this module
+  (`python -m hivemind_content_studio.identity --write`) and required by
+  `hosted-server.js`, so the JavaScript side has no second copy of the bundle
+  id to forget.
+* `desktop/src-tauri/tauri.conf.json` — the shipped shell's product name and
+  bundle id.
 
 `test/studio/test_identity.py` fails if the generated JSON drifts from these
 constants, or if the bundle id is typed anywhere else in the tree.
@@ -53,7 +55,6 @@ IDENTITY_JSON_PATH = (
     Path(__file__).resolve().parents[2]
     / "packages"
     / "open-generative-ai"
-    / "electron"
     / "identity.json"
 )
 
@@ -136,7 +137,7 @@ def render_identity_json() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Print or regenerate the shared identity JSON.")
-    parser.add_argument("--write", action="store_true", help="write packages/open-generative-ai/electron/identity.json")
+    parser.add_argument("--write", action="store_true", help="write packages/open-generative-ai/identity.json")
     args = parser.parse_args(argv)
     rendered = render_identity_json()
     if args.write:
