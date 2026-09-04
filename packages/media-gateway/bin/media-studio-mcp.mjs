@@ -5196,7 +5196,12 @@ async function startStdio() {
   console.error(`Media Studio MCP running on stdio; backend=${backendBase}`);
 }
 
-async function startHttp({ host, port }) {
+/** The MCP HTTP surface as one Express app.
+ *
+ *  The collapsed Node service (node-services.mjs) mounts this behind a path
+ *  prefix on the shared port; `--http` still listens on MEDIA_STUDIO_MCP_PORT,
+ *  which is what keeps 8796 answering during the transition. */
+export function createMcpHttpApp({ host = '127.0.0.1' } = {}) {
   const app = createMediaStudioMcpExpressApp({ host });
   app.post('/mcp', async (req, res) => {
     if (!authorizedHttpRequest(req)) {
@@ -5231,6 +5236,18 @@ async function startHttp({ host, port }) {
   app.delete('/mcp', (_req, res) => {
     res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
   });
+  return app;
+}
+
+/** What this surface says about itself in the collapsed service's one health
+ *  endpoint. The MCP endpoint itself answers JSON-RPC only, so a plain probe
+ *  needs somewhere else to look. */
+export function mcpHealth() {
+  return { ok: true, service: 'media-studio-mcp', backend: backendBase, tools: toolCatalog.length };
+}
+
+async function startHttp({ host, port }) {
+  const app = createMcpHttpApp({ host });
   const listener = app.listen(port, host, () => {
     console.error(`Media Studio MCP listening at http://${host}:${port}/mcp; backend=${backendBase}`);
   });

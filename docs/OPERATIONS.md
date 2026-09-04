@@ -108,7 +108,7 @@ Start the complete managed app:
 uv run content-studio stack start
 ```
 
-Open `http://127.0.0.1:8765`. Use `content-studio stack status`, `restart`, `stop`, or `url` for lifecycle control. The supervisor owns ports 8765, 8787, 8788, 8794, 8796, the configured ComfyUI lanes, and optional native MLX/Tailscale listeners. Creating a run is a safe local draft operation; resume, retry, cancellation, and approval decisions require `Authorization: Bearer <CONTENT_STUDIO_CONTROL_TOKEN>`. The approval signing secret and operator token remain server-side.
+Open `http://127.0.0.1:8765`. Use `content-studio stack status`, `restart`, `stop`, or `url` for lifecycle control. The supervisor owns ports 8765, 8787, 8793, 8788, 8794, 8796, the configured ComfyUI lanes, and optional native MLX/Tailscale listeners. The Canvas host and ComfyUI proxy, the local-inference bridge and the agent MCP are one Node child (`packages/media-gateway/node-services.mjs`): it serves all three on 8793 under `/canvas`, `/bridge` and `/agent`, answers for all three on `http://127.0.0.1:8793/healthz`, and keeps 8788, 8794 and 8796 answering unprefixed so anything that addresses them by number still works. Creating a run is a safe local draft operation; resume, retry, cancellation, and approval decisions require `Authorization: Bearer <CONTENT_STUDIO_CONTROL_TOKEN>`. The approval signing secret and operator token remain server-side.
 
 `.github/SECURITY.md` has the full "what listens where" table — every port, its
 bind address, and what authenticates it — plus how to report a vulnerability

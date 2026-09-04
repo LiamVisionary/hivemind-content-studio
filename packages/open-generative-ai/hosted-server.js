@@ -1184,29 +1184,48 @@ function serveStatic(res, pathname) {
   send(res, 200, fs.readFileSync(file), { 'Content-Type': contentType(file), 'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache' });
 }
 
-const server = http.createServer(async (req, res) => {
+// The bridge's whole surface as one request handler. The collapsed Node
+// service (packages/media-gateway/node-services.mjs) mounts this behind a path
+// prefix on the shared port; running this file directly still serves it bare on
+// OGA_PORT, which is what keeps 8794 answering during the transition.
+function handleBridgeRequest(req, res) {
   let u;
   try {
     u = new URL(req.url, `http://${req.headers.host || HOST}`);
   } catch {
     return sendJson(res, 400, { error: 'Invalid request URL' });
   }
-  try {
-    if (u.pathname === '/health' || u.pathname === '/healthz') return sendJson(res, 200, { ok: true, service: `${identity.productName} local-inference bridge`, hosted: true, zimage: ZIMAGE_URL });
-    // Awaited, so a rejection inside a route lands in THIS catch instead of
-    // escaping as an unhandled rejection (which terminates Node 22).
-    if (u.pathname.startsWith('/local-ai/')) return await handleLocalAi(req, res, u.pathname, u.searchParams);
-    if (u.pathname.startsWith('/api/')) return sendJson(res, 501, { error: 'Cloud Muapi proxy is not enabled in hosted mode; use local Z-Image or the desktop app API-key flow.' });
-    return serveStatic(res, u.pathname);
-  } catch (e) {
-    if (res.headersSent) { try { res.end(); } catch { /* already closed */ } return undefined; }
-    return sendJson(res, 500, { error: 'The local inference bridge hit an unexpected error' });
-  }
-});
-// Last line of defence: log the kind of failure (never a payload — requests
-// carry prompts and pictures) and keep serving the other callers.
-process.on('unhandledRejection', (reason) => {
-  const name = reason && reason.name ? reason.name : typeof reason;
-  console.error(`[open-generative-ai-hosted] unhandled rejection (${name}); the bridge stays up`);
-});
-server.listen(PORT, HOST, () => console.log(`[open-generative-ai-hosted] http://${HOST}:${PORT}`));
+  return (async () => {
+    try {
+      if (u.pathname === '/health' || u.pathname === '/healthz') return sendJson(res, 200, bridgeHealth());
+      // Awaited, so a rejection inside a route lands in THIS catch instead of
+      // escaping as an unhandled rejection (which terminates Node 22).
+      if (u.pathname.startsWith('/local-ai/')) return await handleLocalAi(req, res, u.pathname, u.searchParams);
+      if (u.pathname.startsWith('/api/')) return sendJson(res, 501, { error: 'Cloud Muapi proxy is not enabled in hosted mode; use local Z-Image or the desktop app API-key flow.' });
+      return serveStatic(res, u.pathname);
+    } catch (e) {
+      if (res.headersSent) { try { res.end(); } catch { /* already closed */ } return undefined; }
+      return sendJson(res, 500, { error: 'The local inference bridge hit an unexpected error' });
+    }
+  })();
+}
+
+/** What this surface says about itself, on its own /health and in the collapsed
+ *  service's one health endpoint. Same object either way, so the two answers
+ *  cannot drift. */
+function bridgeHealth() {
+  return { ok: true, service: `${identity.productName} local-inference bridge`, hosted: true, zimage: ZIMAGE_URL };
+}
+
+module.exports = { handleBridgeRequest, bridgeHealth, DEFAULT_HOST: HOST, DEFAULT_PORT: PORT };
+
+if (require.main === module) {
+  const server = http.createServer(handleBridgeRequest);
+  // Last line of defence: log the kind of failure (never a payload — requests
+  // carry prompts and pictures) and keep serving the other callers.
+  process.on('unhandledRejection', (reason) => {
+    const name = reason && reason.name ? reason.name : typeof reason;
+    console.error(`[open-generative-ai-hosted] unhandled rejection (${name}); the bridge stays up`);
+  });
+  server.listen(PORT, HOST, () => console.log(`[open-generative-ai-hosted] http://${HOST}:${PORT}`));
+}

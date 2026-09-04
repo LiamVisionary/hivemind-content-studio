@@ -41,9 +41,22 @@ inherits one.
 |---|---|---|---|
 | Control API (`content-studio-api`, `control_api.py`) | bundled Python | 8765 (`CONTENT_STUDIO_CONTROL_PORT`) | `GET /readyz` |
 | Media gateway (`packages/media-gateway/app.py`) | bundled Python | 8787 | `GET /health` |
-| Gateway frontend / Canvas (`packages/media-gateway/server.js`) | bundled Node | 8788 | `GET /healthz` |
-| Local-inference bridge (`packages/open-generative-ai/hosted-server.js`) | bundled Node | 8794 (`OGA_PORT`) | `GET /health` |
-| Media Studio MCP (`packages/media-gateway/bin/media-studio-mcp.mjs --http`) | bundled Node | 8796 (`MEDIA_STUDIO_MCP_PORT`) | `GET /mcp` |
+| Node services (`packages/media-gateway/node-services.mjs`) | bundled Node | 8793 (`HIVEMIND_NODE_SERVICES_PORT`) | `GET /healthz` — speaks for all three surfaces below |
+
+One Node process serves the three Node surfaces, mounted on path prefixes of
+its own port, and keeps their old ports answering unprefixed so anything that
+addresses them by number still works. Retiring one of those numbers is a
+separate decision.
+
+| Surface | Mounted at | Compatibility port | Its own health |
+|---|---|---|---|
+| Gateway frontend / Canvas (`packages/media-gateway/server.js`) | `/canvas` | 8788 (`PORT`) | `GET /healthz` |
+| Local-inference bridge (`packages/open-generative-ai/hosted-server.js`) | `/bridge` | 8794 (`OGA_PORT`) | `GET /health` |
+| Media Studio MCP (`packages/media-gateway/bin/media-studio-mcp.mjs --http`) | `/agent` | 8796 (`MEDIA_STUDIO_MCP_PORT`) | `POST /mcp` |
+
+Each of those three files still listens on its own port when it is run as the
+program, so `node server.js`, `node hosted-server.js` and
+`media-studio-mcp.mjs --http` remain the way to bring one surface up alone.
 
 **Attach-only — never spawned, never killed by the shell**
 

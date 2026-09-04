@@ -19,6 +19,14 @@ use crate::ports::loopback_origin;
 /// Documented ports. Preferred, never forced: a port already answering its own
 /// health check is a process to attach to, not one to evict.
 pub const GATEWAY_PORT: u16 = 8787;
+/// The one Node child's own port. It mounts the Canvas surface, the local model
+/// bridge and the agent MCP behind `/canvas`, `/bridge` and `/agent`, and
+/// answers for all three on `/healthz` — so the shell waits on one thing.
+pub const NODE_SERVICES_PORT: u16 = 8793;
+/// The three numbers those surfaces used to have a process each on. The
+/// collapsed service keeps them answering, because the frontend, the MCP client
+/// config and any running instance all address them by number; retiring one is
+/// a separate decision.
 pub const CANVAS_PORT: u16 = 8788;
 pub const BRIDGE_PORT: u16 = 8794;
 pub const MCP_PORT: u16 = 8796;
@@ -93,6 +101,7 @@ pub struct Layout {
     pub private_secret: String,
     pub control_port: u16,
     pub gateway_port: u16,
+    pub node_services_port: u16,
     pub canvas_port: u16,
     pub bridge_port: u16,
     pub mcp_port: u16,
@@ -159,6 +168,7 @@ impl Layout {
             private_secret,
             control_port,
             gateway_port: GATEWAY_PORT,
+            node_services_port: NODE_SERVICES_PORT,
             canvas_port: CANVAS_PORT,
             bridge_port: BRIDGE_PORT,
             mcp_port: MCP_PORT,
@@ -209,7 +219,7 @@ impl ServicePlan {
     }
 }
 
-/// The five supervised children, in boot order.
+/// The three supervised children, in boot order.
 pub fn service_plans(layout: &Layout) -> Vec<ServicePlan> {
     let gateway_dir = layout.studio_root.join("packages/media-gateway");
     let open_gen_dir = layout.studio_root.join("packages/open-generative-ai");
@@ -320,15 +330,30 @@ pub fn service_plans(layout: &Layout) -> Vec<ServicePlan> {
                 any_http_answer: false,
             },
         },
+        // One Node child for the three Node surfaces. It serves them on its own
+        // port behind `/canvas`, `/bridge` and `/agent`, and keeps 8788, 8794
+        // and 8796 answering unprefixed so nothing that addresses them by
+        // number has to change. `/healthz` on its own port speaks for all three,
+        // which is why the shell waits on one thing here and not three.
         ServicePlan {
-            id: "canvas".into(),
-            label: "Canvas".into(),
+            id: "node-services".into(),
+            label: "Canvas, model bridge and agent bridge".into(),
             required: false,
-            without_it: "The Canvas panel stays empty; every other studio tab works.".into(),
+            without_it:
+                "The Canvas panel stays empty, downloaded models cannot run locally, and agents cannot drive the studio. Every other studio tab works."
+                    .into(),
             program: layout.node.clone(),
-            args: vec!["server.js".into()],
-            cwd: gateway_dir.clone(),
+            args: vec!["node-services.mjs".into()],
+            cwd: gateway_dir,
             env: with(&[
+                (
+                    "HIVEMIND_NODE_SERVICES_HOST".into(),
+                    "127.0.0.1".to_string(),
+                ),
+                (
+                    "HIVEMIND_NODE_SERVICES_PORT".into(),
+                    layout.node_services_port.to_string(),
+                ),
                 ("NODE_ENV", "production".to_string()),
                 ("HOST", "127.0.0.1".to_string()),
                 ("PORT", layout.canvas_port.to_string()),
@@ -341,41 +366,9 @@ pub fn service_plans(layout: &Layout) -> Vec<ServicePlan> {
                         .display()
                         .to_string(),
                 ),
-            ]),
-            health: HealthCheck {
-                port: layout.canvas_port,
-                path: "/".into(),
-                any_http_answer: false,
-            },
-        },
-        ServicePlan {
-            id: "local-inference".into(),
-            label: "Local model bridge".into(),
-            required: false,
-            without_it: "Models you downloaded stay listed but cannot run locally.".into(),
-            program: layout.node.clone(),
-            args: vec!["hosted-server.js".into()],
-            cwd: open_gen_dir,
-            env: with(&[
                 ("OGA_HOST", "127.0.0.1".to_string()),
                 ("OGA_PORT", layout.bridge_port.to_string()),
                 ("ZIMAGE_TOKEN_FILE", token_file.display().to_string()),
-            ]),
-            health: HealthCheck {
-                port: layout.bridge_port,
-                path: "/health".into(),
-                any_http_answer: false,
-            },
-        },
-        ServicePlan {
-            id: "agent-mcp".into(),
-            label: "Agent bridge".into(),
-            required: false,
-            without_it: "Agents cannot drive the studio; you still can.".into(),
-            program: layout.node.clone(),
-            args: vec!["bin/media-studio-mcp.mjs".into(), "--http".into()],
-            cwd: gateway_dir,
-            env: with(&[
                 ("MEDIA_STUDIO_MCP_HOST", "127.0.0.1".to_string()),
                 ("MEDIA_STUDIO_MCP_PORT", layout.mcp_port.to_string()),
                 (
@@ -392,9 +385,12 @@ pub fn service_plans(layout: &Layout) -> Vec<ServicePlan> {
                 ),
             ]),
             health: HealthCheck {
-                port: layout.mcp_port,
-                path: "/mcp".into(),
-                any_http_answer: true,
+                port: layout.node_services_port,
+                // A real answer, not "anything HTTP": this endpoint is 200 only
+                // when all three surfaces came up, and names the one that did
+                // not when they did not.
+                path: "/healthz".into(),
+                any_http_answer: false,
             },
         },
     ]
@@ -509,10 +505,33 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_bridge_accepts_any_http_answer_because_it_refuses_get() {
+    fn every_child_reports_readiness_with_a_real_health_answer() {
+        // The agent MCP used to be probed with "any HTTP answer" because it
+        // refuses a GET on purpose. Folded into the collapsed Node service, it
+        // is covered by that service's own /healthz, so nothing is waiting on a
+        // 405 any more.
         let plans = service_plans(&layout_with_port(8765));
-        assert!(plan(&plans, "agent-mcp").health.any_http_answer);
-        assert!(!plan(&plans, "control-api").health.any_http_answer);
+        assert!(plans.iter().all(|plan| !plan.health.any_http_answer));
+    }
+
+    #[test]
+    fn the_three_node_surfaces_are_one_child_that_keeps_the_old_ports() {
+        let plans = service_plans(&layout_with_port(8765));
+        let node_ids: Vec<&str> = plans
+            .iter()
+            .filter(|plan| plan.args.iter().any(|arg| arg.ends_with(".js") || arg.ends_with(".mjs")))
+            .map(|plan| plan.id.as_str())
+            .collect();
+        assert_eq!(node_ids, vec!["node-services"]);
+
+        let node = plan(&plans, "node-services");
+        assert_eq!(node.health.port, NODE_SERVICES_PORT);
+        assert_eq!(node.health.path, "/healthz");
+        // The old numbers still reach the collapsed service, so the frontend,
+        // the MCP client config and a running instance keep working.
+        assert_eq!(node.env["PORT"], CANVAS_PORT.to_string());
+        assert_eq!(node.env["OGA_PORT"], BRIDGE_PORT.to_string());
+        assert_eq!(node.env["MEDIA_STUDIO_MCP_PORT"], MCP_PORT.to_string());
     }
 
     #[test]

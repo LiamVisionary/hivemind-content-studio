@@ -1477,10 +1477,21 @@ function repairMissingSamplerNegativeConditioning(payload) {
   return repairCount;
 }
 
-app.prepare().then(() => {
+/** Bring the Canvas surface up and hand back its request/upgrade handlers.
+ *
+ *  The collapsed Node service (node-services.mjs) mounts these behind a path
+ *  prefix on the shared port; running this file directly still listens on PORT,
+ *  which is what keeps 8788 answering during the transition. Both callers get
+ *  the same handlers, so there is one dispatch table and not two. */
+async function createCanvasSurface() {
+  await app.prepare();
   const nextServer = http.createServer((req, res) => handle(req, res));
-  nextServer.listen(internalPort, '127.0.0.1', () => {
-    console.log(`Next internal server listening on http://127.0.0.1:${internalPort}`);
+  await new Promise((resolve, reject) => {
+    nextServer.once('error', reject);
+    nextServer.listen(internalPort, '127.0.0.1', () => {
+      console.log(`Next internal server listening on http://127.0.0.1:${internalPort}`);
+      resolve();
+    });
   });
 
   // Every branch below forwards with the gateway's capability token attached,
@@ -1611,14 +1622,14 @@ app.prepare().then(() => {
     }
   }
 
-  const publicServer = http.createServer((req, res) => {
+  function handleCanvasRequest(req, res) {
     const pathname = pathnameOf(req);
 
     // The one route with no credential: the supervisor has to be able to tell
     // whether this child is alive before anyone has signed in. It says that and
     // nothing else.
     if (canvasGateModule.isHealthProbe(pathname, req.method)) {
-      const body = JSON.stringify({ ok: true, service: 'media-studio-canvas' });
+      const body = JSON.stringify(canvasHealth());
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
@@ -1632,9 +1643,9 @@ app.prepare().then(() => {
       if (!decision.allowed) { refuseCanvasRequest(req, res); return; }
       dispatchPublicRequest(req, res, pathname);
     }).catch(() => refuseCanvasRequest(req, res));
-  });
+  }
 
-  publicServer.on('upgrade', (req, socket, head) => {
+  function handleCanvasUpgrade(req, socket, head) {
     const pathname = pathnameOf(req);
 
     if (pathname !== '/ws' && pathname !== '/comfy/ws' && pathname !== '/mobile/api/comfy/ws') {
@@ -1656,12 +1667,35 @@ app.prepare().then(() => {
       }
       proxyComfyWebSocket(req, socket, head);
     }).catch(() => socket.destroy());
-  });
+  }
 
-  publicServer.listen(port, hostname, () => {
-    console.log(`Media Studio public frontend listening on http://${hostname}:${port}`);
-    console.log(`Proxying HTTP to ${nextTarget}`);
-    console.log(`Bridging ComfyUI WebSocket /ws to lanes: ${comfyLaneTargets.map(([lane, target]) => `${lane}=${target}`).join(", ")}`);
-    console.log(`Comfy lanes: ${comfyLaneTargets.map(([lane, target]) => `${lane}=${target}`).join(", ")}`);
+  return { handleRequest: handleCanvasRequest, handleUpgrade: handleCanvasUpgrade, health: canvasHealth };
+}
+
+/** What this surface says about itself, on its own /healthz and in the
+ *  collapsed service's one health endpoint. */
+function canvasHealth() {
+  return { ok: true, service: 'media-studio-canvas' };
+}
+
+function laneSummary() {
+  return comfyLaneTargets.map(([lane, target]) => `${lane}=${target}`).join(', ');
+}
+
+module.exports = { createCanvasSurface, canvasHealth, laneSummary, DEFAULT_HOST: hostname, DEFAULT_PORT: port };
+
+if (require.main === module) {
+  createCanvasSurface().then((surface) => {
+    const publicServer = http.createServer(surface.handleRequest);
+    publicServer.on('upgrade', surface.handleUpgrade);
+    publicServer.listen(port, hostname, () => {
+      console.log(`Media Studio public frontend listening on http://${hostname}:${port}`);
+      console.log(`Proxying HTTP to ${nextTarget}`);
+      console.log(`Bridging ComfyUI WebSocket /ws to lanes: ${laneSummary()}`);
+      console.log(`Comfy lanes: ${laneSummary()}`);
+    });
+  }).catch((error) => {
+    console.error('Canvas surface failed to start:', error);
+    process.exit(1);
   });
-});
+}
