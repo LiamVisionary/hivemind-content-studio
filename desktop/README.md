@@ -54,8 +54,19 @@ any of these environment variables override it:
 | `HIVEMIND_MEDIA_STATE_DIR` | `~/.hivemindos/media-studio`, adopted in place |
 | `COMFY_LANES` | the two documented local lanes |
 
-Bundling the Python and Node runtimes and writing `runtime.json` into the app's
-resources is the packaging step's job, not this one's.
+`runtime.json` is written by `scripts/stage_desktop_resources.py`, which also
+stages the runtimes it names into `src-tauri/resources/`. Its paths are relative
+to the app's resource directory — a bundle does not know where it will be
+installed — and `ShellConfig::anchor_to` resolves them against that directory.
+The environment still wins over the file, which is what keeps `cargo tauri dev`
+against a checkout working with nothing staged.
+
+`bundle.resources` in `tauri.conf.json` names those parts, and `tauri-build`
+refuses to compile when one of the named paths is missing. That is why a
+`PLACEHOLDER.md` for each part is committed: a checkout that has never built a
+frontend still has to compile. `python3 scripts/stage_desktop_resources.py
+--verify` fails while any of them is still a placeholder, and the release
+workflow runs it between staging and the bundle step.
 
 ## Running and testing it
 

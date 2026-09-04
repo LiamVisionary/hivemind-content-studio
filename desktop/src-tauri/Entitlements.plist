@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The entitlements a Developer-ID, hardened-runtime build needs, and nothing
+  else. docs/RELEASE.md §2.3 is the reasoning; this file is that decision.
+
+  THE APP SANDBOX IS DELIBERATELY ABSENT. Do not add
+  com.apple.security.app-sandbox here, however tidy it looks. Under the sandbox
+  macOS rewrites HOME to a per-app container, so ~/.hivemindos/.env — the one
+  PassBook credential store this machine shares between its apps — resolves to
+  a private empty directory: every key reports absent, the app looks broken,
+  and the store sits untouched two directories away. The same goes for the
+  user's ComfyUI checkout, their model directories and
+  ~/.comfy-private.noindex, all of which live wherever the user put them.
+  Consequence accepted with that: direct DMG distribution only, never the Mac
+  App Store, with hardened runtime + notarization carrying the security story.
+
+  Each key below is here because something breaks without it:
+-->
+<plist version="1.0">
+<dict>
+    <!-- The webview's JavaScript engine allocates executable memory. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- The bundled Python's native wheels (torch, cryptography,
+         faster-whisper) map executable pages the hardened runtime would
+         otherwise refuse. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- Those same wheels dlopen dylibs that carry the wheel's own signature
+         rather than this app's team id. Library validation would refuse every
+         one of them, so a signed build would die at import time while the
+         unsigned build it was tested from worked. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

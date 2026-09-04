@@ -29,6 +29,18 @@ pub fn run(context: tauri::Context<tauri::Wry>) {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // The save pair `saveBytes()` looks for on `window.__TAURI__`. A
+        // WKWebView does not carry out `<a download>` of a blob: URL, so
+        // without these the anchor branch returns `{ ok: true }` having written
+        // nothing — and the vault recovery screen would tell someone their only
+        // key was saved to a file that does not exist (docs/RELEASE.md §2.5).
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        // Registered, not just configured: `plugins.updater` in tauri.conf.json
+        // describes an update channel that reaches nobody unless this line is
+        // here. scripts/check_updater_config.py asserts all three of the crate,
+        // this registration and the `updater:default` permission.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Arc::clone(&controller))
         .setup(move |app| {
             let handle = app.handle().clone();

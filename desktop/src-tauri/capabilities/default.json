@@ -1,8 +1,20 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The boot screen: read the boot state, act on a failed service, reveal the log folder.",
+  "description": "The boot screen: read the boot state, act on a failed service, reveal the log folder. Then the studio itself: save a file the user picked, and check for an update.",
   "windows": ["main"],
+  "remote": {
+    "comment": [
+      "The window loads http://127.0.0.1:<port> and not tauri://localhost (§2.1),",
+      "so every permission below reaches a REMOTE origin as far as the capability",
+      "system is concerned. Without this block the IPC is denied on the studio page",
+      "and every Download button fails silently. The port is a range, not a",
+      "constant: ports.rs falls back through 8765-8785 when 8765 is taken, which is",
+      "why the pattern wildcards it. `capability_reaches_the_loopback_studio_origin`",
+      "in ports.rs proves this literal matches every port the shell can choose."
+    ],
+    "urls": ["http://127.0.0.1:*"]
+  },
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -10,6 +22,9 @@
     "allow-boot-status",
     "allow-retry-service",
     "allow-skip-service",
-    "allow-reveal-logs"
+    "allow-reveal-logs",
+    "dialog:allow-save",
+    "fs:allow-write-file",
+    "updater:default"
   ]
 }

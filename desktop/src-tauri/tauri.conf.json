@@ -8,6 +8,7 @@
     "frontendDist": "splash"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
@@ -39,8 +40,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "resources/runtime.json": "runtime.json",
+      "resources/desktop-python": "desktop-python",
+      "resources/node": "node",
+      "resources/studio": "studio",
+      "resources/legal": "legal"
+    },
     "macOS": {
-      "minimumSystemVersion": "14.0"
+      "minimumSystemVersion": "14.0",
+      "entitlements": "Entitlements.plist"
     },
     "createUpdaterArtifacts": true
   },

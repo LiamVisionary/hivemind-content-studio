@@ -67,7 +67,7 @@ Then re-run suite 3: the owner-gate and static-asset tests read the built bundle
 python3 scripts/generate_notices.py --check
 python3 -m hivemind_content_studio.identity --write && git diff --exit-code \
   packages/open-generative-ai/electron/identity.json
-python3 scripts/check_updater_config.py
+python3 scripts/check_updater_config.py             # config + plugin present
 python3 scripts/build_desktop_python.py            # dependency split + size
 ```
 
@@ -117,8 +117,11 @@ No suite can do these, because they are about what a person sees.
 1. Dispatch **Release desktop (build only)** with the version (semver, no
    prefix — the tag it names is `studio-v<version>`). Preflight refuses a tag
    that already exists, a stale notices file, a drifted identity, an updater
-   config that disagrees with `tauri.conf.json`, and a desktop dependency set
-   that carries the Streamlit stack.
+   config that disagrees with `tauri.conf.json` or describes a plugin that is not
+   in the build, and a desktop dependency set that carries the Streamlit stack.
+   The macOS job then stages the bundle's resources and runs
+   `scripts/stage_desktop_resources.py --verify`, which refuses to bundle the
+   committed placeholders instead of the real runtimes.
 2. Download the artifact. Its name ends in `signed` or `UNSIGNED`; an
    `UNSIGNED.txt` inside says which secrets were absent
    (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`
@@ -127,7 +130,11 @@ No suite can do these, because they are about what a person sees.
    person who built them: macOS refuses to open one, and promotion rejects it.
 3. Smoke-test the DMG on a **second** machine — install, launch, sign in, one
    hosted generation, one restore, quit — and check again that no ComfyUI
-   process was killed on quit.
+   process was killed on quit. **Press Download on a result and confirm a native
+   save sheet appears and the file is on disk afterwards.** This one is blocking,
+   not advisory: when the dialog/fs plugins are unreachable the browser fallback
+   reports success and writes nothing, and the one-time vault recovery key goes
+   through the same function (`docs/RELEASE.md` §2.5).
 4. Dispatch **Release desktop (promote)** with the build's run id and the
    approval string `promote-<run id>`. It refuses an unsigned or un-notarized
    candidate, publishes the release at the tag, and only then writes

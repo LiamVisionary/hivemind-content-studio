@@ -27,7 +27,17 @@ base64 = "0.22"
 # ciphertext it protects (finding security-09).
 keyring = "=4.1.5"
 tauri = { version = "2", features = [] }
+# Every "keep this" control in the studio — a clip, a restored master, a persona
+# export, the ONE-TIME vault recovery key — ends in saveBytes(), and a WKWebView
+# does not carry out `<a download>` on its own: without these two the anchor
+# branch returns ok and writes nothing (docs/RELEASE.md §2.5).
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 tauri-plugin-opener = "2"
+# Configuring plugins.updater without this crate is a dead update channel that
+# every gate reports as healthy; scripts/check_updater_config.py now asserts the
+# dependency, the registration and the permission together.
+tauri-plugin-updater = "2"
 url = "2"
 zeroize = { version = "1.8.2", features = ["derive"] }
 

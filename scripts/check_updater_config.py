@@ -11,6 +11,13 @@ It also refuses a private key in the repository. The updater's private key is
 read from the signing environment under a secret *name*; a key material blob in
 a tracked file is a leak, not a configuration.
 
+And it asserts that the plugin the configuration describes is actually in the
+build. `plugins.updater` used to be declared while `tauri-plugin-updater` was
+not a dependency, `lib.rs` registered only the opener plugin and no capability
+granted an `updater:` permission — so this script reported that everything
+agreed about an update channel that reached nobody. A gate that passes on a
+plugin that is not there is worse than no gate.
+
     python3 scripts/check_updater_config.py                # drift + hygiene
     python3 scripts/check_updater_config.py --require-key   # also: pubkey is set
 
@@ -28,6 +35,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 UPDATER_CONFIG = ROOT / "desktop" / "src-tauri" / "updater.json"
 TAURI_CONFIG = ROOT / "desktop" / "src-tauri" / "tauri.conf.json"
+CARGO_TOML = ROOT / "desktop" / "src-tauri" / "Cargo.toml"
+SHELL_LIB = ROOT / "desktop" / "src-tauri" / "src" / "lib.rs"
+CAPABILITIES = ROOT / "desktop" / "src-tauri" / "capabilities"
+
+# The three things that have to be true for a promoted latest.json to reach an
+# installed app, none of which the two JSON files can tell you.
+PLUGIN_CRATE = "tauri-plugin-updater"
+PLUGIN_INIT = "tauri_plugin_updater"
+PLUGIN_PERMISSION = "updater:"
 
 # Anything that looks like key material rather than a name.
 PRIVATE_KEY_MARKERS = ("untrusted comment: minisign secret key", "PRIVATE KEY", "RWRT")
@@ -35,6 +51,58 @@ PRIVATE_KEY_MARKERS = ("untrusted comment: minisign secret key", "PRIVATE KEY", 
 
 def _load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _plugin_problems(configured: bool) -> list[str]:
+    """The updater config is a promise; these three make the shipped app keep it.
+
+    Checked whether or not the updater is configured, because the failure runs
+    both ways: a config with no plugin is a dead channel that every other gate
+    calls healthy, and a plugin with no config is dead weight in the binary.
+    """
+    problems: list[str] = []
+
+    cargo = CARGO_TOML.read_text(encoding="utf-8") if CARGO_TOML.is_file() else ""
+    declared = any(
+        line.split("=")[0].strip().strip('"') == PLUGIN_CRATE
+        for line in cargo.splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    )
+    registered = PLUGIN_INIT in (SHELL_LIB.read_text(encoding="utf-8") if SHELL_LIB.is_file() else "")
+    granted = []
+    if CAPABILITIES.is_dir():
+        for path in sorted(CAPABILITIES.glob("*.json")):
+            capability = _load(path)
+            for permission in capability.get("permissions") or []:
+                name = permission if isinstance(permission, str) else permission.get("identifier", "")
+                if name.startswith(PLUGIN_PERMISSION):
+                    granted.append(f"{path.name}:{name}")
+
+    if not configured:
+        if declared or registered or granted:
+            problems.append(
+                f"{PLUGIN_CRATE} is in the build but tauri.conf.json declares no `plugins.updater`, so the "
+                "plugin has no endpoint to ask. Configure it or drop the dependency."
+            )
+        return problems
+
+    if not declared:
+        problems.append(
+            f"tauri.conf.json configures the updater but {CARGO_TOML.name} does not depend on "
+            f"{PLUGIN_CRATE}, so the shipped app has no updater in it. A promoted latest.json would "
+            "reach nobody, and nothing else in this pipeline would say so."
+        )
+    if not registered:
+        problems.append(
+            f"{PLUGIN_INIT} is never registered in src/lib.rs. A plugin that is a dependency and not a "
+            "`.plugin(...)` line is compiled in and never runs."
+        )
+    if not granted:
+        problems.append(
+            "No capability grants an `updater:` permission, so the update check would be denied by the "
+            "capability system. Add `updater:default` to desktop/src-tauri/capabilities/default.json."
+        )
+    return problems
 
 
 def check(*, require_key: bool) -> list[str]:
@@ -80,6 +148,7 @@ def check(*, require_key: bool) -> list[str]:
     if TAURI_CONFIG.is_file():
         tauri = _load(TAURI_CONFIG)
         updater = (tauri.get("plugins") or {}).get("updater") or {}
+        problems.extend(_plugin_problems(bool(updater)))
         if not updater:
             problems.append(
                 "tauri.conf.json declares no `plugins.updater`, so the shipped app would have no updater "
@@ -121,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Updater: {state}; endpoint {config['endpoints'][0]}")
     if TAURI_CONFIG.is_file():
         print("tauri.conf.json agrees with desktop/src-tauri/updater.json.")
+        print(f"{PLUGIN_CRATE}: a dependency, registered in lib.rs, and granted an `updater:` permission.")
     else:
         print("desktop/src-tauri/tauri.conf.json does not exist yet; nothing to compare against.")
     return 0
