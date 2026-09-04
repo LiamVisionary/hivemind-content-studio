@@ -6115,11 +6115,23 @@ RESTORE_ROOT = GATEWAY_STATE_DIR / "restore"
 # Projects are the point of the feature (reopen last week's render) but they are
 # also multi-gigabyte, so old ones are reaped rather than kept forever.
 RESTORE_PROJECT_TTL_DAYS = int(os.environ.get("ZIMG_RESTORE_PROJECT_TTL_DAYS", "30"))
-# The upload arrives as base64 inside a JSON body, decrypted by the browser —
-# the same round trip RIFE and upscale make — so this cap is about how much the
-# gateway will hold in memory at once, not about how long a film may be. Roughly
-# 570MB of video, which at 1080p is a good ten minutes.
-RESTORE_MAX_SOURCE_BYTES = 768 * 1024 * 1024
+# The source arrives on /api/restore/upload as a RAW body written to disk a
+# block at a time, so this is a disk ceiling rather than a memory one: nothing
+# in this process, or in the control API in front of it, ever holds the clip.
+# It used to arrive as base64 inside a JSON body, which meant three full copies
+# of a multi-hundred-megabyte file — and a browser that refused to build the
+# string at all somewhere north of 384MB, on exactly the footage people rent a
+# GPU to restore. The number is advertised in /api/restore/capabilities so the
+# studio can say it BEFORE the upload rather than after it.
+RESTORE_MAX_SOURCE_BYTES = int(os.environ.get(
+    "ZIMG_RESTORE_MAX_SOURCE_BYTES", str(4 * 1024 * 1024 * 1024)))
+# Staged sources that no project ever claimed. A picked-then-abandoned clip is
+# not working state anybody will come back to, and it is gigabytes.
+RESTORE_UPLOAD_ROOT = RESTORE_ROOT / "uploads"
+RESTORE_UPLOAD_TTL_HOURS = int(os.environ.get("ZIMG_RESTORE_UPLOAD_TTL_HOURS", "24"))
+# What the streaming reader pulls off the socket at a time. Big enough that a
+# gigabyte is a few thousand reads, small enough that memory is flat.
+RESTORE_UPLOAD_BLOCK_BYTES = 4 * 1024 * 1024
 # One chunk of a 4K render is minutes of diffusion on a laptop; the cap is
 # generous because the failure it guards against is a hung lane, not a slow one.
 RESTORE_CHUNK_TIMEOUT_SECONDS = int(os.environ.get("ZIMG_RESTORE_CHUNK_TIMEOUT", "5400"))
@@ -6161,8 +6173,30 @@ class RestoreCancelled(RuntimeError):
     """The owner stopped the project. Finished chunks stay on disk."""
 
 
+class RestoreTooLarge(ValueError):
+    """The source is past this machine's ceiling — said with both numbers.
+
+    Its own class because the answer is a 413 with advice ("trim it, or raise
+    the ceiling"), not the 400 every other bad body gets.
+    """
+
+    def __init__(self, size_bytes, max_bytes):
+        megabyte = 1024 * 1024
+        self.size_bytes = int(size_bytes)
+        self.max_bytes = int(max_bytes)
+        super().__init__(
+            f"that clip is {self.size_bytes // megabyte}MB and this machine takes up to "
+            f"{self.max_bytes // megabyte}MB — trim it, or restore it in two halves"
+        )
+
+
 def restore_project_dir(project_id):
-    directory = (RESTORE_ROOT / safe_name(str(project_id))).resolve()
+    name = safe_name(str(project_id))
+    # `uploads` is the staging directory beside the projects, so a project by
+    # that name would have its delete route rmtree everybody's staged sources.
+    if name == RESTORE_UPLOAD_ROOT.name:
+        raise ValueError("bad restore project id")
+    directory = (RESTORE_ROOT / name).resolve()
     if not _is_under(directory, RESTORE_ROOT.resolve()):
         raise ValueError("bad restore project id")
     return directory
@@ -6185,6 +6219,80 @@ def _restore_cancelled(project_id):
 def _clear_restore_cancel(project_id):
     with restore_cancel_lock:
         restore_cancel_flags.discard(str(project_id))
+
+
+def restore_upload_path(source_id):
+    """Where a streamed source landed, for the start request that claims it.
+
+    Always `.mp4` regardless of what the container really is: the runner moves
+    this file to `source.mp4` a moment later anyway, and ffmpeg reads the bytes
+    rather than the name. One name means one path to validate.
+    """
+    name = safe_name(str(source_id or ""))
+    if not name:
+        raise ValueError("that upload id is not one this machine issued")
+    candidate = (RESTORE_UPLOAD_ROOT / f"{name}.mp4").resolve()
+    if not _is_under(candidate, RESTORE_UPLOAD_ROOT.resolve()):
+        raise ValueError("that upload id is not one this machine issued")
+    return candidate
+
+
+def reap_restore_uploads(ttl_hours=None):
+    """Drop staged sources no start request ever claimed.
+
+    A clip picked and then abandoned is gigabytes of nothing. Anything a project
+    took has already been MOVED out of this directory by the runner, so age is
+    the only test needed.
+    """
+    ttl = RESTORE_UPLOAD_TTL_HOURS if ttl_hours is None else int(ttl_hours)
+    if ttl <= 0 or not RESTORE_UPLOAD_ROOT.exists():
+        return 0
+    cutoff = time.time() - ttl * 3600
+    removed = 0
+    for candidate in list(RESTORE_UPLOAD_ROOT.glob("*")):
+        try:
+            if not candidate.is_file() or candidate.stat().st_mtime > cutoff:
+                continue
+            candidate.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _claim_restore_source(data):
+    """The staged clip a start (or finish) request is pointing at, or None.
+
+    Two transports, and only one of them is the good one. `source_id` names a
+    file already streamed to disk by /api/restore/upload — nothing is copied,
+    and it is how anything larger than a phone clip gets here. `video_base64`
+    is the old inline body, kept because the MCP and older clients still send
+    it for small clips; the studio no longer does.
+    """
+    source_id = str((data or {}).get("source_id") or "").strip()
+    if source_id:
+        staged = restore_upload_path(source_id)
+        if not staged.is_file():
+            raise ValueError(
+                "that upload is no longer on this machine — pick the clip again and restart"
+            )
+        return staged
+    return stage_inline_video_base64((data or {}).get("video_base64"), RESTORE_MAX_SOURCE_BYTES)
+
+
+def restore_retention():
+    """How long the two kinds of working file are kept, for the studio to say.
+
+    The reaper's behaviour is right — a restore project is gigabytes of
+    intermediates — but it used to be announced only in the service log, so a
+    project that aged out simply vanished. Saying the number on the card is the
+    difference between a policy and a disappearance.
+    """
+    return {
+        "project_ttl_days": RESTORE_PROJECT_TTL_DAYS,
+        "upload_ttl_hours": RESTORE_UPLOAD_TTL_HOURS,
+        "max_source_bytes": RESTORE_MAX_SOURCE_BYTES,
+    }
 
 
 def probe_restore_source(path):
@@ -7251,6 +7359,25 @@ def reap_restore_projects(ttl_days=None):
                 continue
             shutil.rmtree(manifest.parent, ignore_errors=True)
             removed += 1
+            # Recorded, not just logged. A project that ages out used to vanish
+            # from the studio with nothing to read; this is the line that lets
+            # it say what happened instead. No prompt, no path — the project id
+            # and the rule that removed it.
+            try:
+                append_history({
+                    "id": f"reap-{project.get('id') or manifest.parent.name}",
+                    "kind": "restore_project_reaped",
+                    "backend": "seedvr2-restore",
+                    "status": "reaped",
+                    "project_id": project.get("id") or manifest.parent.name,
+                    "finished_at": now_iso(),
+                    "error": (
+                        f"Its working files were removed after {ttl} days. "
+                        "Any master it produced is still in History."
+                    ),
+                })
+            except OSError:
+                pass
         except Exception:
             continue
     return removed
@@ -12511,6 +12638,38 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("request body too large")
         return self.rfile.read(n) if n else b""
 
+    def stream_body_to_file(self, destination, max_bytes):
+        """Write a raw request body to disk a block at a time.
+
+        The whole point is that no copy of the clip exists in memory: this is
+        how a two-gigabyte restore source gets here at all. It lands on a
+        `.part` file and is renamed only once the declared length has arrived,
+        so a dropped connection leaves nothing another request could mistake
+        for a complete upload. Returns the byte count written.
+        """
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        if length <= 0:
+            raise ValueError("that upload arrived with no body")
+        if length > max_bytes:
+            raise RestoreTooLarge(length, max_bytes)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        part = destination.with_name(destination.name + ".part")
+        written = 0
+        try:
+            with part.open("wb") as handle:
+                while written < length:
+                    block = self.rfile.read(min(RESTORE_UPLOAD_BLOCK_BYTES, length - written))
+                    if not block:
+                        break
+                    handle.write(block)
+                    written += len(block)
+            if written != length:
+                raise ValueError("that upload stopped part way — try it again")
+            part.replace(destination)
+        finally:
+            part.unlink(missing_ok=True)
+        return written
+
     def proxy_to_frontend(self, parsed):
         target_path = parsed.path
         if target_path in {"/models", "/history", "/workbench"}:
@@ -13127,6 +13286,12 @@ class Handler(BaseHTTPRequestHandler):
                 "color_corrections": list(video_restore.COLOR_CORRECTIONS),
                 "resolutions": video_restore.RESOLUTION_PRESETS,
                 "any": any(lane["available"] for lane in lanes),
+                # The two facts the studio cannot work out for itself and has to
+                # state BEFORE the wait: how big a source this machine takes,
+                # and how long its working files are kept. Both are configured
+                # here and were, until now, announced only in the service log.
+                "retention": restore_retention(),
+                "max_source_bytes": RESTORE_MAX_SOURCE_BYTES,
             })
         if parsed.path.startswith("/api/restore/project/"):
             project_id = safe_name(parsed.path.rsplit("/", 1)[-1])
@@ -13403,16 +13568,46 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": str(exc)}, 400)
             except Exception as exc:
                 return self.send_json({"error": str(exc)}, 500)
+        if parsed.path == "/api/restore/upload":
+            # The source, as raw bytes, written straight to disk in blocks.
+            #
+            # No JSON, no base64, no copy in memory anywhere along the way: the
+            # start request that follows names the id this hands back. This is
+            # the route that makes a multi-hundred-megabyte restore possible at
+            # all — the old inline-base64 transport cost three full copies and
+            # simply refused past a few hundred megabytes, which is the size of
+            # the footage this studio exists for.
+            reap_restore_uploads()
+            source_id = f"u{uuid.uuid4().hex[:16]}"
+            try:
+                written = self.stream_body_to_file(
+                    restore_upload_path(source_id), RESTORE_MAX_SOURCE_BYTES)
+            except RestoreTooLarge as exc:
+                return self.send_json({
+                    "error": str(exc), "operational": True,
+                    "max_source_bytes": exc.max_bytes, "bytes": exc.size_bytes,
+                }, 413)
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 400)
+            except OSError as exc:
+                return self.send_json({"error": f"that upload could not be written: {exc}"}, 507)
+            return self.send_json({
+                "ok": True, "source_id": source_id, "bytes": written,
+                **restore_retention(),
+            }, 201)
         if parsed.path == "/api/restore":
             # Start a restoration, or resume one. The same route for both: a
             # resume is a start that already has finished chunks, and making it
             # a second endpoint would be two ways to get the plan wrong.
             try:
-                data = json.loads((self.read_body(max_bytes=RESTORE_MAX_SOURCE_BYTES) or b"{}").decode("utf-8"))
+                # The ordinary JSON cap now, not a 768MB one: the body is a
+                # set of dials and a staged id. It still leaves room for the
+                # small inline clip an older client might send.
+                data = json.loads((self.read_body(max_bytes=MAX_JSON_BODY_BYTES) or b"{}").decode("utf-8"))
                 project_id = safe_name(str(data.get("project_id") or ""))
-                staged = stage_inline_video_base64(data.get("video_base64"), RESTORE_MAX_SOURCE_BYTES)
+                staged = _claim_restore_source(data)
                 if staged is None and not project_id:
-                    return self.send_json({"error": "video_base64 is required to start a restoration"}, 400)
+                    return self.send_json({"error": "a source clip is required to start a restoration"}, 400)
                 options = {
                     key: data.get(key) for key in (
                         "model", "resolution", "max_resolution", "batch_size", "chunk_seconds",
@@ -13525,15 +13720,17 @@ class Handler(BaseHTTPRequestHandler):
             # disk; sharpening, grain, softening and the reframe are one ffmpeg
             # pass over it.
             try:
-                data = json.loads((self.read_body(max_bytes=RESTORE_MAX_SOURCE_BYTES) or b"{}").decode("utf-8"))
+                data = json.loads((self.read_body(max_bytes=MAX_JSON_BODY_BYTES) or b"{}").decode("utf-8"))
                 project_id = safe_name(str(data.get("project_id") or ""))
                 if not project_id or not restore_manifest_path(project_id).is_file():
                     return self.send_json({"error": "no such restoration project"}, 404)
                 finish = data.get("finish") if isinstance(data.get("finish"), dict) else {}
                 # A project whose chunks are sealed is finished from the clip the
                 # BROWSER joined — the gateway cannot read those chunks, so the
-                # assembled master has to arrive from the side that can.
-                assembled = stage_inline_video_base64(data.get("video_base64"), RESTORE_MAX_SOURCE_BYTES)
+                # assembled master has to arrive from the side that can. It
+                # arrives the same way a source does: streamed to disk first,
+                # named here by its id.
+                assembled = _claim_restore_source(data)
                 job_id = uuid.uuid4().hex[:12]
                 with jobs_lock:
                     jobs[job_id] = {
@@ -14110,6 +14307,12 @@ def main():
         reaped = reap_restore_projects()
         if reaped:
             print(f"[restore] reaped {reaped} project(s) older than {RESTORE_PROJECT_TTL_DAYS} days", flush=True)
+        # Sources that were streamed up and then never started. Also swept on
+        # every upload, so a machine that stays up for a month does not keep a
+        # month of abandoned picks.
+        dropped = reap_restore_uploads()
+        if dropped:
+            print(f"[restore] dropped {dropped} unclaimed upload(s)", flush=True)
     except Exception as exc:
         print(f"[restore] project reap skipped: {exc}", file=sys.stderr)
     with download_jobs_lock:

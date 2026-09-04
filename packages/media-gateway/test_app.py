@@ -6432,3 +6432,338 @@ class TheHostedLaneIsNotAComfyLane(unittest.TestCase):
         error = app.restore_pin_error({"run_on": "rental00000000"})
         self.assertIsInstance(error, str)
         self.assertTrue(error)
+
+
+class RestoreChunkLoopTests(unittest.TestCase):
+    """The twenty-minute part of the Restore studio, driven end to end.
+
+    Eight routes dispatch into `run_video_restore`, and until now none of the
+    loop underneath them had a test: not the chunk order, not the cancel that
+    keeps a render resumable, not the failure that must mark one chunk rather
+    than the project, not the assembly that carries the source audio. Those are
+    exactly the paths that lose work, and they lose it invisibly — the owner
+    only finds out after the full wait.
+
+    The lane is a fake, but nothing else is: a real three-chunk clip is cut by
+    the real ffmpeg, the real manifest is written between chunks, and the real
+    assembler joins it. The fake stands only where a GPU would.
+    """
+
+    def setUp(self):
+        self.app = load_app()
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.app.RESTORE_ROOT = root / 'restore'
+        self.app.RESTORE_UPLOAD_ROOT = self.app.RESTORE_ROOT / 'uploads'
+        self.app.COMFY_INPUT_DIR = root / 'input'
+        self.app.COMFY_OUTPUT_DIR = root / 'output'
+        self.app.OUT_DIR = root / 'out'
+        self.app.HISTORY_FILE = root / 'history.jsonl'
+        for directory in (self.app.RESTORE_ROOT, self.app.COMFY_INPUT_DIR,
+                          self.app.COMFY_OUTPUT_DIR, self.app.OUT_DIR):
+            directory.mkdir(parents=True, exist_ok=True)
+        self.root = root
+        self.rendered = []
+        self.fail_chunk = None
+        self.during_chunk = None
+        # Nothing here may touch a machine or the vault.
+        self.app._resolve_restore_lane = lambda plan, options: (
+            'default', 'http://lane.invalid', {
+                'available': True, 'devices': ['cuda:0'], 'models': [], 'attention_modes': ['sdpa'],
+            })
+        self.app.comfy_lane_is_remote = lambda name: False
+        self.app._free_restore_lane = lambda *args, **kwargs: None
+        self.app.encrypt_outputs = lambda paths, job_id=None: [Path(p).name for p in paths]
+        self.app._restore_chunk_on_lane = self._fake_lane
+
+    # --- the fake machine -----------------------------------------------------
+
+    def _fake_lane(self, project, chunk, *, source_name, lane_name, lane_url, capability, job_id):
+        """What a local lane hands back: plaintext PNG frames, in batch order.
+
+        Produced from the chunk the runner really cut, so a plan that asked for
+        the wrong frames shows up as the wrong frame count rather than passing.
+        """
+        index = int(chunk['index'])
+        self.rendered.append(index)
+        if self.fail_chunk is not None and index == self.fail_chunk:
+            raise RuntimeError('CUDA error: out of memory')
+        if self.during_chunk is not None:
+            self.during_chunk(index)
+        staged = self.app.COMFY_INPUT_DIR / source_name
+        frames_dir = self.root / f'frames-{index:04d}'
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ['ffmpeg', '-v', 'error', '-y', '-i', str(staged), str(frames_dir / 'f-%04d.png')],
+            check=True, timeout=180,
+        )
+        return {'frames': sorted(frames_dir.glob('f-*.png')), 'sealed': False}
+
+    # --- the source -----------------------------------------------------------
+
+    def _source(self, *, seconds=3, rate=10, audio=True):
+        path = self.root / 'source.mp4'
+        args = ['ffmpeg', '-v', 'error', '-y',
+                '-f', 'lavfi', '-i', f'testsrc=size=64x64:rate={rate}:duration={seconds}']
+        if audio:
+            args += ['-f', 'lavfi', '-i', f'sine=frequency=440:duration={seconds}',
+                     '-c:a', 'aac', '-shortest']
+        args += ['-pix_fmt', 'yuv420p', str(path)]
+        subprocess.run(args, check=True, timeout=180)
+        return path
+
+    def _options(self, **extra):
+        # Three chunks of ten frames: one batch per chunk, no lead-in and no
+        # dissolve, so the assembly is a plain join and a wrong ORDER shows up
+        # as wrong pixels rather than a wrong seam.
+        options = {
+            'project_id': 'rtest0001',
+            'batch_size': 5,
+            'chunk_seconds': 1,
+            'context_frames': 0,
+            'seam_frames': 0,
+            'resolution': 128,
+            'cache_models': False,
+        }
+        options.update(extra)
+        return options
+
+    def _project(self, project_id='rtest0001'):
+        return self.app.video_restore.read_project(
+            self.app.restore_manifest_path(project_id))
+
+    def _run(self, source, job_id='job00000001', **extra):
+        staged = self.root / 'staged.mp4'
+        shutil.copyfile(source, staged)
+        self.app.run_video_restore(job_id, staged, self._options(**extra))
+        with self.app.jobs_lock:
+            return dict(self.app.jobs[job_id])
+
+    # --- the tests ------------------------------------------------------------
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_the_chunks_run_in_order_and_every_one_is_checkpointed(self):
+        source = self._source()
+        record = self._run(source)
+        self.assertEqual(record['status'], 'success', record.get('error'))
+        # In order, once each. A chunk loop that reorders under a resume writes
+        # a master whose shots are shuffled, and nothing downstream would say so.
+        self.assertEqual(self.rendered, [0, 1, 2])
+        project = self._project()
+        self.assertEqual(project['status'], 'complete')
+        self.assertEqual(sorted(project['chunks']), ['0', '1', '2'])
+        self.assertEqual(self.app.video_restore.first_unfinished_chunk(project), -1)
+        for entry in project['chunks'].values():
+            self.assertEqual(entry['frames'], 10)
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_a_cancel_mid_loop_stops_before_the_next_chunk_and_stays_resumable(self):
+        source = self._source()
+        # Asked for while chunk 0 is rendering — the flag is read at the top of
+        # each chunk, so the stop must land BEFORE chunk 1 is cut.
+        self.during_chunk = lambda index: (
+            self.app.request_restore_cancel('rtest0001') if index == 0 else None)
+        record = self._run(source)
+        self.assertEqual(record['status'], 'cancelled')
+        self.assertEqual(self.rendered, [0])
+        project = self._project()
+        self.assertEqual(project['status'], 'stopped')
+        # The whole reason a stop is offered rather than a delete: the finished
+        # chunk is on disk and the resume knows which one is next.
+        self.assertEqual(sorted(project['chunks']), ['0'])
+        self.assertEqual(self.app.video_restore.first_unfinished_chunk(project), 1)
+        self.assertTrue((self.app.restore_project_dir('rtest0001') / 'source.mp4').is_file())
+
+        # And a resume picks up exactly there, without re-rendering chunk 0.
+        self.during_chunk = None
+        self.rendered = []
+        self.app.run_video_restore('job00000002', None, self._options())
+        self.assertEqual(self.rendered, [1, 2])
+        self.assertEqual(self._project()['status'], 'complete')
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_one_failing_chunk_leaves_the_chunks_before_it_alone(self):
+        source = self._source()
+        self.fail_chunk = 1
+        record = self._run(source)
+        self.assertEqual(record['status'], 'error')
+        project = self._project()
+        self.assertEqual(project['status'], 'error')
+        # Chunk 0 finished and is kept; chunk 1 is not recorded, so a resume
+        # renders it again rather than assembling around a hole.
+        self.assertEqual(sorted(project['chunks']), ['0'])
+        self.assertEqual(self.app.video_restore.first_unfinished_chunk(project), 1)
+        # The machine's own words survive on the project — the studio reads them
+        # through describeRestoreFailure rather than showing them raw.
+        self.assertIn('out of memory', project['error'])
+        # Nothing half-written was left behind for a resume to mistake for work.
+        chunks_dir = self.app.restore_project_dir('rtest0001') / 'chunks'
+        self.assertEqual(sorted(p.name for p in chunks_dir.glob('out-*')), ['out-0000.mkv'])
+        # And the staged cut for the chunk that failed is not left in the input
+        # directory for the private-input sweeper to find hours later.
+        self.assertEqual(list(self.app.COMFY_INPUT_DIR.glob('restore-*')), [])
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_the_assembled_master_is_the_whole_clip_with_its_own_soundtrack(self):
+        source = self._source()
+        record = self._run(source)
+        self.assertEqual(record['status'], 'success', record.get('error'))
+        master = self.app.COMFY_OUTPUT_DIR / 'restore_rtest0001_master.mp4'
+        self.assertTrue(master.is_file())
+        probed = self.app.probe_restore_source(master)
+        # Every source frame, once: the dissolve replaces frames rather than
+        # inserting them, so a master longer than its source is a bug.
+        self.assertEqual(probed['frames'], 30)
+        # Restoration is a picture job — the soundtrack is remuxed from the
+        # ORIGINAL, and losing it is the kind of thing nobody notices until the
+        # render is finished and the wait is spent.
+        self.assertTrue(probed['has_audio'])
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe required')
+    def test_a_silent_source_produces_a_silent_master_rather_than_failing(self):
+        source = self._source(audio=False)
+        record = self._run(source)
+        self.assertEqual(record['status'], 'success', record.get('error'))
+        probed = self.app.probe_restore_source(
+            self.app.COMFY_OUTPUT_DIR / 'restore_rtest0001_master.mp4')
+        self.assertFalse(probed['has_audio'])
+        self.assertEqual(probed['frames'], 30)
+
+
+class RestoreSourceStreamingTests(unittest.TestCase):
+    """The upload that replaced three copies of the film with none.
+
+    A restore source is routinely hundreds of megabytes. It used to arrive as
+    base64 inside a JSON body — a copy in the browser a third larger than the
+    file, a second in the control API, a third on the way here — with a ceiling
+    the browser hit before the gateway did. These are the promises of the route
+    that replaced it.
+    """
+
+    STAGED_ID = 'uaaaaaaaa'
+
+    def setUp(self):
+        self.app = load_app()
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app.RESTORE_ROOT = Path(self.tmp.name) / 'restore'
+        self.app.RESTORE_UPLOAD_ROOT = self.app.RESTORE_ROOT / 'uploads'
+
+    def _stream(self, payload, *, declared=None, max_bytes=None):
+        """Drive the handler's streaming reader over a fake socket."""
+        handler = self.app.Handler.__new__(self.app.Handler)
+        handler.headers = {'Content-Length': str(len(payload) if declared is None else declared)}
+        handler.rfile = io.BytesIO(payload)
+        target = self.app.restore_upload_path(self.STAGED_ID)
+        written = handler.stream_body_to_file(
+            target, self.app.RESTORE_MAX_SOURCE_BYTES if max_bytes is None else max_bytes)
+        return target, written
+
+    def _staged_files(self):
+        root = self.app.RESTORE_UPLOAD_ROOT
+        return sorted(p.name for p in root.glob('*')) if root.exists() else []
+
+    def test_the_bytes_that_arrive_are_the_bytes_on_disk(self):
+        payload = bytes(range(256)) * 40_000
+        target, written = self._stream(payload)
+        self.assertEqual(written, len(payload))
+        self.assertEqual(target.read_bytes(), payload)
+        # And the staged id resolves back to exactly that file.
+        self.assertEqual(self.app._claim_restore_source({'source_id': self.STAGED_ID}), target)
+
+    def test_a_clip_past_the_ceiling_is_refused_with_both_numbers(self):
+        with self.assertRaises(self.app.RestoreTooLarge) as caught:
+            self._stream(b'x' * 4096, max_bytes=1024)
+        said = str(caught.exception)
+        self.assertIn('takes up to', said)
+        # The advice is in the same sentence as the problem.
+        self.assertIn('trim it', said.lower())
+        # Nothing was written, not even a part file.
+        self.assertEqual(self._staged_files(), [])
+
+    def test_a_truncated_upload_leaves_nothing_a_start_could_claim(self):
+        with self.assertRaises(ValueError):
+            self._stream(b'x' * 100, declared=500)
+        # A half-file renamed into place would be a source the runner probes,
+        # plans on, and cuts the wrong chunks out of.
+        self.assertEqual(self._staged_files(), [])
+        with self.assertRaises(ValueError):
+            self.app._claim_restore_source({'source_id': self.STAGED_ID})
+
+    def test_an_expired_upload_says_to_pick_the_clip_again(self):
+        with self.assertRaises(ValueError) as caught:
+            self.app._claim_restore_source({'source_id': 'unothinghere'})
+        self.assertIn('pick the clip again', str(caught.exception))
+
+    def test_an_upload_id_cannot_reach_outside_the_staging_directory(self):
+        root = self.app.RESTORE_UPLOAD_ROOT.resolve()
+        for bad in ('../../etc/passwd', '/etc/passwd', 'a/b/c'):
+            resolved = self.app.restore_upload_path(bad)
+            self.assertEqual(resolved.parent, root, bad)
+        # An id nobody issued is not a path at all.
+        with self.assertRaises(ValueError):
+            self.app.restore_upload_path('')
+
+    def test_unclaimed_uploads_are_reaped_on_their_own_clock(self):
+        target, _ = self._stream(b'x' * 32)
+        self.assertEqual(self.app.reap_restore_uploads(ttl_hours=24), 0)
+        stale = time.time() - 200_000
+        os.utime(target, (stale, stale))
+        self.assertEqual(self.app.reap_restore_uploads(ttl_hours=24), 1)
+        self.assertFalse(target.exists())
+
+    def test_a_project_cannot_be_named_after_the_upload_directory(self):
+        # Its delete route rmtrees the project directory; a project called
+        # "uploads" would take everybody's staged sources with it.
+        with self.assertRaises(ValueError):
+            self.app.restore_project_dir('uploads')
+
+    def test_the_ceiling_and_the_retention_are_advertised_not_only_logged(self):
+        retention = self.app.restore_retention()
+        self.assertEqual(retention['max_source_bytes'], self.app.RESTORE_MAX_SOURCE_BYTES)
+        self.assertGreater(retention['project_ttl_days'], 0)
+        self.assertGreater(retention['upload_ttl_hours'], 0)
+
+
+class RestoreReaperTests(unittest.TestCase):
+    """A project that ages out used to vanish with nothing to read."""
+
+    def setUp(self):
+        self.app = load_app()
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.app.RESTORE_ROOT = root / 'restore'
+        self.app.RESTORE_UPLOAD_ROOT = self.app.RESTORE_ROOT / 'uploads'
+        self.app.HISTORY_FILE = root / 'history.jsonl'
+
+    def _project(self, project_id, status='complete', age_days=0):
+        directory = self.app.restore_project_dir(project_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        manifest = self.app.restore_manifest_path(project_id)
+        self.app.video_restore.write_project(manifest, {
+            'version': 1, 'id': project_id, 'status': status,
+            'plan': {'chunks': []}, 'chunks': {}, 'options': {},
+        })
+        if age_days:
+            when = time.time() - age_days * 86400
+            os.utime(manifest, (when, when))
+        return directory
+
+    def test_an_aged_project_leaves_a_history_line_saying_what_happened(self):
+        directory = self._project('rold00001', age_days=45)
+        self.assertEqual(self.app.reap_restore_projects(ttl_days=30), 1)
+        self.assertFalse(directory.exists())
+        recs = self.app.load_history(10)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]['kind'], 'restore_project_reaped')
+        self.assertEqual(recs[0]['project_id'], 'rold00001')
+        # It says the rule and where the film went — not "gone".
+        self.assertIn('30 days', recs[0]['error'])
+        self.assertIn('History', recs[0]['error'])
+
+    def test_a_running_project_is_never_reaped_however_old(self):
+        directory = self._project('rrun00001', status='running', age_days=400)
+        self.assertEqual(self.app.reap_restore_projects(ttl_days=30), 0)
+        self.assertTrue(directory.exists())

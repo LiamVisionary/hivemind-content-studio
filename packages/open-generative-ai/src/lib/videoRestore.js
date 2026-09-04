@@ -266,6 +266,144 @@ export function finishRequestBody(finish = {}) {
   return body;
 }
 
+/**
+ * What is switched on inside the fold, for the closed header.
+ *
+ * A collapsed section that hides an active control turns a setting into
+ * invisible state, which is the one way this tiering could make things worse.
+ * Only values that DIFFER from RESTORE_DEFAULTS appear.
+ */
+export function advancedSummary(settings = {}) {
+  const at = (key) => settings[key] ?? RESTORE_DEFAULTS[key];
+  const colour = COLOR_CORRECTIONS.find((item) => item.id === at('colorCorrection'));
+  return [
+    Number(at('maxResolution')) > 0 ? `cap ${at('maxResolution')}px` : '',
+    at('batchSize') !== RESTORE_DEFAULTS.batchSize ? `batch ${at('batchSize')}` : '',
+    at('chunkSeconds') !== RESTORE_DEFAULTS.chunkSeconds ? `${at('chunkSeconds')}s chunks` : '',
+    at('contextFrames') !== RESTORE_DEFAULTS.contextFrames ? `lead-in ${at('contextFrames')}` : '',
+    at('seamFrames') !== RESTORE_DEFAULTS.seamFrames
+      ? (Number(at('seamFrames')) ? `seam ${at('seamFrames')}` : 'hard cuts') : '',
+    at('colorCorrection') !== RESTORE_DEFAULTS.colorCorrection ? (colour?.label || at('colorCorrection')) : '',
+    Number(at('seed')) !== RESTORE_DEFAULTS.seed ? `seed ${at('seed')}` : '',
+    at('tiledVae') ? 'tiled VAE' : '',
+  ].filter(Boolean).join(' · ');
+}
+
+// --- what to say when a render stops -----------------------------------------
+
+// The classes a restore actually fails in. Every one of them was, until now,
+// shown to the owner as whatever `str(exc)` happened to be — a CUDA allocator
+// dump, an ffmpeg stderr tail, a Python exception name — on the project card
+// and in every toast. The owner's rule is that raw backend text is evidence,
+// never the sentence.
+//
+// The same OOM test the media gateway and lib/describeFailure.js use, so the
+// three ends agree on what "the card ran out" looks like.
+const RESTORE_OOM = /out of memory|outofmemory|cuda error: out of memory|mps backend out of memory|allocation on device|cuda_error_out_of_memory/i;
+const RESTORE_DOWNLOAD = /(download|fetch|huggingface|hf_hub|safetensors).{0,60}(failed|error|timed out)|could not download|failed to download|no such file.*\.safetensors/i;
+const RESTORE_UNREACHABLE = /failed to fetch|load failed|networkerror|connection refused|econnrefused|errno 61|urlopen error|not answering|did not answer|is not listening|timed out — the lane|may be stuck/i;
+const RESTORE_CANCELLED = /^stopped$|\bstopped\.|was cancelled|cancelled by/i;
+const RESTORE_RENTAL_GONE = /rental|rented machine|lane '[^']+' is (?:gone|unknown)|no longer attached|lane is not attached|machine is no longer/i;
+const RESTORE_SOURCE_GONE = /source clip is gone|has no staged source|upload is no longer/i;
+// The reaper, seen from the studio. A project that aged out is not a render
+// that failed, and the sentence for it is the retention rule rather than
+// "resume" — there is nothing left to resume from.
+const RESTORE_PROJECT_GONE = /no such restoration project|lost track of/i;
+const RESTORE_SPEND = /spent the \$|spending limit|balance|top up/i;
+const RESTORE_MODEL_MISSING = /(model|checkpoint).{0,40}(not installed|is missing|was not found)|seedvr2 nodes/i;
+
+/**
+ * → `{ title, action, detail }` for a render that stopped.
+ *
+ * `title` is what happened in one sentence, `action` is what to change (empty
+ * when there is genuinely nothing to change), and `detail` is the raw text the
+ * caller keeps behind a Details disclosure. It mirrors lib/muapiErrors.js:
+ * pure, no React, no toast, so every branch is testable in node.
+ *
+ * Every branch that names an action names one the Restore studio can actually
+ * perform — the panel's own dials, or the Resume button that sits beside this
+ * card — because an action offered by a screen that cannot do it is the same
+ * dead end as no action at all.
+ */
+export function describeRestoreFailure(error, zhLang = false) {
+  const raw = String(error?.message || error?.error || error || '').trim();
+  const say = (title, action) => ({ title, action, detail: raw === title ? '' : raw });
+  if (!raw) {
+    return say(
+      zhLang ? '这次修复停止了。' : 'That render stopped.',
+      zhLang ? '继续上一次未完成的分块。' : 'Resume picks up at the first unfinished chunk.',
+    );
+  }
+  if (RESTORE_CANCELLED.test(raw)) {
+    return say(
+      zhLang ? '已停止 — 已完成的分块都保留着。' : 'Stopped. Every finished chunk is still here.',
+      zhLang ? '按继续，从下一个分块接着渲染。' : 'Resume continues from the next one — nothing already rendered is repeated.',
+    );
+  }
+  if (RESTORE_OOM.test(raw)) {
+    return say(
+      zhLang ? '这台机器的显存不够跑这个分块。' : 'That machine ran out of memory on this chunk.',
+      zhLang
+        ? '把"时间批次"调小，或降低输出分辨率，然后按继续。'
+        : 'Lower the temporal batch or the output size in Advanced, then resume — the finished chunks are kept.',
+    );
+  }
+  if (RESTORE_PROJECT_GONE.test(raw)) {
+    return say(
+      zhLang ? '这个项目已经不在本机了。' : 'That project is no longer on this machine.',
+      zhLang
+        ? '中间文件到期后会被清理 — 成片仍在历史记录里。'
+        : 'Working files are cleared once they age out; any master it produced is still in History.',
+    );
+  }
+  if (RESTORE_SOURCE_GONE.test(raw)) {
+    return say(
+      zhLang ? '这个项目的源片已经不在本机了。' : "This project's source clip is no longer on this machine.",
+      zhLang ? '重新载入原片再继续。' : 'Load the original clip again and start it — the finished chunks are still reused.',
+    );
+  }
+  if (RESTORE_DOWNLOAD.test(raw)) {
+    return say(
+      zhLang ? '这台机器没能下载到模型权重。' : 'That machine could not download the model weights.',
+      zhLang ? '检查网络后重试，或换一个已经装好的模型。' : 'Check the connection and resume, or pick a model this machine already has.',
+    );
+  }
+  if (RESTORE_MODEL_MISSING.test(raw)) {
+    return say(
+      zhLang ? '这台机器没有这个修复模型。' : 'That machine does not have this restore model.',
+      zhLang ? '换一个模型，或换一台机器。' : 'Pick another model, or another machine, and resume.',
+    );
+  }
+  if (RESTORE_SPEND.test(raw)) {
+    return say(
+      zhLang ? '这次渲染已经用完你批准的金额。' : 'This render reached the amount you approved.',
+      zhLang ? '按继续会按当天价格重新报价并批准。' : 'Resume quotes the rest at today’s price and asks you to approve it.',
+    );
+  }
+  if (RESTORE_RENTAL_GONE.test(raw)) {
+    return say(
+      zhLang ? '那台租用的机器已经不在了。' : 'The rented machine is no longer there.',
+      zhLang ? '在"机器"页重新连接，或改用本机继续。' : 'Attach it again on the Machines page, or switch the machine and resume.',
+    );
+  }
+  if (RESTORE_UNREACHABLE.test(raw)) {
+    return say(
+      zhLang ? '那台机器没有响应。' : 'That machine stopped answering.',
+      zhLang ? '确认它还在运行后再继续。' : 'Check it is still running, then resume — the finished chunks are kept.',
+    );
+  }
+  return say(
+    zhLang ? '这次修复停止了。' : 'That render stopped.',
+    zhLang ? '继续会从第一个未完成的分块接着渲染。' : 'Resume continues from the first unfinished chunk; the details below say what the machine reported.',
+  );
+}
+
+/** The same reading where there is only room for one line — a toast, a row. */
+export function restoreFailureLine(error, zhLang = false) {
+  const read = describeRestoreFailure(error, zhLang);
+  return read.action ? `${read.title} ${read.action}` : read.title;
+}
+
 // --- what to say about a machine ---------------------------------------------
 
 /**
@@ -382,17 +520,105 @@ export async function measureClip(file) {
   };
 }
 
-/** A local file as the base64 the gateway routes take. */
-export async function fileToBase64(file) {
-  const buffer = new Uint8Array(await file.arrayBuffer());
-  let binary = '';
-  // Chunked: a single String.fromCharCode over a few hundred megabytes blows
-  // the argument limit long before it blows memory.
-  const STEP = 0x8000;
-  for (let index = 0; index < buffer.length; index += STEP) {
-    binary += String.fromCharCode.apply(null, buffer.subarray(index, index + STEP));
-  }
-  return btoa(binary);
+// --- getting the clip to the machine ------------------------------------------
+
+// What the gateway will take when it has not said. A restore source is the one
+// upload in this app that is routinely hundreds of megabytes, and the capability
+// payload carries the real number (`max_source_bytes`) — this is only the figure
+// to reason with while that is still in flight.
+export const DEFAULT_MAX_SOURCE_BYTES = 4 * 1024 * 1024 * 1024;
+
+export function maxSourceBytes(capabilities) {
+  const advertised = Number(capabilities?.max_source_bytes
+    ?? capabilities?.retention?.max_source_bytes);
+  return Number.isFinite(advertised) && advertised > 0 ? advertised : DEFAULT_MAX_SOURCE_BYTES;
+}
+
+export function describeBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+  return `${Math.round(value / (1024 * 1024))}MB`;
+}
+
+/**
+ * Is this clip past the machine's ceiling — said BEFORE the upload, with the
+ * fix in the same sentence.
+ *
+ * The old transport discovered this after building a base64 string of the whole
+ * file, which is to say after the wait, and then only as "could not be started".
+ * Returns '' when the file fits.
+ */
+export function sourceTooLargeAdvice(file, capabilities, zhLang = false) {
+  const size = Number(file?.size) || 0;
+  const ceiling = maxSourceBytes(capabilities);
+  if (!size || size <= ceiling) return '';
+  return zhLang
+    ? `这个文件 ${describeBytes(size)}，超过本机上限 ${describeBytes(ceiling)} — 请先裁短，或分两段修复。`
+    : `That clip is ${describeBytes(size)} and this machine takes up to ${describeBytes(ceiling)}. `
+      + 'Trim it, or restore it in two halves.';
+}
+
+/** How long the machine keeps a project's working files, in one line. */
+export function describeRetention(capabilities, zhLang = false) {
+  const days = Number(capabilities?.retention?.project_ttl_days) || 0;
+  if (days <= 0) return '';
+  return zhLang
+    ? `中间文件保留 ${days} 天，之后会被清理（成片仍在历史记录里）。`
+    : `Intermediates are kept ${days} days, then cleared — any finished master stays in History.`;
+}
+
+/**
+ * Stream a clip up and get back the id the start request references.
+ *
+ * XMLHttpRequest rather than fetch, for one reason: fetch cannot report upload
+ * progress, and this is a several-minute upload of a file the owner is watching.
+ * The body is the File itself — no base64, no JSON, no copy — so the browser
+ * streams it from disk and this tab's memory stays flat where it used to build
+ * a string a third larger than the film and then fail outright past a few
+ * hundred megabytes.
+ */
+export function uploadRestoreSource(file, { onProgress = null, signal = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', '/api/restore/upload', true);
+    request.withCredentials = true;
+    request.setRequestHeader('Content-Type', 'application/octet-stream');
+    request.upload.onprogress = (event) => {
+      if (onProgress && event.lengthComputable && event.total > 0) {
+        onProgress(Math.min(1, event.loaded / event.total));
+      }
+    };
+    const fail = (message, status = 0, remedy = '') => {
+      const error = new Error(message);
+      error.status = status;
+      error.remedy = remedy;
+      reject(error);
+    };
+    request.onload = () => {
+      let data = {};
+      try { data = JSON.parse(request.responseText || '{}'); } catch { data = {}; }
+      const detail = data?.detail;
+      if (request.status >= 200 && request.status < 300 && data.source_id) {
+        if (onProgress) onProgress(1);
+        resolve(data);
+        return;
+      }
+      fail(
+        String(detail?.error || detail?.message || detail || data?.error
+          || 'That clip could not be uploaded.'),
+        request.status,
+        String(detail?.remedy || data?.remedy || ''),
+      );
+    };
+    request.onerror = () => fail('The upload stopped before it finished — check the connection and try again.');
+    request.ontimeout = () => fail('The upload timed out before it finished.');
+    request.onabort = () => fail('That upload was cancelled.');
+    if (signal) {
+      if (signal.aborted) { request.abort(); return; }
+      signal.addEventListener('abort', () => request.abort(), { once: true });
+    }
+    request.send(file);
+  });
 }
 
 // --- what a rented render costs ----------------------------------------------
@@ -536,12 +762,16 @@ export async function fetchRestorePlan({
   }
 }
 
-export async function startRestore({ videoBase64 = '', ...rest }) {
+/** Start (or resume) a render against a source already streamed up. */
+export async function startRestore({ sourceId = '', ...rest }) {
   return readJson(await fetch('/api/restore', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...restoreRequestBody(rest.settings || {}, rest), ...(videoBase64 ? { video_base64: videoBase64 } : {}) }),
+    body: JSON.stringify({
+      ...restoreRequestBody(rest.settings || {}, rest),
+      ...(sourceId ? { source_id: sourceId } : {}),
+    }),
   }));
 }
 
@@ -575,8 +805,14 @@ export async function deleteRestoreProject(projectId) {
   }));
 }
 
-/** Re-finish from the saved chunks — or, for a rented project, from the join. */
-export async function finishRestore(projectId, finish, videoBase64 = '') {
+/**
+ * Re-finish from the saved chunks — or, for a rented project, from the join.
+ *
+ * `sourceId` names a clip this tab already streamed up (the master it joined
+ * out of the sealed chunks). Same transport as the source, for the same reason:
+ * a joined 4K master is the biggest file in the whole feature.
+ */
+export async function finishRestore(projectId, finish, sourceId = '') {
   return readJson(await fetch('/api/restore/finish', {
     method: 'POST',
     credentials: 'same-origin',
@@ -584,7 +820,7 @@ export async function finishRestore(projectId, finish, videoBase64 = '') {
     body: JSON.stringify({
       project_id: projectId,
       finish: finishRequestBody(finish),
-      ...(videoBase64 ? { video_base64: videoBase64 } : {}),
+      ...(sourceId ? { source_id: sourceId } : {}),
     }),
   }));
 }

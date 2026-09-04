@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,6 +43,94 @@ from .settings import settings
 # background job on the gateway, so no request here waits on diffusion.
 UPLOAD_TIMEOUT_SECONDS = 600.0
 READ_TIMEOUT_SECONDS = 30.0
+# A gigabyte source crossing this process must never exist in it. The request
+# body is handed to the gateway one block at a time through StreamedBody, and
+# this is how many blocks may be in flight before the reader has to wait for
+# the writer — a few hundred kilobytes of ASGI chunks, not a film.
+STREAM_QUEUE_DEPTH = 8
+
+
+class StreamedBody:
+    """A read-only body one thread fills while another sends it.
+
+    urllib will read a `data` object that has `.read(size)` in blocks, provided
+    the caller sets Content-Length itself (otherwise it falls back to chunked
+    transfer-encoding, which the gateway's plain HTTP server does not decode).
+    That is the whole trick: the async side feeds ASGI chunks in, the blocking
+    urllib call in a worker thread pulls them out, and no copy of the clip is
+    ever assembled anywhere.
+
+    `stop()` is what keeps a failed upload from hanging: when the sender dies
+    (a 413 from the gateway, a dropped socket) the feeder's next `feed` raises
+    instead of blocking forever on a queue nobody is draining.
+    """
+
+    class Stopped(RuntimeError):
+        """The far end stopped reading. The real reason is on the send call."""
+
+    def __init__(self, depth: int = STREAM_QUEUE_DEPTH):
+        self._queue: queue.Queue = queue.Queue(maxsize=max(1, depth))
+        self._buffer = b""
+        self._finished = False
+        self._stopped = False
+
+    # --- the feeding side (the request handler) ---
+    def offer(self, block: bytes) -> bool:
+        """Hand over a block without ever waiting. False when the queue is full.
+
+        The caller is an event loop and the queue is almost never full, so this
+        is the path a whole upload normally takes — no thread hop per 64KB ASGI
+        chunk. Only backpressure sends the caller to `feed` in a worker.
+        """
+        if not block:
+            return True
+        if self._stopped:
+            raise StreamedBody.Stopped("the upload was not accepted")
+        try:
+            self._queue.put_nowait(block)
+            return True
+        except queue.Full:
+            return False
+
+    def feed(self, block: bytes) -> None:
+        if not block:
+            return
+        while True:
+            if self._stopped:
+                raise StreamedBody.Stopped("the upload was not accepted")
+            try:
+                self._queue.put(block, timeout=0.25)
+                return
+            except queue.Full:
+                continue
+
+    def finish(self) -> None:
+        try:
+            self._queue.put(None, timeout=5.0)
+        except queue.Full:
+            self._stopped = True
+
+    def stop(self) -> None:
+        self._stopped = True
+        # Unblock a reader parked on an empty queue.
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+
+    # --- the reading side (urllib, in a worker thread) ---
+    def read(self, size: int = -1) -> bytes:
+        while not self._finished and (size < 0 or len(self._buffer) < size):
+            block = self._queue.get()
+            if block is None:
+                self._finished = True
+                break
+            self._buffer += block
+        if size < 0 or size >= len(self._buffer):
+            out, self._buffer = self._buffer, b""
+        else:
+            out, self._buffer = self._buffer[:size], self._buffer[size:]
+        return out
 
 
 class RestoreError(RuntimeError):
@@ -112,6 +201,54 @@ class RestoreGatewayClient:
                 detail or "The restore service refused that request.",
                 remedy="pick-machine" if operational else "",
                 status_code=exc.code if exc.code in (400, 404, 409) else 502,
+            ) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise RestoreError(
+                "The media gateway is not answering.",
+                remedy="start-stack", status_code=503,
+            ) from exc
+
+    def upload_source(
+        self,
+        body: Any,
+        length: int,
+        *,
+        path: str = "/api/restore/upload",
+        timeout: float = UPLOAD_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
+        """Stream a source clip to the gateway and return its staged id.
+
+        `body` is anything with `.read(size)` — a StreamedBody fed by the
+        request handler, or an open file. Content-Length is set from `length`
+        because urllib would otherwise use chunked transfer-encoding, which the
+        gateway's http.server does not decode.
+        """
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self._token()}",
+                "Accept": "application/json",
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(int(length)),
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8") or "{}")
+                detail = str(payload.get("error") or "")
+            except Exception:
+                detail = ""
+            # A clip past the ceiling is the one refusal here worth its own
+            # words: it names both numbers and what to do, and it must reach
+            # the studio as 413 so the picker can say it beside the file.
+            raise RestoreError(
+                detail or "The restore service would not take that clip.",
+                status_code=exc.code if exc.code in (400, 404, 409, 413, 507) else 502,
             ) from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RestoreError(
