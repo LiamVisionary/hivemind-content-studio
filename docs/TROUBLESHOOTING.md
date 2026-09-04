@@ -50,14 +50,14 @@ is not, so saving over it will ask first.
 
 ## A model will not fit
 
-**You see, on a model row:** *"Needs 14.2 GB — turn on "Unload others first" to
-make room."*
+**You see, on a model row:** *"Needs … — turn on "Unload others first" to make
+room."*, with the model's own size where the ellipsis is.
 
-**Fix:** exactly that. The setting frees the other loaded models before it loads
-this one.
+**Fix:** exactly that. **Unload others first** is the toggle above the model
+list; it frees the other loaded models before it loads this one.
 
-**You see instead:** *"Needs 41.0 GB, which is more than this machine can free
-right now."*
+**You see instead:** *"Needs …, which is more than this machine can free right
+now."*
 
 **Fix:** the model is bigger than this Mac. Pick a smaller one, or change **Runs
 on** to **HivemindOS credits** or **Your accounts**, where the machine is
@@ -148,8 +148,9 @@ account** instead and paste your own HivemindOS account key — "install
 HivemindOS first" is not an answer for someone who does not have it.
 
 The **Runs on** picker shows the balance before you press anything: the
-HivemindOS group's header reads either *"… left"*, *"No credits added yet"* or
-*"Account not connected"*.
+HivemindOS group's header reads the balance with the word *left* after it, or —
+when there is no balance to read — *"No credits added yet"* if the HivemindOS
+app on this machine is answering, and *"Account not connected"* if it is not.
 
 ### Your own provider accounts
 
@@ -163,8 +164,8 @@ generated key value from MUAPI."* The key is saved to this machine's shared
 store, so every app here can use it and it never stays in the browser.
 
 **You see:** *"MUAPI refused the request: …"* (a 4xx), or *"MUAPI request failed
-(5xx) — try again in a moment"*, or *"MUAPI could not be reached — check the
-connection and try again"*.
+(…) — try again in a moment"* with the 5xx status in the brackets, or *"MUAPI
+could not be reached — check the connection and try again"*.
 
 The first is the provider disagreeing with the request — the sentence after the
 colon is theirs. The other two are transient; try again.
@@ -214,7 +215,7 @@ running**, or a studio says *"The studio is not answering"* / *"The studio is
 not running"*, and **Generate** is disabled.
 
 **Fix:** open the chip. Its menu carries the sentence and the exact command to
-restart, together, and a **Retry now** button for when it has already come back
+restart, together, and a **Try again** button for when it has already come back
 on its own. In the packaged desktop app, quitting and reopening does the same
 thing.
 
