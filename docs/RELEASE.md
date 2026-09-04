@@ -39,7 +39,7 @@ inherits one.
 |---|---|---|---|
 | Control API (`content-studio-api`, `control_api.py`) | bundled Python | 8765 (`CONTENT_STUDIO_CONTROL_PORT`) | `GET /api/runtime` |
 | Media gateway (`packages/media-gateway/app.py`) | bundled Python | 8787 | `GET /health` |
-| Gateway frontend / Canvas (`packages/media-gateway/server.js`) | bundled Node | 8788 | `GET /` |
+| Gateway frontend / Canvas (`packages/media-gateway/server.js`) | bundled Node | 8788 | `GET /healthz` |
 | Local-inference bridge (`packages/open-generative-ai/hosted-server.js`) | bundled Node | 8794 (`OGA_PORT`) | `GET /health` |
 | Media Studio MCP (`packages/media-gateway/bin/media-studio-mcp.mjs --http`) | bundled Node | 8796 (`MEDIA_STUDIO_MCP_PORT`) | `GET /mcp` |
 
@@ -56,7 +56,8 @@ inherits one.
   launched by the user or by an explicit action in the app. Same rule: attach,
   report, never reap.
 * **Rented and hosted lanes.** Already remote; nothing to supervise.
-* **Tailscale HTTPS proxy** (8789). Developer/fleet only; not in the bundle.
+* **The tailnet URL.** Nothing to supervise: `tailscale serve` holds it, not a
+  process of ours. See §2.4.
 
 Not shipped at all: the Streamlit WebUI (`webui/Main.py`), the MoneyPrinterTurbo
 HTTP API (`main.py`, `app/router.py`), and the Redis task backend. The stack has
@@ -127,6 +128,46 @@ only), and hardened-runtime + notarization carry the security story instead.
 The entitlements needed are `com.apple.security.cs.allow-jit` (the webview),
 `allow-unsigned-executable-memory` and `disable-library-validation` (the bundled
 Python loading native wheels — torch, cryptography, faster-whisper).
+
+### 2.4 Every port binds loopback, and remote access is a switch
+
+The whole process tree in §1 binds `127.0.0.1`. Nothing is published on the
+user's tailnet at launch.
+
+That is a change, not a restatement. The developer stack used to bind a
+hand-rolled Node HTTPS proxy to the Tailscale address at every boot, and when
+`tailscale cert` was unavailable it generated a **self-signed** certificate with
+openssl so the proxy had something to present. What that proxy fronted was the
+Canvas port, which authenticated nothing of its own while attaching the
+gateway's capability token to everything it forwarded — so every device on the
+tailnet could queue arbitrary ComfyUI graphs (custom nodes run arbitrary code)
+and read the generated library. And a self-signed certificate is a full-screen
+browser warning with no in-app fix, which is the one thing this product does not
+ship.
+
+Two pieces replace it:
+
+* **The Canvas port authenticates.** `packages/media-gateway/lib/canvas-gate.js`
+  gates the whole 8788 dispatch and its WebSocket upgrade on either the gateway
+  capability token (agents, the MCP, `media_studio.py`) or the studio account
+  cookie, checked against the control API's `/api/owner/session` and cached for
+  a few seconds. An unauthenticated navigation is redirected to the studio's
+  sign-in gate on the same host; an XHR gets 401 JSON carrying `sign_in_url`.
+  Only `GET /healthz` is exempt, so a supervisor can still see the child is
+  alive. This works **because of §2.1**: the webview is on `http://127.0.0.1`,
+  cookies are scoped by host and not by port, and 8765 and 8788 are the same
+  site — so the Canvas iframe's own requests carry the session.
+* **Remote access is opt-in.** `src/hivemind_content_studio/remote_access.py`
+  and the switch on the Rented GPUs page run `tailscale serve` — a real
+  certificate, no proxy process of ours, no key on disk — and publish **only**
+  the control API's port. The card shows the resulting URL and names who on the
+  tailnet can reach it. Off by default; turning it off unpublishes.
+
+`packages/media-gateway/tailscale-https-proxy.js` is kept but no longer started.
+Its port (8789) is still named by `trustedOwnerParent.ts`, `StudioRedirect.jsx`,
+`hubData.gatewayUrl`, `McpCliStudio.jsx` and the control API's
+`CONTENT_STUDIO_PROXY_SECRET` forwarded-header path; those are the last users to
+retire before the file goes.
 
 ---
 

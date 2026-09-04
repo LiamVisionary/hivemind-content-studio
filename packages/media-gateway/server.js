@@ -68,6 +68,55 @@ function readWrapperToken() {
 }
 const comfyPrivateViewToken = (process.env.COMFY_PRIVATE_VIEW_TOKEN || '').trim();
 
+// Everything below this line proxies with the gateway's own capability token
+// attached, so the port has to say who is asking before it forwards anything.
+// See lib/canvas-gate.js for the two credentials it accepts and why.
+const studioTarget = (process.env.HIVEMIND_STUDIO_TARGET || 'http://127.0.0.1:8765').replace(/\/+$/, '');
+const canvasGateModule = require('./lib/canvas-gate');
+const { ACCOUNT_COOKIE: GATE_ACCOUNT_COOKIE } = canvasGateModule;
+
+/** Ask the control API whether this session cookie is a signed-in workspace. */
+function verifyAccountCookie(cookieValue) {
+  return new Promise((resolve) => {
+    // One try/catch around the whole thing: anything that throws here — a bad
+    // target URL, a header Node refuses — has to become a refusal, because a
+    // promise that neither resolves nor rejects would hang the request.
+    try {
+      const url = new URL('/api/owner/session', studioTarget);
+      const lib = url.protocol === 'https:' ? https : http;
+      const request = lib.get(url, {
+        headers: {
+          accept: 'application/json',
+          cookie: `${GATE_ACCOUNT_COOKIE}=${cookieValue}`,
+        },
+      }, (upstream) => {
+        const chunks = [];
+        upstream.on('data', (chunk) => chunks.push(chunk));
+        upstream.on('end', () => {
+          if ((upstream.statusCode || 500) !== 200) { resolve(false); return; }
+          try { resolve(Boolean(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}').unlocked)); }
+          catch { resolve(false); }
+        });
+      });
+      request.setTimeout(4000, () => request.destroy(new Error('session probe timeout')));
+      request.on('error', () => resolve(false));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+const canvasGate = canvasGateModule.createCanvasGate({
+  readGatewayToken: readWrapperToken,
+  verifyAccountCookie,
+});
+
+function refuseCanvasRequest(req, res) {
+  const answer = canvasGateModule.refusal(req, studioTarget);
+  res.writeHead(answer.status, answer.headers);
+  res.end(answer.body);
+}
+
 const app = next({ dev, hostname: '127.0.0.1', port: internalPort });
 const handle = app.getRequestHandler();
 const httpToNext = httpProxy.createProxyServer({
@@ -1434,14 +1483,9 @@ app.prepare().then(() => {
     console.log(`Next internal server listening on http://127.0.0.1:${internalPort}`);
   });
 
-  const publicServer = http.createServer((req, res) => {
-    let pathname = '';
-    try {
-      pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
-    } catch {
-      pathname = req.url || '';
-    }
-
+  // Every branch below forwards with the gateway's capability token attached,
+  // so none of it runs until the gate above has said who is asking.
+  function dispatchPublicRequest(req, res, pathname) {
     if ((pathname === '/comfy/api/queue' || pathname === '/comfy/queue' || pathname === '/api/queue' || pathname === '/queue') && (req.method === 'GET' || req.method === 'HEAD')) {
       sendRedactedComfyJson(req, res, '/queue', sanitizeQueuePayload);
       return;
@@ -1557,22 +1601,61 @@ app.prepare().then(() => {
     }
 
     httpToNext.web(req, res);
-  });
+  }
 
-  publicServer.on('upgrade', (req, socket, head) => {
-    let pathname = '';
+  function pathnameOf(req) {
     try {
-      pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
+      return new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
     } catch {
-      pathname = req.url || '';
+      return req.url || '';
     }
+  }
 
-    if (pathname === '/ws' || pathname === '/comfy/ws' || pathname === '/mobile/api/comfy/ws') {
-      proxyComfyWebSocket(req, socket, head);
+  const publicServer = http.createServer((req, res) => {
+    const pathname = pathnameOf(req);
+
+    // The one route with no credential: the supervisor has to be able to tell
+    // whether this child is alive before anyone has signed in. It says that and
+    // nothing else.
+    if (canvasGateModule.isHealthProbe(pathname, req.method)) {
+      const body = JSON.stringify({ ok: true, service: 'media-studio-canvas' });
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'content-length': Buffer.byteLength(body),
+      });
+      res.end(req.method === 'HEAD' ? undefined : body);
       return;
     }
 
-    socket.destroy();
+    canvasGate.authorize(req, pathname).then((decision) => {
+      if (!decision.allowed) { refuseCanvasRequest(req, res); return; }
+      dispatchPublicRequest(req, res, pathname);
+    }).catch(() => refuseCanvasRequest(req, res));
+  });
+
+  publicServer.on('upgrade', (req, socket, head) => {
+    const pathname = pathnameOf(req);
+
+    if (pathname !== '/ws' && pathname !== '/comfy/ws' && pathname !== '/mobile/api/comfy/ws') {
+      socket.destroy();
+      return;
+    }
+
+    // A WebSocket carries the same cookie as the page that opened it, so the
+    // Canvas frame's socket is authorised by the same session as its fetches.
+    // A browser cannot read a failed handshake's body, so the refusal is the
+    // status line — the page's own reconnect surfaces the signed-out state.
+    canvasGate.authorize(req, pathname).then((decision) => {
+      if (!decision.allowed) {
+        if (!socket.destroyed) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        }
+        socket.destroy();
+        return;
+      }
+      proxyComfyWebSocket(req, socket, head);
+    }).catch(() => socket.destroy());
   });
 
   publicServer.listen(port, hostname, () => {

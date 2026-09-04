@@ -121,6 +121,11 @@ from .private_access import (
     write_private_text,
 )
 from .run_privacy import migrate_private_runs
+from .remote_access import (
+    RemoteAccessError,
+    remote_access_status,
+    set_remote_access,
+)
 from .gpu_rentals import register_gpu_rental_routes
 from .shared_env import (
     ContainerisedHomeError,
@@ -320,6 +325,10 @@ class PassBookModeBody(BaseModel):
 
 class ConfirmDeleteBody(BaseModel):
     confirm: bool = False
+
+
+class RemoteAccessBody(BaseModel):
+    enabled: bool = False
 
 
 class CanvasProvenanceBody(BaseModel):
@@ -2451,6 +2460,28 @@ def build_control_app(
         if cached is not None and time.time() - simple_catalog_cache["at"] > SIMPLE_CATALOG_TTL_SECONDS:
             _kick_simple_catalog_refresh()
         return {"ok": True, **capability_matrix(catalog=media if isinstance(media, dict) else None)}
+
+    # Opening the studio on the owner's other devices. Off until someone asks:
+    # the stack used to publish a hand-rolled HTTPS proxy (and a SELF-SIGNED
+    # certificate) over the tailnet at every boot, fronting the Canvas port,
+    # which authenticated nothing. `tailscale serve` carries a real certificate
+    # and publishes only the port this API listens on.
+    @app.get("/api/remote-access", dependencies=[Depends(require_owner)])
+    def remote_access() -> dict:
+        return {"ok": True, **remote_access_status()}
+
+    @app.post("/api/remote-access", dependencies=[Depends(require_owner_account)])
+    def set_remote_access_route(body: RemoteAccessBody) -> dict:
+        # The owner's workspace, not merely a signed-in one: this reaches past
+        # the studio and changes what a whole tailnet can open, the same reason
+        # the shared credential store is owner-only.
+        try:
+            return {"ok": True, **set_remote_access(bool(body.enabled))}
+        except RemoteAccessError as exc:
+            raise HTTPException(status_code=503, detail={
+                "message": exc.message,
+                "remedy": exc.remedy,
+            }) from exc
 
     @app.get("/api/surfaces")
     def surfaces() -> dict:
