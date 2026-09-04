@@ -1,6 +1,6 @@
 // Result gallery cards + viewer modal for the Image studio.
 // Every media src is resolved through useMediaSrc (E2E decrypt, fail-open).
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import { useMediaSrc } from '../../hooks/hooks.js';
 import { t, zh } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';
@@ -19,7 +19,12 @@ export function formatCreated(timestamp) {
 // role="button" gets neither for free).
 export const activatesCard = (key) => key === 'Enter' || key === ' ';
 
-export function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReuse, onUpscale }) {
+// Memoised on its own entry and active flag: the studio re-renders for reasons
+// that have nothing to do with a finished picture (a keystroke in the composer,
+// a settings change), and each card carries a decrypt hook. Every handler takes
+// the entry so the caller can pass ONE stable function per action instead of a
+// fresh closure per card — without that, memo() would never hold.
+export const GalleryCard = memo(function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReuse, onUpscale }) {
   const src = useMediaSrc(entry.url);
   return (
     <div
@@ -27,7 +32,7 @@ export function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReu
         'group relative cursor-pointer overflow-hidden rounded-lg border bg-bg2 transition-colors duration-150',
         active ? 'border-honey' : 'border-line1 hover:border-line2',
       )}
-      onClick={onOpen}
+      onClick={() => onOpen(entry)}
       role="button"
       tabIndex={0}
       draggable
@@ -38,7 +43,7 @@ export function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReu
           e.dataTransfer.effectAllowed = 'copy';
         } catch { /* non-critical */ }
       }}
-      onKeyDown={(e) => { if (activatesCard(e.key)) { e.preventDefault(); onOpen(); } }}
+      onKeyDown={(e) => { if (activatesCard(e.key)) { e.preventDefault(); onOpen(entry); } }}
     >
       {/* No loading="lazy" on result art. Chrome defers a lazy image until a scroll
           or resize re-triggers evaluation, and these strips frequently do not
@@ -63,7 +68,7 @@ export function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReu
           title={t('common.download')}
           aria-label="Download image"
           className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-ink1 transition-colors hover:border-line2 hover:bg-bg1"
-          onClick={(e) => { e.stopPropagation(); onDownload(); }}
+          onClick={(e) => { e.stopPropagation(); onDownload(entry); }}
         >
           <Icon name="download" size={13} />
         </button>
@@ -73,7 +78,7 @@ export function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReu
             title="Upscale (hi-res)"
             aria-label="Upscale image"
             className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-ink1 transition-colors hover:border-line2 hover:bg-bg1"
-            onClick={(e) => { e.stopPropagation(); onUpscale('fast'); }}
+            onClick={(e) => { e.stopPropagation(); onUpscale(entry, 'fast'); }}
           >
             <Icon name="wand" size={13} />
           </button>
@@ -84,7 +89,7 @@ export function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReu
             title="Reuse as reference image"
             aria-label="Reuse as reference image"
             className="grid h-7 w-7 place-items-center rounded-md border border-line1 bg-bg0/80 text-ink1 transition-colors hover:border-line2 hover:bg-bg1"
-            onClick={(e) => { e.stopPropagation(); onReuse(); }}
+            onClick={(e) => { e.stopPropagation(); onReuse(entry); }}
           >
             <Icon name="plus" size={13} />
           </button>
@@ -92,7 +97,7 @@ export function GalleryCard({ entry, active, canReuse, onOpen, onDownload, onReu
       </div>
     </div>
   );
-}
+});
 
 function MetaRow({ label, value }) {
   if (value == null || value === '') return null;

@@ -1770,6 +1770,7 @@ export function VideoStudio({
     s.progressReal = 0;
     s.progressSteps = null;
     s.progressOvertimeMin = null;
+    s.progressQueuePosition = null;
     s.progressEstimateSec = Number(estimateSeconds) || null;
     // Cleared per run, and re-set by the submit below (which happens after
     // this call): a count left over from the previous generation would
@@ -1794,7 +1795,7 @@ export function VideoStudio({
     if (s.generationTimer) clearInterval(s.generationTimer);
     s.generationTimer = null;
   };
-  const updateGenerationProgress = ({ status = '', progress = null, stage = '', estimateSeconds = null, step = null, stepTotal = null, overtimeMinutes = null } = {}) => {
+  const updateGenerationProgress = ({ status = '', progress = null, stage = '', estimateSeconds = null, step = null, stepTotal = null, overtimeMinutes = null, queuePosition = null } = {}) => {
     const value = normalizeVideoGenerationProgress(progress);
     if (value != null) s.progressReal = value;
     if (Number(estimateSeconds) > 0) s.progressEstimateSec = Number(estimateSeconds);
@@ -1802,6 +1803,9 @@ export function VideoStudio({
     // the progress card, next to a Cancel that is already there — the poller
     // no longer has a clock of its own to fail the run with.
     if (Number(overtimeMinutes) > 0) s.progressOvertimeMin = Number(overtimeMinutes);
+    // Not sticky, unlike the counters: the moment the machine's GPU frees up
+    // this stops arriving, and the card has to stop saying "waiting" at once.
+    s.progressQueuePosition = Number(queuePosition) > 0 ? Number(queuePosition) : null;
     // Sampler step counters, when the backend measures them. Sticky: the
     // counters stop arriving once sampling ends and the untracked tail
     // (decode, mux, fetch-back) begins, and blanking the label there would
@@ -3085,6 +3089,7 @@ export function VideoStudio({
             step: data.step,
             stepTotal: data.stepTotal,
             overtimeMinutes: data.overtimeMinutes,
+            queuePosition: data.queuePosition,
           });
         };
         // Mirror the started job to sessionStorage so a tab switch / reload can
@@ -3631,6 +3636,7 @@ export function VideoStudio({
                     step: data.step,
                     stepTotal: data.stepTotal,
                     overtimeMinutes: data.overtimeMinutes,
+                    queuePosition: data.queuePosition,
                   });
                 },
               })
@@ -5242,6 +5248,16 @@ export function VideoStudio({
                 <span>{progressStageLabel}{progressDetail ? ` · ${progressDetail}` : ''}</span>
                 <span>{t('video.progress.elapsed')} {progressElapsed}{progressEta ? ` · ${progressEta}` : ''}</span>
               </div>
+              {/* This machine renders one clip at a time, so a second tab is a
+                  queue, not a stall. Saying which place it is in is what keeps
+                  a motionless bar from reading as a hang. */}
+              {s.progressQueuePosition ? (
+                <div className="text-[11px] text-ink3">
+                  {zh()
+                    ? `正在排队，前面还有 ${s.progressQueuePosition} 个渲染 — 轮到它时会自动开始。`
+                    : `Waiting behind ${s.progressQueuePosition === 1 ? 'one render' : `${s.progressQueuePosition} renders`} — this one starts by itself when the GPU is free.`}
+                </div>
+              ) : null}
               {s.progressOvertimeMin ? (
                 <div className="text-[11px] text-ink3">
                   {zh()

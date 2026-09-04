@@ -6,7 +6,9 @@
 // whole point of peeking first. resolveMediaSrc is fail-open for legacy media.
 import { useEffect, useRef, useState } from 'react';
 import { useVaultUnlockNonce } from '../../hooks/hooks.js';
-import { mediaSealFailure, peekResolvedMediaSrc, resolveMediaSrc } from '../../lib/e2eMedia.js';
+import {
+  mediaSealFailure, peekResolvedMediaSrc, releaseResolvedMedia, resolveMediaSrc, retainResolvedMedia,
+} from '../../lib/e2eMedia.js';
 import { requestVaultUnlock } from '../../lib/vaultSession.js';
 import { Icon } from '../../ui/icons.jsx';
 import { cx } from '../../ui/kit.jsx';
@@ -74,11 +76,15 @@ export function MediaThumb({ url, alt = 'Private output', className = '', imgCla
   useEffect(() => {
     if (!url) return undefined;
     let alive = true;
+    // Same contract as useMediaSrc: a mounted tile holds its decrypted bytes, so
+    // the byte-budgeted cache never revokes an object URL this <img> is showing.
+    retainResolvedMedia(url);
+    const release = () => releaseResolvedMedia(url);
     const cached = peekResolvedMediaSrc(url);
     if (cached) {
       setSrc(cached);
       setState('unlocked');
-      return undefined;
+      return release;
     }
     setState(mediaSealFailure(url) ? 'vault-locked' : 'locked');
     setSrc(null);
@@ -95,6 +101,7 @@ export function MediaThumb({ url, alt = 'Private output', className = '', imgCla
     }).catch(() => { if (alive) setState('failed'); });
     return () => {
       alive = false;
+      release();
       if (revealTimer.current) clearTimeout(revealTimer.current);
     };
   }, [url, retry, unlocked]);

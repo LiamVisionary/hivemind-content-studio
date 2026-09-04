@@ -4809,6 +4809,7 @@ def build_control_app(
             asyncio.get_running_loop().create_task(_finish_media_studio_video_job(job_id))
         progress = None
         steps: dict[str, int] = {}
+        queued_behind = 0
         if entry["status"] == "running":
             state = None
             check_raised = False
@@ -4825,6 +4826,7 @@ def build_control_app(
             if state:
                 entry["check_failures"] = 0
                 progress = state.get("progress")
+                queued_behind = int(state.get("queue_position") or 0)
                 if state.get("progress_total"):
                     steps = {
                         "progress_step": int(state.get("progress_step") or 0),
@@ -4872,6 +4874,9 @@ def build_control_app(
             "elapsed_seconds": elapsed_seconds,
             **({"progress": progress} if progress is not None else {}),
             **steps,
+            # Holding for the machine's GPU slot behind another render. The
+            # studio says how many are ahead rather than showing a frozen bar.
+            **({"queue_position": queued_behind} if queued_behind > 0 else {}),
             **({"estimate_seconds": entry["estimate_seconds"]} if entry.get("estimate_seconds") else {}),
         }
 

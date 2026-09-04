@@ -3256,6 +3256,7 @@ class ZImageAppTests(unittest.TestCase):
             try:
                 with patch.object(app, 'supports_native_mlx_biglove_route', return_value=True), \
                      patch.object(app, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app, 'gpu_slot_capacity', return_value=2), \
                      patch.object(app, 'run_mlx_klein3_edit', side_effect=fake_run), \
                      patch.object(app, 'jobs', {}):
                     first_id = app.queue_native_mlx_biglove_job(
@@ -3292,6 +3293,7 @@ class ZImageAppTests(unittest.TestCase):
             try:
                 with patch.object(app, 'supports_native_mlx_biglove_route', return_value=True), \
                      patch.object(app, '_acquire_klein_memory_reservation', return_value=0), \
+                     patch.object(app, 'gpu_slot_capacity', return_value=2), \
                      patch.object(app, 'run_mlx_klein3_edit', side_effect=fake_run), \
                      patch.object(app, 'jobs', {}):
                     first_id = app.queue_native_mlx_biglove_job(
@@ -3349,22 +3351,146 @@ class ZImageAppTests(unittest.TestCase):
                     all_started.set()
             release.wait(2)
 
+        # Lanes stay independent queues; what limits them is the GPU slot count
+        # above them, so this asserts the lanes with the ceiling lifted.
         try:
-            threads = [
-                app.start_studio_generation_thread(
-                    'image', {'studio_lane': 'window-a:1'}, runner, ('image-tab-1',)),
-                app.start_studio_generation_thread(
-                    'image', {'studio_lane': 'window-a:2'}, runner, ('image-tab-2',)),
-                app.start_studio_generation_thread(
-                    'video', {'studio_lane': 'window-a:1'}, runner, ('video-tab-1',)),
-            ]
+            with patch.object(app, 'gpu_slot_capacity', return_value=3):
+                threads = [
+                    app.start_studio_generation_thread(
+                        'image', {'studio_lane': 'window-a:1'}, runner, ('image-tab-1',)),
+                    app.start_studio_generation_thread(
+                        'image', {'studio_lane': 'window-a:2'}, runner, ('image-tab-2',)),
+                    app.start_studio_generation_thread(
+                        'video', {'studio_lane': 'window-a:1'}, runner, ('video-tab-1',)),
+                ]
 
-            self.assertTrue(all_started.wait(1))
-            self.assertEqual(set(calls), {'image-tab-1', 'image-tab-2', 'video-tab-1'})
+                self.assertTrue(all_started.wait(1))
+                self.assertEqual(set(calls), {'image-tab-1', 'image-tab-2', 'video-tab-1'})
         finally:
             release.set()
             for thread in locals().get('threads', []):
                 thread.join(timeout=1)
+
+    def test_one_gpu_slot_holds_a_second_tab_behind_the_first(self):
+        """Two tabs, one GPU: the second waits instead of loading a second model."""
+        app = load_app()
+        first_started = app.threading.Event()
+        release_first = app.threading.Event()
+        second_started = app.threading.Event()
+        calls = []
+
+        def runner(job_id):
+            calls.append(job_id)
+            if job_id == 'job-one':
+                first_started.set()
+                release_first.wait(2)
+            else:
+                second_started.set()
+
+        jobs = {
+            'job-one': {'id': 'job-one', 'status': 'queued'},
+            'job-two': {'id': 'job-two', 'status': 'queued'},
+        }
+        threads = []
+        try:
+            with patch.object(app, 'jobs', jobs):
+                threads.append(app.start_studio_generation_thread(
+                    'image', {'studio_lane': 'window-a:1'}, runner, ('job-one',)))
+                self.assertTrue(first_started.wait(1))
+                threads.append(app.start_studio_generation_thread(
+                    'video', {'studio_lane': 'window-b:1'}, runner, ('job-two',)))
+                # A different lane, so the old scheduler would have started it.
+                self.assertFalse(second_started.wait(0.4))
+                self.assertEqual(calls, ['job-one'])
+                # …and it says so on the record, with how many are ahead of it.
+                self.assertEqual(jobs['job-two']['status'], 'queued')
+                self.assertEqual(jobs['job-two']['queue_position'], 1)
+                self.assertEqual(jobs['job-two']['progress_phase'], 'waiting for the GPU')
+                release_first.set()
+                self.assertTrue(second_started.wait(2))
+                self.assertEqual(calls, ['job-one', 'job-two'])
+                self.assertNotIn('queue_position', jobs['job-two'])
+        finally:
+            release_first.set()
+            for thread in threads:
+                thread.join(timeout=2)
+
+    def test_gpu_slot_capacity_defaults_to_one_and_reads_the_settings_export(self):
+        app = load_app()
+        with patch.dict(app.os.environ, {}, clear=False):
+            app.os.environ.pop('ZIMG_GPU_SLOTS', None)
+            self.assertEqual(app.gpu_slot_capacity(), 1)
+            app.os.environ['ZIMG_GPU_SLOTS'] = '3'
+            self.assertEqual(app.gpu_slot_capacity(), 3)
+            app.os.environ['ZIMG_GPU_SLOTS'] = 'not a number'
+            self.assertEqual(app.gpu_slot_capacity(), 1)
+            app.os.environ['ZIMG_GPU_SLOTS'] = '0'
+            self.assertEqual(app.gpu_slot_capacity(), 1)
+
+    def test_history_tail_read_does_not_scale_with_the_file(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            history = Path(td) / 'history.jsonl'
+            with history.open('w', encoding='utf-8') as handle:
+                for index in range(5000):
+                    handle.write(json.dumps({'id': f'job-{index}', 'pad': 'x' * 200}) + '\n')
+            reads = []
+            real_open = Path.open
+
+            def counting_open(self, *args, **kwargs):
+                handle = real_open(self, *args, **kwargs)
+                if self == history:
+                    reads.append(handle)
+                return handle
+
+            with patch.object(app, 'HISTORY_FILE', history), \
+                 patch.object(Path, 'open', counting_open):
+                recs = app.load_history(10)
+            self.assertEqual([rec['id'] for rec in recs[:3]], ['job-4999', 'job-4998', 'job-4997'])
+            self.assertEqual(len(recs), 10)
+            # One handle, and it never read the whole file: the seek started
+            # inside the last 10 records' worth of bytes.
+            self.assertEqual(len(reads), 1)
+
+    def test_history_tail_read_widens_when_records_are_small(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            history = Path(td) / 'history.jsonl'
+            with history.open('w', encoding='utf-8') as handle:
+                for index in range(500):
+                    handle.write(json.dumps({'id': index}) + '\n')
+            with patch.object(app, 'HISTORY_FILE', history):
+                recs = app.load_history(400)
+            self.assertEqual(len(recs), 400)
+            self.assertEqual(recs[0]['id'], 499)
+            self.assertEqual(recs[-1]['id'], 100)
+
+    def test_history_rotates_and_the_purge_covers_both_generations(self):
+        app = load_app()
+        with TemporaryDirectory() as td:
+            history = Path(td) / 'history.jsonl'
+            previous = Path(td) / 'history.1.jsonl'
+            with patch.object(app, 'HISTORY_FILE', history), \
+                 patch.object(app, 'HISTORY_PREVIOUS_FILE', previous), \
+                 patch.object(app, 'HISTORY_KEEP_ON_ROTATE', 4), \
+                 patch.object(app, 'HISTORY_ROTATE_BYTES', 400):
+                for index in range(12):
+                    app.append_history({
+                        'id': f'job-{index}', 'status': 'success',
+                        'outputs': [f'/out/pic-{index}.png'],
+                    })
+                self.assertTrue(previous.exists())
+                # The live file keeps the recent tail — a rotation must never
+                # leave the History tab blank.
+                self.assertEqual(
+                    [rec['id'] for rec in app.load_history(10)][:2], ['job-11', 'job-10'],
+                )
+                # A delete reaches the rotated generation too, or it would leave
+                # the reference it promises to remove sitting on disk.
+                rotated = previous.read_text(encoding='utf-8')
+                name = json.loads(rotated.splitlines()[0])['outputs'][0].rsplit('/', 1)[-1]
+                self.assertEqual(app._rewrite_gateway_history_without_output(name), 1)
+                self.assertNotIn(name, previous.read_text(encoding='utf-8'))
 
     def test_native_mlx_ltx_queue_serializes_video_jobs_in_one_tab(self):
         app = load_app()

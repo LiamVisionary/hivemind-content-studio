@@ -99,6 +99,7 @@ class LaneSettings:
     ltx: bool
     flux2_server: bool
     apple_silicon_optimizations: bool
+    gpu_slots: int
 
 
 @dataclass(frozen=True)
@@ -338,6 +339,19 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         restart_required=True,
         summary="Use the Apple Silicon tuning for the local lanes.",
+    ),
+    Setting(
+        key="lanes.gpu_slots",
+        kind="int",
+        env=("ZIMG_GPU_SLOTS",),
+        default=1,
+        restart_required=True,
+        summary=(
+            "How many renders may hold the GPU at once. One is right for one card — "
+            "a second tab waits instead of loading a second model into the same memory."
+        ),
+        minimum=1,
+        maximum=8,
     ),
     # ── network ──
     Setting(

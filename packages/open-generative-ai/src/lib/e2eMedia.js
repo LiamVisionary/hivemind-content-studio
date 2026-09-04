@@ -31,7 +31,87 @@ async function openEnvelope(envelope, { deviceReady, vaultReady }) {
     throw firstError || new Error('No key for this envelope');
 }
 
-const blobCache = new Map(); // original url -> object URL
+// The decrypted-media cache: original url -> { src, bytes }.
+//
+// Every entry is plaintext pixels held in this renderer, so it is a memory
+// budget, not a lookup table. Map iteration order is insertion order and every
+// read re-inserts, which makes the first entry the least recently used one.
+//
+// Nothing is evicted while a mounted component still shows it: `holders` counts
+// the useMediaSrc/MediaThumb effects that retained a URL, and revoking an object
+// URL out from under a live <img> would blank the picture. So the budget is a
+// ceiling on what is kept for LATER, and a session that genuinely has 300 MB of
+// media on screen at once goes over it rather than breaking the view.
+const blobCache = new Map();
+const holders = new Map(); // original url -> mounted consumers holding it
+let cachedBytes = 0;
+
+// 256 MB. Large enough that scrolling back over a session's own work is still
+// instant, small enough that the renderer does not fight the local model for
+// unified memory on a 16 GB Mac.
+export const DEFAULT_MEDIA_CACHE_BUDGET_BYTES = 256 * 1024 * 1024;
+let cacheBudgetBytes = DEFAULT_MEDIA_CACHE_BUDGET_BYTES;
+
+/** Change the ceiling. Tests use it; so would a settings key. */
+export function setResolvedMediaBudget(bytes) {
+    const next = Number(bytes);
+    cacheBudgetBytes = Number.isFinite(next) && next >= 0 ? next : DEFAULT_MEDIA_CACHE_BUDGET_BYTES;
+    evictOverBudget();
+    return cacheBudgetBytes;
+}
+
+/** What the cache holds right now — bytes, entries, retained URLs, the ceiling. */
+export function resolvedMediaCacheStats() {
+    return { bytes: cachedBytes, entries: blobCache.size, held: holders.size, budget: cacheBudgetBytes };
+}
+
+function dropCacheEntry(url) {
+    const entry = blobCache.get(url);
+    if (!entry) return;
+    blobCache.delete(url);
+    cachedBytes = Math.max(0, cachedBytes - entry.bytes);
+    URL.revokeObjectURL(entry.src);
+}
+
+function evictOverBudget() {
+    if (cachedBytes <= cacheBudgetBytes) return;
+    for (const url of [...blobCache.keys()]) {
+        if (cachedBytes <= cacheBudgetBytes) return;
+        if (holders.get(url)) continue; // on screen — never yank it
+        dropCacheEntry(url);
+    }
+}
+
+function rememberResolved(url, src, bytes) {
+    dropCacheEntry(url); // replacing: the old object URL is nobody's now
+    const size = Math.max(0, Number(bytes) || 0);
+    blobCache.set(url, { src, bytes: size });
+    cachedBytes += size;
+    evictOverBudget();
+}
+
+/**
+ * Say that a mounted component is showing `url`, so eviction leaves it alone.
+ *
+ * Paired with releaseResolvedMedia in the same effect's cleanup. Retaining a URL
+ * that is not cached yet is normal and correct: the retain happens before the
+ * decrypt finishes, which is exactly the window in which a burst of new media
+ * could otherwise evict the entry the moment it lands.
+ */
+export function retainResolvedMedia(url) {
+    if (!url || typeof url !== 'string') return;
+    holders.set(url, (holders.get(url) || 0) + 1);
+}
+
+export function releaseResolvedMedia(url) {
+    if (!url || typeof url !== 'string') return;
+    const next = (holders.get(url) || 0) - 1;
+    if (next > 0) holders.set(url, next);
+    else holders.delete(url);
+    // The last consumer unmounting is the moment a long scroll frees anything at
+    // all, so this is where the budget is re-checked.
+    evictOverBudget();
+}
 
 // Sealed media this tab could NOT open, and why:
 //   'locked'        — the vault has no key here (fresh tab, owner cookie still
@@ -105,7 +185,8 @@ export function isProbablyMediaUrl(url) {
 
 export async function resolveMediaSrc(url) {
     if (!url || typeof url !== 'string') return url;
-    if (blobCache.has(url)) return blobCache.get(url);
+    const hit = peekResolvedMediaSrc(url);
+    if (hit) return hit;
     let response;
     try {
         // Same URL, different envelope per key: presenting this device's key is
@@ -155,7 +236,7 @@ export async function resolveMediaSrc(url) {
         const payload = name ? new File([bytes], name, { type }) : new Blob([bytes], { type });
         const blobUrl = URL.createObjectURL(payload);
         noteSealFailure(url, null); // a later unlock opened it after all
-        blobCache.set(url, blobUrl);
+        rememberResolved(url, blobUrl, payload.size);
         return blobUrl;
     } catch {
         // We hold a key and it did not open this envelope: sealed to someone else
@@ -169,7 +250,13 @@ export async function resolveMediaSrc(url) {
 // Synchronous cache probe so display code can skip loading theater (e.g. the
 // unlock animation) for media that is already decrypted this session.
 export function peekResolvedMediaSrc(url) {
-    return blobCache.get(url) ?? null;
+    const entry = blobCache.get(url);
+    if (!entry) return null;
+    // Re-insert: Map order is insertion order, so a read is what makes this the
+    // most recently used entry instead of the next one evicted.
+    blobCache.delete(url);
+    blobCache.set(url, entry);
+    return entry.src;
 }
 
 // Hand the cache bytes the caller already holds in the clear, for a URL that
@@ -182,17 +269,15 @@ export function peekResolvedMediaSrc(url) {
 export function primeResolvedMedia(url, src) {
     if (!url || typeof url !== 'string') return false;
     if (typeof src !== 'string' || !/^(data|blob):/i.test(src)) return false;
-    blobCache.set(url, src);
+    // A data: URL is bytes this cache now holds; a blob: URL was minted
+    // elsewhere and its bytes are already accounted for by whoever made it.
+    rememberResolved(url, src, src.startsWith('data:') ? src.length : 0);
     noteSealFailure(url, null);
     return true;
 }
 
 export function revokeResolvedMedia(url) {
-    const blobUrl = blobCache.get(url);
-    if (blobUrl) {
-        URL.revokeObjectURL(blobUrl);
-        blobCache.delete(url);
-    }
+    dropCacheEntry(url);
 }
 
 /**
@@ -209,7 +294,8 @@ export function clearMediaSealFailures() {
 }
 
 export function clearResolvedMediaCache() {
-    for (const blobUrl of blobCache.values()) URL.revokeObjectURL(blobUrl);
+    for (const entry of blobCache.values()) URL.revokeObjectURL(entry.src);
     blobCache.clear();
+    cachedBytes = 0;
     for (const url of [...sealFailures.keys()]) noteSealFailure(url, null);
 }

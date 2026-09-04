@@ -11,7 +11,7 @@
 //   click/input/change listener trick the old code used (scoped to this studio's
 //   root, not window), plus explicit persist calls on portal-hosted actions.
 // - alert() → toast.error() with identical abort semantics.
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
@@ -73,7 +73,7 @@ import {
 import { rememberGenerationSetup } from '../lib/generationSetupStore.js';
 import { useMediaSrc } from '../hooks/hooks.js';
 import {
-  Button, Card, EmptyState, FailureCallout, ProgressBar, SectionLabel, Spinner,
+  Button, EmptyState, FailureCallout, SectionLabel, Spinner,
 } from '../ui/kit.jsx';
 import { Menu } from '../ui/Menu.jsx';
 import { StudioLayout } from '../ui/kit.jsx';
@@ -83,7 +83,7 @@ import { ImageComposer } from './image/ImageComposer.jsx';
 import { ConfirmModal } from '../ui/Modal.jsx';
 import { AuthModal } from '../dialogs/AuthModal.jsx';
 
-import { computeSmoothProgress, formatElapsed, estimateGenerationSeconds, recordGenerationSeconds } from '../lib/genProgress.js';
+import { computeSmoothProgress, estimateGenerationSeconds, recordGenerationSeconds } from '../lib/genProgress.js';
 import {
   IMAGE_PREFERENCES_KEY, STYLE_PRESETS,
   applyStylePreset, imageTimingProfile, normalizeImagePreferences,
@@ -94,6 +94,7 @@ import { CameraMenu } from './image/CameraMenu.jsx';
 import { applyCameraRig, hasCameraRig, normalizeCameraRig } from '../lib/cameraRig.js';
 import { onComposerMenuRequest, takeComposerMenuRequest } from '../app/composerMenuRequest.js';
 import { GalleryCard, ViewerModal } from './image/GalleryAndViewer.jsx';
+import { GenerationProgressCard, createProgressStore } from './image/GenerationProgressCard.jsx';
 import { CompareViewer } from './image/CompareViewer.jsx';
 import { ExpandDialog } from './image/ExpandDialog.jsx';
 import { MaskEditorDialog } from './image/MaskEditorDialog.jsx';
@@ -346,6 +347,10 @@ function createEngine({ boot = 'persisted', snapshot = null } = {}) {
     progressDisplay: 0,
     progressReal: 0,
     progressEstimateSec: null,
+    // The values that tick several times a second live in their own store, so
+    // the timer repaints the progress card and nothing else. See
+    // image/GenerationProgressCard.jsx.
+    progressStore: createProgressStore(),
     progressSignature: '',
     // Work units (steps x megapixels) of the run in flight, captured at submit
     // so the recorded duration lands in the right bucket.
@@ -653,6 +658,12 @@ export function ImageStudio({
       s.progressWorkUnits,
       s.useLocalModel ? DEFAULT_LOCAL_IMAGE_RATE_SEC : DEFAULT_API_IMAGE_ESTIMATE_SEC,
     );
+    s.progressStore.set({
+      pct: 0,
+      startedAt: s.generationStartedAt,
+      estimateSec: Number(s.progressEstimateSec) || 0,
+      label: s.localProgress.label || '',
+    });
     s.generationTimer = setInterval(() => {
       if (!mountedRef.current) { clearInterval(s.generationTimer); s.generationTimer = null; return; }
       s.progressDisplay = computeSmoothProgress({
@@ -661,7 +672,9 @@ export function ImageStudio({
         realFraction: Number(s.progressReal) || 0,
         prevDisplay: s.progressDisplay,
       });
-      bump();
+      // Deliberately NOT bump(): the tick repaints the progress card through its
+      // own store and leaves the panel, composer and gallery alone.
+      s.progressStore.set({ pct: s.progressDisplay });
     }, 300);
   };
   const finishImageProgress = (success) => {
@@ -674,6 +687,7 @@ export function ImageStudio({
       );
     }
     s.progressDisplay = success ? 1 : 0;
+    s.progressStore.set({ pct: s.progressDisplay });
     if (success) void playCompletionPing();
   };
   const setCurrentLoraSelection = (selection) => {
@@ -1946,7 +1960,9 @@ export function ImageStudio({
         s.localProgress = { active: true, pct, label };
         // Coarse status nudges the bar up (never down); elapsed/estimate drives it.
         s.progressReal = Math.min(1, Math.max(0, progress ?? 0));
-        bump();
+        // The bridge can send these many times a second; only the progress card
+        // is showing the label, so only the progress card repaints.
+        s.progressStore.set({ label });
       });
       const unsub = () => { if (typeof run.unsub === 'function') run.unsub(); run.unsub = null; };
       const historyMeta = { model: `local:${s.selectedLocalModel}`, aspect_ratio: s.selectedAr };
@@ -1995,7 +2011,7 @@ export function ImageStudio({
           if (run.cancelled) break;
           if (batchTotal > 1) {
             s.localProgress = { active: true, pct: 0, label: `Shot ${shot + 1} of ${batchTotal}` };
-            bump();
+            s.progressStore.set({ label: s.localProgress.label });
           }
           const res = await runImage({
             row: localRow(s.selectedLocalModel),
@@ -2299,6 +2315,7 @@ export function ImageStudio({
         // The true submit time, so elapsed covers the whole render rather than
         // restarting the clock at the reload.
         s.generationStartedAt = Number(live.submittedAt) || Date.now();
+        s.progressStore.set({ startedAt: s.generationStartedAt });
         bump();
         void (async () => {
           try {
@@ -2695,6 +2712,29 @@ export function ImageStudio({
     } : undefined,
   };
 
+  // One stable function per gallery action, so React.memo actually holds on the
+  // cards. The bodies are re-created every render (they close over this render's
+  // derived values), so the ref is what keeps the identity the cards see fixed
+  // while the behaviour stays current.
+  const galleryActionsRef = useRef(null);
+  galleryActionsRef.current = {
+    open: (entry) => viewImage(entry.url),
+    // No `|| idx` fallback: the seal keys off entry.id, so an index would name
+    // the file something the vault never recorded — and idx shifts as new
+    // generations arrive, so it isn't even stable for the same output.
+    download: (entry) => downloadImage(entry.url, imageDownloadName(entry.model, entry.id)),
+    reuse: (entry) => {
+      const next = [...s.uploadedImageUrls.filter((u) => u !== entry.url), entry.url]
+        .slice(0, Math.max(s.maxImages, 1));
+      handleReferencesSelected(next);
+    },
+    upscale: (entry, mode) => upscaleEntry(entry, mode),
+  };
+  const openGalleryEntry = useCallback((entry) => galleryActionsRef.current.open(entry), []);
+  const downloadGalleryEntry = useCallback((entry) => galleryActionsRef.current.download(entry), []);
+  const reuseGalleryEntry = useCallback((entry) => galleryActionsRef.current.reuse(entry), []);
+  const upscaleGalleryEntry = useCallback((entry, mode) => galleryActionsRef.current.upscale(entry, mode), []);
+
   const panel = (
     <ImageSettingsPanel
       engine={s}
@@ -2926,30 +2966,13 @@ export function ImageStudio({
             />
           ) : null}
 
-          {s.generating ? (() => {
-            const pct = Math.max(0, Math.min(1, Number(s.progressDisplay) || 0));
-            const eta = Number(s.progressEstimateSec) > 0 ? formatElapsed(s.progressEstimateSec * 1000) : null;
-            return (
-              <Card className="flex flex-col gap-2.5 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-semibold text-ink2">
-                    {s.useLocalModel ? t('image.generatingLocally') : t('common.generating')}
-                  </span>
-                  <span className="font-mono text-xs font-semibold text-honey">{Math.round(pct * 100)}%</span>
-                </div>
-                <ProgressBar value={pct} label={zh() ? '生成进度' : 'Generation progress'} />
-                <div className="flex items-center justify-between gap-3 font-mono text-[11px] text-ink3">
-                  {/* The bridge's status text lives here, not on the Generate button. */}
-                  <span className="min-w-0 truncate">
-                    {s.localProgress.label || (s.useLocalModel ? `local:${s.selectedLocalModel}` : (s.selectedModelName || s.selectedModel))}
-                  </span>
-                  <span className="shrink-0">
-                    {formatElapsed(Date.now() - s.generationStartedAt)}{eta ? ` / ~${eta}` : ''}
-                  </span>
-                </div>
-              </Card>
-            );
-          })() : null}
+          {s.generating ? (
+            <GenerationProgressCard
+              store={s.progressStore}
+              heading={s.useLocalModel ? t('image.generatingLocally') : t('common.generating')}
+              fallbackLabel={s.useLocalModel ? `local:${s.selectedLocalModel}` : (s.selectedModelName || s.selectedModel)}
+            />
+          ) : null}
 
           {s.history.length === 0 && !s.generating ? (
             <EmptyState
@@ -2983,20 +3006,10 @@ export function ImageStudio({
                     entry={entry}
                     active={s.viewerUrl ? s.viewerUrl === entry.url : idx === 0}
                     canReuse={refsSupported}
-                    onOpen={() => viewImage(entry.url)}
-                    onDownload={() => {
-                      // No `|| idx` fallback: the seal keys off entry.id, so an index
-                      // would name the file something the vault never recorded — and
-                      // idx shifts as new generations arrive, so it isn't even stable
-                      // for the same output.
-                      downloadImage(entry.url, imageDownloadName(entry.model, entry.id));
-                    }}
-                    onReuse={() => {
-                      const next = [...s.uploadedImageUrls.filter((u) => u !== entry.url), entry.url]
-                        .slice(0, Math.max(s.maxImages, 1));
-                      handleReferencesSelected(next);
-                    }}
-                    onUpscale={isLocalAIAvailable() ? (mode) => upscaleEntry(entry, mode) : undefined}
+                    onOpen={openGalleryEntry}
+                    onDownload={downloadGalleryEntry}
+                    onReuse={reuseGalleryEntry}
+                    onUpscale={isLocalAIAvailable() ? upscaleGalleryEntry : undefined}
                   />
                 ))}
               </div>

@@ -29,6 +29,10 @@ export function RegionBoxEditor({ regions, onChange, aspect = 1, disabled = fals
   const dragRef = useRef(null);
   const idRef = useRef(1);
   const [draft, setDraft] = useState(null);
+  // The box being moved or resized right now: local to this editor, so a drag
+  // repaints the boxes and nothing else. `onChange` — which re-renders the whole
+  // studio through its `bump()` — is called once, on pointer-up.
+  const [live, setLive] = useState(null); // { id, x, y, w, h }
   const [selectedId, setSelectedId] = useState(null);
 
   const atCap = regions.length >= MAX_REGIONS;
@@ -90,24 +94,32 @@ export function RegionBoxEditor({ regions, onChange, aspect = 1, disabled = fals
     }
     const dx = point.x - drag.origin.x;
     const dy = point.y - drag.origin.y;
-    if (drag.mode === 'move') {
-      patch(drag.id, {
+    const next = drag.mode === 'move'
+      ? {
         x: clamp01(Math.min(drag.box.x + dx, 1 - drag.box.w)),
         y: clamp01(Math.min(drag.box.y + dy, 1 - drag.box.h)),
-      });
-      return;
-    }
-    patch(drag.id, {
-      w: Math.min(1 - drag.box.x, Math.max(MIN_REGION_SIZE, drag.box.w + dx)),
-      h: Math.min(1 - drag.box.y, Math.max(MIN_REGION_SIZE, drag.box.h + dy)),
-    });
+      }
+      : {
+        w: Math.min(1 - drag.box.x, Math.max(MIN_REGION_SIZE, drag.box.w + dx)),
+        h: Math.min(1 - drag.box.y, Math.max(MIN_REGION_SIZE, drag.box.h + dy)),
+      };
+    // Held on the ref as well as in state, for the same reason `draw` is: the
+    // ref is what pointer-up commits, and a drag fast enough to batch with the
+    // release would otherwise commit a box that had not been set yet.
+    drag.next = next;
+    setLive({ id: drag.id, ...next });
   };
 
   const endDrag = () => {
     const drag = dragRef.current;
     dragRef.current = null;
     if (!drag) return;
-    if (drag.mode !== 'draw') return;
+    if (drag.mode !== 'draw') {
+      setLive(null);
+      // One commit for the whole gesture, not one per pointer-move.
+      if (drag.next) patch(drag.id, drag.next);
+      return;
+    }
     const box = drag.box;
     setDraft(null);
     if (!box) return;
@@ -148,7 +160,10 @@ export function RegionBoxEditor({ regions, onChange, aspect = 1, disabled = fals
           disabled ? 'opacity-50' : atCap ? 'cursor-not-allowed' : 'cursor-crosshair',
         )}
       >
-        {regions.map((region, index) => (
+        {regions.map((region0, index) => {
+          // Mid-drag the live box wins; everything else still reads the region.
+          const region = live && live.id === region0.id ? { ...region0, ...live } : region0;
+          return (
           <div
             key={region.id}
             onPointerDown={(event) => startMove(event, region)}
@@ -181,7 +196,8 @@ export function RegionBoxEditor({ regions, onChange, aspect = 1, disabled = fals
               style={{ backgroundColor: region.color }}
             />
           </div>
-        ))}
+          );
+        })}
         {draft ? (
           <div
             style={{

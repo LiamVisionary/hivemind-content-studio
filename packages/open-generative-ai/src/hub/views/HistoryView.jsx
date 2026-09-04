@@ -58,6 +58,44 @@ function useOnVisible(cb, { once = false, rootMargin = '0px', resetKey } = {}) {
   return ref;
 }
 
+// Pagination appends forever — 48 more cards each time the sentinel is seen —
+// and every mounted card holds a decrypted blob. So a card further than two
+// screens from the viewport is unmounted, which releases its hold on the media
+// cache and lets the byte budget evict it. The placeholder keeps the height the
+// card had, so nothing under the cursor jumps when one leaves.
+//
+// `grid` on the wrapper rather than a plain block: a one-child grid stretches
+// that child to the cell, which is what the card got when it WAS the grid item.
+const WINDOW_MARGIN = '200% 0px';
+
+function Windowed({ children }) {
+  const ref = useRef(null);
+  const heightRef = useRef(0);
+  const [mounted, setMounted] = useState(true);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver !== 'function') return undefined;
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[entries.length - 1];
+      if (entry.isIntersecting) {
+        setMounted(true);
+        return;
+      }
+      // Measured on the way out, while the real card is still rendered.
+      const height = entry.boundingClientRect?.height || 0;
+      if (height) heightRef.current = height;
+      setMounted(false);
+    }, { rootMargin: WINDOW_MARGIN });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <div ref={ref} className="grid" style={mounted ? undefined : { height: heightRef.current || undefined }} aria-hidden={mounted ? undefined : true}>
+      {mounted ? children : null}
+    </div>
+  );
+}
+
 function CanvasVideoInner({ url }) {
   const src = useMediaSrc(url);
   // useMediaSrc fails open to the raw envelope URL when this tab can't decrypt;
@@ -438,7 +476,9 @@ export function HistoryView({ active }) {
                 />
                 <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
                   {outputs.map((entry) => (
-                    <CanvasCard key={entry.history_id} entry={entry} onDelete={confirmDeleteOutput} onPreview={setPreview} />
+                    <Windowed key={entry.history_id}>
+                      <CanvasCard entry={entry} onDelete={confirmDeleteOutput} onPreview={setPreview} />
+                    </Windowed>
                   ))}
                 </div>
                 {s.canvasHasMore && !filtering ? (

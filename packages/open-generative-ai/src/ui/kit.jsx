@@ -375,6 +375,10 @@ export function Slider({ value, min = 0, max = 100, step = 1, onChange, onCommit
         onChange={(e) => onChange(Number(e.target.value))}
         onMouseUp={onCommit ? (e) => onCommit(Number(e.target.value)) : undefined}
         onTouchEnd={onCommit ? (e) => onCommit(Number(e.target.value)) : undefined}
+        // Arrow keys never raise a mouse or touch end, so a keyboard user would
+        // otherwise never reach a commit — which matters now that callers defer
+        // their expensive work (a whole-studio re-render, a save) to it.
+        onKeyUp={onCommit ? (e) => onCommit(Number(e.target.value)) : undefined}
       />
       <span className={cx('w-10 shrink-0 text-right text-xs text-ink2', mono && 'font-mono')}>
         {format ? format(value) : value}

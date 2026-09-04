@@ -14,6 +14,8 @@
 // This is a presentational component: every value it reads lives on the caller's
 // mutable engine object and every write goes back through `bump()` / `persist()`,
 // which is the studio's existing contract — no store of its own.
+import { useReducer } from 'react';
+
 import {
   AspectRatioPicker, CollapsibleSection, Field, IconButton, NativeSelect,
   SectionLabel, Segmented, Slider, TextArea, TextInput, Toggle, cx,
@@ -76,6 +78,12 @@ export function ImageSettingsPanel({
   onSelectLocalModel,
   onSelectApiModel,
 }) {
+  // A slider drag fires ~60 changes a second. Each one still writes the engine
+  // straight away (nothing downstream reads a stale value), but only this panel
+  // repaints while the thumb is down; the studio's own `bump()` — which
+  // re-renders the composer and every gallery card — waits for the release.
+  const [, repaint] = useReducer((n) => n + 1, 0);
+
   const advancedHint = [
     Number(s.steps) ? `${s.steps} steps` : '',
     s.seedText && String(s.seedText).trim() !== '-1' ? `seed ${s.seedText}` : '',
@@ -243,13 +251,15 @@ export function ImageSettingsPanel({
             {s.useLocalModel ? (
               <Field label={t('image.steps')} hint={zh() ? undefined : 'More detail, more time — every step is another pass over the picture'}>
                 <Slider min={1} max={50} step={1} value={s.steps}
-                  onChange={(v) => { s.steps = v; bump(); }} />
+                  onChange={(v) => { s.steps = v; repaint(); }}
+                  onCommit={() => bump()} />
               </Field>
             ) : null}
             {s.useLocalModel ? (
               <Field label={t('image.guidanceScale')} hint={zh() ? undefined : 'How literally the model follows your words — high sticks to the prompt, low invents (CFG)'}>
                 <Slider min={1} max={20} step={0.5} value={s.guidanceScale}
-                  onChange={(v) => { s.guidanceScale = v; bump(); }} />
+                  onChange={(v) => { s.guidanceScale = v; repaint(); }}
+                  onCommit={() => bump()} />
               </Field>
             ) : null}
             <Field label={t('image.seed')} hint={zh() ? undefined : 'The same seed and the same settings make the same picture again — leave it at -1 for a new one every press'}>
@@ -497,8 +507,8 @@ export function ImageSettingsPanel({
                           <div className="bg-info" style={{ width: `${100 - Math.round(s.coupleSplit)}%` }} />
                         </div>
                         <Slider min={10} max={90} step={5} value={s.coupleSplit}
-                          onChange={(v) => { s.coupleSplit = v; bump(); }}
-                          onCommit={() => persist()}
+                          onChange={(v) => { s.coupleSplit = v; repaint(); }}
+                          onCommit={() => { bump(); persist(); }}
                           format={(v) => `${v}%`} />
                       </div>
                     </Field>
