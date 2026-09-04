@@ -725,6 +725,16 @@ export const STRINGS = {
     'runs.shownCount': (count) => `${count} shown`,
     'runs.noMatching': 'No matching productions',
     'runs.noMatchingHint': 'Create a production or change the filter.',
+    // A production whose record file the studio can no longer read. The row
+    // stays in the list — one broken record must never hide the rest.
+    'runs.recordMissing': 'Record missing',
+    'runs.recordMissingTitle': "This production's record file is missing, so the studio cannot read it.",
+    'runs.recordSealedTitle': "This production's record is sealed and could not be unlocked.",
+    'runs.recordUnreadableTitle': "This production's record could not be read.",
+    'runs.recordMissingHint': 'Everything else about it — its steps, its status, its history — is still here. The record itself lives in the studio folder, so check that folder is the one this run was made in.',
+    'runs.recordSealedHint': 'The private sections of this record could not be unlocked on this machine. Nothing has been lost — check this workspace’s privacy settings.',
+    'runs.recordUnreadableHint': 'The file is there but this studio cannot make sense of it. Storage settings show which folder it was read from.',
+    'runs.openStorageSettings': 'Open storage settings',
 
     'history.kicker': 'Private archive',
     'history.prompts': 'Prompts',

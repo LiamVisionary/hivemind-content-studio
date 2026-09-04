@@ -16,7 +16,8 @@ import { downloadMedia } from '../../lib/downloadMedia.js';
 import { mediaDownloadName } from '../../lib/downloadNames.js';
 import { Icon } from '../../ui/icons.jsx';
 import { ConfirmModal } from '../../ui/Modal.jsx';
-import { Button, EmptyState, Field, Pill, Segmented, TextInput } from '../../ui/kit.jsx';
+import { Button, EmptyState, FailureCallout, Field, Pill, Segmented, TextInput } from '../../ui/kit.jsx';
+import { runRecordFailure } from '../../lib/runRecord.js';
 import {
   duplicateRun, extensionForMime, filteredRuns, generationArtifactUrl, humanize, laneLabel,
   loadRunIntoSimpleComposer, runAction, runDisplayTitle, setSelectedRunId, setStatusFilter,
@@ -123,6 +124,12 @@ function ArtifactCard({ run, artifact, onOpen }) {
 /* Detail sections                                                    */
 /* ------------------------------------------------------------------ */
 
+// Where the studio folder is shown, which is what a missing record needs
+// checking against. Same navigate event every other cross-page repair uses.
+const openStorageSettings = () => {
+  window.dispatchEvent(new CustomEvent('navigate', { detail: { page: 'settings' } }));
+};
+
 function Section({ title, right, children }) {
   return (
     <section className="flex flex-col gap-1.5">
@@ -149,7 +156,11 @@ function RunDetail({ run, operatorToken }) {
       />
     );
   }
-  const action = run.next_actions?.[0];
+  // A production whose record the studio cannot read: the row is still true —
+  // its steps, its status, its history all come from the store — but there is
+  // no brief, no artifact and nothing to drive until the record is back.
+  const record = runRecordFailure(run);
+  const action = record ? null : run.next_actions?.[0];
   // A failed run has nothing left to cancel.
   const canCancel = !['completed', 'cancelled', 'failed'].includes(run.status);
   const canAuth = Boolean(run.current_step) || canCancel;
@@ -180,6 +191,15 @@ function RunDetail({ run, operatorToken }) {
         </div>
         <StatusPill status={run.status} />
       </div>
+
+      {record ? (
+        <FailureCallout
+          title={`${record.title} ${record.hint}`}
+          detail={record.detail}
+          remedy={{ label: t('runs.openStorageSettings') }}
+          onRemedy={openStorageSettings}
+        />
+      ) : null}
 
       {action ? (
         <Section title={t('runs.nextAction')}>
@@ -218,6 +238,9 @@ function RunDetail({ run, operatorToken }) {
         </div>
       </Section>
 
+      {/* Without the record there is no artifact list to be right about, and
+          "No artifacts yet" would be a claim this run cannot support. */}
+      {record ? null : (
       <Section title={t('runs.artifacts')}>
         {run.artifact_records?.length ? (
           <div className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]">
@@ -229,12 +252,19 @@ function RunDetail({ run, operatorToken }) {
           <p className="text-xs text-ink3">{t('runs.noArtifacts')}</p>
         )}
       </Section>
+      )}
 
       <Section title={t('runs.actions')}>
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => loadRunIntoSimpleComposer(run.run_id)}>{t('runs.usePromptAndSettings')}</Button>
-          <Button size="sm" onClick={() => duplicateRun(run.run_id)}>{t('runs.duplicateAndEdit')}</Button>
-          {run.current_step ? (
+          {/* Everything but cancelling reads the record, so a run without one
+              offers only what still works rather than buttons that 409. */}
+          {record ? null : (
+            <>
+              <Button size="sm" onClick={() => loadRunIntoSimpleComposer(run.run_id)}>{t('runs.usePromptAndSettings')}</Button>
+              <Button size="sm" onClick={() => duplicateRun(run.run_id)}>{t('runs.duplicateAndEdit')}</Button>
+            </>
+          )}
+          {run.current_step && !record ? (
             <>
               <Button size="sm" onClick={() => runAction('resume', run.run_id)}>{t('runs.resume')}</Button>
               <Button size="sm" onClick={() => runAction('retry', run.run_id, run.current_step)}>{t('runs.retryStep')}</Button>
