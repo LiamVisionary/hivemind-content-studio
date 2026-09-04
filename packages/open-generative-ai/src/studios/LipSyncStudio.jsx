@@ -34,7 +34,7 @@ import { toast } from 'react-hot-toast';
 import { muapi } from '../lib/muapi.js';
 import { adoptCloudOutput } from '../lib/cloudAdopt.js';
 import { muapiRow, needsBrowserKey, runVideo } from '../lib/modelRunner.js';
-import { lipsyncModels, imageLipSyncModels, videoLipSyncModels, getResolutionsForLipSyncModel } from '../lib/models.js';
+import { lipsyncModels, imageLipSyncModels, videoLipSyncModels, getResolutionsForLipSyncModel } from '../lib/cloudCatalog.js';
 import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pendingJobs.js';
 import { downloadMedia } from '../lib/downloadMedia.js';
 import { videoDownloadName } from '../lib/downloadNames.js';

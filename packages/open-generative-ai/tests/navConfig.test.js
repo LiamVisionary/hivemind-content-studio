@@ -104,7 +104,9 @@ test('STUDIO_PAGES is exactly the studio loader map in App.jsx', async () => {
     const app = read('src/app/App.jsx');
     const block = app.match(/const STUDIO_LOADERS = \{([\s\S]*?)\n\};/);
     assert.ok(block, 'STUDIO_LOADERS not found in App.jsx');
-    const loaders = [...block[1].matchAll(/^\s*'?([\w-]+)'?:\s*\(\)/gm)].map(([, key]) => key);
+    // A loader may be wrapped — the three cloud studios wait on the served
+    // model catalog — so the key is what matters, not what follows the colon.
+    const loaders = [...block[1].matchAll(/^\s*'?([\w-]+)'?:\s*(?:\w+\()?\(\)/gm)].map(([, key]) => key);
     assert.deepEqual([...STUDIO_PAGES].sort(), loaders.sort(),
         'a studio page with no loader never mounts; a loader with no page key is unreachable');
 });

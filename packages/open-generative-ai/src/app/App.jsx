@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast, Toaster } from 'react-hot-toast';
 import { ExploreDock } from '../bridges/ExploreDock.jsx';
 import { MEDIA_DOWNLOAD_BLOCKED_EVENT } from '../lib/downloadMedia.js';
+import { cloudCatalogReady } from '../lib/cloudCatalog.js';
 import { isFirstRunSetup } from '../lib/firstRun.js';
 import { seedMuapiKeyLocation } from '../lib/muapiKey.js';
 import { getPendingJobs } from '../lib/pendingJobs.js';
@@ -33,12 +34,19 @@ import { StudioTabs } from './StudioTabs.jsx';
 // tab's generation keeps running.
 const TABBED_STUDIOS = new Set(['image', 'video']);
 
+// The cloud model catalog is SERVED (see lib/cloudCatalog.js), and these three
+// studios boot their default model straight off it — Image picks t2iModels[0]
+// when nothing is persisted. So their chunk and the catalog are fetched
+// together and the studio mounts once both are in: the alternative is a first
+// paint with an empty model picker that fills in a moment later.
+const withCloudCatalog = (load) => async () => (await Promise.all([load(), cloudCatalogReady()]))[0];
+
 const STUDIO_LOADERS = {
-  image: () => import('../studios/ImageStudio.jsx').then((m) => m.ImageStudio),
-  video: () => import('../studios/VideoStudio.jsx').then((m) => m.VideoStudio),
+  image: withCloudCatalog(() => import('../studios/ImageStudio.jsx').then((m) => m.ImageStudio)),
+  video: withCloudCatalog(() => import('../studios/VideoStudio.jsx').then((m) => m.VideoStudio)),
   sprite: () => import('../studios/SpriteStudio.jsx').then((m) => m.SpriteStudio),
   story: () => import('../studios/StoryStudio.jsx').then((m) => m.StoryStudio),
-  lipsync: () => import('../studios/LipSyncStudio.jsx').then((m) => m.LipSyncStudio),
+  lipsync: withCloudCatalog(() => import('../studios/LipSyncStudio.jsx').then((m) => m.LipSyncStudio)),
   restore: () => import('../studios/RestoreStudio.jsx').then((m) => m.RestoreStudio),
 };
 
@@ -76,6 +84,10 @@ function initialPage() {
 // navigate()'s own retry/stale-chunk recovery; swallowed here only so a failed
 // preload is never an unhandled rejection.
 if (typeof window !== 'undefined') {
+  // The catalog fetch goes out with the studio chunk rather than behind it —
+  // cloudCatalogReady() is loaded once and shared, so this is the same promise
+  // the loader above waits on.
+  try { cloudCatalogReady(); } catch { /* non-critical */ }
   const landing = STUDIO_LOADERS[initialPage()];
   if (landing) { try { landing().catch(() => {}); } catch { /* non-critical */ } }
 }

@@ -3,7 +3,7 @@
 // composer carry the same readout without a second implementation.
 import { useState } from 'react';
 
-import { i2iModels, t2iModels } from '../../lib/models.js';
+import { i2iModels, t2iModels } from '../../lib/cloudCatalog.js';
 import { servedByAnyMachine } from '../../lib/rentedMachines.js';
 import { t } from '../../lib/i18n.js';
 import { Icon } from '../../ui/icons.jsx';

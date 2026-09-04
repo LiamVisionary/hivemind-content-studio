@@ -26,7 +26,7 @@ import {
   t2iModels, getAspectRatiosForModel, getResolutionsForModel, getQualityFieldForModel,
   i2iModels, getAspectRatiosForI2IModel, getResolutionsForI2IModel, getQualityFieldForI2IModel,
   getMaxImagesForI2IModel,
-} from '../lib/models.js';
+} from '../lib/cloudCatalog.js';
 import { localAI, isHostedLocalAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { LOCAL_MODEL_CATALOG, getLocalModelById } from '../lib/localModels.js';
 import { RENTED_CHANGED_EVENT, consumeRentedModeRequest, rentedMachinesState, servedByAnyMachine } from '../lib/rentedMachines.js';

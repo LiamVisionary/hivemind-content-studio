@@ -77,7 +77,7 @@ const NON_MODEL_PROVIDERS = new Set(['static-text-renderer', 'stickman-renderer'
 /** A model from the browser's own local inventory (sd.cpp checkpoints, Wan2GP). */
 export const localRow = (id, provider = 'sdcpp') => ({ id, provider, source: 'local' });
 
-/** A model from src/lib/modelsData.js — which IS the MUAPI catalog. */
+/** A model from the served cloud catalog (src/lib/cloudCatalog.js). */
 export const muapiRow = (id) => ({ id, provider: 'muapi', source: 'cloud' });
 
 /** A workflow served by this machine's Media Studio (local Comfy, a fleet

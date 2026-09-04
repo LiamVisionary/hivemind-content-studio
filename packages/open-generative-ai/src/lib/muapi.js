@@ -1,4 +1,4 @@
-import { getModelById, getVideoModelById, getI2IModelById, getI2VModelById, getV2VModelById, getLipSyncModelById } from './models.js';
+import { getModelById, getVideoModelById, getI2IModelById, getI2VModelById, getV2VModelById, getLipSyncModelById } from './cloudCatalog.js';
 
 export function applyDeclaredModelInputs(payload, params, modelInfo) {
     Object.keys(modelInfo?.inputs || {}).forEach((name) => {

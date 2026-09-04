@@ -9,7 +9,7 @@
 //   - prompt text never goes to localStorage (it stays in the encrypted composer),
 //     so the localStorage copy is written without the negative prompt.
 import { getComposerSection, updateComposerSection } from '../../../lib/composerState.js';
-import { t2iModels } from '../../../lib/models.js';
+import { cloudCatalogReady, t2iModels } from '../../../lib/cloudCatalog.js';
 import { IMAGE_PREFERENCES_KEY, normalizeImagePreferences } from '../../../studios/image/imagePrefs.js';
 import { VIDEO_PREFERENCES_KEY, normalizeVideoPreferences } from '../../../studios/video/videoLogic.js';
 
@@ -45,7 +45,11 @@ function navigate(page) {
   window.dispatchEvent(new CustomEvent('navigate', { detail: { page } }));
 }
 
-export function openLocalImageModel(modelId) {
+export async function openLocalImageModel(modelId) {
+  // The cloud catalog is served, so the studio's own default lane model is not
+  // known until it lands. Waiting here costs a handoff nothing and keeps the
+  // written preference valid — an empty cloud modelId is rejected on arrival.
+  await cloudCatalogReady();
   const current = normalizeImagePreferences(
     getComposerSection('image').preferences || readJson(IMAGE_PREFERENCES_KEY),
   );
@@ -68,8 +72,8 @@ export function openLocalVideoModel(modelId) {
   navigate('video');
 }
 
-export function openModelInStudio(model) {
+export async function openModelInStudio(model) {
   if (!model?.id) return;
   if (String(model.type || '').toLowerCase() === 'video') openLocalVideoModel(model.id);
-  else openLocalImageModel(model.id);
+  else await openLocalImageModel(model.id);
 }

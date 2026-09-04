@@ -18,7 +18,7 @@ import {
   getDurationsForI2VModel,
   getResolutionsForI2VModel,
   getModesForModel,
-} from '../../lib/models.js';
+} from '../../lib/cloudCatalog.js';
 import {
   getHivemindVideoModelById,
   getSavedHivemindVideoSelection,

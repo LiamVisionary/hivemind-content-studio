@@ -328,7 +328,9 @@ test('the menu lines name the model, the length, the split and the part', async 
 });
 
 test('Seedance 2.5 is in the catalog and reaches 30s in one generation', async () => {
-    const { t2vModels, i2vModels, getDurationsForModel, getVideoModelById } = await import('../src/lib/modelsData.js');
+    const catalog = await import('../src/lib/cloudCatalog.js');
+    await catalog.cloudCatalogReady();
+    const { t2vModels, i2vModels, getDurationsForModel, getVideoModelById } = catalog;
     // Endpoints confirmed against the live MUAPI catalog 2026-08-11.
     for (const id of ['seedance-2.5-text-to-video', 'seedance-2.5-text-to-video-480p']) {
         const model = t2vModels.find((entry) => entry.id === id);

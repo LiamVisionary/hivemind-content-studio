@@ -165,7 +165,8 @@ test('every model the studio can select also resolves flat', async () => {
     // The flat resolver is only unambiguous while ids stay unique across the
     // catalogs — a collision would make a capability answer depend on list
     // order, which is the same class of bug one layer down.
-    const data = await import('../src/lib/modelsData.js');
+    const data = await import('../src/lib/cloudCatalog.js');
+    await data.cloudCatalogReady();
     const seen = new Map();
     for (const list of ['t2vModels', 'i2vModels', 'v2vModels']) {
         for (const entry of data[list] || []) {
