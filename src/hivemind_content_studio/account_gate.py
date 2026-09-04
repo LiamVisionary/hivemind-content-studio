@@ -151,6 +151,103 @@ function passkeyOfferHidden(accountId) {
   try { return localStorage.getItem(offerHiddenKey(accountId)) === '1'; } catch { return false; }
 }
 
+// >>> vault-recovery-crypto
+// The only crypto this gate does on its own. It mirrors src/lib/e2eVault.js —
+// same KDF, same wrap format, same base32 alphabet — because the app bundle
+// lives under /assets, which is gated, and a person who has forgotten their
+// password cannot load it. tests/vaultPasswordRecovery.test.js extracts this
+// exact block and runs it against identities e2eVault created, so the two
+// cannot drift apart unnoticed.
+//
+// Possession is proved by DECRYPTING the server's nonce, never by signing it:
+// the vault keypair is RSA-OAEP with encrypt/decrypt usages only, and WebCrypto
+// refuses to sign with such a key.
+const vaultRecovery = (() => {
+  const PBKDF2_ITERATIONS = 600000;
+  const KDF = `PBKDF2-SHA256-${PBKDF2_ITERATIONS}`;
+  const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; // RFC4648 base32
+  const subtle = crypto.subtle;
+
+  const b64url = (buffer) => btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const unb64url = (text) => {
+    const padded = String(text).replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(padded + '==='.slice((padded.length + 3) % 4));
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  };
+
+  function decodeRecovery(text) {
+    const clean = String(text).toUpperCase().replace(/[^A-Z2-7]/g, '');
+    let bits = 0;
+    let value = 0;
+    const out = [];
+    for (const character of clean) {
+      const index = ALPHABET.indexOf(character);
+      if (index < 0) continue;
+      value = (value << 5) | index;
+      bits += 5;
+      if (bits >= 8) {
+        out.push((value >>> (bits - 8)) & 0xff);
+        bits -= 8;
+      }
+    }
+    return new Uint8Array(out);
+  }
+
+  async function recoveryWrappingKey(recoveryBytes) {
+    const digest = await subtle.digest('SHA-256', recoveryBytes);
+    return subtle.importKey('raw', digest, { name: 'AES-GCM', length: 256 }, false, ['unwrapKey']);
+  }
+
+  function splitWrap(blob) {
+    const [ivPart, ctPart] = String(blob).split('.');
+    return { iv: unb64url(ivPart), ciphertext: unb64url(ctPart) };
+  }
+
+  /**
+   * Unwrap the master key with the recovery key, unwrap the private key with
+   * that, and decrypt the server's nonce with the private key. Null means the
+   * recovery key does not open this vault — a GCM tag mismatch, decided here,
+   * so the server never becomes an oracle for guesses.
+   */
+  async function open(payload, recoveryKeyText) {
+    const wrappingKey = await recoveryWrappingKey(decodeRecovery(recoveryKeyText));
+    let masterKey;
+    try {
+      const wrapped = splitWrap(payload.wrapped_mk_recovery);
+      masterKey = await subtle.unwrapKey(
+        'raw', wrapped.ciphertext, wrappingKey, { name: 'AES-GCM', iv: wrapped.iv },
+        { name: 'AES-GCM', length: 256 }, true, ['unwrapKey'],
+      );
+    } catch {
+      return null;
+    }
+    const sealedPrivate = splitWrap(payload.wrapped_private_key);
+    const privateKey = await subtle.unwrapKey(
+      'pkcs8', sealedPrivate.ciphertext, masterKey, { name: 'AES-GCM', iv: sealedPrivate.iv },
+      { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt'],
+    );
+    const nonce = await subtle.decrypt({ name: 'RSA-OAEP' }, privateKey, unb64url(payload.nonce));
+    return { masterKey, nonce: b64url(nonce) };
+  }
+
+  /** Seal the SAME master key under a new passphrase: new salt, new pass key. */
+  async function rewrap(masterKey, passphrase) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const base = await subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+    const passKey = await subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+      base, { name: 'AES-GCM', length: 256 }, false, ['wrapKey'],
+    );
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const wrapped = await subtle.wrapKey('raw', masterKey, passKey, { name: 'AES-GCM', iv });
+    return { kdf: KDF, salt: b64url(salt), wrapped_mk_pass: `${b64url(iv)}.${b64url(wrapped)}` };
+  }
+
+  return { KDF, decodeRecovery, open, rewrap };
+})();
+// <<< vault-recovery-crypto
+
 let accounts = [];
 let chosen = null;
 
@@ -276,6 +373,11 @@ function choose(account) {
   // which is the one moment enrolment can actually succeed.
   el('passkey').hidden = !account.has_passkey;
   el('password-form').hidden = !account.has_password;
+  el('recover').hidden = true;
+  // Only offered where there is a password to have forgotten. A passkey-only
+  // workspace is opened by the authenticator, and its vault is opened by the
+  // wrap that passkey carries.
+  el('forgot').hidden = !account.has_password;
   el('divider').hidden = !account.has_password || !account.has_passkey;
   if (account.has_passkey) el('passkey').focus(); else el('password').focus();
 }
@@ -284,6 +386,7 @@ function back() {
   chosen = null;
   el('signin').hidden = true;
   el('create').hidden = true;
+  el('recover').hidden = true;
   el('picker').hidden = false;
 }
 
@@ -488,6 +591,68 @@ async function signInWithPassword(event) {
   location.reload();
 }
 
+// ── forgotten password ───────────────────────────────────────────────────────
+//
+// The recovery key is the only thing that can open a vault whose passphrase is
+// gone: the server has never held the master key and cannot re-issue one. So
+// this card unwraps the vault in the browser, proves it did by decrypting a
+// nonce the server sealed to the vault's public key, and hands back the master
+// key re-wrapped under the new passphrase. The server sets the password and
+// stores that wrap in one call, or neither.
+function showRecover() {
+  el('signin').hidden = true;
+  el('recover').hidden = false;
+  el('recover-who').textContent = chosen.name;
+  el('recover-error').textContent = '';
+  el('recover-form').reset();
+  el('recover-key').focus();
+}
+
+function recoverFail(message) {
+  el('recover-error').textContent = message;
+  el('recover-submit').disabled = false;
+}
+
+async function recoverWithKey(event) {
+  event.preventDefault();
+  el('recover-error').textContent = '';
+  const password = el('recover-password').value;
+  if (password !== el('recover-confirm').value) {
+    recoverFail('Those two passwords are different. Type the new one twice.');
+    return;
+  }
+  el('recover-submit').disabled = true;
+  let payload;
+  try {
+    payload = await api('/api/accounts/recovery/challenge', { account_id: chosen.id });
+  } catch (error) {
+    recoverFail(error.message || 'This workspace cannot be recovered right now.');
+    return;
+  }
+  let opened;
+  try {
+    opened = await vaultRecovery.open(payload, el('recover-key').value);
+  } catch {
+    opened = null;
+  }
+  if (!opened) {
+    recoverFail('That recovery key does not open this workspace. Check it for a typo — it is '
+      + 'letters and digits in groups of four — and try again.');
+    return;
+  }
+  try {
+    const wrap = await vaultRecovery.rewrap(opened.masterKey, password);
+    await api('/api/accounts/recovery/reset', {
+      account_id: chosen.id, challenge: payload.challenge, nonce: opened.nonce, password, wrap,
+    });
+  } catch (error) {
+    recoverFail(error.message || 'The new password could not be saved. Try again.');
+    return;
+  }
+  handOff(chosen.id, { passphrase: password });
+  location.reload();
+}
+
 let pendingPassword = null;
 
 function finishWithPassword(extra = {}) {
@@ -589,6 +754,9 @@ el('setup-form').addEventListener('submit', setUpStudio);
 el('passkey').addEventListener('click', () => signInWithPasskey(chosen));
 el('password-form').addEventListener('submit', signInWithPassword);
 el('back').addEventListener('click', back);
+el('forgot').addEventListener('click', showRecover);
+el('recover-form').addEventListener('submit', recoverWithKey);
+el('recover-back').addEventListener('click', () => { el('recover').hidden = true; choose(chosen); });
 el('create-form').addEventListener('submit', createWorkspace);
 el('create-passkey').addEventListener('click', createWorkspaceWithPasskey);
 el('create-back').addEventListener('click', back);
@@ -686,6 +854,9 @@ def account_gate_html() -> str:
             <input id="password" type="password" autocomplete="current-password" required>
           </label>
           <button class="secondary" type="submit">Unlock with password</button>
+          <div style="display:grid;justify-items:center">
+            <button class="back" id="forgot" type="button" hidden>Forgot your password?</button>
+          </div>
         </form>
       </div>
 
@@ -704,6 +875,37 @@ def account_gate_html() -> str:
       <p class="error" id="error" role="alert"></p>
       <div style="display:grid;justify-items:center">
         <button class="back" id="back" type="button">Choose a different workspace</button>
+      </div>
+    </section>
+
+    <section class="card" id="recover" hidden aria-labelledby="recover-title">
+      <div class="who">
+        <span class="mark" style="flex:0 0 auto" aria-hidden="true">{_KEY_GLYPH}</span>
+        <div>
+          <h2 id="recover-title">Use your recovery key</h2>
+          <p class="lede" style="text-align:left;margin:2px 0 0" id="recover-who"></p>
+        </div>
+      </div>
+      <p class="lede" style="text-align:left;margin:0">This is the key you were shown once, when this
+        workspace was created. Nobody can reset a password without it — the key that decrypts your
+        library has never been on this machine's disk in a form the studio can read. Everything you
+        have made stays exactly where it is; only the password changes.</p>
+      <form id="recover-form">
+        <label>Recovery key
+          <input id="recover-key" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="ABCD-EFGH-IJKL-MNOP-..." required>
+        </label>
+        <label>New password
+          <input id="recover-password" type="password" autocomplete="new-password" required>
+        </label>
+        <label>Type it again
+          <input id="recover-confirm" type="password" autocomplete="new-password" required>
+        </label>
+        <button class="primary" id="recover-submit" type="submit">Set the new password</button>
+      </form>
+      <p class="error" id="recover-error" role="alert"></p>
+      <div style="display:grid;justify-items:center">
+        <button class="back" id="recover-back" type="button">I remembered it — go back</button>
       </div>
     </section>
 

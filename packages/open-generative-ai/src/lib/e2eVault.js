@@ -189,6 +189,82 @@ export async function unlockWithRecoveryKey(identity, recoveryKeyText) {
     return true;
 }
 
+// ── re-wrapping (change password, forgotten password, new recovery key) ──────
+//
+// All three move ONE wrap of an unchanged master key. That is what makes them
+// cheap and what makes them safe: nothing already sealed has to be re-encrypted,
+// and every other way into this vault — the recovery copy, each passkey's PRF
+// wrap, this browser's device wrap — keeps working, because each of them wraps
+// the same master key and the master key is not what changes.
+
+/** The master key, extractable, from whichever secret the caller can prove. */
+async function masterKeyFrom(identity, current) {
+    if (current?.recoveryKey) {
+        const recoveryKey = await importRecoveryKey(decodeRecovery(current.recoveryKey));
+        return unwrapMasterKey(recoveryKey, identity.wrapped_mk_recovery);
+    }
+    if (current?.passphrase) return extractableMasterKey(identity, current.passphrase);
+    throw new Error('No current secret to re-wrap from');
+}
+
+/**
+ * Seal the master key under a NEW passphrase: a fresh salt, a fresh pass key.
+ *
+ * `current` is `{ passphrase }` (changing a password you still know) or
+ * `{ recoveryKey }` (you forgot it). Returns the three fields the server needs
+ * to store, or null when the current secret is wrong — a GCM tag mismatch, with
+ * no server round trip and so no oracle.
+ */
+export async function rewrapForPassphrase(identity, current, newPassphrase) {
+    if (!subtle) throw new Error('WebCrypto unavailable');
+    if (!newPassphrase) throw new Error('A new passphrase is required');
+    let mk;
+    try {
+        mk = await masterKeyFrom(identity, current);
+    } catch {
+        return null;
+    }
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const passKey = await deriveWrappingKey(newPassphrase, salt);
+    return { kdf: KDF, salt: toB64url(salt), wrapped_mk_pass: await wrapMasterKey(passKey, mk) };
+}
+
+/**
+ * Mint a new recovery key and seal the master key under it.
+ *
+ * The old recovery key stops working the moment the returned wrap is stored,
+ * which is the point: a key that was printed, photographed or lost should be
+ * revocable without re-encrypting a library.
+ */
+export async function rewrapForRecovery(identity, current) {
+    if (!subtle) throw new Error('WebCrypto unavailable');
+    let mk;
+    try {
+        mk = await masterKeyFrom(identity, current);
+    } catch {
+        return null;
+    }
+    const recoveryBytes = crypto.getRandomValues(new Uint8Array(20));
+    const wrapped = await wrapMasterKey(await importRecoveryKey(recoveryBytes), mk);
+    return { recoveryKey: encodeRecovery(recoveryBytes), wrapped_mk_recovery: wrapped };
+}
+
+/**
+ * Prove possession of this vault by DECRYPTING a server-issued nonce.
+ *
+ * Not by signing it: the vault keypair is RSA-OAEP with encrypt/decrypt usages
+ * only, and WebCrypto refuses to sign with such a key. The server holds the
+ * public half, seals 32 random bytes to it, and believes whoever hands the
+ * plaintext back — which is only a browser that has already unwrapped the
+ * private key, and so has already opened the vault.
+ */
+export async function decryptChallengeNonce(sealedNonce) {
+    if (!subtle) throw new Error('WebCrypto unavailable');
+    if (!unlocked || !privateKey) throw new Error('Vault is locked');
+    const plain = await subtle.decrypt({ name: 'RSA-OAEP' }, privateKey, fromB64url(sealedNonce));
+    return toB64url(plain);
+}
+
 // ── passkey unlock ───────────────────────────────────────────────────────────
 //
 // A passkey signs a challenge; it does not hand over a secret. So proving WHO

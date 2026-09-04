@@ -253,6 +253,24 @@ class AccountStore:
                     purpose TEXT NOT NULL,
                     expires_at REAL NOT NULL
                 );
+                -- A recovery attempt in flight. `nonce` is the plaintext the
+                -- browser must hand back after decrypting it with the vault
+                -- private key; it is issued ONLY sealed to that key's public
+                -- half, so holding this row proves nothing on its own.
+                CREATE TABLE IF NOT EXISTS recovery_challenges (
+                    challenge TEXT PRIMARY KEY,
+                    account_id INTEGER NOT NULL,
+                    nonce TEXT NOT NULL,
+                    expires_at REAL NOT NULL
+                );
+                -- The write-ahead journal that makes a password reset atomic
+                -- across two databases. See begin_password_reset.
+                CREATE TABLE IF NOT EXISTS password_resets (
+                    account_id INTEGER PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    vault_wrap TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -457,6 +475,119 @@ class AccountStore:
         if float(row["expires_at"]) < time.time():
             return None
         return dict(row)
+
+    # ── recovery-key challenges ───────────────────────────────────────────────
+    #
+    # Possession of the vault is proved by DECRYPTION, not by a signature: the
+    # vault keypair is RSA-OAEP with encrypt/decrypt usages only, and WebCrypto
+    # refuses to sign with it. So the server mints a random nonce, hands it out
+    # sealed to the account's vault public key, and believes whoever hands the
+    # plaintext back. It never learns the recovery key, and a caller who cannot
+    # unwrap the private key cannot answer.
+    def issue_recovery_challenge(self, account_id: int) -> tuple[str, bytes]:
+        challenge = b64url(os.urandom(32))
+        nonce = os.urandom(32)
+        with self._connect() as connection:
+            connection.execute("DELETE FROM recovery_challenges WHERE expires_at < ?", (time.time(),))
+            connection.execute(
+                "INSERT INTO recovery_challenges(challenge, account_id, nonce, expires_at) VALUES(?, ?, ?, ?)",
+                (challenge, int(account_id), b64url(nonce), time.time() + CHALLENGE_SECONDS),
+            )
+        return challenge, nonce
+
+    def consume_recovery_challenge(self, challenge: str, nonce: str, account_id: int) -> bool:
+        """Claim a recovery challenge exactly once, and only with the right nonce.
+
+        The row goes whether or not the nonce matches: a wrong answer burns the
+        attempt rather than letting a caller grind one challenge.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM recovery_challenges WHERE challenge = ?", (str(challenge),)
+            ).fetchone()
+            if not row:
+                return False
+            connection.execute("DELETE FROM recovery_challenges WHERE challenge = ?", (str(challenge),))
+        if float(row["expires_at"]) < time.time():
+            return False
+        if int(row["account_id"]) != int(account_id):
+            return False
+        return hmac.compare_digest(str(row["nonce"]), str(nonce or ""))
+
+    # ── password resets, journalled ───────────────────────────────────────────
+    #
+    # A reset changes two things in two different SQLite files: the password
+    # hash here, and the passphrase-wrapped master key in that account's vault.
+    # SQLite cannot commit across both (they are WAL, so an ATTACHed
+    # multi-database transaction is not atomic), so the journal below is the
+    # commit point instead. Write the intent, apply the vault wrap, then apply
+    # the hash and drop the journal in one transaction. A process killed
+    # anywhere after the journal is written is finished on the next boot by
+    # `resume_password_resets`; killed before it, nothing has changed and the
+    # old password still works.
+    def begin_password_reset(self, account_id: int, password_hash: str, vault_wrap: dict[str, str]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO password_resets(account_id, password_hash, vault_wrap, created_at)"
+                " VALUES(?, ?, ?, ?)"
+                " ON CONFLICT(account_id) DO UPDATE SET password_hash = excluded.password_hash,"
+                " vault_wrap = excluded.vault_wrap, created_at = excluded.created_at",
+                (int(account_id), str(password_hash),
+                 json.dumps(dict(vault_wrap), separators=(",", ":"), sort_keys=True), _now()),
+            )
+
+    def pending_password_resets(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM password_resets ORDER BY account_id").fetchall()
+        return [
+            {
+                "account_id": int(row["account_id"]),
+                "password_hash": str(row["password_hash"]),
+                "vault_wrap": json.loads(row["vault_wrap"]),
+            }
+            for row in rows
+        ]
+
+    def finish_password_reset(self, account_id: int) -> bool:
+        """Apply the journalled hash and clear the journal, in one transaction."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT password_hash FROM password_resets WHERE account_id = ?", (int(account_id),)
+            ).fetchone()
+            if not row:
+                return False
+            connection.execute(
+                "UPDATE accounts SET password_hash = ?, updated_at = ? WHERE id = ?",
+                (str(row["password_hash"]), _now(), int(account_id)),
+            )
+            connection.execute("DELETE FROM password_resets WHERE account_id = ?", (int(account_id),))
+        return True
+
+    def cancel_password_reset(self, account_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM password_resets WHERE account_id = ?", (int(account_id),))
+
+
+# ── proving possession of a vault ────────────────────────────────────────────
+
+def seal_recovery_nonce(public_key_b64url: str, nonce: bytes) -> str:
+    """Seal a challenge nonce to a vault's RSA-OAEP public key.
+
+    Mirrors `crypto.subtle.decrypt({name:'RSA-OAEP'}, ...)` on the browser side,
+    which is fixed to the hash the key was generated with (SHA-256).
+    """
+    key = load_spki(public_key_b64url)
+    if not isinstance(key, _rsa.RSAPublicKey):
+        raise ValueError("This vault's public key is not an RSA key")
+    sealed = key.encrypt(
+        nonce,
+        _rsa_padding.OAEP(
+            mgf=_rsa_padding.MGF1(algorithm=_hashes.SHA256()),
+            algorithm=_hashes.SHA256(),
+            label=None,
+        ),
+    )
+    return b64url(sealed)
 
 
 # ── sessions ─────────────────────────────────────────────────────────────────

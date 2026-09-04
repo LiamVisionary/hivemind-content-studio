@@ -30,6 +30,40 @@ unwraps `MK`, then unwraps `PRIV`. `MK`/`PRIV` live only in browser memory for
 the session. A wrong passphrase fails the GCM tag — no oracle on the server.
 Forgotten passphrase → unlock with `RK` instead (unwraps the recovery copy).
 
+## Recovery, and changing a password
+
+All three of these move exactly ONE wrap of an unchanged `MK`, so nothing
+already sealed is re-encrypted and every other way in — the recovery copy, each
+passkey's PRF wrap, a browser's device wrap — keeps working.
+
+**Forgotten password** (the gate's "Forgot your password?", pre-auth):
+
+1. `POST /api/accounts/recovery/challenge` returns `salt`,
+   `wrapped_mk_recovery`, `wrapped_priv`, and `nonce = RSA-OAEP(PUB, random32)`.
+   It **never** returns `wrapped_mk_pass`: unauthenticated, that value is an
+   offline password-cracking oracle. Throttled exactly like unlock.
+2. The browser unwraps `MK` with `RK`, unwraps `PRIV` with `MK`, and decrypts
+   the nonce. Possession is proved by **decryption, not signature** — the vault
+   keypair is RSA-OAEP with encrypt/decrypt usages only and WebCrypto refuses to
+   sign with it.
+3. `POST /api/accounts/recovery/reset` carries the challenge, the decrypted
+   nonce, the new password and a fresh `salt`/`wrapped_mk_pass`. The challenge
+   is single-use.
+
+**Atomicity.** The password hash (accounts.sqlite3) and the vault wrap (that
+account's vault db) cannot share a transaction — both are WAL, so an `ATTACH`ed
+multi-database commit is not atomic. So a journal row in `password_resets` is
+the commit point: written first, then the vault wrap, then the hash and the
+journal drop in one transaction. An in-process failure rolls the vault back and
+the old password still works; a killed process is finished at the next boot from
+the journal. Half a reset — a password that cannot open the library — never
+survives.
+
+**Signed in** (Settings → Privacy & vault): `POST /api/accounts/me/password`
+takes the same wrap plus the current password (verified server-side too, so a
+stolen cookie cannot change it), and `PUT /api/vault/recovery` replaces
+`wrapped_mk_recovery` alone with a freshly minted `RK`, retiring the old one.
+
 ## Data at rest
 
 - **Client-authored state** (composer draft: prompt, reference selection, upload

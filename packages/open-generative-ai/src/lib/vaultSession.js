@@ -14,6 +14,8 @@ import {
     isVaultUnlocked,
     lockVault,
     rememberOnThisDevice,
+    rewrapForPassphrase,
+    rewrapForRecovery,
     unlockWithDevice,
     unlockWithPassphrase,
     unlockWithPrf,
@@ -128,11 +130,13 @@ function retireSignInSecrets(hint) {
     } catch { /* storage unavailable */ }
 }
 
-function announceRecoveryKey(recoveryKey) {
+function announceRecoveryKey(recoveryKey, reason = 'created') {
     // The recovery key is shown exactly once — the server never has it, so if the
     // owner loses both it and the passphrase the content is unrecoverable.
+    // `reason` separates a vault that has just been created from one whose key
+    // was deliberately replaced, so the modal can say which happened.
     try {
-        window.dispatchEvent(new CustomEvent('hivemind-vault-recovery-key', { detail: { recoveryKey } }));
+        window.dispatchEvent(new CustomEvent('hivemind-vault-recovery-key', { detail: { recoveryKey, reason } }));
     } catch { /* no window (tests) */ }
 }
 
@@ -379,6 +383,95 @@ export async function unlockOwnerSession(password) {
         );
     } catch { /* storage unavailable — the reload will fall back to the gate */ }
     return { ok: true, status: response.status };
+}
+
+// ── changing the password, and minting a new recovery key ────────────────────
+//
+// Both re-wrap ONE copy of a master key that does not change, so nothing
+// already sealed is touched and every other way in — each passkey's PRF wrap,
+// this browser's device wrap — keeps working. The current password is required
+// for both: it is the only thing in the browser that can produce the master key
+// in a wrappable form, and asking for it is also what stops a borrowed session
+// from rotating either secret.
+//
+// Failures come back as a `reason` the caller turns into a sentence, never as
+// server text: `password` (wrong current password), `novault` (this workspace
+// has not created one yet), `offline`, `refused` (the session lapsed) or
+// `failed`.
+async function currentIdentity() {
+    const payload = await fetchIdentity();
+    if (!payload.exists || !payload.identity) return null;
+    return payload.identity;
+}
+
+export async function changeWorkspacePassword(currentPassword, newPassword) {
+    let identity;
+    try {
+        identity = await currentIdentity();
+    } catch {
+        return { ok: false, reason: 'offline' };
+    }
+    if (!identity) return { ok: false, reason: 'novault' };
+    // Proved in the browser BEFORE the server is asked to do anything: a wrong
+    // password fails here on a GCM tag, with no round trip to grind against.
+    const wrap = await rewrapForPassphrase(identity, { passphrase: currentPassword }, newPassword);
+    if (!wrap) return { ok: false, reason: 'password' };
+    let response;
+    try {
+        response = await fetch('/api/accounts/me/password', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ current_password: currentPassword, password: newPassword, wrap }),
+        });
+    } catch {
+        return { ok: false, reason: 'offline' };
+    }
+    if (!response.ok) {
+        return { ok: false, reason: response.status === 401 ? 'refused' : response.status === 409 ? 'novault' : 'failed' };
+    }
+    // The gate's per-tab handoff, if this tab still holds one, now names a
+    // password that no longer exists. Left alone, the next reload would try it,
+    // fail to unlock, and present a healthy vault as a locked one.
+    try {
+        if (sessionStorage.getItem(PASSPHRASE_KEY)) {
+            sessionStorage.setItem(
+                PASSPHRASE_KEY,
+                JSON.stringify({ password: newPassword, expiresAt: Date.now() + 24 * 60 * 60 * 1000 }),
+            );
+        }
+    } catch { /* storage unavailable */ }
+    return { ok: true };
+}
+
+export async function mintNewRecoveryKey(currentPassword) {
+    let identity;
+    try {
+        identity = await currentIdentity();
+    } catch {
+        return { ok: false, reason: 'offline' };
+    }
+    if (!identity) return { ok: false, reason: 'novault' };
+    const minted = await rewrapForRecovery(identity, { passphrase: currentPassword });
+    if (!minted) return { ok: false, reason: 'password' };
+    let response;
+    try {
+        response = await fetch('/api/vault/recovery', {
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ wrapped_mk_recovery: minted.wrapped_mk_recovery }),
+        });
+    } catch {
+        return { ok: false, reason: 'offline' };
+    }
+    if (!response.ok) {
+        return { ok: false, reason: response.status === 401 ? 'refused' : response.status === 409 ? 'novault' : 'failed' };
+    }
+    // Only announced once the server has the new wrap: showing a key that was
+    // never stored would be worse than showing none.
+    announceRecoveryKey(minted.recoveryKey, 'rotated');
+    return { ok: true };
 }
 
 // ── owner-session-gated ciphertext blob transport ────────────────────────────
