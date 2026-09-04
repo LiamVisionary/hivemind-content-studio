@@ -32,8 +32,6 @@ _CLOUD_OUTPUT_SUFFIXES = {
 _CLOUD_OUTPUT_DEFAULT_SUFFIX = {"image": ".png", "video": ".mp4", "audio": ".mp3"}
 
 
-
-
 def cloud_output_suffix(url: str, media_type: str, kind: str) -> str:
     """The extension this result is stored under.
 

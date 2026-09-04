@@ -650,7 +650,6 @@ def build_context(
         _sync_canvas_history_for_scope()
         canvas_sync_at[key] = time.monotonic()
 
-
     return StudioContext(
         runs=runs,
         cipher=cipher,

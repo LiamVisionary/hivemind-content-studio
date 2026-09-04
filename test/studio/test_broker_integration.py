@@ -178,11 +178,24 @@ def test_no_two_routes_claim_the_same_path_and_method():
     import inspect
     import re
     from collections import Counter
+    from pathlib import Path
 
     from hivemind_content_studio import control_api
 
-    registered = re.findall(
-        r'@app\.(get|post|put|delete|patch)\(\s*"([^"]+)"', inspect.getsource(control_api))
+    # control_api.py keeps /healthz and /readyz; every other route lives in a
+    # module under hivemind_content_studio/api/ and registers on an APIRouter.
+    # Both spellings are read, so the guard still covers all 113 routes.
+    sources = [inspect.getsource(control_api)]
+    api_package = Path(control_api.__file__).parent / "api"
+    sources += [path.read_text(encoding="utf-8") for path in sorted(api_package.glob("*.py"))]
+
+    registered = [
+        route
+        for source in sources
+        for route in re.findall(
+            r'@(?:app|router)\.(get|post|put|delete|patch)\(\s*"([^"]+)"', source)
+    ]
     duplicates = sorted(route for route, count in Counter(registered).items() if count > 1)
 
     assert not duplicates, f"these routes are registered more than once: {duplicates}"
+    assert len(registered) > 100, "the route scan found almost nothing; the pattern has drifted"
