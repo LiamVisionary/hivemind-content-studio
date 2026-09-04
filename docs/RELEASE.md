@@ -47,8 +47,8 @@ inherits one.
 
 * **ComfyUI lanes** (8188 default, 8198 Anima, 8199 LTX). The user's own
   checkout, its own venv, its own ~25 pinned custom nodes. The shell probes
-  `COMFY_LANES`, shows what answered on the Models page, and offers the guided
-  setup described in §6 when nothing does. It must never `kill_port 8188`: a
+  `COMFY_LANES`, shows what answered on the Models page, and offers the Connect
+  ComfyUI card described in §5 when nothing does. It must never `kill_port 8188`: a
   desktop app that kills a user's ComfyUI because it quit is a bug report, and
   the developer stack's `kill_port` behaviour is exactly what not to copy.
 * **Swift MLX engines** (`engines/flux-2-swift-mlx` 8791, `engines/z-image-swift`).
@@ -211,11 +211,28 @@ MLX engines, Tailscale, an existing PassBook store, an existing
 `~/.hivemindos/media-studio`.
 
 **Installed on first run, with consent and progress**: nothing by default. The
-models the user picks on the Models page, and — if they choose it — the guided
-ComfyUI setup, whose node manifest is the pinned list already maintained in
-`packages/gpu-rentals/provisioning/comfyui-hivemind.sh`. A first launch with no
-ComfyUI is a working app with the hosted and rented lanes available and the
+models the user picks on the Models page — and nothing else. A first launch with
+no ComfyUI is a working app with the hosted and rented lanes available and the
 local lanes showing a setup card; it is not an error state.
+
+**There is no ComfyUI installer in v1.** The Connect ComfyUI card
+(`/api/comfy/connect`, `src/hivemind_content_studio/comfy_connect.py`, reachable
+from the Rented GPUs page and from every studio's empty local section) detects
+what is on the machine — `$COMFY_DIR`, `~/comfy/ComfyUI`, `~/ComfyUI`, the
+ComfyUI Desktop install — attaches an address the user is already serving, or
+links to ComfyUI's own instructions. Two rules hold it to that:
+
+* It never modifies a ComfyUI the app did not create. Detection is `stat()` and
+  one `GET /system_stats`; the attachment is written into this app's own state
+  root (`comfy-attachments.json`, read live by the gateway so attaching lights
+  the lane without a restart). Custom nodes a workflow needs are *named* to the
+  user, never symlinked into their install. The developer stack keeps its own
+  `custom_nodes` symlinks, and only into the checkout it starts itself.
+* The pinned node list in `packages/gpu-rentals/provisioning/comfyui-hivemind.sh`
+  is **not** a manifest for this. It provisions a CUDA box at `/opt/ComfyUI`
+  with a torch build and an accelerator set chosen for a rented NVIDIA card;
+  running it against a Mac checkout would be wrong in every one of those
+  choices.
 
 ---
 
