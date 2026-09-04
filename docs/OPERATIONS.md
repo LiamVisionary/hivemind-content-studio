@@ -148,6 +148,9 @@ accepted field onto a node input:
 
 ## Donor checkout retirement gate
 
+This is a migration gate, not a ship gate. What has to be green before a desktop
+build is dispatched is [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md).
+
 Do not delete an old checkout until all of these are true:
 
 1. `uv run pytest test/studio` and `npm run test:embedded` pass.

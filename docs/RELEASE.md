@@ -237,7 +237,10 @@ them.
 
 ## 7. Release checklist
 
-Run in order. Steps 1-4 are the gate; a failure at any of them stops the tag.
+The full list, with the exact command and expected count for each of the five
+suites, the lint gate, the manual owner-gate and vault smoke, and the packaging
+and promotion steps, is [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md). It is one
+list, so it does not drift from a second copy here. The shape of it:
 
 1. `uv run pytest test` and `uv run pytest test/studio` green; `npm run test:embedded` green; `cd packages/comfyui-mobile && npx vitest run` green.
 2. `python3 scripts/generate_notices.py --check` clean, and `THIRD_PARTY_NOTICES.md` carries no open distribution gate. (It carries none as of 2026-09-03; the donor-checkout retirement gates in [`OPERATIONS.md`](OPERATIONS.md) are the older list.)
@@ -251,6 +254,8 @@ Run in order. Steps 1-4 are the gate; a failure at any of them stops the tag.
 
 Named here rather than left implicit:
 
-* `src-tauri/` does not exist yet. This document is its specification, not a description of it.
+* `src-tauri/tauri.conf.json` does not exist yet. This document is its specification, not a description of it. What is there already: `src-tauri/updater.json`, the one source for the updater endpoint and public key, which `scripts/check_updater_config.py` holds the eventual `tauri.conf.json` to.
+* No updater key pair has been generated, so `src-tauri/updater.json` carries an empty `pubkey` and the build lane produces UNSIGNED artifacts. `scripts/check_updater_config.py --require-key` is the gate that keeps such a build from ever being promoted.
+* The bundled Python is built by `scripts/build_desktop_python.py`; a release still needs a static arm64 ffmpeg/ffprobe pair (repository variable `DESKTOP_FFMPEG_ARCHIVE_URL`, or `vendor/ffmpeg/darwin-arm64`) and a python-build-standalone 3.12 interpreter passed to `--python`.
 * The packaged app's configuration surface (the ~dozen env names and five hard-coded loopback ports the control API resolves by convention) still has no single settings object; see finding `cp-config-surface-for-packaging`.
 * Windows and Linux need bundled runtimes and a signing chain before their lanes can be re-enabled.

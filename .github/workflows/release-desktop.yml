@@ -1,0 +1,465 @@
+# Build the desktop app. Never publishes it.
+#
+# Dispatch-only on purpose. A release that can be triggered by a push is a
+# release that happens by accident, and the only thing worse than a broken
+# build is a broken build that shipped: `docs/RELEASE.md` §4 makes promotion a
+# separate, human step, and `release-desktop-promote.yml` is that step. This
+# workflow produces artifacts and nothing else — no tag is moved, no GitHub
+# Release is created, no `latest.json` is written.
+#
+# Signing is optional here. Every Apple secret is referenced by name and left
+# unset in this repository; when they are absent the macOS lane still builds and
+# uploads an artifact clearly labelled UNSIGNED, because a developer needs to be
+# able to prove the bundle assembles long before a certificate exists. When they
+# are present the same job signs, notarizes, staples and asks Gatekeeper.
+name: Release desktop (build only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, semver without the prefix (e.g. 0.2.0). The tag would be studio-v<version>."
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the build as a pre-release. Pre-releases are downloadable but NEVER move the updater channel."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# One desktop build at a time, whatever version it is for. Never cancel: a build
+# already holding the signing material must be allowed to finish, and a second
+# dispatch waits rather than destroying that work.
+concurrency:
+  group: release-desktop
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Validate the version and the tag it names
+        id: check
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must be semver like 0.2.0, got: $RELEASE_VERSION" >&2
+            exit 1
+          fi
+          tag="studio-v${RELEASE_VERSION}"
+          # `studio-` because this repository also carries the upstream engine's
+          # version, and a bare v1.3.4 would be ambiguous (docs/RELEASE.md §4).
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists. A published tag is the AGPL source offer and is never moved; pick a new version." >&2
+            exit 1
+          fi
+          echo "version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: The desktop shell must be scaffolded
+        run: |
+          set -euo pipefail
+          if [ ! -f src-tauri/tauri.conf.json ]; then
+            echo "src-tauri/tauri.conf.json is missing, so there is nothing to build." >&2
+            echo "docs/RELEASE.md is that directory's specification; scaffold it before dispatching a build." >&2
+            exit 1
+          fi
+
+      - name: The updater config must match the one source for it
+        run: python3 scripts/check_updater_config.py
+
+      - name: The bundle must not carry the Streamlit stack
+        # Plan mode is offline: it reads the pinned sets out of uv.lock and fails
+        # if streamlit, streamlit-tour, azure-cognitiveservices-speech, dashscope
+        # or redis has crept back into the desktop set.
+        run: python3 scripts/build_desktop_python.py
+
+      - name: Notices must not be stale
+        run: |
+          uv sync --frozen --python 3.12
+          uv run --no-sync python3 scripts/generate_notices.py --check
+
+      - name: Identity must not have drifted
+        run: |
+          uv run --no-sync python -m hivemind_content_studio.identity --write
+          git diff --exit-code packages/open-generative-ai/electron/identity.json
+
+  macos:
+    name: macOS (Apple Silicon)
+    needs: preflight
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # The Rust CLI, not the npm one. This repository's root package.json is a
+      # monorepo task runner with no `tauri` script, so tauri-action's default
+      # `npm run tauri` cannot work here; `tauriScript` below points at this
+      # binary instead.
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2.11" --locked
+
+      - name: Build the studio frontends
+        run: |
+          npm ci --prefix packages/open-generative-ai
+          npm ci --prefix packages/comfyui-mobile
+          npm ci --prefix packages/media-gateway
+          npm run build:embedded
+
+      # A static pair, staged into the bundle and put first on every sidecar's
+      # PATH. `vendor/` is gitignored — those binaries are not in the tree — so
+      # on a runner the DESKTOP_FFMPEG_ARCHIVE_URL repository *variable* (not a
+      # secret: it is a public download URL) is the route, and a developer
+      # building locally drops a pair into vendor/ffmpeg/darwin-arm64 instead.
+      # Either way the build refuses rather than silently shipping a bundle that
+      # resolves ffmpeg from the user's PATH.
+      - name: Stage the static ffmpeg pair
+        env:
+          FFMPEG_ARCHIVE_URL: ${{ vars.DESKTOP_FFMPEG_ARCHIVE_URL }}
+        run: |
+          set -euo pipefail
+          target="vendor/ffmpeg/darwin-arm64"
+          if [ -x "$target/ffmpeg" ] && [ -x "$target/ffprobe" ]; then
+            echo "Using the ffmpeg pair already in $target"
+            exit 0
+          fi
+          if [ -z "${FFMPEG_ARCHIVE_URL:-}" ]; then
+            echo "No static ffmpeg. Set the DESKTOP_FFMPEG_ARCHIVE_URL repository variable to an arm64 tarball, or provide $target on the runner." >&2
+            exit 1
+          fi
+          mkdir -p "$target"
+          curl --fail --location --silent --show-error "$FFMPEG_ARCHIVE_URL" -o /tmp/ffmpeg-static.tar.xz
+          tar -xJf /tmp/ffmpeg-static.tar.xz -C "$target" --strip-components=1
+          chmod +x "$target/ffmpeg" "$target/ffprobe"
+          file "$target/ffmpeg"
+
+      # PassBook is a git dependency. The wheel is vendored so the build needs no
+      # VCS access; the checkout is fetched here at the exact commit uv.lock pins.
+      - name: Vendor the PassBook wheel
+        run: |
+          set -euo pipefail
+          pinned="$(python3 - <<'PY'
+          import re, pathlib
+          lock = pathlib.Path("uv.lock").read_text(encoding="utf-8")
+          match = re.search(r"passbook\.git#([0-9a-f]{40})", lock)
+          print(match.group(1) if match else "")
+          PY
+          )"
+          if [ -z "$pinned" ]; then
+            echo "uv.lock does not pin a PassBook commit; refusing to vendor an unpinned credential library." >&2
+            exit 1
+          fi
+          git clone --quiet https://github.com/LiamVisionary/passbook.git /tmp/passbook
+          git -C /tmp/passbook checkout --quiet "$pinned"
+          python3 scripts/build_desktop_python.py --vendor-passbook /tmp/passbook
+
+      - name: Build the frozen desktop Python
+        run: |
+          python3 scripts/build_desktop_python.py \
+            --build src-tauri/resources/desktop-python \
+            --ffmpeg-dir vendor/ffmpeg/darwin-arm64
+
+      # Every Apple secret is referenced by name and unset in this repository.
+      # This step is the only place that decides signed vs unsigned, and both
+      # paths produce an artifact — a build that cannot be signed still has to
+      # prove it assembles.
+      - name: Decide whether this build can be signed
+        id: signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          signed=false
+          notarize=false
+          updater=false
+          if [ -n "${APPLE_CERTIFICATE:-}" ] && [ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ] && [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            signed=true
+          fi
+          if [ "$signed" = true ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            notarize=true
+          fi
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            updater=true
+          fi
+          echo "signed=${signed}" >> "$GITHUB_OUTPUT"
+          echo "notarize=${notarize}" >> "$GITHUB_OUTPUT"
+          echo "updater=${updater}" >> "$GITHUB_OUTPUT"
+          if [ "$signed" = true ]; then
+            echo "Code signing: enabled." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Code signing: **skipped** — APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY are unset. The artifact is labelled UNSIGNED and macOS will refuse to open it without an explicit override." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$updater" = false ]; then
+            echo "Updater artifacts: **skipped** — TAURI_SIGNING_PRIVATE_KEY is unset. An unsigned update cannot be delivered, so none is produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # `createUpdaterArtifacts` in tauri.conf.json makes the build fail when
+      # there is no signing key, which would take the unsigned diagnostic build
+      # down with it. A config overlay turns it off for exactly that case; the
+      # overlay is a file rather than inline JSON so no quoting survives a trip
+      # through the action's argument parsing.
+      - name: Turn off updater artifacts when there is no key
+        if: steps.signing.outputs.updater != 'true'
+        run: |
+          set -euo pipefail
+          cat > src-tauri/no-updater.conf.json <<'JSON'
+          {
+            "bundle": {
+              "createUpdaterArtifacts": false
+            }
+          }
+          JSON
+
+      - name: Import the signing certificate
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          certificate="$RUNNER_TEMP/certificate.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security import "$certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$certificate"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          security list-keychain -d user -s "$keychain" login.keychain-db
+          if ! security find-identity -v -p codesigning "$keychain" | grep -Fq -- "$APPLE_SIGNING_IDENTITY"; then
+            echo "The imported certificate does not contain the identity named by APPLE_SIGNING_IDENTITY." >&2
+            exit 1
+          fi
+
+      # projectPath is the directory that CONTAINS src-tauri — the repository
+      # root here — and tauriScript is the Rust CLI installed above. Without
+      # both, tauri-action looks for an npm `tauri` script at projectPath and
+      # fails on every platform with "Missing script: tauri".
+      - name: Build the app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ steps.signing.outputs.signed == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.notarize == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: .
+          tauriScript: cargo tauri
+          # No `releaseId` and no tag: this workflow uploads artifacts and never
+          # creates a release. Promotion is release-desktop-promote.yml.
+          includeUpdaterJson: false
+          # The truthy branch is a single space, not an empty string: in a
+          # GitHub expression `A && '' || B` evaluates to B, because '' is
+          # falsy — writing '' here would disable the updater artifacts on
+          # exactly the runs that have the key.
+          args: >-
+            --target aarch64-apple-darwin
+            ${{ steps.signing.outputs.updater == 'true' && ' ' || '--config src-tauri/no-updater.conf.json' }}
+
+      - name: Staple the notarization ticket
+        if: steps.signing.outputs.notarize == 'true'
+        run: |
+          set -euo pipefail
+          app="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)"
+          dmg="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' | head -1)"
+          # tauri-action already submitted the app to notarytool; stapling is
+          # what makes it launch on a machine that is offline.
+          xcrun stapler staple "$app"
+          if [ -n "$dmg" ]; then
+            xcrun stapler staple "$dmg"
+          fi
+
+      - name: Ask Gatekeeper
+        if: steps.signing.outputs.notarize == 'true'
+        run: |
+          set -euo pipefail
+          app="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)"
+          xcrun stapler validate "$app"
+          # The assessment the user's Mac performs on first launch. Never
+          # disabled: `--no-assess` is how an unopenable build ships.
+          spctl --assess --type execute --verbose=4 "$app"
+
+      - name: Collect the artifacts
+        id: collect
+        env:
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          NOTARIZED: ${{ steps.signing.outputs.notarize }}
+          UPDATER: ${{ steps.signing.outputs.updater }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release-assets"
+          mkdir -p "$out"
+          bundle="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          find "$bundle" -maxdepth 2 -type f \( -name '*.dmg' -o -name '*.tar.gz' -o -name '*.sig' \) -exec cp {} "$out/" \;
+          label="signed"
+          if [ "$SIGNED" != "true" ]; then
+            label="UNSIGNED"
+            cat > "$out/UNSIGNED.txt" <<EOF
+          This build is NOT signed and NOT notarized.
+
+          macOS will refuse to open it: "Hivemind Content Studio cannot be opened
+          because the developer cannot be verified." It exists to prove the bundle
+          assembles, and to be tested by the person who built it. Do not hand it to
+          anyone else, and do not promote it — release-desktop-promote.yml refuses
+          an unsigned candidate.
+
+          Missing repository secrets: APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
+          APPLE_SIGNING_IDENTITY (signing); APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+          (notarization); TAURI_SIGNING_PRIVATE_KEY (updater artifacts).
+          EOF
+          fi
+          cat > "$out/build.json" <<EOF
+          {
+            "product": "Hivemind Content Studio",
+            "version": "${RELEASE_VERSION}",
+            "tag": "${RELEASE_TAG}",
+            "platform": "darwin-aarch64",
+            "commit": "${GITHUB_SHA}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "signed": ${SIGNED},
+            "notarized": ${NOTARIZED},
+            "updater_artifacts": ${UPDATER},
+            "prerelease": ${PRERELEASE}
+          }
+          EOF
+          echo "label=${label}" >> "$GITHUB_OUTPUT"
+          ls -lh "$out" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: hivemind-content-studio-${{ needs.preflight.outputs.version }}-darwin-aarch64-${{ steps.collect.outputs.label }}
+          path: ${{ runner.temp }}/release-assets
+          retention-days: 14
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows and Linux: present, disabled.
+  #
+  # docs/RELEASE.md §3: v1 is macOS 14+ on Apple Silicon only. The engines assume
+  # it — MLX is Apple Silicon, the ComfyUI lanes are tuned for MPS, and every
+  # performance number in this repository was measured on an M-series machine.
+  # What these lanes are missing is not app code (the control API and the gateway
+  # are already platform-neutral) but the bundled runtimes and a signing chain:
+  # a Windows build needs Authenticode, a Linux build needs its own static
+  # ffmpeg and a deb/AppImage story, and neither has been smoke-tested.
+  #
+  # They are kept here, `if: false`, so the shape does not rot and re-enabling
+  # one is deleting a line rather than reconstructing a job.
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows (disabled for v1)
+    if: false
+    needs: preflight
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2.11" --locked
+
+      - name: Build the app
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: .
+          tauriScript: cargo tauri
+          includeUpdaterJson: false
+
+  linux:
+    name: Linux (disabled for v1)
+    if: false
+    needs: preflight
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2.11" --locked
+
+      - name: Build the app
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: .
+          tauriScript: cargo tauri
+          includeUpdaterJson: false

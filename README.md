@@ -273,3 +273,8 @@ The repository also snapshots the relevant Shared Brain skills under `skills/sha
 - Auto Clipper is declared AGPL-3.0-or-later. The combined work is therefore configured as AGPL-3.0-or-later; see `THIRD_PARTY_NOTICES.md` before distribution.
 
 See [Architecture](docs/ARCHITECTURE.md), [Operations](docs/OPERATIONS.md), [Migration Map](docs/MIGRATION_MAP.md), and [Monetization](docs/MONETIZATION.md).
+
+Shipping: [Release](docs/RELEASE.md) is what the download contains and why;
+[Release checklist](docs/RELEASE_CHECKLIST.md) is what has to be green before a
+build is dispatched, and [test/README.md](test/README.md) is the five test suites
+and their prerequisites.
