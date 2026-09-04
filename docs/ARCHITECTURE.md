@@ -64,6 +64,20 @@ Manifest schema v2 assigns every artifact a stable id, SHA-256, byte size, MIME 
 | `packages/comfyui-mobile` | embedded Canvas workflow editor, queue, output browser, and model manager | canonical run state or direct publishing |
 | `engines/flux-2-swift-mlx` and `engines/z-image-swift` | native Apple Silicon generation engines | browser shell, orchestration, approval, or distribution |
 
+## Where settings live
+
+Five stores, each with one job. Nothing belongs in two of them.
+
+| Store | Holds | Read by |
+|---|---|---|
+| `<media state>/content-studio/settings.json` | the machine's typed settings — folders, optional engines, the loopback addresses, encryption at rest, the rental reaper. One document, one schema (`settings.py`), never a secret. | the control API, and the bash supervisor, which exports it for the servers that only read environment variables |
+| Environment variables | installer and developer knobs, and an escape hatch over the document above (it wins, and the Settings page says which key it is winning over). `stack-local.env` is where a developer sets them so they survive a launchd restart. | every process |
+| PassBook (`~/.hivemindos/.env`) | every credential. The settings document structurally cannot hold one. | the control API, the gateway, the engines |
+| `hive.prefs.v1` in the browser | small non-sensitive preferences — language, the completion chime, the prompt helper's last model, model-use counts, collapsed sections, Inspo and Discover filters. One versioned document (`src/lib/prefs.js`), plus one blob per studio for its saved generation defaults. | the frontend only |
+| The account vault | anything a person typed — prompts, references, composer state. Client-encrypted; the server stores ciphertext it cannot read. | the owner's unlocked browser |
+
+[`SETTINGS.md`](SETTINGS.md) is generated from the schema and lists every key, its default, whether it needs a restart, and which environment variable overrides it — along with the knobs that stay environment-only, marked installer or developer.
+
 ## Unified all-in-one Studio
 
 The browser exposes one shell with Create, Edit, Animate, Restore, Workflow,

@@ -36,11 +36,13 @@ import time
 import urllib.error
 import urllib.request
 
-from . import mtplx_server
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from . import mtplx_server
+from .settings import settings
 
 # Where to look for GGUF weights. LM Studio's own directory is the default
 # because that is where this machine keeps them; HIVEMIND_LLM_MODEL_ROOTS adds
@@ -74,8 +76,7 @@ def free_comfy_memory(timeout: float = 20.0) -> dict[str, Any]:
     ComfyUI's own /free does the unload without touching the queue, the loaded
     workflow, or cached node results.
     """
-    base = (os.environ.get("COMFY_HTTP_DEFAULT") or os.environ.get("COMFY_HTTP")
-            or "http://127.0.0.1:8188").rstrip("/")
+    base = settings().network.comfy_url
     before = _available_memory_bytes()
     request = urllib.request.Request(
         f"{base}/free",

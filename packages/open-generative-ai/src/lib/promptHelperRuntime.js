@@ -9,6 +9,8 @@
 // Pure helpers live in src/lib so the node:test suite can import them; it cannot
 // load JSX.
 
+import { pref, setPrefs } from './prefs.js';
+
 /** Bytes as a short human string. */
 export function formatBytes(bytes) {
     const value = Number(bytes);
@@ -84,16 +86,14 @@ export function sortModels(models) {
 // The owner's last choice, so a fresh page load does not re-offer a model they
 // already passed over. An id is a filename, not prompt text, so localStorage is
 // the right home for it.
-const LAST_MODEL_KEY = 'prompt_helper_last_model';
-
 /** The model this browser last used, or '' if it has never been told. */
 export function lastUsedModelId() {
-    try { return localStorage.getItem(LAST_MODEL_KEY) || ''; } catch { return ''; }
+    return pref('promptHelperModel');
 }
 
 /** Remember a choice so the next open starts from it. */
 export function rememberModelId(modelId) {
-    try { if (modelId) localStorage.setItem(LAST_MODEL_KEY, modelId); } catch { /* quota */ }
+    if (modelId) setPrefs({ promptHelperModel: modelId });
 }
 
 /**

@@ -23,6 +23,7 @@ import {
   inspoCredits, inspoSearchParams, inspoSection, inspoSettings, inspoToStudioSetup, mergeInspoResults,
 } from '../../lib/civitaiInspo.js';
 import { zh } from '../../lib/i18n.js';
+import { pref, setPrefs } from '../../lib/prefs.js';
 import { localAI } from '../../lib/localInferenceClient.js';
 import { formatCount } from '../../lib/modelLibrary.js';
 import { Icon } from '../../ui/icons.jsx';
@@ -30,16 +31,9 @@ import { Modal } from '../../ui/Modal.jsx';
 import { Button, EmptyState, NativeSelect, Segmented, Spinner, TextInput, cx } from '../../ui/kit.jsx';
 import { HubToolbar } from '../components/HubToolbar.jsx';
 
-const FILTER_STORAGE = 'inspo_filters_v1';
-
 function readSaved() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(FILTER_STORAGE) || 'null');
-    if (!saved || typeof saved !== 'object') return null;
-    return { ...DEFAULT_INSPO_FILTERS, ...saved };
-  } catch {
-    return null;
-  }
+  const saved = pref('inspoFilters');
+  return saved ? { ...DEFAULT_INSPO_FILTERS, ...saved } : null;
 }
 
 /** Send a result's prompt and settings to the studio it belongs in. Shared by
@@ -267,9 +261,7 @@ export function InspoView({ active }) {
   const supported = localAI.supportsCivitaiImages();
 
   useEffect(() => {
-    try {
-      localStorage.setItem(FILTER_STORAGE, JSON.stringify(filters));
-    } catch { /* quota */ }
+    setPrefs({ inspoFilters: filters });
   }, [filters]);
 
   const setFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));

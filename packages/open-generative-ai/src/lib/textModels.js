@@ -20,6 +20,7 @@
 // choice, the cost of a press, and the sentence each source is honest about.
 // Nothing here fetches a catalog of its own, so the picker cannot drift from
 // what will actually run.
+import { pref, setPrefs } from './prefs.js';
 import { formatBytes, modelStatus } from './promptHelperRuntime.js';
 
 export const LOCAL = 'local';
@@ -257,26 +258,15 @@ export function search(rows, query) {
  * Per browser, in localStorage, because it is a convenience rather than a
  * record — losing it costs one session of slightly worse ordering.
  */
-const USE_KEY = 'hivemind.producer.modelUse';
-
 export function modelUseCounts() {
-  try {
-    const raw = JSON.parse(window.localStorage.getItem(USE_KEY) || '{}');
-    return raw && typeof raw === 'object' ? raw : {};
-  } catch {
-    return {};
-  }
+  return pref('modelUse');
 }
 
 export function rememberModelUse(id) {
   if (!id) return;
-  try {
-    const counts = modelUseCounts();
-    counts[id] = (Number(counts[id]) || 0) + 1;
-    window.localStorage.setItem(USE_KEY, JSON.stringify(counts));
-  } catch {
-    /* a browser that refuses storage still picks models fine */
-  }
+  const counts = { ...modelUseCounts() };
+  counts[id] = (Number(counts[id]) || 0) + 1;
+  setPrefs({ modelUse: counts });
 }
 
 /**

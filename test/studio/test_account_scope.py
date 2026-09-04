@@ -42,7 +42,7 @@ def test_each_account_gets_its_own_subtree(tmp_path):
     assert first.root.name == "1" and second.root.name == "2"
     # Every store and media root sits inside that account's own directory.
     for paths in (first, second):
-        for candidate in (paths.vault_db, paths.prompt_history_db, paths.studio_state_db,
+        for candidate in (paths.vault_db, paths.prompt_history_db,
                           paths.canvas_history_db, paths.references_root, paths.outputs_root):
             assert candidate.is_relative_to(paths.root)
     # Nothing of one account's is reachable inside the other's root.
@@ -61,17 +61,11 @@ def test_stores_are_cached_per_account_and_never_shared(workspaces):
     assert workspaces.vault(1) is workspaces.vault(1)
     assert workspaces.vault(1) is not workspaces.vault(2)
     assert workspaces.prompt_history(1) is not workspaces.prompt_history(2)
-    assert workspaces.studio_state(1) is not workspaces.studio_state(2)
     assert workspaces.canvas_history(1) is not workspaces.canvas_history(2)
 
 
 def test_one_account_cannot_read_another_accounts_rows(workspaces):
     """The isolation claim, asserted through the real stores."""
-    workspaces.studio_state(1).put("composer", {"prompt": "mine"})
-    workspaces.studio_state(2).put("composer", {"prompt": "theirs"})
-    assert workspaces.studio_state(1).get("composer") == {"prompt": "mine"}
-    assert workspaces.studio_state(2).get("composer") == {"prompt": "theirs"}
-
     workspaces.vault(1).put_blob("library", "saved-prompts", "account-one-ciphertext")
     assert workspaces.vault(1).get_blob("library", "saved-prompts") == "account-one-ciphertext"
     assert workspaces.vault(2).get_blob("library", "saved-prompts") is None
@@ -107,13 +101,13 @@ def test_a_prompt_is_sealed_to_its_own_workspace_vault(workspaces):
 
 
 def test_destroying_a_workspace_removes_the_whole_subtree(workspaces):
-    workspaces.studio_state(3).put("composer", {"prompt": "temporary"})
+    workspaces.vault(3).put_blob("composer", "opengen", "temporary-ciphertext")
     root = workspaces.paths(3).root
     assert root.is_dir()
     workspaces.destroy(3)
     assert not root.exists()
     # A later account with the same id starts empty rather than resurrecting.
-    assert workspaces.studio_state(3).get("composer") == {}
+    assert workspaces.vault(3).get_blob("composer", "opengen") is None
 
 
 # ── migration off the single-owner layout ────────────────────────────────────
@@ -169,8 +163,8 @@ def test_sqlite_sidecars_travel_with_their_database(tmp_path):
     (state / "studio-state.sqlite3-shm").write_text("shm")
     migrate_legacy_state(state, 1)
     paths = AccountPaths.under(state, 1)
-    assert paths.studio_state_db.with_name("studio-state.sqlite3-wal").read_text() == "wal"
-    assert paths.studio_state_db.with_name("studio-state.sqlite3-shm").read_text() == "shm"
+    assert paths.root.joinpath("studio-state.sqlite3-wal").read_text() == "wal"
+    assert paths.root.joinpath("studio-state.sqlite3-shm").read_text() == "shm"
 
 
 def test_bootstrap_creates_an_owner_and_adopts_the_legacy_library(tmp_path):

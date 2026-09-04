@@ -12,6 +12,7 @@ from typing import Callable, Mapping
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from .identity import PRODUCT_NAME, SOURCE_URL
+from .settings import load_settings
 
 
 Probe = Callable[[str], bool]
@@ -110,10 +111,14 @@ def unified_runtime_snapshot(
     env = os.environ if environ is None else environ
     probe_fn = probe or _http_probe
 
-    comfy_url, comfy_error = _configured_url(env, ("COMFYUI_URL", "COMFY_HTTP", "COMFY_HTTP_DEFAULT"), "http://127.0.0.1:8188/")
-    bridge_url, bridge_error = _configured_url(env, ("OPEN_GENERATIVE_AI_URL", "OGA_URL"), "http://127.0.0.1:8794/")
+    # Defaults come from this machine's settings document (which reads the same
+    # variables), so a moved gateway or a second ComfyUI is reported at the
+    # address it actually answers on rather than at the address we assumed.
+    network = load_settings(env=env).network
+    comfy_url, comfy_error = _configured_url(env, ("COMFYUI_URL", "COMFY_HTTP", "COMFY_HTTP_DEFAULT"), f"{network.comfy_url}/")
+    bridge_url, bridge_error = _configured_url(env, ("OPEN_GENERATIVE_AI_URL", "OGA_URL"), f"{network.bridge_url}/")
     flux_url, flux_error = _configured_url(env, ("SWIFT_FLUX2_SERVER_URL", "FLUX2_SERVER_URL"), "http://127.0.0.1:8791/")
-    backend_url, backend_error = _configured_url(env, ("MEDIA_STUDIO_BACKEND_URL", "ZIMAGE_API_URL", "ZIMG_BACKEND_URL"), "http://127.0.0.1:8787/")
+    backend_url, backend_error = _configured_url(env, ("MEDIA_STUDIO_BACKEND_URL", "ZIMAGE_API_URL", "ZIMG_BACKEND_URL"), f"{network.gateway_url}/")
 
     surface = {
         "id": "studio",

@@ -40,6 +40,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import local_llm
+from .settings import settings
 
 # Idle lanes measured at ~0.9 GB. A lane with any real model resident is several
 # GB up, so this separates "running" from "holding" without a per-model table.
@@ -83,12 +84,11 @@ def parse_lane_env(raw: str | None, *, default_url: str | None = None) -> dict[s
 
 
 def configured_lanes() -> dict[str, str]:
-    return parse_lane_env(
-        os.environ.get("COMFY_LANES"),
-        default_url=os.environ.get("COMFY_HTTP_DEFAULT")
-        or os.environ.get("COMFY_HTTP")
-        or "http://127.0.0.1:8188",
-    )
+    # The default lane's address is a setting (network.comfy_url), which reads
+    # COMFY_HTTP_DEFAULT/COMFY_HTTP first — so a machine that already exports
+    # one is unchanged, and a person with ComfyUI on another port can now say so
+    # in the app instead of in a shell profile.
+    return parse_lane_env(os.environ.get("COMFY_LANES"), default_url=settings().network.comfy_url)
 
 
 def _port_of(url: str) -> int | None:

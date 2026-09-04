@@ -57,10 +57,12 @@ test('every nav item is a page the router knows', async () => {
     assert.equal(new Set(pages).size, pages.length, 'a page is in the nav twice');
 });
 
-test('isKnownPage rejects settings and garbage', async () => {
+test('isKnownPage takes settings and rejects garbage', async () => {
     const { isKnownPage } = await importSrc('src/app/navConfig.jsx');
-    // 'settings' is a modal the router opens, never a page it navigates to.
-    assert.equal(isKnownPage('settings'), false);
+    // 'settings' used to be a modal the router opened. It is a page now — a
+    // packaged app's machine settings do not fit in a dialog — so the key that
+    // ⌘, and every old `navigate` event carry has to resolve.
+    assert.equal(isKnownPage('settings'), true);
     assert.equal(isKnownPage(''), false);
     assert.equal(isKnownPage(null), false);
     assert.equal(isKnownPage(undefined), false);
@@ -80,7 +82,7 @@ test('the tiers hold exactly the pages they are meant to', async () => {
 
     assert.deepEqual(create.items.map((i) => i.page), ['image', 'video', 'story', 'restore']);
     assert.deepEqual(produce.items.map((i) => i.page), ['planner', 'history', 'runs', 'inspo', 'models']);
-    assert.deepEqual(advanced.items.map((i) => i.page), ['machines', 'providers', 'passbook', 'canvas', 'mcp-cli']);
+    assert.deepEqual(advanced.items.map((i) => i.page), ['machines', 'providers', 'passbook', 'canvas', 'mcp-cli', 'settings']);
     assert.deepEqual(create.labs.items.map((i) => i.page), ['sprite', 'lipsync']);
 
     // Both folds are collapsed by default and remember what you did with them.

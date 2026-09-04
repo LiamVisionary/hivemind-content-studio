@@ -36,7 +36,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-DEFAULT_GATEWAY_URL = "http://127.0.0.1:8787"
+from .settings import settings
+
 # Long enough for a source upload to cross the loopback; the render itself is a
 # background job on the gateway, so no request here waits on diffusion.
 UPLOAD_TIMEOUT_SECONDS = 600.0
@@ -59,7 +60,7 @@ class RestoreGatewayClient:
         state_root = Path(
             os.environ.get("HIVEMIND_MEDIA_STATE_DIR", Path.home() / ".hivemindos/media-studio")
         )
-        self.base_url = (base_url or os.environ.get("ZIMG_GATEWAY_URL") or DEFAULT_GATEWAY_URL).rstrip("/")
+        self.base_url = (base_url or settings().network.gateway_url).rstrip("/")
         self.token_file = Path(
             token_file or os.environ.get("ZIMG_TOKEN_FILE", state_root / "secure/zimg-token")
         ).expanduser().resolve()

@@ -252,5 +252,5 @@ Run in order. Steps 1-4 are the gate; a failure at any of them stops the tag.
 Named here rather than left implicit:
 
 * `src-tauri/` does not exist yet. This document is its specification, not a description of it.
-* The packaged app's configuration surface (the ~dozen env names and five hard-coded loopback ports the control API resolves by convention) still has no single settings object; see finding `cp-config-surface-for-packaging`.
+* ~~The packaged app's configuration surface…~~ Done: `src/hivemind_content_studio/settings.py` is the typed allow-list, `GET`/`PUT /api/settings` is its owner-gated surface, the five loopback literals now read from it, and the supervisor exports the same document for the children. [`SETTINGS.md`](SETTINGS.md) is generated from the schema.
 * Windows and Linux need bundled runtimes and a signing chain before their lanes can be re-enabled.

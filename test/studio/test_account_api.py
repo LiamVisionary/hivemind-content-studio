@@ -77,7 +77,7 @@ def test_the_picker_is_reachable_before_sign_in_and_leaks_nothing(client):
 
 
 def test_everything_else_is_refused_until_a_workspace_is_open(client):
-    assert client.get("/api/studio-state/opengen-composer").status_code == 401
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 401
     assert client.get("/api/media-studio/references").status_code == 401
     gate = client.get("/", headers={"accept": "text/html"})
     assert gate.status_code == 200 and "Who's working?" in gate.text
@@ -86,9 +86,9 @@ def test_everything_else_is_refused_until_a_workspace_is_open(client):
 def test_sign_in_and_out_moves_the_gate(client):
     _sign_in(client, 1, OWNER_PASSWORD)
     assert client.get("/api/accounts").json()["signed_in_as"] == 1
-    assert client.get("/api/studio-state/opengen-composer").status_code == 200
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 200
     assert client.post("/api/accounts/sign-out").status_code == 200
-    assert client.get("/api/studio-state/opengen-composer").status_code == 401
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 401
 
 
 def test_a_wrong_password_says_nothing_useful_and_is_throttled(client):
@@ -114,7 +114,7 @@ def test_a_missing_workspace_is_indistinguishable_from_a_bad_password(client):
 
 def test_a_forged_cookie_does_not_open_a_workspace(client):
     client.cookies.set(ACCOUNT_COOKIE, "1.99999999999.nonce.deadbeef")
-    assert client.get("/api/studio-state/opengen-composer").status_code == 401
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 401
 
 
 # ── managing workspaces ──────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ def test_a_workspace_cannot_delete_a_sibling(client):
 def test_deleting_a_workspace_destroys_its_data(client, tmp_path):
     second = _add_workspace(client, "Second", "second-pass")
     _sign_in(client, second, "second-pass")
-    client.put("/api/studio-state/opengen-composer", json={"state": {"prompt": "theirs"}})
+    client.put("/api/vault/blob/composer/opengen", json={"ciphertext": "theirs-sealed"})
     root = tmp_path / "accounts" / str(second)
     assert root.is_dir()
     _sign_in(client, 1, OWNER_PASSWORD)
@@ -188,15 +188,15 @@ def test_one_workspace_cannot_read_anothers_composer(client):
     second = _add_workspace(client, "Second", "second-pass")
 
     _sign_in(client, 1, OWNER_PASSWORD)
-    client.put("/api/studio-state/opengen-composer", json={"state": {"prompt": "owner's private draft"}})
-    assert client.get("/api/studio-state/opengen-composer").json()["state"]["prompt"] == "owner's private draft"
+    client.put("/api/vault/blob/composer/opengen", json={"ciphertext": "owner's sealed draft"})
+    assert client.get("/api/vault/blob/composer/opengen").json()["ciphertext"] == "owner's sealed draft"
 
     client.post("/api/accounts/sign-out")
     _sign_in(client, second, "second-pass")
-    response = client.get("/api/studio-state/opengen-composer")
+    response = client.get("/api/vault/blob/composer/opengen")
     assert response.status_code == 200
-    assert response.json()["state"] == {}
-    assert "owner's private draft" not in response.text
+    assert response.json()["ciphertext"] is None
+    assert "owner's sealed draft" not in response.text
 
 
 def test_one_workspace_cannot_list_anothers_references(client):
@@ -457,7 +457,7 @@ def test_a_bogus_assertion_is_refused(client):
         "authenticator_data": "y", "signature": "z",
     })
     assert refused.status_code == 401
-    assert client.get("/api/studio-state/opengen-composer").status_code == 401
+    assert client.get("/api/vault/blob/composer/opengen").status_code == 401
 
 
 # ── an existing store keeps working ──────────────────────────────────────────
@@ -587,7 +587,7 @@ def test_an_unclaimed_studio_cannot_be_unlocked(tmp_path: Path, monkeypatch):
     fresh = _unclaimed(tmp_path, monkeypatch)
     assert fresh.post("/api/accounts/unlock",
                       json={"account_id": 1, "password": "anything"}).status_code == 401
-    assert fresh.get("/api/studio-state/opengen-composer").status_code == 401
+    assert fresh.get("/api/vault/blob/composer/opengen").status_code == 401
 
 
 def test_setup_names_the_studio_signs_in_and_only_ever_runs_once(tmp_path: Path, monkeypatch):
@@ -599,7 +599,7 @@ def test_setup_names_the_studio_signs_in_and_only_ever_runs_once(tmp_path: Path,
     after = fresh.get("/api/accounts").json()
     assert after["signed_in_as"] == 1 and after["setup_required"] is False
     assert after["accounts"][0]["name"] == "Bee Studio"
-    assert fresh.get("/api/studio-state/opengen-composer").status_code == 200
+    assert fresh.get("/api/vault/blob/composer/opengen").status_code == 200
     # And the door closes behind it, signed in or not.
     assert fresh.post("/api/accounts/setup",
                       json={"name": "Someone Else", "password": "second"}).status_code == 409

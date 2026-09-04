@@ -11,8 +11,11 @@
 // silent 10ms blip to unlock the context) and playCompletionPing() when the
 // result lands.
 
-const PING_PREF_KEY = 'completion_ping_enabled';
+import { pref, setPrefs } from './prefs.js';
+
 // Legacy locations of the video-studio-only toggle, read once for migration.
+// (`completion_ping_enabled` itself moved into the preferences document, which
+// migrates it on first load — see lib/prefs.js.)
 const LEGACY_VIDEO_PREFS_KEY = 'video_generation_preferences';
 const LEGACY_VIDEO_SESSION_KEY = 'video_ping_when_complete';
 
@@ -20,10 +23,7 @@ let audioContext = null;
 const listeners = new Set();
 
 function readStoredPreference() {
-  try {
-    const stored = localStorage.getItem(PING_PREF_KEY);
-    if (stored != null) return stored === '1';
-  } catch { /* no local storage */ }
+  if (pref('completionPing')) return true;
   try {
     const legacy = JSON.parse(localStorage.getItem(LEGACY_VIDEO_PREFS_KEY) || 'null');
     if (legacy && typeof legacy.pingWhenComplete === 'boolean') return legacy.pingWhenComplete;
@@ -40,7 +40,7 @@ export function isCompletionPingEnabled() {
 
 export function setCompletionPingEnabled(next) {
   enabled = Boolean(next);
-  try { localStorage.setItem(PING_PREF_KEY, enabled ? '1' : '0'); } catch { /* quota */ }
+  setPrefs({ completionPing: enabled });
   listeners.forEach((listener) => {
     try { listener(enabled); } catch { /* listener owns its errors */ }
   });

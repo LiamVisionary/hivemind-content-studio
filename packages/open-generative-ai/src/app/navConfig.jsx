@@ -52,6 +52,9 @@ export const NAV_SECTIONS = [
       { page: 'passbook', icon: 'key', label: () => 'PassBook' },
       { page: 'canvas', icon: 'nodes', label: () => (zh() ? '画布' : 'Canvas') },
       { page: 'mcp-cli', icon: 'terminal', label: () => t('nav.mcpcli') },
+      // Still opened by ⌘, — it is a page now rather than a dialog, because a
+      // packaged app's machine-level settings do not fit in a modal.
+      { page: 'settings', icon: 'settings', label: () => t('settings.title') },
     ],
   },
 ];
@@ -86,6 +89,7 @@ export const HUB_PAGES = {
   // Agents & API is a static docs page with no state of its own — it rides the
   // hub layer rather than the studio mount registry.
   'mcp-cli': 'agents',
+  settings: 'settings',
 };
 
 // Retired pages that still resolve. A page key is a wire contract — old links,

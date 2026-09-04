@@ -8,7 +8,7 @@
 // - hub layer mounts once and is display-toggled forever (iframes keep state)
 // - navToken guards superseded navigations; page commits only after success
 // - stale-chunk recovery reloads once when a rebuilt dist 404s a lazy import
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast, Toaster } from 'react-hot-toast';
 import { ExploreDock } from '../bridges/ExploreDock.jsx';
 import { MEDIA_DOWNLOAD_BLOCKED_EVENT } from '../lib/downloadMedia.js';
@@ -39,8 +39,6 @@ const STUDIO_LOADERS = {
   lipsync: () => import('../studios/LipSyncStudio.jsx').then((m) => m.LipSyncStudio),
   restore: () => import('../studios/RestoreStudio.jsx').then((m) => m.RestoreStudio),
 };
-
-const SettingsModalLazy = lazy(() => import('../dialogs/SettingsModal.jsx').then((m) => ({ default: m.SettingsModal })));
 
 // A rebuilt dist replaces hashed chunks; sessions opened before the rebuild 404 on
 // lazy imports. One forced reload fetches fresh index.html; the timestamp guard
@@ -84,7 +82,6 @@ export function App() {
   const [page, setPage] = useState(null);
   const [studioComps, setStudioComps] = useState({}); // page -> resolved Component, kept mounted
   const [HubComp, setHubComp] = useState(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const navTokenRef = useRef(0);
   const pageRef = useRef(null);
@@ -162,7 +159,7 @@ export function App() {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       if (e.key === ',' && !e.shiftKey) {
         e.preventDefault();
-        setSettingsOpen(true);
+        void navigate('settings');
         return;
       }
       if ((e.key === 'k' || e.key === 'K') && !e.shiftKey) {
@@ -181,12 +178,12 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [navigate]);
 
-  // Inbound router API — hubApp/explore-dock dispatch window 'navigate' events;
-  // detail.page === 'settings' opens the settings modal instead of routing.
+  // Inbound router API — hubApp/explore-dock dispatch window 'navigate' events.
+  // 'settings' used to open a modal; it is a hub page now, so it routes like
+  // every other key and old callers keep working unchanged.
   useEffect(() => {
     const onNavigate = (e) => {
-      if (e.detail?.page === 'settings') setSettingsOpen(true);
-      else navigate(e.detail?.page);
+      navigate(e.detail?.page);
     };
     window.addEventListener('navigate', onNavigate);
     return () => window.removeEventListener('navigate', onNavigate);
@@ -269,7 +266,7 @@ export function App() {
       <Shell
         page={page}
         onNavigate={navigate}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => navigate('settings')}
         onOpenPalette={() => setPaletteOpen(true)}
       >
         {/* First studio chunk still loading: a centred spinner instead of a black area. */}
@@ -300,18 +297,6 @@ export function App() {
           </ErrorBoundary>
         ) : null}
       </Shell>
-
-      {settingsOpen ? (
-        <Suspense
-          fallback={
-            <div className="fixed inset-0 z-[100] grid place-items-center bg-scrim">
-              <Spinner size={22} className="text-ink2" />
-            </div>
-          }
-        >
-          <SettingsModalLazy onClose={() => setSettingsOpen(false)} />
-        </Suspense>
-      ) : null}
 
       <CommandPalette
         open={paletteOpen}

@@ -22,6 +22,7 @@ from .config import load_config
 from .mcp_http import PROTOCOL_VERSION, McpHttpClient
 from .publishing import encode_multipart
 from .qa import qa_video
+from .settings import settings
 
 # How long to wait for the MCP to hand back a queued video job. Sized against
 # the two slow stretches inside that call - staging references on the target
@@ -1994,11 +1995,14 @@ def _http_url(value: str, label: str) -> str:
 
 
 def _local_managed_descriptor() -> MediaStudioDescriptor:
-    port = os.environ.get("MEDIA_STUDIO_MCP_PORT", "8796").strip() or "8796"
+    port = os.environ.get("MEDIA_STUDIO_MCP_PORT", "").strip()
     return MediaStudioDescriptor(
         app_id="managed:media-studio-mcp",
         app_name="Managed Media Studio MCP",
-        mcp_url=_http_url(f"http://127.0.0.1:{port}/mcp", "MEDIA_STUDIO_MCP_PORT"),
+        mcp_url=_http_url(
+            f"http://127.0.0.1:{port}/mcp" if port else settings().network.mcp_url,
+            "MEDIA_STUDIO_MCP_PORT",
+        ),
         upload_base=_http_url(_local_upload_base(), "MEDIA_STUDIO_UPLOAD_BASE").rstrip("/"),
         auth_env_key=os.environ.get("MEDIA_STUDIO_AUTH_ENV_KEY", "ZIMG_TOKEN").strip() or None,
         tool=os.environ.get("MEDIA_STUDIO_VIDEO_TOOL", "media_generate_video").strip(),
@@ -2008,12 +2012,14 @@ def _local_managed_descriptor() -> MediaStudioDescriptor:
 
 
 def _local_upload_base() -> str:
+    # network.upload_base reads MEDIA_STUDIO_UPLOAD_BASE, MEDIA_STUDIO_STUDIO_URL
+    # and ZIMG_STUDIO_URL in that order, then the document, then the default.
+    # The MCP-scoped alias is the one name it does not carry, so it keeps its
+    # place in the middle of the chain rather than moving.
     return (
         os.environ.get("MEDIA_STUDIO_UPLOAD_BASE")
         or os.environ.get("MEDIA_STUDIO_MCP_STUDIO_URL")
-        or os.environ.get("MEDIA_STUDIO_STUDIO_URL")
-        or os.environ.get("ZIMG_STUDIO_URL")
-        or "http://127.0.0.1:8788"
+        or settings().network.upload_base
     ).strip()
 
 
