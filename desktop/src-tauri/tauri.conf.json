@@ -28,7 +28,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": [
+      "dmg",
+      "app"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -38,6 +41,15 @@
     ],
     "macOS": {
       "minimumSystemVersion": "14.0"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/LiamVisionary/hivemind-content-studio/releases/latest/download/latest.json"
+      ],
+      "pubkey": ""
     }
   }
 }

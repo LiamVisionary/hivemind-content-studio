@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hold `src-tauri/tauri.conf.json`'s updater block to `src-tauri/updater.json`.
+"""Hold `desktop/src-tauri/tauri.conf.json`'s updater block to `desktop/src-tauri/updater.json`.
 
 The updater is the one part of the release that cannot be corrected afterwards.
 An app shipped with the wrong public key or a stale endpoint can never be
@@ -26,8 +26,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER_CONFIG = ROOT / "src-tauri" / "updater.json"
-TAURI_CONFIG = ROOT / "src-tauri" / "tauri.conf.json"
+UPDATER_CONFIG = ROOT / "desktop" / "src-tauri" / "updater.json"
+TAURI_CONFIG = ROOT / "desktop" / "src-tauri" / "tauri.conf.json"
 
 # Anything that looks like key material rather than a name.
 PRIVATE_KEY_MARKERS = ("untrusted comment: minisign secret key", "PRIVATE KEY", "RWRT")
@@ -120,9 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     state = "configured" if (config.get("pubkey") or "").strip() else "no public key yet (unsigned builds only)"
     print(f"Updater: {state}; endpoint {config['endpoints'][0]}")
     if TAURI_CONFIG.is_file():
-        print("tauri.conf.json agrees with src-tauri/updater.json.")
+        print("tauri.conf.json agrees with desktop/src-tauri/updater.json.")
     else:
-        print("src-tauri/tauri.conf.json does not exist yet; nothing to compare against.")
+        print("desktop/src-tauri/tauri.conf.json does not exist yet; nothing to compare against.")
     return 0
 
 
