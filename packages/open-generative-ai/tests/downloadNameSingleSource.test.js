@@ -1,3 +1,7 @@
+// Deliberately textual: a single-source guarantee is a claim about the WHOLE
+// tree — that no second implementation exists anywhere — and only a scan can
+// make it.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 

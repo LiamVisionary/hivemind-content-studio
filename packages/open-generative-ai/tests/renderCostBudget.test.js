@@ -4,6 +4,11 @@
 // bugs: the library mounted every page it ever loaded, the Image studio
 // re-rendered its whole tree on a 300 ms timer, and a slider or region drag put
 // that same whole-tree render on every pointer event.
+//
+// Deliberately textual: this file is about re-render cost and lifetime — what
+// is memoised, what releases its decrypted bytes on unmount, what a drag keeps
+// in local state until pointer-up. A static render happens once and measures
+// none of it.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';

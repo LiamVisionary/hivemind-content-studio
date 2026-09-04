@@ -9,6 +9,10 @@
 // which of the three empty states wins: "no image model installed" with an Open
 // Models button is the wrong answer on a machine with no engine to install
 // into, and that difference is invisible in the source.
+//
+// The textual assertions here are deliberate: they are absence claims — no
+// studio assumes ComfyUI is present — and this file renders the parts that do
+// appear on screen.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

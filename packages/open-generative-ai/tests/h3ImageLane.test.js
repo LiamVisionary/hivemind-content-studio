@@ -1,6 +1,9 @@
 // The H3 still-image lane, from the registry through to a model the studio can
 // select. H3 was never released as an image model — this graph decodes a short
 // clip and picks the still out of it — so the wiring is worth pinning.
+//
+// Deliberately textual: an expanded subgraph and the weight names a lane routes
+// on are JSON shapes.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

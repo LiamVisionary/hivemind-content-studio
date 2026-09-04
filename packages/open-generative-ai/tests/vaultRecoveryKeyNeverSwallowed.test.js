@@ -8,6 +8,9 @@
 //
 // The buffer is in-memory and the key is announced exactly once per vault
 // creation, so the flag protected nothing; the modal now shows every key.
+//
+// Deliberately textual: the promise is that no acknowledgement is PERSISTED
+// and that the banner which carried the same flag is gone — an absence, twice.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

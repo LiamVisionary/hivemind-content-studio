@@ -2,12 +2,34 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { renderComponent, renderStudio, textOf } = require('./helpers/render.js');
 
-// Source-shape pins for the Lip sync / shared-dialog fixes. These are
-// JSX files node:test cannot import, so the wiring is asserted on the source;
-// the behaviour itself was driven in the browser.
+// The Lip sync / shared-dialog fixes.
+//
+// This file used to open by saying these were "JSX files node:test cannot
+// import", which stopped being true when tests/helpers/render.js landed: every
+// sentence a person reads is rendered here now. What stays textual is the
+// wiring underneath it — which helper a write goes through, that a deleted file
+// is still deleted, that a retired string has not come back — and each of those
+// says why above itself.
 const read = (relative) => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
 
+test('the Lip sync studio says where the files go before anything is attached', async () => {
+    // Rendered, not grepped: the sentence that warns a person their portrait
+    // leaves the machine has to be on screen when they arrive, not merely
+    // present in the file behind a condition.
+    const lip = textOf(await renderStudio('src/studios/LipSyncStudio.jsx', 'LipSyncStudio'));
+    assert.match(lip, /Runs on MUAPI \(cloud\) — files you attach are uploaded there\./);
+    assert.match(lip, /It needs a MUAPI account\./);
+    assert.match(lip, /Manage keys/, 'and the way to fix that is in the same place as the problem');
+    // The empty state names the next move rather than saying "nothing here".
+    assert.match(lip, /Pick a model, attach a portrait or video plus an audio track, then press Generate\./);
+    assert.match(lip, /Generate/);
+});
+
+// Deliberately textual: which helper the history goes through is invisible on
+// screen — the point is that the studio never touches localStorage itself, and
+// only the source can say that.
 test('Lip sync routes history through the studio helpers, never raw localStorage', () => {
     for (const [relative, key] of [['src/studios/LipSyncStudio.jsx', 'lipsync_history']]) {
         const source = read(relative);
@@ -41,14 +63,34 @@ test('Lip sync: composer drop routes files by kind, sealed portraits are confirm
     assert.match(lip, /if \(model\?\.hasSeed\) lipsyncParams\.seed = -1;/);
 });
 
-test('the saved library surfaces a failed read and an unreadable blob instead of "nothing saved yet"', () => {
+test('the saved library shows a failed read with the button that retries it', async () => {
+    // The failure primitive's whole promise is that a problem never arrives
+    // without its fix. A grep for the string proved the string existed; this
+    // proves the callout and its Retry button paint together, and that the
+    // Retry disappears when there is nothing to retry.
+    const failed = textOf(await renderComponent('src/ui/SavedLibrary.jsx', 'LibraryStateNote', {
+        error: 'the vault is unreachable', onRetry: () => {},
+    }));
+    assert.match(failed, /Couldn't open your library\./);
+    assert.match(failed, /Retry/, 'the remedy is in the same component as the problem');
+
+    const noRetry = textOf(await renderComponent('src/ui/SavedLibrary.jsx', 'LibraryStateNote', { error: 'the vault is unreachable' }));
+    assert.doesNotMatch(noRetry, /Retry/, 'no dead button when there is nothing to retry');
+
+    // An unreadable blob is not "nothing saved yet" — saving over it asks first.
+    const unreadable = textOf(await renderComponent('src/ui/SavedLibrary.jsx', 'LibraryStateNote', {
+        unreadable: true, empty: 'Nothing saved yet',
+    }));
+    assert.match(unreadable, /Saving will ask before replacing it\./);
+});
+
+// Deliberately textual: the read path behind that callout — which hook builds
+// the error, and how the menu turns an unreadable blob into a confirm — has no
+// rendered form until a vault exists to fail.
+test('the saved library reads a failure out of the hook and confirms before overwriting', () => {
     const hooks = read('src/hooks/hooks.js');
     assert.match(hooks, /error: locked \? '' : \(error\?\.message \|\| 'Could not open your library\.'\)/);
     assert.match(hooks, /unreadable: isLibraryUnreadable\(library\)/);
-    const note = read('src/ui/SavedLibrary.jsx');
-    assert.match(note, /Couldn't open your library\./);
-    assert.match(note, /onRetry \? <Button size="sm" variant="neutral" onClick=\{onRetry\}>Retry<\/Button> : null/);
-    assert.match(note, /Saving will ask before replacing it\./);
     const menu = read('src/studios/SavedPromptsMenu.jsx');
     assert.match(menu, /error=\{error\}\s+onRetry=\{retry\}\s+unreadable=\{unreadable\}/);
     assert.match(menu, /if \(error\?\.unreadable\) \{ setConfirmReplace\(name\); return; \}/);
@@ -96,10 +138,16 @@ test('the tab strip is a real tablist and caps how many studios it mounts', () =
     assert.match(tabs, /cancelLabel=\{TEXT\.cancel\(\)\}/);
 });
 
-test('the Agents & API page is truthful about reach and the gate, and a failed copy says so', () => {
-    const page = read('src/studios/McpCliStudio.jsx');
+test('the Agents & API page is truthful about reach and the gate', async () => {
+    const page = textOf(await renderStudio('src/studios/McpCliStudio.jsx', 'McpCliStudio'));
     assert.match(page, /Agents & API/);
     assert.match(page, /this machine only — the MCP server listens on 127\.0\.0\.1/);
+});
+
+// Deliberately textual: the retired over-promises must not come back, and a
+// string that only appears after a clipboard write fails has no render.
+test('the Agents & API page kept its retired promises retired, and says when a copy failed', () => {
+    const page = read('src/studios/McpCliStudio.jsx');
     assert.doesNotMatch(page, /available without a session on/);
     assert.doesNotMatch(page, /packages\/media-gateway\/bin/);
     assert.match(page, /Copy failed — select the text/);

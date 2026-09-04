@@ -1,3 +1,7 @@
+// Deliberately textual (the last three): the labels themselves are pure logic
+// above; what is left is attach-time behaviour — which failure a rejected drop
+// reports, and the per-row switches a picture arms.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 

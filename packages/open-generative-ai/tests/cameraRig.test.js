@@ -1,3 +1,6 @@
+// Deliberately textual: a retired page key that still resolves is a routing
+// table, not a screen — see navConfig's PAGE_ALIASES.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

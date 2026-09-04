@@ -1,3 +1,6 @@
+// Deliberately textual: a gate that has to hold END TO END — registry, panel,
+// request — is a chain of call sites, and a render sees only its last link.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

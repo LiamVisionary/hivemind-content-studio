@@ -3,6 +3,9 @@
 // and the next Generate queued behind the dead poll. The poll now reads an
 // AbortSignal and rejects with the same `{ cancelled: true }` marker the local
 // Media Studio poll uses.
+//
+// Deliberately textual: a signal forwarded from the studio into the poll is a
+// call-site fact.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 

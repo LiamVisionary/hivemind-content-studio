@@ -5,6 +5,9 @@
 // useState and did not survive a reload; and every MUAPI result (Image, Video,
 // Lip Sync) was a CDN link this browser remembered and nothing else, so a
 // relaunch emptied the gallery with nothing having said it would.
+//
+// Deliberately textual: persistence and adoption — what is written, when, and
+// into which workspace.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

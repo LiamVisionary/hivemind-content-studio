@@ -9,6 +9,10 @@
 // The load-bearing constraint throughout: possession of a vault is proved by
 // DECRYPTING a nonce, never by signing one. The vault keypair is RSA-OAEP with
 // encrypt/decrypt usages only, and WebCrypto refuses to sign with it.
+//
+// Deliberately textual: the sign-in gate is a standalone HTML page built
+// outside React (the app bundle lives behind the gate it guards), so there is
+// no component here to mount.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

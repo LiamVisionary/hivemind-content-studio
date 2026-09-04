@@ -10,6 +10,9 @@
 //
 // So: these actually run the transitions. Anything that throws or leaves the
 // setup incoherent fails here.
+//
+// Deliberately textual: the round trip through normalize → restore is checked
+// directly above; the source pin is that the panel reads the same fields back.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');

@@ -5,6 +5,11 @@
 // under a live Generate button, and an empty catalog looked exactly the same as
 // a full one. "Nothing installed" and "the engine is starting" are different
 // problems with different fixes, so they are now different answers.
+//
+// Deliberately textual: what the hosted bridge ANSWERS, and that a hosted
+// studio never seeds its picker from the desktop catalog, are facts about a
+// payload and about which module is read — neither has a rendered form on a
+// machine with no bridge at all.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';

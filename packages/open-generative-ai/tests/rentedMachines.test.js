@@ -1,3 +1,6 @@
+// Deliberately textual: which value survives a reload, and which one rides out
+// as run_on, are storage and payload facts.
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { machineServesModel, servedByAnyMachine } from '../src/lib/rentedMachines.js';

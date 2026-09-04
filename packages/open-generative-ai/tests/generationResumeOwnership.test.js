@@ -4,6 +4,9 @@
 // working. Before this, only Tab 1 was restored and only one job was resumed, so a
 // reload during (say) a rented MiniMax H3 render left the studio looking idle over a
 // machine that was still rendering — and every other tab's run was orphaned outright.
+//
+// Deliberately textual: ownership of a resumed run is decided between tabs and
+// storage before anything is drawn.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

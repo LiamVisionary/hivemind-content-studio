@@ -5,6 +5,9 @@
 // exactly. SavedLibrary.jsx and LoraGroupsMenu.jsx are JSX, which node:test cannot
 // import, so these assert the source shape — the dialog itself was driven in the
 // browser (pick a row → button reads "Overwrite" → onSave gets that exact name).
+//
+// Deliberately textual: which entry a save targets, and how the menu scopes
+// its list to the current base model, are handler wiring.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

@@ -1,3 +1,6 @@
+// Deliberately textual: "no iframe, no gateway surface entry" is an absence
+// claim, and the surface it replaced would still render.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

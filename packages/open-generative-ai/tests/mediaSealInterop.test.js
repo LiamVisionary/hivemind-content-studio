@@ -1,3 +1,6 @@
+// Deliberately textual: the seal formats have to agree across two languages,
+// so what is compared is the code on both sides.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');

@@ -1,3 +1,6 @@
+// Deliberately textual: what the hosted server FORWARDS is a request shape on
+// the wire, not a screen.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

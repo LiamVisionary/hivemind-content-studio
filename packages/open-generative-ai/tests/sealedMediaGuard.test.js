@@ -9,6 +9,9 @@
 //
 // These drive the REAL decrypt path (envelopes sealed here exactly as
 // media_seal.py seals them) so the assertions are about actual behaviour.
+//
+// Deliberately textual: both of these begin with a decrypt that fails at
+// runtime, so there is no first render in which they are true.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

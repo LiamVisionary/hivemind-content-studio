@@ -1,3 +1,6 @@
+// Deliberately textual: "derived from a single current value" is a statement
+// about the source having one of something, which a render cannot count.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

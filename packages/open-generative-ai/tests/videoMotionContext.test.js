@@ -1,3 +1,6 @@
+// Deliberately textual: that a persisted pointer stays an opaque same-origin
+// path is a privacy claim about what is written down, not about what is drawn.
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

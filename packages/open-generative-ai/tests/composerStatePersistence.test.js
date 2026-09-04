@@ -1,3 +1,6 @@
+// Deliberately textual: the encrypted composer draft is wiring between the
+// studio and the vault; nothing about it is on screen.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 

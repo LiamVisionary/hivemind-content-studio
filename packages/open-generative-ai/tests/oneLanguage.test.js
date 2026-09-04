@@ -5,6 +5,10 @@
 // translated app and delivered a bilingual one. The dictionary and the ~1,000
 // `zh() ? … : …` branches all stay — LANGS_ENABLED is the switch — which means
 // nothing in the source tells you the language is off. These tests do.
+//
+// Deliberately textual: two of these are absence claims over the whole tree —
+// no language toggle came back, no unlock reloads the page — and an absence is
+// exactly what a render cannot show.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

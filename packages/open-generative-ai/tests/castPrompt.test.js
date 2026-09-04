@@ -1,3 +1,7 @@
+// Deliberately textual (the last three): the compiler above is exercised
+// directly; what is left is the panel and studio wiring around it — which
+// catalog description reaches the compiler, and where the cast is held.
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -672,9 +676,10 @@ test('a persona is introduced by its gender, and asked for a matching voice when
 });
 
 // ---------------------------------------------------------------------------
-// The wiring around the pure rules. CastStrip.jsx and VideoStudio.jsx are JSX,
-// which node:test cannot import, so these assert the shape of the source the
-// same way the other studio tests do (see personaBar.test.js).
+// The wiring around the pure rules. Deliberately textual: which catalog field
+// reaches the compiler, and where the cast is held so a loaded prompt can be
+// recast on the way in, are call sites — the panel renders the same either
+// way.
 const fs = require('node:fs');
 const path = require('node:path');
 const read = (relative) => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');

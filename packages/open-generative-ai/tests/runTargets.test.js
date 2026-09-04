@@ -6,6 +6,9 @@
 // notion of place in Story and Sprite, and a lane list in Restore. This pins
 // the replacement: three places grouped by BILL, a rental that is a property of
 // This Mac rather than a mode, and an Automatic default that says why.
+//
+// Deliberately textual: "no studio still offers" and "one implementation, not
+// three" are absence claims over the tree.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';
