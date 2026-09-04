@@ -44,6 +44,10 @@ COMFY_ANIMA_PORT="8198"
 COMFY_LTX_PORT="8199"
 CONTENT_STUDIO_PORT="8765"
 OPEN_GEN_PORT="8794"
+# The one Node child. It mounts the Canvas surface, the local-inference bridge
+# and the agent MCP on this port, and keeps 8788, $OPEN_GEN_PORT and
+# $MEDIA_STUDIO_MCP_PORT answering as compatibility ports.
+NODE_SERVICES_PORT="${HIVEMIND_NODE_SERVICES_PORT:-8793}"
 ZIMG_TOKEN_FILE="${ZIMG_TOKEN_FILE:-$MEDIA_STATE_ROOT/secure/zimg-token}"
 
 # Start a service with the machine's shared credentials loaded.
@@ -302,10 +306,15 @@ PY
   fi
   kill_port 8787
   kill_port 8788
+  kill_port "$NODE_SERVICES_PORT"
   kill_port "$MEDIA_STUDIO_MCP_PORT"
   kill_port "$FLUX2_SERVER_PORT"
   kill_port "$TAILSCALE_HTTPS_PORT"
   kill_port "$CONTENT_STUDIO_PORT"
+  # One process holds all four Node ports now, so a stale listener on any of
+  # them costs a whole surface rather than one child. `stop` already reaped
+  # this one; the start path did not.
+  kill_port "$OPEN_GEN_PORT"
   sleep 2
 
   # FLUX2_CLEAR_CACHE_EVERY_N_STEPS is NOT cosmetic: the server's own default is
@@ -565,40 +574,77 @@ PY
     return 1
   fi
 
-	  cd "$APP" || return 1
-	  COMFY_PRIVATE_VIEW_TOKEN="$COMFY_PRIVATE_VIEW_TOKEN" \
-	  HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
-	  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
-	  ZIMG_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
-	  COMFY_MOBILE_DIST="$MOBILE/dist" \
+  # ── The three Node servers are one child now ────────────────────────────
+  #
+  # packages/media-gateway/node-services.mjs mounts all three Node surfaces on
+  # one port ($NODE_SERVICES_PORT) — /canvas, /bridge and /agent — and keeps the
+  # three old numbers answering as compatibility ports, so nothing that
+  # addresses 8788, 8794 or 8796 by number has to change yet. One process, one
+  # health endpoint, one thing to wait on.
+  #
+  # This replaced three separate children. Exactly what switched:
+  #
+  #   cd "$APP"
+  #   COMFY_PRIVATE_VIEW_TOKEN=… HIVEMIND_STUDIO_ROOT=… HIVEMIND_MEDIA_STATE_DIR=… \
+  #   ZIMG_TOKEN_FILE=… COMFY_MOBILE_DIST="$MOBILE/dist" COMFY_LANES=… \
+  #   COMFY_HTTP_DEFAULT=… COMFY_HTTP=… HIVEMIND_STUDIO_TARGET=… \
+  #   with_credentials z-image-frontend npm run start        # Canvas, :8788
+  #   wait_http http://127.0.0.1:8788/healthz 45
+  #
+  #   cd "$OPEN_GEN"
+  #   OGA_HOST=127.0.0.1 OGA_PORT="$OPEN_GEN_PORT" HIVEMIND_MEDIA_STATE_DIR=… \
+  #   ZIMAGE_TOKEN_FILE=… \
+  #   with_credentials open-generative-ai node hosted-server.js   # bridge, :8794
+  #   wait_http "http://127.0.0.1:$OPEN_GEN_PORT/health" 30
+  #
+  #   cd "$APP"                                              # after the control API
+  #   MEDIA_STUDIO_MCP_HOST=127.0.0.1 MEDIA_STUDIO_MCP_PORT="$MEDIA_STUDIO_MCP_PORT" \
+  #   MEDIA_STUDIO_MCP_BACKEND_URL=http://127.0.0.1:8787 \
+  #   MEDIA_STUDIO_MCP_STUDIO_URL=http://127.0.0.1:8788 \
+  #   MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL=http://127.0.0.1:8788 \
+  #   HIVEMIND_MEDIA_STATE_DIR=… MEDIA_STUDIO_TOKEN_FILE=… MEDIA_STUDIO_E2E_PUB_FILE=… \
+  #   with_credentials media-studio-mcp node "$APP/bin/media-studio-mcp.mjs" --http  # :8796
+  #   curl loop against http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT/mcp
+  #
+  # MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL is loopback, always. It used to be the
+  # 8789 proxy's address, which published the Canvas port to the whole tailnet;
+  # that proxy is gone. The tailnet URL the remote-access switch makes belongs
+  # to the CONTROL API, and the studio there resolves media through its own
+  # account-gated routes.
+  cd "$APP" || return 1
+  HIVEMIND_NODE_SERVICES_HOST="127.0.0.1" \
+  HIVEMIND_NODE_SERVICES_PORT="$NODE_SERVICES_PORT" \
+  NODE_ENV="production" \
+  HOST="127.0.0.1" \
+  PORT="8788" \
+  OGA_HOST="127.0.0.1" \
+  OGA_PORT="$OPEN_GEN_PORT" \
+  MEDIA_STUDIO_MCP_HOST="127.0.0.1" \
+  MEDIA_STUDIO_MCP_PORT="$MEDIA_STUDIO_MCP_PORT" \
+  COMFY_PRIVATE_VIEW_TOKEN="$COMFY_PRIVATE_VIEW_TOKEN" \
+  HIVEMIND_STUDIO_ROOT="$STUDIO_ROOT" \
+  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
+  ZIMG_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  ZIMAGE_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  MEDIA_STUDIO_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
+  MEDIA_STUDIO_E2E_PUB_FILE="${MEDIA_STUDIO_E2E_PUB_FILE:-$MEDIA_STATE_ROOT/secure/agent-e2e-pub}" \
+  MEDIA_STUDIO_MCP_BACKEND_URL="http://127.0.0.1:8787" \
+  MEDIA_STUDIO_MCP_STUDIO_URL="http://127.0.0.1:8788" \
+  MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL="http://127.0.0.1:8788" \
+  COMFY_MOBILE_DIST="$MOBILE/dist" \
 	  COMFY_LANES="$comfy_lanes" \
   COMFY_HTTP_DEFAULT="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   COMFY_HTTP="http://127.0.0.1:$COMFY_DEFAULT_PORT" \
   HIVEMIND_STUDIO_TARGET="http://127.0.0.1:$CONTENT_STUDIO_PORT" \
-  with_credentials z-image-frontend npm run start >> "$PRIV/z-image-frontend.log" 2>&1 &
+  with_credentials hivemind-node-services node node-services.mjs >> "$PRIV/hivemind-node-services.log" 2>&1 &
   pid="$!"
   children+=("$pid")
-  log "Z-Image browser frontend child pid=$pid"
+  log "Node services child pid=$pid url=http://127.0.0.1:$NODE_SERVICES_PORT (canvas :8788, bridge :$OPEN_GEN_PORT, mcp :$MEDIA_STUDIO_MCP_PORT)"
 
-  # /healthz, not /: the Canvas port now refuses anonymous callers, and the one
-  # thing a supervisor is owed is whether the child is alive.
-  if ! wait_http http://127.0.0.1:8788/healthz 45; then
-    log "Z-Image frontend did not become healthy in time"
-    return 1
-  fi
-
-  cd "$OPEN_GEN" || return 1
-  OGA_HOST="127.0.0.1" \
-  OGA_PORT="$OPEN_GEN_PORT" \
-  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
-  ZIMAGE_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
-  with_credentials open-generative-ai node hosted-server.js >> "$PRIV/open-generative-ai.log" 2>&1 &
-  pid="$!"
-  children+=("$pid")
-  log "OpenGen local inference bridge child pid=$pid url=http://127.0.0.1:$OPEN_GEN_PORT"
-
-  if ! wait_http "http://127.0.0.1:$OPEN_GEN_PORT/health" 30; then
-    log "OpenGen local inference bridge did not become healthy in time"
+  # One wait, not three. /healthz on the shared port is 200 only when all three
+  # surfaces came up; it names the one that did not when they did not.
+  if ! wait_http "http://127.0.0.1:$NODE_SERVICES_PORT/healthz" 45; then
+    log "Node services did not become healthy in time; see $PRIV/hivemind-node-services.log"
     return 1
   fi
 
@@ -627,39 +673,9 @@ PY
     return 1
   fi
 
-  # MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL is loopback, always. It used to be the
-  # 8789 proxy's address, which published the Canvas port to the whole tailnet;
-  # that proxy is gone. The tailnet URL the remote-access switch makes belongs
-  # to the CONTROL API, and the studio there resolves media through its own
-  # account-gated routes.
-  cd "$APP" || return 1
-  MEDIA_STUDIO_MCP_HOST="127.0.0.1" \
-  MEDIA_STUDIO_MCP_PORT="$MEDIA_STUDIO_MCP_PORT" \
-  MEDIA_STUDIO_MCP_BACKEND_URL="http://127.0.0.1:8787" \
-  MEDIA_STUDIO_MCP_STUDIO_URL="http://127.0.0.1:8788" \
-  MEDIA_STUDIO_MCP_PUBLIC_STUDIO_URL="http://127.0.0.1:8788" \
-  HIVEMIND_MEDIA_STATE_DIR="$MEDIA_STATE_ROOT" \
-  MEDIA_STUDIO_TOKEN_FILE="$ZIMG_TOKEN_FILE" \
-  MEDIA_STUDIO_E2E_PUB_FILE="${MEDIA_STUDIO_E2E_PUB_FILE:-$MEDIA_STATE_ROOT/secure/agent-e2e-pub}" \
-  with_credentials media-studio-mcp node "$APP/bin/media-studio-mcp.mjs" --http >> "$PRIV/media-studio-mcp.log" 2>&1 &
-  pid="$!"
-  children+=("$pid")
-  log "Media Studio MCP HTTP child pid=$pid url=http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT/mcp"
-
-  local mcp_ready=0
-  for _ in $(seq 1 30); do
-    # Streamable HTTP MCP intentionally returns 405 to GET /mcp, so accept any
-    # reachable HTTP response as the readiness signal here.
-    if curl -sS --max-time 2 -o /dev/null "http://127.0.0.1:$MEDIA_STUDIO_MCP_PORT/mcp"; then
-      mcp_ready=1
-      break
-    fi
-    sleep 1
-  done
-  if [ "$mcp_ready" != "1" ]; then
-    log "Media Studio MCP HTTP did not become reachable in time"
-    return 1
-  fi
+  # The MCP endpoint used to start here as its own child on 8796. It is one of
+  # the three surfaces the collapsed Node service brings up above, and its old
+  # port still answers; the block it replaced is quoted there.
 
   # No tailnet proxy is started here. A cold start binds loopback and nothing
   # else; the tailnet URL is made only when someone turns the switch on in the
@@ -686,6 +702,7 @@ stop_children() {
   fi
   kill_port 8787
   kill_port 8788
+  kill_port "$NODE_SERVICES_PORT"
   kill_port "$MEDIA_STUDIO_MCP_PORT"
   kill_port "$FLUX2_SERVER_PORT"
   kill_port "$TAILSCALE_HTTPS_PORT"
@@ -700,14 +717,18 @@ healthy() {
   # catches a real ComfyUI crash without killing active renders.
   curl -fsS --max-time 5 http://127.0.0.1:8787/health >/dev/null || return 1
   curl -fsS --max-time 5 "http://127.0.0.1:$CONTENT_STUDIO_PORT/api/runtime" >/dev/null || return 1
-  curl -fsS --max-time 5 "http://127.0.0.1:$OPEN_GEN_PORT/health" >/dev/null || return 1
-  if curl -fsS --max-time 10 http://127.0.0.1:8788/healthz >/dev/null; then
+  # One probe for all three Node surfaces. It stays a SOFT fail for the same
+  # reason the Canvas probe always was: a heavy Apple Silicon render can make
+  # this child miss a short deadline, and killing the stack mid-generation is
+  # worse than a slow health answer. Child-pid supervision still catches a real
+  # crash.
+  if curl -fsS --max-time 10 "http://127.0.0.1:$NODE_SERVICES_PORT/healthz" >/dev/null; then
     ZIMG_FRONTEND_HEALTH_SOFT_FAILS=0
   else
     ZIMG_FRONTEND_HEALTH_SOFT_FAILS=$(( ${ZIMG_FRONTEND_HEALTH_SOFT_FAILS:-0} + 1 ))
-    log "frontend health soft-failed ($ZIMG_FRONTEND_HEALTH_SOFT_FAILS/6); keeping Comfy lanes alive"
+    log "node services health soft-failed ($ZIMG_FRONTEND_HEALTH_SOFT_FAILS/6); keeping Comfy lanes alive"
     if [ "$ZIMG_FRONTEND_HEALTH_SOFT_FAILS" -eq 6 ]; then
-      log "frontend remained unresponsive during a possible accelerator-heavy render; child-pid supervision stays active and the generation stack will not be restarted"
+      log "node services remained unresponsive during a possible accelerator-heavy render; child-pid supervision stays active and the generation stack will not be restarted"
     fi
   fi
   return 0
@@ -840,6 +861,7 @@ launch_stop() {
   fi
   kill_port 8787
   kill_port 8788
+  kill_port "$NODE_SERVICES_PORT"
   kill_port "$MEDIA_STUDIO_MCP_PORT"
   kill_port "$FLUX2_SERVER_PORT"
   kill_port "$TAILSCALE_HTTPS_PORT"
@@ -864,7 +886,7 @@ status() {
 	  echo "Flux2 Swift/MLX server default: $ZIMG_ENABLE_FLUX2_SERVER"
   echo
   echo "Listeners:"
-	  for port in "$CONTENT_STUDIO_PORT" "$OPEN_GEN_PORT" "$COMFY_DEFAULT_PORT" "$COMFY_LTX_PORT" "$COMFY_ANIMA_PORT" 8787 8788 "$MEDIA_STUDIO_MCP_PORT" "$FLUX2_SERVER_PORT" "$TAILSCALE_HTTPS_PORT"; do
+	  for port in "$CONTENT_STUDIO_PORT" "$NODE_SERVICES_PORT" "$OPEN_GEN_PORT" "$COMFY_DEFAULT_PORT" "$COMFY_LTX_PORT" "$COMFY_ANIMA_PORT" 8787 8788 "$MEDIA_STUDIO_MCP_PORT" "$FLUX2_SERVER_PORT" "$TAILSCALE_HTTPS_PORT"; do
     pids=$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
     if [ -n "$pids" ]; then echo "  :$port pid(s): $pids"; else echo "  :$port not listening"; fi
   done
