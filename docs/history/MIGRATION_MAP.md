@@ -1,5 +1,9 @@
 # Migration map
 
+> **History.** This is a record of a migration that has happened, kept for
+> provenance. It does not describe pending work — see
+> [`../OPERATIONS.md`](../OPERATIONS.md) for the gates that are still enforced.
+
 ## Assimilated responsibilities
 
 | Source | Source responsibility | Unified destination | Decision |
