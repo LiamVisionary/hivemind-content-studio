@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'react-hot-toast';
 
+import { adoptCloudOutput } from '../lib/cloudAdopt.js';
 import { localRow, muapiRow, needsBrowserKey, runImage } from '../lib/modelRunner.js';
 import { describeFailure } from '../lib/describeFailure.js';
 import { runFailureRemedy } from '../lib/failureRemedy.js';
@@ -2188,16 +2189,22 @@ export function ImageStudio({
       if (run.cancelled) return;
       if (res && res.url) {
         if (capturedRequestId) removePendingJob(capturedRequestId);
+        // The kept copy is the one this studio remembers: the provider's URL
+        // expires, and an entry pointing at it is empty by tomorrow. `saved`
+        // false means the keep did not happen — the viewer says so beside
+        // Download instead of letting the loss be discovered later.
+        const kept = res.savedUrl || res.url;
         addToHistory({
           id: res.id || capturedRequestId || Date.now().toString(),
-          url: res.url,
+          url: kept,
           prompt,
           model: s.selectedModel,
           aspect_ratio: s.selectedAr,
           timestamp: new Date().toISOString(),
+          saved: Boolean(res.savedUrl),
         }, s.lastSubmittedContext);
         finishImageProgress(true);
-        viewImage(res.url);
+        viewImage(kept);
       } else {
         throw new Error('No image URL returned by API');
       }
@@ -2287,16 +2294,24 @@ export function ImageStudio({
         .sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0))[0];
       const silent = claimed.filter((job) => job !== live);
 
+      // `{ url, saved }`: a local job is already a kept output, a cloud one is
+      // only kept once it has been adopted — a run recovered after a reload
+      // must not be the one result that stays a soon-dead CDN link.
       const pollJob = async (job) => {
         if (isLocalJob(job)) {
           const result = await window.localAI.resumeGeneration(job.requestId);
-          return result?.url;
+          return { url: result?.url || '', saved: true };
         }
         const interval = Number(job.interval) || 2000;
         const spent = Math.floor((Date.now() - (Number(job.submittedAt) || Date.now())) / interval);
         const attemptsLeft = Math.max(1, (Number(job.maxAttempts) || 60) - spent);
         const result = await muapi.pollForResult(job.requestId, '', attemptsLeft, interval);
-        return result.outputs?.[0] || result.url || result.output?.url;
+        const url = result.outputs?.[0] || result.url || result.output?.url || '';
+        if (!url) return { url: '', saved: false };
+        const savedUrl = await adoptCloudOutput(url, {
+          kind: 'image', model: job.historyMeta?.model || '', provider: 'muapi',
+        });
+        return { url: savedUrl || url, saved: Boolean(savedUrl) };
       };
 
       if (live && !s.generating) {
@@ -2317,10 +2332,10 @@ export function ImageStudio({
         bump();
         void (async () => {
           try {
-            const url = await pollJob(live);
+            const { url, saved } = await pollJob(live);
             if (run.cancelled) return;
             if (url) {
-              addToHistory({ id: live.requestId, url, ...live.historyMeta, timestamp: new Date().toISOString() });
+              addToHistory({ id: live.requestId, url, ...live.historyMeta, saved, timestamp: new Date().toISOString() });
               finishImageProgress(true);
               viewImage(url);
             } else {
@@ -2347,9 +2362,9 @@ export function ImageStudio({
       bump();
       silent.forEach(async (job) => {
         try {
-          const url = await pollJob(job);
+          const { url, saved } = await pollJob(job);
           if (url) {
-            addToHistory({ id: job.requestId, url, ...job.historyMeta, timestamp: new Date().toISOString() });
+            addToHistory({ id: job.requestId, url, ...job.historyMeta, saved, timestamp: new Date().toISOString() });
             void playCompletionPing();
           }
         } catch (e) {

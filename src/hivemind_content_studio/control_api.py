@@ -24,7 +24,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
+from collections.abc import Callable
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from html import escape
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -366,6 +368,20 @@ class StudioImageBody(BaseModel):
     aspect_ratio: str = "1:1"
     quality: str = ""
     seed: int | None = None
+
+
+class CloudOutputAdoptBody(BaseModel):
+    """A finished cloud result the studio wants kept like a local render.
+
+    The URL is the provider's own, and it expires: MUAPI hands back a CDN link
+    that is gone within the day, which is why every Cinema, Lip Sync and cloud
+    Image result used to exist only until the tab closed.
+    """
+
+    url: str = Field(..., max_length=4096)
+    kind: Literal["image", "video", "audio"] = "image"
+    model: str = Field(default="", max_length=200)
+    provider: str = Field(default="", max_length=100)
 
 
 class HivemindosLinkCallbackBody(BaseModel):
@@ -1333,6 +1349,79 @@ def _composer_snapshot(value: object) -> dict[str, Any]:
     return snapshot
 
 
+# -- keeping a cloud result --------------------------------------------------
+# A provider that renders in its own cloud hands back a URL and nothing else.
+# The link expires, so an output only this browser remembers is an output the
+# owner loses on the next relaunch. Everything below turns one of those links
+# into what a local render already produces: bytes under this workspace's
+# outputs root, sealed there, and indexed in this workspace's own History.
+
+CLOUD_OUTPUT_MAX_BYTES = 256 * 1024 * 1024
+CloudOutputFetcher = Callable[[str], tuple[bytes, str]]
+
+# What a provider may hand back, by the kind the studio asked for. A suffix the
+# History index does not recognise lists as a row nothing will open.
+_CLOUD_OUTPUT_SUFFIXES = {
+    "image": {".png", ".jpg", ".jpeg", ".webp", ".gif"},
+    "video": {".mp4", ".mov", ".webm", ".m4v", ".mkv"},
+    "audio": {".mp3", ".wav", ".m4a"},
+}
+_CLOUD_OUTPUT_DEFAULT_SUFFIX = {"image": ".png", "video": ".mp4", "audio": ".mp3"}
+
+
+def cloud_output_suffix(url: str, media_type: str, kind: str) -> str:
+    """The extension this result is stored under.
+
+    The URL's own extension when it is one this kind can have, then the served
+    content type, then the kind's default. The name is what History reads the
+    media type off, so guessing badly here is what makes a finished clip list
+    as an octet-stream row with no player.
+    """
+    allowed = _CLOUD_OUTPUT_SUFFIXES.get(kind, _CLOUD_OUTPUT_SUFFIXES["image"])
+    candidate = Path(urllib.parse.urlparse(str(url or "")).path or "").suffix.lower()
+    if candidate in allowed:
+        return candidate
+    guessed = (mimetypes.guess_extension(str(media_type or "").split(";")[0].strip()) or "").lower()
+    if guessed == ".jpe":
+        guessed = ".jpg"
+    if guessed in allowed:
+        return guessed
+    return _CLOUD_OUTPUT_DEFAULT_SUFFIX.get(kind, ".png")
+
+
+def fetch_cloud_output(url: str) -> tuple[bytes, str]:
+    """Download a finished cloud result, server-side.
+
+    Server-side because the bytes must be sealed with this workspace's key
+    before they touch disk, and because the browser cannot write to the outputs
+    root at all. A ValueError is something the owner can act on; a RuntimeError
+    is the provider not answering.
+    """
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("That result address is not one this machine can fetch.")
+    request = urllib.request.Request(
+        parsed.geturl(),
+        headers={"Accept": "*/*", "User-Agent": "hivemind-content-studio"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            declared = response.headers.get("Content-Length") or ""
+            if declared.isdigit() and int(declared) > CLOUD_OUTPUT_MAX_BYTES:
+                raise ValueError("That result is too large to keep on this machine.")
+            payload = response.read(CLOUD_OUTPUT_MAX_BYTES + 1)
+            media_type = response.headers.get_content_type() or ""
+    except ValueError:
+        raise
+    except (OSError, urllib.error.URLError) as exc:
+        raise RuntimeError("The provider's result could not be downloaded.") from exc
+    if len(payload) > CLOUD_OUTPUT_MAX_BYTES:
+        raise ValueError("That result is too large to keep on this machine.")
+    if not payload:
+        raise RuntimeError("The provider's result was empty.")
+    return payload, media_type
+
+
 def build_control_app(
     *,
     orchestrator: ContentOrchestrator | None = None,
@@ -1346,6 +1435,7 @@ def build_control_app(
     canvas_media_fetcher: CanvasMediaFetcher | None = None,
     canvas_workflow_fetcher: CanvasWorkflowFetcher | None = None,
     canvas_delete_fetcher: CanvasDeleteFetcher | None = None,
+    cloud_output_fetcher: CloudOutputFetcher | None = None,
 ) -> FastAPI:
     # Join the machine's shared credential store before anything asks for a key.
     # On a machine that already has HivemindOS this adopts the existing store; on
@@ -1441,6 +1531,7 @@ def build_control_app(
     fetch_canvas_media = canvas_media_fetcher or canvas_gateway.media
     fetch_canvas_workflow = canvas_workflow_fetcher or canvas_gateway.workflow
     delete_canvas_output = canvas_delete_fetcher or canvas_gateway.delete
+    fetch_cloud_result = cloud_output_fetcher or fetch_cloud_output
     configured_control_token = control_token if control_token is not None else os.environ.get("CONTENT_STUDIO_CONTROL_TOKEN", "")
     configured_operator_token = operator_token if operator_token is not None else os.environ.get("CONTENT_STUDIO_OPERATOR_TOKEN", "")
     if approvals is None:
@@ -3874,6 +3965,73 @@ def build_control_app(
             "seconds": round(time.perf_counter() - started, 3),
         }
 
+    @app.post("/api/media-studio/adopt", dependencies=[Depends(require_owner)])
+    async def adopt_cloud_output(body: CloudOutputAdoptBody) -> dict:
+        """Keep a finished cloud result the way a local render is kept.
+
+        A provider that renders in its own cloud returns a URL that expires, so
+        until this route existed a lip sync, a Cinema shot and every cloud image
+        lived in one browser tab and nowhere else: close the window and minutes
+        of paid work were gone with no warning that they would be. The bytes are
+        fetched here, sealed with the SAME key path as generate_studio_image
+        (client-only E2E when this account has a vault, the legacy cipher when
+        it does not), written under this workspace's outputs root, and indexed
+        in this workspace's History — so the result is listed in the Library
+        beside every local one instead of being remembered by the tab.
+
+        Not /api/media-studio/references: that store is the reference PICKER's,
+        and an output filed there would be offered as an input and never listed
+        as work. The output is claimed for the account in scope, so the boundary
+        AGENTS.md draws around one workspace's media holds here too.
+        """
+        # Checked before the fetcher, not inside it: an address this machine
+        # will not open should be refused whoever is doing the downloading.
+        if urllib.parse.urlparse(body.url.strip()).scheme not in ("http", "https"):
+            raise HTTPException(status_code=400, detail="That result address is not one this machine can fetch.")
+        try:
+            payload, served_type = await asyncio.to_thread(fetch_cloud_result, body.url.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        name = f"cloud-{uuid.uuid4().hex[:12]}{cloud_output_suffix(body.url, served_type, body.kind)}"
+        output = (outputs_root() / name).resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(payload)
+        spki = _vault_public_key()
+        if spki:
+            media_type = mimetypes.guess_type(name)[0] or served_type or "application/octet-stream"
+            seal_private_media_e2e(output, spki, media_type=media_type)
+        else:
+            _encrypt_private_media(output, cipher)
+        if not (_private_media_exists(output) or e2e_media_exists(output)):
+            raise HTTPException(status_code=500, detail="That result could not be secured on this machine.")
+        # Indexed directly rather than waiting for a sync: the gateway walks its
+        # own output roots and has never heard of this one, so a result adopted
+        # here would otherwise never appear in the Library it was saved for.
+        stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        canvas_store().sync([{
+            "id": f"cloud-{name}",
+            "status": "success",
+            "created_at": stamp,
+            "finished_at": stamp,
+            "outputs": [str(output)],
+            "timestamp_source": "gateway-history",
+        }])
+        scope = current_account.get()
+        if scope is not None:
+            gateway_claims.claim_output(name, scope.id)
+        _forget_canvas_sync()
+        return {
+            "ok": True,
+            "output": name,
+            "url": f"/api/media-studio/generated/{urllib.parse.quote(name)}",
+            "encrypted_at_rest": True,
+            "kind": body.kind,
+            **({"model": body.model} if body.model else {}),
+            **({"provider": body.provider} if body.provider else {}),
+        }
+
     @app.post("/api/media-studio/video", dependencies=[Depends(require_owner_or_control)])
     async def generate_media_studio_video(body: MediaStudioVideoBody, request: Request) -> dict:
         # Decoding up to 3x100 MB of inline clips (plus HEIC transcodes and
@@ -4935,13 +5093,14 @@ def build_control_app(
         ]
         return {"ok": True, "references": references}
 
-    @app.get("/api/media-studio/generated/{filename}", dependencies=[Depends(require_owner)])
-    def media_studio_generated_video(filename: str, request: Request) -> Response:
-        name = Path(filename).name
-        output = (outputs_root() / name).resolve()
-        root = outputs_root().resolve()
-        if name != filename or not output.is_relative_to(root):
-            raise HTTPException(status_code=404, detail="Generated video not found")
+    def _generated_output_response(output: Path, request: Request) -> Response:
+        """Serve one output out of THIS workspace's outputs root.
+
+        Split out of the route below because History reaches the same files by
+        a different door: a cloud result adopted into this root is listed by
+        history_id, not by filename, and both doors must hand back the same
+        envelope or the browser's decryption sees two different things.
+        """
         # Client-only E2E envelope: serve verbatim, the browser decrypts.
         envelope = read_e2e_envelope(output)
         if envelope is not None:
@@ -4956,6 +5115,25 @@ def build_control_app(
         except ValueError as exc:
             raise HTTPException(status_code=503, detail="Generated video could not be decrypted") from exc
         return _private_media_response(body, media_type=media_type, range_header=request.headers.get("range", ""))
+
+    def _own_generated_output(locator: str) -> Path | None:
+        """The path under this workspace's outputs root that `locator` names, or
+        None when it names something else (a gateway clip, a Canvas render)."""
+        try:
+            candidate = Path(str(locator)).expanduser().resolve()
+            root = outputs_root().resolve()
+        except (OSError, RuntimeError):
+            return None
+        return candidate if candidate.is_relative_to(root) else None
+
+    @app.get("/api/media-studio/generated/{filename}", dependencies=[Depends(require_owner)])
+    def media_studio_generated_video(filename: str, request: Request) -> Response:
+        name = Path(filename).name
+        output = (outputs_root() / name).resolve()
+        root = outputs_root().resolve()
+        if name != filename or not output.is_relative_to(root):
+            raise HTTPException(status_code=404, detail="Generated video not found")
+        return _generated_output_response(output, request)
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str, request: Request) -> dict:
@@ -5072,6 +5250,24 @@ def build_control_app(
             output_name = canvas_store().output_name(history_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Canvas output not found") from None
+        own = _own_generated_output(output_name)
+        if own is not None:
+            # Ours to remove: the plaintext file, whichever sealed form it took,
+            # and the row. Asking the gateway to delete a path it never held
+            # would answer 503 and leave the output on this disk.
+            removed = 0
+            for candidate in (own, _private_media_sidecar(own), e2e_media_sidecar(own)):
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    candidate.unlink()
+                    removed += 1
+            canvas_store().delete(history_id)
+            _forget_canvas_sync()
+            if not removed:
+                raise HTTPException(
+                    status_code=404,
+                    detail="That output was already gone; its History row has been cleared.",
+                )
+            return {"ok": True, "removed_history_rows": 1, "deleted_files": removed}
         try:
             result = delete_canvas_output(output_name)
         except RuntimeError as exc:
@@ -5094,6 +5290,11 @@ def build_control_app(
             output_name = canvas_store().output_name(history_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Canvas output not found") from None
+        # An adopted cloud result lives in this workspace's own outputs root,
+        # which the gateway has never heard of. Serve it from where it is.
+        own = _own_generated_output(output_name)
+        if own is not None:
+            return _generated_output_response(own, request)
         try:
             # Presenting the caller's key is what selects the envelope: a device
             # that generated this clip gets the copy sealed to itself, everyone
