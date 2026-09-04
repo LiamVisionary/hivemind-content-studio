@@ -3,9 +3,15 @@
   "version": 1,
   "manager": "Media Studio supervisor",
   "workspace": "../..",
+  "note": "The three Node surfaces are ONE process now (node-services.mjs on 8793, mounted at /canvas, /bridge and /agent). 8788, 8794 and 8796 still answer as compatibility ports, so every entrypoint below stays true; new readers should prefer nodeServices and its /healthz, which is the only endpoint that knows whether all three surfaces came up.",
   "entrypoints": {
     "local": "http://127.0.0.1:8765",
     "backend": "http://127.0.0.1:8787",
+    "nodeServices": "http://127.0.0.1:8793",
+    "nodeServicesHealth": "http://127.0.0.1:8793/healthz",
+    "canvas": "http://127.0.0.1:8793/canvas/",
+    "bridge": "http://127.0.0.1:8793/bridge/",
+    "agentMcp": "http://127.0.0.1:8793/agent/mcp",
     "mcp": "http://127.0.0.1:8796/mcp",
     "tailnetMcp": "configured by the local supervisor",
     "comfy": "http://127.0.0.1:8188",
@@ -13,11 +19,26 @@
   },
   "components": [
     {
+      "id": "node-services",
+      "name": "Studio Node Services",
+      "role": "one Node process hosting the Canvas surface, the local-inference bridge and the agent MCP",
+      "healthUrl": "http://127.0.0.1:8793/healthz",
+      "port": 8793,
+      "mounts": {
+        "canvas": "/canvas",
+        "bridge": "/bridge",
+        "agent-mcp": "/agent"
+      },
+      "legacyPorts": [8788, 8794, 8796]
+    },
+    {
       "id": "gateway",
       "name": "Studio Gateway",
       "role": "Next.js shell, ComfyUI proxy, model manager, mobile route wrapper",
       "healthUrl": "http://127.0.0.1:8788",
-      "port": 8788
+      "port": 8788,
+      "servedBy": "node-services",
+      "mount": "/canvas"
     },
     {
       "id": "backend",
@@ -27,11 +48,22 @@
       "port": 8787
     },
     {
+      "id": "bridge",
+      "name": "Local Model Bridge",
+      "role": "local-inference bridge for the open-generative-ai studio",
+      "healthUrl": "http://127.0.0.1:8794/health",
+      "port": 8794,
+      "servedBy": "node-services",
+      "mount": "/bridge"
+    },
+    {
       "id": "mcp",
       "name": "Media Studio MCP",
       "role": "HTTP MCP endpoint for image/video generation tools",
       "healthUrl": "http://127.0.0.1:8796/mcp",
-      "port": 8796
+      "port": 8796,
+      "servedBy": "node-services",
+      "mount": "/agent"
     },
     {
       "id": "comfyui",
@@ -45,7 +77,9 @@
       "name": "ComfyUI Mobile Workbench",
       "role": "workflow editor, queue, output browser, and media viewer",
       "healthUrl": "http://127.0.0.1:8788/mobile/",
-      "port": 8788
+      "port": 8788,
+      "servedBy": "node-services",
+      "mount": "/canvas"
     },
     {
       "id": "native",
