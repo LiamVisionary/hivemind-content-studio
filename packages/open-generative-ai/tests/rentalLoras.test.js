@@ -97,7 +97,7 @@ test('a failed add surfaces the control API detail instead of a bare status', as
     }
 });
 
-test('the LoRA panel renders the registry-filtered catalog in Rented mode', () => {
+test('the LoRA panel renders the registry-filtered catalog on a rented machine', () => {
     const section = read('src/studios/image/LoraSection.jsx');
     // The same selector UI serves local and rented — the rented difference is
     // one filter over the same catalog, not a second component.
@@ -109,9 +109,12 @@ test('the LoRA panel renders the registry-filtered catalog in Rented mode', () =
     assert.match(section, /useRentalLoras\(true\)/);
     assert.match(section, /const canManageRentals = rentalRegistry\.status === 'ready'/);
     assert.doesNotMatch(section, /devMode/);
-    // Both studios pass their own Rented-source flag.
-    assert.match(read('src/studios/ImageStudio.jsx'), /rentedOnly: Boolean\(s\.rentedOnly\),/);
-    assert.match(read('src/studios/VideoStudio.jsx'), /rentedOnly=\{Boolean\(s\.setup\.rentedOnly\)\}/);
+    // Both studios answer the same question — does THIS tab's work land on a
+    // rented machine — off the per-tab pin. There is no rented MODE to read:
+    // a rental is a property of This Mac, and the pin is the only override.
+    assert.match(read('src/studios/ImageStudio.jsx'), /onRentedMachine: Boolean\(s\.useLocalModel && pinnedMachine\(\)\),/);
+    assert.match(read('src/studios/VideoStudio.jsx'), /onRentedMachine=\{Boolean\(s\.setup\.localMode && s\.setup\.rentedMachineId\)\}/);
+    assert.doesNotMatch(section, /rentedOnly/, 'the retired mode is gone from the panel too');
 });
 
 test('the rental control asks SFW or NSFW before anything is registered', () => {

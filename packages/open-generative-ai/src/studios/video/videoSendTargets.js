@@ -36,7 +36,7 @@ const EMPTY_MACHINES = { live: [], idle: [], broken: [], provisioning: [] };
  *  question. What a machine serves is now said on the row it serves, once. */
 export function videoModelsForSource(source, { setup, catalogs, hasSourceToggle = true }) {
   const localMode = source !== 'api';
-  const probe = { ...setup, localMode, rentedOnly: false };
+  const probe = { ...setup, localMode };
   return generationModelsFor(probe, catalogs)
     .filter((model) => !hasSourceToggle || isLocalVideoModel(model.id) === localMode);
 }
@@ -115,7 +115,6 @@ function persistedVideoSetup() {
       localMode: typeof prefs.localMode === 'boolean'
         ? prefs.localMode
         : (isHivemindStudioEnabled() && isLocalAIAvailable()) || isLocalVideoModel(prefs.modelId),
-      rentedOnly: Boolean(prefs.rentedOnly),
       imageMode: false,
     };
   } catch {

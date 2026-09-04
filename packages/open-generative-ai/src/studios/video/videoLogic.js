@@ -316,8 +316,8 @@ export const motionReferencePackedRows = (s, id, clipSeconds) => {
 // The packed-row budget is a property of the CARD, not the workflow: the base
 // number was measured on a 32 GB 5090, and the catalog publishes the same
 // budget per card size (`max_packed_rows_by_vram_gb`). Which card that is, the
-// studio already knows: this tab's "Run on" pin when Rented is on (the gateway
-// tries `run_on` first), otherwise the routing leader among the attached
+// studio already knows: this tab's "Run on" pin (the gateway tries `run_on`
+// first), otherwise the routing leader among the attached
 // rentals — the same first-match rule the gateway applies. No machine known,
 // or a card the table does not list, keeps the measured base.
 const MOTION_REFERENCE_VRAM_KEY_TOLERANCE_GB = 1.5; // a "32 GB" card reports ~31.4 GiB
@@ -325,7 +325,7 @@ const MOTION_REFERENCE_VRAM_KEY_TOLERANCE_GB = 1.5; // a "32 GB" card reports ~3
 export const servingMachineFor = (s, id, machines) => {
   const list = Array.isArray(machines) ? machines.filter(Boolean) : [];
   if (!list.length) return null;
-  if (s?.rentedOnly && s?.rentedMachineId) {
+  if (s?.rentedMachineId) {
     const pinned = list.find((machine) => String(machine?.rental_id) === String(s.rentedMachineId) && machine?.attached);
     if (pinned) return pinned;
   }
@@ -488,9 +488,9 @@ export function buildInitialSetup(c) {
     localMode: isHivemindStudioEnabled() && isLocalAIAvailable()
       ? true
       : isLocalVideoModel(defaultModel.id),
-    // Rented is opt-in: a boot with no saved preference runs on this machine.
-    rentedOnly: false,
-    // Per-tab "Run on" pin (a rental id); '' follows the Machines default.
+    // Per-tab "Run on" pin (a rental id); '' follows the Machines default. It
+    // is the only override: where work lands is otherwise the gateway's own
+    // routing, which sends it to an attached box when the needles match.
     rentedMachineId: '',
     imageMode: false,
     v2vMode: false,
@@ -857,7 +857,6 @@ export function applyRestoredPreferences(prev, preferences, c) {
     v2vMode: Boolean(v2vModel),
     imageMode: !v2vModel && Boolean(i2vModel),
     localMode: preferences.localMode ?? isLocalVideoModel(target.id),
-    rentedOnly: Boolean(preferences.rentedOnly && (preferences.localMode ?? isLocalVideoModel(target.id))),
     rentedMachineId: typeof preferences.rentedMachineId === 'string' ? preferences.rentedMachineId : '',
   }, target);
   s = applyModelDefaults(s, c);

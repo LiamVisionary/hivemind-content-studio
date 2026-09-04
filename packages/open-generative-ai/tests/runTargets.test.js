@@ -293,3 +293,136 @@ test('an image runs on the account the picker chose, not always on MUAPI', async
   assert.ok(IMAGE_TAB_FIELDS.includes('selectedProvider'));
   assert.ok(IMAGE_TAB_FIELDS.includes('runOnAutomatic'), 'Automatic is sticky per tab');
 });
+
+/* ---------------- one picker, one vocabulary, in every studio ---------------- */
+
+/**
+ * The surfaces that let somebody choose where work runs, and the ONE component
+ * each of them has to ask with.
+ *
+ * Phase 3 built the picker and put it in Image and Video; Story and Sprite kept
+ * a fit picker with no notion of place, Restore kept a lane list with a
+ * CLOUD_LANE id, and the Send-to menu kept a two-row control that merely
+ * borrowed the new words. This is the guard against the fifth one: a studio may
+ * bring its own INVENTORY (a feature's rated rows, the gateway's lanes, another
+ * tab's sources) but never its own vocabulary for where the bill lands.
+ */
+const RUN_ON_SURFACES = [
+  'src/studios/image/ImageSettingsPanel.jsx',
+  'src/studios/image/ImageComposer.jsx',
+  'src/studios/VideoStudio.jsx',
+  'src/studios/story/CastStage.jsx',
+  'src/studios/story/MotionStage.jsx',
+  'src/studios/SpriteStudio.jsx',
+  'src/studios/restore/RestoreSettings.jsx',
+  'src/components/SendToMenu.jsx',
+];
+
+test('every studio asks where work runs with the SAME component', async () => {
+  for (const file of RUN_ON_SURFACES) {
+    const source = read(file);
+    assert.match(source, /<RunOn(Picker|List)/, `${file} must render the one picker`);
+    assert.match(
+      source,
+      /from '[^']*RunOnPicker\.jsx'/,
+      `${file} must import it rather than reimplement it`,
+    );
+    // The controls it replaced, by name. A studio that grows one again fails
+    // here rather than shipping a fourth mental model.
+    assert.doesNotMatch(source, /ModelFitPicker/, `${file} still has a fit picker of its own`);
+    assert.doesNotMatch(source, /rentedOnly/, `${file} still has a rented MODE`);
+    assert.doesNotMatch(source, /<LaneRow/, `${file} still has a lane list of its own`);
+    assert.doesNotMatch(source, /<SourceRow/, `${file} still has a source control of its own`);
+  }
+  // …and the fit picker is gone, not merely unused: a component nothing renders
+  // is the next studio's shortcut back to a fourth vocabulary.
+  assert.equal(fs.existsSync(new URL(path.join('..', 'src/studios/ModelFitPicker.jsx'), import.meta.url)), false);
+});
+
+test('every studio speaks the SAME group names, whatever inventory it brings', async () => {
+  const { RUN_PLACES, groupRunTargets, runTargetsFromRows } = await import('../src/lib/runTargets.js');
+  const { restoreRunTargets } = await import('../src/lib/videoRestore.js');
+  const { sendRunTargets } = await import('../src/lib/studioTargets.js');
+  const places = new Set(RUN_PLACES.map((place) => place.id));
+  const labels = RUN_PLACES.map((place) => place.label);
+
+  const inventories = {
+    // Image and Video: the served media catalog joined with this browser's own.
+    catalog: await build(),
+    // Story and Sprite: the capability matrix's rows for one feature, rated.
+    matrix: runTargetsFromRows([
+      { id: 'z-image-turbo', label: 'Z-Image Turbo', provider: 'sdcpp', source: 'local', rating: 'good', reason: 'Draws a clean sheet.', evidence: 'measured' },
+      { id: 'gpt-image-2', label: 'GPT Image 2', provider: 'openai-gpt-image-oauth', source: 'cloud', rating: 'good', reason: 'Follows the brief.', evidence: 'reported' },
+      { id: 'automatic', label: 'Automatic', provider: 'hivemindos-hosted-media', source: 'cloud', rating: 'workable', reason: 'The house default.', evidence: 'reasoned' },
+    ]),
+    // Restore: the gateway's own lanes, which are places and not providers.
+    lanes: runTargetsFromRows(restoreRunTargets([
+      { lane: 'default', available: true, paid: false, assembles_here: true },
+      { lane: 'vast-48', available: true, paid: true, machine: 'RTX 5090' },
+      { lane: 'cloud', available: true, paid: true },
+    ]), { kind: 'video' }),
+    // The Send-to menu: another tab's two places, described.
+    send: runTargetsFromRows(sendRunTargets({
+      sources: {
+        local: { available: true, modelId: 'minimax-h3', modelName: 'MiniMax H3', switches: false, note: '' },
+        api: { available: true, modelId: 'seedance', modelName: 'Seedance', switches: true, note: '' },
+      },
+    }), { kind: 'video' }),
+  };
+
+  for (const [name, targets] of Object.entries(inventories)) {
+    assert.ok(targets.length, `${name} produced no rows`);
+    for (const target of targets) {
+      assert.ok(places.has(target.place), `${name}: "${target.place}" is not one of the three places`);
+      assert.ok(target.placeLabel, `${name}: a row with no place label`);
+      // No registry id, lane name or mode word may reach a reader.
+      assert.doesNotMatch(target.placeLabel, /[:_]|^(API|cloud|local|rented|default)$/i,
+        `${name}: "${target.placeLabel}" is a wire value, not a place`);
+    }
+    const groups = groupRunTargets(targets).map((group) => group.label);
+    assert.deepEqual(groups, labels.filter((label) => groups.includes(label)),
+      `${name} groups in a different order`);
+  }
+
+  // Restore's lanes in particular: the hosted one is a BILL (HivemindOS
+  // credits), a rented box is This Mac's hardware, and CLOUD_LANE stays the
+  // wire value it always was.
+  const hosted = inventories.lanes.find((target) => target.id === 'cloud');
+  assert.equal(hosted.place, 'hivemindos');
+  assert.equal(hosted.placeLabel, 'HivemindOS credits');
+  assert.equal(inventories.lanes.find((target) => target.id === 'vast-48').place, 'this-mac');
+  assert.equal(inventories.lanes.find((target) => target.id === 'default').place, 'this-mac');
+});
+
+test('a rental is the per-tab pin now, not a mode any preference remembers', async () => {
+  // `rentedOnly` was a fourth thing to be in on top of three places, and it
+  // meant "local, plus filter the menu" — which the gateway's lane rules did
+  // anyway. The pin is what a person actually set, so the pin is what survives.
+  const RETIRED_IN = ['src/lib/videoPreferences.js', 'src/studios/image/imagePrefs.js',
+    'src/lib/studioTabs.js', 'src/studios/video/videoLogic.js', 'src/studios/video/videoSendTargets.js',
+    'src/studios/ImageStudio.jsx', 'src/studios/VideoStudio.jsx', 'src/studios/image/LoraSection.jsx'];
+  for (const file of RETIRED_IN) {
+    // Comments may still explain what was retired; nothing may still read it.
+    const live = read(file).split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+    assert.equal(live.includes('rentedOnly'), false, `${file} still reads or writes rentedOnly`);
+  }
+  // …and everywhere it USED to gate the routing, the pin took its place rather
+  // than the promise about where work lands simply disappearing.
+  for (const file of ['src/lib/videoPreferences.js', 'src/studios/image/imagePrefs.js',
+    'src/lib/studioTabs.js', 'src/studios/video/videoLogic.js',
+    'src/studios/ImageStudio.jsx', 'src/studios/VideoStudio.jsx', 'src/studios/image/LoraSection.jsx']) {
+    assert.match(read(file), /rentedMachineId|onRentedMachine|pinnedMachine/, `${file} lost the pin with it`);
+  }
+  const { normalizeVideoPreferences } = await import('../src/lib/videoPreferences.js');
+  const { normalizeImagePreferences } = await import('../src/studios/image/imagePrefs.js');
+  const video = normalizeVideoPreferences({ modelId: 'minimax-h3', rentedOnly: true, rentedMachineId: 'vast:48' });
+  assert.equal('rentedOnly' in video, false);
+  assert.equal(video.rentedMachineId, 'vast:48');
+  const image = normalizeImagePreferences({ modelId: 'z-image-turbo', rentedOnly: true, rentedMachineId: 'vast:48' });
+  assert.equal('rentedOnly' in image, false);
+  assert.equal(image.rentedMachineId, 'vast:48');
+  // The per-tab pin still travels with a duplicated tab; the retired mode does not.
+  const { IMAGE_TAB_FIELDS } = await import('../src/lib/studioTabs.js');
+  assert.ok(IMAGE_TAB_FIELDS.includes('rentedMachineId'));
+  assert.equal(IMAGE_TAB_FIELDS.includes('rentedOnly'), false);
+});

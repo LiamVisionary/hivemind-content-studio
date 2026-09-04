@@ -31,16 +31,68 @@ export function readinessFromCatalog(catalogProviders, oauth) {
     if (place === PLACE_HIVEMINDOS) hivemindosCredits = true;
     if (place === PLACE_ACCOUNTS) keyedProviders.push(id);
   }
-  // Connected AND usable: a grant whose refresh token has expired is a
-  // connection in the settings sense and a dead end in the generation sense,
-  // and the ladder must not lead with one.
-  const connectedProviders = Object.entries(PROVIDER_OAUTH)
+  return { hivemindosCredits, keyedProviders, connectedProviders: connectedProviders(oauth) };
+}
+
+/** Connected AND usable: a grant whose refresh token has expired is a
+ *  connection in the settings sense and a dead end in the generation sense,
+ *  and the ladder must not lead with one. */
+export function connectedProviders(oauth) {
+  return Object.entries(PROVIDER_OAUTH)
     .filter(([, connection]) => {
       const status = oauth?.[connection];
       return Boolean(status?.connected) && status.usable !== false && !status.needs_reconnect;
     })
     .map(([provider]) => provider);
-  return { hivemindosCredits, keyedProviders, connectedProviders };
+}
+
+/**
+ * The same readiness, read off rows that are already run targets.
+ *
+ * Story and Sprite rate the capability matrix's rows rather than the media
+ * catalog directly, so they have no `catalogProviders` to read — but a row that
+ * is `ready` on a bill IS that bill answering, which is the only thing the
+ * ladder asks. One ladder, two inventories.
+ */
+export function readinessFromTargets(targets, oauth) {
+  const keyedProviders = [];
+  let hivemindosCredits = false;
+  for (const target of targets || []) {
+    if (!target?.ready) continue;
+    if (target.place === PLACE_HIVEMINDOS) hivemindosCredits = true;
+    if (target.place === PLACE_ACCOUNTS && !keyedProviders.includes(target.provider)) {
+      keyedProviders.push(target.provider);
+    }
+  }
+  return { hivemindosCredits, keyedProviders, connectedProviders: connectedProviders(oauth) };
+}
+
+/**
+ * The attached rentals, kept current while a studio is mounted.
+ *
+ * Every picker needs them for the same reason — a rental is a property of This
+ * Mac, so the row it serves has to be able to name it — and a studio that
+ * fetched them once at mount would freeze the boot-time answer.
+ */
+export function useRentedMachines() {
+  const [machines, setMachines] = useState(EMPTY_MACHINES);
+  const refresh = useCallback(async () => {
+    setMachines((await rentedMachinesState({ force: true }).catch(() => EMPTY_MACHINES)) || EMPTY_MACHINES);
+  }, []);
+  useEffect(() => {
+    let live = true;
+    rentedMachinesState().catch(() => EMPTY_MACHINES).then((state) => {
+      if (live) setMachines(state || EMPTY_MACHINES);
+    });
+    return () => { live = false; };
+  }, []);
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onChange = () => { void refresh(); };
+    window.addEventListener(RENTED_CHANGED_EVENT, onChange);
+    return () => window.removeEventListener(RENTED_CHANGED_EVENT, onChange);
+  }, [refresh]);
+  return { machines, refreshMachines: refresh };
 }
 
 /** The capability verdicts for one feature, keyed the way buildRunTargets asks

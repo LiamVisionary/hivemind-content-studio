@@ -164,6 +164,55 @@ export function buildRunTargets({
   return [...local, ...cloud];
 }
 
+/**
+ * Run targets from rows an inventory has ALREADY rated and filtered.
+ *
+ * The media catalog is not the only inventory. Story and Sprite rank the
+ * capability matrix's own rows per feature (which drops sentinels and carries
+ * the evidence behind each verdict), and Restore is handed lanes by the
+ * gateway. Those studios used to answer "where does this run" with a control of
+ * their own because their rows did not come from `buildRunTargets`; this is the
+ * adapter, so the ROWS stay theirs and the vocabulary stops being.
+ *
+ * A row that already knows it cannot run wins over the transport table: a
+ * studio knows constraints the table does not — a sealed sprite that can only
+ * be animated on this machine, a lane with no SeedVR2 nodes — and re-deriving
+ * `ready` here would offer a press that can only fail.
+ */
+export function runTargetsFromRows(rows, { kind = 'image', machines = null, pinned = '' } = {}) {
+  return (rows || []).map((row) => {
+    const target = makeTarget({
+      id: String(row.id ?? row.model ?? ''),
+      provider: String(row.provider || ''),
+      source: row.source || 'cloud',
+      label: String(row.label || row.model_label || row.name || row.id || ''),
+      family: String(row.family || ''),
+      accepts: Array.isArray(row.accepts) ? row.accepts : null,
+      rating: row.rating || '',
+      ratingReason: row.reason || '',
+      available: row.available !== false,
+      machines,
+      pinned,
+      kind,
+    });
+    // A row that names its own place is not a catalogued model: Restore's lanes
+    // are places the GATEWAY named, and asking the transport table about them
+    // would refuse every one of them for having no provider.
+    const declared = Boolean(row.place);
+    const blocked = row.available === false;
+    return {
+      ...target,
+      // How the verdict was arrived at travels with the row: a picker that
+      // shows a rating has to be able to say where the rating came from.
+      evidence: row.evidence || '',
+      ...(declared ? { place: row.place, placeLabel: row.placeLabel || target.placeLabel } : {}),
+      ...(row.badge ? { badge: row.badge } : {}),
+      ready: declared ? !blocked : (blocked ? false : target.ready),
+      reason: blocked && row.unavailableReason ? row.unavailableReason : (declared ? '' : target.reason),
+    };
+  });
+}
+
 /** The list as the picker shows it: three groups, empty ones dropped. There is
  *  no fourth group — a rental rides on its This Mac row. */
 export function groupRunTargets(targets) {
@@ -244,7 +293,13 @@ export function runOnReadout(target, { reason = '', automatic = false } = {}) {
 }
 
 export function readoutText(readout) {
-  const head = [readout.place, readout.model].filter(Boolean).join(' · ');
+  // Said once. Some rows ARE their place — Restore's local lane is "This
+  // computer" running on this computer — and "This computer · This computer"
+  // reads as a bug rather than as an answer.
+  const parts = readout.model && readout.model !== readout.place
+    ? [readout.place, readout.model]
+    : [readout.place];
+  const head = parts.filter(Boolean).join(' · ');
   return readout.note ? `${head} — ${readout.note}` : head;
 }
 

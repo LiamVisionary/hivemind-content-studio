@@ -27,6 +27,8 @@
 //                   — and the price is quoted and approved before a byte moves.
 //                   It is also the one lane where footage leaves the machine.
 
+import { PLACE_HIVEMINDOS, PLACE_THIS_MAC } from './modelRunner.js';
+
 // The hosted lane's name, as the gateway reports it. Not a machine: there is
 // nothing to attach, nothing to provision and nothing running between renders.
 export const CLOUD_LANE = 'cloud';
@@ -470,6 +472,63 @@ export function describeTensorRt(lane, zh = false) {
 /** Whether it is worth showing the acceleration line at all for this lane. */
 export function laneHasTensorRt(lane) {
   return Boolean(lane?.tensorrt?.available);
+}
+
+/**
+ * The gateway's lanes, in the studio's ONE "where does this run" vocabulary.
+ *
+ * A lane is a place, and this studio used to be the last one that would not say
+ * so: it had its own list, its own three words ("This computer", "Rented GPU",
+ * "Hosted GPU") and its own CLOUD_LANE id, beside an Image studio saying "This
+ * Mac / HivemindOS credits / Your accounts" for the same three bills. The lane
+ * NAME is the wire value and does not move; what a person reads does.
+ *
+ *   a local lane   This Mac      free
+ *   a rented lane  This Mac      billed by the hour — a rental is a property of
+ *                                this Mac, never a place of its own
+ *   the hosted one HivemindOS    billed per render, in the credits you have
+ *
+ * Shaped for runTargets.runTargetsFromRows, which turns these into the same
+ * rows the RunOnPicker shows everywhere else.
+ */
+export function restoreRunTargets(lanes, zh = false) {
+  return (lanes || []).map((lane) => {
+    const hosted = lane.lane === CLOUD_LANE;
+    // Two local lanes both called "This computer" is a picker nobody can use,
+    // so the default lane keeps the friendly name and every other one is named.
+    const label = hosted
+      ? (zh ? '托管 GPU' : 'Hosted GPU')
+      : lane.paid
+        ? (lane.machine || (zh ? '租用的 GPU' : 'Rented GPU'))
+        : lane.lane === 'default'
+          ? (zh ? '这台电脑' : 'This computer')
+          : `${zh ? '这台电脑' : 'This computer'} — ${lane.lane}`;
+    const accel = lane.available ? describeTensorRt(lane, zh) : '';
+    return {
+      // The lane name IS the id: it is what `run_on` carries to the gateway.
+      id: lane.lane,
+      provider: 'restore',
+      source: hosted ? 'cloud' : 'local',
+      label,
+      place: hosted ? PLACE_HIVEMINDOS : PLACE_THIS_MAC,
+      placeLabel: hosted ? (zh ? 'HivemindOS 额度' : 'HivemindOS credits') : label,
+      // Free, by the hour, or by the render — the whole decision, said once.
+      // No price on a machine that cannot run the job: "Free" beside "cannot do
+      // this" reads as an offer.
+      badge: lane.available
+        ? {
+          label: hosted ? (zh ? '按次' : 'Per render') : lane.paid ? (zh ? '按小时' : 'Per hour') : (zh ? '免费' : 'Free'),
+          tone: lane.paid || hosted ? 'neutral' : 'ok',
+        }
+        : null,
+      available: Boolean(lane.available),
+      unavailableReason: lane.available ? '' : (lane.reason || describeLane(lane, zh)),
+      // What choosing this lane actually means, and — where it matters — what
+      // its VAE acceleration is doing.
+      reason: [describeLane(lane, zh), accel].filter(Boolean).join(' '),
+      remedy: lane.remedy || '',
+    };
+  });
 }
 
 export function describeChunkPlan(plan, zh = false) {

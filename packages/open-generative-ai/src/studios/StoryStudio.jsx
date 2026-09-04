@@ -37,7 +37,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-hot-toast';
 
 import { registerPromptInserter, loadStudioSetup } from '../app/promptTarget.js';
-import { defaultPick, fetchCapabilityMatrix, rankModels, serverRows } from '../lib/capabilityMatrix.js';
+import { fetchCapabilityMatrix, rankModels, serverRows } from '../lib/capabilityMatrix.js';
 import { getComposerSection, hydrateComposerState, updateComposerSection } from '../lib/composerState.js';
 import { primeResolvedMedia } from '../lib/e2eMedia.js';
 import { isHivemindStudioEnabled, mediaSourceToDataUrl } from '../lib/hivemindStudio.js';
@@ -45,7 +45,9 @@ import { isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { useLocalImageCatalog } from '../lib/useLocalCatalog.js';
 import { LocalCatalogNotice } from './LocalCatalogNotice.jsx';
 import { askProducer } from '../lib/localProducer.js';
-import { needsBrowserKey, runImage, transportFor } from '../lib/modelRunner.js';
+import { needsBrowserKey, runImage } from '../lib/modelRunner.js';
+import { pickRunTarget, runTargetsFromRows } from '../lib/runTargets.js';
+import { readinessFromTargets, useRentedMachines } from '../lib/useRunTargets.js';
 import {
   fetchOAuthStatus, readinessFor, readinessFromError, refreshMuapiKeyLocation, startOAuthLogin,
 } from '../lib/providerReadiness.js';
@@ -157,9 +159,13 @@ export function StoryStudio({ active = true } = {}) {
   // "On this machine" and default to the first workable row in it, which in a
   // hosted studio is an id the bridge refuses.
   const { models: localModels, status: localStatus, refresh: refreshLocalCatalog } = useLocalImageCatalog();
-  const [sheetModel, setSheetModel] = useState(null);
-  const [plateModel, setPlateModel] = useState(null);
-  const [boardModel, setBoardModel] = useState(null);
+  // The tab's own OVERRIDE, not the pick: null means "follow Automatic", which
+  // is the same default every other studio's Runs-on picker starts on and the
+  // only one that keeps re-answering as the inventory moves.
+  const [sheetChoice, setSheetChoice] = useState(null);
+  const [plateChoice, setPlateChoice] = useState(null);
+  const [boardChoice, setBoardChoice] = useState(null);
+  const { machines: rentedMachines } = useRentedMachines();
 
   const [drawing, setDrawing] = useState('');
   const [authOpen, setAuthOpen] = useState(false);
@@ -497,24 +503,36 @@ export function StoryStudio({ active = true } = {}) {
     const cloud = serverRows(matrix, featureId).map((row) => ({
       ...row, id: row.model, label: row.model_label, source: 'cloud',
     }));
-    // `available` from the matrix means the PROVIDER answered its probe. A row
-    // also has to be one this studio can actually route, or the picker offers a
-    // model whose Draw button can only fail — which is how an OAuth pick ended
-    // up asking for a MUAPI key.
-    return rankModels(matrix, featureId, [...local, ...cloud]).map((row) => {
-      const route = transportFor(row);
-      return {
-        ...row,
-        available: row.available !== false && route.runnable,
-        unavailableReason: route.runnable ? '' : route.reason,
-        transport: route.transport,
-      };
-    });
+    // `available` from the matrix means the PROVIDER answered its probe. What a
+    // row can be ROUTED through, where it runs and who pays for it are all one
+    // question, and runTargetsFromRows is the one place it is answered — this
+    // studio's own copy of the transport check was the fourth vocabulary.
+    return rankModels(matrix, featureId, [...local, ...cloud]);
   }, [matrix, localModels]);
 
-  const sheetChoices = useMemo(() => choicesFor('story_character_sheet'), [choicesFor]);
-  const plateChoices = useMemo(() => choicesFor('story_location'), [choicesFor]);
-  const boardChoices = useMemo(() => choicesFor('story_board'), [choicesFor]);
+  // The same rows every other studio's picker shows, from this studio's own
+  // rated inventory: three places grouped by bill, a rental as a property of
+  // This Mac, and one Automatic default that says why it chose what it chose.
+  const targetsFor = useCallback(
+    (featureId) => runTargetsFromRows(choicesFor(featureId), { kind: 'image', machines: rentedMachines }),
+    [choicesFor, rentedMachines],
+  );
+  const sheetChoices = useMemo(() => targetsFor('story_character_sheet'), [targetsFor]);
+  const plateChoices = useMemo(() => targetsFor('story_location'), [targetsFor]);
+  const boardChoices = useMemo(() => targetsFor('story_board'), [targetsFor]);
+
+  const automaticFor = useCallback((targets) => pickRunTarget('image', {
+    catalog: targets, machines: rentedMachines, readiness: readinessFromTargets(targets, oauth),
+  }), [rentedMachines, oauth]);
+  const sheetAuto = useMemo(() => automaticFor(sheetChoices), [automaticFor, sheetChoices]);
+  const plateAuto = useMemo(() => automaticFor(plateChoices), [automaticFor, plateChoices]);
+  const boardAuto = useMemo(() => automaticFor(boardChoices), [automaticFor, boardChoices]);
+  // What the stage actually draws with: this tab's override, or the Automatic
+  // pick. A picker whose default cannot be returned to is how a one-off choice
+  // became permanent by accident.
+  const sheetModel = sheetChoice || sheetAuto.target;
+  const plateModel = plateChoice || plateAuto.target;
+  const boardModel = boardChoice || boardAuto.target;
 
   // Shown beside the pickers only when this machine offers nothing at all —
   // with cloud rows on screen a local warning would be noise.
@@ -522,9 +540,6 @@ export function StoryStudio({ active = true } = {}) {
     ? <LocalCatalogNotice status={localStatus} onCheckAgain={refreshLocalCatalog} />
     : null;
 
-  useEffect(() => { if (!sheetModel && sheetChoices.length) setSheetModel(defaultPick(sheetChoices)); }, [sheetChoices, sheetModel]);
-  useEffect(() => { if (!plateModel && plateChoices.length) setPlateModel(defaultPick(plateChoices)); }, [plateChoices, plateModel]);
-  useEffect(() => { if (!boardModel && boardChoices.length) setBoardModel(defaultPick(boardChoices)); }, [boardChoices, boardModel]);
 
   /**
    * Draw one image and hand back a persistent reference URL.
@@ -567,7 +582,7 @@ export function StoryStudio({ active = true } = {}) {
         const off = size && canvasMismatch(aspect, size.width, size.height);
         if (off) {
           toast(
-            `The ${label} came back ${off.got} — ${model?.name || model?.id || 'that model'} ignored the ${aspect} canvas that was asked for, so the panels are squashed. Draw it with a different model, or set the clip aspect to match.`,
+            `The ${label} came back ${off.got} — ${model?.label || model?.name || model?.id || 'that model'} ignored the ${aspect} canvas that was asked for, so the panels are squashed. Draw it with a different model, or set the clip aspect to match.`,
             { duration: 14000 },
           );
         }
@@ -1180,10 +1195,12 @@ export function StoryStudio({ active = true } = {}) {
               : 'everything is written — this rewrites all of it, with an Undo'}
             sheetChoices={sheetChoices}
             sheetModel={sheetModel}
-            onSheetModel={setSheetModel}
+            onSheetModel={setSheetChoice}
+            sheetAutomatic={sheetAuto}
             plateChoices={plateChoices}
             plateModel={plateModel}
-            onPlateModel={setPlateModel}
+            onPlateModel={setPlateChoice}
+            plateAutomatic={plateAuto}
             localNotice={localNotice}
             readinessFor={rowReadiness}
             onFixReadiness={fixReadiness}
@@ -1213,7 +1230,8 @@ export function StoryStudio({ active = true } = {}) {
             notes={notes}
             boardChoices={boardChoices}
             boardModel={boardModel}
-            onBoardModel={setBoardModel}
+            onBoardModel={setBoardChoice}
+            boardAutomatic={boardAuto}
             localNotice={localNotice}
             readinessFor={rowReadiness}
             onFixReadiness={fixReadiness}

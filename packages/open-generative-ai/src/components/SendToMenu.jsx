@@ -8,16 +8,19 @@
 // labelled blocks with nothing attached at all (lib/videoDelivery.js).
 //
 // So the menu shows the consequence next to the choice: every row carries the
-// model that source is on and one line saying what will actually travel there.
+// model that place is on and one line saying what will actually travel there.
+// The list itself is the studio's ONE Runs-on picker (RunOnList) rather than a
+// control of this menu's own that merely borrowed its words.
 // Reusable on purpose — this is the shape any studio handing work to another
 // one needs, and the Story studio is simply the first.
 import { useEffect, useMemo, useState } from 'react';
 import { zh } from '../lib/i18n.js';
 import { Menu, MenuHeading } from '../ui/Menu.jsx';
 import { Button, cx } from '../ui/kit.jsx';
-import { Icon } from '../ui/icons.jsx';
+import { RunOnList } from './RunOnPicker.jsx';
+import { runTargetsFromRows } from '../lib/runTargets.js';
 import {
-  SEND_SOURCES, SOURCE_LABELS, listSendTargets, mergeSendTargets, selectSendTarget, subscribeSendTargets,
+  listSendTargets, mergeSendTargets, selectSendTarget, sendRunTargets, subscribeSendTargets,
 } from '../lib/studioTargets.js';
 
 /**
@@ -46,67 +49,6 @@ export function useSendTargets(section = 'video', resolve = null) {
   return mergeSendTargets(listSendTargets(section), resolved);
 }
 
-function SourceRow({ source, descriptor, describeFor, selected, onSelect }) {
-  const label = SOURCE_LABELS[source]?.[zh() ? 'zh' : 'en'] || source;
-  const available = Boolean(descriptor?.available);
-  // The sender describes its own trip: how much of a production survives is a
-  // property of the production and the target together, so a picture count
-  // measured here would be a guess about somebody else's payload.
-  const consequence = available
-    ? [descriptor.note, describeFor?.(descriptor.plan) || ''].filter(Boolean).join(' · ')
-    : (descriptor?.reason || '');
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      disabled={!available}
-      onClick={() => onSelect(source)}
-      className={cx(
-        'flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left transition-colors duration-150',
-        selected
-          ? 'border-honey/40 bg-honey-tint text-ink1'
-          : 'border-transparent text-ink2',
-        // Hover classes are emitted ONLY when the row can be chosen. Adding a
-        // disabled override alongside them left both in the class list and let
-        // stylesheet order decide, which is not a decision anybody made.
-        available && !selected && 'hover:border-line2 hover:bg-bg3 hover:text-ink1',
-        !available && 'cursor-not-allowed opacity-45',
-      )}
-    >
-      {/* Selection is a CONTROL, not a background tint. bg-bg2 over a bg-bg1
-          panel is six units of difference — hover and selected read as the same
-          ambiguous shading, and which row is armed becomes a guess. */}
-      <span
-        aria-hidden="true"
-        className={cx(
-          'mt-[3px] grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full border transition-colors duration-150',
-          selected ? 'border-honey' : 'border-line2',
-        )}
-      >
-        {selected ? <span className="h-1.5 w-1.5 rounded-full bg-honey" /> : null}
-      </span>
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex items-center gap-1.5 text-[13px] font-medium">
-          <Icon name={source === 'api' ? 'cloud' : 'cpu'} size={12} className="shrink-0 text-ink3" />
-          {label}
-        </span>
-        {/* The subtitle IS the point: a source with no model named under it is a
-            choice made blind. `switches` matters as much as the name — this
-            source does not offer what is loaded now, so picking it moves the tab. */}
-        <span className="truncate text-[11px] text-ink3">
-          {available
-            ? `${descriptor.switches ? (zh() ? '切换到 ' : 'switches to ') : ''}${descriptor.modelName || descriptor.modelId}`
-            : consequence}
-        </span>
-        {available && consequence ? (
-          <span className="truncate text-[10px] text-ink3/80">{consequence}</span>
-        ) : null}
-      </span>
-    </button>
-  );
-}
-
 /**
  * The panel's contents, mounted only while it is open.
  *
@@ -126,9 +68,15 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
     () => targets.find((entry) => entry.tabId === tabId) || targets.find((entry) => entry.active) || targets[0] || null,
     [targets, tabId],
   );
-  const chosen = source || target?.current || 'local';
+  // 'rented' was a third mode this menu still remembered; a tab that saved one
+  // means This Mac, which is what a rental has always been mechanically.
+  const chosen = source || (target?.current === 'api' ? 'api' : 'local');
   const descriptor = target?.sources?.[chosen] || null;
   const ready = Boolean(target && descriptor?.available);
+  const runTargets = useMemo(
+    () => runTargetsFromRows(sendRunTargets(target, describeFor, zh()), { kind: 'video' }),
+    [target, describeFor],
+  );
 
   if (!target) {
     return (
@@ -167,19 +115,16 @@ function SendToBody({ section, resolve, describeFor, onSend, close }) {
         </>
       ) : null}
 
-      <MenuHeading>{zh() ? '在哪里运行' : 'Run it on'}</MenuHeading>
-      <div role="radiogroup" className="flex flex-col">
-        {SEND_SOURCES.map((entry) => (
-          <SourceRow
-            key={entry}
-            source={entry}
-            descriptor={target.sources?.[entry] || null}
-            describeFor={describeFor}
-            selected={entry === chosen}
-            onSelect={setSource}
-          />
-        ))}
-      </div>
+      {/* The same list every studio's Runs-on picker shows — grouped by who
+          pays, with each row carrying the model it would land on and what would
+          actually travel there. It used to be a two-row control of its own
+          that merely borrowed the words. */}
+      <RunOnList
+        targets={runTargets}
+        value={runTargets.find((entry) => entry.id === chosen) || null}
+        onChange={(entry) => setSource(entry.id)}
+        searchable={false}
+      />
       <div className="mt-1 border-t border-line1 px-1.5 pb-0.5 pt-2">
         <Button
           variant="primary"

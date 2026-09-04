@@ -8,7 +8,7 @@
 // export step between here and the Video studio.
 import { Icon } from '../../ui/icons.jsx';
 import { Button, NativeSelect, cx } from '../../ui/kit.jsx';
-import { ModelFitPicker } from '../ModelFitPicker.jsx';
+import { RunOnPicker } from '../../components/RunOnPicker.jsx';
 import { IDENTITY_LOCKS, SHEET_AUDIT, SHEET_BACKGROUNDS, SILHOUETTE_TEST, neverChangeLine } from './characterSheet.js';
 import { LOCATION_ASPECTS, MOTION_SOURCES, locationGaps, motionElements } from './location.js';
 import { producerIsRunning } from './state.js';
@@ -209,7 +209,7 @@ export function CastStage({
   story, specs, busy, thinking, drawing, onFill, onUpdate, onLocation, onPatchCharacter,
   onAddCharacter, onRemoveCharacter, onDrawSheet, onDrawPlate, onChooseLocation,
   draft, onCancel, onSuggestPlaces, draftHint, draftLabel,
-  sheetChoices, sheetModel, onSheetModel, plateChoices, plateModel, onPlateModel,
+  sheetChoices, sheetModel, onSheetModel, sheetAutomatic, plateChoices, plateModel, onPlateModel, plateAutomatic,
   readinessFor, onFixReadiness, fixing, localNotice = null,
 }) {
   const location = story.location;
@@ -237,20 +237,29 @@ export function CastStage({
       <Disclosure label="Drawn with" hint={`· ${sheetModel?.label || 'no model picked'}`} tone="card">
         {/* Why this machine offers nothing, and the one press that changes it. */}
         {localNotice}
-        <ModelFitPicker
+        {/* The SAME control every other studio asks this question with — three
+            places grouped by who pays, and an Automatic default that says why.
+            This stage used to show a fit picker with no notion of place at all. */}
+        <RunOnPicker
           label="Character sheets"
-          rows={sheetChoices}
+          targets={sheetChoices}
           value={sheetModel}
           onChange={onSheetModel}
+          automatic={sheetAutomatic}
+          onAutomatic={() => onSheetModel(null)}
+          isAutomatic={sheetModel === sheetAutomatic?.target}
           readinessFor={readinessFor}
           onFixReadiness={onFixReadiness}
           busyAction={fixing}
         />
-        <ModelFitPicker
+        <RunOnPicker
           label="The plate"
-          rows={plateChoices}
+          targets={plateChoices}
           value={plateModel}
           onChange={onPlateModel}
+          automatic={plateAutomatic}
+          onAutomatic={() => onPlateModel(null)}
+          isAutomatic={plateModel === plateAutomatic?.target}
           readinessFor={readinessFor}
           onFixReadiness={onFixReadiness}
           busyAction={fixing}
