@@ -87,6 +87,13 @@ export function SavedPromptsMenu({
   // trigger and `extraSections` renders above "Save current prompt…".
   chip = null,
   extraSections = null,
+  // Controlled mode, forwarded verbatim to Menu. A caller that loads this
+  // component lazily owns the open state: the chip it shows while the chunk is
+  // in flight is the thing that was clicked, so the menu has to come up already
+  // open rather than waiting for a second click. Omit both and it keeps its own
+  // state, exactly as before.
+  open: openProp = undefined,
+  onOpenChange = undefined,
 }) {
   const { entries, loading, locked, error, unreadable, retry } = useSavedLibrary(LIBRARIES.prompts);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -203,6 +210,8 @@ export function SavedPromptsMenu({
       <Menu
         up
         width="w-[22rem]"
+        open={openProp}
+        onOpenChange={onOpenChange}
         trigger={(open, toggle) => (
           <ChipButton
             icon={chip?.icon || 'database'}

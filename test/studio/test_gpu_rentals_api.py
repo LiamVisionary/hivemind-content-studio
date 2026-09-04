@@ -3420,3 +3420,44 @@ def test_attaching_a_box_whose_doors_all_died_says_which_and_why(tmp_path, monke
     detail = response.json()["detail"]
     assert "9.9.9.9:41000 is serving TLS, not SSH" in detail
     assert "ssh7.vast.ai:19896 is serving TLS, not SSH" in detail
+
+
+def test_the_machine_list_is_one_snapshot_and_a_read_never_reaps(tmp_path: Path, monkeypatch) -> None:
+    """Every mounted studio polls this every 30s and the Machines view polls it
+    too, while a build lists each configured marketplace and probes every box
+    (1.5s beacon + 1.5s tunnel ceilings). It also used to DESTROY machines on
+    the way past — the failed-provisioning reaper and the warm-volume settle ran
+    inside the GET. Both are bookkeeping, and bookkeeping does not belong in a
+    read: the standing reaper thread owns that clock now."""
+    marketplace_reads = {"count": 0}
+
+    def handler(method, path, payload):
+        if method == "GET":
+            marketplace_reads["count"] += 1
+        return {"instances": [
+            {"id": 1, "label": STUDIO_LABEL, "actual_status": "running", "gpu_name": "RTX 5090",
+             "dph_total": 0.469, "public_ipaddr": "1.2.3.4",
+             "ports": {"22/tcp": [{"HostPort": "1111"}]}},
+        ]}
+
+    _fake_vast(monkeypatch, handler)
+    reaped: list[list] = []
+    monkeypatch.setattr(gpu_rentals, "reap_failed_rentals", lambda dtos: reaped.append(dtos) or [])
+    settled: list[list] = []
+    monkeypatch.setattr(gpu_rentals, "_settle_warm_volumes", lambda dtos: settled.append(dtos))
+
+    client = _client(tmp_path, monkeypatch)
+    first = client.get("/api/gpu-rentals").json()
+    assert first["rentals"][0]["managed"] is True
+    reads_after_first = marketplace_reads["count"]
+    assert reads_after_first >= 1
+
+    # The next poll is served from the snapshot: nothing the DTOs read off disk
+    # has moved, so there is nothing new to say.
+    second = client.get("/api/gpu-rentals").json()
+    assert second["rentals"] == first["rentals"]
+    assert marketplace_reads["count"] == reads_after_first
+
+    # And neither read destroyed anything.
+    assert reaped == []
+    assert settled == []

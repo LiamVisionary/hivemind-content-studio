@@ -67,6 +67,19 @@ function initialPage() {
   return isKnownPage(requested) ? requested : 'image';
 }
 
+// Start the landing studio's chunk NOW, at module scope, rather than after React
+// has mounted and navigate() has run: those were two round trips in a row (the
+// entry, then the studio and its deps) with nothing on screen between them.
+// Kicked here, the fetch overlaps React's boot and navigate() finds the promise
+// already in flight — STUDIO_LOADERS returns the same module promise, so this
+// costs one extra import() call and no extra request. A rejection is left to
+// navigate()'s own retry/stale-chunk recovery; swallowed here only so a failed
+// preload is never an unhandled rejection.
+if (typeof window !== 'undefined') {
+  const landing = STUDIO_LOADERS[initialPage()];
+  if (landing) { try { landing().catch(() => {}); } catch { /* non-critical */ } }
+}
+
 export function App() {
   const [page, setPage] = useState(null);
   const [studioComps, setStudioComps] = useState({}); // page -> resolved Component, kept mounted

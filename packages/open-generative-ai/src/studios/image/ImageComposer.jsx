@@ -11,6 +11,8 @@
 //
 // Presentational: it reads and writes the caller's mutable engine object and
 // calls `bump()`, exactly as the studio did inline.
+import { lazy, Suspense, useState } from 'react';
+
 import { ENHANCE_TAGS, QUICK_PROMPTS } from '../../lib/promptUtils.js';
 import { t, zh } from '../../lib/i18n.js';
 import { ugcVariantAt } from '../../lib/ugcMode.js';
@@ -19,10 +21,17 @@ import { Button, Card, IconButton, SectionLabel, TextArea, TextInput, cx } from 
 import { ChipButton, Menu, MenuHeading, MenuItem } from '../../ui/Menu.jsx';
 import { CompletionPingToggle } from '../../ui/CompletionPingToggle.jsx';
 import { UploadPicker } from '../UploadPicker.jsx';
-import { SavedPromptsMenu } from '../SavedPromptsMenu.jsx';
 import { CameraMenu } from './CameraMenu.jsx';
 import { ReferenceRolesMenu } from './ReferenceRolesMenu.jsx';
 import { ModelMenu } from './ImageModelMenu.jsx';
+
+// The Starters popover carries the whole shipped prompt library — the animation
+// shelf, the cast/persona prompts and the H3 character notes — which made it by
+// far the largest thing on the app's DEFAULT page, and it is shut on arrival.
+// Loaded when the chip is pressed: the placeholder below is the same ChipButton,
+// so the bar does not move, and the menu comes up already open because the click
+// that armed it IS the click that opens it.
+const SavedPromptsMenuLazy = lazy(() => import('../SavedPromptsMenu.jsx').then((m) => ({ default: m.SavedPromptsMenu })));
 
 
 export function ImageComposer({
@@ -82,6 +91,15 @@ export function ImageComposer({
   const hasPrompt = Boolean(s.prompt.trim());
   const ugcNextIndex = Number.isInteger(s.ugcVariantIndex) ? s.ugcVariantIndex + 1 : 0;
   const ugcCast = ugcVariantAt(ugcArmed ? s.ugcVariantIndex : ugcNextIndex);
+  // The Starters popover is loaded on demand (see SavedPromptsMenuLazy): this
+  // holds its open state so the placeholder chip's click both arms the import
+  // and opens the menu it turns into.
+  const [startersOpen, setStartersOpen] = useState(false);
+  const startersChip = {
+    icon: 'sparkles',
+    label: zh() ? '起点' : 'Starters',
+    title: zh() ? '快速起点、UGC 段落与已保存提示词' : 'Quick starters, the UGC block, and your saved prompts',
+  };
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-2">
@@ -243,53 +261,66 @@ export function ImageComposer({
             />
 
             {/* Starters: quick prompts, the UGC block and the saved library are
-                sections of ONE menu. */}
-            <SavedPromptsMenu
-              section="image"
-              prompt={s.prompt}
-              negativePrompt={s.negativePrompt}
-              chip={{
-                icon: 'sparkles',
-                label: zh() ? '起点' : 'Starters',
-                title: zh() ? '快速起点、UGC 段落与已保存提示词' : 'Quick starters, the UGC block, and your saved prompts',
-              }}
-              extraSections={(close) => (
-                <>
-                  <MenuHeading>{t('image.quickStarters')}</MenuHeading>
-                  {QUICK_PROMPTS.map((q) => (
-                    <MenuItem key={q.label} onClick={() => { setPromptValue(q.prompt); close(); }}>
-                      {q.label}
-                    </MenuItem>
-                  ))}
-                  <MenuHeading>{zh() ? 'UGC 首帧' : 'UGC first frame'}</MenuHeading>
-                  <MenuItem
-                    icon="persona"
-                    meta={ugcVerticalAvailable ? 'also sets 9:16' : 'no 9:16 here'}
-                    onClick={() => { onApplyUgc(ugcNextIndex); close(); }}
-                    title={`${ugcCast.person} — ${ugcCast.room.place}, ${ugcCast.room.light}`}
-                  >
-                    {ugcArmed
-                      ? (zh() ? '换一组阵容' : 'Deal a new cast')
-                      : (zh() ? '开启 UGC 模式' : 'Turn on UGC mode')}
-                  </MenuItem>
-                  {ugcArmed ? (
-                    <MenuItem icon="x" onClick={() => { onApplyUgc(null); close(); }}>
-                      {zh() ? '关闭 UGC 模式' : 'Turn off UGC mode'}
-                    </MenuItem>
-                  ) : null}
-                  <div className="my-1 h-px bg-line1" />
-                </>
-              )}
-              capture={captureContext}
-              onLoadPrompt={({ prompt, negativePrompt }) => {
-                setPromptValue(prompt);
-                s.negativePrompt = negativePrompt;
-                persist();
-                bump();
-                promptRef.current?.focus();
-              }}
-              onLoadContext={onRestoreContext}
-            />
+                sections of ONE menu — and the library is the heaviest thing on
+                this page while the menu is shut on arrival, so it loads on the
+                press. The chip below stands in until then and looks identical,
+                so the bar never moves. */}
+            {startersOpen ? (
+              <Suspense fallback={<ChipButton {...startersChip} active disabled />}>
+                <SavedPromptsMenuLazy
+                  open={startersOpen}
+                  onOpenChange={setStartersOpen}
+                  section="image"
+                  prompt={s.prompt}
+                  negativePrompt={s.negativePrompt}
+                  chip={startersChip}
+                  extraSections={(close) => (
+                    <>
+                      <MenuHeading>{t('image.quickStarters')}</MenuHeading>
+                      {QUICK_PROMPTS.map((q) => (
+                        <MenuItem key={q.label} onClick={() => { setPromptValue(q.prompt); close(); }}>
+                          {q.label}
+                        </MenuItem>
+                      ))}
+                      <MenuHeading>{zh() ? 'UGC 首帧' : 'UGC first frame'}</MenuHeading>
+                      <MenuItem
+                        icon="persona"
+                        meta={ugcVerticalAvailable ? 'also sets 9:16' : 'no 9:16 here'}
+                        onClick={() => { onApplyUgc(ugcNextIndex); close(); }}
+                        title={`${ugcCast.person} — ${ugcCast.room.place}, ${ugcCast.room.light}`}
+                      >
+                        {ugcArmed
+                          ? (zh() ? '换一组阵容' : 'Deal a new cast')
+                          : (zh() ? '开启 UGC 模式' : 'Turn on UGC mode')}
+                      </MenuItem>
+                      {ugcArmed ? (
+                        <MenuItem icon="x" onClick={() => { onApplyUgc(null); close(); }}>
+                          {zh() ? '关闭 UGC 模式' : 'Turn off UGC mode'}
+                        </MenuItem>
+                      ) : null}
+                      <div className="my-1 h-px bg-line1" />
+                    </>
+                  )}
+                  capture={captureContext}
+                  onLoadPrompt={({ prompt, negativePrompt }) => {
+                    setPromptValue(prompt);
+                    s.negativePrompt = negativePrompt;
+                    persist();
+                    bump();
+                    promptRef.current?.focus();
+                  }}
+                  onLoadContext={onRestoreContext}
+                />
+              </Suspense>
+            ) : (
+              <ChipButton
+                {...startersChip}
+                onClick={() => setStartersOpen(true)}
+                // Warmed on hover so the chunk is usually already there by the
+                // time the click lands.
+                onPointerEnter={() => { void import('../SavedPromptsMenu.jsx'); }}
+              />
+            )}
 
             {/* Improve: one door for "make my prompt better", with the three
                 routes inside it instead of three chips that all say the same. */}

@@ -7,14 +7,15 @@
 // Contract with App.jsx: <HubLayer visible={isHub} view={'create'|'canvas'|…} />.
 // - on mount: startHub() (boot runs exactly once; it binds the window listeners
 //   for 'hivemind-hub-refresh' / 'hivemind-owner-lock-broadcast' / message /
-//   visibilitychange, and starts the 10s + 1s poll loops).
+//   visibilitychange, and starts the 10s poll loop).
 // - on view change: activateHubView(view) (store sync + per-view lazy work:
 //   canvas → loadToolSurface, history → loadPrompts, telemetry → load…).
-// - setHubRootEl wires this node so the poll loops can gate on root.isConnected.
+// - setHubVisible tells the data layer whether the hub is the page on screen;
+//   that flag, not this node being in the document, is what gates the polls.
 import { useEffect, useRef } from 'react';
 import { ErrorBoundary } from '../app/ErrorBoundary.jsx';
 import { cx } from '../ui/kit.jsx';
-import { activateHubView, setHubRootEl, setHubVisible, startHub } from './hubData.js';
+import { activateHubView, setHubVisible, startHub } from './hubData.js';
 import { PlannerView } from './views/PlannerView.jsx';
 import { CanvasView } from './views/CanvasView.jsx';
 import { InspoView } from './views/InspoView.jsx';
@@ -32,11 +33,9 @@ import { McpCliStudio } from '../studios/McpCliStudio.jsx';
 export function HubLayer({ visible, view }) {
   const rootRef = useRef(null);
 
-  // Boot once and register this node for the poll-loop isConnected gate.
+  // Boot once.
   useEffect(() => {
     startHub();
-    setHubRootEl(rootRef.current);
-    return () => setHubRootEl(null);
   }, []);
 
   // Activate the requested view (store sync + lazy per-view work). `view` is only

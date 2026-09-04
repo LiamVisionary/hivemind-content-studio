@@ -286,6 +286,14 @@ export function mapHivemindWorkflowModels(catalog) {
     }));
 }
 
+// Has a context already been fetched in this session? Callers that follow an
+// empty answer with a forced refetch use this to tell "the cache answered with
+// nothing" from "the wire just answered with nothing" — a forced refetch after
+// the second is the same request twice in a row.
+export function hivemindStudioContextCached() {
+    return contextCache !== null;
+}
+
 export async function loadHivemindStudioContext({ refresh = false } = {}) {
     if (!isHivemindStudioEnabled()) return defaultContext();
     if (contextCache && !refresh) return contextCache;
@@ -308,7 +316,15 @@ export async function loadHivemindStudioContext({ refresh = false } = {}) {
                 // still FULL — the fallback names the same models — which is why
                 // callers cannot detect this by counting. Absent on older
                 // payloads, which predate the flag and were always live.
-                videoRegistryLive: !catalogForContext || provider?.registry_live !== false,
+                //
+                // `pending` is the same condition from the other direction: the
+                // control API is still building its catalog behind a boot warm-up
+                // and answered immediately with an empty media block rather than
+                // holding the request open for it. Marked not-live so the studio's
+                // existing degraded-registry backoff asks again, which is exactly
+                // what this window needs.
+                videoRegistryLive: !catalogForContext
+                    || (catalogForContext.pending !== true && provider?.registry_live !== false),
             };
             if (request !== contextRequest) return contextCache || candidate;
             hiveVideoModels = candidate.videoModels;

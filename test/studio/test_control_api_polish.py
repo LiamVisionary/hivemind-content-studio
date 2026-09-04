@@ -603,3 +603,121 @@ def test_the_bridge_proxy_exposes_the_image_job_cancel_route(tmp_path: Path, mon
     # Neither a GET on it nor a deeper path is granted.
     assert client.get("/local-ai/job/zimg-1/cancel").status_code == 404
     assert client.post("/local-ai/job/zimg-1/cancel/extra").status_code == 404
+
+
+# ── polled routes stop doing real work on every call ─────────────────────────
+
+def test_the_catalog_says_pending_instead_of_joining_the_boot_build(tmp_path: Path, monkeypatch) -> None:
+    """The warm-up thread starts the catalog at boot; a request that arrives
+    while it is running used to build the SAME thing a second time and wait for
+    it — an 8s HivemindOS call plus a 3s probe and a 30s registry read, with the
+    first model picker of the session staring at a spinner."""
+    from hivemind_content_studio import control_api
+
+    started = threading.Event()
+    release = threading.Event()
+    built = {"count": 0}
+
+    def slow_catalog():
+        built["count"] += 1
+        started.set()
+        release.wait(5)
+        return {"image": [], "video": []}
+
+    monkeypatch.setattr(control_api, "media_catalog", slow_catalog)
+    app = _app(tmp_path, monkeypatch)
+    # Exactly what the boot warm-up leaves behind: a build in flight on its own
+    # thread, and nothing cached yet.
+    for hook in app.state.startup_hooks:
+        if hook.__name__ == "_warm_simple_catalog":
+            hook()
+            break
+    assert started.wait(5), "the warm-up never started its build"
+    try:
+        client = TestClient(app)
+        assert client.post("/api/accounts/unlock", json={"account_id": 1, "password": OWNER_PASSWORD}).status_code == 200
+        response = client.get("/api/simple/catalog")
+    finally:
+        release.set()
+
+    assert response.status_code == 200
+    payload = response.json()
+    # Answered, not stalled: the local planner is there to pick from, the media
+    # block is empty and says so, and the header names when the real one lands.
+    assert payload["pending"] is True
+    assert response.headers["Retry-After"] == "2"
+    assert payload["brains"]
+    assert payload["media"] == {"image": [], "video": []}
+    # And, above all, the request did not start a second copy of the same build.
+    assert built["count"] == 1
+
+
+def test_the_capability_matrix_reads_the_cached_catalog_not_a_fresh_probe(tmp_path: Path, monkeypatch) -> None:
+    """Story and Sprite fetch the matrix on every mount. Built live it ran the
+    whole provider readiness sweep — a `higgsfield account status` subprocess
+    and a 5s hosted-media call included — for a verdict the catalog cache is
+    already holding."""
+    from hivemind_content_studio import control_api
+
+    builds = {"count": 0}
+
+    def counted_catalog():
+        builds["count"] += 1
+        return {
+            "image": [{"id": "muapi", "label": "MUAPI", "available": True, "detail": "",
+                       "registry_live": True, "models": []}],
+            "video": [],
+        }
+
+    monkeypatch.setattr(control_api, "media_catalog", counted_catalog)
+    client = _client(tmp_path, monkeypatch)
+
+    assert client.get("/api/simple/catalog").status_code == 200
+    after_catalog = builds["count"]
+    assert after_catalog >= 1
+
+    matrix = client.get("/api/capabilities/matrix")
+    assert matrix.status_code == 200
+    assert matrix.json()["ok"] is True
+    assert builds["count"] == after_catalog, "the matrix re-probed every provider"
+
+
+def test_the_runtime_snapshot_is_memoized_for_a_few_seconds(tmp_path: Path, monkeypatch) -> None:
+    """/api/runtime probes all three engines live (1.5s each) and is the route
+    the supervisor polls for readiness."""
+    from hivemind_content_studio import control_api
+
+    calls = {"count": 0}
+
+    def counted_snapshot():
+        calls["count"] += 1
+        return {"ok": True, "engines": []}
+
+    monkeypatch.setattr(control_api, "unified_runtime_snapshot", counted_snapshot)
+    client = _client(tmp_path, monkeypatch)
+
+    first = client.get("/api/runtime")
+    assert first.status_code == 200
+    assert first.json()["version"]
+    client.get("/api/runtime")
+    client.get("/api/runtime")
+    assert calls["count"] == 1
+
+
+def test_lane_memory_is_one_snapshot_for_every_open_studio(tmp_path: Path, monkeypatch) -> None:
+    """Per lane this spawns `lsof` and `ps`, asks the queue over HTTP and then
+    runs `vm_stat`. Every open studio polls it every 20 seconds."""
+    from hivemind_content_studio import control_api
+
+    calls = {"count": 0}
+
+    def counted_snapshot():
+        calls["count"] += 1
+        return {"lanes": []}
+
+    monkeypatch.setattr(control_api.comfy_lanes, "snapshot", counted_snapshot)
+    client = _client(tmp_path, monkeypatch)
+
+    assert client.get("/api/lanes/memory").json() == {"ok": True, "lanes": []}
+    assert client.get("/api/lanes/memory").json() == {"ok": True, "lanes": []}
+    assert calls["count"] == 1
